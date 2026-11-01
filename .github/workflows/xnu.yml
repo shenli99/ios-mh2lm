@@ -54,7 +54,9 @@ jobs:
 
       - name: Install Xcode 15.4
         run: |
-          brew install xcodesorg/made/xcodes
+          # xcodes is preinstalled on the macos-15 image; ensure it's present anyway
+          brew list xcodes >/dev/null 2>&1 || brew install xcodes
+          xcodes version
           # xcodes >= 1.0 downloads via XcodeReleases: no Apple ID needed
           xcodes install 15.4
           XC=$(xcodes installed --path 15.4)
