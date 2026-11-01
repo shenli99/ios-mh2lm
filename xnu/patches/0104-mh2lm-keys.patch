@@ -1,0 +1,35 @@
+diff --git a/pexpert/pexpert/arm64/sweet_dev.h b/pexpert/pexpert/arm64/sweet_dev.h
+index 8cd5b9e..6326962 100644
+--- a/pexpert/pexpert/arm64/sweet_dev.h
++++ b/pexpert/pexpert/arm64/sweet_dev.h
+@@ -36,17 +36,22 @@
+ #define SWEET_DEV_FB_STRIDE     (SWEET_DEV_FB_W * 4)
+ 
+ /* Same SoC as guacamole: SPMI arbiter and RPMh/command DB at the same
+- * addresses. Only the keys driver uses SPMI here (power key, read only);
+- * boot with sweetkeys=0 until the LG PMIC wiring is checked. */
++ * addresses. Only the keys driver uses SPMI here (read only).
++ * Keys from the LG Windows DSDT (aloha-mh2lm lg-mh2lm/ACPI/DSDT.aml, BTNS on
++ * \_SB.PM01): pin 0 = power (PON KPDPWR), pin 1 = volume down (PON RESIN),
++ * pin 0x85 = volume up (PM8150 GPIO6). The Xiaomi Mi 9 (cepheus, SM8150)
++ * DSDT has the same three pins: this is the SM8150 reference wiring, unlike
++ * guacamole (GPIO6/GPIO7). The driver checks that GPIO6 is an enabled
++ * input before using it and never writes PMIC registers. */
+ #define SWEET_DEV_SPMI_CORE_PA  0x0c440000u
+ #define SWEET_DEV_SPMI_OBS_PA   0x0e600000u
+ #define SWEET_DEV_SPMI_CFG_PA   0x0c40a000u
+-#define SWEET_DEV_PON_RT        0x0810u
+-#define SWEET_DEV_VOL_GPIO_RT   0xc110u
+-#define SWEET_DEV_VOL_GPIO2_RT  0xc610u
+-#define SWEET_DEV_VOL_GPIO_SID  0
+-#define SWEET_DEV_VOL_DOWN_PON  0
+-#define SWEET_DEV_KEYS_VOLUME   0       /* LG volume key GPIOs not identified */
++#define SWEET_DEV_PON_RT        0x0810u          /* PON RT_STS: bit 0 KPDPWR, bit 1 RESIN */
++#define SWEET_DEV_VOL_GPIO_RT   0xc510u          /* volume up: PM8150 GPIO6 */
++#define SWEET_DEV_VOL_GPIO2_RT  0xc610u          /* unused: volume down is PON RESIN */
++#define SWEET_DEV_VOL_GPIO_SID  0                /* PM8150 */
++#define SWEET_DEV_VOL_DOWN_PON  1
++#define SWEET_DEV_KEYS_VOLUME   1
+ 
+ #define SWEET_DEV_RPMH_RSC_PA   0x18220000u
+ #define SWEET_DEV_RPMH_TCS_PA   0x18220d00u
