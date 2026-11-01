@@ -1,0 +1,158 @@
+diff --git a/bsd/dev/sweet_display_probe.c b/bsd/dev/sweet_display_probe.c
+index dc04277..0a32299 100644
+--- a/bsd/dev/sweet_display_probe.c
++++ b/bsd/dev/sweet_display_probe.c
+@@ -1,5 +1,5 @@
+ /*
+- * mh2lm display-controller probe: READ ONLY. Prints the state UEFI left the
++ * mh2lm display-controller probe: read only unless sweetdcs is set. Prints the state UEFI left the
+  * SM8150 MDSS/DSI0 in (scanout source, tear check, autorefresh, DSI command
+  * engine) so DCS brightness and TE-synced flips can be written against facts.
+  * No register is written: clocks are checked first (a read of a gated block
+@@ -15,6 +15,11 @@
+  * LineageOS android_kernel_xiaomi_sm8150 sde_hw_intf.c / dsi_ctrl_hw_cmn.c.
+  *
+  * Boot-arg sweetdispprobe=0 disables it.
++ *
++ * Boot-arg sweetdcs=N (1..100) additionally WRITES: after the probe passes it
++ * sends one DCS 0x51 brightness (N percent of 0xfff) through DSI0's embedded
++ * command FIFO, holds 10 s, sends 100 %, and probes again. This touches the
++ * INTF1 tear-check/autorefresh and DSI0 command registers and restores them.
+  */
+ #include <pexpert/arm64/sweet_dev.h>
+ 
+@@ -117,6 +122,112 @@ dp_probe(unsigned pass, vm_offset_t gcc, vm_offset_t dispcc, vm_offset_t sspp, v
+ 	}
+ }
+ 
++/* ---- DCS 0x51 brightness (boot-arg sweetdcs=1..100, percent; off by default) ---- */
++
++static void
++dp_wr(vm_offset_t base, uint32_t off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = v;
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++/* Poll base+off until (value & mask) == want, at most ms milliseconds. */
++static int
++dp_poll(vm_offset_t base, uint32_t off, uint32_t mask, uint32_t want, unsigned ms)
++{
++	for (unsigned us = 0; us < ms * 1000u; us += 50) {
++		if ((dp_rd(base, off) & mask) == want) {
++			return 0;
++		}
++		delay(50);
++	}
++	return -1;
++}
++
++/*
++ * One DCS long write through DSI0's embedded command FIFO, in the order of the
++ * K20 Pro dsi_packet()/raphael_display_command_begin() (from Linux
++ * sde_encoder_phys_cmd_prepare_commit and dsi_ctrl_hw_cmn.c): stop TE kickoffs
++ * and autorefresh, wait for the frame in flight and DSI idle, send, wait for
++ * CMD_DMA_DONE, clean up, restore every register touched.
++ */
++static int
++dp_dcs_write(vm_offset_t intf, vm_offset_t dsi, const uint32_t *words, unsigned count)
++{
++	if ((dp_rd(dsi, 0x004) & 7u) != 5u || dp_rd(dsi, 0x15c) != 0 || (dp_rd(dsi, 0x110) & (1u << 24))) {
++		printf("SWEET DISP: dcs: DSI not in the expected state (ctrl %#x fifo %#x irq %#x)\n",
++		    dp_rd(dsi, 0x004), dp_rd(dsi, 0x15c), dp_rd(dsi, 0x110));
++		return -1;
++	}
++	uint32_t sync = dp_rd(intf, 0x288), refresh = dp_rd(intf, 0x2b4);
++	dp_wr(intf, 0x288, sync & ~(1u << 20));         /* no new TE kickoff */
++	dp_wr(intf, 0x2b4, 0);                          /* autorefresh off */
++	int rc = 0;
++	/* Let the frame in flight finish: line counter back at 0 or past the last line. */
++	unsigned us;
++	for (us = 0; us < 100000u; us += 50) {
++		uint32_t line = dp_rd(intf, 0x2b0) & 0xffffu;
++		if (!line || line >= SWEET_DEV_FB_H) {
++			break;
++		}
++		delay(50);
++	}
++	if (us >= 100000u || dp_poll(dsi, 0x008, (1u << 2) | (1u << 1), 0, 200)) {
++		printf("SWEET DISP: dcs: DSI did not go idle (status %#x line %#x)\n",
++		    dp_rd(dsi, 0x008), dp_rd(intf, 0x2b0));
++		rc = -2;
++		goto restore;
++	}
++	uint32_t dma = dp_rd(dsi, 0x03c), length = dp_rd(dsi, 0x04c), trigger = dp_rd(dsi, 0x084);
++	const uint32_t statuses = 0x51115501u;          /* W1C only the DMA/BTA status bits */
++	dp_wr(dsi, 0x110, (dp_rd(dsi, 0x110) & ~statuses) | 1u | (1u << 20));
++	dp_wr(dsi, 0x084, (trigger & ~7u) | 4u);        /* software DMA trigger */
++	dp_wr(dsi, 0x15c, (1u << 1) | (1u << 2) | (3u << 16));
++	for (unsigned i = 0; i < count; i++) {
++		dp_wr(dsi, 0x17c, words[i]);
++	}
++	if (count & 1u) {
++		dp_wr(dsi, 0x17c, 0);
++	}
++	dp_wr(dsi, 0x03c, (dma & ~((1u << 31) | (1u << 30))) | (1u << 28) | (1u << 26));
++	dp_wr(dsi, 0x04c, count * 4u);
++	dp_wr(dsi, 0x090, 1);                           /* CMD_DMA trigger */
++	if (dp_poll(dsi, 0x110, 1u, 1u, 200)) {
++		rc = -3;
++	} else if (dp_rd(dsi, 0x110) & (1u << 24)) {
++		rc = -4;
++	}
++	uint32_t irq = dp_rd(dsi, 0x110), status = dp_rd(dsi, 0x008), ack = dp_rd(dsi, 0x068);
++	dp_wr(dsi, 0x110, (dp_rd(dsi, 0x110) & ~statuses) | 1u | (1u << 20));
++	dp_wr(dsi, 0x15c, 0);
++	dp_wr(dsi, 0x1ec, 1);                           /* FIFO reset, as the native timeout path */
++	delay(1);
++	dp_wr(dsi, 0x1ec, 0);
++	dp_wr(dsi, 0x04c, length);
++	dp_wr(dsi, 0x03c, dma);
++	dp_wr(dsi, 0x084, trigger);
++	printf("SWEET DISP: dcs: rc %d irq %#x status %#x ack %#x\n", rc, irq, status, ack);
++restore:
++	dp_wr(intf, 0x288, sync);
++	dp_wr(intf, 0x2b4, refresh);
++	return rc;
++}
++
++/* DCS 0x51, 12-bit big-endian (LG DSDT: BacklightBitWidth 12, BacklightDCSEndian TRUE). */
++static int
++dp_brightness(vm_offset_t intf, vm_offset_t dsi, unsigned percent)
++{
++	uint32_t level = (percent * 0xfffu + 50u) / 100u;
++	if (level == 0) {
++		level = 1;      /* never display-off brightness */
++	}
++	/* Embedded header {wc lo, wc hi, type 0x39 | VC 0, flags 0xc0}, then 51 hi lo. */
++	const uint32_t words[2] = {0xc0390003u, 0xff000051u | ((level >> 8) << 8) | ((level & 0xffu) << 16)};
++	printf("SWEET DISP: dcs 51 %02x %02x (%u%%)\n", level >> 8, level & 0xffu, percent);
++	return dp_dcs_write(intf, dsi, words, 2);
++}
++
+ static void
+ dp_thread(void *arg __unused, wait_result_t wr __unused)
+ {
+@@ -136,6 +247,21 @@ dp_thread(void *arg __unused, wait_result_t wr __unused)
+ 		dp_probe(pass, gcc, dispcc, sspp, ctl, intf1, intf2, dsi);
+ 		dp_wait(1000);
+ 	}
++	unsigned percent = 0;
++	(void)PE_parse_boot_argn("sweetdcs", &percent, sizeof(percent));
++	if (percent >= 1 && percent <= 100) {
++		/* Same clock gate as the probe; the probe printed why if it failed. */
++		if (!(dp_rd(gcc, GCC_DISP_AHB) & CBCR_ENABLE) || (dp_rd(dispcc, DISPCC_AHB_CBCR) & CBCR_OFF)) {
++			printf("SWEET DISP: dcs skipped: MDSS clock gate not met\n");
++			goto out;
++		}
++		/* Requested level, hold 10 s, then 100 %: the change is visible by eye. */
++		if (dp_brightness(intf1, dsi, percent) == 0) {
++			dp_wait(10000);
++			(void)dp_brightness(intf1, dsi, 100);
++		}
++		dp_probe(3, gcc, dispcc, sspp, ctl, intf1, intf2, dsi);
++	}
+ out:
+ 	(void)thread_terminate(current_thread());
+ 	thread_block(THREAD_CONTINUE_NULL);
