@@ -1,0 +1,44 @@
+diff --git a/bsd/dev/sweet_display_probe.c b/bsd/dev/sweet_display_probe.c
+index 8d9f251..dc04277 100644
+--- a/bsd/dev/sweet_display_probe.c
++++ b/bsd/dev/sweet_display_probe.c
+@@ -35,8 +35,8 @@ void sweet_display_probe_init(void);
+ #define GCC_DISP_PAGE   0xb000u
+ #define GCC_DISP_AHB    0x00cu          /* gcc_disp_ahb_clk CBCR at 0xb00c */
+ #define DISPCC_PA       0x0af00000u
+-#define DISPCC_MDP_CBCR 0x1014u
+-#define DISPCC_AHB_CBCR 0x2080u         /* the K20 Pro code's MDSS AHB check */
++#define DISPCC_AHB_CBCR 0x2080u         /* the K20 Pro code's MDSS access check */
++#define CBCR_ENABLE     (1u << 0)
+ #define CBCR_OFF        (1u << 31)
+ #define MDP_PA          0x0ae00000u
+ #define DSI0_PA         0x0ae94000u
+@@ -74,16 +74,22 @@ static void
+ dp_probe(unsigned pass, vm_offset_t gcc, vm_offset_t dispcc, vm_offset_t sspp, vm_offset_t ctl,
+     vm_offset_t intf1, vm_offset_t intf2, vm_offset_t dsi)
+ {
++	/*
++	 * Same gate as the K20 Pro code (raphael_display_init), without its enable
++	 * writes: gcc_disp_ahb only needs CLK_ENABLE (it is hardware-gated, so
++	 * CLK_OFF reads 1 while the bus is idle: 0x80000003 on mh2lm, 0108 run 1),
++	 * and dispcc +0x2080 must report CLK_OFF clear.
++	 */
+ 	uint32_t ahb = dp_rd(gcc, GCC_DISP_AHB);
+ 	printf("SWEET DISP: pass %u gcc disp_ahb %#x\n", pass, ahb);
+-	if (ahb & CBCR_OFF) {
+-		printf("SWEET DISP: gcc disp_ahb clock off: no DISPCC/MDSS read\n");
++	if (!(ahb & CBCR_ENABLE)) {
++		printf("SWEET DISP: gcc disp_ahb not enabled: no DISPCC/MDSS read\n");
+ 		return;
+ 	}
+-	uint32_t mdp = dp_rd(dispcc, DISPCC_MDP_CBCR), mahb = dp_rd(dispcc, DISPCC_AHB_CBCR);
+-	printf("SWEET DISP: dispcc mdp %#x ahb %#x\n", mdp, mahb);
+-	if ((mdp & CBCR_OFF) || (mahb & CBCR_OFF)) {
+-		printf("SWEET DISP: MDSS clock off: no MDSS read\n");
++	uint32_t mahb = dp_rd(dispcc, DISPCC_AHB_CBCR);
++	printf("SWEET DISP: dispcc +0x2080 %#x\n", mahb);
++	if (mahb & CBCR_OFF) {
++		printf("SWEET DISP: dispcc +0x2080 clock off: no MDSS read\n");
+ 		return;
+ 	}
+ 	/* VIG0 source: +0x00 size, +0x14 plane-0 address, +0x24 stride (K20 Pro checks these). */
