@@ -1,0 +1,997 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index da3bc2e..5f0d156 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -110,6 +110,7 @@ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_gpu.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_touch_sec.c		standard
++bsd/dev/sweet_touch_tcm.c		standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 5bbddb8..3eceb82 100644
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -661,7 +661,8 @@ sweet_touch_init(void)
+ 		printf("SWEET TOUCH: kernel_thread_start failed %d\n", kr);
+ 	}
+ }
+-#elif defined(ARM64_BOARD_CONFIG_SWEET) && !SWEET_DEV_TOUCH_SEC
++#elif defined(ARM64_BOARD_CONFIG_SWEET) && !SWEET_DEV_TOUCH_SEC && \
++    !(defined(SWEET_DEV_TOUCH_TCM) && SWEET_DEV_TOUCH_TCM)
+ /*
+  * No touch driver for this board yet: keeps the sweet_ufs.c call site happy.
+  * (sweet_touch_sec.c will replace this once the S6SY761 driver lands.)
+diff --git a/bsd/dev/sweet_touch_tcm.c b/bsd/dev/sweet_touch_tcm.c
+new file mode 100644
+index 0000000..b5bcac0
+--- /dev/null
++++ b/bsd/dev/sweet_touch_tcm.c
+@@ -0,0 +1,944 @@
++/*
++ * LG G8X ThinQ (mh2lm, SM8150) touch: Synaptics TouchComm (TCM) at I2C
++ * address 0x20 on the SE17 lines (gpio55/gpio56).
++ *
++ * Board facts are from the LG Windows ACPI tables: TSC1 (_HID "SNPTSTCM" in
++ * Mu-Silicium's mh2 DSDT, MSHW1003 in aloha-mh2lm's) is I2C 0x20 at 400 kHz
++ * on \_SB.IC18 (= 0x00C80000 = SE17), interrupt TLMM gpio122 (level, active
++ * low, pull-up), reset TLMM gpio54. Its PEP D0 sequence drives TLMM gpio59
++ * and gpio152 high, waits, then raises gpio54; there is no PMIC or RPMh rail
++ * in it, so this driver never votes a regulator.
++ *
++ * Transport: SE17's FIFO interface is fused off on SM8150 (guacamole,
++ * sweet_touch_sec.c), so I2C is bit-banged on the two GPIOs exactly as there
++ * (open-drain emulation, SDA/SCL auto-swapped when nothing acknowledges).
++ * TouchComm over I2C has no register address: plain reads and writes.
++ *
++ * Protocol: TouchComm v1/v2 from UniXNU-Pagani-Drivers PaganiInput/S3910.c
++ * (Copyright (c) 2026 UniXNU contributors, BSD-2-Clause-Patent), reduced to
++ * the generic sequence: identify, application info, set and read back the
++ * touch report format, enable the touch report. The S3910-only HBP steps
++ * (report 0x23, dynamic config 0x11 = LBP) are left out. Controller
++ * firmware is never written, erased or flashed; a controller in bootloader
++ * mode is reported and left alone.
++ */
++#include <pexpert/arm64/sweet_dev.h>
++
++#if defined(ARM64_BOARD_CONFIG_SWEET) && defined(SWEET_DEV_TOUCH_TCM) && SWEET_DEV_TOUCH_TCM
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++/* Mach MIG declaration is not included by BSD's exported thread.h. */
++extern kern_return_t thread_terminate(thread_t);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++void sweet_touch_init(void);
++
++#define TS_ADDR         0x20u
++#define TS_PIN_RESET    54u
++#define TS_PIN_PWR_A    59u     /* PEP D0 first step */
++#define TS_PIN_PWR_B    152u    /* PEP D0 second step */
++#define TS_PIN_IRQ      122u    /* ATTN, active low */
++#define TS_PIN_I2C_A    55u
++#define TS_PIN_I2C_B    56u
++
++#define TCM_CONTACTS    10u
++#define TCM_PAYLOAD_MAX 512u
++
++/* ---- TLMM (SM8150: four tile arrays, as sweet_touch_sec.c) ---- */
++
++enum { TS_TILE_WEST, TS_TILE_EAST, TS_TILE_NORTH, TS_TILE_SOUTH, TS_TILE_COUNT };
++
++static vm_offset_t ts_tiles[TS_TILE_COUNT];
++
++static unsigned
++ts_tile(unsigned pin)
++{
++	if (pin <= 7 || pin == 38 || (pin >= 51 && pin <= 82) ||
++	    (pin >= 98 && pin <= 101) || (pin >= 114 && pin <= 124) ||
++	    (pin >= 126 && pin <= 154)) {
++		return TS_TILE_SOUTH;
++	}
++	if ((pin >= 8 && pin <= 20) || (pin >= 31 && pin <= 37) ||
++	    (pin >= 39 && pin <= 42) || (pin >= 83 && pin <= 86) ||
++	    (pin >= 88 && pin <= 97) || (pin >= 102 && pin <= 104) ||
++	    pin >= 169) {
++		return TS_TILE_NORTH;
++	}
++	if ((pin >= 21 && pin <= 30) || (pin >= 43 && pin <= 50) || pin == 87) {
++		return TS_TILE_EAST;
++	}
++	return TS_TILE_WEST;
++}
++
++#define TS_GPIO_OFF(n)    ((uint32_t)(n) * 0x1000u)
++#define TS_GPIO_IO_OFF(n) (TS_GPIO_OFF(n) + 4u)
++
++static uint32_t
++ts_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++ts_wr(vm_offset_t base, uint32_t off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static uint32_t ts_gpio_rd(unsigned pin) { return ts_rd(ts_tiles[ts_tile(pin)], TS_GPIO_OFF(pin)); }
++static uint32_t ts_gpio_io_rd(unsigned pin) { return ts_rd(ts_tiles[ts_tile(pin)], TS_GPIO_IO_OFF(pin)); }
++static void ts_gpio_wr(unsigned pin, uint32_t v) { ts_wr(ts_tiles[ts_tile(pin)], TS_GPIO_OFF(pin), v); }
++static void ts_gpio_io_wr(unsigned pin, uint32_t v) { ts_wr(ts_tiles[ts_tile(pin)], TS_GPIO_IO_OFF(pin), v); }
++
++static int ts_chan;
++
++static void
++ts_wait(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&ts_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++/* mux 0 = GPIO, pull 0 none / 1 down / 3 up, drive 3 = 8 mA. */
++static void
++ts_gpio(unsigned pin, unsigned mux, unsigned pull, unsigned drive, bool out, bool high)
++{
++	uint32_t cfg = ts_gpio_rd(pin);
++	if (out) {
++		/* Latch the level before switching the pin to output. */
++		ts_gpio_io_wr(pin, (ts_gpio_io_rd(pin) & ~2u) | (high ? 2u : 0u));
++	}
++	cfg &= ~0x3ffu;
++	cfg |= (mux << 2) | pull | (drive << 6) | (out ? 0x200u : 0u);
++	ts_gpio_wr(pin, cfg);
++}
++
++/* ---- bit-banged I2C (sweet_touch_sec.c, about 100 kHz) ---- */
++
++static unsigned bb_sda_pin = TS_PIN_I2C_A, bb_scl_pin = TS_PIN_I2C_B;
++static unsigned ts_i2c_errors;
++
++/* "low" drives 0, "release" is an input (the external pull-up sets the level). */
++static void
++bb_level(unsigned pin, bool low)
++{
++	uint32_t cfg = ts_gpio_rd(pin) & ~0x3ffu;
++	if (low) {
++		ts_gpio_io_wr(pin, ts_gpio_io_rd(pin) & ~2u);
++		cfg |= 0x200u;
++	}
++	ts_gpio_wr(pin, cfg);
++}
++
++static void bb_sda(unsigned v) { bb_level(bb_sda_pin, !v); }
++static void bb_scl(unsigned v) { bb_level(bb_scl_pin, !v); }
++static int bb_sda_read(void) { return (int)(ts_gpio_io_rd(bb_sda_pin) & 1u); }
++static void bb_delay(void) { delay(4); }
++
++static void
++bb_start(void)
++{
++	bb_sda(1);
++	bb_scl(1);
++	bb_delay();
++	bb_sda(0);
++	bb_delay();
++	bb_scl(0);
++	bb_delay();
++}
++
++static void
++bb_stop(void)
++{
++	bb_sda(0);
++	bb_delay();
++	bb_scl(1);
++	bb_delay();
++	bb_sda(1);
++	bb_delay();
++}
++
++static void
++bb_tx_byte(uint8_t b)
++{
++	for (int i = 7; i >= 0; --i) {
++		bb_sda((b >> i) & 1u);
++		bb_delay();
++		bb_scl(1);
++		bb_delay();
++		bb_scl(0);
++		bb_delay();
++	}
++}
++
++static uint8_t
++bb_rx_byte(bool ack)
++{
++	uint8_t v = 0;
++
++	bb_sda(1);
++	for (int i = 7; i >= 0; --i) {
++		bb_delay();
++		bb_scl(1);
++		bb_delay();
++		v = (uint8_t)((v << 1) | (uint8_t)bb_sda_read());
++		bb_scl(0);
++	}
++	bb_sda(ack ? 0 : 1);
++	bb_delay();
++	bb_scl(1);
++	bb_delay();
++	bb_scl(0);
++	bb_sda(1);
++	bb_delay();
++	return v;
++}
++
++/* Returns 0 when the target acknowledged the byte just sent. */
++static int
++bb_ack(void)
++{
++	int ack;
++	bb_sda(1);
++	bb_delay();
++	bb_scl(1);
++	bb_delay();
++	ack = bb_sda_read();
++	bb_scl(0);
++	bb_delay();
++	return ack ? ENXIO : 0;
++}
++
++/* Clock nine pulses so a target holding SDA low can let go. */
++static void
++bb_recover(void)
++{
++	bb_sda(1);
++	for (unsigned i = 0; i < 9; ++i) {
++		bb_scl(0);
++		bb_delay();
++		bb_scl(1);
++		bb_delay();
++	}
++	bb_stop();
++}
++
++/* TouchComm transfers: no register address on I2C. */
++static int
++ts_i2c_write(const uint8_t *tx, size_t n)
++{
++	int err;
++	bb_start();
++	bb_tx_byte((uint8_t)(TS_ADDR << 1));
++	err = bb_ack();
++	for (size_t i = 0; i < n && err == 0; ++i) {
++		bb_tx_byte(tx[i]);
++		err = bb_ack();
++	}
++	bb_stop();
++	if (err) {
++		ts_i2c_errors++;
++	}
++	return err;
++}
++
++static int
++ts_i2c_read(uint8_t *rx, size_t n)
++{
++	int err;
++	bb_start();
++	bb_tx_byte((uint8_t)((TS_ADDR << 1) | 1u));
++	err = bb_ack();
++	for (size_t i = 0; i < n && err == 0; ++i) {
++		rx[i] = bb_rx_byte(i + 1u < n);
++	}
++	bb_stop();
++	if (err) {
++		ts_i2c_errors++;
++	}
++	return err;
++}
++
++/* ---- TouchComm (from PaganiInput/S3910.c, see the header comment) ---- */
++
++static struct {
++	uint16_t max_x, max_y, config_size, max_write, max_read;
++	uint8_t mode, code, ready, crc, version, sequence;
++	uint16_t length;
++	uint8_t command;
++	const char *stage;
++	uint32_t detail;
++	uint8_t payload[TCM_PAYLOAD_MAX];
++} tcm;
++
++static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | (uint16_t)p[1] << 8); }
++static uint32_t le32(const uint8_t *p) { return le16(p) | (uint32_t)le16(p + 2) << 16; }
++
++/* Report format: object count (0x18, 8 bits), then per object index (6),
++ * classification (7), x (8, 16 bits), y (9, 16 bits); end (3). */
++static const uint8_t tcm_format[] = {0x18, 8, 1, 6, 8, 7, 8, 8, 16, 9, 16, 3, 0};
++
++static uint8_t
++crc6(const uint8_t *p, unsigned bits)
++{
++	uint8_t crc = 0x3f;
++	for (unsigned i = 0; i < bits; ++i) {
++		unsigned bit = ((crc >> 5) ^ (p[i / 8] >> (7 - i % 8))) & 1;
++		crc = (uint8_t)(((crc << 1) & 0x3f) ^ (bit ? 3 : 0));
++	}
++	return crc;
++}
++
++static uint16_t
++crc16(const uint8_t *p, unsigned size)
++{
++	uint16_t crc = 0xffff;
++	for (unsigned i = 0; i < size; ++i) {
++		crc ^= (uint16_t)p[i] << 8;
++		for (unsigned b = 0; b < 8; ++b) {
++			crc = (uint16_t)((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0));
++		}
++	}
++	return crc;
++}
++
++static int
++write_v2(uint8_t cmd, const uint8_t *data, unsigned length)
++{
++	static uint8_t packet[TCM_PAYLOAD_MAX + 6];
++	unsigned size = 4 + length + (length ? 2 : 0);
++	tcm.stage = "write";
++	tcm.detail = length;
++	if (length > TCM_PAYLOAD_MAX || (length && !data) || (tcm.max_write && size > tcm.max_write)) {
++		return -90;
++	}
++	packet[0] = cmd;
++	packet[1] = (uint8_t)length;
++	packet[2] = (uint8_t)(length >> 8);
++	packet[3] = (uint8_t)((tcm.sequence++ & 1) << 6);
++	packet[3] |= crc6(packet, 26);
++	if (length) {
++		memcpy(packet + 4, data, length);
++		uint16_t crc = crc16(packet, length + 4);
++		packet[length + 4] = (uint8_t)(crc >> 8);
++		packet[length + 5] = (uint8_t)crc;
++	}
++	return ts_i2c_write(packet, size);
++}
++
++static int
++response_v2(void)
++{
++	/* One driver thread: static keeps the buffer off the 16 KiB kernel stack. */
++	static uint8_t body[TCM_PAYLOAD_MAX + 6];
++	uint8_t head[4];
++	tcm.stage = "header";
++	tcm.detail = 0;
++	int rc = ts_i2c_read(head, sizeof head);
++	if (rc) {
++		return rc;
++	}
++	tcm.detail = le32(head);
++	if (crc6(head, 32)) {
++		return -74;
++	}
++	tcm.code = head[0];
++	tcm.length = le16(head + 1);
++	int discard = tcm.length > TCM_PAYLOAD_MAX;
++	if (discard && (tcm.ready || tcm.code != 0x23)) {
++		return -90;
++	}
++	unsigned cap = tcm.max_read ? tcm.max_read : 256;
++	if (cap > sizeof body) {
++		cap = sizeof body;
++	}
++	if (cap <= 6) {
++		tcm.stage = "read limit";
++		tcm.detail = cap;
++		return -90;
++	}
++	for (unsigned offset = 0; offset < tcm.length;) {
++		unsigned size = tcm.length - offset;
++		if (size > cap - 6) {
++			size = cap - 6;
++		}
++		for (unsigned retry = 0; retry < 5; ++retry) {
++			rc = write_v2(retry ? 8 : 7, NULL, 0);
++			if (rc) {
++				return rc;
++			}
++			tcm.stage = "continued";
++			tcm.detail = 0;
++			rc = ts_i2c_read(body, size + 6);
++			if (rc) {
++				return rc;
++			}
++			tcm.detail = le32(body);
++			if (!crc6(body, 32) && !crc16(body, size + 6)) {
++				break;
++			}
++			tcm.stage = "body CRC";
++			if (retry == 4) {
++				return -74;
++			}
++		}
++		if (!discard) {
++			memcpy(tcm.payload + offset, body + 4, size);
++		}
++		offset += size;
++	}
++	return 0;
++}
++
++static int
++exchange_v2(uint8_t cmd, const uint8_t *data, unsigned length)
++{
++	uint8_t sequence = tcm.sequence;
++	for (unsigned retry = 0; retry < 5; ++retry) {
++		/* A requested retransmission keeps the original sequence bit. */
++		tcm.sequence = sequence;
++		int rc = write_v2(cmd, data, length);
++		if (rc) {
++			return rc;
++		}
++		ts_wait(1);
++		rc = response_v2();
++		if (rc) {
++			return rc;
++		}
++		if (tcm.code != 8 && tcm.code != 0xfe) {
++			return 0;
++		}
++	}
++	tcm.stage = "retry";
++	tcm.detail = tcm.code;
++	return -5;
++}
++
++static int
++request_v2(uint8_t cmd, const uint8_t *data, unsigned length)
++{
++	unsigned cap = tcm.max_write ? tcm.max_write : TCM_PAYLOAD_MAX + 6, offset = 0;
++	if (cap > TCM_PAYLOAD_MAX + 6) {
++		cap = TCM_PAYLOAD_MAX + 6;
++	}
++	tcm.stage = "write limit";
++	tcm.detail = cap;
++	if (length > TCM_PAYLOAD_MAX || (length && (!data || cap <= 6)) || cap < 4) {
++		return -90;
++	}
++	do {
++		unsigned size = length - offset;
++		if (size && size > cap - 6) {
++			size = cap - 6;
++		}
++		int rc = exchange_v2(offset ? 1 : cmd, data ? data + offset : NULL, size);
++		if (rc) {
++			return rc;
++		}
++		if (tcm.code == 0x10 && cmd != 2) {
++			tcm.stage = "restart";
++			return -104;
++		}
++		if (tcm.code < 0x10 && tcm.code != 1 && tcm.code != 4 && tcm.code != 7) {
++			tcm.stage = "reply";
++			tcm.detail = tcm.code;
++			return -5;
++		}
++		offset += size;
++	} while (offset < length);
++	return 0;
++}
++
++static int
++message(void)
++{
++	static uint8_t body[TCM_PAYLOAD_MAX + 7];
++	uint8_t head[4];
++
++	if (tcm.version == 2) {
++		return exchange_v2(0x0a, NULL, 0);
++	}
++	tcm.stage = "header";
++	tcm.detail = 0;
++	int rc = ts_i2c_read(head, sizeof head);
++	if (rc) {
++		return rc;
++	}
++	tcm.detail = le32(head);
++	if (head[0] != 0xa5) {
++		if (!tcm.version && tcm.detail && tcm.detail != 0xffffffff && !crc6(head, 32)) {
++			tcm.version = 2;    /* identify through a fresh v2 command */
++			return 0;
++		}
++		return -71;
++	}
++	tcm.version = 1;
++	tcm.code = head[1];
++	tcm.length = le16(head + 2);
++	if (tcm.length > TCM_PAYLOAD_MAX) {
++		/* A queued oversized report can precede a command response after reset. */
++		if (tcm.ready || tcm.code != 0x23) {
++			return -90;
++		}
++		unsigned left = tcm.length;
++		while (left) {
++			unsigned size = left > TCM_PAYLOAD_MAX ? TCM_PAYLOAD_MAX : left;
++			tcm.stage = "continued";
++			tcm.detail = 0;
++			rc = ts_i2c_read(body, size + 2 + (size == left ? 5 : 0));
++			if (rc) {
++				return rc;
++			}
++			tcm.detail = le32(body);
++			if (body[0] != 0xa5 || body[1] != 3) {
++				return -71;
++			}
++			if (size == left && body[size + 2] != 0x5a) {
++				tcm.stage = "padding";
++				tcm.detail = body[size + 2];
++				return -71;
++			}
++			left -= size;
++		}
++		return 0;
++	}
++	if (!tcm.length) {
++		return 0;
++	}
++	/* The continued read repeats a5 03, then payload, 0x5a, optional CRC/RC, 0x5a. */
++	tcm.stage = "continued";
++	tcm.detail = 0;
++	rc = ts_i2c_read(body, tcm.length + 7u);
++	if (rc) {
++		return rc;
++	}
++	tcm.detail = le32(body);
++	if (body[0] != 0xa5 || body[1] != 3) {
++		return -71;
++	}
++	if (body[tcm.length + 2] != 0x5a) {
++		tcm.stage = "padding";
++		tcm.detail = body[tcm.length + 2];
++		return -71;
++	}
++	if (tcm.code == 0x10) {
++		tcm.crc = le16(body + tcm.length + 3) != 0x5a5a;
++	}
++	memcpy(tcm.payload, body + 2, tcm.length);
++	return 0;
++}
++
++static int
++command(uint8_t cmd, const uint8_t *data, unsigned length)
++{
++	static uint8_t packet[TCM_PAYLOAD_MAX + 5];
++	int rc;
++
++	tcm.command = cmd;
++	tcm.stage = "write";
++	tcm.detail = length;
++	if (tcm.version == 2) {
++		rc = request_v2(cmd, data, length);
++	} else {
++		if (length > TCM_PAYLOAD_MAX || (length && !data) ||
++		    (tcm.max_write && length + 3 + 2 * tcm.crc > tcm.max_write)) {
++			return -90;
++		}
++		packet[0] = cmd;
++		packet[1] = (uint8_t)length;
++		packet[2] = (uint8_t)(length >> 8);
++		if (length) {
++			memcpy(packet + 3, data, length);
++		}
++		unsigned size = length + 3;
++		if (tcm.crc) {
++			uint16_t crc = crc16(packet, size);
++			packet[size++] = (uint8_t)crc;
++			packet[size++] = (uint8_t)(crc >> 8);
++		}
++		rc = ts_i2c_write(packet, size);
++	}
++	if (rc) {
++		return rc;
++	}
++	for (unsigned n = 0; n < 300; ++n) {
++		if (tcm.version != 2 || n) {
++			ts_wait(10);
++			rc = message();
++			if (rc) {
++				return rc;
++			}
++		}
++		if (tcm.code == 1 || (cmd == 2 && tcm.code == 0x10)) {
++			return 0;
++		}
++		if (tcm.code == 0x10) {
++			tcm.stage = "restart";
++			return -104;
++		}
++		if (tcm.code >= 0xfe || (tcm.code && tcm.code < 0x10 && tcm.code != 4 && tcm.code != 7)) {
++			tcm.stage = "reply";
++			tcm.detail = tcm.code;
++			return -5;
++		}
++	}
++	tcm.stage = "timeout";
++	return -110;
++}
++
++static void
++tcm_fail(int rc)
++{
++	printf("SWEET TOUCH: TouchComm v%u cmd %#x failed at \"%s\" rc=%d detail=%#x code=%#x len=%u i2c-errors=%u\n",
++	    tcm.version, tcm.command, tcm.stage ? tcm.stage : "?", rc, tcm.detail, tcm.code,
++	    tcm.length, ts_i2c_errors);
++}
++
++/*
++ * Identify, application info, then the touch report format. Returns 0 when
++ * touch reports (0x11) are enabled in the format tcm_decode() expects.
++ */
++static int
++tcm_start(void)
++{
++	int rc;
++
++	memset(&tcm, 0, sizeof tcm);
++	rc = message();
++	if (rc) {
++		return rc;
++	}
++	if (tcm.code != 0x10) {
++		rc = command(2, NULL, 0);           /* IDENTIFY */
++		if (rc) {
++			return rc;
++		}
++	}
++	tcm.stage = "identify";
++	tcm.detail = tcm.length;
++	if (tcm.length < 24) {
++		return -71;
++	}
++	char part[17];
++	memcpy(part, tcm.payload + 2, 16);
++	part[16] = 0;
++	for (unsigned i = 0; i < 16; ++i) {
++		if (part[i] && (part[i] < 0x20 || part[i] > 0x7e)) {
++			part[i] = '?';
++		}
++	}
++	tcm.mode = tcm.payload[1];
++	tcm.max_write = le16(tcm.payload + 22);
++	if (tcm.version == 2 && tcm.length >= 26) {
++		tcm.max_read = le16(tcm.payload + 24);
++	}
++	printf("SWEET TOUCH: TouchComm v%u identify: proto %u mode %u part \"%s\" build %u max-write %u max-read %u crc %u\n",
++	    tcm.version, tcm.payload[0], tcm.mode, part,
++	    tcm.length >= 22 ? (unsigned)le32(tcm.payload + 18) : 0u, tcm.max_write, tcm.max_read, tcm.crc);
++	tcm.detail = tcm.mode;
++	if (tcm.mode != 1) {
++		/* Bootloader or another mode: the firmware is left untouched. */
++		printf("SWEET TOUCH: controller not in application mode (%u); touch withheld\n", tcm.mode);
++		return -19;
++	}
++	rc = command(0x20, NULL, 0);                /* GET_APPLICATION_INFO */
++	if (rc) {
++		return rc;
++	}
++	tcm.stage = "app info";
++	tcm.detail = tcm.length;
++	if (tcm.length < 38) {
++		return -71;
++	}
++	unsigned status = le16(tcm.payload + 2);
++	tcm.config_size = le16(tcm.payload + 12);
++	tcm.max_x = le16(tcm.payload + 32);
++	tcm.max_y = le16(tcm.payload + 34);
++	unsigned objects = le16(tcm.payload + 36);
++	printf("SWEET TOUCH: app info status %u config %u max %ux%u objects %u\n",
++	    status, tcm.config_size, tcm.max_x, tcm.max_y, objects);
++	tcm.detail = status;
++	if (status) {
++		return -71;
++	}
++	tcm.stage = "limits";
++	tcm.detail = (uint32_t)tcm.config_size << 16 | objects;
++	if (!tcm.max_x || !tcm.max_y || !objects || tcm.config_size < sizeof tcm_format ||
++	    tcm.config_size > TCM_PAYLOAD_MAX) {
++		return -71;
++	}
++	uint8_t report = 0x11;
++	rc = command(6, &report, 1);                /* DISABLE_REPORT touch */
++	if (rc) {
++		return rc;
++	}
++	/* The format lives in controller RAM only; a reset restores the default. */
++	static uint8_t config[TCM_PAYLOAD_MAX];
++	memset(config, 0, sizeof config);
++	memcpy(config, tcm_format, sizeof tcm_format);
++	rc = command(0x26, config, tcm.config_size);        /* SET_TOUCH_REPORT_CONFIG */
++	if (rc) {
++		return rc;
++	}
++	rc = command(0x25, NULL, 0);                /* GET_TOUCH_REPORT_CONFIG */
++	if (rc) {
++		return rc;
++	}
++	tcm.stage = "format";
++	tcm.detail = tcm.length >= 4 ? le32(tcm.payload) : tcm.length;
++	if (tcm.length < sizeof tcm_format || memcmp(tcm.payload, tcm_format, sizeof tcm_format)) {
++		return -71;
++	}
++	report = 0x11;
++	rc = command(5, &report, 1);                /* ENABLE_REPORT touch */
++	if (rc) {
++		return rc;
++	}
++	tcm.ready = 1;
++	return 0;
++}
++
++struct tcm_contact { uint16_t x, y; uint8_t active; };
++
++/* Object count, then per object: index, classification, x, y (16-bit LE). */
++static int
++tcm_decode(const uint8_t *p, size_t length, struct tcm_contact *out)
++{
++	if (!length || p[0] > TCM_CONTACTS || length != 1u + 6u * p[0]) {
++		return -71;
++	}
++	uint16_t seen = 0;
++	memset(out, 0, sizeof(*out) * TCM_CONTACTS);
++	for (unsigned n = 0; n < p[0]; ++n) {
++		const uint8_t *c = p + 1 + n * 6;
++		unsigned id = c[0];
++		if (id >= TCM_CONTACTS || (seen & (1u << id))) {
++			return -71;
++		}
++		seen |= (uint16_t)(1u << id);
++		uint16_t x = le16(c + 2), y = le16(c + 4);
++		if (x > tcm.max_x || y > tcm.max_y) {
++			return -71;
++		}
++		/* Finger and glove are contacts; palms never become fingers. */
++		if (c[1] != 1 && c[1] != 2) {
++			continue;
++		}
++		out[id].active = 1;
++		out[id].x = x;
++		out[id].y = y;
++	}
++	return 0;
++}
++
++/* ---- driver thread ---- */
++
++static struct tcm_contact ts_now[TCM_CONTACTS], ts_prev[TCM_CONTACTS];
++static int ts_px[TCM_CONTACTS], ts_py[TCM_CONTACTS];
++static unsigned ts_flip;        /* boot-arg sweettouchflip: 1 = mirror x, 2 = mirror y, 4 = swap x/y */
++static unsigned ts_events;
++
++static void
++ts_map(const struct tcm_contact *c, int *px, int *py)
++{
++	unsigned x = c->x, y = c->y, mx = tcm.max_x, my = tcm.max_y;
++	if (ts_flip & 4u) {
++		unsigned t = x; x = y; y = t;
++		t = mx; mx = my; my = t;
++	}
++	if (ts_flip & 1u) {
++		x = mx - x;
++	}
++	if (ts_flip & 2u) {
++		y = my - y;
++	}
++	*px = (int)((uint64_t)x * (SWEET_DEV_FB_W - 1) / mx);
++	*py = (int)((uint64_t)y * (SWEET_DEV_FB_H - 1) / my);
++}
++
++static void
++ts_report(void)
++{
++	static unsigned moves;
++	for (unsigned id = 0; id < TCM_CONTACTS; ++id) {
++		if (ts_now[id].active) {
++			int x, y;
++			ts_map(&ts_now[id], &x, &y);
++			ts_px[id] = x;
++			ts_py[id] = y;
++			ts_events++;
++			if (!ts_prev[id].active || (++moves % 25u) == 0) {
++				printf("SWEET TOUCH: f%u %s raw %u,%u -> %d,%d\n", id,
++				    ts_prev[id].active ? "move" : "down", ts_now[id].x, ts_now[id].y, x, y);
++			}
++			sweet_hid_touch((int)id, 1, x, y);
++		} else if (ts_prev[id].active) {
++			ts_events++;
++			printf("SWEET TOUCH: f%u up %d,%d\n", id, ts_px[id], ts_py[id]);
++			sweet_hid_touch((int)id, 0, ts_px[id], ts_py[id]);
++		}
++		ts_prev[id] = ts_now[id];
++	}
++}
++
++static void
++ts_release_all(void)
++{
++	memset(ts_now, 0, sizeof ts_now);
++	ts_report();
++}
++
++static void
++ts_pins(const char *when)
++{
++	printf("SWEET TOUCH: pins %s rst=%#x/%#x pwr59=%#x/%#x pwr152=%#x/%#x irq=%#x/%#x bus=%#x/%#x\n", when,
++	    ts_gpio_rd(TS_PIN_RESET), ts_gpio_io_rd(TS_PIN_RESET),
++	    ts_gpio_rd(TS_PIN_PWR_A), ts_gpio_io_rd(TS_PIN_PWR_A),
++	    ts_gpio_rd(TS_PIN_PWR_B), ts_gpio_io_rd(TS_PIN_PWR_B),
++	    ts_gpio_rd(TS_PIN_IRQ), ts_gpio_io_rd(TS_PIN_IRQ),
++	    ts_gpio_io_rd(TS_PIN_I2C_A), ts_gpio_io_rd(TS_PIN_I2C_B));
++}
++
++static void
++ts_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	unsigned delay_s = 20;
++	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
++	(void)PE_parse_boot_argn("sweettouchflip", &ts_flip, sizeof(ts_flip));
++	printf("SWEET TOUCH: TouchComm driver starting in %u s (flip %#x)\n", delay_s, ts_flip);
++	ts_wait(delay_s * 1000u);
++
++	ts_tiles[TS_TILE_WEST] = ml_io_map(SWEET_DEV_TOUCH_NORTH_PA + 0x00100000u, 0x100000);
++	ts_tiles[TS_TILE_EAST] = ml_io_map(SWEET_DEV_TOUCH_NORTH_PA + 0x00500000u, 0x100000);
++	ts_tiles[TS_TILE_NORTH] = ml_io_map(SWEET_DEV_TOUCH_NORTH_PA + 0x00900000u, 0x100000);
++	ts_tiles[TS_TILE_SOUTH] = ml_io_map(SWEET_DEV_TOUCH_NORTH_PA + 0x00d00000u, 0x100000);
++	if (!ts_tiles[0] || !ts_tiles[1] || !ts_tiles[2] || !ts_tiles[3]) {
++		printf("SWEET TOUCH: TLMM mapping failed\n");
++		goto out;
++	}
++	ts_pins("before");
++
++	/* LG PEP D0: gpio59, gpio152 high; then reset. Bus released, ATTN input pull-up. */
++	bb_level(TS_PIN_I2C_A, false);
++	bb_level(TS_PIN_I2C_B, false);
++	ts_gpio(TS_PIN_IRQ, 0, 3, 3, false, false);
++	ts_gpio(TS_PIN_RESET, 0, 0, 3, true, false);    /* reset asserted */
++	ts_gpio(TS_PIN_PWR_A, 0, 3, 3, true, true);
++	ts_wait(1);
++	ts_gpio(TS_PIN_PWR_B, 0, 3, 3, true, true);
++	ts_wait(20);
++	ts_gpio(TS_PIN_RESET, 0, 0, 3, true, true);     /* reset released */
++	ts_wait(200);
++	bb_recover();
++	ts_pins("after");
++
++	int rc = -1;
++	for (unsigned attempt = 0; attempt < 2 && rc; ++attempt) {
++		rc = tcm_start();
++		if (rc == ENXIO && tcm.version == 0 && attempt == 0) {
++			/* Nothing acknowledged 0x20: the device tree does not say which pin is SDA. */
++			printf("SWEET TOUCH: no ack with sda=%u scl=%u; swapping\n", bb_sda_pin, bb_scl_pin);
++			unsigned t = bb_sda_pin;
++			bb_sda_pin = bb_scl_pin;
++			bb_scl_pin = t;
++			bb_level(TS_PIN_I2C_A, false);
++			bb_level(TS_PIN_I2C_B, false);
++			bb_recover();
++			continue;
++		}
++		break;
++	}
++	if (rc) {
++		tcm_fail(rc);
++		ts_pins("failed");
++		goto out;
++	}
++	printf("SWEET TOUCH: TouchComm ready (sda=%u scl=%u), max %ux%u, polling\n",
++	    bb_sda_pin, bb_scl_pin, tcm.max_x, tcm.max_y);
++
++	unsigned errors = 0, ticks = 0, attn_low = 0, reports = 0;
++	for (;;) {
++		bool attn = (ts_gpio_io_rd(TS_PIN_IRQ) & 1u) == 0;
++		attn_low += attn;
++		/* ATTN low means a report is waiting; every 10th tick reads anyway. */
++		if (attn || (ticks % 10u) == 0) {
++			if (tcm.version == 2) {
++				tcm.command = 0x0a;
++			}
++			rc = message();
++			if (rc == 0 && tcm.code == 0x10) {
++				printf("SWEET TOUCH: controller restarted; touch stopped\n");
++				ts_release_all();
++				goto out;
++			}
++			if (rc == 0 && tcm.code == 0x11) {
++				rc = tcm_decode(tcm.payload, tcm.length, ts_now);
++				if (rc == 0) {
++					reports++;
++					ts_report();
++				} else {
++					tcm.stage = "contacts";
++					tcm.detail = tcm.length;
++				}
++			}
++			if (rc) {
++				if ((errors++ % 100u) == 0) {
++					tcm_fail(rc);
++				}
++				if (errors == 10u) {
++					ts_release_all();
++					bb_recover();
++				}
++			} else {
++				errors = 0;
++			}
++		}
++		if ((++ticks % 1000u) == 0u) {  /* every 10 s */
++			printf("SWEET TOUCH: state reports=%u events=%u attn-low=%u i2c-errors=%u\n",
++			    reports, ts_events, attn_low, ts_i2c_errors);
++		}
++		ts_wait(10);
++	}
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++sweet_touch_init(void)
++{
++	static bool started;
++	int enabled = 1;
++	thread_t thread;
++
++	if (started) {
++		return;
++	}
++	started = true;
++	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
++	if (!enabled) {
++		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
++		return;
++	}
++	kern_return_t kr = kernel_thread_start(ts_thread, NULL, &thread);
++	if (kr == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("SWEET TOUCH: kernel_thread_start failed %d\n", kr);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET && SWEET_DEV_TOUCH_TCM */
+diff --git a/pexpert/pexpert/arm64/sweet_dev.h b/pexpert/pexpert/arm64/sweet_dev.h
+index 6326962..631f968 100644
+--- a/pexpert/pexpert/arm64/sweet_dev.h
++++ b/pexpert/pexpert/arm64/sweet_dev.h
+@@ -58,11 +58,13 @@
+ #define SWEET_DEV_RPMH_TCS_SIZE 0x3000u
+ #define SWEET_DEV_RPMH_DICT_PA  0x0c3f000cu
+ 
+-/* Touch and USB are off: the touch controller, its I2C SE, GPIOs and supply
+- * rail differ from guacamole, and a wrong RPMh regulator vote could damage
+- * the board. The constants only keep the shared sources compiling. */
++/* Touch: Synaptics TouchComm at I2C 0x20 on SE17 (gpio55/56, bit-banged as
++ * on guacamole), ATTN gpio122, reset gpio54, power enables gpio59/gpio152
++ * (LG Windows DSDT TSC1 + PEP0). No RPMh/PMIC rail: sweet_touch_tcm.c.
++ * USB stays off. The other touch constants only keep shared sources compiling. */
+ #define SWEET_DEV_TOUCH         0
+ #define SWEET_DEV_TOUCH_SEC     0
++#define SWEET_DEV_TOUCH_TCM     1
+ #define SWEET_DEV_TOUCH_VREG_NAME "none"
+ #define SWEET_DEV_TOUCH_VREG_MV 0
+ #define SWEET_DEV_TOUCH_SE_PA   0x00c80000u
