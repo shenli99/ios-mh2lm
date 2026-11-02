@@ -10,7 +10,8 @@
   `sweetlog-batt1.bin`, `sweetlog-usb-batt-visible.bin`, and
   `sweetlog-0112e.bin`; none contains the DWC3/gadget/ACM lines. It is not
   an EP0, DMA, VBUS, or battery failure.
-- **Change committed locally (push pending network recovery):** 0103 now sets
+- **Change committed locally (push pending network recovery):** commit
+  `04863c0` (`mh2lm: enable guarded USB probe`) makes 0103 set
   `SWEET_DEV_USB=1` for MH2LM, retaining `SWEET_DEV_USB_VBUS_DEFAULT=0`.
   New 0117 makes the USB progress marker a no-op when
   `SWEET_DEV_MARK_PA=0`, so the initial probe never maps or writes physical
