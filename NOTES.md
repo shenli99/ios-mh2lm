@@ -54,6 +54,18 @@
   passes `git apply --check`. Run one more CI build before using the full
   feature kernel; the 0112g kernel itself is sufficient only for the narrow
   `sweetusb=1` read-only USB probe.
+- **0112m CI result (2026-11-03, ready for the next test image):** all of
+  0103--0117 applied in order, including 0105 and the previously skipped
+  0108--0111 display/backlight sequence; the log ends `XNU Build Done!`.
+  `kernel.development.mh2lm` SHA256 is
+  `a0b532b10b7afda8e27872d7af7bfe2abab3bd8cbeaba5a95426f4c5bedcab6d`.
+  Extracted buildtree confirms `SWEET_DEV_TOUCH_TCM=1`,
+  `SWEET_DEV_USB=1`, `sweet_display_probe.c` in `bsd/conf/files`, and
+  AppleARMBacklight. The final kernel contains the expected DWC3 probe,
+  gadget DMA and CDC-ACM strings, plus the SID2 battery and display strings;
+  it contains no USB stub string. Use this artifact for the disposable first
+  USB test with only `sweetusb=1`; do not enable gadget mode or VBUS writes
+  yet.
 - **Next after CI:** boot a disposable image with only `sweetusb=1` (keep
   battery arguments off) and pull the persistent ring log. Expected first
   lines are GCC/GDSC/CBCR and DWC3 state, not gadget writes. Only after that
