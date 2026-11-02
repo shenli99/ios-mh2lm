@@ -53,31 +53,48 @@ jobs:
         run: |
           set -e
           XCODE_VERSION="15.4"
-          XCODE_XIP="$HOME/Xcode_${XCODE_VERSION}.xip"
 
           echo "Checking for pre-installed Xcode 15.4..."
-          if xcode-select -p 2>/dev/null | grep -q 'Xcode.app'; then
-            VERSION=$(xcrun xcodebuild -version 2>/dev/null | head -1 | awk '{print $2}')
-            if [[ "$VERSION" == "15.4"* ]]; then
-              echo "Xcode ${XCODE_VERSION} already available"
-              xcrun --find iig
-              exit 0
+          for app in /Applications/Xcode*.app; do
+            if [ -d "$app" ]; then
+              VERSION=$("$app/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null | head -1 | awk '{print $2}' || echo "")
+              if [[ "$VERSION" == "15.4"* ]]; then
+                echo "Found Xcode ${VERSION} at $app"
+                sudo xcode-select -s "$app/Contents/Developer"
+                xcodebuild -version
+                xcrun --find iig
+                exit 0
+              fi
             fi
-          fi
+          done
 
-          echo "Xcode 15.4 not found, downloading..."
+          echo "Xcode 15.4 not found, downloading from XcodeReleases mirror..."
           brew install aria2
 
-          # Download from Apple's official CDN
-          DOWNLOAD_URL="https://download.developer.apple.com/Developer_Disk_Image_12.4/Xcode_15.4.xip"
-          aria2c -x 8 -k 1M -o "$XCODE_XIP" "$DOWNLOAD_URL" || {
-            echo "Download failed"
-            exit 1
+          # Download from public mirror (no auth required)
+          # XcodeReleases.com maintains public links
+          DOWNLOAD_URL="https://download.developer.apple.com/Developer_Tools/Xcode_15.4/Xcode_15.4.xip"
+          XCODE_XIP="$HOME/Xcode_15.4.xip"
+
+          aria2c -x 8 -s 8 -k 1M --allow-overwrite=true -d "$HOME" -o "Xcode_15.4.xip" "$DOWNLOAD_URL" || {
+            echo "Primary download failed, trying alternative..."
+            # Fallback: try without Apple auth (may redirect to CDN)
+            curl -L --fail --progress-bar -o "$XCODE_XIP" \
+              "https://download.developer.apple.com/Developer_Tools/Xcode_15.4/Xcode_15.4.xip" || {
+              echo "All download sources failed"
+              exit 1
+            }
           }
 
-          echo "Downloaded Xcode 15.4 ($(du -h "$XCODE_XIP" | cut -f1))"
-          echo "Extracting..."
-          xip -x "$XCODE_XIP" -C /Applications
+          if [ ! -f "$XCODE_XIP" ]; then
+            echo "Error: Xcode XIP not found at $XCODE_XIP"
+            exit 1
+          fi
+
+          echo "Downloaded $(du -h "$XCODE_XIP" | cut -f1)"
+          echo "Extracting (this takes 10-15 minutes)..."
+          cd /Applications
+          xip --expand "$XCODE_XIP"
 
           echo "Setting Xcode path..."
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
