@@ -71,6 +71,16 @@
   lines are GCC/GDSC/CBCR and DWC3 state, not gadget writes. Only after that
   test `sweetusb=2 sweetusbstep=1` through `sweetusbstep=6`, one step per
   boot; do not set `sweetvbus` until the read-only probe is confirmed.
+- **0112m USB-probe image packaged (2026-11-03):**
+  `/home/shenli/work1/out-bs/boot-16k-0112m-usbprobe.img` is an Android boot
+  image (header v1, 2048-byte page size), built from the verified 0112m kernel
+  above and `adt-16k-3g.adt`. Its SHA256 is
+  `f114a3c2806236bf1a9fb3b4eac373d225f294f3d45b87cfa804fc7e23083e11`.
+  Its UniXNU arguments retain the established 0112f GUI/iOS-rw baseline and
+  add only `sweetusb=1`; they contain no `sweetusb=2`, `sweetvbus`,
+  `sweetbattery`, or `sweetbatt`. It is strictly for `fastboot boot`, not
+  flashing. The reproducible local packager is
+  `/home/shenli/work1/out-bs/mk16k-0112m-usbprobe.sh`.
 
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
