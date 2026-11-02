@@ -422,9 +422,10 @@ index 0b7870b..8cd5b9e 100644
 +#define SWEET_DEV_RPMH_TCS_SIZE 0x3000u
 +#define SWEET_DEV_RPMH_DICT_PA  0x0c3f000cu
 +
-+/* Touch and USB are off: the touch controller, its I2C SE, GPIOs and supply
-+ * rail differ from guacamole, and a wrong RPMh regulator vote could damage
-+ * the board. The constants only keep the shared sources compiling. */
++/* Touch remains off: the touch controller, its I2C SE, GPIOs and supply rail
++ * differ from guacamole. USB uses the verified DWC3/QUSB2 register map below;
++ * keep its bring-up behind the sweetusb boot arg until host enumeration is
++ * proven on this board. */
 +#define SWEET_DEV_TOUCH         0
 +#define SWEET_DEV_TOUCH_SEC     0
 +#define SWEET_DEV_TOUCH_VREG_NAME "none"
@@ -435,8 +436,8 @@ index 0b7870b..8cd5b9e 100644
 +#define SWEET_DEV_TOUCH_GCC_VOTE 0x52014u
 +#define SWEET_DEV_TOUCH_RCG     0x1e148u
 +
-+#define SWEET_DEV_USB           0
-+#define SWEET_DEV_MARK_PA       0x0UL   /* USB progress marker; unused while SWEET_DEV_USB is 0 */
++#define SWEET_DEV_USB           1
++#define SWEET_DEV_MARK_PA       0x0UL   /* USB progress marker; no IMEM marker on mh2lm */
 +#define SWEET_DEV_USB_ARM_ON_EVENT 1
 +#define SWEET_DEV_USB_VBUS_DEFAULT 0
 +#define SWEET_DEV_USB_GCC_PA    0x00100000u

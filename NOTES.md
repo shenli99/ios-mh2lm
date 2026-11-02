@@ -1,6 +1,35 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-21, latest)
+## Agent handoff / active work (2026-11-02, latest)
+
+### MH2LM USB compile-gate fix (2026-11-02)
+- **Root cause:** the 0112--0114 DWC3 CDC-ACM implementation was present in
+  `bsd/dev/sweet_usb.c`, but MH2LM set `SWEET_DEV_USB=0` in the board block
+  added by 0103. Its runtime therefore compiled only the deliberate stub:
+  `SWEET USB: no driver for this board yet`. This matches
+  `sweetlog-batt1.bin`, `sweetlog-usb-batt-visible.bin`, and
+  `sweetlog-0112e.bin`; none contains the DWC3/gadget/ACM lines. It is not
+  an EP0, DMA, VBUS, or battery failure.
+- **Change committed locally (push pending network recovery):** 0103 now sets
+  `SWEET_DEV_USB=1` for MH2LM, retaining `SWEET_DEV_USB_VBUS_DEFAULT=0`.
+  New 0117 makes the USB progress marker a no-op when
+  `SWEET_DEV_MARK_PA=0`, so the initial probe never maps or writes physical
+  address zero while no verified persistent marker address exists for MH2LM.
+- **Local validation:** updated source/header in
+  `/tmp/work1-xnu-buildtree-0112.GdVHWS`, compiled `bsd/dev/sweet_usb.c` as
+  ARM64 with `ARM64_BOARD_CONFIG_MH2LM` and
+  `ARM64_BOARD_CONFIG_SWEET`. `/tmp/mh2lm-sweet_usb-full.o` contains
+  `_sweet_usb_probe`, `_sweet_usb_gadget_start`, `_ud_bringup_thread`, plus
+  `SWEET USB: GDSC usb30_prim`, `gadget step 0: DMA`, and
+  `ACM endpoints configured`; it does **not** contain the stub string. The
+  0112 build-log artifact is empty, so `tools/xnu-cc.py` could not recover a
+  CI compile command; the direct compiler invocation used the generated
+  MH2LM headers and matched include roots instead.
+- **Next after CI:** boot a disposable image with only `sweetusb=1` (keep
+  battery arguments off) and pull the persistent ring log. Expected first
+  lines are GCC/GDSC/CBCR and DWC3 state, not gadget writes. Only after that
+  test `sweetusb=2 sweetusbstep=1` through `sweetusbstep=6`, one step per
+  boot; do not set `sweetvbus` until the read-only probe is confirmed.
 
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at

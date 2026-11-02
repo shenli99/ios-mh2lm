@@ -1,0 +1,23 @@
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -103,6 +103,10 @@ static vm_offset_t usb_imem;
+ static uint32_t
+ usb_mark_read(void)
+ {
++	/* MH2LM has no verified reset-surviving scratch address yet. */
++	if (SWEET_USB_IMEM_PA == 0) {
++		return 0;
++	}
+ 	if (usb_imem == 0) {
+ 		usb_imem = ml_io_map(SWEET_USB_IMEM_PA, 0x1000);
+ 	}
+@@ -113,5 +117,8 @@ static void
+ usb_mark(uint32_t v)
+ {
++	if (SWEET_USB_IMEM_PA == 0) {
++		return;
++	}
+ 	(void)usb_mark_read();
+ 	if (usb_imem) {
+ 		*(volatile uint32_t *)(usb_imem + SWEET_USB_IMEM_MARK) = v;
