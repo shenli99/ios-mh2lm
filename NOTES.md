@@ -112,6 +112,20 @@
   and EP0 configuration, then stops before the `DALEPENA` write. It has no
   `sweetvbus`, `sweetusbdma`, battery, or key override; no enumeration is
   expected in this stage.
+- **0112m m2 hardware result / m3 step-4 follow-up (2026-11-03):**
+  `logs/sweetlog-0112m2.bin` completed the intended pre-enable gadget path
+  without destabilizing iOS or the keys. The worker allocated DMA at
+  `0xc43ac000` (below 4 GiB), DCTL soft reset completed in 1 ms, and
+  `GEVNTADRHI` retained all bits of a `0xffffffff` write, proving the
+  controller accepts 64-bit event-buffer addresses. The programmed event
+  address and size read back as `0x00000000c43ac000` and `0x80001000`, EP0
+  setup completed, and the driver stopped exactly before step 4. The next
+  disposable image is
+  `/home/shenli/work1/out-bs/boot-16k-0112m-usbprobe-m3-step4.img` (SHA256
+  `f2acb8fc9d042c75d65b985abaf98c050c04b46c2c1317c969eb778f3a6bf1e3`),
+  made by `out-bs/mk16k-0112m-usbprobe-m3-step4.sh`. It changes only
+  `sweetusbstep=4`, so it writes `DALEPENA=0x3` for EP0 and then stops before
+  QSCRATCH/VBUS or RUN_STOP. Enumeration is still not expected.
 
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
