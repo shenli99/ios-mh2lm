@@ -97,6 +97,21 @@
   `sweetusb=1`, removes `sweetkeys=0`, and has no gadget/VBUS/battery boot
   arguments. Verify that the log shows key initialization plus power and
   volume-down transitions; keep gadget mode disabled for that boot.
+- **0112m m1 hardware result / m2 step-1 follow-up (2026-11-03):**
+  `logs/sweetlog-0112m1.bin` confirms that m1 restored the read-only key
+  driver: it identifies the live PON and GPIO6 APIDs, verifies the GPIO is an
+  enabled input, and records both Power (`key=0`, HID usage `0x30`) and
+  Volume Down (`key=2`, HID usage `0xea`) press/release pairs. SpringBoard
+  again initiated a normal shutdown. The USB state probe is unchanged and
+  healthy. The next disposable image is
+  `/home/shenli/work1/out-bs/boot-16k-0112m-usbprobe-m2-step1.img` (SHA256
+  `003eaae281a634f52282ccc32e93128797da4537454b9a885056c92053ccc02c`),
+  made by `out-bs/mk16k-0112m-usbprobe-m2-step1.sh`. It adds only
+  `sweetusb=2 sweetusbstep=1`: after the default 15-second deferred worker
+  delay it tests DMA allocation, DCTL soft reset, event-buffer programming,
+  and EP0 configuration, then stops before the `DALEPENA` write. It has no
+  `sweetvbus`, `sweetusbdma`, battery, or key override; no enumeration is
+  expected in this stage.
 
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
