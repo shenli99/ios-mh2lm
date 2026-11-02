@@ -1,23 +1,21 @@
-# ios-guacamole
+# ios-mh2lm
 
-**Apple's iOS 16 running on the OnePlus 7 Pro.**
+**Apple's iOS 16 running on the LG G8X ThinQ.**
 
-This is a port of [ios-sweet](https://github.com/dipa-studio/ios-sweet) (XNU on the
-Xiaomi Redmi Note 10 Pro) to the OnePlus 7 Pro (`guacamole`, Qualcomm SM8150 /
-Snapdragon 855, Adreno 640). Apple's open-source XNU kernel (xnu-8796, the iOS 16
-generation) boots from the stock bootloader and runs the **unmodified iOS 16.7.16
-(20H392) userland of the iPhone X**: launchd, the system daemons, backboardd,
-SpringBoard and the stock apps.
+This is a port of [ios-guacamole](https://github.com/wochgn/ios-guacamole) (XNU on
+the OnePlus 7 Pro) to the LG G8X ThinQ (`mh2lm`, Qualcomm SM8150 / Snapdragon 855,
+Adreno 640). Apple's open-source XNU kernel (xnu-8796, the iOS 16 generation) boots
+from Mu-Silicium's UEFI firmware → UniXNU → DarwinBoot, and runs the **unmodified
+iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons,
+backboardd, SpringBoard and the stock apps.
 
-As of **2026-10-20** the phone boots to the **iOS home screen**: SpringBoard
-renders, apps open, and the touchscreen works. Rendering runs entirely on the CPU;
-there is no GPU driver.
+As of **2026-11-02** the phone boots to the **iOS lock screen**: SpringBoard
+renders, apps open, touchscreen works, hardware keys (power/volume) work, display
+brightness control works, and PSCI shutdown/restart work. Rendering runs entirely
+on the CPU; there is no GPU driver.
 
-![iOS 16 Settings > General > About on the OnePlus 7 Pro](docs/guacamole-about.jpg)
-
-*iOS 16.7.16 on a OnePlus 7 Pro: Settings > General > About reports "iPhone X",
-17 GB capacity and 4.15 GB available. The panel is letterboxed (1125x2436 canvas
-centred in the 1440x3120 panel).*
+*iOS 16.7.16 on an LG G8X ThinQ: Settings > General > About reports "iPhone X".
+The panel (1080x2340) is letterboxed (1125x2436 canvas centred with side bars).*
 
 [中文说明](README.zh-CN.md)
 
@@ -29,28 +27,30 @@ centred in the 1440x3120 panel).*
 
 | Area | State |
 | --- | --- |
-| Boot | Stock OnePlus ABL → `fastboot boot` of our shim → XNU. Nothing is flashed to the boot partitions |
+| Boot | Mu-Silicium UEFI (Qualcomm EDK2) → UniXNU → DarwinBoot → XNU. Boot image flashed to `boot_a`/`boot_b` |
 | CPU | All 8 cores via PSCI (`cpus=8`), 16K pages, GICv3 interrupts, 19.2 MHz timer |
-| Memory | 3 GiB at `0xc0000000` (the profile also offers the 4 GiB upper bank at `0x180000000`) |
+| Memory | 3 GiB at `0xc0000000` (owned-memory-size in ADT; DarwinBoot default 256 MiB causes iOS OOM hangs) |
 | Storage | Own UFS host driver (`ufshc@1d84000`); the iOS root is a journaled HFS+ volume in `userdata`, read/write |
 | iOS userland | Real iPhone X 16.7.16 root filesystem and shared cache; launchd and the system daemons run |
-| Display | Kernel IOSurface + IOMobileFramebuffer (`AppleCLCD`) services; CoreAnimation renders in software; frames are copied into the ABL splash framebuffer at 30 Hz. Presenting the iPhone X panel (1125x2436) letterboxed into the 1440x3120 panel |
-| GUI | backboardd, SpringBoard, home screen, apps |
-| Touch | Samsung S6SY761 at I²C `0x48` on GENI SE17, driven by **GPIO bit-bang I²C** (the SE's FIFO interface is fused off on this unit); TLMM four-tile GPIO addressing; 1.8 V rail and `ldoa17` (3008 mV) through RPMh |
+| Display | Kernel IOSurface + IOMobileFramebuffer (`AppleCLCD`) services; CoreAnimation renders in software; frames are copied into the UEFI GOP framebuffer at 30 Hz. Presenting the iPhone X panel (1125x2436) letterboxed into the 1080x2340 panel. **Hardware brightness control** via DCS 0x51 over DSI0 command FIFO, driven by `AppleARMBacklight` IOKit service (CoreBrightness → kernel → panel) |
+| GUI | backboardd, SpringBoard, lock screen, home screen, apps, Control Center, shutdown slider |
+| Touch | Synaptics TouchComm (s3618, SNPTSTCM) at I²C `0x20` on GENI SE17, driven by **GPIO bit-bang I²C** (the SE's FIFO interface is fused off on this unit); TLMM addressing; 1.8 V rails through GPIO |
+| Hardware keys | Power (PON `0xc08` bit 0), Volume Down (PON RESIN `0xc08` bit 1), Volume Up (PM8150 GPIO6 `0xc510`), all via SPMI PMIC observer interface |
+| Power management | PSCI SYSTEM_OFF (SMC 0x84000008) and SYSTEM_RESET (SMC 0x84000009) for shutdown/restart; panic stops without reboot to preserve the screen |
 | Device identity | iPhone X (`iPhone10,3` / `D22AP`): no Home button, gesture UI |
 | Activation | Native "Hactivation" path of mobileactivationd, chosen through device-tree security status. No Apple servers involved |
 
 ## What does not work (yet)
 
 - **No GPU.** The Adreno 640 sits idle; CoreAnimation uses its software renderer
-  (roughly 20-30 fps). A plan exists; see [Roadmap](#roadmap).
-- **No Wi-Fi, Bluetooth, cellular, audio, camera, sensors, GPS or SEP / Face ID.**
+  (roughly 20-30 fps).
+- **No Wi-Fi, Bluetooth, cellular, audio, camera, sensors, GPS.**
   Daemons for them start and fail or keep relaunching.
 - **The setup wizard hangs** after "Don't Transfer App & Data". The root image used
-  here skips Setup, which is why the home screen comes up directly.
+  here skips Setup, which is why the lock screen / home screen comes up directly.
 - **Few apps.** The image has only what is on the system volume. There is no App
   Store and no Apple ID.
-- **Slow boot:** about 4-5 minutes on the Apple logo.
+- **Boot time:** about 3-5 minutes on the Apple logo.
 - **Security is off:** permissive code signing (AMFI) and sandbox policies, a stub
   AppleKeyStore, no data protection. Do not put anything personal on it.
 
