@@ -51,7 +51,7 @@ jobs:
             sudo chmod +x /usr/local/bin/xcodes
             sw_vers
             ls -d /Applications/Xcode*.app
-            XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+            XC=$(ls -d /Applications/Xcode-*.app | sort -V | head -1)
             echo "export DEVELOPER_DIR=$XC/Contents/Developer" >> $BASH_ENV
             sudo xcode-select -s "$XC"
             xcodebuild -version
