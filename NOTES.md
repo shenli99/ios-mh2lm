@@ -81,6 +81,22 @@
   `sweetbattery`, or `sweetbatt`. It is strictly for `fastboot boot`, not
   flashing. The reproducible local packager is
   `/home/shenli/work1/out-bs/mk16k-0112m-usbprobe.sh`.
+- **0112m m0 hardware result / m1 follow-up (2026-11-03):**
+  `logs/sweetlog-0112m0.bin` proves the intended read-only USB probe reached
+  the live controller: `usb30_prim` GDSC is on, all sampled clocks are on, and
+  DWC3 returns `GSNPSID=0x33313130` with valid device/PHY/QSCRATCH registers.
+  The boot reached SpringBoard and launchd later recorded a normal shutdown
+  request. Its lost hardware-key shortcut has a packaging-only cause:
+  `sweetkeys=0` was inadvertently retained, and the log explicitly says
+  `SWEET KEYS: disabled (sweetkeys=0)`. It is not a USB or key-driver
+  regression; 0104 supplies MH2LM's read-only SPMI key mapping and defaults
+  keys to enabled. The next disposable image is
+  `/home/shenli/work1/out-bs/boot-16k-0112m-usbprobe-m1.img` (SHA256
+  `c758ab790783839026f12c28700937217a2f4ddcef69e43e150f3e1d8a688f44`),
+  made by `out-bs/mk16k-0112m-usbprobe-m1.sh`. It retains only
+  `sweetusb=1`, removes `sweetkeys=0`, and has no gadget/VBUS/battery boot
+  arguments. Verify that the log shows key initialization plus power and
+  volume-down transitions; keep gadget mode disabled for that boot.
 
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
