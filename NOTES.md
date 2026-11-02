@@ -37,6 +37,23 @@
   CURRENT_MACHINE_CONFIG MH2LM`; those are downstream errors, not separate
   source or CircleCI failures. Every `xnu/patches/*.patch` now passes
   `git apply --numstat` parsing locally.
+- **0112g CI result (2026-11-03):** the XNU build completed and produced
+  `kernel.development.mh2lm` (SHA256
+  `7fcd288c07f7a5313644d5134931079218b71c51f661666e57f10cf8f20d4b81`).
+  It was compiled with both `ARM64_BOARD_CONFIG_MH2LM` and
+  `ARM64_BOARD_CONFIG_SWEET`; the kernel contains `SWEET USB: GDSC
+  usb30_prim`, `gadget step 0: DMA`, and `ACM endpoints configured`, with no
+  `no driver for this board yet` string. Thus the guarded USB probe and full
+  CDC-ACM branch are genuinely in this artifact.
+- **0112g patch-chain follow-up:** CI did apply 0103, 0104 and 0112--0117,
+  but it skipped 0105 because that patch still replaced the pre-USB 0103
+  comment verbatim. Its absence made 0108--0111 skip in turn because their
+  TCM/display source context was missing. The 0105 hunk now matches the
+  post-0103 text and narrowly adds `SWEET_DEV_TOUCH_TCM=1`; on a clean 0112g
+  buildtree, 0105 then applies followed by 0108, 0109 and 0110, and 0111
+  passes `git apply --check`. Run one more CI build before using the full
+  feature kernel; the 0112g kernel itself is sufficient only for the narrow
+  `sweetusb=1` read-only USB probe.
 - **Next after CI:** boot a disposable image with only `sweetusb=1` (keep
   battery arguments off) and pull the persistent ring log. Expected first
   lines are GCC/GDSC/CBCR and DWC3 state, not gadget writes. Only after that

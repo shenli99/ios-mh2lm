@@ -978,17 +978,14 @@ diff --git a/pexpert/pexpert/arm64/sweet_dev.h b/pexpert/pexpert/arm64/sweet_dev
 index 6326962..631f968 100644
 --- a/pexpert/pexpert/arm64/sweet_dev.h
 +++ b/pexpert/pexpert/arm64/sweet_dev.h
-@@ -58,11 +58,13 @@
+@@ -58,12 +58,13 @@
  #define SWEET_DEV_RPMH_TCS_SIZE 0x3000u
  #define SWEET_DEV_RPMH_DICT_PA  0x0c3f000cu
  
--/* Touch and USB are off: the touch controller, its I2C SE, GPIOs and supply
-- * rail differ from guacamole, and a wrong RPMh regulator vote could damage
-- * the board. The constants only keep the shared sources compiling. */
-+/* Touch: Synaptics TouchComm at I2C 0x20 on SE17 (gpio55/56, bit-banged as
-+ * on guacamole), ATTN gpio122, reset gpio54, power enables gpio59/gpio152
-+ * (LG Windows DSDT TSC1 + PEP0). No RPMh/PMIC rail: sweet_touch_tcm.c.
-+ * USB stays off. The other touch constants only keep shared sources compiling. */
+ /* Touch remains off: the touch controller, its I2C SE, GPIOs and supply rail
+  * differ from guacamole. USB uses the verified DWC3/QUSB2 register map below;
+  * keep its bring-up behind the sweetusb boot arg until host enumeration is
+  * proven on this board. */
  #define SWEET_DEV_TOUCH         0
  #define SWEET_DEV_TOUCH_SEC     0
 +#define SWEET_DEV_TOUCH_TCM     1
