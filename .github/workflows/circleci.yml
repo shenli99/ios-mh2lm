@@ -108,9 +108,11 @@ jobs:
             cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
             ls -la out
             (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
+            tar czf kernel-out.tgz -C out .
+            ls -la kernel-out.tgz
 
       - store_artifacts:   # 对应 actions/upload-artifact（kernel）
-          path: out/
+          path: kernel-out.tgz
           destination: xnu-kernel
 
 workflows:
