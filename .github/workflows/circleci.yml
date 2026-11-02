@@ -65,7 +65,8 @@ jobs:
             if [ "<< pipeline.parameters.keep_going >>" = "true" ]; then
               export MAKEFLAGS="-k"
             fi
-            bash build.sh
+            set -o pipefail
+            bash build.sh 2>&1 | tee ../build.log
 
       # ── 以下步骤对应 if: always()，使用 when: always ──
 
@@ -86,6 +87,10 @@ jobs:
       - store_artifacts:   # 对应 actions/upload-artifact（buildtree）
           path: buildtree.tgz
           destination: xnu-buildtree
+
+      - store_artifacts:
+          path: build.log
+          destination: xnu-build-log
 
       - run:
           name: Inspect closed KDK support libs
