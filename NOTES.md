@@ -26,6 +26,17 @@
   0112 build-log artifact is empty, so `tools/xnu-cc.py` could not recover a
   CI compile command; the direct compiler invocation used the generated
   MH2LM headers and matched include roots instead.
+- **0112f CI diagnosis and local correction:** CircleCI itself was unchanged.
+  The build log at `/home/shenli/work1/logs/xnu-build-log-0112f.txt` showed
+  `0103-mh2lm-board.patch` rejected as `corrupt patch at line 465`. The
+  expanded MH2LM USB comment added one line but its unified-diff hunk count
+  remained `+20,75`; this made the following hunk look like malformed patch
+  syntax. 0103 has been corrected to `+20,76` and its following offset to
+  `+248,14`. The CI script then skipped 0104--0111 as a consequence of the
+  missing board patch and finally stopped at `Unsupported
+  CURRENT_MACHINE_CONFIG MH2LM`; those are downstream errors, not separate
+  source or CircleCI failures. Every `xnu/patches/*.patch` now passes
+  `git apply --numstat` parsing locally.
 - **Next after CI:** boot a disposable image with only `sweetusb=1` (keep
   battery arguments off) and pull the persistent ring log. Expected first
   lines are GCC/GDSC/CBCR and DWC3 state, not gadget writes. Only after that

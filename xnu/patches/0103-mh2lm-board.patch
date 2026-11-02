@@ -384,7 +384,7 @@ index 0b7870b..8cd5b9e 100644
   *   GUACAMOLE  OnePlus 7 Pro (SM8150):  -DARM64_BOARD_CONFIG_GUACAMOLE
   *   SWEET      Redmi Note 10 Pro (SM7150): default
   *
-@@ -19,7 +20,75 @@
+@@ -19,7 +20,76 @@
   * "sweet port", not "sweet phone": per-board numbers live here.
   */
  
@@ -462,7 +462,7 @@ index 0b7870b..8cd5b9e 100644
  
  /* ------------- OnePlus 7 Pro (guacamole, SM8150) ------------- */
  
-@@ -178,6 +247,14 @@
+@@ -178,6 +248,14 @@
  #define SWEET_DEV_PANEL_MM_W    68
  #define SWEET_DEV_PANEL_MM_H    151
  
