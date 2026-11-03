@@ -2,6 +2,71 @@
 
 ## Agent handoff / active work (2026-11-02, latest)
 
+### Kernel replacement regression baseline (measured through 2026-11-03)
+
+Use this compact checklist when replacing the XNU base, rebasing the MH2LM
+patch series, or changing a low-level driver.  The detailed chronology below
+remains the authority for test setup and interpretation.  Raw captures named
+here live under `/home/shenli/work1/logs/` and are deliberately not committed;
+preserve them alongside any replacement-kernel test results.
+
+- **Known-good 0112k6 battery baseline:** `kernel.development.mh2lm` SHA256
+  `916a874c723847728aa9fb5d38461e944a8dc9f1199f9e5331930d143f4c45e5`;
+  reproducible temporary-boot image
+  `out-bs/boot-16k-0112k6-battery-policy-log.img` SHA256
+  `fb1b1e8f7bee624d10a30dbfb9190ba19c17b6167dd8a9e0469c339dc1051f66`.
+  It uses Android boot header v1, 2048-byte pages and the established GUI/iOS
+  read-write baseline plus `sweetbattery=1 sweetbatt=1 sweetbattdiag=1
+  sweetbattirqdiag=1`.  Test with `fastboot boot` only.
+- **CPU, MMU and interrupt floor:** EL1 entry is with the MMU off; the target
+  supports 16K and 4K translation granules.  The validated 16K mapping
+  baseline is T0SZ 28, MAIR `0x44ff00`, TCR `0x1409CB51C` and a 40-bit PA
+  range.  Framebuffer fill improved from 110 ms (MMU off) to 3.5 ms with
+  Normal-NC mapping; the memory loop improved from 70 ms to 0.7 ms.  Any
+  replacement that regresses these numbers needs MMU/cache investigation
+  before higher-level driver work.
+- **Interrupt/SMP floor:** GIC Group 1 is proven on hardware: vtimer INTID 19
+  and ptimer INTID 18 each delivered 30 IRQs in 300 ms, and SGI1-to-self
+  delivered 10/10.  The timer frequency is 19.2 MHz.  PSCI 1.1 uses SMC and
+  `CPU_ON` brings up all seven secondary CPUs (eight cores total).  Do not
+  substitute XNU's default Group-0/FIQ or HVC assumptions.
+- **USB CDC-ACM baseline:** `sweetlog-0112m11.bin` demonstrates concurrent
+  USB logging and battery service: host DTR asserted, `console=222691` bytes,
+  TX `237/238`, and zero TX errors.  The controlled VBUS/device-mode setup
+  uses the USB-specific image/arguments documented in the 0112m chronology;
+  it is a separate test mode, not a default battery-test setting.
+- **Input acquisition cost and behavior:** hardware key delivery to IOHID is
+  edge-based after acquisition, but `sweet_keys.c` currently polls PMIC PON
+  plus GPIO6 every 20 ms (about 100 PMIC reads/second).  TouchComm currently
+  samples ATTN GPIO122 every 10 ms and forces a transfer every tenth pass.
+  These are established functional fallbacks, not the desired final
+  interrupt-driven input design; record responsiveness and CPU impact before
+  changing either cadence.
+- **Battery/UI data quality:** the published battery percentage must have
+  `src=gauge`, not voltage-curve fallback, when the paired raw MSOC bytes are
+  valid.  The validated conversion maps raw `0xa5..0xa8` to 65--66%; it
+  removed the former cable-induced voltage-curve jump.  Status updates are
+  presently a read-only two-second fallback poll.  PMIC event preflight found
+  USBIN_PLUGIN at APID 269/bit 4 and CHG_STATE_CHANGE at APID 266/bit 1, but
+  both peripheral and PMIC-arb gates are disabled, so no source reaches GIC
+  SPI 481.  Do not enable those gates until a real GIC consumer, latch
+  acknowledgment order and workloop handoff are implemented together.
+- **Physical charging evidence:** `sweetlog-0112m19.bin` records 65 matching
+  active-charge samples: `external=1`, `charging=1`, CHGR state `0x3`
+  (`FULLON_CHARGE`), enable `0x1`, and roughly -2.2 to -2.3 A battery current
+  (negative is charge current for this Qualcomm fuel gauge).  A contiguous
+  active set rises from about 4198 to 4304 mV and 63% to 66% MSOC.  Input
+  policy is `path=0x95`, valid USB, no input suspend, 1500 mA ICL, AICL
+  enabled/rerun, and APSD DTC-done.  This is real PMIC charging under a
+  read-only XNU diagnostic build, not a UI-only indication.  It still needs
+  repeated long plug/unplug and locked-screen tests before claiming stable
+  behavior across all sources, temperatures and sleep states.
+
+**Regression rule:** compare values and state transitions, not merely whether
+iOS reaches the desktop.  Keep new raw logs with their kernel/image SHA256,
+boot arguments, cable state and elapsed test time; the persistent ring is
+circular, so its exported line order alone cannot prove a transition order.
+
 ### MH2LM USB compile-gate fix (2026-11-02)
 - **Root cause:** the 0112--0114 DWC3 CDC-ACM implementation was present in
   `bsd/dev/sweet_usb.c`, but MH2LM set `SWEET_DEV_USB=0` in the board block
