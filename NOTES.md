@@ -63,8 +63,9 @@ test results in this file.
   boundary to the PON-specific PMIC-arb route probe; GPIO6 and the PMIC
   peripheral interrupt bytes have not been reached. Linux DTS confirms the
   PMIC-arb `chnls` window is 0x0c600000/0x02000000, so the next probe splits
-  the PON route into metadata, intr owner bitmap, `ACC_ENABLE`, and
-  `IRQ_STATUS` reads (0130) instead of guessing which access faults.
+  the PON route into metadata, intr owner bitmap, channel mapping, `ACC_ENABLE`,
+  and `IRQ_STATUS` reads (0130/0131) instead of guessing whether the mapping or
+  a register access faults.
 
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 

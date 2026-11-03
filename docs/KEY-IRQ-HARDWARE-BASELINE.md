@@ -188,18 +188,19 @@ route 拆成单独的只读部分；它仍然不写 PDC、PMIC 或 GIC：
 ```text
 mask 32   = PON route metadata：APID map + write owner
 mask 64   = PON intr owner bitmap
-mask 128  = PON channel ACC_ENABLE
-mask 256  = PON channel IRQ_STATUS
+mask 128  = PON channel window map only
+mask 256  = PON channel ACC_ENABLE
+mask 512  = PON channel IRQ_STATUS
 ```
 
 每个镜像均使用 `sweetkeys=1 sweetusb=0`，继续保留 20 ms 轮询。依次测试 32、64、
-128、256；某一步回到 LG BSP 时立即停止。各成功阶段导出持久日志并提取：
+128、256、512；某一步回到 LG BSP 时立即停止。各成功阶段导出持久日志并提取：
 
 ```text
 SWEET SPMI IRQ: keys-pon route-parts=...
 ```
 
-0130 的四项全部通过后，才回到 0129 的 `mask 2` 完整 PON route，再继续 GPIO6、
+0130/0131 的五项全部通过后，才回到 0129 的 `mask 2` 完整 PON route，再继续 GPIO6、
 PON/GPIO6 外设中断字节和最终 `mask 31`。只有这些证据齐全后，才实施 mux 的第一
 个可写、单 source Power IRQ 测试，并始终保留可选的轮询回退。
 
@@ -214,4 +215,5 @@ PON/GPIO6 外设中断字节和最终 `mask 31`。只有这些证据齐全后，
 - 已验证的按键日志：`logs/sweetlog-0113-baseline.bin`，以及同轮 battery/USB 日志。
 - 只读 route-inspection 基础接口：`xnu/patches/0128-mh2lm-spmi-mux-key-preflight.patch`；
   当前分阶段预检：`xnu/patches/0129-mh2lm-key-irq-diag-stages.patch`；PON 微阶段：
-  `xnu/patches/0130-mh2lm-pon-route-microdiag.patch`。
+  `xnu/patches/0130-mh2lm-pon-route-microdiag.patch`、
+  `xnu/patches/0131-mh2lm-pon-channel-map-probe.patch`。

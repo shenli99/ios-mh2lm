@@ -156,12 +156,15 @@ if [ "$KEY_IRQ_PROFILE" = '--key-irq-pon-route-micro' ]; then
 	make_profile key-irq-pon-route-owner \
 		"LG G8X - XNU PON route owner bitmap (${LABEL})" \
 		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=64"
+	make_profile key-irq-pon-route-map \
+		"LG G8X - XNU PON route channel map (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=128"
 	make_profile key-irq-pon-route-enable \
 		"LG G8X - XNU PON route ACC_ENABLE (${LABEL})" \
-		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=128"
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=256"
 	make_profile key-irq-pon-route-status \
 		"LG G8X - XNU PON route IRQ_STATUS (${LABEL})" \
-		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=256"
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=512"
 fi
 
 printf 'kernel SHA256: %s\n' "$KERNEL_SHA256"
@@ -173,6 +176,6 @@ if [ "$KEY_IRQ_PROFILE" = '--key-irq-diag-matrix' ]; then
 	printf ', key-irq-init, key-irq-route-pon, key-irq-route-volume-up, key-irq-cfg-pon, key-irq-cfg-volume-up, key-irq-full'
 fi
 if [ "$KEY_IRQ_PROFILE" = '--key-irq-pon-route-micro' ]; then
-	printf ', key-irq-pon-route-meta, key-irq-pon-route-owner, key-irq-pon-route-enable, key-irq-pon-route-status'
+	printf ', key-irq-pon-route-meta, key-irq-pon-route-owner, key-irq-pon-route-map, key-irq-pon-route-enable, key-irq-pon-route-status'
 fi
 printf '\n'

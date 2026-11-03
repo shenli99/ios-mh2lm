@@ -55,10 +55,10 @@ PMIC 外设 / 控制器
 **目的：** 建立共享 PMIC IRQ 的可扩展分发和下半部交接机制，并以按键作为第一
 个真实 consumer 验证。
 
-**当前检查点（0130，待 CI 与硬件测试）：** 0114a2 的 helper-init 阶段可进入 iOS，
+**当前检查点（0130/0131，待 CI 与硬件测试）：** 0114a2 的 helper-init 阶段可进入 iOS，
 而 PON 完整 route 阶段返回 LG BSP；成功日志还证明普通按键轮询已找到 PON APID 248。
-因此 0130 将 PON route 进一步拆成 APID metadata、intr owner bitmap、channel
-`ACC_ENABLE` 和 channel `IRQ_STATUS` 四个只读阶段。所有阶段不注册 GIC、不写 PDC、
+因此 0130/0131 将 PON route 进一步拆成 APID metadata、intr owner bitmap、channel
+window map、channel `ACC_ENABLE` 和 channel `IRQ_STATUS` 五个只读阶段。所有阶段不注册 GIC、不写 PDC、
 不使能或清除 PMIC IRQ，也不改变 20 ms 按键轮询。详见硬件基线文档的测试顺序。
 
 **实施边界：**
