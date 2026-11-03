@@ -508,12 +508,14 @@
   The long 0124 policy line is often interleaved before SMB_EN's select/config
   fields, so it cannot yet distinguish a software-disabled command from an
   external SMB_EN selection. Patch
-  `0125-mh2lm-battery-policy-log-format.patch` is staged locally to fix the
-  APSD DTC bit decode, expose slow-plugin timeout separately, and split the
-  record into short INPUT, TYPEC and SMB lines. It remains read-only and makes
-  no PMIC, IRQ, charging or IOPM state change. Next test: collect the three
-  short records both unplugged and plugged, especially the complete
-  `SWEET BATT SMB` record, before choosing a safe controller design.
+  `0125-mh2lm-battery-policy-log-format.patch` fixes the APSD DTC bit decode,
+  exposes slow-plugin timeout separately, and splits the record into short
+  INPUT, TYPEC and SMB lines. It remains read-only and makes no PMIC, IRQ,
+  charging or IOPM state change. It is committed locally as `f84bba8`
+  (`battery: correct PM8150B policy diagnostics`) and is not pushed. Next
+  test: collect the three short records both unplugged and plugged, especially
+  the complete `SWEET BATT SMB` record, before choosing a safe controller
+  design.
 
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
