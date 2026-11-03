@@ -219,6 +219,23 @@
   after that should the host terminal be expected to receive console text.
   No CircleCI workflow change is involved.
 
+- **0112m m9 hardware result: isolated battery service passes (2026-11-03):**
+  `logs/sweetlog-0112m9.bin` came from the disposable
+  `out-bs/boot-16k-0112m-battery-read.img` image (SHA256
+  `51e9ec489fb53b1a8aa9672b09bf190c0d18cd4b04a2588608088af3367acf4d`).
+  Its boot arguments contain only the established GUI/iOS-rw baseline plus
+  `sweetbattery=1 sweetbatt=1`: no USB gadget/VBUS arguments and no key
+  override. PM8150B USID 2 responded consistently: `SOC=0xB8` with
+  `SOC_READY`, VBATT `0x811e/0x811c` = `4034mV`, and every poll published
+  `78%`. USB VBUS is present (`usb=0x10`), while charger status `0x47` has a
+  low state value outside the driver's charging/full ranges, so the published
+  state `external=1, charging=0, full=0` is expected rather than a failure.
+  SpringBoard, backboardd, touch, power and volume-key events continued after
+  the battery polls; there is no battery-path timeout or kernel panic. Battery
+  reads are therefore hardware-validated and are not the cause of the earlier
+  desktop-entry or USB-live-log issue. Keep this read-only path unchanged
+  while the CDC-ACM 0113 build is tested.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
