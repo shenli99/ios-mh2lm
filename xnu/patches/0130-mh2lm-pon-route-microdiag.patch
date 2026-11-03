@@ -1,0 +1,187 @@
+mh2lm: isolate PON PMIC-arb route reads (0130)
+
+The 0114a2 key diagnostic established a precise boundary: the same kernel
+reaches iOS with sweetkeysirqdiag=1 (SPMI helper only), but
+sweetkeysirqdiag=2 returns to the LG BSP while querying PON's complete route.
+The successful init log proves the normal key driver has already found PON at
+APID 248 and can poll it. Existing battery route logs prove the generic
+PMIC-arb v5 diagnostic accesses work for APIDs 266 and 269. The remaining
+unproven accesses are PON-specific IRQ-route registers.
+
+Split a route diagnostic into independent read-only parts: APID metadata,
+the intr-region owner bitmap, the PON channel ACC_ENABLE word, and its
+IRQ_STATUS word. The legacy full route API continues to run all parts. New
+key masks 0x20/0x40/0x80/0x100 run only one PON part each after the helper is
+initialized. Nothing registers the GIC SPI, writes PDC, enables/clears PMIC
+interrupts, or changes the polling fallback.
+
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -67,14 +67,19 @@
+  * 32-APID owner bitmap is in the separate intr region. All reads here are
+  * bounded and have no side effects on the PMIC. */
+ static void
+-sp_irq_diag_peripheral(unsigned sid, unsigned peripheral, const char *name)
++sp_irq_diag_peripheral(unsigned sid, unsigned peripheral, const char *name,
++	unsigned parts)
+ {
+ 	unsigned ppid = (sid << 8) | peripheral;
+ 	bool found = false;
+-	vm_offset_t intr = ml_io_map(SP_INTR_PA, 0x1000);
+-	if (!intr) {
+-		printf("SWEET SPMI IRQ: %s ppid=%#x intr mapping failed\n", name, ppid);
+-		return;
++	vm_offset_t intr = 0;
++	if ((parts & SWEET_SPMI_IRQ_DIAG_ROUTE_OWNER) != 0) {
++		intr = ml_io_map(SP_INTR_PA, 0x1000);
++		if (!intr) {
++			printf("SWEET SPMI IRQ: %s ppid=%#x intr mapping failed\n", name,
++			    ppid);
++			return;
++		}
+ 	}
+ 	for (unsigned apid = 0; apid < sp_count; ++apid) {
+ 		uint32_t map = sp_rd(sp_core, SP_APID_MAP_OFF + 4u * apid);
+@@ -85,19 +90,29 @@
+ 		unsigned owner = sp_rd(sp_cfg, SP_OWNERSHIP_OFF + 4u * apid) & 7u;
+ 		unsigned ownerWord = apid >> 5;
+ 		unsigned ownerBit = apid & 31u;
+-		uint32_t ownerMask = sp_rd(intr, 4u * ownerWord);
+-		vm_offset_t chnls = ml_io_map(SP_CHNLS_PA + SP_CHNLS_APID_STRIDE * apid,
+-		    0x1000);
+-		if (!chnls) {
+-			printf("SWEET SPMI IRQ: %s ppid=%#x apid=%u chnls mapping failed\n",
+-			    name, ppid, apid);
+-			continue;
++		uint32_t ownerMask = 0, enable = 0, status = 0;
++		if ((parts & SWEET_SPMI_IRQ_DIAG_ROUTE_OWNER) != 0) {
++			ownerMask = sp_rd(intr, 4u * ownerWord);
+ 		}
+-		uint32_t enable = sp_rd(chnls, SP_ACC_ENABLE_OFF);
+-		uint32_t status = sp_rd(chnls, SP_IRQ_STATUS_OFF);
+-		printf("SWEET SPMI IRQ: %s ppid=%#x apid=%u map=%#x owner=%u "
++		if ((parts & (SWEET_SPMI_IRQ_DIAG_ROUTE_ENABLE |
++		    SWEET_SPMI_IRQ_DIAG_ROUTE_STATUS)) != 0) {
++			vm_offset_t chnls = ml_io_map(
++			    SP_CHNLS_PA + SP_CHNLS_APID_STRIDE * apid, 0x1000);
++			if (!chnls) {
++				printf("SWEET SPMI IRQ: %s ppid=%#x apid=%u chnls mapping failed\n",
++				    name, ppid, apid);
++				continue;
++			}
++			if ((parts & SWEET_SPMI_IRQ_DIAG_ROUTE_ENABLE) != 0) {
++				enable = sp_rd(chnls, SP_ACC_ENABLE_OFF);
++			}
++			if ((parts & SWEET_SPMI_IRQ_DIAG_ROUTE_STATUS) != 0) {
++				status = sp_rd(chnls, SP_IRQ_STATUS_OFF);
++			}
++		}
++		printf("SWEET SPMI IRQ: %s route-parts=%#x ppid=%#x apid=%u map=%#x owner=%u "
+ 		    "irq-owner=%u owner-word=%u owner-mask=%#x owner-bit=%u active=%u "
+-		    "acc-enable=%#x irq-status=%#x\n", name, ppid, apid, map, owner,
++		    "acc-enable=%#x irq-status=%#x\n", name, parts, ppid, apid, map, owner,
+ 		    (map & SP_IRQ_OWNER_BIT) ? 1 : 0, ownerWord, ownerMask, ownerBit,
+ 		    (ownerMask >> ownerBit) & 1u, enable, status);
+ 	}
+@@ -115,14 +130,23 @@
+ 	}
+ 	IOLockLock(sp_lock);
+ 	printf("SWEET SPMI IRQ: PMIC-arb v5 read-only preflight; no GIC handler, no enable, no clear\n");
+-	sp_irq_diag_peripheral(2, 0x13, "usbin");
+-	sp_irq_diag_peripheral(2, 0x10, "chgr");
++	sp_irq_diag_peripheral(2, 0x13, "usbin", SWEET_SPMI_IRQ_DIAG_ROUTE_ALL);
++	sp_irq_diag_peripheral(2, 0x10, "chgr", SWEET_SPMI_IRQ_DIAG_ROUTE_ALL);
+ 	IOLockUnlock(sp_lock);
+ }
+ 
+ void
+ sweet_spmi_irq_diag_source(unsigned sid, unsigned peripheral, const char *name)
+ {
++	sweet_spmi_irq_diag_source_parts(sid, peripheral, name,
++	    SWEET_SPMI_IRQ_DIAG_ROUTE_ALL);
++}
++
++void
++sweet_spmi_irq_diag_source_parts(unsigned sid, unsigned peripheral,
++	const char *name, unsigned parts)
++{
++	parts &= SWEET_SPMI_IRQ_DIAG_ROUTE_ALL;
+ 	if (!sp_ready) {
+ 		printf("SWEET SPMI IRQ: %s skipped; arbiter is not ready\n",
+ 		    name ? name : "source");
+@@ -133,10 +157,15 @@
+ 		    name ? name : "source", sid, peripheral);
+ 		return;
+ 	}
++	if (!parts) {
++		printf("SWEET SPMI IRQ: %s requested no route parts\n",
++		    name ? name : "source");
++		return;
++	}
+ 	IOLockLock(sp_lock);
+-	printf("SWEET SPMI IRQ: %s read-only source preflight; no GIC handler, no enable, no clear\n",
+-	    name ? name : "source");
+-	sp_irq_diag_peripheral(sid, peripheral, name ? name : "source");
++	printf("SWEET SPMI IRQ: %s read-only route parts=%#x; no GIC handler, no enable, no clear\n",
++	    name ? name : "source", parts);
++	sp_irq_diag_peripheral(sid, peripheral, name ? name : "source", parts);
+ 	IOLockUnlock(sp_lock);
+ }
+ 
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -15,9 +15,18 @@
+  * This is a read-only bring-up probe: it never enables, clears, or claims
+  * an interrupt. Call only after sweet_spmi_init() outside primary IRQ context. */
+ void sweet_spmi_irq_diag(void);
++#define SWEET_SPMI_IRQ_DIAG_ROUTE_META    0x01u
++#define SWEET_SPMI_IRQ_DIAG_ROUTE_OWNER   0x02u
++#define SWEET_SPMI_IRQ_DIAG_ROUTE_ENABLE  0x04u
++#define SWEET_SPMI_IRQ_DIAG_ROUTE_STATUS  0x08u
++#define SWEET_SPMI_IRQ_DIAG_ROUTE_ALL \
++	(SWEET_SPMI_IRQ_DIAG_ROUTE_META | SWEET_SPMI_IRQ_DIAG_ROUTE_OWNER | \
++	SWEET_SPMI_IRQ_DIAG_ROUTE_ENABLE | SWEET_SPMI_IRQ_DIAG_ROUTE_STATUS)
+ /* Read-only route inspection for one PMIC peripheral. It never registers a
+  * GIC handler, enables/clears a PMIC interrupt or writes a PMIC register. */
+ void sweet_spmi_irq_diag_source(unsigned sid, unsigned peripheral, const char *name);
++void sweet_spmi_irq_diag_source_parts(unsigned sid, unsigned peripheral,
++	const char *name, unsigned parts);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -300,8 +300,8 @@
+ 	if (irqDiag != 0) {
+ 		unsigned mask = (unsigned)irqDiag;
+ 		printf("SWEET KEYS IRQ: read-only diagnostic mask=%#x\n", mask);
+-		/* bit 0: helper init only; bits 1/2: per-source PMIC-arb route. */
+-		if ((mask & 0x07u) != 0) {
++		/* bit 0: helper init; bits 1/2 or 5..8: PMIC-arb route probes. */
++		if ((mask & 0x1e7u) != 0) {
+ 			if (sweet_spmi_init() != 0) {
+ 				printf("SWEET KEYS IRQ: shared SPMI preflight unavailable\n");
+ 			} else {
+@@ -309,6 +309,22 @@
+ 					sweet_spmi_irq_diag_source(0u, KEYS_PON_RT >> 8,
+ 					    "keys-pon");
+ 				}
++				if ((mask & 0x20u) != 0) {
++					sweet_spmi_irq_diag_source_parts(0u, KEYS_PON_RT >> 8,
++					    "keys-pon", SWEET_SPMI_IRQ_DIAG_ROUTE_META);
++				}
++				if ((mask & 0x40u) != 0) {
++					sweet_spmi_irq_diag_source_parts(0u, KEYS_PON_RT >> 8,
++					    "keys-pon", SWEET_SPMI_IRQ_DIAG_ROUTE_OWNER);
++				}
++				if ((mask & 0x80u) != 0) {
++					sweet_spmi_irq_diag_source_parts(0u, KEYS_PON_RT >> 8,
++					    "keys-pon", SWEET_SPMI_IRQ_DIAG_ROUTE_ENABLE);
++				}
++				if ((mask & 0x100u) != 0) {
++					sweet_spmi_irq_diag_source_parts(0u, KEYS_PON_RT >> 8,
++					    "keys-pon", SWEET_SPMI_IRQ_DIAG_ROUTE_STATUS);
++				}
+ #if SWEET_DEV_KEYS_VOLUME
+ 				if ((mask & 0x04u) != 0) {
+ 					sweet_spmi_irq_diag_source(SWEET_DEV_VOL_GPIO_SID,

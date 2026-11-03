@@ -53,6 +53,18 @@ test results in this file.
   GPIO6 route, PON peripheral bytes and GPIO6 peripheral bytes. One future CI
   artifact will be packaged into those five stages plus a full mask-31 image;
   do not repeat the 0114a all-at-once diagnostic.
+- **0114a2 key IRQ stage result (2026-11-03):** the new `key-irq-init` image
+  (`sweetkeysirqdiag=1`) reached iOS. Decoded
+  `logs/sweetlog-0114a2-keyini.bin` is a fresh 4 MiB SWEETLOG ring (flush
+  #13), with `SWEET KEYS: ... pon-apid=248 ...` followed by
+  `SWEET KEYS IRQ: read-only diagnostic mask=0x1`; normal key polling also
+  produced key events. The next image, `key-irq-route-pon`
+  (`sweetkeysirqdiag=2`), returned directly to the LG BSP. This moves the
+  boundary to the PON-specific PMIC-arb route probe; GPIO6 and the PMIC
+  peripheral interrupt bytes have not been reached. Linux DTS confirms the
+  PMIC-arb `chnls` window is 0x0c600000/0x02000000, so the next probe splits
+  the PON route into metadata, intr owner bitmap, `ACC_ENABLE`, and
+  `IRQ_STATUS` reads (0130) instead of guessing which access faults.
 
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 

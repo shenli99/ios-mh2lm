@@ -178,36 +178,30 @@ GPIO6 为 APID 261。Linux 通用流程会先清 arbiter pending、再向外设
 | PDC pin/预配置 | 某些 QCOM 路线需 PDC 才能从 PMIC-arb 送达 GIC | 证明现有固件已配置，或确认目标 pin/寄存器后才写 |
 | GIC 上游 trigger | DTS `IRQ_TYPE_NONE` 不指定 edge/level | GIC callback 完成受控单按键试验且无重复 / 未处理 disable |
 
-## 下一次实机测试：0129 分阶段只读预检
+## 下一次实机测试：0130 PON route 微阶段只读预检
 
-0114a 说明完整的 0128 预检与 baseline 的唯一区别在诊断分支：baseline 可进入
-iOS，而 `sweetkeysirqdiag=1` 镜像回到 LG BSP；其导出的持久日志是上一轮 0113
-USB+battery-ui 日志，不能归因到具体读取。0129 因此将诊断分解为位图。它仍然不写
-PDC、PMIC 或 GIC：
-
-```text
-mask 1   = 仅初始化只读 SPMI helper
-mask 2   = PON 的 PMIC-arb route（同时初始化 helper）
-mask 4   = GPIO6 的 PMIC-arb route（同时初始化 helper）
-mask 8   = PON 原始 PMIC interrupt bytes（observer reads）
-mask 16  = GPIO6 原始 PMIC interrupt bytes（observer reads）
-mask 31  = 全部阶段；仅在前五项均通过后执行
-```
-
-每个镜像均使用 `sweetkeys=1 sweetusb=0`，继续保留 20 ms 轮询。依次测试 1、2、4、
-8、16；某一步回到 LG BSP 时立即停止，前一步即为最后已验证边界。各成功阶段导出
-持久日志并提取下列前缀：
+0114a2 已经验证：`sweetkeysirqdiag=1`（helper init）可以进入 iOS，而
+`sweetkeysirqdiag=2`（PON 完整 route）直接回到 LG BSP。成功日志中的按键轮询已
+找到 PON `APID 248`，所以问题不在普通按键访问或 helper 初始化。0130 继续把 PON
+route 拆成单独的只读部分；它仍然不写 PDC、PMIC 或 GIC：
 
 ```text
-SWEET SPMI IRQ: keys-pon ...
-SWEET SPMI IRQ: keys-volume-up ...
-SWEET KEYS IRQ CFG: pon ...
-SWEET KEYS IRQ CFG: volume-up ...
+mask 32   = PON route metadata：APID map + write owner
+mask 64   = PON intr owner bitmap
+mask 128  = PON channel ACC_ENABLE
+mask 256  = PON channel IRQ_STATUS
 ```
 
-只有 1、2、4、8、16 全部通过，才测试 31。通过条件不是“按键还能工作”，而是两个
-source 的路由、enable、pending/latch 和电平转换都能被解释。只有这些证据齐全后，
-才实施 mux 的第一个可写、单 source Power IRQ 测试，并始终保留可选的轮询回退。
+每个镜像均使用 `sweetkeys=1 sweetusb=0`，继续保留 20 ms 轮询。依次测试 32、64、
+128、256；某一步回到 LG BSP 时立即停止。各成功阶段导出持久日志并提取：
+
+```text
+SWEET SPMI IRQ: keys-pon route-parts=...
+```
+
+0130 的四项全部通过后，才回到 0129 的 `mask 2` 完整 PON route，再继续 GPIO6、
+PON/GPIO6 外设中断字节和最终 `mask 31`。只有这些证据齐全后，才实施 mux 的第一
+个可写、单 source Power IRQ 测试，并始终保留可选的轮询回退。
 
 ## 证据索引
 
@@ -219,4 +213,5 @@ source 的路由、enable、pending/latch 和电平转换都能被解释。只�
 - XNU GIC helper：`ref/UniXNU-src/drivers/ArmCpu/ArmCpu.cpp`。
 - 已验证的按键日志：`logs/sweetlog-0113-baseline.bin`，以及同轮 battery/USB 日志。
 - 只读 route-inspection 基础接口：`xnu/patches/0128-mh2lm-spmi-mux-key-preflight.patch`；
-  当前分阶段预检：`xnu/patches/0129-mh2lm-key-irq-diag-stages.patch`。
+  当前分阶段预检：`xnu/patches/0129-mh2lm-key-irq-diag-stages.patch`；PON 微阶段：
+  `xnu/patches/0130-mh2lm-pon-route-microdiag.patch`。
