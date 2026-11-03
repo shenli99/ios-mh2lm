@@ -332,6 +332,18 @@
   must be derived from the MH2LM UEFI charger configuration rather than the
   status-bar workaround.
 
+- **PMIC event-driven battery preflight staged, not yet hardware-tested
+  (2026-11-03):** `0122-mh2lm-battery-irq-preflight.patch` adds an opt-in
+  `sweetbattirqdiag=1` probe for the eventual event-driven path. It does not
+  register SM8150 GIC SPI 481 and it performs no PMIC write, enable or clear.
+  On the next combined charging test it will only log the PM8150B USBIN
+  (`PPID 0x213`) and CHGR (`0x210`) APID mappings, write owner, IRQ-owner bit,
+  EE0 owner bitmap bit, and v5 channel enable/status words. This establishes
+  whether XNU can safely receive `USBIN_PLUGIN` and `CHG_STATE_CHANGE` before
+  adding a handler that schedules a normal `SweetBattery::poll()` on the
+  workloop. The 2-second 0121 timer is a temporary local fallback, not the
+  intended final event mechanism.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then

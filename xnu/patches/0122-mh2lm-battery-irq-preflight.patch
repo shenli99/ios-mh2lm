@@ -1,0 +1,195 @@
+mh2lm: preflight PMIC-arb battery IRQ routing (0122)
+
+The battery source still relies exclusively on its observer timer (two seconds
+in temporary 0121), rather than a hardware event. PM8150B exposes
+USBIN_PLUGIN and CHG_STATE_CHANGE through the SM8150 PMIC-arb (GIC SPI 481),
+but the port must not claim that shared interrupt or alter peripheral IRQ
+configuration before the live APID routing is known.
+
+Add an opt-in `sweetbattirqdiag=1` preflight.  It reads and logs all APID
+mappings for PM8150B USBIN (PPID 0x213) and CHGR (0x210), their write owner,
+IRQ-owner flag, EE0 owner bitmap bit, and v5 channel enable/status words.
+It never registers a GIC handler, enables or clears a PMIC interrupt, writes a
+PMIC register, or changes published battery properties.  The default boot path
+is unchanged.
+
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -16,9 +16,17 @@
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+ #define SP_CORE_PA SWEET_DEV_SPMI_CORE_PA
++#define SP_CHNLS_PA SWEET_DEV_SPMI_CHNLS_PA
+ #define SP_OBS_PA  SWEET_DEV_SPMI_OBS_PA
++#define SP_INTR_PA SWEET_DEV_SPMI_INTR_PA
+ #define SP_CFG_PA  SWEET_DEV_SPMI_CFG_PA
+ #define SP_NO_APID 0xffffu
++#define SP_APID_MAP_OFF 0x900u
++#define SP_OWNERSHIP_OFF 0x700u
++#define SP_CHNLS_APID_STRIDE 0x10000u
++#define SP_ACC_ENABLE_OFF 0x100u
++#define SP_IRQ_STATUS_OFF 0x104u
++#define SP_IRQ_OWNER_BIT 0x01000000u
+ 
+ static vm_offset_t sp_core, sp_obs, sp_cfg;
+ static IOLock *sp_lock;
+@@ -40,11 +48,11 @@
+ {
+ 	uint16_t found = SP_NO_APID;
+ 	for (unsigned i = 0; i < sp_count; ++i) {
+-		uint32_t map = sp_rd(sp_core, 0x900u + 4u * i);
++		uint32_t map = sp_rd(sp_core, SP_APID_MAP_OFF + 4u * i);
+ 		if (!map || ((map >> 8) & 0xfffu) != ppid) {
+ 			continue;
+ 		}
+-		unsigned owner = sp_rd(sp_cfg, 0x700u + 4u * i) & 7u;
++		unsigned owner = sp_rd(sp_cfg, SP_OWNERSHIP_OFF + 4u * i) & 7u;
+ 		if (found == SP_NO_APID || owner == 0) {
+ 			found = (uint16_t)i;
+ 		}
+@@ -52,6 +60,66 @@
+ 	return found;
+ }
+ 
++/* Linux's v5 PMIC-arb driver routes PMIC peripheral IRQs through GIC SPI
++ * 481. Before this port registers that SPI or changes a PMIC enable/clear
++ * bit, dump the routing state for the two relevant peripherals. The v5
++ * access-enable and status words are in the read/write channel, while the
++ * 32-APID owner bitmap is in the separate intr region. All reads here are
++ * bounded and have no side effects on the PMIC. */
++static void
++sp_irq_diag_peripheral(unsigned sid, unsigned peripheral, const char *name)
++{
++	unsigned ppid = (sid << 8) | peripheral;
++	bool found = false;
++	vm_offset_t intr = ml_io_map(SP_INTR_PA, 0x1000);
++	if (!intr) {
++		printf("SWEET SPMI IRQ: %s ppid=%#x intr mapping failed\n", name, ppid);
++		return;
++	}
++	for (unsigned apid = 0; apid < sp_count; ++apid) {
++		uint32_t map = sp_rd(sp_core, SP_APID_MAP_OFF + 4u * apid);
++		if (!map || ((map >> 8) & 0xfffu) != ppid) {
++			continue;
++		}
++		found = true;
++		unsigned owner = sp_rd(sp_cfg, SP_OWNERSHIP_OFF + 4u * apid) & 7u;
++		unsigned ownerWord = apid >> 5;
++		unsigned ownerBit = apid & 31u;
++		uint32_t ownerMask = sp_rd(intr, 4u * ownerWord);
++		vm_offset_t chnls = ml_io_map(SP_CHNLS_PA + SP_CHNLS_APID_STRIDE * apid,
++		    0x1000);
++		if (!chnls) {
++			printf("SWEET SPMI IRQ: %s ppid=%#x apid=%u chnls mapping failed\n",
++			    name, ppid, apid);
++			continue;
++		}
++		uint32_t enable = sp_rd(chnls, SP_ACC_ENABLE_OFF);
++		uint32_t status = sp_rd(chnls, SP_IRQ_STATUS_OFF);
++		printf("SWEET SPMI IRQ: %s ppid=%#x apid=%u map=%#x owner=%u "
++		    "irq-owner=%u owner-word=%u owner-mask=%#x owner-bit=%u active=%u "
++		    "acc-enable=%#x irq-status=%#x\n", name, ppid, apid, map, owner,
++		    (map & SP_IRQ_OWNER_BIT) ? 1 : 0, ownerWord, ownerMask, ownerBit,
++		    (ownerMask >> ownerBit) & 1u, enable, status);
++	}
++	if (!found) {
++		printf("SWEET SPMI IRQ: %s ppid=%#x has no APID mapping\n", name, ppid);
++	}
++}
++
++void
++sweet_spmi_irq_diag(void)
++{
++	if (!sp_ready) {
++		printf("SWEET SPMI IRQ: skipped; arbiter is not ready\n");
++		return;
++	}
++	IOLockLock(sp_lock);
++	printf("SWEET SPMI IRQ: PMIC-arb v5 read-only preflight; no GIC handler, no enable, no clear\n");
++	sp_irq_diag_peripheral(2, 0x13, "usbin");
++	sp_irq_diag_peripheral(2, 0x10, "chgr");
++	IOLockUnlock(sp_lock);
++}
++
+ int
+ sweet_spmi_init(void)
+ {
+diff --git a/bsd/dev/sweet_spmi.h b/bsd/dev/sweet_spmi.h
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -11,6 +11,10 @@
+  * on guacamole) and addr selects the peripheral: only the DT-declared PM8150B
+  * blocks are routed, and every call is a single read. */
+ int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
++/* Logs PMIC-arb v5 routing state for the PM8150B charger/USB peripherals.
++ * This is a read-only bring-up probe: it never enables, clears, or claims
++ * an interrupt. Call only from the battery worker thread. */
++void sweet_spmi_irq_diag(void);
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -26,6 +26,7 @@
+ /* bsd/dev/sweet_spmi.c */
+ extern "C" int sweet_spmi_init(void);
+ extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
++extern "C" void sweet_spmi_irq_diag(void);
+ 
+ /* PM8150B carries both the SMB5 charger and the fuel gauge on guacamole, and
+  * the DT places it at USID 2 (qcom,pm8150b@2, reg = <0x2 0x0>). Offsets are the
+@@ -586,6 +587,8 @@
+ 	int diag = 0;
+ 	(void)PE_parse_boot_argn("sweetbattdiag", &diag, sizeof(diag));
+ 	fDiag = fSid2 && diag == 1;
++	int irqDiag = 0;
++	(void)PE_parse_boot_argn("sweetbattirqdiag", &irqDiag, sizeof(irqDiag));
+ 	if (fSid2) {
+ 		IOLog("SWEET BATTERY: PM8150B SID %u read path enabled (sweetbatt=1)\n",
+ 		    SWEET_BATT_SID);
+@@ -593,6 +596,10 @@
+ 	if (fDiag) {
+ 		IOLog("SWEET BATTERY: charger/current diagnostics enabled (read-only)\n");
+ 	}
++	if (fSid2 && irqDiag == 1) {
++		IOLog("SWEET BATTERY: PMIC-arb IRQ preflight enabled (read-only)\n");
++		sweet_spmi_irq_diag();
++	}
+ 	/* Publish a complete source BEFORE registerService wakes powerd. */
+ 	poll();
+ 	if (fReal) {
+diff --git a/pexpert/pexpert/arm64/sweet_dev.h b/pexpert/pexpert/arm64/sweet_dev.h
+--- a/pexpert/pexpert/arm64/sweet_dev.h
++++ b/pexpert/pexpert/arm64/sweet_dev.h
+@@ -44,7 +44,9 @@
+  * guacamole (GPIO6/GPIO7). The driver checks that GPIO6 is an enabled
+  * input before using it and never writes PMIC registers. */
+ #define SWEET_DEV_SPMI_CORE_PA  0x0c440000u
++#define SWEET_DEV_SPMI_CHNLS_PA 0x0c600000u
+ #define SWEET_DEV_SPMI_OBS_PA   0x0e600000u
++#define SWEET_DEV_SPMI_INTR_PA  0x0e700000u
+ #define SWEET_DEV_SPMI_CFG_PA   0x0c40a000u
+ #define SWEET_DEV_PON_RT        0x0810u          /* PON RT_STS: bit 0 KPDPWR, bit 1 RESIN */
+ #define SWEET_DEV_VOL_GPIO_RT   0xc510u          /* volume up: PM8150 GPIO6 */
+@@ -115,7 +117,9 @@
+  * PM8009 = 0xa. The drivers find APIDs by peripheral ID (PON 0x008,
+  * GPIO 0x4c1), so they pick the right SID themselves. */
+ #define SWEET_DEV_SPMI_CORE_PA  0x0c440000u
++#define SWEET_DEV_SPMI_CHNLS_PA 0x0c600000u
+ #define SWEET_DEV_SPMI_OBS_PA   0x0e600000u
++#define SWEET_DEV_SPMI_INTR_PA  0x0e700000u
+ #define SWEET_DEV_SPMI_CFG_PA   0x0c40a000u
+ #define SWEET_DEV_PON_RT        0x0810u          /* PON RT_STS (PON base 0x800 + 0x10) */
+ #define SWEET_DEV_VOL_GPIO_RT   0xc110u          /* sweet: PM6150L GPIO2 */
+@@ -208,7 +212,9 @@
+ #define SWEET_DEV_FB_STRIDE     (SWEET_DEV_FB_W * 4)
+ 
+ #define SWEET_DEV_SPMI_CORE_PA  0x0c440000u
++#define SWEET_DEV_SPMI_CHNLS_PA 0x0c600000u
+ #define SWEET_DEV_SPMI_OBS_PA   0x0e600000u
++#define SWEET_DEV_SPMI_INTR_PA  0x0e700000u
+ #define SWEET_DEV_SPMI_CFG_PA   0x0c40a000u
+ #define SWEET_DEV_PON_RT        0x0810u
+ #define SWEET_DEV_VOL_GPIO_RT   0xc110u
