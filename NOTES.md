@@ -393,6 +393,39 @@
   `SWEET BATTERY SID2` line and the two boot-time `SWEET BATT IRQ CFG`
   lines.
 
+- **0112m m17: MSOC fixed; PMIC event gates remain closed (2026-11-03):**
+  `logs/sweetlog-0112m17.bin` validates 0123 on hardware. The new-format
+  samples (`msoc=`, rather than legacy `soc=`) retain
+  `src=gauge`: raw 0xa7..0xa5 all scale and publish 65%, despite the
+  voltage curve moving roughly 43..65% across normal discharge and physical
+  USB insertion. Connected samples raise VBATT to about 3939 mV and set
+  `usb=0x10 external=1`; unplugged samples return to `usb=0x26
+  external=0`. The published gauge value does not take the former
+  voltage-curve 51->65% jump. A few legacy `soc=... src=curve` records in
+  the circular persistent log predate 0123: the final 0123 build tree cannot
+  emit that old format, so do not use those residue lines to judge m17.
+  There is no panic/trap signature and SpringBoard, touch and keys remain
+  live.
+
+  The IRQ preflight gives a stop condition for direct event work:
+  USBIN_PLUGIN bit 4 is edge/high/low configured and CHG_STATE_CHANGE bit 1
+  is edge/high configured, but both PMIC peripheral `enabled=0` and their
+  PMIC-arb routes have `acc-enable=0`; latches and arb status are zero.
+  Mapping/ownership are otherwise valid (USBIN APID 269 and CHGR APID 266,
+  both IRQ-owned by EE0). Therefore no PMIC event can reach GIC SPI 481 yet.
+  Do not enable either gate until a real SPI consumer, PMIC-arb enable
+  sequence, and peripheral-latch acknowledgment ordering have been designed
+  together. The 2-second polling fallback remains required.
+
+  Physical charging is still unproven and currently contradicted: all sampled
+  states remain 7 (`DISABLE_CHARGE`) with `en=0` and `smben=0`.
+  Connected `st5=0x80` distinguishes cable presence, but only two tiny
+  negative IBATT readings (-976 and -6347 uA) occur amid otherwise disabled
+  samples and are not meaningful charge current. The IRQ-CFG logger currently
+  prints a literal `\\n` after each line because its new C string contains
+  a doubled backslash; this is cosmetic and must be corrected in the next
+  functional battery patch, not in a standalone rebuild.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
