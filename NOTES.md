@@ -138,6 +138,19 @@
   the MH2LM default VBUS mode 0. It has no `sweetvbus` argument, so neither
   QSCRATCH nor PHY VBUS override is written; it stops before RUN_STOP and no
   enumeration is expected.
+- **0112m m4 hardware result / m5 step-6 follow-up (2026-11-03):**
+  `logs/sweetlog-0112m4.bin` reached and completed the QSCRATCH inspection at
+  VBUS mode 0: `HS_PHY_CTRL=0x10000000`, `SS_PHY_CTRL=0x00000000`, and
+  `GENERAL_CFG=0x00000004`. It then stopped before step 6; there were no
+  override-write lines, while keys and normal SpringBoard shutdown remained
+  healthy. The next disposable image is
+  `/home/shenli/work1/out-bs/boot-16k-0112m-usbprobe-m5-step6-run.img`
+  (SHA256 `b4dcf0135f6e39dd6da8fc69b04e1a75c285911038cd049288e008c9ef559598`),
+  made by `out-bs/mk16k-0112m-usbprobe-m5-step6-run.sh`. It changes only
+  `sweetusbstep=6`: DWC3 is switched to device mode/run, EP0 is armed after
+  the controller runs, and the polled event/log threads start. No `sweetvbus`
+  argument is passed, so VBUS mode remains 0; enumeration is not required for
+  this test.
 
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
