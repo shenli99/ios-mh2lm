@@ -27,7 +27,7 @@ index 2d08f83..4f84e20 100644
  /* bsd/dev/sweet_spmi.c */
  extern "C" int sweet_spmi_init(void);
  extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
-@@ -87,7 +90,74 @@ class AppleSmartBatteryManager : public SweetBattery {
+@@ -87,7 +90,84 @@ class AppleSmartBatteryManager : public SweetBattery {
  	OSDeclareDefaultStructors(AppleSmartBatteryManager);
 +public:
 +	bool init(OSDictionary *dictionary = NULL) APPLE_KEXT_OVERRIDE;
@@ -42,6 +42,8 @@ index 2d08f83..4f84e20 100644
 +	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
 +	    IOExternalMethodDispatch *dispatch, OSObject *target,
 +	    void *reference) APPLE_KEXT_OVERRIDE;
++	IOReturn exportObjectToClient(task_t task, OSObject *object,
++	    io_object_t *clientObject) APPLE_KEXT_OVERRIDE;
 +};
 +OSDefineMetaClassAndStructors(AppleSmartBatteryManagerUserClient, IOUserClient);
 +
@@ -74,6 +76,14 @@ index 2d08f83..4f84e20 100644
 +{
 +	terminate();
 +	return kIOReturnSuccess;
++}
++
++IOReturn
++AppleSmartBatteryManagerUserClient::exportObjectToClient(__unused task_t task,
++    OSObject *object, __unused io_object_t *clientObject)
++{
++	OSSafeReleaseNULL(object);
++	return kIOReturnUnsupported;
 +}
 +
 +IOReturn

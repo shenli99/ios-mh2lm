@@ -288,7 +288,14 @@
   boot without `sweetusb`, `sweetusbstep`, or `sweetvbus`: `sweetvbus=1`
   forces the USB VBUS override and cannot validate a physical unplug. After
   the desktop appears, unplug, wait at least 35-45 seconds for the battery
-  poll, then retrieve the persistent log after shutdown/recovery.
+  poll, then retrieve the persistent log after shutdown/recovery. The first
+  0119 CI attempt (0112k) reached the final link but failed because this XNU
+  configuration does not link the base
+  `IOUserClient::exportObjectToClient(task_t, OSObject *, io_object_t *)`
+  implementation. The user client now explicitly overrides that vtable slot,
+  releases the consumed object, and returns `kIOReturnUnsupported`; a replay
+  of the 0112k `SweetBattery.cpp` compile command succeeds, and its object no
+  longer imports that missing base symbol.
 
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
