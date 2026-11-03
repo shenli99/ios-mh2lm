@@ -344,6 +344,33 @@
   workloop. The 2-second 0121 timer is a temporary local fallback, not the
   intended final event mechanism.
 
+- **0112m m16 capacity-jump root cause and 0123 follow-up (2026-11-03):**
+  `logs/sweetlog-0112m16.bin` proves the visible jumps are not real stored
+  energy changes. The PM8150B returns raw monotonic-SOC bytes such as
+  `0xa8..0xac`; 0120 rejects every value above 100 as invalid, then 0121
+  publishes the voltage-curve fallback every two seconds. A cable changes the
+  terminal voltage from about 3858 mV (curve 51%) to 3935 mV (curve 65%), so
+  the UI jumps while the pack has not gained 14%. Linux
+  `fg_get_msoc_raw()/fg_get_msoc()` instead accepts matching 0x4009/0x400a
+  bytes, maps 0->0 and 0xff->100, and nearest-rounds 1..254 to 1..99
+  (therefore `0xa8 -> 66%`). Patch
+  `0123-mh2lm-battery-msoc-irq-lines.patch` mirrors that bounded,
+  read-only pair check and scaling; voltage remains only a failed-gauge
+  fallback. With `sweetbattirqdiag=1`, it also logs read-only USBIN_PLUGIN
+  bit 4 and CHG_STATE_CHANGE bit 1 configuration as
+  `SWEET BATT IRQ CFG` (rt/edge/high/low/enabled/latched/read-ok). It does
+  **not** register SPI 481, clear a latch, enable a PMIC line, or write a
+  charging register. The next boot must use
+  `sweetbattery=1 sweetbatt=1 sweetbattdiag=1 sweetbattirqdiag=1`, without
+  `sweetusb`, `sweetvbus`, or `sweetusbstep`. Success is repeated
+  `src=gauge` samples such as `msoc=0xa8 scaled=66%` that stay stable
+  across physical insertion/removal; the curve field may change but must not
+  become the published value while the MSOC pair is valid. This still does
+  not prove charging: connected m15/m16 samples remain state 7
+  (`DISABLE_CHARGE`), `en=0`, `smben=0`, with no stable negative IBATT.
+  Continue treating `SWEET BATT DIAG` state/en/smben/ibatt/signed/ua fields,
+  not the UI icon or VBUS detection, as charging evidence.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then

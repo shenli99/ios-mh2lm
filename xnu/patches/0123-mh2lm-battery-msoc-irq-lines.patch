@@ -1,0 +1,195 @@
+mh2lm: scale PM8150B MSOC and inspect PMIC IRQ lines (0123)
+
+`sweetlog-0112m16.bin` shows that the existing `soc <= 100` test rejects
+PM8150B's real raw monotonic SOC bytes (normally 0xa8..0xac), then publishes a
+voltage-curve estimate every two seconds. Cable insertion changes the pack
+terminal voltage by tens of millivolts, which appears in the UI as a false
+multi-point capacity jump.
+
+Linux's `fg_get_msoc_raw()` reads BATT_SOC_FG_MONOTONIC_SOC (0x4009) and its
+shadow copy (0x400a), rejecting a mismatched pair. `fg_get_msoc()` then maps raw
+0..255 to 0..100, retaining 0/255 endpoints and scaling 1..254 to 1..99 with
+nearest-integer rounding. Mirror that read-only behaviour. The generic voltage
+curve remains only a read-failure fallback, and the normal log prints both
+values for hardware validation.
+
+Extend the existing `sweetbattirqdiag=1` preflight with read-only configuration
+samples for USBIN_PLUGIN (USB peripheral bit 4) and CHG_STATE_CHANGE (CHGR
+peripheral bit 1): real-time, edge, polarity, enable and latch state. This does
+not register GIC SPI 481, clear a latch, change PMIC interrupt enables or write
+any charging register. It separates PMIC line configuration from the
+already-recorded PMIC-arb APID routing before a later event-controller change.
+
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -2,8 +2,9 @@
+  * Built-in iOS battery bring-up service. Default: 100%, AC, not charging.
+  * sweetbattery=1: read-only PM6150 polling every two seconds; voltage-derived
+  * SOC is an UNCALIBRATED estimate, not a replacement for the Linux QG algo.
+- * sweetbattery=1 sweetbatt=1: also read PM8150B at SPMI USID 2 -- gauge SOC
+- * (0x4009, gated on 0x4010 bit1) with the voltage curve only as fallback, real
++ * sweetbattery=1 sweetbatt=1: also read PM8150B at SPMI USID 2 -- raw MSOC
++ * (0x4009 plus its 0x400a shadow, gated on 0x4010 bit1) with the voltage
++ * curve only as fallback, real
+  * VBATT (0x41A0/0x41A1) and SMB5 charging state (0x1006/0x1310). Unlike the
+  * old all-or-nothing chain these blocks are independently valid. Without
+  * sweetbatt the file behaves exactly as before. What the gauge reports is what
+@@ -33,7 +34,8 @@
+  * vendor fg-reg.h and smb5 definitions for the fg-gen4 blocks that same DT
+  * declares: batt-soc@4000 and batt-info@4100. Everything below is read only. */
+ #define SWEET_BATT_SID		2u
+-#define SWEET_BATT_FG_SOC	0x4009u	/* BATT_SOC_FG_MONOTONIC_SOC, already % */
++#define SWEET_BATT_FG_SOC	0x4009u	/* BATT_SOC_FG_MONOTONIC_SOC raw */
++#define SWEET_BATT_FG_SOC_CP	0x400au	/* BATT_SOC_FG_MONOTONIC_SOC_CP */
+ #define SWEET_BATT_FG_RT_STS	0x4010u	/* BATT_SOC_INT_RT_STS */
+ #define SWEET_BATT_SOC_READY	0x02u	/* bit1 SOC_READY: 0x4009 is live */
+ #define SWEET_BATT_VBATT	0x41a0u	/* BATT_INFO_VBATT_LSB, MSB at +1 */
+@@ -89,6 +91,10 @@
+ 	static bool readWord(unsigned sid, unsigned address, uint16_t *value);
+ 	static bool readWordPair(unsigned sid, unsigned address, unsigned copyAddress,
+ 	    uint16_t *value);
++	static bool readBytePair(unsigned sid, unsigned address, unsigned copyAddress,
++	    uint8_t *value);
++	static unsigned scaleMsoc(uint8_t raw);
++	static void logIrqLines(void);
+ 	static unsigned estimatePercent(unsigned mv);
+ };
+ OSDefineMetaClassAndStructors(SweetBattery, IOPMPowerSource);
+@@ -355,6 +361,76 @@
+ 	return false;
+ }
+ 
++/* PM8150B's MONOTONIC_SOC is a byte with an adjacent shadow copy, not a
++ * literal percentage. Match the Linux FG driver's bounded consistency check
++ * before scaling it. A failed pair is unknown, never 0%. */
++bool
++SweetBattery::readBytePair(unsigned sid, unsigned address, unsigned copyAddress,
++    uint8_t *value)
++{
++	for (unsigned attempt = 0; attempt < 4; ++attempt) {
++		uint8_t sample, copy;
++		if (sweet_spmi_read(sid, address, &sample) ||
++		    sweet_spmi_read(sid, copyAddress, &copy)) {
++			return false;
++		}
++		if (sample == copy) {
++			*value = sample;
++			return true;
++		}
++	}
++	return false;
++}
++
++unsigned
++SweetBattery::scaleMsoc(uint8_t raw)
++{
++	/* Linux fg_get_msoc(): endpoints stay 0/100; raw 1..254 maps to 1..99
++	 * with nearest-integer rounding. In particular 0xa8 is 66%, not invalid. */
++	if (raw == 0xffu) {
++		return 100u;
++	}
++	if (raw == 0u) {
++		return 0u;
++	}
++	return (((unsigned)(raw - 1u) * 98u + 126u) / 253u) + 1u;
++}
++
++void
++SweetBattery::logIrqLines(void)
++{
++	/* PMIC peripheral IRQ configuration is separate from the PMIC-arb APID
++	 * route. These reads prove whether firmware has enabled the two lines we
++	 * would later claim; they neither clear latches nor alter charger policy. */
++	struct irqLine {
++		const char *name;
++		unsigned peripheral;
++		unsigned bit;
++	};
++	static const irqLine lines[] = {
++		{ "usbin-plugin", 0x13u, 4u },
++		{ "chg-state-change", 0x10u, 1u },
++	};
++	for (unsigned i = 0; i < sizeof(lines) / sizeof(lines[0]); ++i) {
++		const irqLine *line = &lines[i];
++		unsigned base = line->peripheral << 8;
++		uint8_t rt = 0, type = 0, high = 0, low = 0, enabled = 0, latched = 0;
++		bool ok = !sweet_spmi_read(SWEET_BATT_SID, base + 0x10u, &rt) &&
++		    !sweet_spmi_read(SWEET_BATT_SID, base + 0x11u, &type) &&
++		    !sweet_spmi_read(SWEET_BATT_SID, base + 0x12u, &high) &&
++		    !sweet_spmi_read(SWEET_BATT_SID, base + 0x13u, &low) &&
++		    !sweet_spmi_read(SWEET_BATT_SID, base + 0x15u, &enabled) &&
++		    !sweet_spmi_read(SWEET_BATT_SID, base + 0x18u, &latched);
++		unsigned mask = 1u << line->bit;
++		IOLog("SWEET BATT IRQ CFG: %s bit=%u rt=%u edge=%u high=%u low=%u "
++		    "enabled=%u latched=%u read-ok=%d\\n", line->name, line->bit,
++		    ((unsigned)rt & mask) ? 1 : 0, ((unsigned)type & mask) ? 1 : 0,
++		    ((unsigned)high & mask) ? 1 : 0, ((unsigned)low & mask) ? 1 : 0,
++		    ((unsigned)enabled & mask) ? 1 : 0, ((unsigned)latched & mask) ? 1 : 0,
++		    ok ? 1 : 0);
++	}
++}
++
+ unsigned
+ SweetBattery::estimatePercent(unsigned mv)
+ {
+@@ -442,11 +518,12 @@
+ 		publish(100, 4200, 0, true, true, false, true, false, false);
+ 		return;
+ 	}
+-	/* 0x4010 bit1 gates 0x4009: without SOC_READY that byte is stale. */
++	/* 0x4010 bit1 gates 0x4009: without SOC_READY the MSOC shadow pair is
++	 * stale. Linux compares 0x4009 and 0x400a before it scales raw 0..255. */
+ 	bool socOk = !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_FG_RT_STS,
+ 	    &socSts) && (socSts & SWEET_BATT_SOC_READY) &&
+-	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_FG_SOC, &soc) &&
+-	    soc <= 100u;
++	    readBytePair(SWEET_BATT_SID, SWEET_BATT_FG_SOC,
++	    SWEET_BATT_FG_SOC_CP, &soc);
+ 	bool mvOk = readWord(SWEET_BATT_SID, SWEET_BATT_VBATT, &rawVoltage) &&
+ 	    rawVoltage != 0 && rawVoltage != 0xffffu;
+ 	mv = mvOk ? (unsigned)(((uint64_t)rawVoltage * uv) / 1000000u) : 0;
+@@ -479,11 +556,11 @@
+ 	 * decodes these two bytes and nothing else. 0x110b (charge path) is
+ 	 * equally unproven, so "capable" follows VBUS presence instead. */
+ 	bool charging = external && state >= 1u && state <= 4u;
+-	/* The percentage that goes to IOKit: the gauge register whenever it is
+-	 * ready and in range, the single-cell curve only when it is not. This is
+-	 * the value the old code computed and then threw away. */
+-	unsigned raw = socOk ? (unsigned)soc :
+-	    (mvOk ? estimatePercent(mv) : 100u);
++	/* The percentage that goes to IOKit: the stable MSOC shadow pair whenever
++	 * it is ready, the single-cell curve only when the gauge read fails. */
++	unsigned curve = mvOk ? estimatePercent(mv) : 0u;
++	unsigned raw = socOk ? scaleMsoc(soc) :
++	    (mvOk ? curve : 100u);
+ 	/* Which of the two said it, for the log line below. */
+ 	const char *src = socOk ? "gauge" : (mvOk ? "curve" : "none");
+ 	if (!measured) {
+@@ -520,12 +597,13 @@
+ 	 * (src=gauge is 0x4009, src=curve is the fallback table) and the one
+ 	 * actually published, so a photo of the log proves both what was read and
+ 	 * what iOS was told. held=1 means the guard kept the previous value. */
+-	IOLog("SWEET BATTERY SID2: soc=%#x sts=%#x ready=%d vbatt=%#x mv=%u "
+-	    "uv=%u chgr=%#x usb=%#x sysbatt=%#x raw=%u%% src=%s held=%d "
++	IOLog("SWEET BATTERY SID2: msoc=%#x scaled=%u%% sts=%#x ready=%d "
++	    "vbatt=%#x mv=%u uv=%u curve=%u%% chgr=%#x usb=%#x sysbatt=%#x "
++	    "raw=%u%% src=%s held=%d "
+ 	    "-> %u%% %umV external=%d charging=%d full=%d\n",
+-	    (unsigned)soc, (unsigned)socSts,
++	    (unsigned)soc, socOk ? scaleMsoc(soc) : 0u, (unsigned)socSts,
+ 	    (socSts & SWEET_BATT_SOC_READY) ? 1 : 0, (unsigned)rawVoltage, mv, uv,
+-	    (unsigned)chgr, (unsigned)usb, (unsigned)sysBatt, raw, src,
++	    curve, (unsigned)chgr, (unsigned)usb, (unsigned)sysBatt, raw, src,
+ 	    published != raw ? 1 : 0, published, fLastMv,
+ 	    external ? 1 : 0, charging ? 1 : 0, full ? 1 : 0);
+ 	/* The optional diagnostic never changes published state or writes a PMIC
+@@ -599,6 +677,7 @@
+ 	if (fSid2 && irqDiag == 1) {
+ 		IOLog("SWEET BATTERY: PMIC-arb IRQ preflight enabled (read-only)\n");
+ 		sweet_spmi_irq_diag();
++		logIrqLines();
+ 	}
+ 	/* Publish a complete source BEFORE registerService wakes powerd. */
+ 	poll();
+
