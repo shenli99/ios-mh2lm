@@ -257,6 +257,21 @@
   do not add driver changes merely for cleanup before a new functional target
   requires them.
 
+- **0112m m12 battery-UI compatibility diagnosis (2026-11-03):**
+  the diagnostic image retained the m11 USB/battery baseline and added only
+  `sweetiolog=powerd,PowerUIAgent`. In both
+  `logs/live-0112m12.txt` and `logs/sweetlog-0112m12.bin`, `powerd` and
+  `PowerUIAgent` match the running `SweetBattery` service through
+  `IOPMPowerSource`; the PM8150B data path and published source properties are
+  therefore not the reason no battery state is visible in the UI. `powerd`
+  nevertheless repeatedly performs an exact `AppleSmartBatteryManager` match
+  and finds none. Patch `0118-mh2lm-battery-ui-class.patch` adds that runtime
+  class as a behaviour-free subclass of `SweetBattery` and changes only the
+  built-in personality's class/category strings. It does not add a second
+  controller, alter PMIC reads, or add any power/charging write path. The next
+  CI kernel must validate that exact match and the visible battery UI before
+  considering a separate `AppleARMPMUPowerSource` compatibility layer.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then

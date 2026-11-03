@@ -1,0 +1,48 @@
+mh2lm: expose the battery source as AppleSmartBatteryManager (0118)
+
+The real PM8150B data path and the generic IOPMPowerSource publication are
+already validated.  In the 0112m12 hardware trace, powerd and PowerUIAgent
+match the generic source, but powerd repeatedly asks for the exact
+AppleSmartBatteryManager class and finds none.  Keep SweetBattery as the
+implementation and expose a zero-behaviour subclass under that expected
+class name.  This changes no PMIC access, power-source property, or write
+path.
+
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index f5eebc7..2d08f83 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -68,6 +68,17 @@ private:
+ };
+ OSDefineMetaClassAndStructors(SweetBattery, IOPMPowerSource);
+
++/*
++ * powerd accepts the generic source but also uses this exact iPhone-class
++ * match to select its battery UI path.  Inherit every SweetBattery method and
++ * state unchanged: the class name is the compatibility surface, not a second
++ * controller or a second power source.
++ */
++class AppleSmartBatteryManager : public SweetBattery {
++	OSDeclareDefaultStructors(AppleSmartBatteryManager);
++};
++OSDefineMetaClassAndStructors(AppleSmartBatteryManager, SweetBattery);
++
+ bool
+ SweetBattery::init(OSDictionary *dictionary)
+ {
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index f29880c..ee5dd10 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -106,9 +106,9 @@ const char * gIOKernelConfigTables =
+     "     'IOMatchCategory' = SweetHIDTouch;"
+     "   },"
+     "   {"
+-    "     'IOClass'         = SweetBattery;"
++    "     'IOClass'         = AppleSmartBatteryManager;"
+     "     'IOProviderClass' = IOResources;"
+-    "     'IOMatchCategory' = SweetBattery;"
++    "     'IOMatchCategory' = AppleSmartBatteryManager;"
+     "   },"
+ #endif
+     "   {"
