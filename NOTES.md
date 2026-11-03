@@ -297,6 +297,22 @@
   of the 0112k `SweetBattery.cpp` compile command succeeds, and its object no
   longer imports that missing base symbol.
 
+- **0112m m14 UI success, charging still unproven (2026-11-03):**
+  `logs/sweetlog-0112m14.bin` confirms the 0119 user client works: `powerd`
+  opens `AppleSmartBatteryManager` with `0x0`, and physical cable changes are
+  visible in PM8150B's USBIN status (`usb=0x10` / external=1 when connected,
+  `usb=0x26` / external=0 when disconnected). The UI is therefore consuming
+  live source state rather than a fixed full/charging icon. It does **not**
+  prove the battery is charging: every connected sample reports
+  `chgr=0x47`, whose low three bits are SMB5 `DISABLE_CHARGE` (7), and
+  `charging=0`; the FG SOC byte is invalid (`0xb9`) so displayed percentage is
+  voltage-curve fallback. Voltage movement around 4.01-4.03 V is insufficient
+  to infer current direction. Patch `0120-mh2lm-battery-charge-diagnostics.patch`
+  adds an opt-in `sweetbattdiag=1` probe only. It logs SMB5 status/enable/pause/
+  inhibit gates and a matching PM8150B IBATT/current-copy pair (488.281 uA per
+  signed raw step; negative is charging in the Qualcomm FG convention), while
+  leaving all published IOPM properties unchanged and performing no PMIC write.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then

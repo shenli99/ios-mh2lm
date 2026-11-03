@@ -1,0 +1,147 @@
+mh2lm: add gated read-only PM8150B charge diagnostics (0120)
+
+0112m14 proves that USB VBUS is detected and the iOS battery UI consumes the
+published source, but SMB5 reports state 7 (DISABLE_CHARGE).  Add an explicit
+sweetbattdiag=1 probe to log only the relevant charger gates and a stable
+IBATT/current-copy pair.  It never changes published battery properties and
+performs no PMIC writes.  Without that boot argument this patch is inert.
+
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 615f89a..20f2a3b 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -36,10 +36,19 @@
+ #define SWEET_BATT_FG_RT_STS	0x4010u	/* BATT_SOC_INT_RT_STS */
+ #define SWEET_BATT_SOC_READY	0x02u	/* bit1 SOC_READY: 0x4009 is live */
+ #define SWEET_BATT_VBATT	0x41a0u	/* BATT_INFO_VBATT_LSB, MSB at +1 */
++#define SWEET_BATT_IBATT	0x41a2u	/* BATT_INFO_IBATT_LSB, MSB at +1 */
++#define SWEET_BATT_IBATT_CP	0x41a8u	/* stable-copy IBATT LSB/MSB */
+ #define SWEET_BATT_SYS_BATT	0x4107u	/* bit2 BATT_MISSING_HW */
+ #define SWEET_BATT_BATT_MISSING	0x04u
+ #define SWEET_BATT_CHGR_STATUS	0x1006u	/* smb5 chgr status, bits 2:0 */
++#define SWEET_BATT_CHGR_STATUS2	0x1007u	/* bit1 battery over-voltage */
++#define SWEET_BATT_CHGR_STATUS5	0x100bu	/* trickle/pre/full-on enables */
++#define SWEET_BATT_CHGR_STATUS7	0x100du	/* battery thermal limits */
++#define SWEET_BATT_CHGR_ENABLE	0x1042u	/* bit0 charging enable command */
++#define SWEET_BATT_CHGR_PAUSE	0x1043u	/* bit0 charging pause command */
++#define SWEET_BATT_CHGR_CFG2	0x1051u	/* bit0 charger inhibit */
++#define SWEET_BATT_SMB_EN	0x1648u	/* SMB enable override/status command */
+ #define SWEET_BATT_USBIN_RT_STS	0x1310u	/* smb5 USB IN rt sts, bit4 = VBUS */
+ /* The VBATT LSB scale is not in the DT: gen4 documents 122070 uV, the older
+  * gen3 part used 194637 uV. Take the raw word and keep whichever lands inside a
+  * single lithium cell's range, so a wrong guess shows as "no voltage" instead
+@@ -64,7 +73,7 @@ private:
+ 	IOWorkLoop *fLoop;
+ 	IOTimerEventSource *fTimer;
+ 	bool fTimerAdded, fRunning, fReal;
+-	bool fSid2, fPercentValid;
++	bool fSid2, fDiag, fPercentValid;
+ 	unsigned fLastMv, fLastPercent, fPendingPercent;
+ 	int fLastMode;
+ 	void putNumber(const char *key, UInt32 value);
+@@ -76,6 +85,8 @@ private:
+ 	static void timerFired(OSObject *owner, IOTimerEventSource *sender);
+ 	static IOReturn stopPolling(OSObject *owner, void *, void *, void *, void *);
+ 	static bool readWord(unsigned sid, unsigned address, uint16_t *value);
++	static bool readWordPair(unsigned sid, unsigned address, unsigned copyAddress,
++	    uint16_t *value);
+ 	static unsigned estimatePercent(unsigned mv);
+ };
+ OSDefineMetaClassAndStructors(SweetBattery, IOPMPowerSource);
+@@ -180,7 +191,7 @@ SweetBattery::init(OSDictionary *dictionary)
+ 	fLoop = NULL;
+ 	fTimer = NULL;
+ 	fTimerAdded = fRunning = fReal = false;
+-	fSid2 = false;
++	fSid2 = fDiag = false;
+ 	fLastMv = 4200;	/* last real VBATT; static until a gauge word works */
+ 	/* Nothing has been published yet, so the first real sample is adopted as
+ 	 * is instead of being held back as an implausible jump. */
+@@ -318,7 +329,31 @@ SweetBattery::readWord(unsigned sid, unsigned address, uint16_t *value)
+ 	return false;
+ }
+ 
++/* FG exposes an IBATT copy register specifically for a consistent raw sample.
++ * Do not write its hold bits: a matching pair is enough for diagnostics. */
++bool
++SweetBattery::readWordPair(unsigned sid, unsigned address, unsigned copyAddress,
++    uint16_t *value)
++{
++	for (unsigned attempt = 0; attempt < 4; ++attempt) {
++		uint8_t lo, hi, copyLo, copyHi;
++		if (sweet_spmi_read(sid, address, &lo) ||
++		    sweet_spmi_read(sid, address + 1, &hi) ||
++		    sweet_spmi_read(sid, copyAddress, &copyLo) ||
++		    sweet_spmi_read(sid, copyAddress + 1, &copyHi)) {
++			return false;
++		}
++		uint16_t sample = (uint16_t)((unsigned)lo | ((unsigned)hi << 8));
++		uint16_t copy = (uint16_t)((unsigned)copyLo | ((unsigned)copyHi << 8));
++		if (sample == copy) {
++			*value = sample;
++			return true;
++		}
++	}
++	return false;
++}
++
+ unsigned
+ SweetBattery::estimatePercent(unsigned mv)
+ {
+ 	/* Generic single-cell curve, intentionally NOT advertised as QG SOC.
+@@ -491,10 +526,34 @@ SweetBattery::pollSid2(void)
+ 	    (unsigned)chgr, (unsigned)usb, (unsigned)sysBatt, raw, src,
+ 	    published != raw ? 1 : 0, published, fLastMv,
+ 	    external ? 1 : 0, charging ? 1 : 0, full ? 1 : 0);
+-	/* IBATT (0x41A2/0x41A3) is deliberately not read: the gen4 current LSB is
+-	 * unproven, and a timed-out read poisons that APID lane for the whole boot,
+-	 * which would take VBATT down with it. Amperage stays unpublished rather
+-	 * than guessed; 0228-battery-diag prints the raw word when needed. */
++	/* The optional diagnostic never changes published state or writes a PMIC
++	 * register. It exists solely to distinguish VBUS presence from a real charge
++	 * current and to expose the hardware gates behind DISABLE_CHARGE. */
++	if (fDiag) {
++		uint8_t status2 = 0, status5 = 0, status7 = 0, enable = 0, pause = 0;
++		uint8_t cfg2 = 0, smbEn = 0;
++		uint16_t rawCurrent = 0;
++		bool configOk = !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_CHGR_STATUS2,
++		    &status2) && !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_CHGR_STATUS5,
++		    &status5) && !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_CHGR_STATUS7,
++		    &status7) && !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_CHGR_ENABLE,
++		    &enable) && !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_CHGR_PAUSE,
++		    &pause) && !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_CHGR_CFG2,
++		    &cfg2) && !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_SMB_EN, &smbEn);
++		bool currentOk = readWordPair(SWEET_BATT_SID, SWEET_BATT_IBATT,
++		    SWEET_BATT_IBATT_CP, &rawCurrent);
++		int signedCurrent = (rawCurrent & 0x8000u) ? (int)rawCurrent - 65536 :
++		    (int)rawCurrent;
++		/* Qualcomm FG's signed raw unit is 488.281 uA; negative is charging. */
++		int currentUa = (int)(((int64_t)signedCurrent * 488281) / 1000);
++		IOLog("SWEET BATT DIAG: state=%u st2=%#x st5=%#x st7=%#x en=%#x "
++		    "pause=%#x cfg2=%#x smben=%#x ibatt=%#x signed=%d ua=%d "
++		    "config-ok=%d current-ok=%d\n", state, (unsigned)status2,
++		    (unsigned)status5, (unsigned)status7, (unsigned)enable,
++		    (unsigned)pause, (unsigned)cfg2, (unsigned)smbEn,
++		    (unsigned)rawCurrent, signedCurrent, currentUa, configOk ? 1 : 0,
++		    currentOk ? 1 : 0);
++	}
+ 	publish(published, fLastMv, 0, external, external, charging, full,
+ 	    measured, false);
+ }
+@@ -523,10 +582,16 @@ SweetBattery::start(IOService *provider)
+ 	int sid2 = 0;
+ 	(void)PE_parse_boot_argn("sweetbatt", &sid2, sizeof(sid2));
+ 	fSid2 = fReal && sid2 == 1;
++	int diag = 0;
++	(void)PE_parse_boot_argn("sweetbattdiag", &diag, sizeof(diag));
++	fDiag = fSid2 && diag == 1;
+ 	if (fSid2) {
+ 		IOLog("SWEET BATTERY: PM8150B SID %u read path enabled (sweetbatt=1)\n",
+ 		    SWEET_BATT_SID);
+ 	}
++	if (fDiag) {
++		IOLog("SWEET BATTERY: charger/current diagnostics enabled (read-only)\n");
++	}
+ 	/* Publish a complete source BEFORE registerService wakes powerd. */
+ 	poll();
+ 	if (fReal) {
