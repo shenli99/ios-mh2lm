@@ -517,6 +517,27 @@
   the complete `SWEET BATT SMB` record, before choosing a safe controller
   design.
 
+- **0112k6 build and short-record validation image prepared (2026-11-03):**
+  CircleCI applied 0125 and completed with `XNU Build Done!`. The extracted
+  `kernel.development.mh2lm` SHA256 is
+  `916a874c723847728aa9fb5d38461e944a8dc9f1199f9e5331930d143f4c45e5`,
+  matching its artifact manifest. The final kernel contains `SWEET BATT
+  INPUT`, `SWEET BATT TYPEC` and `SWEET BATT SMB`, with no legacy long-policy
+  string required for this test.
+
+  The reproducible packer is
+  `out-bs/mk16k-0112k6-battery-policy-log.sh`; it produced
+  `out-bs/boot-16k-0112k6-battery-policy-log.img` (SHA256
+  `fb1b1e8f7bee624d10a30dbfb9190ba19c17b6167dd8a9e0469c339dc1051f66`).
+  It is Android boot header v1 with a 2048-byte page size; its embedded loader
+  and 32 MiB ramdisk both byte-match the verified packaging inputs. The boot
+  arguments retain the established GUI/iOS-rw baseline plus only
+  `sweetbattery=1 sweetbatt=1 sweetbattdiag=1 sweetbattirqdiag=1`; they reject
+  USB/VBUS/step, key and touch overrides. Use `fastboot boot` only, never a
+  partition flash. Collect the short INPUT, TYPEC and SMB records while
+  unplugged, after 10+ seconds connected to a known-good charger, and after
+  another 10+ seconds unplugged. Preserve the matching SID2 and DIAG records.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
