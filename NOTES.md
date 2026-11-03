@@ -729,6 +729,36 @@ circular, so its exported line order alone cannot prove a transition order.
   corresponding single-path and two-path regression tests; use `fastboot boot`
   only, never flash.
 
+- **0113 battery-UI hardware result: plug/unplug wakes the display, but the
+  lock screen is only partially composed (2026-11-03):**
+  `logs/sweetlog-0113-battery-ui.bin` SHA256
+  `6fffa51f4d791c9eb233fa82ad96a33024d4ace23ca641cb99a1ec0c47ea0c47`
+  validates the end-to-end generic power-source path. While display-off was
+  active, a cable insertion produced `SWEET BATT UI event=2` with
+  `external=1 capable=1`, followed immediately by `updateStatus`, a `powerd`
+  open plus selector-4 call, SpringBoard surfaces for the charging display,
+  `SWEET FB: display on`, and a CoreBrightness fade to 1088. A later cable
+  removal produced event 5 (`external=0 capable=0`) and another display-on
+  sequence. Thus the large charging glyph and wake seen on hardware are real
+  power-event results, not an explicit driver-side display request. The short
+  plug/unplug checks did not yet enter active charge (`charging=0` throughout),
+  so they are evidence for state notification and wake only, not a new
+  charging-current conclusion.
+
+  The resulting screen is not a complete normal lock screen: status-bar and
+  home-indicator content appears but the centre/clock region remains black.
+  This matches the current `SweetFramebuffer` design, not a battery-state
+  failure. `RequestPowerChange(0)` fades every panel pixel to black; on wake,
+  the backend replays only the latest swap's enabled layers directly into the
+  panel. It neither retains all current layer state nor clears/recomposes a
+  complete frame. A lock-screen partial update can therefore repaint its small
+  status/home layers while the clock's layer is absent from that same swap and
+  stays black. Do not try to fix this by faking more battery notifications.
+  The next display fix is a bounded framebuffer compositor repair: retain
+  active per-layer state across swaps and compose a complete frame after a
+  power-on transition. `powerd` selector 4 with argument 2 remains unsupported
+  and needs later ABI work, but it is not preventing the observed wake.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
