@@ -198,6 +198,27 @@
   is needed to validate live logging; persistent-ring extraction remains the
   recovery path for failures before enumeration.
 
+- **0112m m8 result / CDC bulk-IN TX fix staged (2026-11-03):**
+  `logs/sweetlog-0112m8.bin` rules out the host listener and enumeration as
+  the reason that `logs/live-0112m7.txt` remained empty. The device recorded
+  `ACM endpoints configured`, then `port opened by the host`; its periodic
+  state reached `configured=1, dtr=1`. The reader therefore opened the
+  correct `/dev/ttyACM*` node and asserted DTR successfully. The failure is
+  wholly on the gadget TX path: `console` stops at exactly 8192 bytes and no
+  EP3 (`0x81`, bulk-IN) completion advances `log_pos` or clears `tx_busy`.
+  `0113-mh2lm-usb-cdc-acm-tx.patch` is the narrow follow-up: the observed
+  high-speed bulk endpoints and descriptors use a consistent 512-byte MPS;
+  the console worker avoids an exact multiple of that MPS; a bus reset clears
+  stale configured/DTR/TX state; serial-state notifications are sent only on
+  a state change rather than requeued forever; and the first three TX submit
+  and completion events plus periodic `complete/submitted/error` counts are
+  logged. It applies cleanly on the exact 0112m build tree and
+  `bsd/dev/sweet_usb.c` compiles with the saved CI arm64 command
+  (`0 of 1 files failed`). The next hardware log must show at least
+  `console TX submit 8191 bytes` followed by `console TX complete 1`; only
+  after that should the host terminal be expected to receive console text.
+  No CircleCI workflow change is involved.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then

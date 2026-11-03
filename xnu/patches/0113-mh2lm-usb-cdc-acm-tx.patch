@@ -1,0 +1,166 @@
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -315,9 +315,13 @@ sweet_usb_probe(void)
+ #define UD_TRB_INT      0x1050          /* ep2 IN (interrupt, notifications) */
+ #define UD_DATA         0x1100          /* ep0 data stage, 512 bytes */
+ #define UD_NOTIFY       0x1300          /* 10-byte notification */
+-#define UD_RX           0x1400          /* bulk OUT data (dropped), 256 bytes */
++#define UD_RX           0x1400          /* bulk OUT data (dropped), 512 bytes */
+ #define UD_TX           0x2000          /* console bytes waiting for the host */
+-#define UD_TX_MAX       0x2000
++/* m8 confirmed the MH2LM enumerates at high speed.  Keep every console TRB
++ * short of a whole number of HS bulk packets while isolating TX completion. */
++#define UD_BULK_MPS     512
++#define UD_RX_MAX       UD_BULK_MPS
++#define UD_TX_MAX       0x1fff
+ #define UD_SIZE         0x4000
+ 
+ /* Physical endpoints: 2n = OUT, 2n+1 = IN */
+@@ -335,6 +339,9 @@ static struct {
+ 	bool        data_in;        /* data stage direction */
+ 	uint32_t    events;
+ 	uint32_t    posted;         /* console bytes handed to the host */
++	uint32_t    tx_submitted;
++	uint32_t    tx_completed;
++	uint32_t    tx_errors;
+ 	bool        configured;
+ 	bool        dtr;            /* the host opened the port */
+ 	bool        tx_busy;
+@@ -394,7 +401,7 @@ ud_epcmd(unsigned ep, uint32_t cmd, uint32_t p0, uint32_t p1, uint32_t p2)
+ }
+ 
+ /* One TRB (at DMA offset trb) on physical endpoint ep. */
+-static void
++static int
+ ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl)
+ {
+ 	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + trb);
+@@ -410,8 +417,9 @@ ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl
+ 	}
+ 	usb_mark(SWEET_USB_MARK_TRB_CMD);
+ 	uint64_t tpa = ud.dma_pa + trb;
+-	ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
++	int err = ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
+ 	usb_mark(SWEET_USB_MARK_TRB_WAIT);
++	return err;
+ }
+ 
+ static void
+@@ -439,8 +447,9 @@ ud_stall(void)
+  * Association Descriptor.  VID 0x1209 / PID 0x0002 = pid.codes test ID, not
+  * a product.  Interface 0 is the communication class (what Windows matches
+  * on: USB\Class_02&SubClass_02&Prot_01), interface 1 carries the bulk pair.
+- * Bulk max packet is 64 so the same descriptor block stays legal whether
+- * the core ends up enumerating at high or at full speed.
++ * MH2LM enumerates at high speed (DSTS connect speed 0), so the bulk pair
++ * uses the HS maximum of 512 bytes.  The endpoint configuration must agree
++ * with this descriptor.
+  */
+ static const uint8_t ud_dev_desc[18] = {
+ 	18, 1, 0x00, 0x02, 0xef, 0x02, 0x01, 64,
+@@ -456,8 +465,8 @@ static const uint8_t ud_cfg_desc[75] = {
+ 	5, 0x24, 0x06, 0, 1,                            /* union: control 0, data 1 */
+ 	7, 5, 0x82, 0x03, 16, 0, 8,                     /* ep 0x82 interrupt IN, 16 bytes */
+ 	9, 4, 1, 0, 2, 0x0a, 0x00, 0x00, 0,             /* data interface 1: two bulk endpoints */
+-	7, 5, 0x81, 0x02, 64, 0, 0,                     /* ep 0x81 bulk IN, 64 */
+-	7, 5, 0x01, 0x02, 64, 0, 0,                     /* ep 0x01 bulk OUT, 64 */
++	7, 5, 0x81, 0x02, 0, 2, 0,                      /* ep 0x81 bulk IN, 512 */
++	7, 5, 0x01, 0x02, 0, 2, 0,                      /* ep 0x01 bulk OUT, 512 */
+ };
+ static const char *const ud_strings[] = {
+ 	NULL, "ios-sweet", "Sweet iOS serial console", "0001",
+@@ -509,9 +518,9 @@ ud_configure(void)
+ 		return;
+ 	}
+ 	if (ud_epcmd(0, DEPCMD_DEPSTARTCFG | (2u << 16), 0, 0, 0) ||
+-	    ud_epcmd(EP_RX, DEPCMD_SETEPCONFIG, (2u << 1) | (64u << 3), (1u << 8) | ((uint32_t)EP_RX << 25), 0) ||
++	    ud_epcmd(EP_RX, DEPCMD_SETEPCONFIG, (2u << 1) | (UD_BULK_MPS << 3), (1u << 8) | ((uint32_t)EP_RX << 25), 0) ||
+ 	    ud_epcmd(EP_RX, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0) ||
+-	    ud_epcmd(EP_TX, DEPCMD_SETEPCONFIG, (2u << 1) | (64u << 3) | (1u << 17), (1u << 8) | ((uint32_t)EP_TX << 25), 0) ||
++	    ud_epcmd(EP_TX, DEPCMD_SETEPCONFIG, (2u << 1) | (UD_BULK_MPS << 3) | (1u << 17), (1u << 8) | ((uint32_t)EP_TX << 25), 0) ||
+ 	    ud_epcmd(EP_TX, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0) ||
+ 	    ud_epcmd(EP_INT, DEPCMD_SETEPCONFIG, (3u << 1) | (16u << 3) | (2u << 17),
+ 	    (1u << 8) | (7u << 16) | ((uint32_t)EP_INT << 25), 0) ||
+@@ -560,6 +569,7 @@ ud_setup(void)
+ 			ok = (length == 0);
+ 			if (ok) {
+ 				printf("SWEET USB: port %s by the host\n", ud.dtr ? "opened" : "closed");
++				ud_notify_serial_state();
+ 			}
+ 			break;
+ 		case 0x23:              /* SEND_BREAK */
+@@ -628,7 +638,7 @@ extern uint64_t sweet_log_position(void);
+ static void
+ ud_rx_arm(void)
+ {
+-	ud_start_trb(EP_RX, UD_TRB_RX, UD_RX, 64, TRBCTL_NORMAL);
++	(void)ud_start_trb(EP_RX, UD_TRB_RX, UD_RX, UD_RX_MAX, TRBCTL_NORMAL);
+ }
+ 
+ /* The console ring, streamed to the host: nothing here may print, it would
+@@ -645,13 +655,27 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
+ 		}
+ 		uint64_t next = ud.log_pos;
+ 		uint32_t n = sweet_log_copy(&next, (char *)(ud.dma + UD_TX), UD_TX_MAX);
++		if (n > 1 && (n % UD_BULK_MPS) == 0) {
++			/* Do not make a CDC read depend on an implicit ZLP. */
++			next = ud.log_pos;
++			n = sweet_log_copy(&next, (char *)(ud.dma + UD_TX), n - 1);
++		}
+ 		if (n == 0) {
+ 			continue;
+ 		}
+ 		ud.log_pos_next = next;
+ 		ud.tx_busy = true;
+ 		ud.posted += n;
+-		ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, n, TRBCTL_NORMAL);
++		ud.tx_submitted++;
++		if (ud.tx_submitted <= 3) {
++			printf("SWEET USB: console TX submit %u bytes\n", n);
++		}
++		if (ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, n, TRBCTL_NORMAL) != 0) {
++			ud.tx_busy = false;
++			if (++ud.tx_errors <= 3) {
++				printf("SWEET USB: console TX submit failed\n");
++			}
++		}
+ 	}
+ }
+ 
+@@ -662,6 +686,9 @@ ud_event(uint32_t ev)
+ 		uint32_t type = (ev >> 8) & 0xf;
+ 		if (type == 1) {        /* USB reset */
+ 			dwc_wr(DCFG, dwc_rd(DCFG) & ~(0x7fu << 3));
++			ud.configured = false;
++			ud.dtr = false;
++			ud.tx_busy = false;
+ 			printf("SWEET USB: bus reset\n");
+ 			ud_start_setup();
+ 		} else if (type == 2) { /* connect done */
+@@ -688,10 +715,12 @@ ud_event(uint32_t ev)
+ 	if (ep == EP_TX && type == 1) {         /* a console chunk has been read */
+ 		ud.log_pos = ud.log_pos_next;
+ 		ud.tx_busy = false;
++		if (++ud.tx_completed <= 3) {
++			printf("SWEET USB: console TX complete %u\n", ud.tx_completed);
++		}
+ 		return;
+ 	}
+ 	if (ep == EP_INT && type == 1) {        /* notification taken */
+-		ud_notify_serial_state();
+ 		return;
+ 	}
+ 	if (ep > 1) {
+@@ -757,8 +786,9 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
+ 			    dwc_rd(GEVNTCOUNT) & 0xffff, dwc_rd(DSTS));
+ 		}
+ 		if ((++ticks % 30000) == 0) {
+-			printf("SWEET USB: console %u bytes, events %u, configured %d, dtr %d\n",
+-			    ud.posted, ud.events, ud.configured, ud.dtr);
++			printf("SWEET USB: console %u bytes, TX %u/%u err %u, events %u, configured %d, dtr %d\n",
++			    ud.posted, ud.tx_completed, ud.tx_submitted, ud.tx_errors,
++			    ud.events, ud.configured, ud.dtr);
+ 		}
+ 		ud_sleep_ms(1);
+ 	}
