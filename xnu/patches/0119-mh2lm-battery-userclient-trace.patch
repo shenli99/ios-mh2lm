@@ -1,0 +1,104 @@
+mh2lm: trace the battery manager user-client contract (0119)
+
+0118 proved that powerd now finds AppleSmartBatteryManager, but every
+IOServiceOpen(type 0) returns kIOReturnUnsupported because the generic
+IOPMPowerSource exposes no IOUserClient.  Publish a minimal user client before
+the service is registered so the open succeeds.  Its only behaviour is to log
+the caller and the first occurrence of each external-method selector; unknown
+selectors still return kIOReturnUnsupported.  This is an ABI-discovery step,
+not a fabricated battery backend and it performs no hardware writes.
+
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 2d08f83..4f84e20 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -16,11 +16,14 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <device/device_types.h> /* io_buf_ptr_t for private OSKext headers */
+ #include <IOKit/IOLib.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOUserClient.h>
+ #include <IOKit/IOWorkLoop.h>
+ #include <IOKit/IOTimerEventSource.h>
+ #include <IOKit/pwr_mgt/IOPMPowerSource.h>
+ #include <libkern/c++/OSCollectionIterator.h>
+ #include <pexpert/pexpert.h>
++#include <sys/proc.h>
+ /* bsd/dev/sweet_spmi.c */
+ extern "C" int sweet_spmi_init(void);
+ extern "C" int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
+@@ -87,7 +90,74 @@ class AppleSmartBatteryManager : public SweetBattery {
+ 	OSDeclareDefaultStructors(AppleSmartBatteryManager);
++public:
++	bool init(OSDictionary *dictionary = NULL) APPLE_KEXT_OVERRIDE;
+ };
+ OSDefineMetaClassAndStructors(AppleSmartBatteryManager, SweetBattery);
+ 
++class AppleSmartBatteryManagerUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(AppleSmartBatteryManagerUserClient);
++public:
++	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target,
++	    void *reference) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(AppleSmartBatteryManagerUserClient, IOUserClient);
++
++bool
++AppleSmartBatteryManager::init(OSDictionary *dictionary)
++{
++	if (!SweetBattery::init(dictionary)) {
++		return false;
++	}
++	/* SweetBattery::start() registers the service, so do this in init(). */
++	setProperty(kIOUserClientClassKey, "AppleSmartBatteryManagerUserClient");
++	return true;
++}
++
++bool
++AppleSmartBatteryManagerUserClient::initWithTask(task_t owningTask,
++    void *securityID, UInt32 type)
++{
++	if (!IOUserClient::initWithTask(owningTask, securityID, type)) {
++		return false;
++	}
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	IOLog("SWEET BATT UC: %s open type %u\n", name, type);
++	return true;
++}
++
++IOReturn
++AppleSmartBatteryManagerUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++AppleSmartBatteryManagerUserClient::externalMethod(uint32_t selector,
++    IOExternalMethodArguments *args, __unused IOExternalMethodDispatch *dispatch,
++    __unused OSObject *target, __unused void *reference)
++{
++	static uint64_t logged;
++	if (selector >= 64 || !(logged & (1ULL << selector))) {
++		if (selector < 64) {
++			logged |= 1ULL << selector;
++		}
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		uint32_t structIn = args->structureInputDescriptor != NULL ?
++		    (uint32_t)args->structureInputDescriptor->getLength() : args->structureInputSize;
++		uint32_t structOut = args->structureOutputDescriptor != NULL ?
++		    (uint32_t)args->structureOutputDescriptor->getLength() : args->structureOutputSize;
++		IOLog("SWEET BATT UC: %s sel %u in %u/%u out %u/%u -> unsupported\n",
++		    name, selector, args->scalarInputCount, structIn,
++		    args->scalarOutputCount, structOut);
++	}
++	return kIOReturnUnsupported;
++}
++
+ bool
+ SweetBattery::init(OSDictionary *dictionary)
+ {

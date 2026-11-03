@@ -272,6 +272,24 @@
   CI kernel must validate that exact match and the visible battery UI before
   considering a separate `AppleARMPMUPowerSource` compatibility layer.
 
+- **0112m m13 battery-UI open diagnosis (2026-11-03):** the 0118 class alias
+  succeeded: `powerd` matched `AppleSmartBatteryManager` and `PowerUIAgent`
+  matched it through `IOPMPowerSource`. The same boot's PM8150B samples
+  published real data (`78%`, `4032-4034mV`, external power present, neither
+  charging nor full), but every `powerd` `IOServiceOpen(type 0)` returned
+  `0xe00002c7` (`kIOReturnUnsupported`). This is the default `IOService`
+  result when no `IOUserClient` is available, so userland never consumed the
+  otherwise correct source properties and the on-screen full/charging glyph
+  remained static. Patch `0119-mh2lm-battery-userclient-trace.patch` installs
+  the smallest read-only compatibility surface: a user client on
+  `AppleSmartBatteryManager` that accepts the open and logs the first call of
+  each external-method selector, while unknown selectors still return
+  `kIOReturnUnsupported` and no PMIC write path is added. For that ABI probe,
+  boot without `sweetusb`, `sweetusbstep`, or `sweetvbus`: `sweetvbus=1`
+  forces the USB VBUS override and cannot validate a physical unplug. After
+  the desktop appears, unplug, wait at least 35-45 seconds for the battery
+  poll, then retrieve the persistent log after shutdown/recovery.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
