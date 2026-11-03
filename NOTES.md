@@ -42,6 +42,17 @@ test results in this file.
   only `sweetkeys=1 sweetkeysirqdiag=1` to the known GUI/iOS-rw baseline.
   Boot it temporarily with `fastboot boot`; persistent-log extraction remains
   the required result channel.
+- **0114a diagnostic boundary (2026-11-03):** the 0114a baseline image, which
+  contains the same new kernel but omits `sweetkeysirqdiag`, reaches iOS.
+  The all-at-once diagnostic image returns to the LG BSP. The file initially
+  exported as `sweetlog-0114a-keyirq.bin` is byte-for-byte identical to
+  `sweetlog-0113-usb-battery-ui.bin` (SHA256
+  `3a43214a0dcf445b72c43dba6966aef25d00770afee08d9d1d2bf170745d51b0`),
+  so it predates 0114a and cannot identify a failing MMIO read. Follow-up 0129
+  changes the diagnostic to isolated read-only stages: helper init, PON route,
+  GPIO6 route, PON peripheral bytes and GPIO6 peripheral bytes. One future CI
+  artifact will be packaged into those five stages plus a full mask-31 image;
+  do not repeat the 0114a all-at-once diagnostic.
 
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 

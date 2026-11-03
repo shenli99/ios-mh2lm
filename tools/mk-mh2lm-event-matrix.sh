@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix]\n' "$0" >&2
 	exit 2
 fi
 
@@ -16,6 +16,8 @@ case "$KEY_IRQ_PROFILE" in
 	'')
 		;;
 	--key-irq-preflight)
+		;;
+	--key-irq-diag-matrix)
 		;;
 	*)
 		printf 'unknown optional profile: %s\n' "$KEY_IRQ_PROFILE" >&2
@@ -61,7 +63,7 @@ grep -Fqx "$KERNEL_SHA256  kernel.development.mh2lm" "$TMPDIR/SHA256SUMS"
 # requested battery transition trace and the previously validated ACM driver.
 strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'SWEET BATT UI:'
 strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'ACM endpoints configured'
-if [ "$KEY_IRQ_PROFILE" = '--key-irq-preflight' ]; then
+if [ -n "$KEY_IRQ_PROFILE" ]; then
 	strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'keys-volume-up'
 fi
 
@@ -123,12 +125,35 @@ make_profile usb-battery-ui \
 if [ "$KEY_IRQ_PROFILE" = '--key-irq-preflight' ]; then
 	make_profile key-irq-preflight \
 		"LG G8X - XNU key IRQ preflight (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=31"
+fi
+if [ "$KEY_IRQ_PROFILE" = '--key-irq-diag-matrix' ]; then
+	make_profile key-irq-init \
+		"LG G8X - XNU key IRQ helper init (${LABEL})" \
 		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=1"
+	make_profile key-irq-route-pon \
+		"LG G8X - XNU key IRQ PON route (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=2"
+	make_profile key-irq-route-volume-up \
+		"LG G8X - XNU key IRQ GPIO6 route (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=4"
+	make_profile key-irq-cfg-pon \
+		"LG G8X - XNU key IRQ PON config (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=8"
+	make_profile key-irq-cfg-volume-up \
+		"LG G8X - XNU key IRQ GPIO6 config (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=16"
+	make_profile key-irq-full \
+		"LG G8X - XNU key IRQ full preflight (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=31"
 fi
 
 printf 'kernel SHA256: %s\n' "$KERNEL_SHA256"
 printf 'created profiles for %s: baseline, battery-ui, battery-ui-preserve-off, usb, usb-battery-ui' "$LABEL"
 if [ "$KEY_IRQ_PROFILE" = '--key-irq-preflight' ]; then
 	printf ', key-irq-preflight'
+fi
+if [ "$KEY_IRQ_PROFILE" = '--key-irq-diag-matrix' ]; then
+	printf ', key-irq-init, key-irq-route-pon, key-irq-route-volume-up, key-irq-cfg-pon, key-irq-cfg-volume-up, key-irq-full'
 fi
 printf '\n'

@@ -55,11 +55,12 @@ PMIC 外设 / 控制器
 **目的：** 建立共享 PMIC IRQ 的可扩展分发和下半部交接机制，并以按键作为第一
 个真实 consumer 验证。
 
-**当前检查点（0128，待 CI 与硬件测试）：** `sweetkeysirqdiag=1` 只读输出
-PON 与 PM8150 GPIO6 的 APID/owner/PMIC-arb channel 路由状态，以及各自原始
-RT_STS、SET_TYPE、POLARITY_HIGH、POLARITY_LOW、EN_SET、LATCHED_STS 字节。
-它不注册 GIC、不写 PDC、不使能或清除 PMIC IRQ，也不改变 20 ms 按键轮询。
-该结果是静态路由表的 MH2LM 依据，不等同于 IRQ 已启用或按键 IRQ 已验收。
+**当前检查点（0128/0129，待 CI 与硬件测试）：** 0114a 的完整 0128 预检返回 LG
+BSP，而同一 0114a kernel 的无诊断 baseline 可进入 iOS；持久日志没有写入本轮，因而
+不能将故障归因到某个读取。0129 将 `sweetkeysirqdiag` 改为分阶段只读位图：helper
+初始化、PON route、GPIO6 route、PON 原始配置和 GPIO6 原始配置分别测试，只有全数
+通过才运行 mask 31 的完整预检。所有阶段不注册 GIC、不写 PDC、不使能或清除 PMIC
+IRQ，也不改变 20 ms 按键轮询。详见硬件基线文档的测试顺序。
 
 **实施边界：**
 

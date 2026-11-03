@@ -178,17 +178,25 @@ GPIO6 为 APID 261。Linux 通用流程会先清 arbiter pending、再向外设
 | PDC pin/预配置 | 某些 QCOM 路线需 PDC 才能从 PMIC-arb 送达 GIC | 证明现有固件已配置，或确认目标 pin/寄存器后才写 |
 | GIC 上游 trigger | DTS `IRQ_TYPE_NONE` 不指定 edge/level | GIC callback 完成受控单按键试验且无重复 / 未处理 disable |
 
-## 下一次实机测试：0128 只读预检
+## 下一次实机测试：0129 分阶段只读预检
 
-前提是包含本地提交 `2cf4a9c` 的 CI 产物。启动参数为：
+0114a 说明完整的 0128 预检与 baseline 的唯一区别在诊断分支：baseline 可进入
+iOS，而 `sweetkeysirqdiag=1` 镜像回到 LG BSP；其导出的持久日志是上一轮 0113
+USB+battery-ui 日志，不能归因到具体读取。0129 因此将诊断分解为位图。它仍然不写
+PDC、PMIC 或 GIC：
 
 ```text
-sweetkeys=1 sweetkeysirqdiag=1
+mask 1   = 仅初始化只读 SPMI helper
+mask 2   = PON 的 PMIC-arb route（同时初始化 helper）
+mask 4   = GPIO6 的 PMIC-arb route（同时初始化 helper）
+mask 8   = PON 原始 PMIC interrupt bytes（observer reads）
+mask 16  = GPIO6 原始 PMIC interrupt bytes（observer reads）
+mask 31  = 全部阶段；仅在前五项均通过后执行
 ```
 
-此测试不注册 GIC callback，不写 PDC，不 enable/clear PMIC IRQ，也不替换 20 ms
-轮询。请分别保存：空闲、Power 按下/松开、Volume Down 按下/松开、Volume Up
-按下/松开后的完整持久日志，并提取下列前缀：
+每个镜像均使用 `sweetkeys=1 sweetusb=0`，继续保留 20 ms 轮询。依次测试 1、2、4、
+8、16；某一步回到 LG BSP 时立即停止，前一步即为最后已验证边界。各成功阶段导出
+持久日志并提取下列前缀：
 
 ```text
 SWEET SPMI IRQ: keys-pon ...
@@ -197,9 +205,9 @@ SWEET KEYS IRQ CFG: pon ...
 SWEET KEYS IRQ CFG: volume-up ...
 ```
 
-通过条件不是“按键还能工作”，而是两个 source 的路由、enable、pending/latch 和
-电平转换都能被解释。只有这些证据齐全后，才实施 mux 的第一个可写、单 source
-Power IRQ 测试，并始终保留可选的轮询回退。
+只有 1、2、4、8、16 全部通过，才测试 31。通过条件不是“按键还能工作”，而是两个
+source 的路由、enable、pending/latch 和电平转换都能被解释。只有这些证据齐全后，
+才实施 mux 的第一个可写、单 source Power IRQ 测试，并始终保留可选的轮询回退。
 
 ## 证据索引
 
@@ -210,4 +218,5 @@ Power IRQ 测试，并始终保留可选的轮询回退。
 - Linux QPNP/PMIC-arb 语义：`drivers/spmi/spmi-pmic-arb.c`。
 - XNU GIC helper：`ref/UniXNU-src/drivers/ArmCpu/ArmCpu.cpp`。
 - 已验证的按键日志：`logs/sweetlog-0113-baseline.bin`，以及同轮 battery/USB 日志。
-- 当前只读预检：`xnu/patches/0128-mh2lm-spmi-mux-key-preflight.patch`。
+- 只读 route-inspection 基础接口：`xnu/patches/0128-mh2lm-spmi-mux-key-preflight.patch`；
+  当前分阶段预检：`xnu/patches/0129-mh2lm-key-irq-diag-stages.patch`。

@@ -1,0 +1,73 @@
+mh2lm: split key IRQ preflight into isolated read-only stages (0129)
+
+The 0114a full key preflight image returns to the LG BSP, while the same 0114a
+kernel with the diagnostic argument absent reaches iOS. The retained persistent
+ring is from the previous 0113 run, so it cannot identify which of the new
+reads occurred before the reset. Do not retry the all-at-once probe or infer a
+PMIC write fault: 0128 is read-only, but it combines PMIC-arb initialization,
+two per-APID route reads and two blocks of observer reads.
+
+Treat sweetkeysirqdiag as a bit mask so a single CI artifact can isolate one
+operation per temporary fastboot image. Bit 0 only initializes the existing
+read-only SPMI helper; bit 1 reads PON's PMIC-arb route; bit 2 reads GPIO6's
+route; bit 3 reads PON's peripheral interrupt bytes; bit 4 reads GPIO6's
+peripheral interrupt bytes. Mask 31 is the former full preflight. Every stage
+continues to avoid GIC registration, PDC writes and PMIC enable/clear writes.
+
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -105,6 +105,10 @@
+ keys_irq_diag_line(const char *name, uint16_t apid, uint16_t rtAddr)
+ {
+ 	uint8_t rt = 0, type = 0, high = 0, low = 0, enabled = 0, latched = 0;
++	if (apid == KEYS_NO_APID) {
++		printf("SWEET KEYS IRQ CFG: %s skipped; no APID\n", name);
++		return;
++	}
+ 	bool ok = keys_read(apid, rtAddr, &rt) &&
+ 	    keys_read(apid, (uint16_t)(rtAddr + 1u), &type) &&
+ 	    keys_read(apid, (uint16_t)(rtAddr + 2u), &high) &&
+@@ -293,19 +297,34 @@
+ 		printf("SWEET KEYS: no readable power key; polling retained for recovery\n");
+ 	}
+ #endif /* SWEET_DEV_KEYS_VOLUME */
+-	if (irqDiag == 1) {
+-		if (sweet_spmi_init() != 0) {
+-			printf("SWEET KEYS IRQ: shared SPMI preflight unavailable\n");
+-		} else {
+-			sweet_spmi_irq_diag_source(0u, KEYS_PON_RT >> 8, "keys-pon");
++	if (irqDiag != 0) {
++		unsigned mask = (unsigned)irqDiag;
++		printf("SWEET KEYS IRQ: read-only diagnostic mask=%#x\n", mask);
++		/* bit 0: helper init only; bits 1/2: per-source PMIC-arb route. */
++		if ((mask & 0x07u) != 0) {
++			if (sweet_spmi_init() != 0) {
++				printf("SWEET KEYS IRQ: shared SPMI preflight unavailable\n");
++			} else {
++				if ((mask & 0x02u) != 0) {
++					sweet_spmi_irq_diag_source(0u, KEYS_PON_RT >> 8,
++					    "keys-pon");
++				}
+ #if SWEET_DEV_KEYS_VOLUME
+-			sweet_spmi_irq_diag_source(SWEET_DEV_VOL_GPIO_SID,
+-			    KEYS_GPIO_RT >> 8, "keys-volume-up");
++				if ((mask & 0x04u) != 0) {
++					sweet_spmi_irq_diag_source(SWEET_DEV_VOL_GPIO_SID,
++					    KEYS_GPIO_RT >> 8, "keys-volume-up");
++				}
+ #endif
++			}
++		}
++		/* bits 3/4 are observer reads of the PMIC interrupt blocks. */
++		if ((mask & 0x08u) != 0) {
++			keys_irq_diag_line("pon", keys_pon_apid, KEYS_PON_RT);
+ 		}
+-		keys_irq_diag_line("pon", keys_pon_apid, KEYS_PON_RT);
+ #if SWEET_DEV_KEYS_VOLUME
+-		keys_irq_diag_line("volume-up", keys_gpio_apid, KEYS_GPIO_RT);
++		if ((mask & 0x10u) != 0) {
++			keys_irq_diag_line("volume-up", keys_gpio_apid, KEYS_GPIO_RT);
++		}
+ #endif
+ 	}
+ 	kern_return_t kr = kernel_thread_start(keys_thread, NULL, &thread);
