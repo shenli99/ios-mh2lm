@@ -126,6 +126,18 @@
   made by `out-bs/mk16k-0112m-usbprobe-m3-step4.sh`. It changes only
   `sweetusbstep=4`, so it writes `DALEPENA=0x3` for EP0 and then stops before
   QSCRATCH/VBUS or RUN_STOP. Enumeration is still not expected.
+- **0112m m3 hardware result / m4 step-5-read follow-up (2026-11-03):**
+  `logs/sweetlog-0112m3.bin` confirms the `DALEPENA=0x3` EP0 enable completed
+  and the worker stopped exactly before step 5. The m3 gadget path therefore
+  reached every planned pre-QSCRATCH state without affecting SpringBoard or
+  the restored key driver. The next disposable image is
+  `/home/shenli/work1/out-bs/boot-16k-0112m-usbprobe-m4-step5-read.img`
+  (SHA256 `3d5019c18d49ec3c0c5491b91c3e1aceabad2e1d4173797c3bd8e0094a599bd1`),
+  made by `out-bs/mk16k-0112m-usbprobe-m4-step5-read.sh`. It changes only
+  `sweetusbstep=5`, causing the driver to read and print QSCRATCH state with
+  the MH2LM default VBUS mode 0. It has no `sweetvbus` argument, so neither
+  QSCRATCH nor PHY VBUS override is written; it stops before RUN_STOP and no
+  enumeration is expected.
 
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
