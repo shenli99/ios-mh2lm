@@ -4,13 +4,24 @@
 # extracted kernel, the known 16K ADT, and the clean 32 MiB ramdisk baseline.
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL\n' "$0" >&2
+if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight]\n' "$0" >&2
 	exit 2
 fi
 
 ARTIFACT=$1
 LABEL=$2
+KEY_IRQ_PROFILE=${3:-}
+case "$KEY_IRQ_PROFILE" in
+	'')
+		;;
+	--key-irq-preflight)
+		;;
+	*)
+		printf 'unknown optional profile: %s\n' "$KEY_IRQ_PROFILE" >&2
+		exit 2
+		;;
+esac
 case "$LABEL" in
 	*[!A-Za-z0-9._-]*|'')
 		printf 'label may contain only A-Z, a-z, 0-9, dot, underscore, and dash\n' >&2
@@ -50,6 +61,9 @@ grep -Fqx "$KERNEL_SHA256  kernel.development.mh2lm" "$TMPDIR/SHA256SUMS"
 # requested battery transition trace and the previously validated ACM driver.
 strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'SWEET BATT UI:'
 strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'ACM endpoints configured'
+if [ "$KEY_IRQ_PROFILE" = '--key-irq-preflight' ]; then
+	strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'keys-volume-up'
+fi
 
 make_profile() {
 	local name=$1
@@ -106,6 +120,15 @@ make_profile usb \
 make_profile usb-battery-ui \
 	"LG G8X - XNU USB plus battery UI trace (${LABEL})" \
 	"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetbattery=1 sweetbatt=1 sweetbattdiag=1 sweetbattirqdiag=1 sweetbattuidiag=1"
+if [ "$KEY_IRQ_PROFILE" = '--key-irq-preflight' ]; then
+	make_profile key-irq-preflight \
+		"LG G8X - XNU key IRQ preflight (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=1"
+fi
 
 printf 'kernel SHA256: %s\n' "$KERNEL_SHA256"
-printf 'created profiles for %s: baseline, battery-ui, battery-ui-preserve-off, usb, usb-battery-ui\n' "$LABEL"
+printf 'created profiles for %s: baseline, battery-ui, battery-ui-preserve-off, usb, usb-battery-ui' "$LABEL"
+if [ "$KEY_IRQ_PROFILE" = '--key-irq-preflight' ]; then
+	printf ', key-irq-preflight'
+fi
+printf '\n'

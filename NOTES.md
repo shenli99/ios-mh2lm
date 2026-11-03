@@ -30,6 +30,18 @@ test results in this file.
   export the persistent log, and retain the `SWEET SPMI IRQ: keys-*` plus
   `SWEET KEYS IRQ CFG:` lines with the kernel/image SHA256. This test proves
   route facts only; it must not be called an IRQ-delivery test.
+- **0114a artifact packaged, hardware test pending (2026-11-03):** CI log
+  `logs/xnu-build-log-0114a.txt` applied 0128 and reached `XNU Build Done!`.
+  The verified artifact kernel SHA256 is
+  `91551d3768fe2de7034a3701493556724466173804e745c0d90e538991745903`.
+  `tools/mk-mh2lm-event-matrix.sh` now accepts the opt-in
+  `--key-irq-preflight` profile; it generated
+  `out-bs/boot-16k-0114a-key-irq-preflight.img` (SHA256
+  `de8aeff864334ff77487e23f9aaabeee5aff53a19aa65b1c5ca89008f1d064d0`)
+  from that same kernel. Its boot args explicitly keep `sweetusb=0` and add
+  only `sweetkeys=1 sweetkeysirqdiag=1` to the known GUI/iOS-rw baseline.
+  Boot it temporarily with `fastboot boot`; persistent-log extraction remains
+  the required result channel.
 
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 
