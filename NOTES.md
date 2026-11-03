@@ -2,6 +2,13 @@
 
 ## Agent handoff / active work (2026-11-02, latest)
 
+**Implementation roadmap:** `docs/IRQ-FRAMEBUFFER-PLAN.md` records the agreed
+two-stage order: first make the existing key, DWC3 USB and touch paths
+interrupt-driven through the XNU-native design, then write the detailed
+framebuffer repair plan. It defines the `SweetSpmiInterruptMux` route-table
+boundary and the hardware acceptance criteria; keep measured observations and
+test results in this file.
+
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 
 Use this compact checklist when replacing the XNU base, rebasing the MH2LM
