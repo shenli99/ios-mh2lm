@@ -632,6 +632,38 @@ circular, so its exported line order alone cannot prove a transition order.
   write. Next work is to establish repeatable charge/noncharge transition
   behavior and, separately, finish event-driven battery state notification.
 
+- **0112m20: stable charge retained through display-off testing (2026-11-03):**
+  `logs/sweetlog-0112m20.bin` (SHA256
+  `ef270d05c9d4f770299d679bd8c4e332edcacf21dba271d015dd2b4e3342414a`)
+  strengthens the m19 result. It contains 83 matched active-charge records:
+  `external=1`, `charging=1`, CHGR state 3 (`FULLON_CHARGE`) and a negative
+  matched FG current in every record. The retained sequence includes 64
+  consecutive state-3 samples, one isolated non-atomic-looking read where
+  USB/CHGR report zero while the matching FG current is still -2.31 A, then
+  19 more state-3 samples before the later noncharging records. The following
+  sample immediately returns to the normal active-charge state, so this lone
+  mixed register snapshot is not evidence of a real charge stop. With the
+  current two-second observer cadence, the first run alone covers roughly 128
+  seconds of continuous retained evidence; circular-log wrap means it cannot
+  measure the user's full wall-clock charge duration.
+
+  Gauge-derived capacity moves monotonically from 66% (`msoc=0xa9`) to 69%
+  (`0xb1`) while VBATT rises from 4107 mV to 4347 mV. The first active sample
+  is a normal current ramp at about -1.19 A; the remaining steady samples are
+  generally near -2.2 to -2.3 A (83-sample mean about -2.23 A). After the
+  later cable-removal region, matched records return to `external=0`, state 7
+  and positive discharge current. There is no retained panic, kernel-trap or
+  TouchComm I2C-error signature.
+
+  The log also records 51 active-charge samples while `SWEET FB: display off`
+  is in effect, about 102 seconds at the observer cadence. This validates that
+  the current framebuffer-black display-off implementation does not stop PMIC
+  charging. It is **not** evidence of deep suspend or PMIC wake capability:
+  the present display-off path leaves the system running, and USB/charging
+  PMIC IRQ gates remain disabled. The missing plug-in charging animation is
+  therefore a separate event/UI-compatibility problem, not a charge-current
+  failure.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
