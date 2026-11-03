@@ -538,6 +538,35 @@
   unplugged, after 10+ seconds connected to a known-good charger, and after
   another 10+ seconds unplugged. Preserve the matching SID2 and DIAG records.
 
+- **0112m19: physical PM8150B charging confirmed (2026-11-03):**
+  `logs/sweetlog-0112m19.bin` validates real charging under the 0112k6
+  read-only kernel. In 65 matching samples, SID2 reports `external=1` and
+  `charging=1`; CHGR status is `0x3`, which is SMB5 `FULLON_CHARGE`, and the
+  command register reads `en=0x1`. The fuel-gauge current is repeatedly about
+  `-2.2` to `-2.3 A` (for example raw `0xed5f`, signed `-4769`,
+  `-2328612 uA`), using the already-validated Qualcomm FG sign convention in
+  which negative current charges the pack. This is corroborated by VBATT
+  climbing through the contiguous sample set from about 4198 mV to 4304 mV
+  and raw MSOC advancing from 63% to 66%. The UI is therefore not faking this
+  charging state, and XNU made no PMIC write to obtain it.
+
+  Active-charge samples also retain the expected ready input policy:
+  `path=0x95`, USB selected and valid, neither suspend bit set, 1500 mA ICL,
+  AICL enabled/rerun enabled, and APSD `0x1` with `dtc-done=1`. The persistent
+  ring also contains cable-present noncharging samples (`state=7`,
+  `charging=0`, near-zero current); its wrap order cannot establish a precise
+  transition sequence, so repeat long-duration plug/unplug testing before
+  claiming stable re-charge behavior across every source and temperature.
+
+  The short records fixed the APSD decode and log interleaving, but every
+  `SWEET BATT SMB` line has `read-ok=0`. Its zeroed override/select fields are
+  therefore invalid, not evidence that SMB_EN is clear: the current boolean
+  read chain stops at an earlier failing Type-C/MISC access. Any later
+  diagnostic refinement must report individual read successes; this is not a
+  blocker for the now-confirmed charge path. Do not add a charger-enable
+  write. Next work is to establish repeatable charge/noncharge transition
+  behavior and, separately, finish event-driven battery state notification.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
