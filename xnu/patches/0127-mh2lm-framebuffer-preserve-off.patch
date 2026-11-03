@@ -1,0 +1,86 @@
+mh2lm: preserve framebuffer contents during display-off (0127)
+
+The 0113 lock-screen charger wake reaches the standard IOPM notification
+chain and real CoreBrightness backlight control, but it resumes to a partial
+lock screen. SweetFramebuffer currently responds to RequestPowerChange(0) by
+mutating every physical framebuffer pixel to black. On power-on it can replay
+only the latest 4-layer CoreAnimation swap, which need not include the clock
+layer, leaving the erased region black.
+
+Add an opt-in `sweetfbpreserveoff=1` experiment. It leaves the framebuffer
+contents intact while display-off is active, but retains the normal power
+request, vsync notifications, pending-swap behavior, and AppleARMBacklight
+path. On MH2LM, CoreBrightness already drives real panel brightness to its
+lowest safe level through DCS 0x51, so the screen can be physically black
+without destroying the last complete CPU-composited frame.
+
+The default remains the existing fade/clear behavior. This patch adds no
+shadow buffer, IOSurface retention, compositor state, GPU behavior, PMIC
+change, or display power request. It is deliberately an A/B diagnostic before
+considering a bounded shadow buffer or a GPU-present backend.
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -17,9 +17,10 @@
+  *      +0x104 enabled layer mask
+  *   6  SwapWait, 7 GetID, 8 GetDisplaySize -> [w, h],
+  *   12 RequestPowerChange [state]: 0 = display off (backboardd, power
+- *      button / auto-lock), else on. Off fades the panel out over a few
+- *      vsyncs (halving each pixel) and keeps it black until on again;
+- *      the panel itself stays powered (AMOLED black pixels are off).
++ *      button / auto-lock), else on. By default off fades the panel out over
++ *      a few vsyncs (halving each pixel) and keeps it black until on again;
++ *      sweetfbpreserveoff=1 leaves scanout pixels intact while CoreBrightness
++ *      drives the real panel to its lowest safe brightness.
+  *   18 IsMainDisplay,
+  *   28 GetDotPitch, 72 Enable/DisableNotifications [func, refcon, type, 0]
+  * Everything else is accepted and logged once.
+@@ -116,6 +117,7 @@ public:
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
++	bool          fPreserveOff;   /* leave scanout contents intact while off */
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void addClient(IOMobileFramebufferUserClient *client);
+@@ -363,6 +365,9 @@ AppleCLCD::start(IOService *provider)
+ 	uint32_t hz = 10;
+ 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
++	int preserveOff = 0;
++	(void)PE_parse_boot_argn("sweetfbpreserveoff", &preserveOff, sizeof(preserveOff));
++	fPreserveOff = preserveOff != 0;
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+@@ -371,6 +376,9 @@ AppleCLCD::start(IOService *provider)
+ 	registerService();
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
++	if (fPreserveOff) {
++		IOLog("SWEET FB: preserving framebuffer contents while display is off\n");
++	}
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ 	int backlight = 1;
+ 	PE_parse_boot_argn("sweetbacklight", &backlight, sizeof(backlight));
+@@ -406,13 +414,16 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		client->notify(SWEET_FB_NOTIFY_VSYNC, values, 6);
+ 	}
+ 	if (fb->fPowerOff) {
+-		/* Fade out: halve every channel each vsync, then black, then idle. */
++		/* CoreBrightness makes the real panel black. The opt-in preserve mode
++		 * avoids destroying the last complete CPU-composited frame, because a
++		 * later wake can contain only a partial layer update. */
++		bool preserve = fb->fPreserveOff;
+ 		uint32_t step = fb->fFadeStep;
+-		if (step <= 6) {
++		if (!preserve && step <= 6) {
+ 			fb->fFadeStep = step + 1;
+ 		}
+ 		IOLockUnlock(fb->fLock);
+-		if (step <= 6) {
++		if (!preserve && step <= 6) {
+ 			for (uint32_t y = 0; y < fb->fHeight; y++) {
+ 				volatile uint32_t *row = (volatile uint32_t *)(fb->fPixels + (uint64_t)y * fb->fRowBytes);
+ 				for (uint32_t x = 0; x < fb->fWidth; x++) {

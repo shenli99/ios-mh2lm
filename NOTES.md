@@ -754,10 +754,57 @@ circular, so its exported line order alone cannot prove a transition order.
   complete frame. A lock-screen partial update can therefore repaint its small
   status/home layers while the clock's layer is absent from that same swap and
   stays black. Do not try to fix this by faking more battery notifications.
-  The next display fix is a bounded framebuffer compositor repair: retain
-  active per-layer state across swaps and compose a complete frame after a
-  power-on transition. `powerd` selector 4 with argument 2 remains unsupported
-  and needs later ABI work, but it is not preventing the observed wake.
+  `powerd` selector 4 with argument 2 remains unsupported and needs later ABI
+  work, but it is not preventing the observed wake.
+
+- **0127 staged: conservative framebuffer preservation experiment
+  (2026-11-03):** `0127-mh2lm-framebuffer-preserve-off.patch` replaces the
+  previously proposed immediate retained-layer compositor repair with a much
+  narrower, reversible first test. Under opt-in `sweetfbpreserveoff=1`,
+  `SweetFramebuffer` retains the physical scanout pixels while its existing
+  `RequestPowerChange(0)` state is active; it does not change power requests,
+  vsync delivery, pending-swap processing, IOSurface lifetimes, or PMIC and
+  battery code. MH2LM's real `AppleARMBacklight` remains active: CoreBrightness
+  sets DCS `0x51` to its lowest safe brightness level, so the physical panel
+  can be black without erasing the last complete CPU-composited frame. Without
+  the new boot argument, the existing seven-vsync fade/clear path is unchanged.
+  The kernel logs `SWEET FB: preserving framebuffer contents while display is off` when
+  the test mode is active.
+
+  The patch is intentionally GPU-compatible: `swap()` remains the existing
+  CoreAnimation protocol receiver and `present()` remains a CPU backend; no
+  new software compositor is introduced. A future GPU backend can replace the
+  presentation implementation while preserving the user-client and display
+  power contracts. Do not port Hakios wholesale: its matching `0x46c`/four
+  layer protocol and non-destructive `RequestPowerChange` behavior are useful
+  references, but its `MiniIOSurface`, multi-swap queue and presenter thread
+  are a separate display stack. UniXNU's shadow buffer is likewise a useful
+  later pattern, not a drop-in solution: it targets `IOMobileFramebufferLegacy`
+  and GOP/single-frame scanout rather than this four-layer CPU path.
+
+  **Decision tree after the first 0127 hardware test:**
+  1. If the charger plug/unplug wake restores a complete clock/lock screen,
+     keep the non-destructive off behavior and repeat normal lock/unlock,
+     timed auto-lock and long charge tests before making it the default.
+  2. If only some frames remain incomplete, implement a bounded full-panel
+     shadow buffer as a CPU-path fallback. At 1080 x 2400 x 4 bytes it costs
+     10,368,000 bytes (about 9.89 MiB); it must have explicit validity and
+     invalidation rules so it is removable once a GPU scanout backend exists.
+  3. Do not retain/recompose four CoreAnimation layers in the kernel and do not
+     import Hakios's full presenter before GPU design work establishes surface
+     ownership, synchronization fences and scanout constraints.
+
+  **First 0127 test:** add only `sweetfbpreserveoff=1` to the established
+  0113 battery-UI image arguments after the next successful CI artifact is
+  packaged. Boot with `fastboot boot` only. Confirm the boot log contains the
+  preserve marker, then execute both directions: (a) Power/auto-lock, wait
+  three seconds, insert charger, wait for the charging glyph/wake, then remove
+  it; (b) connect charger, turn the screen off, then remove the charger. In
+  each case record whether the central clock, status bar and home indicator are
+  all present, whether a later normal Power wake remains correct, and export
+  the persistent log. The expected trace still contains `SWEET FB: display
+  off/on`; the absence of pixel clearing is controlled only by the boot
+  argument.
 
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
