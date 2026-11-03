@@ -24,13 +24,51 @@ if [ ! -c "$dev" ]; then
 	exit 1
 fi
 
-# Opening the TTY asserts DTR through cdc_acm. The device sends raw console
-# bytes, so disable terminal transformations before reading it.
-stty -F "$dev" 115200 raw -echo -icrnl -onlcr
-printf 'Reading live MH2LM console from %s\n' "$dev" >&2
+# Open read/write and assert modem-control lines explicitly. Relying on the
+# implicit DTR policy of stty/cat is not reliable across Linux cdc_acm builds.
+exec python3 - "$dev" "$out" <<'PY'
+import fcntl
+import os
+import select
+import struct
+import sys
+import termios
+import tty
 
-if [ -n "$out" ]; then
-	cat "$dev" | tee -a "$out"
-else
-	cat "$dev"
-fi
+device, output = sys.argv[1:]
+fd = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+log = None
+bits = struct.pack('I', termios.TIOCM_DTR | termios.TIOCM_RTS)
+
+try:
+    tty.setraw(fd, when=termios.TCSANOW)
+    fcntl.ioctl(fd, termios.TIOCMBIS, bits)
+    if output:
+        log = open(output, 'ab', buffering=0)
+    print(f'Reading live MH2LM console from {device} (DTR/RTS asserted)', file=sys.stderr)
+
+    while True:
+        ready, _, _ = select.select([fd], [], [])
+        if fd not in ready:
+            continue
+        try:
+            chunk = os.read(fd, 4096)
+        except BlockingIOError:
+            continue
+        if not chunk:
+            continue
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
+        if log is not None:
+            log.write(chunk)
+except KeyboardInterrupt:
+    pass
+finally:
+    try:
+        fcntl.ioctl(fd, termios.TIOCMBIC, bits)
+    except OSError:
+        pass
+    if log is not None:
+        log.close()
+    os.close(fd)
+PY

@@ -188,8 +188,9 @@
   port after enumeration. Reuse the m7 image for live logging; start
   `tools/sweet-usbacm-log.sh logs/live-0112m7.txt` first, then `fastboot boot`
   m7 in another terminal. The tool waits for the unique `/dev/ttyACM*` device,
-  opens it (asserting DTR), sets raw mode, prints live console bytes, and
-  appends them to the selected file. Set `SWEET_ACM_DEVICE=/dev/ttyACM<N>` if
+  opens it read/write, explicitly asserts DTR/RTS with `TIOCMBIS`, sets raw
+  mode, prints live console bytes, and appends them to the selected file. Set
+  `SWEET_ACM_DEVICE=/dev/ttyACM<N>` if
   another ACM device is already attached. No further kernel or SS-PHY change
   is needed to validate live logging; persistent-ring extraction remains the
   recovery path for failures before enumeration.
