@@ -1,0 +1,52 @@
+mh2lm: correct PM8150B policy diagnostic decoding (0125)
+
+Hardware validation of 0124 shows that its long single `SWEET BATT POLICY`
+record is routinely interleaved with unrelated console output before the
+SMB_EN fields are emitted. It also exposes an APSD decode mistake: SMB5
+defines APSD_DTC_STATUS_DONE_BIT at bit 0, while bit 7 is merely
+APSD_STATUS_7_BIT.
+
+Keep the diagnostic entirely read-only, but emit the policy as three short,
+self-contained records. Decode the APSD DTC-complete bit correctly and print
+bit 5 separately as the slow-plugin timeout condition. The final record
+contains the SMB_EN command/select state needed before any future
+charger-controller design is considered. This patch adds no PMIC write,
+interrupt change, charger enable, or published power-source state change.
+
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -460,19 +460,21 @@ SweetBattery::logChargePolicy(void)
+ 	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_TYPEC_MISC, &misc) &&
+ 	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_SMB_EN, &smbEn) &&
+ 	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_SMB_CFG, &smbCfg);
+-	IOLog("SWEET BATT POLICY: path=%#x use-usb=%u valid-input=%u path-suspend=%u "
+-	    "cmd-il=%#x cmd-suspend=%u icl=%umA apsd=%#x done=%u enum=%u "
+-	    "aicl=%#x aicl-en=%u aicl-adc=%u aicl-rerun=%u collapse-suspend=%u "
+-	    "sink=%#x typec=%#x state-attached=%u misc=%#x cc-attached=%u vbus=%u "
+-	    "smben=%#x override=%u override-val=%u smbcfg=%#x smb-sel=%u read-ok=%d\n",
++	IOLog("SWEET BATT INPUT: path=%#x use-usb=%u valid-input=%u path-suspend=%u "
++	    "cmd-il=%#x cmd-suspend=%u icl=%umA apsd=%#x dtc-done=%u enum=%u slow-plugin=%u\n",
+ 	    (unsigned)path, (path & 0x10u) ? 1 : 0, (path & 0x01u) ? 1 : 0,
+ 	    (path & 0x40u) ? 1 : 0, (unsigned)cmdIl, (cmdIl & 0x01u) ? 1 : 0,
+-	    (unsigned)icl * 50u, (unsigned)apsd, (apsd & 0x80u) ? 1 : 0,
+-	    (apsd & 0x10u) ? 1 : 0, (unsigned)aicl, (aicl & 0x04u) ? 1 : 0,
+-	    (aicl & 0x08u) ? 1 : 0, (aicl & 0x10u) ? 1 : 0,
+-	    (aicl & 0x80u) ? 1 : 0, (unsigned)sink, (unsigned)typec,
+-	    (typec & 0x20u) ? 1 : 0, (unsigned)misc, (misc & 0x01u) ? 1 : 0,
+-	    (misc & 0x20u) ? 1 : 0,
+-	    (unsigned)smbEn, (smbEn & 0x08u) ? 1 : 0, (smbEn & 0x10u) ? 1 : 0,
++	    (unsigned)icl * 50u, (unsigned)apsd, (apsd & 0x01u) ? 1 : 0,
++	    (apsd & 0x10u) ? 1 : 0, (apsd & 0x20u) ? 1 : 0);
++	IOLog("SWEET BATT TYPEC: aicl=%#x aicl-en=%u aicl-adc=%u aicl-rerun=%u "
++	    "collapse-suspend=%u sink=%#x typec=%#x state-attached=%u misc=%#x "
++	    "cc-attached=%u vbus=%u\n",
++	    (unsigned)aicl, (aicl & 0x04u) ? 1 : 0, (aicl & 0x08u) ? 1 : 0,
++	    (aicl & 0x10u) ? 1 : 0, (aicl & 0x80u) ? 1 : 0, (unsigned)sink,
++	    (unsigned)typec, (typec & 0x20u) ? 1 : 0, (unsigned)misc,
++	    (misc & 0x01u) ? 1 : 0, (misc & 0x20u) ? 1 : 0);
++	IOLog("SWEET BATT SMB: en=%#x override=%u override-val=%u cfg=%#x "
++	    "smb-sel=%u read-ok=%d\n", (unsigned)smbEn,
++	    (smbEn & 0x08u) ? 1 : 0, (smbEn & 0x10u) ? 1 : 0,
+ 	    (unsigned)smbCfg, (smbCfg & 0x10u) ? 1 : 0, ok ? 1 : 0);
+ }

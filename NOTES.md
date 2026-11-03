@@ -484,6 +484,37 @@
   connected records, then disconnect it for another 10 seconds. Preserve the
   matching `SWEET BATT DIAG`, `SWEET BATTERY SID2` and boot-time IRQ-CFG lines.
 
+- **0112m18: USB input policy is ready; charger remains deliberately disabled
+  (2026-11-03):** `logs/sweetlog-0112m18.bin` validates the 0124 read-only
+  policy probe. Unplugged records consistently show `path=0x2`, no selected
+  or valid USB input, while the gauge stays stable at 62--63%. After cable
+  insertion, `path=0x95` shows both USB selection and valid input; neither the
+  power-path nor USB command suspension bit is set, ICL is 1500 mA, and AICL
+  is enabled with periodic rerun and collapse suspend. APSD raw values are
+  `0x1` and `0x21`: bit 0 is the Lineage SMB5 DTC-complete bit, and `0x21`
+  additionally carries its bit-5 slow-plugin timeout indication. Therefore
+  the old logger's `done=0` is a decoding bug, not failed charger detection.
+
+  The charger itself is not proven enabled: connected `SID2` samples continue
+  to publish `charging=0`, and the representative matching diagnostic state
+  is 7 (`DISABLE_CHARGE`) with `en=0` and `smben=0`. The occasional tiny
+  negative current samples are not evidence of actual charging. `cfg2=0x2c`
+  has its charger-inhibit bit clear, so the observed blocker is the disabled
+  charger policy/enable path, not missing VBUS, input suspension, zero ICL or
+  disabled AICL. The Linux SMB5 driver only releases its default disable vote
+  after wider controller initialization; do not write `CHARGING_ENABLE_CMD`
+  as an isolated next step.
+
+  The long 0124 policy line is often interleaved before SMB_EN's select/config
+  fields, so it cannot yet distinguish a software-disabled command from an
+  external SMB_EN selection. Patch
+  `0125-mh2lm-battery-policy-log-format.patch` is staged locally to fix the
+  APSD DTC bit decode, expose slow-plugin timeout separately, and split the
+  record into short INPUT, TYPEC and SMB lines. It remains read-only and makes
+  no PMIC, IRQ, charging or IOPM state change. Next test: collect the three
+  short records both unplugged and plugged, especially the complete
+  `SWEET BATT SMB` record, before choosing a safe controller design.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
