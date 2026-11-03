@@ -695,14 +695,16 @@ circular, so its exported line order alone cannot prove a transition order.
   artifact, do not request separate cloud builds for each combination. Run
   `tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-LABEL.gz
   LABEL` once. It verifies the artifact's own kernel SHA256 manifest plus the
-  `SWEET BATT UI` and CDC-ACM strings, then emits four reproducible temporary
+  `SWEET BATT UI` and CDC-ACM strings, then emits five reproducible temporary
   Android boot-header-v1 images from the same kernel: `baseline` (explicit
-  `sweetusb=0`), `battery-ui` (the read-only lock-screen trace), `usb`
-  (established ACM `sweetusb=2 sweetusbstep=6 sweetvbus=1`), and
-  `usb-battery-ui` (both paths together). All retain the normal enabled key
-  driver and are for `fastboot boot` only. This matrix isolates a failure
-  first, then provides the combined USB/battery regression result without a
-  second CI compile. A later real key/USB/battery IRQ implementation must use
+  `sweetusb=0`), `battery-ui` (the read-only lock-screen trace),
+  `battery-ui-preserve-off` (the same trace plus the 0127 framebuffer
+  preservation experiment), `usb` (established ACM
+  `sweetusb=2 sweetusbstep=6 sweetvbus=1`), and `usb-battery-ui` (both paths
+  together). All retain the normal enabled key driver and are for `fastboot
+  boot` only. This matrix isolates a failure first, then provides the
+  framebuffer A/B and combined USB/battery regression results without a second
+  CI compile. A later real key/USB/battery IRQ implementation must use
   separate opt-in boot arguments and extend this generator rather than
   replacing these known-good fallback profiles.
 

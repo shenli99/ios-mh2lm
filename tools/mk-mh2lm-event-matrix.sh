@@ -97,6 +97,9 @@ make_profile baseline \
 make_profile battery-ui \
 	"LG G8X - XNU battery UI trace (${LABEL})" \
 	"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetbattery=1 sweetbatt=1 sweetbattdiag=1 sweetbattirqdiag=1 sweetbattuidiag=1"
+make_profile battery-ui-preserve-off \
+	"LG G8X - XNU battery UI preserve-off (${LABEL})" \
+	"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetbattery=1 sweetbatt=1 sweetbattdiag=1 sweetbattirqdiag=1 sweetbattuidiag=1 sweetfbpreserveoff=1"
 make_profile usb \
 	"LG G8X - XNU USB ACM (${LABEL})" \
 	"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1"
@@ -105,4 +108,4 @@ make_profile usb-battery-ui \
 	"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetbattery=1 sweetbatt=1 sweetbattdiag=1 sweetbattirqdiag=1 sweetbattuidiag=1"
 
 printf 'kernel SHA256: %s\n' "$KERNEL_SHA256"
-printf 'created profiles for %s: baseline, battery-ui, usb, usb-battery-ui\n' "$LABEL"
+printf 'created profiles for %s: baseline, battery-ui, battery-ui-preserve-off, usb, usb-battery-ui\n' "$LABEL"
