@@ -759,6 +759,49 @@ circular, so its exported line order alone cannot prove a transition order.
   `powerd` selector 4 with argument 2 remains unsupported and needs later ABI
   work, but it is not preventing the observed wake.
 
+- **0113 baseline, USB and combined regression result (2026-11-03):** the
+  remaining three images were booted with `fastboot boot` only. Their raw ring
+  captures are `logs/sweetlog-0113-baseline.bin` SHA256
+  `00dfda1ed35d36650aab51fbd1ee5b54b03817a74eb61ce099bbbfe950d26e69`,
+  `logs/sweetlog-0113-usb.bin` SHA256
+  `e4ac5c5b38b837ca16421760b3b6c7ab084081847d63b91a0d0e7cf265b5d5c2`,
+  and `logs/sweetlog-0113-usb-battery-ui.bin` SHA256
+  `3a43214a0dcf445b72c43dba6966aef25d00770afee08d9d1d2bf170745d51b0`.
+  The `panic` text in each capture is only the existing `panic_screen=1` boot
+  argument, `DumpPanic` service name and early uninitialized-panic-buffer
+  notices; none contains a kernel trap, data abort or panic. All three reach a
+  normal SpringBoard-requested shutdown.
+
+  The baseline preserves repeated `SWEET FB: display off/on` plus real
+  CoreBrightness fade pairs, 183 touch reports/events with zero I2C errors,
+  and Power/volume press/release delivery. The USB-only live capture
+  `logs/live-0113-usb.txt` SHA256
+  `12c8e85df5cba12e0773a94e19184c6ab4ef1154a0fa89fdf832041001bc4043`
+  reaches 243,493 console bytes, TX `159/160`, zero errors, 449 DWC3 events,
+  `configured=1` and `dtr=1`. This is a clean regression pass for the existing
+  polling CDC-ACM path.
+
+  The combined live capture `logs/live-0113-usb-battery-ui.txt` SHA256
+  `289b05e7afd66dead1775c37ce73dbd1dc523d2f72deb545d6a2f99acff4294f`
+  records multiple unplug/plug transitions: battery UI events 2--7 alternate
+  `external/capable` between 0 and 1 and each is followed by `updateStatus`.
+  Reconnecting the same USB cable naturally causes DWC3 bus reset, ACM
+  configuration and host DTR close/open cycles; after those cycles console
+  output continues to 291,302 bytes, TX `69/75`, zero errors and 928 events.
+  The short combined sequence did not enter active charge (`charging=0`), so
+  it validates UI/USB coexistence and recovery, not charging-current behavior.
+  A transient key GPIO/PMIC read error appears near the later multi-key use in
+  each profile, but the associated releases, touch traffic and orderly
+  shutdown continue; retain it as a baseline observation for the future
+  interrupt-driven key implementation rather than treating it as a 0113
+  regression.
+
+  These results close the 0113 functional matrix: they demonstrate that 0126
+  battery tracing did not regress the existing polling display, key, touch or
+  CDC-ACM paths. They do **not** validate USB, key or battery IRQ/event mode;
+  all three remain polling fallbacks until a separate preflight, acknowledge
+  ordering and workloop-handoff implementation is tested.
+
 - **0127 staged: conservative framebuffer preservation experiment
   (2026-11-03):** `0127-mh2lm-framebuffer-preserve-off.patch` replaces the
   previously proposed immediate retained-layer compositor repair with a much
