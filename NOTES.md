@@ -706,6 +706,29 @@ circular, so its exported line order alone cannot prove a transition order.
   separate opt-in boot arguments and extend this generator rather than
   replacing these known-good fallback profiles.
 
+- **0113 CI artifact and one-build matrix prepared (2026-11-03):** CircleCI
+  applied `0126-mh2lm-battery-ui-transition-trace.patch` and completed with
+  `XNU Build Done!`. The extracted `kernel.development.mh2lm` SHA256 is
+  `eb96b9c3a0bb90dfd27e77ea4dba452c3b5f754e5898e2bb187f6f2ae92f06d8`,
+  matching `logs/xnu-kernel-0113.gz`'s manifest. The kernel contains both the
+  0126 `SWEET BATT UI` strings and `SWEET USB: ACM endpoints configured`.
+  `tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-0113.gz 0113` generated and
+  read back all four temporary Android boot-header-v1, 2048-byte-page images:
+  `out-bs/boot-16k-0113-baseline.img` SHA256
+  `aef23ad75a847aa7b35ceff059a21006c0ab0968c152b4d4886eab68c1482376`,
+  `out-bs/boot-16k-0113-battery-ui.img` SHA256
+  `86e0afda7b3396e537313d71591f704855b940559bbadabcf814b7f6dc60e6c7`,
+  `out-bs/boot-16k-0113-usb.img` SHA256
+  `9cc0d60a82cb60dec9a31e819a9ae0bc823f3882487df584e9a7d38b061d927f`,
+  and `out-bs/boot-16k-0113-usb-battery-ui.img` SHA256
+  `9315e91c21e110681b58867260a5182c80fb448da3e35e4e8b07948c79d8fa84`.
+  All four embed the same verified 0113 kernel. The first hardware test is
+  `battery-ui`: after desktop, Power to framebuffer-off, wait three seconds,
+  connect a known-good charger for 8--10 seconds, remove it for 8--10 seconds,
+  then pull the persistent log. Leave the USB and combined images for the
+  corresponding single-path and two-path regression tests; use `fastboot boot`
+  only, never flash.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
