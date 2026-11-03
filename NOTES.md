@@ -438,7 +438,8 @@
   fields give `use-usb`, `valid-input`, `path-suspend`, `cmd-suspend`, ICL in
   mA, APSD done/enumeration, AICL enable/ADC/rerun/collapse policy, Type-C
   state/CC/VBUS attachment and SMB_EN selection/override state. It also fixes
-  0123's literal `\\n` in `SWEET BATT IRQ CFG`.
+  0123's literal `\\n` in `SWEET BATT IRQ CFG`. It is committed locally as
+  `eab8cac` (`battery: diagnose PM8150B charging policy`); it is not pushed.
 
   The patch has no SPMI write, PMIC IRQ enable/clear, GIC handler, charger
   state change or published-IOPM change. Its local syntax check uses the
