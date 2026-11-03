@@ -371,6 +371,28 @@
   Continue treating `SWEET BATT DIAG` state/en/smben/ibatt/signed/ua fields,
   not the UI icon or VBUS detection, as charging evidence.
 
+- **0112k4 build and validation image prepared (2026-11-03):** CircleCI
+  applied 0123 and linked `kernel.development.mh2lm` successfully. The
+  downloaded artifact's `SHA256SUMS` and extracted kernel agree on
+  `5d47d8ab485ec2e55f8e1cd8679ecbd57e9c393765789e87bccf82ddd98690e8`;
+  the downloaded build tree contains `readBytePair`, `scaleMsoc`, and
+  `SWEET BATT IRQ CFG` in final `SweetBattery.cpp`. The reproducible
+  packer is `out-bs/mk16k-0112k4-battery-msoc-irq.sh`; it produced
+  `out-bs/boot-16k-0112k4-battery-msoc-irq.img`
+  (SHA256
+  `b80b3157fb7838152c15189be8c481e339359ef91e589826e1d3dad15ba9cb04`).
+  Its ramdisk was unpacked after packaging and byte-matches the source
+  ramdisk; the embedded kernel and ADT were separately read back and match.
+  The entry has only the established GUI/iOS-rw baseline plus
+  `sweetbattery=1 sweetbatt=1 sweetbattdiag=1 sweetbattirqdiag=1`; it
+  rejects `sweetusb`, `sweetvbus`, `sweetusbstep`, and
+  `sweetkeys` arguments. Boot it with `fastboot boot` only, not a
+  partition flash. On the phone, leave it disconnected for a short baseline,
+  insert the cable, wait 10 seconds, remove it, wait 10 seconds, then export
+  the persistent log after shutdown/recovery. Capture both every
+  `SWEET BATTERY SID2` line and the two boot-time `SWEET BATT IRQ CFG`
+  lines.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
