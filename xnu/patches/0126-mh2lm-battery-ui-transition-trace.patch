@@ -1,0 +1,137 @@
+mh2lm: trace lock-screen battery transition contract (0126)
+
+0112m20 confirms that PM8150B charging continues while the current
+framebuffer-only display-off state is active. The missing plug-in charging
+animation is therefore not a charge-current failure. Before implementing any
+PMIC IRQ or AppleSmartBatteryManager ABI behaviour, record the exact standard
+IOPM source transition and every battery user-client call that occurs during a
+controlled lock-screen plug/unplug sequence.
+
+Under the new opt-in `sweetbattuidiag=1` argument, log only externally visible
+source transitions (external, capable, charging or full) immediately before
+and after the existing `updateStatus()` call. Also log every user-client
+external method while the option is active, including its first scalar input.
+Without the argument, the existing once-per-selector user-client trace remains
+unchanged.
+
+This is diagnostics only: it performs no PMIC write, does not enable or clear
+an IRQ, does not change a user-client return value, and does not request a
+display power transition. Existing `SWEET FB: display off/on` markers provide
+the display-side correlation for the resulting persistent log.
+
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -75,6 +75,11 @@ extern "C" void sweet_spmi_irq_diag(void);
+  * move what IOKit (and therefore the screen) already shows. */
+ #define SWEET_BATT_SOC_JUMP	5u
+ 
++/* Opt-in tracing for the lock-screen plug/unplug investigation. It is read
++ * from SweetBattery::start() before the service is published; the user client
++ * later uses it only to increase logging, never to alter its ABI. */
++static bool gSweetBattUiDiag;
++
+ class SweetBattery : public IOPMPowerSource {
+ 	OSDeclareDefaultStructors(SweetBattery);
+ public:
+@@ -86,7 +91,9 @@ private:
+ 	IOWorkLoop *fLoop;
+ 	IOTimerEventSource *fTimer;
+ 	bool fTimerAdded, fRunning, fReal;
+-	bool fSid2, fDiag, fPercentValid;
++	bool fSid2, fDiag, fUiDiag, fPercentValid;
++	bool fUiPublished, fUiExternal, fUiCapable, fUiCharging, fUiFull;
++	uint32_t fUiSequence;
+ 	unsigned fLastMv, fLastPercent, fPendingPercent;
+ 	int fLastMode;
+ 	void putNumber(const char *key, UInt32 value);
+@@ -180,19 +187,21 @@ AppleSmartBatteryManagerUserClient::externalMethod(uint32_t selector,
+     __unused OSObject *target, __unused void *reference)
+ {
+ 	static uint64_t logged;
+-	if (selector >= 64 || !(logged & (1ULL << selector))) {
+-		if (selector < 64) {
+-			logged |= 1ULL << selector;
+-		}
++	bool first = selector >= 64 || !(logged & (1ULL << selector));
++	if (selector < 64) {
++		logged |= 1ULL << selector;
++	}
++	if (gSweetBattUiDiag || first) {
+ 		char name[32];
+ 		proc_selfname(name, sizeof(name));
+ 		uint32_t structIn = args->structureInputDescriptor != NULL ?
+ 		    (uint32_t)args->structureInputDescriptor->getLength() : args->structureInputSize;
+ 		uint32_t structOut = args->structureOutputDescriptor != NULL ?
+ 		    (uint32_t)args->structureOutputDescriptor->getLength() : args->structureOutputSize;
+-		IOLog("SWEET BATT UC: %s sel %u in %u/%u out %u/%u -> unsupported\n",
++		uint64_t scalar0 = args->scalarInputCount ? args->scalarInput[0] : 0;
++		IOLog("SWEET BATT UC: %s sel %u in %u/%u arg0=%#llx out %u/%u -> unsupported\n",
+ 		    name, selector, args->scalarInputCount, structIn,
+-		    args->scalarOutputCount, structOut);
++		    (unsigned long long)scalar0, args->scalarOutputCount, structOut);
+ 	}
+ 	return kIOReturnUnsupported;
+ }
+@@ -209,7 +218,9 @@ SweetBattery::init(OSDictionary *dictionary)
+ 	fLoop = NULL;
+ 	fTimer = NULL;
+ 	fTimerAdded = fRunning = fReal = false;
+-	fSid2 = fDiag = false;
++	fSid2 = fDiag = fUiDiag = false;
++	fUiPublished = fUiExternal = fUiCapable = fUiCharging = fUiFull = false;
++	fUiSequence = 0;
+ 	fLastMv = 4200;	/* last real VBATT; static until a gauge word works */
+ 	/* Nothing has been published yet, so the first real sample is adopted as
+ 	 * is instead of being held back as an implausible jump. */
+@@ -313,7 +324,29 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
+ 		setLegacyIOBatteryInfo(legacy);
+ 		legacy->release();
+ 	}
++	/* Log only an externally visible source transition. This makes a plug or
++	 * charge-state transition unambiguous in the circular persistent log while
++	 * retaining updateStatus() as the only IOPM notification mechanism. */
++	bool uiChanged = !fUiPublished || external != fUiExternal ||
++	    capable != fUiCapable || charging != fUiCharging ||
++	    full != fUiFull;
++	if (fUiDiag && uiChanged) {
++		fUiSequence++;
++		IOLog("SWEET BATT UI: event=%u publish external=%d capable=%d charging=%d "
++		    "full=%d percent=%u mv=%u sample=%d current-valid=%d\n",
++		    fUiSequence, external ? 1 : 0, capable ? 1 : 0,
++		    charging ? 1 : 0, full ? 1 : 0, percent, mv,
++		    measured ? 1 : 0, currentValid ? 1 : 0);
++	}
+ 	updateStatus(); /* Flush PS properties and send 0xe0024100 on change. */
++	if (fUiDiag && uiChanged) {
++		IOLog("SWEET BATT UI: event=%u updateStatus complete\n", fUiSequence);
++	}
++	fUiPublished = true;
++	fUiExternal = external;
++	fUiCapable = capable;
++	fUiCharging = charging;
++	fUiFull = full;
+ 	int mode = measured ? 1 : 0;
+ 	if (mode != fLastMode) {
+ 		IOLog("SWEET BATTERY: %s, %u%% %umV external=%d charging=%d\n",
+@@ -714,6 +747,10 @@ SweetBattery::start(IOService *provider)
+ 	int diag = 0;
+ 	(void)PE_parse_boot_argn("sweetbattdiag", &diag, sizeof(diag));
+ 	fDiag = fSid2 && diag == 1;
++	int uiDiag = 0;
++	(void)PE_parse_boot_argn("sweetbattuidiag", &uiDiag, sizeof(uiDiag));
++	fUiDiag = fSid2 && uiDiag == 1;
++	gSweetBattUiDiag = fUiDiag;
+ 	int irqDiag = 0;
+ 	(void)PE_parse_boot_argn("sweetbattirqdiag", &irqDiag, sizeof(irqDiag));
+ 	if (fSid2) {
+@@ -723,6 +760,9 @@ SweetBattery::start(IOService *provider)
+ 	if (fDiag) {
+ 		IOLog("SWEET BATTERY: charger/current diagnostics enabled (read-only)\n");
+ 	}
++	if (fUiDiag) {
++		IOLog("SWEET BATT UI: transition/user-client tracing enabled (read-only)\n");
++	}
+ 	if (fSid2 && irqDiag == 1) {
+ 		IOLog("SWEET BATTERY: PMIC-arb IRQ preflight enabled (read-only)\n");
+ 		sweet_spmi_irq_diag();

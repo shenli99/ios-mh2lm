@@ -664,6 +664,48 @@ circular, so its exported line order alone cannot prove a transition order.
   therefore a separate event/UI-compatibility problem, not a charge-current
   failure.
 
+- **0126 staged: lock-screen power transition trace (2026-11-03):**
+  `0126-mh2lm-battery-ui-transition-trace.patch` is an opt-in, read-only
+  diagnostic that has passed `git apply --check` against the exact post-0125
+  source tree and a recovered CI-argument local syntax check for
+  `SweetBattery.cpp`. With the existing battery baseline plus
+  `sweetbattuidiag=1`, it emits a compact `SWEET BATT UI` record only when the
+  externally visible published state changes (external power, charge-capable,
+  charging, full), immediately before and after the existing `updateStatus()`
+  notification. It also records every `AppleSmartBatteryManager` user-client
+  external method with selector and scalar argument. Without that boot
+  argument, the prior once-per-selector user-client logging remains unchanged.
+  The patch makes no PMIC write, does not enable or clear an IRQ, does not
+  alter user-client return values, and does not request display wake.
+
+  After the CI kernel is available, make a temporary boot image from the
+  established GUI/iOS-rw battery baseline with only
+  `sweetbattery=1 sweetbatt=1 sweetbattdiag=1 sweetbattirqdiag=1
+  sweetbattuidiag=1` as the battery additions. Exclude USB/VBUS/step, key and
+  touch overrides. Test through `fastboot boot` only: wait for the desktop;
+  press Power to turn the framebuffer off; wait three seconds; connect a
+  known-good charger; wait 8--10 seconds; remove it; wait another 8--10
+  seconds; then export the persistent log. Correlate the new `SWEET BATT UI`
+  and `SWEET BATT UC` records with existing `SWEET FB: display off/on` lines.
+  This controlled trace decides whether the next change belongs in event
+  delivery, the private user-client ABI, or power-adapter detail publication;
+  do not force a charging animation as a substitute for that result.
+
+  **One-build local test matrix:** after this patch reaches a successful CI
+  artifact, do not request separate cloud builds for each combination. Run
+  `tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-LABEL.gz
+  LABEL` once. It verifies the artifact's own kernel SHA256 manifest plus the
+  `SWEET BATT UI` and CDC-ACM strings, then emits four reproducible temporary
+  Android boot-header-v1 images from the same kernel: `baseline` (explicit
+  `sweetusb=0`), `battery-ui` (the read-only lock-screen trace), `usb`
+  (established ACM `sweetusb=2 sweetusbstep=6 sweetvbus=1`), and
+  `usb-battery-ui` (both paths together). All retain the normal enabled key
+  driver and are for `fastboot boot` only. This matrix isolates a failure
+  first, then provides the combined USB/battery regression result without a
+  second CI compile. A later real key/USB/battery IRQ implementation must use
+  separate opt-in boot arguments and extend this generator rather than
+  replacing these known-good fallback profiles.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
