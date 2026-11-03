@@ -151,6 +151,19 @@
   the controller runs, and the polled event/log threads start. No `sweetvbus`
   argument is passed, so VBUS mode remains 0; enumeration is not required for
   this test.
+- **0112m m5 hardware result / m6 HS-VBUS pre-run follow-up (2026-11-03):**
+  `logs/sweetlog-0112m5.bin` confirms DWC3 reaches device running state with
+  VBUS mode 0: `PRTCAPDIR` was already 2, `RUN_STOP` cleared the halt state
+  immediately (`DSTS=0x00920001`), and EP0 was armed only after that point.
+  The polled thread reported no events, configuration, DTR, or console bytes,
+  as expected without a valid session; iOS, keys, and normal shutdown remained
+  healthy. The next disposable image is
+  `/home/shenli/work1/out-bs/boot-16k-0112m-usbprobe-m6-vbus1-pre-run.img`
+  (SHA256 `51a6a2786fc2a2679053bcb513a48254f2cdff0a6a4213acd4782ad4dcfd1c72`),
+  made by `out-bs/mk16k-0112m-usbprobe-m6-vbus1-pre-run.sh`. It sets only
+  `sweetvbus=1` with `sweetusbstep=5`: the HS QSCRATCH VBUS-valid bits are
+  written and read back, but the driver stops before RUN_STOP. It does not
+  change SS PHY state and no enumeration is expected.
 
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
