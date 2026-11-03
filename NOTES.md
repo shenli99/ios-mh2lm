@@ -187,9 +187,12 @@
   console path is active. `dtr=0` is not a device fault: the host closed the
   port after enumeration. Reuse the m7 image for live logging; start
   `tools/sweet-usbacm-log.sh logs/live-0112m7.txt` first, then `fastboot boot`
-  m7 in another terminal. The tool waits for the unique `/dev/ttyACM*` device,
-  opens it read/write, explicitly asserts DTR/RTS with `TIOCMBIS`, sets raw
-  mode, prints live console bytes, and appends them to the selected file. Set
+  m7 in another terminal. The tool is intentionally long-lived across the
+  USB disconnect/reconnect caused by `fastboot boot`: it waits before the node
+  exists, reopens it after delayed enumeration, and resumes waiting after a
+  later disconnect. Once present, it opens the TTY read/write, explicitly
+  asserts DTR/RTS with `TIOCMBIS`, sets raw mode, prints live console bytes,
+  and appends them to the selected file. Set
   `SWEET_ACM_DEVICE=/dev/ttyACM<N>` if
   another ACM device is already attached. No further kernel or SS-PHY change
   is needed to validate live logging; persistent-ring extraction remains the

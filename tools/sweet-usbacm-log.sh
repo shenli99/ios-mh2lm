@@ -7,68 +7,93 @@ set -eu
 out=${1:-}
 dev=${SWEET_ACM_DEVICE:-}
 
-if [ -z "$dev" ]; then
-	printf '%s\n' 'Waiting for exactly one /dev/ttyACM* device...' >&2
-	while :; do
-		set -- /dev/ttyACM*
-		if [ "$#" -eq 1 ] && [ -c "$1" ]; then
-			dev=$1
-			break
-		fi
-		sleep 1
-	done
-fi
-
-if [ ! -c "$dev" ]; then
-	printf 'CDC-ACM device is not a character device: %s\n' "$dev" >&2
-	exit 1
-fi
-
-# Open read/write and assert modem-control lines explicitly. Relying on the
-# implicit DTR policy of stty/cat is not reliable across Linux cdc_acm builds.
+# Stay alive across the USB disconnect/reconnect caused by fastboot boot.
+# With SWEET_ACM_DEVICE set, wait for that exact node rather than requiring it
+# to exist before the listener starts.
 exec python3 - "$dev" "$out" <<'PY'
 import fcntl
+import glob
 import os
 import select
+import stat
 import struct
 import sys
 import termios
+import time
 import tty
 
-device, output = sys.argv[1:]
-fd = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-log = None
+requested, output = sys.argv[1:]
 bits = struct.pack('I', termios.TIOCM_DTR | termios.TIOCM_RTS)
+log = open(output, 'ab', buffering=0) if output else None
+last_wait_state = None
+
+def character_devices(paths):
+    devices = []
+    for path in paths:
+        try:
+            if stat.S_ISCHR(os.stat(path).st_mode):
+                devices.append(path)
+        except FileNotFoundError:
+            pass
+    return devices
 
 try:
-    tty.setraw(fd, when=termios.TCSANOW)
-    fcntl.ioctl(fd, termios.TIOCMBIS, bits)
-    if output:
-        log = open(output, 'ab', buffering=0)
-    print(f'Reading live MH2LM console from {device} (DTR/RTS asserted)', file=sys.stderr)
-
     while True:
-        ready, _, _ = select.select([fd], [], [])
-        if fd not in ready:
+        if requested:
+            candidates = character_devices([requested])
+        else:
+            candidates = character_devices(glob.glob('/dev/ttyACM*'))
+
+        if len(candidates) != 1:
+            if requested:
+                wait_state = f'Waiting for {requested} to appear...'
+            elif not candidates:
+                wait_state = 'Waiting for one /dev/ttyACM* device...'
+            else:
+                wait_state = ('More than one /dev/ttyACM* device is present; '
+                              'set SWEET_ACM_DEVICE=/dev/ttyACM<N>.')
+            if wait_state != last_wait_state:
+                print(wait_state, file=sys.stderr)
+                last_wait_state = wait_state
+            time.sleep(1)
             continue
+
+        device = candidates[0]
+        fd = None
         try:
-            chunk = os.read(fd, 4096)
-        except BlockingIOError:
-            continue
-        if not chunk:
-            continue
-        sys.stdout.buffer.write(chunk)
-        sys.stdout.buffer.flush()
-        if log is not None:
-            log.write(chunk)
+            fd = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            tty.setraw(fd, when=termios.TCSANOW)
+            fcntl.ioctl(fd, termios.TIOCMBIS, bits)
+            print(f'Reading live MH2LM console from {device} (DTR/RTS asserted)', file=sys.stderr)
+            last_wait_state = None
+
+            while True:
+                ready, _, _ = select.select([fd], [], [], 1)
+                if fd not in ready:
+                    continue
+                try:
+                    chunk = os.read(fd, 4096)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    raise OSError('CDC-ACM device disconnected')
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+                if log is not None:
+                    log.write(chunk)
+        except OSError as exc:
+            print(f'CDC-ACM read session ended: {exc}', file=sys.stderr)
+            time.sleep(1)
+        finally:
+            if fd is not None:
+                try:
+                    fcntl.ioctl(fd, termios.TIOCMBIC, bits)
+                except OSError:
+                    pass
+                os.close(fd)
 except KeyboardInterrupt:
     pass
 finally:
-    try:
-        fcntl.ioctl(fd, termios.TIOCMBIC, bits)
-    except OSError:
-        pass
     if log is not None:
         log.close()
-    os.close(fd)
 PY
