@@ -236,6 +236,27 @@
   desktop-entry or USB-live-log issue. Keep this read-only path unchanged
   while the CDC-ACM 0113 build is tested.
 
+- **0112m m10/m11 hardware result: USB live logging and battery coexist (2026-11-03):**
+  `logs/sweetlog-0112m10.bin` validates the 0113 CDC bulk-IN TX fix on
+  hardware: after the host opens the ACM port, the device records TX
+  completions and reaches `console=216199 bytes`, `TX 157/158`, `err 0`, with
+  `configured=1, dtr=1`. This replaces the previous exact-8192-byte stall;
+  it demonstrates the fix bundle as a whole, not a claim that one individual
+  change alone was causal. The combined disposable image
+  `out-bs/boot-16k-0112m8-usb-battery-m11.img` (SHA256
+  `68f78ce1644da831aa67293f423b4d4cd2f09e4f751d7af8bf816d2099ffd023`)
+  then passed with only `sweetusb=2 sweetusbstep=6 sweetvbus=1
+  sweetbattery=1 sweetbatt=1`; it deliberately excludes `sweetkeys=` and
+  `sweetusbdma`. In `logs/sweetlog-0112m11.bin`, PM8150B SID2 stayed
+  `SOC_READY=1` at `78%`, `4034-4035mV`, `external=1`, while USB reached
+  `console=222691 bytes`, `TX 237/238`, `err 0`, with host DTR asserted.
+  SpringBoard, touch and key events continued after both services started;
+  there is no `panic(cpu)`, kernel-trap, or debugger signature, and the live
+  log ends in normal userspace teardown followed by `PSCI SYSTEM_OFF`. USB
+  live logging and the read-only battery service are now integration-validated;
+  do not add driver changes merely for cleanup before a new functional target
+  requires them.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
