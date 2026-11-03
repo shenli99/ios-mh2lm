@@ -313,6 +313,25 @@
   signed raw step; negative is charging in the Qualcomm FG convention), while
   leaving all published IOPM properties unchanged and performing no PMIC write.
 
+- **0112k2 m15 charging diagnosis and UI latency root cause (2026-11-03):**
+  `logs/sweetlog-0112m15.bin` contains the 0120 read-only diagnostics with
+  `config-ok=1` and `current-ok=1`. PM8150B sees physical USB insertion and
+  removal (`usb=0x10`/`st5=0x80` versus `usb=0x26`/`st5=0x40`), but every
+  sample remains charger state 7 (`DISABLE_CHARGE`) with `en=0` and `smben=0`.
+  It never reports a negative IBATT: connected samples are zero or positive
+  (including `+297851 uA`), while unplugged samples are consistently about
+  `+456000 uA`. Under the Qualcomm FG convention used by the diagnostic,
+  negative current is charging, so this proves that the existing UI is showing
+  VBUS presence only; it is not physically charging the pack. The same build
+  tree shows `SweetBattery` performs `updateStatus()` after each poll, but
+  arms its sole observer timer at 30,000 ms. The observed several-second to
+  tens-of-seconds icon delay is therefore a polling-latency issue, not an iOS
+  UI cache failure. Patch `0121-mh2lm-battery-poll-cadence.patch` reduces only
+  that read-only polling interval to two seconds. It deliberately does not
+  enable charging or change PMIC state; a later, separate write experiment
+  must be derived from the MH2LM UEFI charger configuration rather than the
+  status-bar workaround.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
