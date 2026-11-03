@@ -14,6 +14,10 @@
 每一轮仍应沿用一个已验证的内核产物生成多个临时 `fastboot boot` 测试镜像的
 方式。不要为了单一测试组合重复触发云端编译；不要在本路线中持久刷写启动分区。
 
+按键的 GIC、DTS、PMIC 外设和 PMIC-arb 事实、未知项及预检步骤见
+[`KEY-IRQ-HARDWARE-BASELINE.md`](KEY-IRQ-HARDWARE-BASELINE.md)。该基线是
+`SweetSpmiInterruptMux` 的硬件输入，不以其他设备的 PDC/PMIC 常量替代 MH2LM 实测。
+
 ## 大目标一：既有驱动的 IRQ 化
 
 ### 架构约束
@@ -53,7 +57,7 @@ PMIC 外设 / 控制器
 
 **当前检查点（0128，待 CI 与硬件测试）：** `sweetkeysirqdiag=1` 只读输出
 PON 与 PM8150 GPIO6 的 APID/owner/PMIC-arb channel 路由状态，以及各自原始
-RT_STS、SET_TYPE、POLARITY_HIGH、POLARITY_LOW、EN_SET、LATCHED_CLR 字节。
+RT_STS、SET_TYPE、POLARITY_HIGH、POLARITY_LOW、EN_SET、LATCHED_STS 字节。
 它不注册 GIC、不写 PDC、不使能或清除 PMIC IRQ，也不改变 20 ms 按键轮询。
 该结果是静态路由表的 MH2LM 依据，不等同于 IRQ 已启用或按键 IRQ 已验收。
 

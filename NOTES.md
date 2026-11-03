@@ -1957,3 +1957,15 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
      cpu_init, before arm_vm_init.
   5. panic hook at top of panic_trap_to_debugger: va_copy + _doprnt(fmt, &copy, sweet_early_putc, 16).
   Verify with tools/xnu-cc.py (compile+symbols) and patch-order simulation before the single CI run.
+
+## IRQ 硬件基线（2026-11-03）
+- 新增 `docs/KEY-IRQ-HARDWARE-BASELINE.md`，集中记录 MH2LM Power、Volume Down、
+  Volume Up 的 GIC、DTS、PMIC PON/GPIO6、PMIC-arb v5 资料、已证实的 IRQ 位以及
+  禁止推测写入的未知项。三个按键都通过 PMIC-arb 的 DTS SPI 481（XNU INTID 513）
+  汇聚；SoC TLMM 不属于按键 IRQ 链路。
+- DTS 已确认 PON KPDPWR=bit0、RESIN=bit1、PM8150 GPIO6=bit0；实际 APID 分别为
+  PON 248、GPIO6 261。`RT_STS` 的实时电平已在 `sweetlog-0113-baseline.bin` 通过
+  三键按下/松开验证。
+- 仍不得 arm：PON/GPIO6 现有 gate/latch/owner 状态、PMIC-arb v5 清除顺序、PDC
+  input 和 GIC 上游 trigger 仍需 0128 的只读 `sweetkeysirqdiag=1` 预检。0128 输出的
+  `latched` 是 `LATCHED_STS (+0x18)`，不是写入用的 `LATCHED_CLR (+0x14)`。
