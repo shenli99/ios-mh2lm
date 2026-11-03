@@ -461,6 +461,29 @@
   does not authorize any PMIC write. A separate controller design is required
   even if every input precondition is healthy.
 
+- **0112k5 build and policy-validation image prepared (2026-11-03):** CircleCI
+  applied 0124 and completed with `XNU Build Done!`. The artifact manifest and
+  extracted `kernel.development.mh2lm` agree on SHA256
+  `8ea83fd6eb451a5dea7438da871a8e5931ef28649dadf9401b98a1723a370e81`.
+  The final kernel contains both `SWEET BATT IRQ CFG` and the complete
+  `SWEET BATT POLICY` format string, including the decoded AICL and Type-C
+  fields. The reproducible packer is
+  `out-bs/mk16k-0112k5-battery-policy.sh`; it produced
+  `out-bs/boot-16k-0112k5-battery-policy.img` (SHA256
+  `6bf81694cd6b02923531b33d037bc9c3650471d3d8fa27b6dc884463694d172b`).
+  It is Android boot header v1 with a 2048-byte page size. Its embedded kernel
+  blob and 32 MiB ramdisk were both extracted from the completed image and
+  byte-match their verified packaging inputs.
+
+  The image retains the established GUI/iOS-rw baseline plus only
+  `sweetbattery=1 sweetbatt=1 sweetbattdiag=1 sweetbattirqdiag=1`; it rejects
+  `sweetusb`, `sweetvbus`, `sweetusbstep`, `sweetkeys` and `sweettouch`
+  overrides. Use `fastboot boot` only, never a partition flash. For the test,
+  collect at least two unplugged `SWEET BATT POLICY` records, then connect a
+  known-good charger for at least 10 seconds and collect at least five
+  connected records, then disconnect it for another 10 seconds. Preserve the
+  matching `SWEET BATT DIAG`, `SWEET BATTERY SID2` and boot-time IRQ-CFG lines.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
