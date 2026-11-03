@@ -1,6 +1,7 @@
 # MH2LM IRQ 与 Framebuffer 路线图
 
-**状态：** 已确定路线，尚未开始 IRQ 实现。
+**状态：** 大目标一 / 子目标 1 已进入只读硬件预检；`SweetSpmiInterruptMux`
+尚未 arm，按键仍使用既有轮询回退。
 **更新日期：** 2026-11-03
 **适用范围：** `ref/ios-mh2lm` 的 MH2LM XNU 驱动；本文是实施和验收计划，
 不替代 `NOTES.md` 中已经取得的硬件观察、日志结论和回归基线。
@@ -49,6 +50,12 @@ PMIC 外设 / 控制器
 
 **目的：** 建立共享 PMIC IRQ 的可扩展分发和下半部交接机制，并以按键作为第一
 个真实 consumer 验证。
+
+**当前检查点（0128，待 CI 与硬件测试）：** `sweetkeysirqdiag=1` 只读输出
+PON 与 PM8150 GPIO6 的 APID/owner/PMIC-arb channel 路由状态，以及各自原始
+RT_STS、SET_TYPE、POLARITY_HIGH、POLARITY_LOW、EN_SET、LATCHED_CLR 字节。
+它不注册 GIC、不写 PDC、不使能或清除 PMIC IRQ，也不改变 20 ms 按键轮询。
+该结果是静态路由表的 MH2LM 依据，不等同于 IRQ 已启用或按键 IRQ 已验收。
 
 **实施边界：**
 

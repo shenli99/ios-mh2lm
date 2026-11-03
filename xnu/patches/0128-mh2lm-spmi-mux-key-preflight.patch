@@ -1,0 +1,136 @@
+mh2lm: preflight PMIC IRQ routes for hardware keys (0128)
+
+The first `SweetSpmiInterruptMux` consumer will be the already-working power,
+volume-up and volume-down key path. Before it can claim the PMIC-arb's shared
+GIC SPI 481, MH2LM needs an on-device record of the PON and PM8150 GPIO6
+routes and the PMIC peripheral's raw interrupt configuration. The existing
+battery preflight establishes this approach for PM8150B charger sources, but
+it does not inspect the PON/GPIO APIDs that the key driver actually uses.
+
+Add an opt-in `sweetkeysirqdiag=1` preflight. It initializes the existing
+read-only SPMI observer helper if necessary, then logs each key peripheral's
+APID mapping, owner, PMIC-arb IRQ-owner bit, owner bitmap, channel access
+enable and channel IRQ status. The key driver separately logs raw RT_STS,
+SET_TYPE, POLARITY_HIGH, POLARITY_LOW, EN_SET and LATCHED_CLR bytes for PON
+and GPIO6. Raw whole-byte output avoids guessing the exact key IRQ bit before
+the target hardware confirms it.
+
+This patch does not register a GIC callback, change PDC configuration, enable
+or clear any PMIC interrupt, or change the 20 ms key-polling fallback. It adds
+a generic read-only per-source route inspection API that the later static
+SweetSpmiInterruptMux route table can reuse.
+
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -120,6 +120,26 @@
+ 	IOLockUnlock(sp_lock);
+ }
+ 
++void
++sweet_spmi_irq_diag_source(unsigned sid, unsigned peripheral, const char *name)
++{
++	if (!sp_ready) {
++		printf("SWEET SPMI IRQ: %s skipped; arbiter is not ready\n",
++		    name ? name : "source");
++		return;
++	}
++	if (sid > 15u || peripheral > 0xffu) {
++		printf("SWEET SPMI IRQ: %s invalid sid=%u peripheral=%#x\n",
++		    name ? name : "source", sid, peripheral);
++		return;
++	}
++	IOLockLock(sp_lock);
++	printf("SWEET SPMI IRQ: %s read-only source preflight; no GIC handler, no enable, no clear\n",
++	    name ? name : "source");
++	sp_irq_diag_peripheral(sid, peripheral, name ? name : "source");
++	IOLockUnlock(sp_lock);
++}
++
+ int
+ sweet_spmi_init(void)
+ {
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -15,6 +15,9 @@
+  * This is a read-only bring-up probe: it never enables, clears, or claims
+- * an interrupt. Call only from the battery worker thread. */
++ * an interrupt. Call only after sweet_spmi_init() outside primary IRQ context. */
+ void sweet_spmi_irq_diag(void);
++/* Read-only route inspection for one PMIC peripheral. It never registers a
++ * GIC handler, enables/clears a PMIC interrupt or writes a PMIC register. */
++void sweet_spmi_irq_diag_source(unsigned sid, unsigned peripheral, const char *name);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -13,6 +13,7 @@
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/arm64/sweet_dev.h>
++#include "sweet_spmi.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_key(int key, int down);
+@@ -97,6 +98,24 @@
+ 	return false;
+ }
+ 
++/* This is deliberately a read-only preflight. The raw bytes are recorded as
++ * whole registers because the PON/GPIO interrupt bit assignment and firmware
++ * gates must be demonstrated on MH2LM before SweetSpmiInterruptMux arms them. */
++static void
++keys_irq_diag_line(const char *name, uint16_t apid, uint16_t rtAddr)
++{
++	uint8_t rt = 0, type = 0, high = 0, low = 0, enabled = 0, latched = 0;
++	bool ok = keys_read(apid, rtAddr, &rt) &&
++	    keys_read(apid, (uint16_t)(rtAddr + 1u), &type) &&
++	    keys_read(apid, (uint16_t)(rtAddr + 2u), &high) &&
++	    keys_read(apid, (uint16_t)(rtAddr + 3u), &low) &&
++	    keys_read(apid, (uint16_t)(rtAddr + 5u), &enabled) &&
++	    keys_read(apid, (uint16_t)(rtAddr + 8u), &latched);
++	printf("SWEET KEYS IRQ CFG: %s apid=%u rt=%#x edge=%#x high=%#x low=%#x "
++	    "enabled=%#x latched=%#x read-ok=%d\n", name, apid, rt, type, high,
++	    low, enabled, latched, ok ? 1 : 0);
++}
++
+ #if SWEET_DEV_KEYS_VOLUME
+ static uint16_t
+ keys_gpio_ppid(uint32_t rt_addr)
+@@ -200,12 +219,14 @@
+ sweet_keys_init(void)
+ {
+ 	int enabled = 1;
++	int irqDiag = 0;
+ 	thread_t thread;
+ 	if (keys_started) {
+ 		return;
+ 	}
+ 	keys_started = true;
+ 	(void)PE_parse_boot_argn("sweetkeys", &enabled, sizeof(enabled));
++	(void)PE_parse_boot_argn("sweetkeysirqdiag", &irqDiag, sizeof(irqDiag));
+ 	if (!enabled) {
+ 		printf("SWEET KEYS: disabled (sweetkeys=0)\n");
+ 		return;
+@@ -272,6 +293,21 @@
+ 		printf("SWEET KEYS: no readable power key; polling retained for recovery\n");
+ 	}
+ #endif /* SWEET_DEV_KEYS_VOLUME */
++	if (irqDiag == 1) {
++		if (sweet_spmi_init() != 0) {
++			printf("SWEET KEYS IRQ: shared SPMI preflight unavailable\n");
++		} else {
++			sweet_spmi_irq_diag_source(0u, KEYS_PON_RT >> 8, "keys-pon");
++#if SWEET_DEV_KEYS_VOLUME
++			sweet_spmi_irq_diag_source(SWEET_DEV_VOL_GPIO_SID,
++			    KEYS_GPIO_RT >> 8, "keys-volume-up");
++#endif
++		}
++		keys_irq_diag_line("pon", keys_pon_apid, KEYS_PON_RT);
++#if SWEET_DEV_KEYS_VOLUME
++		keys_irq_diag_line("volume-up", keys_gpio_apid, KEYS_GPIO_RT);
++#endif
++	}
+ 	kern_return_t kr = kernel_thread_start(keys_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);

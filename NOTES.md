@@ -9,6 +9,28 @@ framebuffer repair plan. It defines the `SweetSpmiInterruptMux` route-table
 boundary and the hardware acceptance criteria; keep measured observations and
 test results in this file.
 
+### IRQ migration / sub-goal 1: key-route preflight staged (2026-11-03)
+
+- **0128 staged locally, not yet through CI or hardware:**
+  `0128-mh2lm-spmi-mux-key-preflight.patch` is the first deliberately
+  non-invasive step toward `SweetSpmiInterruptMux`. With the opt-in boot
+  argument `sweetkeysirqdiag=1`, it records the existing MH2LM PON and PM8150
+  GPIO6 routes: APID mapping, PMIC-arb ownership/owner bitmap, channel
+  access-enable/status, and raw peripheral RT/type/polarity/enable/latch
+  bytes. It does not attach GIC SPI 481, configure PDC, enable or clear a PMIC
+  IRQ, or change the established 20 ms key polling path.
+- **Why this comes first:** confirmed hardware facts are PON APID 248 and
+  PM8150 GPIO6 APID 261 from the 0112m20/0113 logs, plus the SM8150 DTS route
+  `spmi@c440000` -> GIC SPI 481. The key sources' interrupt-gate state has not
+  yet been captured on MH2LM. Do not infer it from the charger APID 266/269
+  diagnostic or from UniXNU's different-board PDC constants.
+- **First test after a successful CI artifact:** build a temporary boot image
+  from the usual GUI/iOS-rw baseline with `sweetkeys=1 sweetkeysirqdiag=1`
+  added, boot with `fastboot boot` only, confirm normal Power/volume operation,
+  export the persistent log, and retain the `SWEET SPMI IRQ: keys-*` plus
+  `SWEET KEYS IRQ CFG:` lines with the kernel/image SHA256. This test proves
+  route facts only; it must not be called an IRQ-delivery test.
+
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 
 Use this compact checklist when replacing the XNU base, rebasing the MH2LM
