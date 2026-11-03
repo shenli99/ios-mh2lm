@@ -1,0 +1,108 @@
+mh2lm: diagnose PM8150B charging policy gates (0124)
+
+The status bar and the existing `SWEET BATT DIAG` prove physical VBUS
+presence, but they do not show whether the PM8150B SMB5 input path has the
+Type-C, APSD and AICL prerequisites that Linux configures before it releases
+the default charge-disable vote.  In particular, state 7 and an unset
+CHARGING_ENABLE_CMD bit alone do not say whether a future controller must
+first configure the input policy or whether it is only disabled by policy.
+
+Add a `SWEET BATT POLICY` diagnostic line under the existing opt-in
+`sweetbattdiag=1` guard.  It reads (and never writes) the SMB5 power path,
+USB input suspend/current/AICL controls, APSD status, Type-C sink/state/misc
+status, and SMB_EN control/select bytes.  The decoded fields use the MH2LM
+Lineage SMB5 definitions: 50 mA per PM8150B ICL code, Type-C state-attach
+bit 5, CC-attach bit 0, VBUS bit 5, and AICL enable/ADC/rerun/collapse bits.
+
+Also correct 0123's cosmetic IRQ diagnostic string: it emitted a literal
+`\\n` instead of ending the record.  No interrupt enable, latch clear,
+charger configuration or charger command is added by this patch.
+
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -51,7 +51,16 @@
+ #define SWEET_BATT_CHGR_PAUSE	0x1043u	/* bit0 charging pause command */
+ #define SWEET_BATT_CHGR_CFG2	0x1051u	/* bit0 charger inhibit */
+ #define SWEET_BATT_SMB_EN	0x1648u	/* SMB enable override/status command */
++#define SWEET_BATT_DCDC_PATH	0x110bu	/* USB/DC power-path status */
++#define SWEET_BATT_USBIN_APSD	0x1307u	/* USB charger-detection status */
+ #define SWEET_BATT_USBIN_RT_STS	0x1310u	/* smb5 USB IN rt sts, bit4 = VBUS */
++#define SWEET_BATT_USBIN_CMD_IL	0x1340u	/* bit0 explicitly suspends USB input */
++#define SWEET_BATT_USBIN_ICL	0x1370u	/* PM8150B input-current limit, 50mA */
++#define SWEET_BATT_USBIN_AICL	0x1380u	/* AICL/suspend-on-collapse policy */
++#define SWEET_BATT_TYPEC_SNK	0x1506u	/* advertised Type-C sink current */
++#define SWEET_BATT_TYPEC_STATE	0x1509u	/* Type-C attach/detach state */
++#define SWEET_BATT_TYPEC_MISC	0x150bu	/* Type-C attached/VBUS status */
++#define SWEET_BATT_SMB_CFG	0x1690u	/* bit4 selects the SMB_EN pin */
+ #define SWEET_BATT_POLL_MS	2000u	/* bounded observer reads; prompt UI state */
+ /* The VBATT LSB scale is not in the DT: gen4 documents 122070 uV, the older
+  * gen3 part used 194637 uV. Take the raw word and keep whichever lands inside a
+@@ -95,6 +104,7 @@
+ 	    uint8_t *value);
+ 	static unsigned scaleMsoc(uint8_t raw);
+ 	static void logIrqLines(void);
++	static void logChargePolicy(void);
+ 	static unsigned estimatePercent(unsigned mv);
+ };
+ OSDefineMetaClassAndStructors(SweetBattery, IOPMPowerSource);
+@@ -423,7 +433,7 @@
+ 		    !sweet_spmi_read(SWEET_BATT_SID, base + 0x18u, &latched);
+ 		unsigned mask = 1u << line->bit;
+ 		IOLog("SWEET BATT IRQ CFG: %s bit=%u rt=%u edge=%u high=%u low=%u "
+-		    "enabled=%u latched=%u read-ok=%d\\n", line->name, line->bit,
++		    "enabled=%u latched=%u read-ok=%d\n", line->name, line->bit,
+ 		    ((unsigned)rt & mask) ? 1 : 0, ((unsigned)type & mask) ? 1 : 0,
+ 		    ((unsigned)high & mask) ? 1 : 0, ((unsigned)low & mask) ? 1 : 0,
+ 		    ((unsigned)enabled & mask) ? 1 : 0, ((unsigned)latched & mask) ? 1 : 0,
+@@ -431,6 +441,42 @@
+ 	}
+ }
+ 
++void
++SweetBattery::logChargePolicy(void)
++{
++	/* Linux's PM8150B SMB5 probe sets these before releasing CHG_DISABLE.
++	 * The port only reads them here, so a log can distinguish an explicit
++	 * charger disable from an input suspend, absent Type-C sink, zero ICL, or
++	 * disabled AICL. It deliberately cannot identify Linux's high-level voter. */
++	uint8_t path = 0, apsd = 0, cmdIl = 0, icl = 0, aicl = 0;
++	uint8_t sink = 0, typec = 0, misc = 0, smbEn = 0, smbCfg = 0;
++	bool ok = !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_DCDC_PATH, &path) &&
++	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_USBIN_APSD, &apsd) &&
++	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_USBIN_CMD_IL, &cmdIl) &&
++	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_USBIN_ICL, &icl) &&
++	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_USBIN_AICL, &aicl) &&
++	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_TYPEC_SNK, &sink) &&
++	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_TYPEC_STATE, &typec) &&
++	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_TYPEC_MISC, &misc) &&
++	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_SMB_EN, &smbEn) &&
++	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_SMB_CFG, &smbCfg);
++	IOLog("SWEET BATT POLICY: path=%#x use-usb=%u valid-input=%u path-suspend=%u "
++	    "cmd-il=%#x cmd-suspend=%u icl=%umA apsd=%#x done=%u enum=%u "
++	    "aicl=%#x aicl-en=%u aicl-adc=%u aicl-rerun=%u collapse-suspend=%u "
++	    "sink=%#x typec=%#x state-attached=%u misc=%#x cc-attached=%u vbus=%u "
++	    "smben=%#x override=%u override-val=%u smbcfg=%#x smb-sel=%u read-ok=%d\n",
++	    (unsigned)path, (path & 0x10u) ? 1 : 0, (path & 0x01u) ? 1 : 0,
++	    (path & 0x40u) ? 1 : 0, (unsigned)cmdIl, (cmdIl & 0x01u) ? 1 : 0,
++	    (unsigned)icl * 50u, (unsigned)apsd, (apsd & 0x80u) ? 1 : 0,
++	    (apsd & 0x10u) ? 1 : 0, (unsigned)aicl, (aicl & 0x04u) ? 1 : 0,
++	    (aicl & 0x08u) ? 1 : 0, (aicl & 0x10u) ? 1 : 0,
++	    (aicl & 0x80u) ? 1 : 0, (unsigned)sink, (unsigned)typec,
++	    (typec & 0x20u) ? 1 : 0, (unsigned)misc, (misc & 0x01u) ? 1 : 0,
++	    (misc & 0x20u) ? 1 : 0,
++	    (unsigned)smbEn, (smbEn & 0x08u) ? 1 : 0, (smbEn & 0x10u) ? 1 : 0,
++	    (unsigned)smbCfg, (smbCfg & 0x10u) ? 1 : 0, ok ? 1 : 0);
++}
++
+ unsigned
+ SweetBattery::estimatePercent(unsigned mv)
+ {
+@@ -633,6 +679,7 @@
+ 		    (unsigned)pause, (unsigned)cfg2, (unsigned)smbEn,
+ 		    (unsigned)rawCurrent, signedCurrent, currentUa, configOk ? 1 : 0,
+ 		    currentOk ? 1 : 0);
++		logChargePolicy();
+ 	}
+ 	publish(published, fLastMv, 0, external, external, charging, full,
+ 	    measured, false);

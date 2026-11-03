@@ -426,6 +426,40 @@
   a doubled backslash; this is cosmetic and must be corrected in the next
   functional battery patch, not in a standalone rebuild.
 
+- **0124 PM8150B policy diagnostic staged, read-only (2026-11-03):** the
+  MH2LM Lineage SMB5 driver configures connector mode, Type-C/USB input
+  policy, AICL and thermal controls before it releases its default
+  `chg_disable_votable` vote. Its eventual write to `CHARGING_ENABLE_CMD`
+  (`0x1042`, bit 0) is therefore not a standalone charger-init recipe. Patch
+  `0124-mh2lm-battery-policy-diagnostics.patch` adds an opt-in
+  `SWEET BATT POLICY` record whenever `sweetbattdiag=1` is active. It reads
+  only the PM8150B power path, APSD, USB input-suspend/current-limit/AICL,
+  Type-C sink/state/misc, and SMB_EN command/select registers. The decoded
+  fields give `use-usb`, `valid-input`, `path-suspend`, `cmd-suspend`, ICL in
+  mA, APSD done/enumeration, AICL enable/ADC/rerun/collapse policy, Type-C
+  state/CC/VBUS attachment and SMB_EN selection/override state. It also fixes
+  0123's literal `\\n` in `SWEET BATT IRQ CFG`.
+
+  The patch has no SPMI write, PMIC IRQ enable/clear, GIC handler, charger
+  state change or published-IOPM change. Its local syntax check uses the
+  saved 0112k4 CircleCI iokit command and generated MH2LM iokit build
+  directory, with the checked source temporarily substituted and restored:
+  `0 of 1 files failed`. The CI log uses `/Users/distiller/project/dxb` while
+  the local helper expects the older runner path, and this host supplies
+  `/usr/bin/clang++` rather than the helper's historical `~/swift` compiler;
+  the validation used temporary copies to adapt those two environment paths,
+  not a repository tool change.
+
+  **Next hardware image:** boot with the established GUI/iOS-rw baseline plus
+  `sweetbattery=1 sweetbatt=1 sweetbattdiag=1 sweetbattirqdiag=1`, and no
+  `sweetusb`, `sweetvbus` or `sweetusbstep`. Capture two or more policy lines
+  unplugged, then insert a known-good charger for at least 10 seconds and
+  capture five or more connected lines, then unplug for another 10 seconds.
+  The test asks only whether the input path and Type-C/AICL preconditions are
+  already valid while charge stays disabled. It does not prove charging and
+  does not authorize any PMIC write. A separate controller design is required
+  even if every input precondition is healthy.
+
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
   18:05; iOS reached SpringBoard (SpringBoard/AKS/touch lines), then
