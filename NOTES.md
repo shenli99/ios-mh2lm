@@ -177,6 +177,22 @@
   arm EP0 after a valid session. SuperSpeed PHY remains untouched. Enumeration
   or device events may begin in this stage; the persistent ring remains the
   fallback diagnostic path.
+- **0112m m7 hardware result: CDC-ACM works end-to-end (2026-11-03):**
+  `logs/sweetlog-0112m7.bin` is the first complete MH2LM USB-device success.
+  With `sweetvbus=1`, DWC3 ran, reported bus reset and connect-done, served
+  device/configuration/string descriptors, accepted `SET_ADDRESS(2)` and
+  `SET_CONFIGURATION(1)`, and printed `ACM endpoints configured`. The host
+  then sent the normal ACM line-coding/control requests; the recorded
+  `configured=1`, `events=125`, and `console=8192 bytes` prove the bulk-IN
+  console path is active. `dtr=0` is not a device fault: the host closed the
+  port after enumeration. Reuse the m7 image for live logging; start
+  `tools/sweet-usbacm-log.sh logs/live-0112m7.txt` first, then `fastboot boot`
+  m7 in another terminal. The tool waits for the unique `/dev/ttyACM*` device,
+  opens it (asserting DTR), sets raw mode, prints live console bytes, and
+  appends them to the selected file. Set `SWEET_ACM_DEVICE=/dev/ttyACM<N>` if
+  another ACM device is already attached. No further kernel or SS-PHY change
+  is needed to validate live logging; persistent-ring extraction remains the
+  recovery path for failures before enumeration.
 
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
