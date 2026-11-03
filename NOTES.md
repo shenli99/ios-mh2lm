@@ -164,6 +164,19 @@
   `sweetvbus=1` with `sweetusbstep=5`: the HS QSCRATCH VBUS-valid bits are
   written and read back, but the driver stops before RUN_STOP. It does not
   change SS PHY state and no enumeration is expected.
+- **0112m m6 hardware result / m7 HS-VBUS run follow-up (2026-11-03):**
+  `logs/sweetlog-0112m6.bin` proves the first QSCRATCH HS override is accepted:
+  with VBUS mode 1, the driver wrote the HS VBUS-valid bits and read back
+  `HS_PHY_CTRL=0x10100000`, then stopped before step 6. SpringBoard, key
+  press/release events, and normal shutdown all remained healthy. The next
+  disposable image is
+  `/home/shenli/work1/out-bs/boot-16k-0112m-usbprobe-m7-vbus1-run.img`
+  (SHA256 `ee827dd2ff0c7bcbbbdcde3c995d779d1ffb8819836b7ff1144596b1093e03af`),
+  made by `out-bs/mk16k-0112m-usbprobe-m7-vbus1-run.sh`. It retains the same
+  HS-only `sweetvbus=1` and changes `sweetusbstep=6`, allowing DWC3 to run and
+  arm EP0 after a valid session. SuperSpeed PHY remains untouched. Enumeration
+  or device events may begin in this stage; the persistent ring remains the
+  fallback diagnostic path.
 
 ### Session handoff (2026-10-21 22:20)
 - **0087 verified on hardware.** Booted `img-gpu-0087.img` (`sweetgpu=3`) at
