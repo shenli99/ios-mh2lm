@@ -2,12 +2,34 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**0114a15 DEBUG profile confirmed; scoped INFO/DEBUG filtering works:**
+`logs/live-e-0114a15-irq-only-debug1.txt` SHA-256
+`c3dc0443f8fb7daf37376e89fd8283b32e535824573a17842f02a7a0e77d317d`
+is a 3240-line ACM capture from the DEBUG image. Launchd boot arguments at
+lines 16/146 include `sweetloglevel=3`; the capture contains 279 `[DEBUG]`
+lines (274 USB, 5 touch), 108 `[INFO]`, 8 `[WARN]` and no driver `[ERROR]`.
+The prior `live-e-0114a15-irq-only-debug.txt` had no `sweetloglevel=3` and
+zero `[DEBUG]`, so the default INFO versus DEBUG profile distinction is
+confirmed. USB INTID 165 armed, reached 896 IRQ hits and TX 461/463 with
+`err=0`; it reconfigured and reopened after host reconnects. Early USB IRQ
+hits had transient `empty=1`, but later counters show `empty=0` and USB
+remained active. Touch GPIO122/INTID 240 armed, reached at least 16 IRQ hits,
+and produced HID down/up with DEBUG coordinate records. Eight USB endpoint
+command status 1 WARN records accompanied enumeration/reconnect; no USB or
+touch IRQ failure, fallback or driver stop appears. No key press or PMIC mux
+route event is present in this short DEBUG capture, so key concurrency is
+supported by the preceding normal-profile capture, not this one. ERROR
+persistence on a deliberately induced driver fault remains untested and is
+not needed to accept the normal-path logging-level behavior.
+
 **0114a15 fixed IRQ live capture passes the concurrent functional path;
-DEBUG profile identity unresolved:** `logs/live-e-0114a15-irq-only-debug.txt`
+default INFO profile identified by a later DEBUG capture:**
+`logs/live-e-0114a15-irq-only-debug.txt`
 SHA-256 `19f64f6ade97ab8c3808f49208a34ff52abda1fdd6cddf2c98e301a969530484`
 is a 3719-line ACM capture. Its launchd boot arguments at lines 14/146 omit
 `sweetloglevel=3`, and it has zero `[DEBUG]` lines, despite the filename;
-user was asked which image was actually booted. The capture shows USB GIC
+the later `debug1` capture confirms that it represents the default INFO
+profile. The capture shows USB GIC
 INTID 165 armed and 1536 IRQ hits, ACM stream through TX 1296/1298 with
 `err=0` and `empty=0`; TouchComm GPIO122/INTID 240 armed, 689 IRQ hits,
 HID touch events including finger 1, and a transient `empty=1` at 396
@@ -20,12 +42,12 @@ appears. Four `[WARN]` USB endpoint command status 1 records also occurred
 in the earlier 0114a13 combined capture; they did not stop enumeration or
 streaming here. Thus normal fixed-IRQ operation passed in this capture, while
 the 0138 exceptional ack retry path was not exercised. DEBUG-level output
-still needs a verified `sweetloglevel=3` boot. The log begins in launchd,
+was subsequently verified by the `debug1` capture. The log begins in launchd,
 so early boot records and the mux's `armed` line are not in this capture;
 the real PMIC route hits prove it was active later.
 
 **0114a15 artifact verified and two temporary fixed-IRQ images packaged;
-phone test pending:** User downloaded `logs/xnu-buildtree-0114a15.gz` and
+phone results above:** User downloaded `logs/xnu-buildtree-0114a15.gz` and
 `logs/xnu-kernel-0114a15.gz`; the 0114a15 build log was not downloaded, so
 its full warnings and CI run ID are not recorded. The build tree's key, USB,
 TouchComm, UFS, log-level header and PMIC mux files all byte-match
@@ -39,12 +61,9 @@ and `out-bs/boot-16k-0114a15-irq-only-debug.img` SHA-256
 `0dc9b2fcff0dd1fdec7cc116e539edea1bb89da9f6e35600044617724a0dd657`.
 Both carry kernel SHA-256
 `bc596ce6d81bd24b3cdbb24cf78260c70df4133eff2b7174e4ca2e385d1e00cf`;
-DEBUG differs only by `sweetloglevel=3` in boot arguments. Test the normal
-image with `fastboot boot` first. Check desktop entry, Power/Volume Up/Down
-and combinations, touch after display sleep/wake, USB enumeration and live
-ACM, then concurrent key/touch/USB activity. Export a fresh persistent
-SWEETLOG if boot or USB fails. Use the DEBUG image only if detailed IRQ
-events are needed. No 0114a15 phone result exists yet.
+DEBUG differs only by `sweetloglevel=3` in boot arguments. The normal and
+DEBUG phone captures are recorded above; use the normal image for later
+functional testing and DEBUG only when detailed event records are needed.
 
 **0114a14 CircleCI built a kernel without 0139/0140; do not phone-test that
 artifact:** `logs/xnu-build-log-0114a14.txt` lines 229–241 show 0138 applied,

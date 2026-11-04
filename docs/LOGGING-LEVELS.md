@@ -43,13 +43,16 @@ IRQ 故障日志必须是 ERROR，并在屏蔽中断、停止功能之前或之�
 0140 是 0139 之后的补丁。0114a14 的 dxb 跳过了 0139 和 0140，虽然最终
 显示构建完成，但该产物不能用于本轮验证。0139 已修正为基于 0138 后的源码，
 CI 也增加了补丁标记校验。0114a15 的 buildtree 与内核标记已确认包含两者，
-普通与 DEBUG 镜像均已打包；普通模式已有一轮实机日志，DEBUG 模式待验证。需确认两种
-镜像共用相同 kernel，普通日志含 INFO/WARN/ERROR 而不含这些驱动的
-DEBUG；DEBUG 镜像能看到详细事件；故障时 ERROR 同时进入持久日志，
-即使 USB ACM 已因 IRQ 故障断开也可提取。另需检查正常级别下三键、
-USB、触摸的 IRQ 命中与 HID/枚举功能没有回归。
+普通与 DEBUG 镜像均已打包，并各有一轮实机日志。两镜像共用同一内核；
+普通日志显示 INFO/WARN 且没有这些驱动的 DEBUG；DEBUG 镜像显示 USB
+枚举和触摸细节。正常级别下的三键、USB、触摸 IRQ 命中与 HID/枚举功能
+没有回归。仍未实测故障时 ERROR 是否进入持久 SWEETLOG；此项需要有
+自然发生的故障日志，或未来专门安排受控故障测试。
 
 0114a15 的 `live-e-0114a15-irq-only-debug.txt` 已显示三路固定 IRQ 与
 `[INFO]`/`[WARN]` 正常工作，没有 `[DEBUG]` 或 `[ERROR]`。其启动参数没有
 `sweetloglevel=3`，因此这份日志只能验证默认 INFO 档；文件名不能作为
-DEBUG 镜像已启动的依据。DEBUG 档和故障 ERROR 持久化仍待实测。
+DEBUG 镜像已启动的依据。后续 `live-e-0114a15-irq-only-debug1.txt` 的
+启动参数明确包含 `sweetloglevel=3`，并出现 279 条 `[DEBUG]`（274 USB、
+5 触摸），同时保留 `[INFO]`/`[WARN]`；USB ACM 持续工作，发送错误为零。
+两档过滤现已通过实机验证，故障 ERROR 持久化仍待实测。

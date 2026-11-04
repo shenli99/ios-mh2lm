@@ -12,6 +12,10 @@ PMIC mux 路由共 32 次命中、触摸 689 次、USB 1536 次，含息屏唤�
 并发活动，无驱动停止；固定 IRQ 的正常路径已通过本轮组合测试。0138 的异常
 确认重试未被触发，仍未单独验证。日志文件名虽含 DEBUG，实际 boot-args 未含
 `sweetloglevel=3`，分级日志的 DEBUG 档仍待核对。
+随后 `live-e-0114a15-irq-only-debug1.txt` 明确带有 `sweetloglevel=3`，
+记录 279 条 `[DEBUG]` 且 USB/触摸 IRQ 继续工作；正常 INFO 与 DEBUG
+两档已分别验证。按键未在这份较短的 DEBUG 日志中操作，仍以前一份
+组合测试为依据。
 Framebuffer 修复尚未启动。
 **更新日期：** 2026-11-04
 **适用范围：** `ref/ios-mh2lm` 的 MH2LM XNU 驱动；本文是实施和验收计划，
