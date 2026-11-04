@@ -40,8 +40,9 @@ PMIC 外设 / 控制器
   consumer 分别直接绑定同一 SPI。UniXNU 的 `armcpu_spi_attach(...)` 是
   参考实现；0114a7 实际内核使用内建 `SweetCPU`，不含这个符号，须先为当前
   XNU 的 GIC IRQ 分发建立唯一的 SPI 513 注册与回退机制。
-- mux 的上游应是很短的 GIC callback：确认/分类待处理中断、按路由策略确认
-  latch，并调度下半部。不得在该上下文直接执行 IOKit、SPMI observer 读取、
+- mux 的上游应是很短的 GIC callback：屏蔽对应 GIC SPI 并向软件
+  `IOInterruptEventSource` 发信号。PMIC pending 扫描、latch 确认和重新使能
+  由 `IOWorkLoop` worker 完成；不得在 GIC callback 执行 SPMI observer 读取、
   HID、DSI 或 UI 工作。
 - mux 内部不得写死面向具体功能的 `switch`。采用静态路由表：每一项描述
   SID、PPID、PMIC bit mask、初始化后解析出的 APID、触发/极性/latch/确认策略、

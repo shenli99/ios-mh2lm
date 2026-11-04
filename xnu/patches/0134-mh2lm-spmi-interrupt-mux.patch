@@ -6,7 +6,8 @@ resolves only EE0 IRQ-owned APIDs, maps Power, Volume Down and Volume Up to
 consumer callbacks, and handles PMIC-arb v5 channel/peripheral acknowledgement.
 The top half masks SPI 513 before EOI; the worker drains/acks and unmasks it,
 with bounded failure handling that turns off GIC/PDC/PMIC gates and restores
-the existing key poll period. No IOKit or SPMI access occurs in the top half.
+the existing key poll period. The top half only masks GIC and signals the
+software IOInterruptEventSource; it does not run SPMI, HID or UI work.
 
 Default boot behavior is unchanged. sweetkeysirq=1 tests software workloop
 handoff without MMIO gates; =2 arms Power only while retaining 20 ms polling
