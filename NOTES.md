@@ -2,6 +2,28 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**0114a15 artifact verified and two temporary fixed-IRQ images packaged;
+phone test pending:** User downloaded `logs/xnu-buildtree-0114a15.gz` and
+`logs/xnu-kernel-0114a15.gz`; the 0114a15 build log was not downloaded, so
+its full warnings and CI run ID are not recorded. The build tree's key, USB,
+TouchComm, UFS, log-level header and PMIC mux files all byte-match
+`scratch/log-level-0114a13/xnu/`. The kernel manifest passed SHA-256 and the
+kernel contains the 0139 fixed key/touch/USB IRQ markers plus 0140
+`sweetloglevel` and DEBUG text. `tools/mk-mh2lm-event-matrix.sh ... 0114a15
+--irq-only` created and verified both FAT ramdisk copies:
+`out-bs/boot-16k-0114a15-irq-only.img` SHA-256
+`c32009aa4bc01acfdc638f469171f6d7675ef48fd36a6e596aca4638662230d8`,
+and `out-bs/boot-16k-0114a15-irq-only-debug.img` SHA-256
+`0dc9b2fcff0dd1fdec7cc116e539edea1bb89da9f6e35600044617724a0dd657`.
+Both carry kernel SHA-256
+`bc596ce6d81bd24b3cdbb24cf78260c70df4133eff2b7174e4ca2e385d1e00cf`;
+DEBUG differs only by `sweetloglevel=3` in boot arguments. Test the normal
+image with `fastboot boot` first. Check desktop entry, Power/Volume Up/Down
+and combinations, touch after display sleep/wake, USB enumeration and live
+ACM, then concurrent key/touch/USB activity. Export a fresh persistent
+SWEETLOG if boot or USB fails. Use the DEBUG image only if detailed IRQ
+events are needed. No 0114a15 phone result exists yet.
+
 **0114a14 CircleCI built a kernel without 0139/0140; do not phone-test that
 artifact:** `logs/xnu-build-log-0114a14.txt` lines 229–241 show 0138 applied,
 but dxb skipped 0139 after `SweetSpmiInterruptMux.cpp:180` failed and then
@@ -13,13 +35,11 @@ repeated 0138's ack retry hunk. It has now been rebased onto the source after
 0140) succeeded against the extracted 0114a13 build-tree files; all six
 resulting source files byte-match `scratch/log-level-0114a13/xnu/`. CircleCI
 now checks the staged XNU source for 0139/0140 markers after `build.sh` and
-fails clearly if dxb silently skips either patch. This corrected patch and
-CI gate still need a new push/build. No 0114a14 kernel artifact is needed;
-after the next build, check the log for successful 0139/0140 application and
-gate passage before downloading the kernel and packaging `--irq-only` images.
+fails clearly if dxb silently skips either patch. The later 0114a15 artifact
+contains both corrections; no 0114a14 kernel artifact is needed.
 
-**0140 scoped driver log levels, commit `6a9d8c0`; user pushed `9ac108a`,
-corrected CircleCI and phone result pending:** The user
+**0140 scoped driver log levels, commit `6a9d8c0`; present in 0114a15,
+phone result pending:** The user
 observed that the current console, persistent SWEETLOG and ACM output have no
 unified severity. `0140-mh2lm-driver-log-levels.patch` adds ERROR/WARN/INFO/
 DEBUG prefixes and `sweetloglevel=0..3` (default INFO) to key, DWC3 USB,
@@ -40,11 +60,10 @@ compilation with system clang 19 hit existing XNU/Apple builtin errors in
 exported IOKit headers, so CircleCI is still the compile gate for that TU.
 After correcting 0139, `git apply` applied 0138, 0139 and 0140 sequentially
 to the extracted 0114a13 source; all six resulting files byte-match the local
-edited sources. No 0140 phone result exists. After the corrected CircleCI
-build passes its patch gate, review its build log and artifact, then
-package and temporarily boot the normal image; use the debug image only when
-detailed event traces
-are needed. Confirm the normal image retains ERROR/WARN/INFO and the
+edited sources. The 0114a15 artifact contains 0140 and two temporary images
+are ready; no 0140 phone result exists. Boot the normal image first and use
+the DEBUG image only when detailed event traces are needed. Confirm the normal
+image retains ERROR/WARN/INFO and the
 low-rate IRQ proof while suppressing `[DEBUG]` from these drivers. A USB
 failure still requires persistent SWEETLOG extraction.
 
@@ -53,10 +72,11 @@ architecture to **major goal 3** in `docs/IRQ-FRAMEBUFFER-PLAN.md`:
 standardize log structure, add per-target enablement and level thresholds,
 and manage output modes/channels. This plan is documented, not implemented.
 The reported 0114a14 build skipped 0139 and 0140; it is not a valid test
-artifact. No new corrected CircleCI run ID or result has been reported.
+artifact. The corrected 0114a15 artifacts are present, but no build log or
+CI run ID was downloaded.
 
 **0139 fixed IRQ candidate, commits `f90c4a3` and cleanup `c0c5602`,
-included in pushed `9ac108a`; corrected CircleCI and phone test pending:** Following the
+corrected in `f31ff83` and present in 0114a15; phone test pending:** Following the
 0114a13 combined run, the user chose to remove silent runtime polling fallback
 from the MH2LM key, DWC3 USB and TouchComm drivers. New
 `xnu/patches/0139-mh2lm-fixed-event-irqs.patch` builds on committed 0138
@@ -80,9 +100,8 @@ draft.
 GUACAMOLE and SWEET are outside the validation scope. `bash -n` passed for
 the packer, and the tracked script/docs diff
 passed `git diff --check` before commit.
-**0114a14 skipped 0139; no valid 0139 CircleCI or phone result exists yet.**
-Check the next corrected CircleCI build, package that kernel with `--irq-only`,
-and temporarily boot it. Keep the 0114a13 combined image as the prior boot
+**0114a15 includes 0139; phone validation remains open.** Temporarily boot
+the packaged `--irq-only` image. Keep the 0114a13 combined image as the prior boot
 baseline. A USB IRQ failure also stops live ACM output, so export a fresh
 persistent SWEETLOG after shutdown; compare boot args and IRQ failure lines.
 Verify Power, Volume Up/Down including repeated combinations, touch after
