@@ -254,6 +254,10 @@ enable、pending、active、trigger、priority、router 等状态；`3072` 组�
 新的 SWEETLOG，并核对对应 `SWEET KEYS IRQ PDC/GIC` 输出。实机值取得前，不能把
 源码中的配置候选当作本机已配置状态。
 
+0114a8 的内核产物已经完成并校验，0133 探针源码出现在 buildtree 和内核字符串中。
+四个相关镜像已生成，完整路径、SHA256 与测试顺序见 `NOTES.md` 的当前检查点；
+尚无实机 PDC/GIC 读回，因此本表的上游配置状态仍保持“待实机预检”。
+
 ## 证据索引
 
 - 目标 SoC / PMIC DTS：`ref/lge-lineage-kernel/arch/arm64/boot/dts/qcom/sm8150.dtsi`、

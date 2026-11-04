@@ -2,23 +2,37 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**Current checkpoint (implementation commit `c69de95`):** 0114a7 closed the
-PON/GPIO6 route and peripheral read-only preflight; both EE0 APIDs are
-accessible, but their PMIC interrupt
-gates remain off and keys still poll every 20 ms. The target SM8150 Linux
-source maps PDC pin 1 to GIC INTID 513. Patch 0133 now adds independent
-read-only snapshots of PDC pin 1 (`sweetkeysirqdiag=1024`) and GIC SPI 513
-(`2048`), with a combined `3072` profile. It has not been cloud-built or
-phone-tested. After a successful CI build, package one artifact with
-`tools/mk-mh2lm-event-matrix.sh ARTIFACT LABEL --key-irq-upstream`; use
-`fastboot boot` for baseline, PDC, GIC, then combined only if the prior
-stages boot. The 0133 patch applies cleanly to the 0114a7 buildtree and
-`sweet_keys.c` passed a local single-file syntax check using that buildtree's
-CI flags and clang 19; this is not a full kernel build. Extract distinct
-fresh SWEETLOGs. No push has been performed;
-the user pushes when told. Only after those register values are known should
-the SPI callback, route-table mux, bounded Power-source test and polling
-fallback be armed.
+**Current checkpoint (0133 implementation commit `c69de95`, 0114a8
+artifact):** 0114a7 closed the PON/GPIO6 route and peripheral read-only
+preflight; both EE0 APIDs are accessible, but their PMIC interrupt gates
+remain off and keys still poll every 20 ms. The target SM8150 Linux source
+maps PDC pin 1 to GIC INTID 513. Patch 0133 adds independent read-only
+snapshots of PDC pin 1 (`sweetkeysirqdiag=1024`) and GIC SPI 513 (`2048`),
+with a combined `3072` profile. The patch applied cleanly to the 0114a7
+buildtree and passed a local single-file syntax check. The user then pushed
+it and downloaded the 0114a8 buildtree/kernel artifacts. The 0114a8
+buildtree contains the probe source, the kernel manifest matches SHA256
+`accebe637ca034a8353d980ffd1c83c591b226b99200b529b3313593fb05ea1b`,
+and the kernel binary contains the PDC/GIC diagnostic strings. The CircleCI
+build log was not supplied; the kernel artifact itself is complete. No
+phone test has yet been reported.
+
+`tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-0114a8.gz 0114a8
+--key-irq-upstream` generated and verified four relevant temporary images
+from this single kernel. Test with `fastboot boot` only, in order, stopping
+on any regression or LG BSP return: `out-bs/boot-16k-0114a8-baseline.img`
+(SHA256 `47ffac3c1374108cfdf7756ae3ae473599adb6f679b1f1ae046fdafd7f8a5171`),
+`out-bs/boot-16k-0114a8-key-irq-pdc.img`
+(`7030ffc88a7cb1311090d3441a5c8e58aecae7608d30fcf1f54b5c34b76dc7e4`),
+`out-bs/boot-16k-0114a8-key-irq-gic.img`
+(`b49fd5e5dec10e1ef02b8ab0dc3b3254946c7c3c2b852cc16d7f4dc4631bfc73`),
+then `out-bs/boot-16k-0114a8-key-irq-upstream.img`
+(`5646f803be60b784791c588ab234da57cacd191c30eed3d69e6c56150a99b1ec`).
+Extract distinct fresh SWEETLOGs and check `SWEET KEYS IRQ PDC/GIC` lines;
+the four images differ only in boot arguments. No additional push is needed
+for this test. Only after those register values are known should the SPI
+callback, route-table mux, bounded Power-source test and polling fallback
+be armed.
 
 **Implementation roadmap:** `docs/IRQ-FRAMEBUFFER-PLAN.md` records the agreed
 two-stage order: first make the existing key, DWC3 USB and touch paths
