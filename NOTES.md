@@ -93,10 +93,13 @@ test results in this file.
   `IRQ_STATUS`. `tools/mk-mh2lm-event-matrix.sh` generated the three
   corresponding temporary images under `out-bs/` from kernel SHA256
   `b5db4442bda8999263dd24079149f849e20abce2447a624614879a327ee7f2f3`.
-  Boot `0114a5-baseline`, then `0114a5-key-irq-pon-route-map`, followed by
-  `...route-enable` and `...route-status` only if the preceding step reaches
-  iOS. Stop at the first LG BSP return, and compare any exported SWEETLOG's
-  boot arguments and hash against the preceding capture before interpreting it.
+  Boot `0114a5-baseline`, then `0114a5-key-irq-pon-route-map`. Stop after the
+  map result: the old `128` probe already showed that the subsequent
+  map-plus-`ACC_ENABLE` path returns to the LG BSP. If pure mapping succeeds,
+  first restrict future register reads to the EE0-owned, IRQ-owned APID 248;
+  the existing diagnostic otherwise reaches APIDs 1 and 19 (owners 1 and 4)
+  before APID 248. Compare any exported SWEETLOG's boot arguments and hash
+  against the preceding capture before interpreting it.
 
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 
