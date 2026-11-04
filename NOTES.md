@@ -2,6 +2,23 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**0114a13 real touch GPIO122 IRQ passed; three-driver test next:**
+`logs/live-e-0114a13-touch-irq.img` is ASCII/CRLF text despite its suffix;
+SHA-256 `9b19fd6030f2678cf09e46f31d8396b6fab3b5cae66c3f7d400d2d915ab3b2de`.
+Boot args confirm `sweettouchirq=2 sweetusbirq=2 sweetkeysirq=0`.
+TouchComm armed GPIO122 / INTID 240 with `cfg=0x71`, then real IRQs
+occurred with pin status `0x1` and ATTN low. The final counters in the
+capture reached 990 hits, 990 reports, 990 events and zero I2C errors.
+Touch move records and HID down/up records appear repeatedly. `empty=0` throughout;
+one transient `missed=1` at 288 hits returned to zero by 328 hits, with
+no fallback. USB IRQ also reached 526 hits, `empty=0 missed=0`, and ACM
+console output remained active with TX errors zero. The capture has no
+multi-finger (`f1+`) records or tagged sleep/wake sequence, so those
+cases remain unverified. Next boot the existing
+`out-bs/boot-16k-0114a13-touch-irq-all.img` and check simultaneous real
+touch, USB and three-key IRQs; include multi-finger and first touch after
+screen wake. No new kernel build or push is needed for this phone test.
+
 **0114a13 touch GIC-only phone result; advance to real GPIO122 IRQ:**
 `logs/live-0114a13-touch-irq-keys.txt` SHA-256
 `076631f8e9f2f7e2117e7aeeea7f85231c09c3e2867e6efc42d17923ea85f0af`

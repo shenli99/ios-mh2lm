@@ -25,7 +25,10 @@ TLMM GPIO 消费者，应由汇总源分发多个 pin；本阶段只使能 GPIO1
 
 0114a13 第一阶段实机日志 `logs/live-0114a13-touch-irq-keys.txt` 已达到
 INTID 240 软件投递判据：`hits=1 clear=1 pending=0 active=0`。触摸保持
-10 ms 轮询，37 次报告无 I²C 错误。真实 GPIO122 IRQ 仍待下一张镜像验证。
+10 ms 轮询，37 次报告无 I²C 错误。第二阶段
+`logs/live-e-0114a13-touch-irq.img` 已确认 GPIO122／INTID 240 真实投递，
+累计 990 IRQ、990 报告、零 I²C 错误且无回退；`missed` 曾短暂为 1 后归零。
+多指和息屏唤醒后的首次触摸仍待组合测试确认。
 
 - `sweettouchirq=0`（默认）：保留当前 10 ms ATTN 轮询及每 100 ms
   强制读取。
