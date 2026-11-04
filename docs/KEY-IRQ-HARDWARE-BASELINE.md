@@ -276,8 +276,12 @@ gate 前退出，按键保持 20 ms 轮询；日志没有 `armed` 或 `hit route
 空闲，最多等待 100 ms 的 `sleh_irq` 命中，随后屏蔽并清除 pending；只有恰好一次
 命中且 pending/active 清零，才继续打开 PMIC/PDC gate。此时 Group 位的非安全侧
 读回仍记录在日志中，但不再单独决定测试结果。失败仍维持 20 ms 轮询。
-该补丁已通过 0114a9 buildtree 适配和本地单文件 arm64 编译；尚无新 CI/实机
-结果，Power IRQ 仍未验收。后续用已验证的 CDC-ACM 通道直接收集按键 IRQ 日志。
+该补丁已通过 0114a9 buildtree 适配和本地单文件 arm64 编译。0114a10 实机
+Power 模式成功：软件 pending 探针 `hits=1 clear=1 pending=0 active=0`，
+`armed mode=2`，随后 16 次 `hit route=power` 对应 8 次正常按下/松开。
+Group 位仍从非安全侧读回 0，这次实际中断投递证明读回 0 不能阻止该 SPI
+工作。USB CDC-ACM 实时日志同时正常输出。Power 路由硬件验收通过；
+三键模式和 200 ms 恢复轮询仍待实机测试，完整子目标尚未完成。
 
 ## 证据索引
 

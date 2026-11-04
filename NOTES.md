@@ -2,7 +2,7 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**Current checkpoint (0135 compiled as 0114a10; Power image ready for phone):** 0114a7
+**Current checkpoint (0114a10 Power IRQ passed; three-key image ready):** 0114a7
 closed the PON/GPIO6 route and peripheral read-only
 preflight; both EE0 APIDs are accessible, but their PMIC interrupt gates
 remain off and keys still poll every 20 ms. The target SM8150 Linux source
@@ -159,14 +159,41 @@ Its unpacked TOML contains `sweetusb=2 sweetusbstep=6 sweetvbus=1
 sweetkeys=1 sweetkeysirq=2`. The already prepared three-key image
 `out-bs/boot-16k-0114a10-key-irq-all.img` SHA256
 `64a9a6184bcadb274260fdf6cf3e681c8e1c60fbffcf43628c1958badd2e81fe`
-uses the same USB arguments and `sweetkeysirq=3`; **do not boot it before
-Power passes**. Use `fastboot boot` only. Start the existing USB reader before
+uses the same USB arguments and `sweetkeysirq=3`. Use `fastboot boot` only.
+Start the existing USB reader before
 boot and retain SWEETLOG as the early-boot fallback. First boot the Power
 profile. Success requires `GIC software-pending
 probe hits=1 clear=1`, `SWEET MUX: armed mode=2`, and real
 `hit route=power` records with normal press/release; only then boot the
 three-key profile. Probe failure or absent route hits means stop and inspect
 that log, not repeat the software-only mode.
+
+**0114a10 Power phone result (2026-11-04):**
+`logs/sweetlog-0114a10-key-irq-power.bin` SHA256
+`89f49b75c75deac3de517494385ecaaf37cd78a2daba17c6f8815719bd4f45ef`
+(SWEETLOG total 234692, flush 13) confirms `sweetkeysirq=2` and reaches
+SpringBoard. SPI 513 reports `ctlr=0x12 group-read=0 cfg=0 pri=0xa0
+route=0:0`, then `GIC software-pending probe hits=1 clear=1 pending=0
+active=0`. The Power PMIC route is APID 248 bit 0, and the mux arms with
+`pdc=0x2`. There are 16 `hit route=power` records, matching 8 alternating
+Power down/up reports; no mux fallback, stuck-pending fault, IRQ limit or
+kernel panic is present. This **proves the SPI 513 callback, mux workloop and
+Power PMIC IRQ route operate on hardware** despite the non-secure IGROUPR
+readback of zero. Mode 2 still retains 20 ms key polling, so this log alone
+does not establish event-only key latency. The USB live capture
+`logs/live-0114a10-key-irq-power.txt` SHA256
+`63edc16b7c6bf56d595f121c9c1eb7790a3f983d5d0283deea0b264f0726d9e2`
+contains the same route hits; ACM reaches `console=224582 bytes`, TX
+`196/197`, `err=0`, `configured=1`, `dtr=1`. The final live text shows
+normal userspace teardown and `PSCI SYSTEM_OFF`.
+
+**Next phone action:** Temporarily boot
+`out-bs/boot-16k-0114a10-key-irq-all.img` (SHA256 above) with the same USB
+reader. In mode 3, press/release Power, Volume Down and Volume Up separately
+several times, then try the established Power+Volume Down shutdown gesture.
+Collect USB live output and persistent SWEETLOG. Require route hits for all
+three names, matching key down/up reports and no mux fallback or storm;
+only then consider the three-key IRQ subgoal complete.
 
 **Implementation roadmap:** `docs/IRQ-FRAMEBUFFER-PLAN.md` records the agreed
 two-stage order: first make the existing key, DWC3 USB and touch paths
