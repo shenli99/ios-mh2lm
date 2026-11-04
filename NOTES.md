@@ -2,7 +2,24 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**0114a11 DWC3 IRQ artifact checkpoint (phone test pending):**
+**0114a11 GIC-only phone result:**
+`logs/sweetlog-0114a11-usb-irq-gic.bin` SHA256
+`2513fb16c130de05b93c59f7870d544f24379f730ede815f4b88812ea1ba3ad7`
+is a fresh version-1 SWEETLOG (ring 4 MiB, total 239345 bytes, flush 9,
+no wrap) with `sweetusbirq=1`. It reports `GIC intid=165 ctlr=0x12
+group-read=0 cfg=0 pri=0xa0 route=0`, then `software-pending probe
+hits=1 clear=1 pending=0 active=0` and `probe-only mode; DWC3 interrupt
+masked, 1 ms polling retained`. USB reaches `ACM endpoints configured`,
+with 263 processed events, and SpringBoard subsequently initiates a normal
+shutdown. The final console counters show `configured 1, dtr 0, TX 0/2`;
+the host did not open the ACM port during this capture, so this log does
+not establish live USB output. It does establish the GIC software-pending
+path and continued USB enumeration under polling. There is no USB IRQ
+fallback line. Next test: `out-bs/boot-16k-0114a11-usb-irq.img` with
+`sweetusbirq=2`; inspect real `SWEET USB IRQ: hit` lines, event drain,
+enumeration/reconnect, and fallback counters before the key-combined image.
+
+**0114a11 DWC3 IRQ artifact checkpoint (real IRQ phone test pending):**
 The user pushed 0136 commit `9bbb03c` and downloaded
 `logs/xnu-kernel-0114a11.gz` (SHA256
 `fce642c79442fe143310f40daf08bc60309206e6b305ed2c93ec096801231238`)
@@ -32,7 +49,8 @@ Boot only the GIC image first. Require a fresh log with
 `software-pending probe hits=1 clear=1 pending=0 active=0`, a normal desktop,
 and working CDC-ACM before testing the real DWC3 IRQ image. `group-read=0`
 alone is expected in the non-secure view. Stop on failure and retain the
-fresh SWEETLOG. No phone result has been received for 0114a11 yet.
+fresh SWEETLOG. The GIC-only phone result above now supersedes the
+earlier absence of a phone result.
 
 **0136 implementation (historical local checkpoint):**
 `xnu/patches/0136-mh2lm-dwc3-irq.patch` adds optional `sweetusbirq=1`
