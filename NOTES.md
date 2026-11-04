@@ -2,6 +2,20 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**0114a12 BearSSL CI blocker fix prepared; user push required:**
+`0020-stage-bearssl.sh` now stages the same 30 BearSSL files from
+`xnu/patches/bearssl-vendor/` instead of fetching from the failing upstream
+Git server. Both CI workflows copy that directory into `dxb/patches/`.
+The vendor tree matches two previous local CI-staged copies byte-for-byte;
+it includes the MIT license and the existing `KERNEL` limits.h adaptation.
+See `xnu/patches/BEARSSL-VENDOR.md` for provenance and the tree fingerprint.
+The user-cloned `ref/BearSSL` mirror lacks pinned commit `7bea48e5`; no
+substitute version was introduced. A simulated CI copy and stager run
+produced a byte-identical source tree to the prior successful build; both
+workflow YAML files parsed, `bash -n` and `git diff --check` passed. The
+full kernel build remains untested; after this fix is committed, ask the
+user to push and rerun CircleCI.
+
 **0114a12 CI infrastructure failure before 0137 compile:**
 `logs/xnu-build-log-0114a12.txt` ends while dxb runs the existing
 `xnu/patches/0020-stage-bearssl.sh`. Its pinned BearSSL fetch from
@@ -9,10 +23,9 @@
 exits 128. The job stops before applying the XNU patch files or compiling
 `sweet_touch_tcm.c`; this log contains no 0137 compiler/linker error.
 The stager was unchanged by 0137 and has worked in earlier builds.
-Rerun the same CircleCI job/commit `d4753e0` without a new push. If the
-same upstream 502 recurs, harden the stager with an authenticated pinned
-fallback or retry, then push that separate CI fix. The local 0137 source
-and patch checks below still stand; phone behavior remains untested.
+The vendor fix above removes the unavailable Git fetch; after it is pushed,
+CircleCI can proceed to patch application and 0137 compile. The local 0137
+source and patch checks below still stand; phone behavior remains untested.
 
 **0137 touch IRQ implementation (pushed; successful CI build pending):**
 The active 0114a11 TouchComm driver polls GPIO122 every 10 ms; the target
