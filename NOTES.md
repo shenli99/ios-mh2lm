@@ -2,6 +2,36 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**0139 fixed IRQ candidate, commit `f90c4a3`, awaiting user push, CircleCI
+and phone test:** Following the
+0114a13 combined run, the user chose to remove silent runtime polling fallback
+from the MH2LM key, DWC3 USB and TouchComm drivers. New
+`xnu/patches/0139-mh2lm-fixed-event-irqs.patch` builds on committed 0138
+(`a41193a`). Keys always arm the three PMIC mux routes; touch always arms
+GPIO122 / INTID 240; USB always arms DWC3 / INTID 165. A failed route,
+GIC probe, arm or worker stops its function and logs the reason. The CDC log
+sender wakes on new ring bytes, USB configuration and TX completion rather
+than its old 20 ms timer. `tools/mk-mh2lm-event-matrix.sh --irq-only` packages
+one fixed IRQ image; legacy test profiles reject an 0139 kernel. USB changes
+are conditioned on `ARM64_BOARD_CONFIG_MH2LM` because `SWEET_DEV_USB=1` also
+holds on GUACAMOLE and SWEET. Other boards retain their previous code.
+The patch applied to a copy of the exact 0114a13 source plus 0138, and all
+five resulting files byte-match the locally edited tree. All four changed C
+sources compiled as ARM64 Mach-O with CI-derived flags; the mux C++ source
+compiled before the final USB-only fixes, and its key symbols match the C
+objects. The USB source also compiled for GUACAMOLE and SWEET.
+Their final USB machine-code disassembly is identical to the pre-0139
+source. `bash -n` passed for the packer, and the tracked script/docs diff
+passed `git diff --check` before commit.
+**No 0139 CircleCI or phone result exists yet.** After the user pushes the
+commit, check the CircleCI build, package the new kernel with `--irq-only`,
+and temporarily boot it. Keep the 0114a13 combined image as the prior boot
+baseline. A USB IRQ failure also stops live ACM output, so export a fresh
+persistent SWEETLOG after shutdown; compare boot args and IRQ failure lines.
+Verify Power, Volume Up/Down including repeated combinations, touch after
+display sleep/wake, USB enumeration and streaming, and concurrent activity.
+The 0138 ack retry has not yet been phone tested on its own.
+
 **0114a13 three-driver test exposed one key-mux ack failure; 0138 prepared:**
 `logs/live-e-0114a13-touch-irq-all.txt` SHA-256
 `8c2152e91d9426f95f5492de7a0336ff6de476de01b8244313b543e4b1a2f02e`
