@@ -226,6 +226,17 @@ IRQ-owner=1 的 APID 248。下一轮依次测试 `mask 256`、`mask 512`，任�
 （mask 2）、GPIO6 route（4）、PON 外设中断配置（8）、GPIO6 外设中断配置（16），
 四项均通过后再试组合 mask 31。
 
+0114a7 后续 `mask 2/4/8/16/31` 全部进入 iOS，日志逐项核对了启动参数及
+读回值。PON 选中 APID 248、GPIO6 选中 APID 261，均为 EE0 且 IRQ-owner=1；
+两者的 owner bitmap、`ACC_ENABLE`、`IRQ_STATUS` 均为 0。PON 外设读回
+`rt=0x4 edge=0x1 high=0 low=0x3 enabled=0 latched=0`；GPIO6 读回
+`rt=0x1 edge=0 high=0 low=0 enabled=0 latched=0`，`read-ok` 均为 1。
+组合预检 `mask 31` 也完整输出同样结果。旧版在读取重复 PPID 的外部 EE
+channel 时回 LG BSP 是当前最强的故障解释；纯映射成功、跳过外部 EE 后所有
+单项/组合读取成功，排除了 PON APID 248 地址计算错误这一解释。旧失败没有
+现场日志，不能精确归因于 APID 1 或 19。按键目前仍靠轮询，硬件中断使能
+和 GIC/mux 注册尚未实施。
+
 ## 证据索引
 
 - 目标 SoC / PMIC DTS：`ref/lge-lineage-kernel/arch/arm64/boot/dts/qcom/sm8150.dtsi`、

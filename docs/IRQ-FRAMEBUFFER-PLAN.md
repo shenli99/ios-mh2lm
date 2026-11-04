@@ -55,11 +55,13 @@ PMIC 外设 / 控制器
 **目的：** 建立共享 PMIC IRQ 的可扩展分发和下半部交接机制，并以按键作为第一
 个真实 consumer 验证。
 
-**当前检查点（0130/0131，待 CI 与硬件测试）：** 0114a2 的 helper-init 阶段可进入 iOS，
-而 PON 完整 route 阶段返回 LG BSP；成功日志还证明普通按键轮询已找到 PON APID 248。
-因此 0130/0131 将 PON route 进一步拆成 APID metadata、intr owner bitmap、channel
-window map、channel `ACC_ENABLE` 和 channel `IRQ_STATUS` 五个只读阶段。所有阶段不注册 GIC、不写 PDC、
-不使能或清除 PMIC IRQ，也不改变 20 ms 按键轮询。详见硬件基线文档的测试顺序。
+**当前检查点（0114a7，只读路由预检完成）：** PON 的重复 PPID 映射包含
+EE1/EE4 的 APID 1/19 和 EE0 的 APID 248。旧探针读取外部 EE channel 时
+回 LG BSP；0132 跳过外部 EE 后，PON、GPIO6 的路由和外设配置单项/组合
+预检全部进入 iOS。两条 EE0 channel 的 `ACC_ENABLE`、`IRQ_STATUS` 均为 0，
+外设 `EN_SET` 也为 0。下一阶段是核对上游 PDC/GIC、latch/clear 和使能
+顺序，再实现可回退的单 source Power IRQ 试验；当前 20 ms 轮询仍在工作。
+详见硬件基线文档和 `NOTES.md` 的 0114a7 实测记录。
 
 **实施边界：**
 

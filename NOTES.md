@@ -156,6 +156,27 @@ test results in this file.
   `key-irq-cfg-pon` (8), `key-irq-cfg-volume-up` (16), and `key-irq-full`
   (31) images. Test in that order, stopping at any LG BSP return; the final
   combined image is only for after the four isolated stages pass.
+- **0114a7 complete read-only key IRQ preflight (2026-11-04):** all five
+  follow-up images reached iOS, and their distinct fresh SWEETLOGs contain
+  their respective boot arguments `sweetkeysirqdiag=2/4/8/16/31`. Full
+  PON route (`2`) skips EE1 APID 1 and EE4 APID 19, then reads EE0 APID 248;
+  full GPIO6 route (`4`) reads EE0 APID 261. Both report IRQ owner=1,
+  owner bitmap=0, `ACC_ENABLE=0`, and `IRQ_STATUS=0`. PON peripheral config
+  (`8`) reports `rt=0x4 edge=0x1 high=0 low=0x3 enabled=0 latched=0` with
+  `read-ok=1`; GPIO6 (`16`) reports `rt=0x1 edge=0 high=0 low=0 enabled=0
+  latched=0` with `read-ok=1`. The combined `31` image repeats all these
+  values and reaches iOS. The five log SHA256s in test order are
+  `71dd4517767a407e16ddabebfb7e57868f5e1ca8f601d653debadaa0b6bc2bb7`,
+  `e07fcd98ed9c14238ae62e63efefc8e8e7172683c993a5848b83a1a2940ff88c`,
+  `415bd9a4e5fafb99f5e269ecb886c2d3c4854da2a9b4a3057e584b3966e6f4c8`,
+  `66635d49588a518d5dea6d9213d95e521706c045dba17a19f59719acc8626d13`,
+  and `09dfae5868044a39442580f62c6276da00859114f2e9f31dba1b5045e08ed7c1`.
+  The old LG BSP return is thus strongly localized to channel-register
+  reads on foreign-EE duplicate PON APIDs, not to channel mapping or the
+  EE0 APID 248 address. No old failure log identifies whether APID 1 or 19
+  was the exact aborting read. This closes the read-only route preflight,
+  not the key IRQ goal: arbiter and peripheral IRQ enable bits are still 0,
+  with no GIC callback, PMIC mux, or IRQ-produced HID events yet.
 
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 
