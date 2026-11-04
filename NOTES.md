@@ -24,10 +24,20 @@ in this trial is unknown. `ep0 cmd 0x6 status 1` is `STARTTRANSFER`
 reporting no transfer resource per Linux DWC3 command-status handling;
 it appears after reset but also occurred in the healthy polled run and
 is not alone proof of cause.
-Ask for the physical unplug/replug sequence and host `/dev/ttyACM0` result.
-Hold the combined USB+key IRQ image until live ACM transfer and the reset
-sequence are understood; no new cloud build is needed for a controlled
-retest of this existing USB IRQ image.
+The user confirms repeated unplug/replug near the end and reports Windows
+eventually displayed "unrecognized USB device". This confirms a user-visible
+reconnect failure, but the current logs cannot attribute it to IRQ mode.
+The pre-existing `ud_event()` reset path only clears DCFG address and three
+software flags, then calls `ud_start_setup()`; it does not end old transfers
+or reset EP0/other endpoint resources as the reference Linux DWC3 reset
+handler does. That is a concrete candidate for a reconnect bug, not yet a
+proved cause. Hold the combined USB+key IRQ image. Next controlled A/B:
+boot `out-bs/boot-16k-0114a11-usb.img` (same kernel, default 1 ms polling),
+use the same Windows host/cable, repeat about three unplug/replug cycles,
+record whether Windows recognizes each reconnect, then pull a fresh
+SWEETLOG. If polling also fails, prioritize endpoint reset cleanup; if
+only IRQ mode fails, inspect IRQ worker wake/ack timing. No new cloud build
+is needed for this comparison.
 
 **0114a11 GIC-only phone result:**
 `logs/sweetlog-0114a11-usb-irq-gic.bin` SHA256
