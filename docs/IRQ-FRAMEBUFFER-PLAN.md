@@ -23,7 +23,8 @@ IRQ 并停止 gadget 工作线程和实时 ACM 日志。USB 日志发送线程�
 配置和发送完成事件唤醒。启动时有界等待、GIC 软件 pending 探针和诊断
 计数仍保留；电池、UFS、framebuffer 的既有机制不在 0139 范围内。
 
-0139 的 USB 改动仅对 MH2LM 编译，GUACAMOLE 与 SWEET 保留旧代码。
+0139 的实现与验收仅针对 MH2LM；共享按键和 USB 源文件已去掉旧轮询分支，
+GUACAMOLE 与 SWEET 不在本轮支持和验证范围内。
 这一步的源码和本地编译检查不等于实机通过。下一轮从 CircleCI 产物用
 `tools/mk-mh2lm-event-matrix.sh ... --irq-only` 生成单张临时镜像，
 用 `fastboot boot` 验证三键、触摸、USB 枚举与日志并发、息屏/唤醒及重复
