@@ -296,6 +296,13 @@ Volume Up 三条路由分别记录 9、14、9 次 `hit`；全程按键状态按�
 
 ## 证据索引
 
+0114a13 三路组合测试日志 `logs/live-e-0114a13-touch-irq-all.txt` 中，
+按键 mux 初始成功使能三条路由，Volume Down 有四次硬件命中，Volume Up
+有两次硬件命中。第二次 Volume Up 命中后，PMIC 观察者读状态 `0x9`
+（DONE|DROPPED），随后 mux 确认写失败并回退到轮询；后续 Power HID
+事件不能作为 Power IRQ 命中的证据。`0138-mh2lm-spmi-mux-ack-retry.patch`
+增加最多三次可重试的幂等确认写，连续失败仍回退；待 CI 与实机验证。
+
 - 目标 SoC / PMIC DTS：`ref/lge-lineage-kernel/arch/arm64/boot/dts/qcom/sm8150.dtsi`、
   `qcom/pm8150.dtsi`、`qcom/sm8150-pmic-overlay.dtsi`。
 - MH2LM 板级 DTS：`arch/arm64/boot/dts/lge/sm8150-mh2lm/.../sm8150-mh2lm_common-misc.dtsi`

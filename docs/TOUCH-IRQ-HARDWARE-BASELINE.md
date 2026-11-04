@@ -30,6 +30,12 @@ INTID 240 软件投递判据：`hits=1 clear=1 pending=0 active=0`。触摸保�
 累计 990 IRQ、990 报告、零 I²C 错误且无回退；`missed` 曾短暂为 1 后归零。
 多指和息屏唤醒后的首次触摸仍待组合测试确认。
 
+第三阶段 `logs/live-e-0114a13-touch-irq-all.txt` 出现 f0–f9 的 HID
+按下／抬起，并在 `SWEET FB: display off`、`display on` 后记录首次触摸。
+触摸累计 1334 次真实 IRQ／1334 次报告，I²C 错误和空 IRQ 为零，未回退；
+USB IRQ 同时继续运行。按键 mux 在一次 Volume Up 确认写失败后回退轮询，
+因此三路 IRQ 并行验收仍待修复与复测。
+
 - `sweettouchirq=0`（默认）：保留当前 10 ms ATTN 轮询及每 100 ms
   强制读取。
 - `sweettouchirq=1`：保持 GPIO122 中断关闭，对 INTID 240 做有界

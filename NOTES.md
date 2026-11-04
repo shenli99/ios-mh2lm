@@ -2,6 +2,38 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**0114a13 three-driver test exposed one key-mux ack failure; 0138 prepared:**
+`logs/live-e-0114a13-touch-irq-all.txt` SHA-256
+`8c2152e91d9426f95f5492de7a0336ff6de476de01b8244313b543e4b1a2f02e`
+confirms boot args `sweettouchirq=2 sweetusbirq=2 sweetkeysirq=3`.
+Touch GPIO122 / INTID 240 stayed IRQ-driven through 1334 hits and 1334
+reports (`events=5753`, `i2c-errors=0`, `empty=0`); fingers 0–9 produced
+HID down/up. Screen off/on appears at lines 3535/3571, followed by a
+touch down at line 3603. Touch `missed` intermittently reached 1, below
+its 8-report fallback threshold. DWC3 reached 836 IRQ hits with
+`empty=0 missed=0` and continued streaming the console. No touch or USB
+fallback appeared.
+
+The key mux armed three routes. Volume Down got four hardware route hits
+with correct HID down/up; Volume Up got two route hits, then the second
+ack failed at line 3485. Immediately before it, a key observer read
+reported `gpio-ok=0 arb-status=0x9` (PMIC-arb DONE|DROPPED per the target
+Linux driver). `ackRoute()` calls `disableHardware()` on failure, so the
+mux went to polling fallback; subsequent HID events for all three keys,
+including Power and display off/on, do **not** prove concurrent key IRQ.
+No hardware Power route hit appears in this capture. The three-driver
+acceptance criterion is therefore still open, despite functional keys.
+
+New `0138-mh2lm-spmi-mux-ack-retry.patch` retries only the idempotent
+channel/PMIC key IRQ clear sequence up to three times with 20 us between
+attempts, logging recovery; three failures still trigger the existing
+polling fallback. It applied cleanly with `patch -p1 --dry-run` and real
+application on the exact 0114a13 build-tree source. **0138 has not been
+compiled or phone-tested.** After commit, user push and a new CircleCI
+build are needed; then package the new kernel with `--touch-irq` and
+repeat the combined test, explicitly checking Volume Up retry/route,
+Power route and no mux fallback.
+
 **0114a13 real touch GPIO122 IRQ passed; three-driver test next:**
 `logs/live-e-0114a13-touch-irq.img` is ASCII/CRLF text despite its suffix;
 SHA-256 `9b19fd6030f2678cf09e46f31d8396b6fab3b5cae66c3f7d400d2d915ab3b2de`.

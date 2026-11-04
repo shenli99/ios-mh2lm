@@ -1,0 +1,37 @@
+From: ios-mh2lm
+Subject: mh2lm: retry idempotent SPMI key IRQ acknowledgment
+
+0114a13 combined touch/USB/key test saw a PMIC-arb dropped transaction
+(STATUS 0x9) and one volume-up ack failure. Retry the two idempotent
+clear writes up to three times before the existing safe polling fallback.
+The GIC remains masked in the mux worker until the ack succeeds.
+
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -180,8 +180,24 @@
+ ackRoute(const MuxRoute &route)
+ {
+ 	uint32_t mask = 1u << route.bit;
+-	write32(route.channel, 0x108u, mask); /* v5 channel IRQ_CLEAR */
+-	return writePeripheral(route, 0x14u, (uint16_t)mask, 1);
++	/* A key observer read reported PMIC-arb STATUS 0x9 (DROPPED)
++	 * beside a failed ack write. Both clears are idempotent. Keep
++	 * the GIC masked until the worker confirms the ack; retain the
++	 * existing polling fallback after three failed attempts. */
++	for (unsigned attempt = 1; attempt <= 3; ++attempt) {
++		write32(route.channel, 0x108u, mask); /* v5 channel IRQ_CLEAR */
++		if (writePeripheral(route, 0x14u, (uint16_t)mask, 1)) {
++			if (attempt > 1) {
++				IOLog("SWEET MUX: ack recovered route=%s attempts=%u\n",
++				    route.name, attempt);
++			}
++			return true;
++		}
++		if (attempt < 3) {
++			delay(20);
++		}
++	}
++	return false;
+ }
+ 
+ static uint32_t
