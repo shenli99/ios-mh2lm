@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only]\n' "$0" >&2
 	exit 2
 fi
 
@@ -28,6 +28,8 @@ case "$KEY_IRQ_PROFILE" in
 	--usb-irq)
 		;;
 	--touch-irq)
+		;;
+	--irq-only)
 		;;
 	*)
 		printf 'unknown optional profile: %s\n' "$KEY_IRQ_PROFILE" >&2
@@ -94,6 +96,20 @@ if [ "$KEY_IRQ_PROFILE" = '--touch-irq' ]; then
 	grep -Fqa 'SWEET USB IRQ: software-pending probe hits=' "$TMPDIR/kernel.development.mh2lm"
 	grep -Fqa 'SWEET MUX: armed mode=' "$TMPDIR/kernel.development.mh2lm"
 fi
+if [ "$KEY_IRQ_PROFILE" = '--irq-only' ]; then
+	for marker in 'SWEET KEYS IRQ: three routes active; IRQ-only' \
+	    'SWEET TOUCH: TouchComm ready (sda=%u scl=%u), max %ux%u, IRQ-only' \
+	    'SWEET USB IRQ: FAILED %s hits=%u empty=%u; gadget stopped'; do
+		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+			printf 'kernel artifact lacks fixed IRQ marker: %s\n' "$marker" >&2
+			exit 1
+		fi
+	done
+elif grep -Fqa 'SWEET KEYS IRQ: three routes active; IRQ-only' \
+    "$TMPDIR/kernel.development.mh2lm"; then
+	printf 'fixed IRQ kernel requires --irq-only packaging profile\n' >&2
+	exit 1
+fi
 
 make_profile() {
 	local name=$1
@@ -132,6 +148,14 @@ make_profile() {
 	file "$image"
 	sha256sum "$image"
 }
+
+if [ "$KEY_IRQ_PROFILE" = '--irq-only' ]; then
+	make_profile irq-only \
+		"LG G8X - XNU fixed key, USB and touch IRQ (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1"
+	printf 'kernel SHA256: %s\ncreated fixed IRQ profile for %s\n' "$KERNEL_SHA256" "$LABEL"
+	exit 0
+fi
 
 # Keys remain in their normal enabled mode in every profile. USB is explicitly
 # off in the non-USB profiles, because sweetusb=1 otherwise performs a probe.

@@ -1,0 +1,1012 @@
+From: ios-mh2lm
+Subject: mh2lm: run key, DWC3 and touch drivers from IRQ events only
+
+Fix the MH2LM runtime to the already demonstrated real IRQ paths. Remove
+periodic recovery reads and silent polling fallback. On IRQ failure, mask
+the affected source, log the fault and stop that function. The USB console
+ring wakes its TX worker when bytes arrive or a transfer/configuration
+completes, instead of scanning the ring every 20 ms. Finite startup waits
+and other boards' polling paths are unchanged.
+
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -1,8 +1,8 @@
+ /*
+- * Minimal polled SWEET keys. Call once after the scheduler is running.
++ * SWEET PMIC keys. MH2LM uses the PMIC IRQ mux; other boards retain polling.
+  * See hw-report.md: volume-up is PM6150L SID 4, NOT PM6150 SID 0.
+- * PMIC access is READ ONLY: the sole MMIO write issues EXT_READL on an
+- * observer channel. No PMIC config, IRQ acknowledge or reset writes exist.
++ * Key state is read through PMIC observer channels. The MH2LM mux owns
++ * interrupt configuration and acknowledgment.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -16,6 +16,7 @@
+ #include "sweet_spmi.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
+ extern void sweet_hid_key(int key, int down);
+ extern int sweet_spmi_mux_start(unsigned mode);
+ void sweet_keys_init(void);
+@@ -50,8 +51,11 @@
+ static uint32_t keys_version, keys_last_status;
+ static bool keys_started;
+ static int keys_sleep_chan;
++#if !defined(ARM64_BOARD_CONFIG_MH2LM)
+ static volatile unsigned keys_irq_mode;
++#endif
+ static volatile unsigned keys_irq_events;
++static volatile unsigned keys_irq_failed;
+ 
+ /* Called only from the mux's IOWorkLoop, never from the GIC top half. */
+ void
+@@ -63,11 +67,9 @@
+ }
+ 
+ void
+-sweet_keys_irq_fallback(void)
+-{
+-	/* UINT_MAX is a failure latch: if a just-enabled IRQ fails before
+-	 * sweet_keys_init stores its mode, that store cannot undo fallback. */
+-	__atomic_store_n(&keys_irq_mode, ~0u, __ATOMIC_RELEASE);
++sweet_keys_irq_failed(void)
++{
++	__atomic_store_n(&keys_irq_failed, 1u, __ATOMIC_RELEASE);
+ 	thread_wakeup(&keys_sleep_chan);
+ }
+ 
+@@ -224,17 +226,20 @@
+ static void
+ keys_wait(unsigned observedEvents)
+ {
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	(void)assert_wait(&keys_sleep_chan, THREAD_UNINT);
++#else
+ 	uint64_t deadline;
+-	/* Mode 3 uses IRQ wakeups with a 200 ms recovery timeout. Mode 2 leaves
+-	 * the other two keys on the proven 20 ms poll period. */
+ 	unsigned ms = __atomic_load_n(&keys_irq_mode, __ATOMIC_ACQUIRE) == 3u ?
+ 	    200u : 20u;
+ 	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+ 	(void)assert_wait_deadline(&keys_sleep_chan, THREAD_UNINT, deadline);
++#endif
+ 	/* An IRQ delivered after the last sample but before assert_wait must
+ 	 * still cause an immediate new sample. */
+ 	if (__atomic_load_n(&keys_irq_events, __ATOMIC_ACQUIRE) !=
+-	    observedEvents) {
++	    observedEvents ||
++	    __atomic_load_n(&keys_irq_failed, __ATOMIC_ACQUIRE)) {
+ 		thread_wakeup(&keys_sleep_chan);
+ 	}
+ 	thread_block(THREAD_CONTINUE_NULL);
+@@ -248,6 +253,18 @@
+ 	(void)arg;
+ 	(void)result;
+ 	for (;;) {
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++		if (__atomic_load_n(&keys_irq_failed, __ATOMIC_ACQUIRE)) {
++			for (int k = 0; k < 3; ++k) {
++				if (state[k]) {
++					sweet_hid_key(k, 0);
++				}
++			}
++			printf("SWEET KEYS IRQ: stopped after mux failure\n");
++			(void)thread_terminate(current_thread());
++			thread_block(THREAD_CONTINUE_NULL);
++		}
++#endif
+ 		unsigned observedEvents = __atomic_load_n(&keys_irq_events,
+ 		    __ATOMIC_ACQUIRE);
+ 		uint8_t pon = 0;
+@@ -306,7 +323,9 @@
+ {
+ 	int enabled = 1;
+ 	int irqDiag = 0;
++#if !defined(ARM64_BOARD_CONFIG_MH2LM)
+ 	int irqMode = 0;
++#endif
+ 	thread_t thread;
+ 	if (keys_started) {
+ 		return;
+@@ -314,7 +333,9 @@
+ 	keys_started = true;
+ 	(void)PE_parse_boot_argn("sweetkeys", &enabled, sizeof(enabled));
+ 	(void)PE_parse_boot_argn("sweetkeysirqdiag", &irqDiag, sizeof(irqDiag));
++#if !defined(ARM64_BOARD_CONFIG_MH2LM)
+ 	(void)PE_parse_boot_argn("sweetkeysirq", &irqMode, sizeof(irqMode));
++#endif
+ 	if (!enabled) {
+ 		printf("SWEET KEYS: disabled (sweetkeys=0)\n");
+ 		return;
+@@ -369,8 +390,14 @@
+ #else
+ 	if (!pok && !gok) {
+ #endif
+-		printf("SWEET KEYS: no readable keys; polling retained for recovery\n");
+-	}
++		printf("SWEET KEYS: no readable keys\n");
++	}
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	if (!pok || !gok || !up_ok) {
++		printf("SWEET KEYS IRQ: initial PMIC state unavailable; keys disabled\n");
++		return;
++	}
++#endif
+ #else /* !SWEET_DEV_KEYS_VOLUME */
+ 	/* Volume keys unmapped on this board yet: the PMIC GPIO (PM8150 GPIO6,
+ 	 * GPIO7 on guacamole) still has to be identified in the APID table.
+@@ -378,7 +405,7 @@
+ 	printf("SWEET KEYS: arb=%#x apids=%u pon-apid=%u pon=%#x/%d (volume keys unmapped)\n",
+ 	    keys_version, count, keys_pon_apid, pon, pok);
+ 	if (!pok) {
+-		printf("SWEET KEYS: no readable power key; polling retained for recovery\n");
++		printf("SWEET KEYS: no readable power key\n");
+ 	}
+ #endif /* SWEET_DEV_KEYS_VOLUME */
+ 	if (irqDiag != 0) {
+@@ -438,24 +465,24 @@
+ 			keys_irq_diag_gic();
+ 		}
+ 	}
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	if (sweet_spmi_mux_start(3u) != 0 ||
++	    __atomic_load_n(&keys_irq_failed, __ATOMIC_ACQUIRE)) {
++		printf("SWEET KEYS IRQ: mux setup failed; keys disabled\n");
++		return;
++	}
++	printf("SWEET KEYS IRQ: three routes active; IRQ-only\n");
++#else
+ 	if (irqMode != 0) {
+ 		if (irqMode < 0 || irqMode > 3 ||
+ 		    sweet_spmi_mux_start((unsigned)irqMode) != 0) {
+-			printf("SWEET KEYS IRQ: mux mode=%d unavailable; 20 ms polling retained\n",
++			printf("SWEET KEYS IRQ: mux mode=%d unavailable; polling retained\n",
+ 			    irqMode);
+ 		} else {
+-			unsigned expectedMode = 0;
+-			if (__atomic_compare_exchange_n(&keys_irq_mode, &expectedMode,
+-			    (unsigned)irqMode, false, __ATOMIC_ACQ_REL,
+-			    __ATOMIC_ACQUIRE)) {
+-				printf("SWEET KEYS IRQ: mux mode=%d started, polling fallback retained\n",
+-				    irqMode);
+-			} else {
+-				printf("SWEET KEYS IRQ: mux mode=%d fell back during setup; 20 ms polling retained\n",
+-				    irqMode);
+-			}
+-		}
+-	}
++			__atomic_store_n(&keys_irq_mode, (unsigned)irqMode, __ATOMIC_RELEASE);
++		}
++	}
++#endif
+ 	kern_return_t kr = kernel_thread_start(keys_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -27,6 +27,7 @@
+ #include <pexpert/arm64/sweet_dev.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
+ void sweet_usb_probe(void);
+ static void sweet_usb_gadget_start(vm_offset_t dwc);
+ static void ud_bringup_thread(void *arg, wait_result_t wr);
+@@ -249,8 +250,8 @@
+  *
+  * ABL leaves the DWC3 powered, clocked, in device mode and halted, with the
+  * PHY set up, so only the device controller is restarted: soft reset, an
+- * event buffer in our memory, endpoint 0, run. Events are polled from a
+- * kernel thread (no interrupt), like the UFS driver. DMA is not cache
++ * event buffer in our memory, endpoint 0, run. A DWC3 IRQ wakes the
++ * event worker. DMA is not cache
+  * coherent (DT qcom,gsi-disable-io-coherency): buffers are cleaned and
+  * invalidated around every transfer.
+  *
+@@ -357,6 +358,30 @@
+ } ud;
+ static inline uint32_t dwc_rd(uint32_t off);
+ 
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++/* 0: inactive, 1: armed, 2: worker pending, 3: failed,
++ * 4: bounded software-pending GIC probe. */
++static volatile unsigned ud_irq_state;
++static volatile unsigned ud_irq_hits;
++static volatile unsigned ud_irq_probe_hits;
++static vm_offset_t ud_gicd;
++static int ud_irq_sleep_chan;
++static bool ud_irq_ready;
++static unsigned ud_irq_empty;
++static int ud_log_chan;
++static volatile unsigned ud_log_started, ud_log_pending;
++
++/* Called by the console ring after new bytes arrive. Coalesce wakeups. */
++void
++sweet_usb_log_notify(void)
++{
++	if (__atomic_load_n(&ud_log_started, __ATOMIC_ACQUIRE) &&
++	    __atomic_exchange_n(&ud_log_pending, 1u, __ATOMIC_ACQ_REL) == 0u) {
++		thread_wakeup(&ud_log_chan);
++	}
++}
++
++#else
+ /* 0: polling, 1: armed, 2: worker pending, 3: masked/fallback,
+  * 4: bounded software-pending GIC probe. */
+ static volatile unsigned ud_irq_state;
+@@ -367,6 +392,8 @@
+ static int ud_irq_requested;
+ static bool ud_irq_ready;
+ static unsigned ud_irq_empty, ud_irq_missed;
++
++#endif
+ 
+ static uint32_t
+ ud_gic_rd(unsigned off)
+@@ -553,6 +580,59 @@
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++static void
++ud_irq_wait(unsigned observed)
++{
++	(void)assert_wait(&ud_irq_sleep_chan, THREAD_UNINT);
++	if (__atomic_load_n(&ud_irq_hits, __ATOMIC_ACQUIRE) != observed ||
++	    __atomic_load_n(&ud_irq_state, __ATOMIC_ACQUIRE) == 3u) {
++		clear_wait(current_thread(), THREAD_AWAKENED);
++	}
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static void
++ud_irq_fail(const char *reason)
++{
++	__atomic_store_n(&ud_irq_state, 3u, __ATOMIC_RELEASE);
++	if (ud_gicd) {
++		ud_gic_wr(0x180u + 4u * UD_IRQ_WORD, UD_IRQ_BIT);
++	}
++	dwc_wr(GEVNTSIZ, dwc_rd(GEVNTSIZ) | UD_INTMASK);
++	__atomic_store_n(&ud_log_started, 0u, __ATOMIC_RELEASE);
++	thread_wakeup(&ud_irq_sleep_chan);
++	thread_wakeup(&ud_log_chan);
++	printf("SWEET USB IRQ: FAILED %s hits=%u empty=%u; gadget stopped\n",
++	    reason, __atomic_load_n(&ud_irq_hits, __ATOMIC_ACQUIRE), ud_irq_empty);
++}
++
++static bool
++ud_irq_arm(void)
++{
++	if (!ud_irq_ready) {
++		return false;
++	}
++	__atomic_store_n(&ud_irq_state, 1u, __ATOMIC_RELEASE);
++	ud_gic_wr(0x100u + 4u * UD_IRQ_WORD, UD_IRQ_BIT);
++	bool waited = ud_gic_wait();
++	bool enabled = (ud_gic_rd(0x100u + 4u * UD_IRQ_WORD) & UD_IRQ_BIT) != 0;
++	unsigned state = __atomic_load_n(&ud_irq_state, __ATOMIC_ACQUIRE);
++	if (!waited || (!enabled && state == 1u) || state == 3u) {
++		ud_irq_fail("GIC enable readback");
++		return false;
++	}
++	dwc_wr(GEVNTSIZ, dwc_rd(GEVNTSIZ) & ~UD_INTMASK);
++	if (dwc_rd(GEVNTSIZ) & UD_INTMASK) {
++		ud_irq_fail("DWC3 event unmask readback");
++		return false;
++	}
++	printf("SWEET USB IRQ: armed intid=%u size=%#x pending=%u\n",
++	    UD_IRQ_INTID, dwc_rd(GEVNTSIZ), dwc_rd(GEVNTCOUNT) & 0xffffu);
++	return true;
++}
++
++#else
+ static void
+ ud_irq_wait(unsigned observed)
+ {
+@@ -604,6 +684,8 @@
+ 	    UD_IRQ_INTID, dwc_rd(GEVNTSIZ), dwc_rd(GEVNTCOUNT) & 0xffffu);
+ 	return true;
+ }
++
++#endif
+ 
+ static int
+ ud_epcmd(unsigned ep, uint32_t cmd, uint32_t p0, uint32_t p1, uint32_t p2)
+@@ -824,6 +906,9 @@
+ 		if (value == 1) {
+ 			ud_configure();
+ 		}
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++		sweet_usb_log_notify();
++#endif
+ 		printf("SWEET USB: configured (%u)\n", value);
+ 	} else if (req == 8) {          /* GET_CONFIGURATION */
+ 		data[0] = ud.configured ? 1 : 0; n = 1;
+@@ -871,6 +956,56 @@
+ 
+ /* The console ring, streamed to the host: nothing here may print, it would
+  * feed itself through the ring. */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++static void
++ud_log_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	ud.log_pos = sweet_log_position();
++	ud.log_pos = ud.log_pos > 65536 ? ud.log_pos - 65536 : 0;
++	__atomic_store_n(&ud_log_started, 1u, __ATOMIC_RELEASE);
++	for (;;) {
++		if (__atomic_load_n(&ud_irq_state, __ATOMIC_ACQUIRE) == 3u) {
++			break;
++		}
++		__atomic_store_n(&ud_log_pending, 0u, __ATOMIC_RELEASE);
++		if (ud.configured && !ud.tx_busy) {
++			uint64_t next = ud.log_pos;
++			uint32_t n = sweet_log_copy(&next, (char *)(ud.dma + UD_TX), UD_TX_MAX);
++			if (n > 1 && (n % UD_BULK_MPS) == 0) {
++				/* Do not make a CDC read depend on an implicit ZLP. */
++				next = ud.log_pos;
++				n = sweet_log_copy(&next, (char *)(ud.dma + UD_TX), n - 1);
++			}
++			if (n) {
++				ud.log_pos_next = next;
++				ud.tx_busy = true;
++				ud.posted += n;
++				ud.tx_submitted++;
++				if (ud.tx_submitted <= 3) {
++					printf("SWEET USB: console TX submit %u bytes\n", n);
++				}
++				if (ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, n,
++				    TRBCTL_NORMAL) != 0) {
++					ud.tx_busy = false;
++					if (++ud.tx_errors <= 3) {
++						printf("SWEET USB: console TX submit failed\n");
++					}
++				}
++			}
++		}
++		(void)assert_wait(&ud_log_chan, THREAD_UNINT);
++		if (__atomic_exchange_n(&ud_log_pending, 0u,
++		    __ATOMIC_ACQ_REL)) {
++			clear_wait(current_thread(), THREAD_AWAKENED);
++		}
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++	__atomic_store_n(&ud_log_started, 0u, __ATOMIC_RELEASE);
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++#else
+ static void
+ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
+ {
+@@ -906,6 +1041,8 @@
+ 		}
+ 	}
+ }
++
++#endif
+ 
+ static void
+ ud_event(uint32_t ev)
+@@ -917,6 +1054,9 @@
+ 			ud.configured = false;
+ 			ud.dtr = false;
+ 			ud.tx_busy = false;
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++			sweet_usb_log_notify();
++#endif
+ 			printf("SWEET USB: bus reset\n");
+ 			ud_start_setup();
+ 		} else if (type == 2) { /* connect done */
+@@ -943,6 +1083,9 @@
+ 	if (ep == EP_TX && type == 1) {         /* a console chunk has been read */
+ 		ud.log_pos = ud.log_pos_next;
+ 		ud.tx_busy = false;
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++		sweet_usb_log_notify();
++#endif
+ 		if (++ud.tx_completed <= 3) {
+ 			printf("SWEET USB: console TX complete %u\n", ud.tx_completed);
+ 		}
+@@ -986,6 +1129,70 @@
+ 	}
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++static void
++ud_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	for (;;) {
++		unsigned observed = __atomic_load_n(&ud_irq_hits, __ATOMIC_ACQUIRE);
++		unsigned irqState = __atomic_load_n(&ud_irq_state, __ATOMIC_ACQUIRE);
++		if (irqState == 3u) {
++			break;
++		}
++		uint32_t count = dwc_rd(GEVNTCOUNT) & 0xffffu;
++		if (count) {
++			ud_sync(UD_EVT, UD_EVT_SIZE);
++			for (uint32_t done = 0; done < count; done += 4) {
++				uint32_t ev = *(volatile uint32_t *)(ud.dma + UD_EVT + ud.evt_pos);
++				ud.evt_pos = (ud.evt_pos + 4) % UD_EVT_SIZE;
++				if (ud.events++ < 200) {
++					printf("SWEET USB: event 0x%08x\n", ev);
++				}
++				ud_event(ev);
++			}
++			dwc_wr(GEVNTCOUNT, count);
++		}
++		if (__atomic_load_n(&ud_irq_state, __ATOMIC_ACQUIRE) == 3u) {
++			break;
++		}
++		if (irqState == 2u) {
++			if (count == 0 && ++ud_irq_empty >= 16u) {
++				ud_irq_fail("16 empty IRQ wakeups");
++				break;
++			}
++			if (count) {
++				ud_irq_empty = 0;
++			}
++			if (observed <= 16u || (observed & 255u) == 0) {
++				printf("SWEET USB IRQ: hit irq=%u bytes=%u events=%u empty=%u\n",
++				    observed, count, ud.events, ud_irq_empty);
++			}
++			if ((observed & 127u) == 0) {
++				printf("SWEET USB IRQ: counters hits=%u empty=%u count=%u TX=%u/%u err=%u\n",
++				    observed, ud_irq_empty, dwc_rd(GEVNTCOUNT) & 0xffffu,
++				    ud.tx_completed, ud.tx_submitted, ud.tx_errors);
++			}
++			unsigned expected = 2u;
++			if (!__atomic_compare_exchange_n(&ud_irq_state, &expected,
++			    1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++				break;
++			}
++			ud_gic_wr(0x100u + 4u * UD_IRQ_WORD, UD_IRQ_BIT);
++			if (__atomic_load_n(&ud_irq_state, __ATOMIC_ACQUIRE) == 3u) {
++				ud_gic_wr(0x180u + 4u * UD_IRQ_WORD, UD_IRQ_BIT);
++				break;
++			}
++		}
++		if ((dwc_rd(GEVNTCOUNT) & 0xffffu) != 0) {
++			continue; /* Drain events queued while the worker ran. */
++		}
++		ud_irq_wait(observed);
++	}
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++#else
+ static void
+ ud_thread(void *arg __unused, wait_result_t wr __unused)
+ {
+@@ -1063,6 +1270,8 @@
+ 	}
+ }
+ 
++#endif
++
+ /*
+  * The controller is brought up long after the rest of the boot, so a USB
+  * problem can never take the system down with it: by the time this runs iOS
+@@ -1089,12 +1298,14 @@
+ 	thread_t thread;
+ 
+ 	ud.dwc = dwc;
++#if !defined(ARM64_BOARD_CONFIG_MH2LM)
+ 	(void)PE_parse_boot_argn("sweetusbirq", &ud_irq_requested,
+ 	    sizeof(ud_irq_requested));
+ 	if (ud_irq_requested < 0 || ud_irq_requested > 2) {
+ 		printf("SWEET USB IRQ: invalid mode=%d; polling retained\n", ud_irq_requested);
+ 		ud_irq_requested = 0;
+ 	}
++#endif
+ 	printf("SWEET USB: gadget step 0: DMA\n");
+ 	/*
+ 	 * All of XNU's DRAM is above 4 GiB. If the controller turns out to
+@@ -1159,11 +1370,19 @@
+ 
+ 	dwc_wr(GEVNTADRLO, (uint32_t)(ud.dma_pa + UD_EVT));
+ 	dwc_wr(GEVNTADRHI, (uint32_t)((ud.dma_pa + UD_EVT) >> 32));
+-	dwc_wr(GEVNTSIZ, (1u << 31) | UD_EVT_SIZE);     /* interrupt masked: polled */
++	dwc_wr(GEVNTSIZ, (1u << 31) | UD_EVT_SIZE);     /* masked until IRQ arm */
+ 	dwc_wr(GEVNTCOUNT, dwc_rd(GEVNTCOUNT) & 0xffff);
+ 	ud.evt_pos = 0;
+ 	printf("SWEET USB: GEVNTADR readback 0x%08x%08x size 0x%08x\n",
+ 	    dwc_rd(GEVNTADRHI), dwc_rd(GEVNTADRLO), dwc_rd(GEVNTSIZ));
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	ud_gicd = ml_io_map(UD_GICD_PA, 0x10000);
++	ud_irq_ready = ud_gicd && ud_gic_configure() && ud_gic_probe();
++	if (!ud_irq_ready) {
++		printf("SWEET USB IRQ: GIC setup failed; gadget disabled\n");
++		return;
++	}
++#else
+ 	if (ud_irq_requested) {
+ 		ud_gicd = ml_io_map(UD_GICD_PA, 0x10000);
+ 		ud_irq_ready = ud_gicd && ud_gic_configure() && ud_gic_probe();
+@@ -1173,6 +1392,7 @@
+ 			printf("SWEET USB IRQ: probe-only mode; DWC3 interrupt masked, 1 ms polling retained\n");
+ 		}
+ 	}
++#endif
+ 
+ 	/* High speed, address 0 */
+ 	uint32_t dcfg = dwc_rd(DCFG) & ~(7u | (0x7fu << 3));
+@@ -1271,6 +1491,23 @@
+ 	printf("SWEET USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n", dwc_rd(DSTS), i, ud.dma_pa);
+ 	printf("SWEET USB:   - arming ep0 setup now that the controller runs\n");
+ 	ud_start_setup();
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	if (!ud_irq_arm()) {
++		printf("SWEET USB IRQ: arm failed; gadget disabled\n");
++		return;
++	}
++	if (kernel_thread_start(ud_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		ud_irq_fail("event worker creation");
++		return;
++	}
++	if (kernel_thread_start(ud_log_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		ud_irq_fail("log worker creation");
++	}
++#else
+ 	bool workerStarted = kernel_thread_start(ud_thread, NULL, &thread) == KERN_SUCCESS;
+ 	if (workerStarted) {
+ 		thread_deallocate(thread);
+@@ -1283,6 +1520,7 @@
+ 	if (kernel_thread_start(ud_log_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
++#endif
+ }
+ #elif defined(ARM64_BOARD_CONFIG_SWEET)
+ /*
+--- a/bsd/dev/sweet_touch_tcm.c
++++ b/bsd/dev/sweet_touch_tcm.c
+@@ -110,13 +110,13 @@
+ static void ts_gpio_io_wr(unsigned pin, uint32_t v) { ts_wr(ts_tiles[ts_tile(pin)], TS_GPIO_IO_OFF(pin), v); }
+ 
+ static int ts_chan;
+-/* 0: 10 ms polling; 1: armed; 2: worker pending; 3: fallback;
+- * 4: GIC software-pending probe, with the TLMM pin IRQ still disabled. */
++/* 0: inactive; 1: armed; 2: worker pending; 3: failed;
++ * 4: bounded GIC software-pending probe. */
+ static volatile unsigned ts_irq_state, ts_irq_hits, ts_irq_probe_hits;
+ static vm_offset_t ts_gicd;
+-static int ts_irq_chan, ts_irq_requested;
++static int ts_irq_chan;
+ static bool ts_irq_ready;
+-static unsigned ts_irq_empty, ts_irq_missed, ts_irq_no_progress;
++static unsigned ts_irq_empty, ts_irq_no_progress;
+ 
+ static void
+ ts_wait(unsigned ms)
+@@ -284,9 +284,7 @@
+ static void
+ ts_irq_wait(unsigned observed)
+ {
+-	uint64_t deadline;
+-	clock_interval_to_deadline(200, NSEC_PER_MSEC, &deadline);
+-	(void)assert_wait_deadline(&ts_irq_chan, THREAD_UNINT, deadline);
++	(void)assert_wait(&ts_irq_chan, THREAD_UNINT);
+ 	if (__atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE) != observed ||
+ 	    __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE) == 3u) {
+ 		clear_wait(current_thread(), THREAD_AWAKENED);
+@@ -295,7 +293,7 @@
+ }
+ 
+ static void
+-ts_irq_fallback(const char *reason)
++ts_irq_fail(const char *reason)
+ {
+ 	__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
+ 	vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
+@@ -303,16 +301,14 @@
+ 	if (ts_gicd) {
+ 		ts_gic_wr(0x180u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+ 	}
+-	printf("SWEET TOUCH IRQ: fallback %s hits=%u empty=%u missed=%u; 10 ms polling restored\n",
+-	    reason, __atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE),
+-	    ts_irq_empty, ts_irq_missed);
+-	thread_wakeup(&ts_irq_chan);
++	printf("SWEET TOUCH IRQ: FAILED %s hits=%u empty=%u; touch stopped\n",
++	    reason, __atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE), ts_irq_empty);
+ }
+ 
+ static bool
+ ts_irq_arm(void)
+ {
+-	if (!ts_irq_ready || ts_irq_requested != 2) {
++	if (!ts_irq_ready) {
+ 		return false;
+ 	}
+ 	vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
+@@ -325,7 +321,7 @@
+ 	ts_wr(tile, TS_INTR_STATUS, status & ~1u);
+ 	uint32_t readback = ts_rd(tile, TS_INTR_CFG);
+ 	if ((readback & 0xffu) != (cfg & 0xffu)) {
+-		ts_irq_fallback("TLMM config readback");
++		ts_irq_fail("TLMM config readback");
+ 		return false;
+ 	}
+ 	__atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
+@@ -334,12 +330,12 @@
+ 	bool enabled = (ts_gic_rd(0x100u + 4u * TS_IRQ_WORD) & TS_IRQ_BIT) != 0;
+ 	unsigned state = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);
+ 	if (!waited || (!enabled && state == 1u) || state == 3u) {
+-		ts_irq_fallback("GIC enable readback");
++		ts_irq_fail("GIC enable readback");
+ 		return false;
+ 	}
+ 	ts_wr(tile, TS_INTR_CFG, cfg | 1u);
+ 	if ((ts_rd(tile, TS_INTR_CFG) & 1u) == 0) {
+-		ts_irq_fallback("TLMM enable readback");
++		ts_irq_fail("TLMM enable readback");
+ 		return false;
+ 	}
+ 	printf("SWEET TOUCH IRQ: armed gpio=%u intid=%u cfg=%#x status=%#x attn=%u\n",
+@@ -1055,11 +1051,6 @@
+ 	unsigned delay_s = 20;
+ 	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
+ 	(void)PE_parse_boot_argn("sweettouchflip", &ts_flip, sizeof(ts_flip));
+-	(void)PE_parse_boot_argn("sweettouchirq", &ts_irq_requested, sizeof(ts_irq_requested));
+-	if (ts_irq_requested < 0 || ts_irq_requested > 2) {
+-		printf("SWEET TOUCH IRQ: invalid mode=%d; polling retained\n", ts_irq_requested);
+-		ts_irq_requested = 0;
+-	}
+ 	printf("SWEET TOUCH: TouchComm driver starting in %u s (flip %#x)\n", delay_s, ts_flip);
+ 	ts_wait(delay_s * 1000u);
+ 
+@@ -1108,45 +1099,37 @@
+ 		ts_pins("failed");
+ 		goto out;
+ 	}
+-	printf("SWEET TOUCH: TouchComm ready (sda=%u scl=%u), max %ux%u, irq-mode=%d\n",
+-	    bb_sda_pin, bb_scl_pin, tcm.max_x, tcm.max_y, ts_irq_requested);
+-	if (ts_irq_requested) {
+-		ts_gicd = ml_io_map(TS_GICD_PA, 0x10000);
+-		ts_irq_ready = ts_gicd && ts_gic_configure() && ts_gic_probe();
+-		if (!ts_irq_ready) {
+-			printf("SWEET TOUCH IRQ: GIC probe unavailable; 10 ms polling retained\n");
+-		} else if (ts_irq_requested == 1) {
+-			printf("SWEET TOUCH IRQ: probe-only; TLMM pin interrupt disabled, 10 ms polling retained\n");
+-		} else {
+-			(void)ts_irq_arm();
+-		}
++	printf("SWEET TOUCH: TouchComm ready (sda=%u scl=%u), max %ux%u, IRQ-only\n",
++	    bb_sda_pin, bb_scl_pin, tcm.max_x, tcm.max_y);
++	ts_gicd = ml_io_map(TS_GICD_PA, 0x10000);
++	ts_irq_ready = ts_gicd && ts_gic_configure() && ts_gic_probe();
++	if (!ts_irq_ready || !ts_irq_arm()) {
++		printf("SWEET TOUCH IRQ: setup failed; touch disabled\n");
++		goto out;
+ 	}
+ 
+ 	unsigned errors = 0, ticks = 0, attn_low = 0, reports = 0;
+-	unsigned last_irq = 0;
+ 	for (;;) {
+ 		unsigned observed = __atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE);
+ 		unsigned irqState = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);
++		if (irqState == 3u) {
++			goto irq_stop;
++		}
+ 		bool attn = (ts_gpio_io_rd(TS_PIN_IRQ) & 1u) == 0;
+-		uint32_t pinStatus = irqState == 1u || irqState == 2u ?
+-		    ts_rd(ts_tiles[ts_tile(TS_PIN_IRQ)], TS_INTR_STATUS) & 1u : 0;
++		uint32_t pinStatus = ts_rd(ts_tiles[ts_tile(TS_PIN_IRQ)],
++		    TS_INTR_STATUS) & 1u;
+ 		attn_low += attn;
+-		/* In IRQ mode, avoid the old forced I2C read every 100 ms.
+-		 * A 200 ms recovery wake checks the ATTN level without I2C. */
+ 		bool did_message = false, did_report = false;
+-		if (attn || ((irqState != 1u && irqState != 2u) && (ticks % 10u) == 0)) {
++		/* Once woken by an IRQ, drain while ATTN remains low. */
++		if (attn) {
+ 			if (tcm.version == 2) {
+ 				tcm.command = 0x0a;
+ 			}
+ 			rc = message();
+ 			did_message = rc == 0;
+ 			if (rc == 0 && tcm.code == 0x10) {
+-				printf("SWEET TOUCH: controller restarted; touch stopped\n");
+-				if (irqState == 1u || irqState == 2u) {
+-					ts_irq_fallback("controller restart");
+-				}
+-				ts_release_all();
+-				goto out;
++				ts_irq_fail("controller restart");
++				goto irq_stop;
+ 			}
+ 			if (rc == 0 && tcm.code == 0x11) {
+ 				rc = tcm_decode(tcm.payload, tcm.length, ts_now);
+@@ -1154,13 +1137,6 @@
+ 					reports++;
+ 					did_report = true;
+ 					ts_report();
+-					if (irqState == 1u && observed == last_irq &&
+-					    ++ts_irq_missed >= 8u) {
+-						ts_irq_fallback("reports seen only by recovery polling");
+-					}
+-					if (irqState == 2u || observed != last_irq) {
+-						ts_irq_missed = 0;
+-					}
+ 				} else {
+ 					tcm.stage = "contacts";
+ 					tcm.detail = tcm.length;
+@@ -1171,64 +1147,54 @@
+ 					tcm_fail(rc);
+ 				}
+ 				if (errors == 10u) {
+-					ts_release_all();
+ 					bb_recover();
+-					if (irqState == 1u || irqState == 2u) {
+-						ts_irq_fallback("10 I2C errors");
+-					}
++					ts_irq_fail("10 I2C errors");
++					goto irq_stop;
+ 				}
+ 			} else {
+ 				errors = 0;
+ 			}
+ 		}
+-		if (irqState == 1u || irqState == 2u) {
+-			if ((ts_gpio_io_rd(TS_PIN_IRQ) & 1u) == 0 &&
+-			    did_message && !did_report && ++ts_irq_no_progress >= 16u) {
+-				ts_irq_fallback("ATTN low without touch-report progress");
+-			} else if (did_report || (ts_gpio_io_rd(TS_PIN_IRQ) & 1u) != 0) {
+-				ts_irq_no_progress = 0;
+-			}
+-		}
+-		unsigned period = irqState == 1u || irqState == 2u ? 50u : 1000u;
+-		if ((++ticks % period) == 0u) {
++		if ((ts_gpio_io_rd(TS_PIN_IRQ) & 1u) == 0 &&
++		    did_message && !did_report && ++ts_irq_no_progress >= 16u) {
++			ts_irq_fail("ATTN low without touch-report progress");
++			goto irq_stop;
++		} else if (did_report || (ts_gpio_io_rd(TS_PIN_IRQ) & 1u) != 0) {
++			ts_irq_no_progress = 0;
++		}
++		if ((++ticks % 50u) == 0u) {
+ 			printf("SWEET TOUCH: state reports=%u events=%u attn-low=%u i2c-errors=%u\n",
+ 			    reports, ts_events, attn_low, ts_i2c_errors);
+-			if (period == 50u) {
+-				printf("SWEET TOUCH IRQ: counters hits=%u empty=%u missed=%u pin-status=%u attn=%u\n",
+-				    __atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE),
+-				    ts_irq_empty, ts_irq_missed, pinStatus, attn ? 1 : 0);
+-			}
+-		}
+-		irqState = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);
++			printf("SWEET TOUCH IRQ: counters hits=%u empty=%u pin-status=%u attn=%u\n",
++			    __atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE),
++			    ts_irq_empty, pinStatus, attn ? 1 : 0);
++		}
+ 		if (irqState == 2u) {
+ 			if (!did_message && ++ts_irq_empty >= 16u) {
+-				ts_irq_fallback("16 IRQ wakeups without a TouchComm message");
+-			} else {
+-				if (did_message) {
+-					ts_irq_empty = 0;
+-				}
+-				vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
+-				uint32_t status = ts_rd(tile, TS_INTR_STATUS);
+-				ts_wr(tile, TS_INTR_STATUS, status & ~1u);
+-				if (observed <= 16u || (observed & 255u) == 0) {
+-					printf("SWEET TOUCH IRQ: hit irq=%u status=%#x attn=%u reports=%u\n",
+-					    observed, status, attn ? 1 : 0, reports);
+-				}
+-				__atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
+-				ts_gic_wr(0x100u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+-			}
+-		}
+-		last_irq = observed;
+-		irqState = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);
+-		if ((irqState == 1u || irqState == 2u) &&
+-		    (ts_gpio_io_rd(TS_PIN_IRQ) & 1u) != 0) {
+-			ts_irq_wait(observed);
+-		} else if (irqState == 1u || irqState == 2u) {
+-			continue; /* Drain a report while ATTN remains low. */
+-		} else {
+-			ts_wait(10);
+-		}
+-	}
++				ts_irq_fail("16 empty IRQ wakeups");
++				goto irq_stop;
++			}
++			if (did_message) {
++				ts_irq_empty = 0;
++			}
++			vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
++			uint32_t status = ts_rd(tile, TS_INTR_STATUS);
++			ts_wr(tile, TS_INTR_STATUS, status & ~1u);
++			if (observed <= 16u || (observed & 255u) == 0) {
++				printf("SWEET TOUCH IRQ: hit irq=%u status=%#x attn=%u reports=%u\n",
++				    observed, status, attn ? 1 : 0, reports);
++			}
++			__atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
++			ts_gic_wr(0x100u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
++		}
++		if ((ts_gpio_io_rd(TS_PIN_IRQ) & 1u) == 0) {
++			continue;
++		}
++		ts_irq_wait(observed);
++	}
++irq_stop:
++	ts_release_all();
++
+ out:
+ 	(void)thread_terminate(current_thread());
+ 	thread_block(THREAD_CONTINUE_NULL);
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -694,6 +694,9 @@
+ static uint32_t sweet_log_secs = SWEET_LOG_SECS;
+ 
+ /* Called for all console output, any context: never blocks. */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++extern void sweet_usb_log_notify(void);
++#endif
+ void sweet_log_append(const char *c, int size);
+ 
+ void
+@@ -706,6 +709,9 @@
+ 	for (int i = 0; i < size; i++) {
+ 		sweet_log_ring[(at + (uint64_t)i) % SWEET_LOG_SIZE] = c[i];
+ 	}
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	sweet_usb_log_notify();
++#endif
+ }
+ 
+ /*
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -4,8 +4,7 @@
+  * and SPMI work runs on its IOWorkLoop. The table is independent of the
+  * physical GIC handoff so future PMIC consumers can be registered here.
+  *
+- * sweetkeysirq=1: software handoff only; 2: Power source; 3: all keys.
+- * The existing key poller remains the recovery path in every mode.
++ * MH2LM arms all three key routes and stops the keys on mux errors.
+  */
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ #include <device/device_types.h>
+@@ -19,7 +18,7 @@
+ 
+ extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern "C" void sweet_keys_irq_notify(unsigned key);
+-extern "C" void sweet_keys_irq_fallback(void);
++extern "C" void sweet_keys_irq_failed(void);
+ 
+ #define MUX_GICD_PA       0x17a00000u
+ #define MUX_PDC_PA        0x0b220000u
+@@ -133,7 +132,7 @@
+ 	return result;
+ }
+ 
+-/* Observer EXT_READL. Used only before the key polling thread starts. */
++/* Observer EXT_READL. Used only during key IRQ route setup. */
+ static bool
+ readPeripheral(const MuxRoute &route, unsigned reg, uint8_t *out)
+ {
+@@ -180,8 +179,24 @@
+ ackRoute(const MuxRoute &route)
+ {
+ 	uint32_t mask = 1u << route.bit;
+-	write32(route.channel, 0x108u, mask); /* v5 channel IRQ_CLEAR */
+-	return writePeripheral(route, 0x14u, (uint16_t)mask, 1);
++	/* A key observer read reported PMIC-arb STATUS 0x9 (DROPPED)
++	 * beside a failed ack write. Both clears are idempotent. Keep
++	 * the GIC masked until the worker confirms the ack; retain the
++	 * IRQ shutdown after three failed attempts. */
++	for (unsigned attempt = 1; attempt <= 3; ++attempt) {
++		write32(route.channel, 0x108u, mask); /* v5 channel IRQ_CLEAR */
++		if (writePeripheral(route, 0x14u, (uint16_t)mask, 1)) {
++			if (attempt > 1) {
++				IOLog("SWEET MUX: ack recovered route=%s attempts=%u\n",
++				    route.name, attempt);
++			}
++			return true;
++		}
++		if (attempt < 3) {
++			delay(20);
++		}
++	}
++	return false;
+ }
+ 
+ static uint32_t
+@@ -215,7 +230,7 @@
+ 		(void)writePeripheral(route, 0x16u, (uint16_t)(1u << route.bit), 1);
+ 		write32(route.channel, 0x100u, 0);
+ 	}
+-	sweet_keys_irq_fallback();
++	sweet_keys_irq_failed();
+ }
+ 
+ static bool
+@@ -367,7 +382,7 @@
+ 		return;
+ 	}
+ 	if (irqCount > MUX_IRQ_LIMIT) {
+-		IOLog("SWEET MUX: IRQ limit reached count=%u; polling fallback\n", irqCount);
++		IOLog("SWEET MUX: IRQ limit reached count=%u; IRQ disabled\n", irqCount);
+ 		disableHardware();
+ 		return;
+ 	}
+@@ -381,7 +396,7 @@
+ 			}
+ 			uint32_t status = read32(route.channel, 0x104u);
+ 			if (status & ~allowedMaskForApid(route.apid)) {
+-				IOLog("SWEET MUX: unregistered PMIC pending apid=%u status=%#x; polling fallback\n",
++				IOLog("SWEET MUX: unregistered PMIC pending apid=%u status=%#x; IRQ disabled\n",
+ 				    route.apid, status);
+ 				disableHardware();
+ 				return;
+@@ -418,7 +433,7 @@
+ 	}
+ 	if (!handled || stillPending) {
+ 		++faultCount;
+-		IOLog("SWEET MUX: unhandled/stuck irq handled=%u pending=%u faults=%u; polling fallback\n",
++		IOLog("SWEET MUX: unhandled/stuck irq handled=%u pending=%u faults=%u; IRQ disabled\n",
+ 		    handled ? 1 : 0, stillPending ? 1 : 0, faultCount);
+ 		disableHardware();
+ 		return;
+@@ -486,7 +501,7 @@
+ 	cfg = ml_io_map(SWEET_DEV_SPMI_CFG_PA, 0x1000);
+ 	obs = ml_io_map(SWEET_DEV_SPMI_OBS_PA, 0x10000);
+ 	if (!gicd || !pdc || !core || !cfg || !obs) {
+-		IOLog("SWEET MUX: upstream or PMIC map failed; polling retained\n");
++		IOLog("SWEET MUX: upstream or PMIC map failed; IRQ unavailable\n");
+ 		return -1;
+ 	}
+ 	uint32_t version = read32(core, 0);
+@@ -518,13 +533,13 @@
+ 	/* No hardware gate is opened until callback, worker and all checks exist. */
+ 	if ((read32(pdc, 0x114u) & 7u) != 4u || !configureGic() ||
+ 	    !probeGicDelivery()) {
+-		IOLog("SWEET MUX: PDC polarity, GIC config or delivery probe failed; polling retained\n");
++		IOLog("SWEET MUX: PDC polarity, GIC config or delivery probe failed; IRQ unavailable\n");
+ 		return -1;
+ 	}
+ 	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+ 		MuxRoute &route = routes[i];
+ 		if (route.active && !configureRoute(route)) {
+-			IOLog("SWEET MUX: route %s setup failed; polling fallback\n", route.name);
++			IOLog("SWEET MUX: route %s setup failed; IRQ disabled\n", route.name);
+ 			disableHardware();
+ 			return -1;
+ 		}
+@@ -532,7 +547,7 @@
+ 	uint32_t enable = read32(pdc, 0x10u);
+ 	write32(pdc, 0x10u, enable | 2u);
+ 	if ((read32(pdc, 0x10u) & 2u) == 0) {
+-		IOLog("SWEET MUX: PDC pin 1 enable failed; polling fallback\n");
++		IOLog("SWEET MUX: PDC pin 1 enable failed; IRQ disabled\n");
+ 		disableHardware();
+ 		return -1;
+ 	}
+@@ -544,7 +559,7 @@
+ 	/* An immediate valid IRQ may already have masked the SPI in the top
+ 	 * half. That is a successful enable, not a failed readback. */
+ 	if ((!enabledBit && currentState == 1u) || currentState == 3u) {
+-		IOLog("SWEET MUX: GIC SPI 513 enable failed; polling fallback\n");
++		IOLog("SWEET MUX: GIC SPI 513 enable failed; IRQ disabled\n");
+ 		disableHardware();
+ 		return -1;
+ 	}
+@@ -554,8 +569,8 @@
+ 	return 0;
+ }
+ #else
+-/* The shared sweet_keys.c is also linked for sweet and guacamole. Their
+- * existing default polling path stays linkable without MH2LM hardware. */
++/* The shared sweet_keys.c is also linked for sweet and guacamole. Those
++ * boards remain linkable without MH2LM hardware. */
+ extern "C" int sweet_spmi_mux_start(unsigned)
+ {
+ 	return -1;
