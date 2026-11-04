@@ -65,11 +65,13 @@ EE1/EE4 的 APID 1/19 和 EE0 的 APID 248。旧探针读取外部 EE channel �
 详见硬件基线文档和 `NOTES.md` 的 0114a7 实测记录。
 
 SM8150 PDC 源码已确认 pin 1 对应 PMIC EE0 IRQ / GIC INTID 513；Linux
-PMIC-arb v5 确认 channel clear 在 `+0x108`。这些是可用于实现的源码证据，
-但当前设备的 PDC pin 1 enable/config 与 GIC SPI 513 的实际寄存器状态仍待
-只读采样。首轮可写试验应先具备当前内核的 SPI callback、mux 路由表、
-中断风暴保护及轮询回退，然后才按单 Power source 开 gate。
-0133 已加入可独立选择的 PDC/GIC 只读快照代码，尚待 CI 和实机验证。
+PMIC-arb v5 确认 channel clear 在 `+0x108`。0114a8 实机读回 PDC pin 1
+`enable-bank=0 config=0x4`，已知该 pin 当前关闭、配置为高电平有效。
+GIC SPI 513 的现有空闲值无需再单独测试；当前 XNU 没有为它做专门配置，
+新驱动会明确设置并读回 Group 1、level、priority、route 与 enable。
+首轮可写试验应先具备当前内核的 SPI callback、mux 路由表、中断风暴保护
+及轮询回退，然后才按单 Power source 开 gate。0133 的 GIC/组合只读镜像
+保留作诊断备选，不作为进入实现的前置测试。
 
 **实施边界：**
 

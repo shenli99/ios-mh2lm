@@ -105,11 +105,11 @@ HID、UI 或 IOKit 工作。
 | Volume Up pinctrl | `key_vol_up_default`：`pins = "gpio6"`、`function = "normal"`、`input-enable`、`bias-pull-up`、`power-source = <1>` | 已确认 | 已由 Linux 描述；现有 XNU 轮询输入也正常 |
 | debounce / wake | `debounce-interval = <15>`、`gpio-key,wakeup`、`linux,can-disable` | 已确认 | 未来 IRQ worker 需保留等效去抖/唤醒语义 |
 | PON 配置 | `qcom,pon-dbc-delay = <15625>`、`kpdpwr-sw-debounce`，并配置 KPDPWR/RESIN | 已确认 | PON 可能由 PMIC 固件和 Android 留下的配置参与，不能盲改 |
-| PDC input / mapping | PDC 基址 `0x0b220000`，大小 `0x400`；pin 1 -> GIC INTID 513 | 源码确认 | `pdc-sm8150.c` 标注 pin 1 为 EE0 PMIC peripheral IRQ；实际 enable/config 尚待读回 |
+| PDC input / mapping | PDC 基址 `0x0b220000`，大小 `0x400`；pin 1 -> GIC INTID 513 | 源码与 0114a8 实机确认 | `enable-bank=0`，pin 1 当前关闭；`config=0x4`，高电平有效 |
 
 PDC Linux 驱动使用 `base + 0x10` 的 bit 1 控制 pin 1 enable，
 `base + 0x110 + 4*1 = base + 0x114` 配置该 pin 的类型/极性。当前硬件
-寄存器值尚未采样，不能假设 bootloader 已打开或设置为 level-high。
+0114a8 已读回 `enable-bank=0 config=0x4`；pin 1 没有打开，配置为高电平有效。
 
 ### GPIO 控制器寄存器：哪些需要、哪些不需要
 
@@ -183,8 +183,8 @@ GPIO6 为 APID 261。Linux 通用流程会先清 arbiter pending、再向外设
 | PON/GPIO6 的 `SET_TYPE`、极性、`EN_SET`、`LATCHED_STS` | 证实 Android/固件留下的实际配置 | 0114a7 启动时只读值已取得；按下/释放时的 latch 变化仍待验证 |
 | APID owner、IRQ owner bit、intr owner bitmap、`ACC_ENABLE`、`IRQ_STATUS` | 证实 XNU 所在 EE 有资格接收两条 source | 0114a7 已取得只读值，两个 EE0 APID 均可读且 gate 为 0 |
 | PMIC-arb v5 clear | 不清 pending 将造成上游 level 重入/风暴 | Linux 源码已确认 `+0x108` 写法；实机效果仍待受控单源测试 |
-| PDC pin/预配置 | PMIC-arb 需经 PDC pin 1 到 GIC INTID 513 | pin 映射与寄存器偏移已从目标 Linux 源码确认；现有寄存器值待读回 |
-| GIC 上游 trigger | DTS `IRQ_TYPE_NONE` 不指定 edge/level | 读回 GIC/PDC 现有类型；SPI 513 callback 完成受控单键试验且无风暴 |
+| PDC pin/预配置 | PMIC-arb 需经 PDC pin 1 到 GIC INTID 513 | 0114a8 已读回 pin 1 disabled/config `0x4`；使能写入待受控单源测试 |
+| GIC 上游 trigger | DTS `IRQ_TYPE_NONE` 不指定 edge/level | 新驱动显式配置并读回 GIC SPI 513；callback 完成受控单键试验且无风暴 |
 
 ## 历史实机预检：0130/0131 PON route 微阶段
 
@@ -255,8 +255,10 @@ enable、pending、active、trigger、priority、router 等状态；`3072` 组�
 源码中的配置候选当作本机已配置状态。
 
 0114a8 的内核产物已经完成并校验，0133 探针源码出现在 buildtree 和内核字符串中。
-四个相关镜像已生成，完整路径、SHA256 与测试顺序见 `NOTES.md` 的当前检查点；
-尚无实机 PDC/GIC 读回，因此本表的上游配置状态仍保持“待实机预检”。
+`sweetlog-0114a8-key-irq-pdc.bin` 是新日志，确认 PDC pin 1 关闭、配置为高电平
+有效，启动到 SpringBoard。原定 GIC-only、组合只读镜像无需再测：路由和寄存器
+布局早已从目标源码确认，GIC 的旧空闲值不是实现前置条件；新的驱动应显式配置
+并读回 SPI 513。镜像路径和日志 SHA256 见 `NOTES.md` 当前检查点。
 
 ## 证据索引
 

@@ -14,25 +14,35 @@ it and downloaded the 0114a8 buildtree/kernel artifacts. The 0114a8
 buildtree contains the probe source, the kernel manifest matches SHA256
 `accebe637ca034a8353d980ffd1c83c591b226b99200b529b3313593fb05ea1b`,
 and the kernel binary contains the PDC/GIC diagnostic strings. The CircleCI
-build log was not supplied; the kernel artifact itself is complete. No
-phone test has yet been reported.
+build log was not supplied; the kernel artifact itself is complete. The
+PDC-only image was subsequently tested below.
 
 `tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-0114a8.gz 0114a8
---key-irq-upstream` generated and verified four relevant temporary images
-from this single kernel. Test with `fastboot boot` only, in order, stopping
-on any regression or LG BSP return: `out-bs/boot-16k-0114a8-baseline.img`
+--key-irq-upstream` generated four temporary images from this single kernel:
+`out-bs/boot-16k-0114a8-baseline.img`
 (SHA256 `47ffac3c1374108cfdf7756ae3ae473599adb6f679b1f1ae046fdafd7f8a5171`),
 `out-bs/boot-16k-0114a8-key-irq-pdc.img`
 (`7030ffc88a7cb1311090d3441a5c8e58aecae7608d30fcf1f54b5c34b76dc7e4`),
 `out-bs/boot-16k-0114a8-key-irq-gic.img`
 (`b49fd5e5dec10e1ef02b8ab0dc3b3254946c7c3c2b852cc16d7f4dc4631bfc73`),
-then `out-bs/boot-16k-0114a8-key-irq-upstream.img`
+and `out-bs/boot-16k-0114a8-key-irq-upstream.img`
 (`5646f803be60b784791c588ab234da57cacd191c30eed3d69e6c56150a99b1ec`).
-Extract distinct fresh SWEETLOGs and check `SWEET KEYS IRQ PDC/GIC` lines;
-the four images differ only in boot arguments. No additional push is needed
-for this test. Only after those register values are known should the SPI
-callback, route-table mux, bounded Power-source test and polling fallback
-be armed.
+The four images differ only in boot arguments. **Correction:** the source
+mapping, register offsets, and INTID were already known before 0133; I
+incorrectly treated a full set of upstream idle snapshots as a prerequisite
+to implementation. The newly available
+`logs/sweetlog-0114a8-key-irq-pdc.bin` (SHA256
+`ec2e2e4b155bb7bdaa9e0f079e7d9ce5e9f3c7123c3098c3c7e88a2176a94521`,
+SWEETLOG total 222784, flush 10) is a fresh `sweetkeysirqdiag=1024` boot,
+reaches SpringBoard and reads `pin=1 intid=513 enable-bank=0 enabled=0
+config=0x4`. This confirms the PDC pin is currently disabled and configured
+active-high. Together with 0114a7's PMIC gate=0 readings, this explains why
+no key IRQ can yet arrive. The GIC-only and combined read-only images need
+not be tested: current `pe_fiq.c` configures GIC global forwarding and the
+timer/SGI, but does not configure SPI 513; the new driver can set and read
+back its own Group 1, level, priority, route and enable state. Next implement
+the unique SPI callback, route-table mux, bounded Power-source test and
+polling fallback. No further 0114a8 boot is required for that work.
 
 **Implementation roadmap:** `docs/IRQ-FRAMEBUFFER-PLAN.md` records the agreed
 two-stage order: first make the existing key, DWC3 USB and touch paths
@@ -213,7 +223,7 @@ test results in this file.
   route is now specific: SM8150 `pdc-sm8150.c` maps PDC pin 1
   (`ee0_apps_hlos_spmi_periph_irq`) to GIC INTID 513. PDC uses enable
   bank `0x0b220000 + 0x10` bit 1 and pin config `0x0b220000 + 0x114`;
-  neither value has been read on MH2LM yet. Linux PMIC-arb v5 writes
+  neither value had been read on MH2LM at that checkpoint. Linux PMIC-arb v5 writes
   32-bit `BIT(irq)` to the APID channel `IRQ_CLEAR` at `+0x108`, then
   writes the PMIC peripheral `LATCHED_CLR` at `+0x14`; its unmask path
   writes channel `ACC_ENABLE` at `+0x100` and clears the old latch before
@@ -224,10 +234,12 @@ test results in this file.
   `sleh_irq` passes non-timer/non-SGI INTIDs to an optional per-CPU
   interrupt handler and EOIs afterward. Implement a single SPI 513
   registration/dispatch path in the current XNU before claiming that API.
-  Next safe step: read-only PDC pin 1 and GIC SPI 513 register snapshots,
-  then add a boot-arg-gated mux/one-source Power IRQ test with a bounded
-  callback, pending acknowledgement and polling fallback. Do not arm
-  PMIC/PDC/GIC gates from the 0114a7 read-only images.
+  The 0114a8 PDC-only log subsequently read pin 1 as disabled and
+  active-high (`enable-bank=0 config=0x4`). A separate idle GIC snapshot is
+  not a prerequisite: implement a boot-arg-gated mux/one-source Power IRQ
+  test with explicit GIC SPI 513 configuration/readback, a bounded callback,
+  pending acknowledgement and polling fallback. Do not arm PMIC/PDC/GIC
+  gates from the 0114a7 read-only images.
 
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 
