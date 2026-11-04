@@ -2,8 +2,8 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**0140 scoped driver log levels, commit `6a9d8c0`, awaiting user
-push/CircleCI/phone:** The user
+**0140 scoped driver log levels, commit `6a9d8c0`; user pushed `9ac108a`,
+CircleCI and phone result pending:** The user
 observed that the current console, persistent SWEETLOG and ACM output have no
 unified severity. `0140-mh2lm-driver-log-levels.patch` adds ERROR/WARN/INFO/
 DEBUG prefixes and `sweetloglevel=0..3` (default INFO) to key, DWC3 USB,
@@ -24,15 +24,22 @@ compilation with system clang 19 hit existing XNU/Apple builtin errors in
 exported IOKit headers, so CircleCI is still the compile gate for that TU.
 0139 then 0140 applied sequentially to the exact source after 0138; all six
 resulting files byte-match the local edited sources. No 0140 phone result
-exists. After user push, review CircleCI first, then package and temporarily
-boot the normal image; use the debug image only when detailed event traces
+exists. After CircleCI finishes, review its build log and artifact, then
+package and temporarily boot the normal image; use the debug image only when
+detailed event traces
 are needed. Confirm the normal image retains ERROR/WARN/INFO and the
 low-rate IRQ proof while suppressing `[DEBUG]` from these drivers. A USB
 failure still requires persistent SWEETLOG extraction.
 
-**0139 fixed IRQ candidate, commits `f90c4a3` and cleanup `c0c5602`, awaiting
-user push, CircleCI
-and phone test:** Following the
+The user chose to use 0140 temporarily and defer a complete logging
+architecture to **major goal 3** in `docs/IRQ-FRAMEBUFFER-PLAN.md`:
+standardize log structure, add per-target enablement and level thresholds,
+and manage output modes/channels. This plan is documented, not implemented.
+No CircleCI run ID or result has been reported yet; do not infer CI success
+from the push.
+
+**0139 fixed IRQ candidate, commits `f90c4a3` and cleanup `c0c5602`,
+included in pushed `9ac108a`; CircleCI and phone test pending:** Following the
 0114a13 combined run, the user chose to remove silent runtime polling fallback
 from the MH2LM key, DWC3 USB and TouchComm drivers. New
 `xnu/patches/0139-mh2lm-fixed-event-irqs.patch` builds on committed 0138
@@ -41,8 +48,9 @@ GPIO122 / INTID 240; USB always arms DWC3 / INTID 165. A failed route,
 GIC probe, arm or worker stops its function and logs the reason. The CDC log
 sender wakes on new ring bytes, USB configuration and TX completion rather
 than its old 20 ms timer. `tools/mk-mh2lm-event-matrix.sh --irq-only` packages
-one fixed IRQ image; legacy test profiles reject an 0139 kernel. USB changes
-are implemented in the shared key and USB sources. The user confirmed that
+one fixed IRQ image and, with 0140, a second DEBUG log image; legacy test
+profiles reject an 0139 kernel. The changes are implemented in shared key
+and USB sources. The user confirmed that
 only MH2LM needs support here, so the temporary legacy polling branches were
 removed instead of maintained for GUACAMOLE and SWEET.
 The patch applied to a copy of the exact 0114a13 source plus 0138, and all
@@ -55,8 +63,8 @@ draft.
 GUACAMOLE and SWEET are outside the validation scope. `bash -n` passed for
 the packer, and the tracked script/docs diff
 passed `git diff --check` before commit.
-**No 0139 CircleCI or phone result exists yet.** After the user pushes the
-commit, check the CircleCI build, package the new kernel with `--irq-only`,
+**No 0139 CircleCI or phone result exists yet.** Check the pending CircleCI
+build, package the new kernel with `--irq-only`,
 and temporarily boot it. Keep the 0114a13 combined image as the prior boot
 baseline. A USB IRQ failure also stops live ACM output, so export a fresh
 persistent SWEETLOG after shutdown; compare boot args and IRQ failure lines.
