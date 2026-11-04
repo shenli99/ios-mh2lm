@@ -2,6 +2,33 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**0114a11 real DWC3 IRQ phone result, USB link behavior under review:**
+`logs/sweetlog-0114a11-usb-irq.bin` SHA256
+`eb2274f725285048fd27e1c2acde92e68ca052443d47e1a30c1e97ae4731de47`
+is a fresh version-1 SWEETLOG (ring 4 MiB, total 224043 bytes, flush 11,
+no wrap) with `sweetusbirq=2`. The INTID 165 software-pending gate passes
+(`hits=1 clear=1 pending=0 active=0`), DWC3 unmask reads back `size=0x1000`,
+and real IRQ hit lines run from 1 through 16 and again at 256. Periodic
+counts rise through 82, 147, 229, 247 with `empty=0 missed=0 count=0`;
+there is no fallback or panic. The first two enumerations reach
+`ACM endpoints configured` and the log includes SpringBoard activity.
+This proves real DWC3 event IRQ delivery, drain/ack and rearm.
+
+The USB host behavior is **not yet a clean pass**: after the second ACM
+configuration, the log contains 13 additional bus reset/connect cycles
+(15 total, versus 2 in the GIC-only/polled 0114a11 run), no subsequent
+setup request or ACM configuration, and the last counters show
+`configured=0 dtr=0 TX=0/2`. The earlier 0114a10 polled run had DTR=1
+and TX completions; both 0114a11 captures had DTR=0, so host ACM usage
+in this trial is unknown. `ep0 cmd 0x6 status 1` is `STARTTRANSFER`
+reporting no transfer resource per Linux DWC3 command-status handling;
+it appears after reset but also occurred in the healthy polled run and
+is not alone proof of cause.
+Ask for the physical unplug/replug sequence and host `/dev/ttyACM0` result.
+Hold the combined USB+key IRQ image until live ACM transfer and the reset
+sequence are understood; no new cloud build is needed for a controlled
+retest of this existing USB IRQ image.
+
 **0114a11 GIC-only phone result:**
 `logs/sweetlog-0114a11-usb-irq-gic.bin` SHA256
 `2513fb16c130de05b93c59f7870d544f24379f730ede815f4b88812ea1ba3ad7`
