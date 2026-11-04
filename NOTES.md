@@ -2,7 +2,24 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**0114a12 BearSSL CI blocker fix prepared; user push required:**
+**0114a13 build artifacts received; touch IRQ phone test pending:**
+`logs/xnu-buildtree-0114a13.gz` and `logs/xnu-kernel-0114a13.gz` are present.
+The build tree contains the `sweettouchirq` modes and touch IRQ probe code;
+its 30 staged BearSSL files are byte-identical to the vendored copies.
+The kernel manifest matches SHA-256
+`d7e44e609cf826741e0f4651af5834b68a4e2e73902f57d42810a5174b8ed10a`,
+and the kernel contains the touch, USB and key-mux IRQ markers. The 0114a13
+build log was not downloaded, so compiler warnings were not reviewed.
+`tools/mk-mh2lm-event-matrix.sh ... 0114a13 --touch-irq` verified the
+manifest and each FAT ramdisk copy, then created eight `fastboot boot`
+images in `out-bs/`. Test in order:
+`boot-16k-0114a13-touch-irq-gic.img` (software pending only),
+`boot-16k-0114a13-touch-irq.img` (real touch IRQ, key polling), then
+`boot-16k-0114a13-touch-irq-all.img` (touch+USB+three-key IRQ). Advance
+only after the preceding stage boots and its SWEETLOG passes review.
+No 0114a13 phone boot or touch IRQ hardware delivery has yet been observed.
+
+**0114a12 BearSSL CI blocker fixed for 0114a13:**
 `0020-stage-bearssl.sh` now stages the same 30 BearSSL files from
 `xnu/patches/bearssl-vendor/` instead of fetching from the failing upstream
 Git server. Both CI workflows copy that directory into `dxb/patches/`.
@@ -13,8 +30,8 @@ The user-cloned `ref/BearSSL` mirror lacks pinned commit `7bea48e5`; no
 substitute version was introduced. A simulated CI copy and stager run
 produced a byte-identical source tree to the prior successful build; both
 workflow YAML files parsed, `bash -n` and `git diff --check` passed. The
-full kernel build remains untested; after this fix is committed, ask the
-user to push and rerun CircleCI.
+subsequent 0114a13 build artifacts are present and include the staged
+BearSSL tree. The 0114a13 build log was not provided.
 
 **0114a12 CI infrastructure failure before 0137 compile:**
 `logs/xnu-build-log-0114a12.txt` ends while dxb runs the existing
@@ -23,11 +40,10 @@ user to push and rerun CircleCI.
 exits 128. The job stops before applying the XNU patch files or compiling
 `sweet_touch_tcm.c`; this log contains no 0137 compiler/linker error.
 The stager was unchanged by 0137 and has worked in earlier builds.
-The vendor fix above removes the unavailable Git fetch; after it is pushed,
-CircleCI can proceed to patch application and 0137 compile. The local 0137
-source and patch checks below still stand; phone behavior remains untested.
+The vendor fix above removed the unavailable Git fetch. The subsequent
+0114a13 artifacts include the 0137 source; phone behavior remains untested.
 
-**0137 touch IRQ implementation (pushed; successful CI build pending):**
+**0137 touch IRQ implementation (0114a13 artifact received; phone test pending):**
 The active 0114a11 TouchComm driver polls GPIO122 every 10 ms; the target
 MH2LM touch DTS has `interrupt-parent=&tlmm`, GPIO122 low level, and the
 SM8150 TLMM node advertises GIC SPI 208 (candidate XNU INTID 240).
@@ -51,10 +67,10 @@ Both modified files compile as arm64 Mach-O objects with CI-derived flags;
 patch applied with `patch -p1 --dry-run` on the exact 0114a11 buildtree,
 and the applied files byte-match locally compiled sources. The packaging
 script passes `bash -n` and rejects the older 0114a11 kernel artifact
-because it lacks the touch IRQ marker. **0137 has no CI or phone result.**
-After a successful CI retry, verify the new buildtree/kernel, then test GIC-only before
-real TLMM IRQ and the three-driver combination. Do not treat a software
-pending hit alone as proof of real GPIO122 delivery.
+because it lacks the touch IRQ marker. **0114a13 contains the 0137 code,
+but has no phone result.** Test GIC-only before real TLMM IRQ and the
+three-driver combination. Do not treat a software pending hit alone as
+proof of real GPIO122 delivery.
 
 **0114a11 USB+key IRQ parallel phone result; second child target reached:**
 `logs/sweetlog-0114a11-usb-irq-keys.bin` SHA256
