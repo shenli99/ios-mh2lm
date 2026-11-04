@@ -66,6 +66,37 @@ test results in this file.
   the PON route into metadata, intr owner bitmap, channel mapping, `ACC_ENABLE`,
   and `IRQ_STATUS` reads (0130/0131) instead of guessing whether the mapping or
   a register access faults.
+- **0114a3 artifact provenance and result (2026-11-04):** the generated
+  `key-irq-pon-route-map` image was named according to the local 0131 test
+  matrix, but `logs/xnu-buildtree-0114a3.gz` contains only the 0130 source:
+  `sweet_spmi.h` has no `SWEET_SPMI_IRQ_DIAG_ROUTE_CHANNEL`, and
+  `sweet_keys.c` still maps `sweetkeysirqdiag=128` to `ACC_ENABLE` and has no
+  `512`/`IRQ_STATUS` stage. The local `c32f76b` commit was therefore not in
+  the cloud build; the artifact corresponds to the pushed `dcdf1c9` line.
+  Hardware result: masks 32 and 64 reached iOS, while the image labelled
+  `...route-map.img` returned to the LG BSP. Because that image actually
+  performed the old channel mapping plus `ACC_ENABLE` read, it does **not**
+  prove that the physical channel-window map `0x0d580000` is invalid. Push
+  `c32f76b` and rebuild before interpreting the pure map stage; do not change
+  the address constants based on 0114a3.
+- The file later exported as `logs/sweetlog-0114a3-key-irq-pon-route-map.bin`
+  is byte-for-byte identical to `...route-owner.bin` (both SHA256
+  `6c7e097a1e38f2574bfec403b7124c9af6f1a0f49213c24aa7af1e1f3f7e1c72`).
+  It contains `sweetkeysirqdiag=64` and provides no failure-stage trace.
+  The source probe iterates all three PPID `0x8` matches seen in the 0114a3
+  logs: APIDs 1, 19 and 248. A channel-map failure alone therefore does not
+  identify APID 248 or physical address `0x0d580000` as the failing access.
+- **0114a5 artifact ready for the pure-map test (2026-11-04):**
+  `logs/xnu-build-log-0114a5.txt` applies 0131 and reports `XNU Build Done!`;
+  the extracted `logs/xnu-buildtree-0114a5.gz` confirms `128` now selects
+  `ROUTE_CHANNEL` (map only), `256` selects `ACC_ENABLE`, and `512` selects
+  `IRQ_STATUS`. `tools/mk-mh2lm-event-matrix.sh` generated the three
+  corresponding temporary images under `out-bs/` from kernel SHA256
+  `b5db4442bda8999263dd24079149f849e20abce2447a624614879a327ee7f2f3`.
+  Boot `0114a5-baseline`, then `0114a5-key-irq-pon-route-map`, followed by
+  `...route-enable` and `...route-status` only if the preceding step reaches
+  iOS. Stop at the first LG BSP return, and compare any exported SWEETLOG's
+  boot arguments and hash against the preceding capture before interpreting it.
 
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 

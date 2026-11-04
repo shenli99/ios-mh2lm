@@ -204,6 +204,13 @@ SWEET SPMI IRQ: keys-pon route-parts=...
 PON/GPIO6 外设中断字节和最终 `mask 31`。只有这些证据齐全后，才实施 mux 的第一
 个可写、单 source Power IRQ 测试，并始终保留可选的轮询回退。
 
+0114a3 云端只编进了 0130：当时名为 `route-map` 的本地镜像传入 `mask 128`，
+实际执行了映射加 `ACC_ENABLE` 读取；失败后导出的文件又是与前一轮 `owner`
+完全相同的旧日志。0114a5 的 buildtree 已确认包含 0131，`mask 128` 才是真正的
+纯映射。探针会遍历 PPID `0x8` 的全部匹配 APID（实测为 1、19、248），所以若
+0114a5 的纯映射仍失败，下一步应先定位具体是哪一个 APID，不能只凭 PON 最终
+选用 APID 248 就认定 `0x0d580000` 有问题。
+
 ## 证据索引
 
 - 目标 SoC / PMIC DTS：`ref/lge-lineage-kernel/arch/arm64/boot/dts/qcom/sm8150.dtsi`、
