@@ -2,7 +2,19 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**0137 touch IRQ implementation, local only; push needed for CI:**
+**0114a12 CI infrastructure failure before 0137 compile:**
+`logs/xnu-build-log-0114a12.txt` ends while dxb runs the existing
+`xnu/patches/0020-stage-bearssl.sh`. Its pinned BearSSL fetch from
+`https://www.bearssl.org/git/BearSSL` receives HTTP 502 and `git fetch`
+exits 128. The job stops before applying the XNU patch files or compiling
+`sweet_touch_tcm.c`; this log contains no 0137 compiler/linker error.
+The stager was unchanged by 0137 and has worked in earlier builds.
+Rerun the same CircleCI job/commit `d4753e0` without a new push. If the
+same upstream 502 recurs, harden the stager with an authenticated pinned
+fallback or retry, then push that separate CI fix. The local 0137 source
+and patch checks below still stand; phone behavior remains untested.
+
+**0137 touch IRQ implementation (pushed; successful CI build pending):**
 The active 0114a11 TouchComm driver polls GPIO122 every 10 ms; the target
 MH2LM touch DTS has `interrupt-parent=&tlmm`, GPIO122 low level, and the
 SM8150 TLMM node advertises GIC SPI 208 (candidate XNU INTID 240).
@@ -27,7 +39,7 @@ patch applied with `patch -p1 --dry-run` on the exact 0114a11 buildtree,
 and the applied files byte-match locally compiled sources. The packaging
 script passes `bash -n` and rejects the older 0114a11 kernel artifact
 because it lacks the touch IRQ marker. **0137 has no CI or phone result.**
-After user push, verify the new buildtree/kernel, then test GIC-only before
+After a successful CI retry, verify the new buildtree/kernel, then test GIC-only before
 real TLMM IRQ and the three-driver combination. Do not treat a software
 pending hit alone as proof of real GPIO122 delivery.
 
