@@ -139,6 +139,23 @@ test results in this file.
   `395b77b4e219c384c790e56d4dd1869212257c86317b03c3fa67a7b6b0010568`).
   Test enable (`sweetkeysirqdiag=256`) first, then status (`512`) only if
   enable reaches iOS. Both remain read-only; stop at any LG BSP return.
+- **0114a7 channel-read results (2026-11-04):** both `key-irq-pon-route-enable`
+  and `key-irq-pon-route-status` reached iOS. Their fresh, distinct SWEETLOGs
+  have SHA256 `50cb880bb154d14dd7b4ac33812c61ae925b70229c02fe268c0a1b4576619366`
+  and `c9f01ad7af4eafc74b816000118fbe4c9e4c1b2223a58f0557a5995333fd3e3a`.
+  Boot arguments contain `sweetkeysirqdiag=256` and `512` respectively;
+  the log records `route-parts=0x4` and `0x8`, skips APIDs 1/19 (EE1/EE4),
+  then completes APID 248 (EE0, IRQ owner) with `acc-enable=0` and
+  `irq-status=0`. The PON channel's access enable is currently off; this
+  remains a read-only probe, not an IRQ-delivery test. Because the old
+  diagnostic failed only when it also read all duplicate APID channels,
+  a foreign-EE channel read is the leading cause of the earlier LG BSP
+  return, but there is no failure trace identifying APID 1 versus 19.
+  Using the same verified 0114a7 kernel, `--key-irq-diag-matrix` generated
+  temporary `key-irq-route-pon` (mask 2), `key-irq-route-volume-up` (4),
+  `key-irq-cfg-pon` (8), `key-irq-cfg-volume-up` (16), and `key-irq-full`
+  (31) images. Test in that order, stopping at any LG BSP return; the final
+  combined image is only for after the four isolated stages pass.
 
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 
