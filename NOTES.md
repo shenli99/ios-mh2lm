@@ -2,6 +2,21 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**0114a15 driver architecture reviewed; documentation only:**
+`docs/CURRENT-DRIVER-ARCHITECTURE.md` (commit `98199bf`) now maps the exact
+0114a15 buildtree source and phone evidence for USB, keys, touch input,
+framebuffer/IOSurface presentation and backlight. PMIC keys follow the planned GIC callback plus
+software IOInterruptEventSource/IOWorkLoop design. USB and touch use short GIC
+callbacks plus event-woken BSD workers. All three INTIDs still use board-specific
+branches in `sleh_irq` and direct GIC Distributor MMIO; no generic interrupt
+controller provider/registration exists yet. HID and IOMobileFramebuffer/
+IOSurface are project-built IOKit-compatible userland interfaces. Display
+still uses ABL scanout memory, timer-generated vsync and CPU copy of the latest
+swap, so the known partial lock-screen redraw is a framebuffer architecture
+gap. This review changed no kernel code and requires no CI build or phone boot.
+The workspace `AI-GUIDE.md` now points to the current handoff and architecture
+document; its older body remains an explicitly dated boot-bring-up snapshot.
+
 **0114a15 DEBUG profile confirmed; scoped INFO/DEBUG filtering works:**
 `logs/live-e-0114a15-irq-only-debug1.txt` SHA-256
 `c3dc0443f8fb7daf37376e89fd8283b32e535824573a17842f02a7a0e77d317d`
