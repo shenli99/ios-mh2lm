@@ -127,6 +127,18 @@ test results in this file.
   files as 0132 test images. Retrieve the CI artifacts from a run whose build
   log explicitly applies `0132-mh2lm-key-irq-owned-channel-probe.patch`,
   and verify the extracted source before testing `256` or `512`.
+- **0114a7 artifact ready (2026-11-04):** the build log applies 0132 and
+  reaches `XNU Build Done!`; the extracted buildtree contains the EE0/IRQ
+  owner check and `channel skipped` log before `ml_io_map()`. Its kernel gzip
+  SHA256 is `9e8ba6faa035078e6c7026173f6a5363ca4f6dc0f755461bfb79eb32960fde19`,
+  distinct from 0114a5/0114a6. The image builder extracted kernel SHA256
+  `f535798978d9592557cf23713c1a56ea73e909b809bb7c33e95cd1bc22ec156f`
+  and produced `out-bs/boot-16k-0114a7-key-irq-pon-route-enable.img`
+  (SHA256 `e127399e64764a36c81a7f3c623c5cd38d619d8267b33be4fd760ff7997ae520`)
+  and `...route-status.img` (SHA256
+  `395b77b4e219c384c790e56d4dd1869212257c86317b03c3fa67a7b6b0010568`).
+  Test enable (`sweetkeysirqdiag=256`) first, then status (`512`) only if
+  enable reaches iOS. Both remain read-only; stop at any LG BSP return.
 
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 
