@@ -2,8 +2,24 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**0114a14 CircleCI built a kernel without 0139/0140; do not phone-test that
+artifact:** `logs/xnu-build-log-0114a14.txt` lines 229–241 show 0138 applied,
+but dxb skipped 0139 after `SweetSpmiInterruptMux.cpp:180` failed and then
+skipped dependent 0140. The final `XNU Build Done!` only means the older
+source compiled. The 0139 patch was generated against the pre-0138 mux and
+repeated 0138's ack retry hunk. It has now been rebased onto the source after
+0138. The correction and CI gate are committed as `f31ff83`. Local
+`git apply --check` and `git apply` in CI order (0138 → 0139 →
+0140) succeeded against the extracted 0114a13 build-tree files; all six
+resulting source files byte-match `scratch/log-level-0114a13/xnu/`. CircleCI
+now checks the staged XNU source for 0139/0140 markers after `build.sh` and
+fails clearly if dxb silently skips either patch. This corrected patch and
+CI gate still need a new push/build. No 0114a14 kernel artifact is needed;
+after the next build, check the log for successful 0139/0140 application and
+gate passage before downloading the kernel and packaging `--irq-only` images.
+
 **0140 scoped driver log levels, commit `6a9d8c0`; user pushed `9ac108a`,
-CircleCI and phone result pending:** The user
+corrected CircleCI and phone result pending:** The user
 observed that the current console, persistent SWEETLOG and ACM output have no
 unified severity. `0140-mh2lm-driver-log-levels.patch` adds ERROR/WARN/INFO/
 DEBUG prefixes and `sweetloglevel=0..3` (default INFO) to key, DWC3 USB,
@@ -22,9 +38,10 @@ ARM64 Mach-O with CI-derived flags; the mux C++ header/macros compiled in an
 isolated C++ test and the full mux source preprocessed. Full local C++
 compilation with system clang 19 hit existing XNU/Apple builtin errors in
 exported IOKit headers, so CircleCI is still the compile gate for that TU.
-0139 then 0140 applied sequentially to the exact source after 0138; all six
-resulting files byte-match the local edited sources. No 0140 phone result
-exists. After CircleCI finishes, review its build log and artifact, then
+After correcting 0139, `git apply` applied 0138, 0139 and 0140 sequentially
+to the extracted 0114a13 source; all six resulting files byte-match the local
+edited sources. No 0140 phone result exists. After the corrected CircleCI
+build passes its patch gate, review its build log and artifact, then
 package and temporarily boot the normal image; use the debug image only when
 detailed event traces
 are needed. Confirm the normal image retains ERROR/WARN/INFO and the
@@ -35,11 +52,11 @@ The user chose to use 0140 temporarily and defer a complete logging
 architecture to **major goal 3** in `docs/IRQ-FRAMEBUFFER-PLAN.md`:
 standardize log structure, add per-target enablement and level thresholds,
 and manage output modes/channels. This plan is documented, not implemented.
-No CircleCI run ID or result has been reported yet; do not infer CI success
-from the push.
+The reported 0114a14 build skipped 0139 and 0140; it is not a valid test
+artifact. No new corrected CircleCI run ID or result has been reported.
 
 **0139 fixed IRQ candidate, commits `f90c4a3` and cleanup `c0c5602`,
-included in pushed `9ac108a`; CircleCI and phone test pending:** Following the
+included in pushed `9ac108a`; corrected CircleCI and phone test pending:** Following the
 0114a13 combined run, the user chose to remove silent runtime polling fallback
 from the MH2LM key, DWC3 USB and TouchComm drivers. New
 `xnu/patches/0139-mh2lm-fixed-event-irqs.patch` builds on committed 0138
@@ -63,8 +80,8 @@ draft.
 GUACAMOLE and SWEET are outside the validation scope. `bash -n` passed for
 the packer, and the tracked script/docs diff
 passed `git diff --check` before commit.
-**No 0139 CircleCI or phone result exists yet.** Check the pending CircleCI
-build, package the new kernel with `--irq-only`,
+**0114a14 skipped 0139; no valid 0139 CircleCI or phone result exists yet.**
+Check the next corrected CircleCI build, package that kernel with `--irq-only`,
 and temporarily boot it. Keep the 0114a13 combined image as the prior boot
 baseline. A USB IRQ failure also stops live ACM output, so export a fresh
 persistent SWEETLOG after shutdown; compare boot args and IRQ failure lines.
