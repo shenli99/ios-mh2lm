@@ -211,6 +211,14 @@ PON/GPIO6 外设中断字节和最终 `mask 31`。只有这些证据齐全后，
 0114a5 的纯映射仍失败，下一步应先定位具体是哪一个 APID，不能只凭 PON 最终
 选用 APID 248 就认定 `0x0d580000` 有问题。
 
+0114a5 实测 baseline 与真正的 `mask 128` 均进入 iOS；新日志含
+`route-parts=0x10`，并完整打印 APID 1、19、248。三项 channel 映射均成功。
+Linux v5 对重复 PPID 选择当前 EE 拥有的 APID，并只检查其 IRQ 通道。
+新增 0132 让 channel 寄存器探针跳过 EE1/EE4 的 APID 1/19，只检查 EE0 且
+IRQ-owner=1 的 APID 248。下一轮依次测试 `mask 256`、`mask 512`，任一步
+回 LG BSP 即停止。此前 `0114a3` 的 channel 读取失败可能来自外部 EE 的
+通道访问；在 0132 实机结果出来之前，这仍是假设。
+
 ## 证据索引
 
 - 目标 SoC / PMIC DTS：`ref/lge-lineage-kernel/arch/arm64/boot/dts/qcom/sm8150.dtsi`、

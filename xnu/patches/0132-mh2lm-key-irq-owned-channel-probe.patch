@@ -1,0 +1,35 @@
+mh2lm: limit key IRQ channel register probes to the IRQ-owned EE0 APID (0132)
+
+The 0114a5 pure-map diagnostic reaches iOS after mapping all three APIDs
+for PON PPID 0x8. The earlier 0114a3 diagnostic returned to the LG BSP
+when it also read ACC_ENABLE. Runtime metadata shows APIDs 1 and 19 are
+owned by EEs 1 and 4, while APID 248 belongs to EE0 and has the IRQ-owner
+bit. Linux's PMIC-arb v5 driver chooses the EE-owned APID for a duplicate
+PPID and only probes IRQ status for APIDs whose irq_ee matches the current
+EE. Avoid channel register accesses on the other EEs' APIDs here.
+
+Keep metadata and owner-only diagnostics unchanged. For any diagnostic
+that maps or reads a channel, log skipped duplicates and continue to the
+EE0 IRQ-owned APID. This remains read-only and does not register GIC,
+enable, or clear an interrupt. It retains the existing key polling path.
+
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -94,6 +94,17 @@ sp_irq_diag_peripheral(unsigned sid, unsigned peripheral, const char *name,
+ 		if ((parts & SWEET_SPMI_IRQ_DIAG_ROUTE_OWNER) != 0) {
+ 			ownerMask = sp_rd(intr, 4u * ownerWord);
+ 		}
++		/* v5 can have duplicate PPIDs for different execution environments.
++		 * The channel's IRQ registers are only probed through our own EE0,
++		 * IRQ-owned APID; do not touch a foreign EE's channel registers. */
++		if ((parts & (SWEET_SPMI_IRQ_DIAG_ROUTE_CHANNEL |
++		    SWEET_SPMI_IRQ_DIAG_ROUTE_ENABLE |
++		    SWEET_SPMI_IRQ_DIAG_ROUTE_STATUS)) != 0 &&
++		    (owner != 0u || (map & SP_IRQ_OWNER_BIT) == 0)) {
++			printf("SWEET SPMI IRQ: %s ppid=%#x apid=%u channel skipped owner=%u irq-owner=%u (EE0 IRQ owner required)\n",
++			    name, ppid, apid, owner, (map & SP_IRQ_OWNER_BIT) ? 1 : 0);
++			continue;
++		}
+ 		if ((parts & (SWEET_SPMI_IRQ_DIAG_ROUTE_CHANNEL |
+ 		    SWEET_SPMI_IRQ_DIAG_ROUTE_ENABLE |
+ 		    SWEET_SPMI_IRQ_DIAG_ROUTE_STATUS)) != 0) {

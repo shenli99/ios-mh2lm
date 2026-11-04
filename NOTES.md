@@ -100,6 +100,23 @@ test results in this file.
   the existing diagnostic otherwise reaches APIDs 1 and 19 (owners 1 and 4)
   before APID 248. Compare any exported SWEETLOG's boot arguments and hash
   against the preceding capture before interpreting it.
+- **0114a5 hardware result (2026-11-04):** both `0114a5-baseline` and
+  `0114a5-key-irq-pon-route-map` reached iOS. Their exported 4 MiB SWEETLOG
+  files are distinct (SHA256 `12b4b92769b8466052190788466bb18a57ee6cfa8dcfc532fcbb31ea0030eaf6`
+  and `1881e0f9edb0c23ebb7da0377e4c1266485954b008fa5221f2e5622dcecbd548`);
+  the second records `sweetkeysirqdiag=128` and `route-parts=0x10`. Its
+  complete route output covers APIDs 1, 19 and 248, proving all three
+  `ml_io_map()` calls returned and logging continued. The earlier failure
+  therefore occurs in the channel register read path. It does not yet prove
+  which APID caused the abort. Runtime ownership is APID 1 -> EE1, 19 ->
+  EE4, and 248 -> EE0 with IRQ-owner bit set. Linux PMIC-arb v5 selects the
+  current EE's APID for duplicate PPIDs and skips IRQ status for foreign IRQ
+  owners. Patch 0132 applies that rule to channel register diagnostics,
+  logging foreign APIDs as skipped. It is read-only and keeps key polling;
+  once compiled, test `256` (EE0 `ACC_ENABLE`) then `512` (EE0 `IRQ_STATUS`)
+  with `fastboot boot`, stopping if either returns to the LG BSP. A success
+  would support, but not alone prove, that 0114a3 failed on an inaccessible
+  foreign EE channel.
 
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 
