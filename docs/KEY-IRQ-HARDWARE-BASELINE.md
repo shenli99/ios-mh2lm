@@ -264,8 +264,13 @@ enable、pending、active、trigger、priority、router 等状态；`3072` 组�
 模式：`1` 软件 workloop 交接、`2` 单 Power 硬件 IRQ、`3` 三键硬件 IRQ。
 GIC SPI 513 的独占入口在当前 `sleh_irq` 的 EOI 前，路由表只选择 EE0
 IRQ-owner APID；硬件确认、有限次 drain、错误时关闭 gate 和原轮询回退均已写入。
-这些是本地代码状态，尚未取得 CI 编译或实机 IRQ 命中证据，不能据此把验收条件
-标为完成。
+0114a9 云端内核已编译，实机第 3 项 `sweetkeysirq=2` 启动到 SpringBoard，
+但 GIC SPI 513 的 IGROUPR bit 写后读回为 0，`configureGic()` 在打开 PMIC/PDC
+gate 前退出，按键保持 20 ms 轮询；日志没有 `armed` 或 `hit route=power`。
+历史 shim 2c 已记录非安全视图下 IGROUPR 读零但 timer/SGI Group 1 仍可投递，
+所以这个读回不能单独证明 SPI 513 的实际分组或可投递性。具体日志 SHA256 和
+测试决策见 `NOTES.md`。三键第 4 项暂停，先查清 SPI 513 分组/安全域语义并设计
+有界诊断；目前不能把按键 IRQ 验收条件标为完成。
 
 ## 证据索引
 

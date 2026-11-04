@@ -2,7 +2,7 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**Current checkpoint (0134 mux commit `e393921`, 0114a9 packaged, no phone result):** 0114a7
+**Current checkpoint (0134 mux commit `e393921`, 0114a9 Power trial failed to arm):** 0114a7
 closed the PON/GPIO6 route and peripheral read-only
 preflight; both EE0 APIDs are accessible, but their PMIC interrupt gates
 remain off and keys still poll every 20 ms. The target SM8150 Linux source
@@ -96,6 +96,25 @@ failure, or absent `SWEET MUX: hit route=power` after repeated Power presses
 in mode 2. Only test mode 3 after mode 2 reports route hits and normal
 press/release. The local documentation-only commit for this packaging does
 not need to be pushed for the phone test.
+
+**0114a9 stage 3 result (2026-11-04):**
+`logs/sweetlog-0114a9-key-irq-power.bin` SHA256
+`fc4638d2d7aa8cf4c87521313a9dd7d9e93888078c0d90dcb401cc3ad3814ce6`
+(SWEETLOG total 249181, flush 28) confirms `sweetkeysirq=2` and reaches
+SpringBoard. The mux prints `GIC intid=513 group=0 cfg=0 pri=0xa0 route=0:0`,
+then `PDC polarity or GIC config check failed; polling retained`; the key
+driver prints `mux mode=2 unavailable; 20 ms polling retained`. Multiple
+Power down/up reports follow, but there is no `armed` or `hit route=power`.
+Thus the **Power IRQ test did not pass**: key input works through polling
+fallback. The GIC Group 1 bit readback alone caused `configureGic()` to
+return false before PMIC/PDC gates were opened. Earlier shim 2c found
+GICD/GICR IGROUPR bits reading zero from the non-secure view even while
+Group 1 timer/SGI delivery worked; this makes that readback a questionable
+health check, but does not establish that SPI 513 is deliverable. Check the
+GIC security/group semantics and design a bounded diagnostic before changing
+the gate sequence. **Do not boot stage 4** with 0114a9; stage 2 need not be
+repeated to diagnose this stage 3 failure. No hardware IRQ acceptance
+criterion is met yet.
 
 **Implementation roadmap:** `docs/IRQ-FRAMEBUFFER-PLAN.md` records the agreed
 two-stage order: first make the existing key, DWC3 USB and touch paths
