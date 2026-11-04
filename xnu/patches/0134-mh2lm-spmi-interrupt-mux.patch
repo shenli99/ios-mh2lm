@@ -1,0 +1,665 @@
+mh2lm: add gated SweetSpmiInterruptMux with key IRQ consumers (0134)
+
+Add the current XNU's sole SPI 513 callback before GIC EOI and hand it to a
+provider-less IOInterruptEventSource on an IOWorkLoop. A static route table
+resolves only EE0 IRQ-owned APIDs, maps Power, Volume Down and Volume Up to
+consumer callbacks, and handles PMIC-arb v5 channel/peripheral acknowledgement.
+The top half masks SPI 513 before EOI; the worker drains/acks and unmasks it,
+with bounded failure handling that turns off GIC/PDC/PMIC gates and restores
+the existing key poll period. No IOKit or SPMI access occurs in the top half.
+
+Default boot behavior is unchanged. sweetkeysirq=1 tests software workloop
+handoff without MMIO gates; =2 arms Power only while retaining 20 ms polling
+for the other keys; =3 arms all three keys with a 200 ms recovery poll.
+All MMIO gate writes and route configuration are limited to explicit opt-in
+modes and verified against the MH2LM owner/APID, PDC and GIC readbacks.
+
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -17,6 +17,7 @@
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_hid_key(int key, int down);
++extern int sweet_spmi_mux_start(unsigned mode);
+ void sweet_keys_init(void);
+ 
+ #define KEYS_CORE_PA     SWEET_DEV_SPMI_CORE_PA
+@@ -49,6 +50,26 @@
+ static uint32_t keys_version, keys_last_status;
+ static bool keys_started;
+ static int keys_sleep_chan;
++static volatile unsigned keys_irq_mode;
++static volatile unsigned keys_irq_events;
++
++/* Called only from the mux's IOWorkLoop, never from the GIC top half. */
++void
++sweet_keys_irq_notify(unsigned key)
++{
++	(void)key;
++	__atomic_add_fetch(&keys_irq_events, 1u, __ATOMIC_RELAXED);
++	thread_wakeup(&keys_sleep_chan);
++}
++
++void
++sweet_keys_irq_fallback(void)
++{
++	/* UINT_MAX is a failure latch: if a just-enabled IRQ fails before
++	 * sweet_keys_init stores its mode, that store cannot undo fallback. */
++	__atomic_store_n(&keys_irq_mode, ~0u, __ATOMIC_RELEASE);
++	thread_wakeup(&keys_sleep_chan);
++}
+ 
+ static uint32_t
+ keys_rd(vm_offset_t base, uint32_t off)
+@@ -201,11 +222,21 @@
+ #endif /* SWEET_DEV_KEYS_VOLUME */
+ 
+ static void
+-keys_wait(void)
++keys_wait(unsigned observedEvents)
+ {
+ 	uint64_t deadline;
+-	clock_interval_to_deadline(20, NSEC_PER_MSEC, &deadline);
++	/* Mode 3 uses IRQ wakeups with a 200 ms recovery timeout. Mode 2 leaves
++	 * the other two keys on the proven 20 ms poll period. */
++	unsigned ms = __atomic_load_n(&keys_irq_mode, __ATOMIC_ACQUIRE) == 3u ?
++	    200u : 20u;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+ 	(void)assert_wait_deadline(&keys_sleep_chan, THREAD_UNINT, deadline);
++	/* An IRQ delivered after the last sample but before assert_wait must
++	 * still cause an immediate new sample. */
++	if (__atomic_load_n(&keys_irq_events, __ATOMIC_ACQUIRE) !=
++	    observedEvents) {
++		thread_wakeup(&keys_sleep_chan);
++	}
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
+@@ -217,6 +248,8 @@
+ 	(void)arg;
+ 	(void)result;
+ 	for (;;) {
++		unsigned observedEvents = __atomic_load_n(&keys_irq_events,
++		    __ATOMIC_ACQUIRE);
+ 		uint8_t pon = 0;
+ 		bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
+ #if SWEET_DEV_KEYS_VOLUME
+@@ -264,7 +297,7 @@
+ 			sweet_hid_key(0, state[0]);
+ 		}
+ #endif /* SWEET_DEV_KEYS_VOLUME */
+-		keys_wait();
++		keys_wait(observedEvents);
+ 	}
+ }
+ 
+@@ -273,6 +306,7 @@
+ {
+ 	int enabled = 1;
+ 	int irqDiag = 0;
++	int irqMode = 0;
+ 	thread_t thread;
+ 	if (keys_started) {
+ 		return;
+@@ -280,6 +314,7 @@
+ 	keys_started = true;
+ 	(void)PE_parse_boot_argn("sweetkeys", &enabled, sizeof(enabled));
+ 	(void)PE_parse_boot_argn("sweetkeysirqdiag", &irqDiag, sizeof(irqDiag));
++	(void)PE_parse_boot_argn("sweetkeysirq", &irqMode, sizeof(irqMode));
+ 	if (!enabled) {
+ 		printf("SWEET KEYS: disabled (sweetkeys=0)\n");
+ 		return;
+@@ -403,6 +438,24 @@
+ 			keys_irq_diag_gic();
+ 		}
+ 	}
++	if (irqMode != 0) {
++		if (irqMode < 0 || irqMode > 3 ||
++		    sweet_spmi_mux_start((unsigned)irqMode) != 0) {
++			printf("SWEET KEYS IRQ: mux mode=%d unavailable; 20 ms polling retained\n",
++			    irqMode);
++		} else {
++			unsigned expectedMode = 0;
++			if (__atomic_compare_exchange_n(&keys_irq_mode, &expectedMode,
++			    (unsigned)irqMode, false, __ATOMIC_ACQ_REL,
++			    __ATOMIC_ACQUIRE)) {
++				printf("SWEET KEYS IRQ: mux mode=%d started, polling fallback retained\n",
++				    irqMode);
++			} else {
++				printf("SWEET KEYS IRQ: mux mode=%d fell back during setup; 20 ms polling retained\n",
++				    irqMode);
++			}
++		}
++	}
+ 	kern_return_t kr = kernel_thread_start(keys_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1882,7 +1882,12 @@
+ 		cpu_signal_handler();
+ 	} else {
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
+-		if (cdp->interrupt_handler) {
++		bool sweet_handled = false;
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++		extern bool sweet_spmi_mux_irq(unsigned int intid);
++		sweet_handled = sweet_spmi_mux_irq(intid);
++#endif
++		if (!sweet_handled && cdp->interrupt_handler) {
+ 			cdp->interrupt_handler(cdp->interrupt_target,
+ 			    cdp->interrupt_refCon,
+ 			    cdp->interrupt_nub,
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -10,6 +10,7 @@
+ iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitcpp
+ 
+ iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
++iokit/Kernel/arm/SweetSpmiInterruptMux.cpp                       optional iokitcpp
+ iokit/Kernel/arm/SweetEntitlements.cpp                           optional iokitcpp
+ iokit/Kernel/arm/SweetKeyStore.cpp                               optional iokitcpp
+ iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitcpp
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -0,0 +1,500 @@
++/*
++ * MH2LM's single EE0 PMIC peripheral SPI. The GIC top half masks INTID 513
++ * before EOI and queues a provider-less IOInterruptEventSource; all PMIC-arb
++ * and SPMI work runs on its IOWorkLoop. The table is independent of the
++ * physical GIC handoff so future PMIC consumers can be registered here.
++ *
++ * sweetkeysirq=1: software handoff only; 2: Power source; 3: all keys.
++ * The existing key poller remains the recovery path in every mode.
++ */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include <device/device_types.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOWorkLoop.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/arm64/sweet_dev.h>
++#include <stdint.h>
++
++extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern "C" void sweet_keys_irq_notify(unsigned key);
++extern "C" void sweet_keys_irq_fallback(void);
++
++#define MUX_GICD_PA       0x17a00000u
++#define MUX_PDC_PA        0x0b220000u
++#define MUX_INTID         513u
++#define MUX_SPI_WORD      (MUX_INTID / 32u)
++#define MUX_SPI_BIT       (1u << (MUX_INTID % 32u))
++#define MUX_NO_APID       0xffffu
++#define MUX_IRQ_OWNER_BIT 0x01000000u
++#define MUX_IRQ_LIMIT     256u
++
++typedef void (*MuxConsumer)(void *, unsigned);
++struct MuxRoute {
++	unsigned sid;
++	unsigned per;
++	unsigned bit;
++	unsigned key;
++	unsigned armMode;
++	const char *name;
++	MuxConsumer consumer;
++	void *context;
++	uint16_t apid;
++	vm_offset_t channel;
++	bool active;
++};
++
++static void
++keyConsumer(void *context, unsigned key)
++{
++	(void)context;
++	sweet_keys_irq_notify(key);
++}
++
++/* Route policy is data: mode 2 arms Power, mode 3 arms all three keys. */
++static MuxRoute routes[] = {
++	{0, 0x08, 0, 0, 2, "power", keyConsumer, NULL, MUX_NO_APID, 0, false},
++	{0, 0x08, 1, 2, 3, "volume-down", keyConsumer, NULL, MUX_NO_APID, 0, false},
++	{0, 0xc5, 0, 1, 3, "volume-up", keyConsumer, NULL, MUX_NO_APID, 0, false},
++};
++
++static vm_offset_t gicd, pdc, core, cfg, obs;
++static IOWorkLoop *workLoop;
++static IOInterruptEventSource *eventSource;
++static volatile unsigned state; /* 0 off, 1 armed, 2 worker pending, 3 failed */
++static unsigned irqCount, workCount, routeCount, faultCount;
++static unsigned mode;
++
++static uint32_t
++read32(vm_offset_t base, unsigned off)
++{
++	uint32_t value = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return value;
++}
++
++static void
++write32(vm_offset_t base, unsigned off, uint32_t value)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = value;
++	__asm__ volatile("dsb oshst" ::: "memory");
++}
++
++static uint64_t
++read64(vm_offset_t base, unsigned off)
++{
++	uint64_t value = *(volatile uint64_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return value;
++}
++
++static void
++write64(vm_offset_t base, unsigned off, uint64_t value)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint64_t *)(base + off) = value;
++	__asm__ volatile("dsb oshst" ::: "memory");
++}
++
++static bool
++waitGic(void)
++{
++	for (unsigned i = 0; i < 1000; ++i) {
++		if ((read32(gicd, 0x000u) & (1u << 31)) == 0) {
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++static uint16_t
++findOwnedApid(unsigned sid, unsigned per, unsigned count)
++{
++	unsigned ppid = (sid << 8) | per;
++	uint16_t result = MUX_NO_APID;
++	for (unsigned i = 0; i < count; ++i) {
++		uint32_t map = read32(core, 0x900u + 4u * i);
++		if (((map >> 8) & 0xfffu) != ppid ||
++		    (map & MUX_IRQ_OWNER_BIT) == 0) {
++			continue;
++		}
++		if ((read32(cfg, 0x700u + 4u * i) & 7u) != 0) {
++			continue; /* never access a foreign EE channel */
++		}
++		if (result != MUX_NO_APID) {
++			return MUX_NO_APID; /* ambiguous EE0 IRQ owner */
++		}
++		result = (uint16_t)i;
++	}
++	return result;
++}
++
++/* Observer EXT_READL. Used only before the key polling thread starts. */
++static bool
++readPeripheral(const MuxRoute &route, unsigned reg, uint8_t *out)
++{
++	if (!obs || !out || route.apid == MUX_NO_APID) {
++		return false;
++	}
++	vm_offset_t lane = obs + 0x80u * route.apid;
++	write32(lane, 0, (1u << 27) | ((reg & 0xffu) << 4));
++	for (unsigned i = 0; i < 1000; ++i) {
++		uint32_t status = read32(lane, 0x08u);
++		if (status & 1u) {
++			if (status & 0x0eu) {
++				return false;
++			}
++			*out = (uint8_t)read32(lane, 0x18u);
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++/* v5 EXT_WRITEL through the EE0 APID's RW channel, 1 or 2 bytes. */
++static bool
++writePeripheral(const MuxRoute &route, unsigned reg, uint16_t data,
++    unsigned bytes)
++{
++	if (!route.channel || bytes == 0 || bytes > 2) {
++		return false;
++	}
++	write32(route.channel, 0x10u, data);
++	write32(route.channel, 0x00u, ((reg & 0xffu) << 4) | (bytes - 1u));
++	for (unsigned i = 0; i < 1000; ++i) {
++		uint32_t status = read32(route.channel, 0x08u);
++		if (status & 1u) {
++			return (status & 0x0eu) == 0;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++static bool
++ackRoute(const MuxRoute &route)
++{
++	uint32_t mask = 1u << route.bit;
++	write32(route.channel, 0x108u, mask); /* v5 channel IRQ_CLEAR */
++	return writePeripheral(route, 0x14u, (uint16_t)mask, 1);
++}
++
++static uint32_t
++allowedMaskForApid(uint16_t apid)
++{
++	uint32_t mask = 0;
++	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
++		const MuxRoute &route = routes[i];
++		if (route.active && route.apid == apid) {
++			mask |= 1u << route.bit;
++		}
++	}
++	return mask;
++}
++
++static void
++disableHardware(void)
++{
++	__atomic_store_n(&state, 3u, __ATOMIC_RELEASE);
++	if (gicd) {
++		write32(gicd, 0x180u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
++	}
++	if (pdc) {
++		write32(pdc, 0x10u, read32(pdc, 0x10u) & ~2u);
++	}
++	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
++		MuxRoute &route = routes[i];
++		if (!route.active || !route.channel) {
++			continue;
++		}
++		(void)writePeripheral(route, 0x16u, (uint16_t)(1u << route.bit), 1);
++		write32(route.channel, 0x100u, 0);
++	}
++	sweet_keys_irq_fallback();
++}
++
++static bool
++configureGic(void)
++{
++	uint32_t typer = read32(gicd, 0x004u);
++	if (((typer & 0x1fu) + 1u) * 32u <= MUX_INTID) {
++		return false;
++	}
++	write32(gicd, 0x180u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
++	if (!waitGic()) {
++		return false;
++	}
++	unsigned word = MUX_INTID / 32u;
++	uint32_t group = read32(gicd, 0x80u + 4u * word) | MUX_SPI_BIT;
++	write32(gicd, 0x80u + 4u * word, group);
++	unsigned cfgOff = 0xc00u + 4u * (MUX_INTID / 16u);
++	uint32_t cfgValue = read32(gicd, cfgOff) &
++	    ~(3u << (2u * (MUX_INTID % 16u)));
++	write32(gicd, cfgOff, cfgValue); /* level-high after PDC conversion */
++	unsigned priOff = 0x400u + (MUX_INTID & ~3u);
++	unsigned priShift = 8u * (MUX_INTID & 3u);
++	uint32_t priority = read32(gicd, priOff);
++	write32(gicd, priOff, (priority & ~(0xffu << priShift)) |
++	    (0xa0u << priShift));
++	write64(gicd, 0x6000u + 8u * MUX_INTID, 0); /* boot CPU MPIDR 0 */
++	if (!waitGic()) {
++		return false;
++	}
++	uint32_t gotGroup = read32(gicd, 0x80u + 4u * word);
++	uint32_t gotCfg = read32(gicd, cfgOff);
++	uint32_t gotPri = read32(gicd, priOff);
++	uint64_t gotRoute = read64(gicd, 0x6000u + 8u * MUX_INTID);
++	IOLog("SWEET MUX: GIC intid=%u group=%u cfg=%u pri=%#x route=%#x:%#x\n",
++	    MUX_INTID, (gotGroup & MUX_SPI_BIT) ? 1 : 0,
++	    (gotCfg >> (2u * (MUX_INTID % 16u))) & 3u,
++	    (gotPri >> priShift) & 0xffu,
++	    (uint32_t)(gotRoute >> 32), (uint32_t)gotRoute);
++	return (gotGroup & MUX_SPI_BIT) != 0 &&
++	    ((gotCfg >> (2u * (MUX_INTID % 16u))) & 3u) == 0 &&
++	    ((gotPri >> priShift) & 0xffu) == 0xa0u && gotRoute == 0;
++}
++
++static bool
++configureRoute(MuxRoute &route)
++{
++	uint8_t type = 0, high = 0, low = 0, enabled = 0;
++	if (!readPeripheral(route, 0x11u, &type) ||
++	    !readPeripheral(route, 0x12u, &high) ||
++	    !readPeripheral(route, 0x13u, &low) ||
++	    !readPeripheral(route, 0x15u, &enabled)) {
++		return false;
++	}
++	uint8_t mask = (uint8_t)(1u << route.bit);
++	if (!writePeripheral(route, 0x11u, type | mask, 1) ||
++	    !writePeripheral(route, 0x12u, high | mask, 1) ||
++	    !writePeripheral(route, 0x13u, low | mask, 1) ||
++	    !ackRoute(route)) {
++		return false;
++	}
++	write32(route.channel, 0x100u, 1u); /* ACC_ENABLE */
++	if (!writePeripheral(route, 0x14u,
++	    (uint16_t)(mask | (uint16_t)(mask << 8)), 2)) {
++		return false; /* LATCHED_CLR + EN_SET in one v5 transaction */
++	}
++	uint8_t gotType = 0, gotHigh = 0, gotLow = 0, gotEnable = 0;
++	if (!readPeripheral(route, 0x11u, &gotType) ||
++	    !readPeripheral(route, 0x12u, &gotHigh) ||
++	    !readPeripheral(route, 0x13u, &gotLow) ||
++	    !readPeripheral(route, 0x15u, &gotEnable) ||
++	    (gotType & mask) == 0 || (gotHigh & mask) == 0 ||
++	    (gotLow & mask) == 0 || (gotEnable & mask) == 0 ||
++	    (read32(route.channel, 0x100u) & 1u) == 0) {
++		IOLog("SWEET MUX: %s peripheral/channel readback failed type=%#x high=%#x low=%#x enable=%#x\n",
++		    route.name, gotType, gotHigh, gotLow, gotEnable);
++		return false;
++	}
++	IOLog("SWEET MUX: route %s sid=%u per=%#x apid=%u bit=%u cfg=%#x/%#x/%#x old-enable=%#x\n",
++	    route.name, route.sid, route.per, route.apid, route.bit,
++	    type, high, low, enabled);
++	return true;
++}
++
++static void
++drainInterrupt(void)
++{
++	++workCount;
++	if (mode == 1) {
++		IOLog("SWEET MUX: software event delivered on IOWorkLoop\n");
++		return;
++	}
++	if (__atomic_load_n(&state, __ATOMIC_ACQUIRE) != 2u) {
++		return;
++	}
++	if (irqCount > MUX_IRQ_LIMIT) {
++		IOLog("SWEET MUX: IRQ limit reached count=%u; polling fallback\n", irqCount);
++		disableHardware();
++		return;
++	}
++	bool handled = false;
++	for (unsigned pass = 0; pass < 4; ++pass) {
++		bool pending = false;
++		for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
++			MuxRoute &route = routes[i];
++			if (!route.active) {
++				continue;
++			}
++			uint32_t status = read32(route.channel, 0x104u);
++			if (status & ~allowedMaskForApid(route.apid)) {
++				IOLog("SWEET MUX: unregistered PMIC pending apid=%u status=%#x; polling fallback\n",
++				    route.apid, status);
++				disableHardware();
++				return;
++			}
++			if ((status & (1u << route.bit)) == 0) {
++				continue;
++			}
++			pending = true;
++			if (!ackRoute(route)) {
++				IOLog("SWEET MUX: ack failed route=%s status=%#x\n",
++				    route.name, status);
++				disableHardware();
++				return;
++			}
++			++routeCount;
++			route.consumer(route.context, route.key);
++			if (routeCount <= 32 || (routeCount & 63u) == 0) {
++				IOLog("SWEET MUX: hit route=%s status=%#x irq=%u work=%u hits=%u\n",
++				    route.name, status, irqCount, workCount, routeCount);
++			}
++			handled = true;
++		}
++		if (!pending) {
++			break;
++		}
++	}
++	bool stillPending = false;
++	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
++		const MuxRoute &route = routes[i];
++		if (route.active &&
++		    (read32(route.channel, 0x104u) & (1u << route.bit))) {
++			stillPending = true;
++		}
++	}
++	if (!handled || stillPending) {
++		++faultCount;
++		IOLog("SWEET MUX: unhandled/stuck irq handled=%u pending=%u faults=%u; polling fallback\n",
++		    handled ? 1 : 0, stillPending ? 1 : 0, faultCount);
++		disableHardware();
++		return;
++	}
++	__atomic_store_n(&state, 1u, __ATOMIC_RELEASE);
++	write32(gicd, 0x100u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
++}
++
++static void
++workAction(OSObject *owner, IOInterruptEventSource *source, int count)
++{
++	(void)owner;
++	(void)source;
++	(void)count;
++	drainInterrupt();
++}
++
++extern "C" bool
++sweet_spmi_mux_irq(unsigned int intid)
++{
++	if (intid != MUX_INTID) {
++		return false;
++	}
++	unsigned expected = 1u;
++	if (!__atomic_compare_exchange_n(&state, &expected, 2u, false,
++	    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++		return expected == 2u || expected == 3u;
++	}
++	write32(gicd, 0x180u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
++	++irqCount;
++	eventSource->interruptOccurred(NULL, NULL, 0);
++	return true;
++}
++
++extern "C" int
++sweet_spmi_mux_start(unsigned requestedMode)
++{
++	if (requestedMode < 1u || requestedMode > 3u || workLoop) {
++		return -1;
++	}
++	mode = requestedMode;
++	workLoop = IOWorkLoop::workLoop();
++	if (!workLoop) {
++		return -1;
++	}
++	eventSource = IOInterruptEventSource::interruptEventSource(workLoop,
++	    workAction, NULL, 0);
++	if (!eventSource || workLoop->addEventSource(eventSource) != kIOReturnSuccess) {
++		IOLog("SWEET MUX: software event source unavailable\n");
++		return -1;
++	}
++	if (mode == 1) {
++		IOLog("SWEET MUX: software handoff test queued; no PMIC/PDC/GIC gates\n");
++		eventSource->interruptOccurred(NULL, NULL, 0);
++		return 0;
++	}
++	gicd = ml_io_map(MUX_GICD_PA, 0x10000);
++	pdc = ml_io_map(MUX_PDC_PA, 0x400);
++	core = ml_io_map(SWEET_DEV_SPMI_CORE_PA, 0x2000);
++	cfg = ml_io_map(SWEET_DEV_SPMI_CFG_PA, 0x1000);
++	obs = ml_io_map(SWEET_DEV_SPMI_OBS_PA, 0x10000);
++	if (!gicd || !pdc || !core || !cfg || !obs) {
++		IOLog("SWEET MUX: upstream or PMIC map failed; polling retained\n");
++		return -1;
++	}
++	uint32_t version = read32(core, 0);
++	unsigned count = read32(core, 4) & 0x7ffu;
++	if (version < 0x50000000u || version >= 0x60000000u ||
++	    count == 0 || count > 512) {
++		IOLog("SWEET MUX: unsupported arb=%#x count=%u\n", version, count);
++		return -1;
++	}
++	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
++		MuxRoute &route = routes[i];
++		route.active = mode >= route.armMode;
++		if (!route.active) {
++			continue;
++		}
++		route.apid = findOwnedApid(route.sid, route.per, count);
++		if (route.apid == MUX_NO_APID) {
++			IOLog("SWEET MUX: %s has no unique EE0 IRQ-owned APID\n", route.name);
++			return -1;
++		}
++		route.channel = ml_io_map(SWEET_DEV_SPMI_CHNLS_PA +
++		    0x10000u * route.apid, 0x1000);
++		if (!route.channel) {
++			IOLog("SWEET MUX: %s channel map failed apid=%u\n",
++			    route.name, route.apid);
++			return -1;
++		}
++	}
++	/* No hardware gate is opened until callback, worker and all checks exist. */
++	if ((read32(pdc, 0x114u) & 7u) != 4u || !configureGic()) {
++		IOLog("SWEET MUX: PDC polarity or GIC config check failed; polling retained\n");
++		return -1;
++	}
++	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
++		MuxRoute &route = routes[i];
++		if (route.active && !configureRoute(route)) {
++			IOLog("SWEET MUX: route %s setup failed; polling fallback\n", route.name);
++			disableHardware();
++			return -1;
++		}
++	}
++	uint32_t enable = read32(pdc, 0x10u);
++	write32(pdc, 0x10u, enable | 2u);
++	if ((read32(pdc, 0x10u) & 2u) == 0) {
++		IOLog("SWEET MUX: PDC pin 1 enable failed; polling fallback\n");
++		disableHardware();
++		return -1;
++	}
++	__atomic_store_n(&state, 1u, __ATOMIC_RELEASE);
++	write32(gicd, 0x100u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
++	uint32_t enabledBit = read32(gicd, 0x100u + 4u * MUX_SPI_WORD) &
++	    MUX_SPI_BIT;
++	unsigned currentState = __atomic_load_n(&state, __ATOMIC_ACQUIRE);
++	/* An immediate valid IRQ may already have masked the SPI in the top
++	 * half. That is a successful enable, not a failed readback. */
++	if ((!enabledBit && currentState == 1u) || currentState == 3u) {
++		IOLog("SWEET MUX: GIC SPI 513 enable failed; polling fallback\n");
++		disableHardware();
++		return -1;
++	}
++	IOLog("SWEET MUX: armed mode=%u intid=%u pdc=%#x routes=%u limit=%u state=%u\n",
++	    mode, MUX_INTID, read32(pdc, 0x10u), mode == 3 ? 3 : 1,
++	    MUX_IRQ_LIMIT, currentState);
++	return 0;
++}
++#else
++/* The shared sweet_keys.c is also linked for sweet and guacamole. Their
++ * existing default polling path stays linkable without MH2LM hardware. */
++extern "C" int sweet_spmi_mux_start(unsigned)
++{
++	return -1;
++}
++#endif /* ARM64_BOARD_CONFIG_MH2LM */

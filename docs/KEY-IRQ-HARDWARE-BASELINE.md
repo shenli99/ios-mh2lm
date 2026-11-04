@@ -245,20 +245,27 @@ channel 时回 LG BSP 是当前最强的故障解释；纯映射成功、跳过�
 现场日志，不能精确归因于 APID 1 或 19。按键目前仍靠轮询，硬件中断使能
 和 GIC/mux 注册尚未实施。
 
-下一轮 0133 将 PDC 与 GIC 的实机读回分离：`sweetkeysirqdiag=1024` 只映射并读取
+历史诊断方案 0133 将 PDC 与 GIC 的实机读回分离：`sweetkeysirqdiag=1024` 只映射并读取
 PDC pin 1 的 enable bank/config；`2048` 只读取 GICD 对 INTID 513 的 Group 1、
 enable、pending、active、trigger、priority、router 等状态；`3072` 组合两者。
 它不打开任何 gate、不注册 IRQ，也不改变按键轮询。CI 产物用
 `tools/mk-mh2lm-event-matrix.sh ARTIFACT LABEL --key-irq-upstream` 生成测试镜像；
-依次临时启动 baseline、PDC、GIC，前三项都进入 iOS 后再启动组合项。每项需提取
-新的 SWEETLOG，并核对对应 `SWEET KEYS IRQ PDC/GIC` 输出。实机值取得前，不能把
-源码中的配置候选当作本机已配置状态。
+原定依次临时启动 baseline、PDC、GIC，前三项都进入 iOS 后再启动组合项。
+这套测试顺序已由下文 0114a8 的结果修订；保留这里供回溯历史。实机值取得前，
+不能把源码中的配置候选当作本机已配置状态。
 
 0114a8 的内核产物已经完成并校验，0133 探针源码出现在 buildtree 和内核字符串中。
 `sweetlog-0114a8-key-irq-pdc.bin` 是新日志，确认 PDC pin 1 关闭、配置为高电平
 有效，启动到 SpringBoard。原定 GIC-only、组合只读镜像无需再测：路由和寄存器
 布局早已从目标源码确认，GIC 的旧空闲值不是实现前置条件；新的驱动应显式配置
 并读回 SPI 513。镜像路径和日志 SHA256 见 `NOTES.md` 当前检查点。
+
+0134 已按上述已知路由实现首版 mux，提供不改变默认行为的 `sweetkeysirq`
+模式：`1` 软件 workloop 交接、`2` 单 Power 硬件 IRQ、`3` 三键硬件 IRQ。
+GIC SPI 513 的独占入口在当前 `sleh_irq` 的 EOI 前，路由表只选择 EE0
+IRQ-owner APID；硬件确认、有限次 drain、错误时关闭 gate 和原轮询回退均已写入。
+这些是本地代码状态，尚未取得 CI 编译或实机 IRQ 命中证据，不能据此把验收条件
+标为完成。
 
 ## 证据索引
 
@@ -274,4 +281,5 @@ enable、pending、active、trigger、priority、router 等状态；`3072` 组�
   当前分阶段预检：`xnu/patches/0129-mh2lm-key-irq-diag-stages.patch`；PON 微阶段：
   `xnu/patches/0130-mh2lm-pon-route-microdiag.patch`、
   `xnu/patches/0131-mh2lm-pon-channel-map-probe.patch`；上游控制器只读探针：
-  `xnu/patches/0133-mh2lm-key-irq-upstream-snapshot.patch`。
+  `xnu/patches/0133-mh2lm-key-irq-upstream-snapshot.patch`；首版 mux：
+  `xnu/patches/0134-mh2lm-spmi-interrupt-mux.patch`。

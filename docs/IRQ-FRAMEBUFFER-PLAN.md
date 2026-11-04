@@ -1,7 +1,8 @@
 # MH2LM IRQ 与 Framebuffer 路线图
 
 **状态：** 大目标一 / 子目标 1 的只读路由预检已完成；
-`SweetSpmiInterruptMux` 尚未 arm，按键仍使用既有轮询回退。
+`SweetSpmiInterruptMux` 的首版代码已本地完成，尚待 CI/实机验证；默认按键仍使用
+既有 20 ms 轮询。
 **更新日期：** 2026-11-04
 **适用范围：** `ref/ios-mh2lm` 的 MH2LM XNU 驱动；本文是实施和验收计划，
 不替代 `NOTES.md` 中已经取得的硬件观察、日志结论和回归基线。
@@ -56,7 +57,7 @@ PMIC 外设 / 控制器
 **目的：** 建立共享 PMIC IRQ 的可扩展分发和下半部交接机制，并以按键作为第一
 个真实 consumer 验证。
 
-**当前检查点（0114a7，只读路由预检完成）：** PON 的重复 PPID 映射包含
+**历史检查点（0114a7，只读路由预检完成）：** PON 的重复 PPID 映射包含
 EE1/EE4 的 APID 1/19 和 EE0 的 APID 248。旧探针读取外部 EE channel 时
 回 LG BSP；0132 跳过外部 EE 后，PON、GPIO6 的路由和外设配置单项/组合
 预检全部进入 iOS。两条 EE0 channel 的 `ACC_ENABLE`、`IRQ_STATUS` 均为 0，
@@ -73,6 +74,12 @@ GIC SPI 513 的现有空闲值无需再单独测试；当前 XNU 没有为它做
 及轮询回退，然后才按单 Power source 开 gate。0133 的 GIC/组合只读镜像
 保留作诊断备选，不作为进入实现的前置测试。
 
+0134 首版已包含上述可按启动参数选择的 gate：`sweetkeysirq=1` 只验证
+IOInterruptEventSource/IOWorkLoop 软件交接，`=2` 仅启用 Power IRQ，`=3`
+启用三键 IRQ。默认参数不改硬件。其构建产物需依次临时启动 baseline、
+软件交接、Power、三键镜像，每步提取独立日志；只有前一步正常才进入下一步。
+0134 的语法与补丁应用已在本地验证，CircleCI 和设备结果仍未知。
+
 **实施边界：**
 
 - 实现 `SweetSpmiInterruptMux`、静态路由表、pending 状态扫描、确认顺序、
@@ -80,7 +87,8 @@ GIC SPI 513 的现有空闲值无需再单独测试；当前 XNU 没有为它做
 - 在启用任何 PMIC IRQ gate 前，完成 MH2LM DTB/DSDT、PMIC-arb v5、APID、PDC
   与确认寄存器的只读核对；不得复用 UniXNU 其他设备的 PPID、PDC pin 或寄存器
   常量。
-- 先仅将按键接入 mux：上半部唤醒既有按键 worker，按键 worker 继续读取电平并
+- 先仅将按键接入 mux：GIC 上半部调度 mux 的软件事件，mux worker 唤醒既有按键
+  worker；按键 worker 继续读取电平并
   经既有 `sweet_hid_key()` 发布 HID 事件。IRQ 成功 arm 后，替换当前 20 ms
   轮询等待；保留安全的回退/诊断模式，直到硬件稳定。
 - 暂不把电池/充电 PMIC gate 作为本子目标的硬件 consumer。它们将来可以复用 mux，

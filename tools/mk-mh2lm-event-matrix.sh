@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux]\n' "$0" >&2
 	exit 2
 fi
 
@@ -22,6 +22,8 @@ case "$KEY_IRQ_PROFILE" in
 	--key-irq-pon-route-micro)
 		;;
 	--key-irq-upstream)
+		;;
+	--key-irq-mux)
 		;;
 	*)
 		printf 'unknown optional profile: %s\n' "$KEY_IRQ_PROFILE" >&2
@@ -69,6 +71,9 @@ strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'SWEET BATT UI:'
 strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'ACM endpoints configured'
 if [ -n "$KEY_IRQ_PROFILE" ]; then
 	strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'keys-volume-up'
+fi
+if [ "$KEY_IRQ_PROFILE" = '--key-irq-mux' ]; then
+	strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'SWEET MUX: armed mode='
 fi
 
 make_profile() {
@@ -179,6 +184,17 @@ if [ "$KEY_IRQ_PROFILE" = '--key-irq-upstream' ]; then
 		"LG G8X - XNU key IRQ upstream snapshot (${LABEL})" \
 		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=3072"
 fi
+if [ "$KEY_IRQ_PROFILE" = '--key-irq-mux' ]; then
+	make_profile key-irq-mux-soft \
+		"LG G8X - XNU key IRQ mux software handoff (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirq=1"
+	make_profile key-irq-power \
+		"LG G8X - XNU Power key IRQ (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirq=2"
+	make_profile key-irq-all \
+		"LG G8X - XNU all key IRQs (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirq=3"
+fi
 
 printf 'kernel SHA256: %s\n' "$KERNEL_SHA256"
 printf 'created profiles for %s: baseline, battery-ui, battery-ui-preserve-off, usb, usb-battery-ui' "$LABEL"
@@ -193,5 +209,8 @@ if [ "$KEY_IRQ_PROFILE" = '--key-irq-pon-route-micro' ]; then
 fi
 if [ "$KEY_IRQ_PROFILE" = '--key-irq-upstream' ]; then
 	printf ', key-irq-pdc, key-irq-gic, key-irq-upstream'
+fi
+if [ "$KEY_IRQ_PROFILE" = '--key-irq-mux' ]; then
+	printf ', key-irq-mux-soft, key-irq-power, key-irq-all'
 fi
 printf '\n'

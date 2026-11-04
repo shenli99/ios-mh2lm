@@ -2,8 +2,8 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**Current checkpoint (0133 implementation commit `c69de95`, 0114a8
-artifact):** 0114a7 closed the PON/GPIO6 route and peripheral read-only
+**Current checkpoint (0134 mux staged locally, no CI/phone result):** 0114a7
+closed the PON/GPIO6 route and peripheral read-only
 preflight; both EE0 APIDs are accessible, but their PMIC interrupt gates
 remain off and keys still poll every 20 ms. The target SM8150 Linux source
 maps PDC pin 1 to GIC INTID 513. Patch 0133 adds independent read-only
@@ -40,9 +40,35 @@ active-high. Together with 0114a7's PMIC gate=0 readings, this explains why
 no key IRQ can yet arrive. The GIC-only and combined read-only images need
 not be tested: current `pe_fiq.c` configures GIC global forwarding and the
 timer/SGI, but does not configure SPI 513; the new driver can set and read
-back its own Group 1, level, priority, route and enable state. Next implement
-the unique SPI callback, route-table mux, bounded Power-source test and
-polling fallback. No further 0114a8 boot is required for that work.
+back its own Group 1, level, priority, route and enable state. No further
+0114a8 boot is required for that work.
+
+Patch `0134-mh2lm-spmi-interrupt-mux.patch` now stages the current-XNU
+SPI 513 callback, one provider-less software `IOInterruptEventSource` on
+an `IOWorkLoop`, and a table of Power/Volume Down/Volume Up PMIC routes.
+Only EE0 IRQ-owned APIDs are mapped; the GIC top half masks before EOI and
+queues the worker, which scans/acks routed pending bits and wakes the
+existing key worker. `sweetkeysirq=0` (default) retains the 20 ms polling
+baseline and does not call mux setup. Explicit modes: `1` tests only the
+software handoff, with no PMIC/PDC/GIC gate writes; `2` arms Power only,
+while all keys keep 20 ms polling; `3` arms all three keys with a 200 ms
+recovery poll. Hardware modes configure both-edge PMIC key latches, the
+GIC SPI 513 Group 1/level/priority/boot-CPU route, and PDC pin 1 only
+after the software event source exists. Each failed readback/ack/stuck
+pending path masks GIC/PDC and disables the PMIC gates, reverting to
+20 ms polling. A 256-interrupt lifetime cap is a test-stage storm guard.
+The internal dispatch is a route table with callback/context, not a
+feature switch. The exact 0114a8 buildtree accepted 0134 in `patch --dry-run`;
+the changed key C file, `sleh.c`, and new IOKit C++ file passed local
+single-file compilation against 0114a7 CI flags after the final route-table
+refinement; all three emitted Mach-O objects with matching C ABI symbols.
+The non-MH2LM stub also passed a local syntax/object check. CircleCI and
+device behavior remain unverified. No push was
+performed. After a CI artifact is available, package once with
+`tools/mk-mh2lm-event-matrix.sh ARTIFACT LABEL --key-irq-mux`, then use
+`fastboot boot` in order: baseline, software handoff, Power IRQ, all keys
+(stop on any failure). Distinct SWEETLOGs must show workloop delivery,
+GIC/route readbacks, route hits/ack, and normal HID press/release.
 
 **Implementation roadmap:** `docs/IRQ-FRAMEBUFFER-PLAN.md` records the agreed
 two-stage order: first make the existing key, DWC3 USB and touch paths
