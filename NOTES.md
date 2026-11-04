@@ -2,6 +2,28 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**0114a15 fixed IRQ live capture passes the concurrent functional path;
+DEBUG profile identity unresolved:** `logs/live-e-0114a15-irq-only-debug.txt`
+SHA-256 `19f64f6ade97ab8c3808f49208a34ff52abda1fdd6cddf2c98e301a969530484`
+is a 3719-line ACM capture. Its launchd boot arguments at lines 14/146 omit
+`sweetloglevel=3`, and it has zero `[DEBUG]` lines, despite the filename;
+user was asked which image was actually booted. The capture shows USB GIC
+INTID 165 armed and 1536 IRQ hits, ACM stream through TX 1296/1298 with
+`err=0` and `empty=0`; TouchComm GPIO122/INTID 240 armed, 689 IRQ hits,
+HID touch events including finger 1, and a transient `empty=1` at 396
+which returned to zero at 441. PMIC mux had 32 logged hardware route
+hits: Power 11, Volume Up 8, Volume Down 13, with matching key HID events.
+Display off/on appears at lines 3005/3035 and 3234/3294; touch HID events
+follow the latter wake at line 3304. Concurrent USB, key and touch activity
+continued. No driver `[ERROR]`, ack failure/recovery, fallback or shutdown
+appears. Four `[WARN]` USB endpoint command status 1 records also occurred
+in the earlier 0114a13 combined capture; they did not stop enumeration or
+streaming here. Thus normal fixed-IRQ operation passed in this capture, while
+the 0138 exceptional ack retry path was not exercised. DEBUG-level output
+still needs a verified `sweetloglevel=3` boot. The log begins in launchd,
+so early boot records and the mux's `armed` line are not in this capture;
+the real PMIC route hits prove it was active later.
+
 **0114a15 artifact verified and two temporary fixed-IRQ images packaged;
 phone test pending:** User downloaded `logs/xnu-buildtree-0114a15.gz` and
 `logs/xnu-kernel-0114a15.gz`; the 0114a15 build log was not downloaded, so
