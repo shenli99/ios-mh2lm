@@ -2,6 +2,34 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**0140 scoped driver log levels, commit `6a9d8c0`, awaiting user
+push/CircleCI/phone:** The user
+observed that the current console, persistent SWEETLOG and ACM output have no
+unified severity. `0140-mh2lm-driver-log-levels.patch` adds ERROR/WARN/INFO/
+DEBUG prefixes and `sweetloglevel=0..3` (default INFO) to key, DWC3 USB,
+TouchComm and PMIC mux call sites. Failure and shutdown records are ERROR;
+transient reads/retries are WARN; bounded IRQ hits/counters remain INFO so
+default logs still prove hardware delivery; register dumps, control/event
+details and touch coordinates are DEBUG. The ring and ACM byte-stream formats
+are unchanged. Other XNU/IOKit/userspace and Sweet driver logs remain raw;
+no unprefixed line should be assumed to be INFO. See
+`docs/LOGGING-LEVELS.md` for semantics and scope.
+
+`tools/mk-mh2lm-event-matrix.sh --irq-only` now makes a normal image and,
+only if the kernel contains 0140, an `irq-only-debug` image with
+`sweetloglevel=3` from the same kernel. Four changed C files compiled as
+ARM64 Mach-O with CI-derived flags; the mux C++ header/macros compiled in an
+isolated C++ test and the full mux source preprocessed. Full local C++
+compilation with system clang 19 hit existing XNU/Apple builtin errors in
+exported IOKit headers, so CircleCI is still the compile gate for that TU.
+0139 then 0140 applied sequentially to the exact source after 0138; all six
+resulting files byte-match the local edited sources. No 0140 phone result
+exists. After user push, review CircleCI first, then package and temporarily
+boot the normal image; use the debug image only when detailed event traces
+are needed. Confirm the normal image retains ERROR/WARN/INFO and the
+low-rate IRQ proof while suppressing `[DEBUG]` from these drivers. A USB
+failure still requires persistent SWEETLOG extraction.
+
 **0139 fixed IRQ candidate, commits `f90c4a3` and cleanup `c0c5602`, awaiting
 user push, CircleCI
 and phone test:** Following the
