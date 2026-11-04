@@ -283,6 +283,15 @@ Group 位仍从非安全侧读回 0，这次实际中断投递证明读回 0 不
 工作。USB CDC-ACM 实时日志同时正常输出。Power 路由硬件验收通过；
 三键模式和 200 ms 恢复轮询仍待实机测试，完整子目标尚未完成。
 
+0114a10 三键模式也已在实机运行：软件投递探针成功，Power、Volume Down、
+Volume Up 三条路由分别记录 9、14、9 次 `hit`；全程按键状态按下/松开配对，
+没有 mux 回退、卡住的 pending、风暴上限或内核 panic。路由日志在前 32 次
+后仅每 64 次再打印，后续没有逐次 `hit` 行属于预期节流。USB CDC-ACM
+并行输出正常。三条硬件中断路由已验证；Mode 3 仍有 200 ms 恢复轮询，
+本次不证明完全无轮询或长期运行可靠性。`CATransformLayer` 的
+`allowsGroupBlending` 警告来自 SpringBoard，在 0114a9 未启用 IRQ 时已出现，
+不属于本 mux 的错误。
+
 ## 证据索引
 
 - 目标 SoC / PMIC DTS：`ref/lge-lineage-kernel/arch/arm64/boot/dts/qcom/sm8150.dtsi`、

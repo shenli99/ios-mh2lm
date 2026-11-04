@@ -2,7 +2,7 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**Current checkpoint (0114a10 Power IRQ passed; three-key image ready):** 0114a7
+**Current checkpoint (0114a10 three-key IRQ routes passed on phone):** 0114a7
 closed the PON/GPIO6 route and peripheral read-only
 preflight; both EE0 APIDs are accessible, but their PMIC interrupt gates
 remain off and keys still poll every 20 ms. The target SM8150 Linux source
@@ -187,13 +187,35 @@ contains the same route hits; ACM reaches `console=224582 bytes`, TX
 `196/197`, `err=0`, `configured=1`, `dtr=1`. The final live text shows
 normal userspace teardown and `PSCI SYSTEM_OFF`.
 
-**Next phone action:** Temporarily boot
-`out-bs/boot-16k-0114a10-key-irq-all.img` (SHA256 above) with the same USB
-reader. In mode 3, press/release Power, Volume Down and Volume Up separately
-several times, then try the established Power+Volume Down shutdown gesture.
-Collect USB live output and persistent SWEETLOG. Require route hits for all
-three names, matching key down/up reports and no mux fallback or storm;
-only then consider the three-key IRQ subgoal complete.
+**0114a10 three-key phone result (2026-11-04):**
+`logs/sweetlog-0114a10-key-irq-all.bin` SHA256
+`6d8dc10c01ff8084dd4c50acae3ab9741329559ea5a3fbab51ef684f0a20a83a`
+(SWEETLOG total 283673, flush 14) confirms `sweetkeysirq=3`, the same
+SPI 513 probe `hits=1 clear=1 pending=0 active=0`, all three PMIC routes,
+and `armed mode=3 pdc=0x2`. The first 32 recorded route hits comprise
+Power 9, Volume Down 14 and Volume Up 9; all three produce physical IRQs
+through the GIC callback and mux worker. Across the full capture, key state
+reports are alternating and balanced: Power 7 down/up pairs, Volume Up 8,
+Volume Down 13. The route log deliberately prints only hits 1–32 and then
+every 64th hit (`routeCount <= 32 || (routeCount & 63) == 0`), so absence of
+later individual `hit` lines is not evidence of a stall. No mux fallback,
+stuck IRQ, storm limit or kernel panic appears. SpringBoard runs and the
+capture ends with normal userspace teardown and `PSCI SYSTEM_OFF`.
+`logs/live-0114a10-key-irq-all.txt` SHA256
+`a6608efbaa50a44e1833b933df5cb0a8f71b61d4160203c0a756896cb363e534`
+contains the same IRQ hits; USB ACM reaches `console=266746 bytes`, TX
+`333/334`, `err=0`, `configured=1`, `dtr=1`. The hardware three-route mux
+path is validated for this session. Mode 3 retains a 200 ms recovery poll,
+so later key state reports alone cannot prove every transition was woken
+by IRQ; this is not an event-only latency measurement.
+
+The SpringBoard warning `CATransformLayer ... changing property
+allowsGroupBlending in transform-only layer, will have no effect` occurs
+27 times in this capture and already occurred 7 times in the 0114a9 Power
+capture, before its hardware IRQ could arm. It is a CoreAnimation property
+warning from SpringBoard: that setting is ignored for transform-only
+layers. It is not a mux/GIC error and does not by itself establish a
+framebuffer defect. Do not treat it as a new 0114a10 IRQ regression.
 
 **Implementation roadmap:** `docs/IRQ-FRAMEBUFFER-PLAN.md` records the agreed
 two-stage order: first make the existing key, DWC3 USB and touch paths
