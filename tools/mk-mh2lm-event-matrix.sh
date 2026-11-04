@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq]\n' "$0" >&2
 	exit 2
 fi
 
@@ -26,6 +26,8 @@ case "$KEY_IRQ_PROFILE" in
 	--key-irq-mux)
 		;;
 	--usb-irq)
+		;;
+	--touch-irq)
 		;;
 	*)
 		printf 'unknown optional profile: %s\n' "$KEY_IRQ_PROFILE" >&2
@@ -82,6 +84,14 @@ if [ "$KEY_IRQ_PROFILE" = '--usb-irq' ]; then
 		printf 'kernel artifact does not contain the DWC3 IRQ probe; check the CI buildtree\n' >&2
 		exit 1
 	fi
+	grep -Fqa 'SWEET MUX: armed mode=' "$TMPDIR/kernel.development.mh2lm"
+fi
+if [ "$KEY_IRQ_PROFILE" = '--touch-irq' ]; then
+	if ! grep -Fqa 'SWEET TOUCH IRQ: software-pending probe hits=' "$TMPDIR/kernel.development.mh2lm"; then
+		printf 'kernel artifact does not contain the TouchComm TLMM IRQ probe; check the CI buildtree\n' >&2
+		exit 1
+	fi
+	grep -Fqa 'SWEET USB IRQ: software-pending probe hits=' "$TMPDIR/kernel.development.mh2lm"
 	grep -Fqa 'SWEET MUX: armed mode=' "$TMPDIR/kernel.development.mh2lm"
 fi
 
@@ -218,6 +228,19 @@ if [ "$KEY_IRQ_PROFILE" = '--usb-irq' ]; then
 		"LG G8X - XNU DWC3 and key IRQ (${LABEL})" \
 		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetusbirq=2 sweetkeys=1 sweetkeysirq=3"
 fi
+if [ "$KEY_IRQ_PROFILE" = '--touch-irq' ]; then
+	# The proven USB IRQ console stays available. Touch probe leaves GPIO122
+	# masked; the real-touch stages separate key polling from key IRQs.
+	make_profile touch-irq-gic \
+		"LG G8X - XNU touch GIC probe (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetusbirq=2 sweetkeys=1 sweetkeysirq=3 sweettouchirq=1"
+	make_profile touch-irq \
+		"LG G8X - XNU touch IRQ (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetusbirq=2 sweetkeys=1 sweetkeysirq=0 sweettouchirq=2"
+	make_profile touch-irq-all \
+		"LG G8X - XNU touch, USB and key IRQ (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetusbirq=2 sweetkeys=1 sweetkeysirq=3 sweettouchirq=2"
+fi
 
 printf 'kernel SHA256: %s\n' "$KERNEL_SHA256"
 printf 'created profiles for %s: baseline, battery-ui, battery-ui-preserve-off, usb, usb-battery-ui' "$LABEL"
@@ -238,5 +261,8 @@ if [ "$KEY_IRQ_PROFILE" = '--key-irq-mux' ]; then
 fi
 if [ "$KEY_IRQ_PROFILE" = '--usb-irq' ]; then
 	printf ', usb-irq-gic, usb-irq, usb-irq-keys'
+fi
+if [ "$KEY_IRQ_PROFILE" = '--touch-irq' ]; then
+	printf ', touch-irq-gic, touch-irq, touch-irq-all'
 fi
 printf '\n'

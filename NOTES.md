@@ -2,6 +2,35 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**0137 touch IRQ implementation, local only; push needed for CI:**
+The active 0114a11 TouchComm driver polls GPIO122 every 10 ms; the target
+MH2LM touch DTS has `interrupt-parent=&tlmm`, GPIO122 low level, and the
+SM8150 TLMM node advertises GIC SPI 208 (candidate XNU INTID 240).
+GPIO122 is absent from the SoC direct-connect table, so 0137 stages the
+TLMM summary path. See `docs/TOUCH-IRQ-HARDWARE-BASELINE.md` for the
+register layout, evidence limits, and test criteria.
+
+`xnu/patches/0137-mh2lm-touch-tlmm-irq.patch` adds `sweettouchirq=0`
+(default 10 ms polling), `1` (GIC software pending with TLMM GPIO122
+disabled), and `2` (probe-gated real level-low TLMM IRQ). The GIC top half
+masks SPI 240 and wakes the existing TouchComm thread. That thread reads
+the message, clears GPIO122 interrupt status, rearms SPI 240 and uses a
+200 ms ATTN-only recovery check without idle I2C reads. Bounded empty,
+missed, I2C-error and ATTN-without-progress paths disable pin/GIC IRQ
+and restore the 10 ms poller. `tools/mk-mh2lm-event-matrix.sh --touch-irq`
+adds GIC probe, touch IRQ with key polling, and touch+USB+key IRQ profiles
+from one kernel artifact; CDC-ACM remains enabled in all three.
+
+Both modified files compile as arm64 Mach-O objects with CI-derived flags;
+`_sweet_touch_irq` is defined and referenced with the same C ABI. The
+patch applied with `patch -p1 --dry-run` on the exact 0114a11 buildtree,
+and the applied files byte-match locally compiled sources. The packaging
+script passes `bash -n` and rejects the older 0114a11 kernel artifact
+because it lacks the touch IRQ marker. **0137 has no CI or phone result.**
+After user push, verify the new buildtree/kernel, then test GIC-only before
+real TLMM IRQ and the three-driver combination. Do not treat a software
+pending hit alone as proof of real GPIO122 delivery.
+
 **0114a11 USB+key IRQ parallel phone result; second child target reached:**
 `logs/sweetlog-0114a11-usb-irq-keys.bin` SHA256
 `43191eead2b3c3a054db873f3bd5c09268e2d072485826bf665f9cecf6cc3a1b`

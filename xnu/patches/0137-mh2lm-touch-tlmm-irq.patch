@@ -1,0 +1,423 @@
+mh2lm: stage TouchComm TLMM GPIO122 IRQ on GIC SPI 208 (0137)
+
+The current TouchComm worker polls ATTN every 10 ms. Keep that as the
+default; sweettouchirq=1 probes the TLMM summary SPI using bounded GIC
+software pending with GPIO122 interrupt disabled, and mode 2 enables
+level-low GPIO122 after the probe. The IRQ top half masks SPI 240 and
+wakes the existing touch worker, which reads TouchComm, clears the TLMM
+status, and rearms the SPI. A 200 ms ATTN recovery check and bounded
+fault thresholds restore the old 10 ms poller.
+
+--- a/bsd/dev/sweet_touch_tcm.c
++++ b/bsd/dev/sweet_touch_tcm.c
+@@ -48,6 +48,14 @@
+ #define TS_PIN_I2C_A    55u
+ #define TS_PIN_I2C_B    56u
+ 
++/* GPIO122 is not a SM8150 direct-connect pin. TLMM summary GIC SPI 208. */
++#define TS_IRQ_INTID    240u
++#define TS_IRQ_BIT      (1u << (TS_IRQ_INTID % 32u))
++#define TS_IRQ_WORD     (TS_IRQ_INTID / 32u)
++#define TS_GICD_PA      0x17a00000u
++#define TS_INTR_CFG     (TS_GPIO_OFF(TS_PIN_IRQ) + 8u)
++#define TS_INTR_STATUS  (TS_GPIO_OFF(TS_PIN_IRQ) + 12u)
++
+ #define TCM_CONTACTS    10u
+ #define TCM_PAYLOAD_MAX 512u
+ 
+@@ -102,6 +110,13 @@
+ static void ts_gpio_io_wr(unsigned pin, uint32_t v) { ts_wr(ts_tiles[ts_tile(pin)], TS_GPIO_IO_OFF(pin), v); }
+ 
+ static int ts_chan;
++/* 0: 10 ms polling; 1: armed; 2: worker pending; 3: fallback;
++ * 4: GIC software-pending probe, with the TLMM pin IRQ still disabled. */
++static volatile unsigned ts_irq_state, ts_irq_hits, ts_irq_probe_hits;
++static vm_offset_t ts_gicd;
++static int ts_irq_chan, ts_irq_requested;
++static bool ts_irq_ready;
++static unsigned ts_irq_empty, ts_irq_missed, ts_irq_no_progress;
+ 
+ static void
+ ts_wait(unsigned ms)
+@@ -110,6 +125,227 @@
+ 	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+ 	(void)assert_wait_deadline(&ts_chan, THREAD_UNINT, deadline);
+ 	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static uint32_t
++ts_gic_rd(unsigned off)
++{
++	return ts_rd(ts_gicd, off);
++}
++
++static void
++ts_gic_wr(unsigned off, uint32_t value)
++{
++	ts_wr(ts_gicd, off, value);
++}
++
++static uint64_t
++ts_gic_rd64(unsigned off)
++{
++	uint64_t value = *(volatile uint64_t *)(ts_gicd + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return value;
++}
++
++static void
++ts_gic_wr64(unsigned off, uint64_t value)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint64_t *)(ts_gicd + off) = value;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static bool
++ts_gic_wait(void)
++{
++	for (unsigned i = 0; i < 1000; ++i) {
++		if ((ts_gic_rd(0) & (1u << 31)) == 0) {
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++static bool
++ts_gic_configure(void)
++{
++	unsigned off = 4u * TS_IRQ_WORD;
++	uint32_t typer = ts_gic_rd(0x004u);
++	if (((typer & 0x1fu) + 1u) * 32u <= TS_IRQ_INTID) {
++		return false;
++	}
++	ts_gic_wr(0x180u + off, TS_IRQ_BIT);
++	if (!ts_gic_wait()) {
++		return false;
++	}
++	ts_gic_wr(0x080u + off, ts_gic_rd(0x080u + off) | TS_IRQ_BIT);
++	unsigned cfgOff = 0xc00u + 4u * (TS_IRQ_INTID / 16u);
++	unsigned cfgShift = 2u * (TS_IRQ_INTID % 16u);
++	ts_gic_wr(cfgOff, ts_gic_rd(cfgOff) & ~(3u << cfgShift));
++	unsigned priOff = 0x400u + (TS_IRQ_INTID & ~3u);
++	unsigned priShift = 8u * (TS_IRQ_INTID & 3u);
++	uint32_t priority = ts_gic_rd(priOff);
++	ts_gic_wr(priOff, (priority & ~(0xffu << priShift)) | (0xa0u << priShift));
++	ts_gic_wr64(0x6000u + 8u * TS_IRQ_INTID, 0); /* boot CPU */
++	if (!ts_gic_wait()) {
++		return false;
++	}
++	uint32_t ctlr = ts_gic_rd(0);
++	uint32_t group = ts_gic_rd(0x080u + off);
++	uint32_t cfg = (ts_gic_rd(cfgOff) >> cfgShift) & 3u;
++	uint32_t pri = (ts_gic_rd(priOff) >> priShift) & 0xffu;
++	uint64_t route = ts_gic_rd64(0x6000u + 8u * TS_IRQ_INTID);
++	printf("SWEET TOUCH IRQ: GIC intid=%u ctlr=%#x group-read=%u cfg=%u pri=%#x route=%#llx\n",
++	    TS_IRQ_INTID, ctlr, (group & TS_IRQ_BIT) ? 1 : 0, cfg, pri, route);
++	/* IGROUPR readback was zero for proven key and USB Group 1 IRQs. */
++	return (ctlr & 2u) != 0 && cfg == 0 && pri == 0xa0u && route == 0;
++}
++
++static bool
++ts_gic_probe(void)
++{
++	unsigned off = 4u * TS_IRQ_WORD;
++	uint32_t pinCfg = ts_rd(ts_tiles[ts_tile(TS_PIN_IRQ)], TS_INTR_CFG);
++	uint32_t pending = ts_gic_rd(0x200u + off) & TS_IRQ_BIT;
++	uint32_t active = ts_gic_rd(0x300u + off) & TS_IRQ_BIT;
++	if ((pinCfg & 1u) || pending || active) {
++		printf("SWEET TOUCH IRQ: probe refused pin-enable=%u pending=%u active=%u\n",
++		    pinCfg & 1u, pending ? 1 : 0, active ? 1 : 0);
++		return false;
++	}
++	__atomic_store_n(&ts_irq_probe_hits, 0u, __ATOMIC_RELEASE);
++	__atomic_store_n(&ts_irq_state, 4u, __ATOMIC_RELEASE);
++	ts_gic_wr(0x100u + off, TS_IRQ_BIT);
++	if (!ts_gic_wait() || (ts_gic_rd(0x100u + off) & TS_IRQ_BIT) == 0) {
++		__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
++		ts_gic_wr(0x180u + off, TS_IRQ_BIT);
++		printf("SWEET TOUCH IRQ: GIC probe enable failed\n");
++		return false;
++	}
++	ts_gic_wr(0x200u + off, TS_IRQ_BIT);
++	for (unsigned i = 0; i < 1000; ++i) {
++		if (__atomic_load_n(&ts_irq_probe_hits, __ATOMIC_ACQUIRE)) {
++			break;
++		}
++		delay(100);
++	}
++	__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
++	ts_gic_wr(0x180u + off, TS_IRQ_BIT);
++	ts_gic_wr(0x280u + off, TS_IRQ_BIT);
++	bool clear = ts_gic_wait();
++	for (unsigned i = 0; clear && i < 1000; ++i) {
++		pending = ts_gic_rd(0x200u + off) & TS_IRQ_BIT;
++		active = ts_gic_rd(0x300u + off) & TS_IRQ_BIT;
++		if (!pending && !active) {
++			break;
++		}
++		if (i == 999) {
++			clear = false;
++		} else {
++			delay(1);
++		}
++	}
++	unsigned hits = __atomic_load_n(&ts_irq_probe_hits, __ATOMIC_ACQUIRE);
++	printf("SWEET TOUCH IRQ: software-pending probe hits=%u clear=%u pending=%u active=%u\n",
++	    hits, clear ? 1 : 0, pending ? 1 : 0, active ? 1 : 0);
++	return hits == 1u && clear;
++}
++
++/* GIC top half: mask the shared TLMM summary SPI before EOI, then wake
++ * the touch worker. I2C, TLMM status ack, and HID run only on that worker. */
++bool
++sweet_touch_irq(unsigned int intid)
++{
++	if (intid != TS_IRQ_INTID) {
++		return false;
++	}
++	unsigned state = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);
++	if (state == 4u) {
++		ts_gic_wr(0x180u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
++		__atomic_add_fetch(&ts_irq_probe_hits, 1u, __ATOMIC_RELEASE);
++		return true;
++	}
++	unsigned expected = 1u;
++	if (__atomic_compare_exchange_n(&ts_irq_state, &expected, 2u, false,
++	    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++		ts_gic_wr(0x180u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
++		__atomic_add_fetch(&ts_irq_hits, 1u, __ATOMIC_RELEASE);
++		thread_wakeup(&ts_irq_chan);
++		return true;
++	}
++	if (expected == 2u || expected == 3u) {
++		ts_gic_wr(0x180u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
++		return true;
++	}
++	return false;
++}
++
++static void
++ts_irq_wait(unsigned observed)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(200, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&ts_irq_chan, THREAD_UNINT, deadline);
++	if (__atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE) != observed ||
++	    __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE) == 3u) {
++		clear_wait(current_thread(), THREAD_AWAKENED);
++	}
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static void
++ts_irq_fallback(const char *reason)
++{
++	__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
++	vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
++	ts_wr(tile, TS_INTR_CFG, ts_rd(tile, TS_INTR_CFG) & ~1u);
++	if (ts_gicd) {
++		ts_gic_wr(0x180u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
++	}
++	printf("SWEET TOUCH IRQ: fallback %s hits=%u empty=%u missed=%u; 10 ms polling restored\n",
++	    reason, __atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE),
++	    ts_irq_empty, ts_irq_missed);
++	thread_wakeup(&ts_irq_chan);
++}
++
++static bool
++ts_irq_arm(void)
++{
++	if (!ts_irq_ready || ts_irq_requested != 2) {
++		return false;
++	}
++	vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
++	uint32_t cfg = ts_rd(tile, TS_INTR_CFG);
++	/* Linux SM8150 TLMM: target=KPSS 3, raw status on, level low,
++	 * pin interrupt disabled until the GIC callback and worker are ready. */
++	cfg = (cfg & ~0xffu) | (3u << 5) | (1u << 4);
++	ts_wr(tile, TS_INTR_CFG, cfg);
++	uint32_t status = ts_rd(tile, TS_INTR_STATUS);
++	ts_wr(tile, TS_INTR_STATUS, status & ~1u);
++	uint32_t readback = ts_rd(tile, TS_INTR_CFG);
++	if ((readback & 0xffu) != (cfg & 0xffu)) {
++		ts_irq_fallback("TLMM config readback");
++		return false;
++	}
++	__atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
++	ts_gic_wr(0x100u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
++	bool waited = ts_gic_wait();
++	bool enabled = (ts_gic_rd(0x100u + 4u * TS_IRQ_WORD) & TS_IRQ_BIT) != 0;
++	unsigned state = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);
++	if (!waited || (!enabled && state == 1u) || state == 3u) {
++		ts_irq_fallback("GIC enable readback");
++		return false;
++	}
++	ts_wr(tile, TS_INTR_CFG, cfg | 1u);
++	if ((ts_rd(tile, TS_INTR_CFG) & 1u) == 0) {
++		ts_irq_fallback("TLMM enable readback");
++		return false;
++	}
++	printf("SWEET TOUCH IRQ: armed gpio=%u intid=%u cfg=%#x status=%#x attn=%u\n",
++	    TS_PIN_IRQ, TS_IRQ_INTID, ts_rd(tile, TS_INTR_CFG),
++	    ts_rd(tile, TS_INTR_STATUS), ts_gpio_io_rd(TS_PIN_IRQ) & 1u);
++	return true;
+ }
+ 
+ /* mux 0 = GPIO, pull 0 none / 1 down / 3 up, drive 3 = 8 mA. */
+@@ -819,6 +1055,11 @@
+ 	unsigned delay_s = 20;
+ 	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
+ 	(void)PE_parse_boot_argn("sweettouchflip", &ts_flip, sizeof(ts_flip));
++	(void)PE_parse_boot_argn("sweettouchirq", &ts_irq_requested, sizeof(ts_irq_requested));
++	if (ts_irq_requested < 0 || ts_irq_requested > 2) {
++		printf("SWEET TOUCH IRQ: invalid mode=%d; polling retained\n", ts_irq_requested);
++		ts_irq_requested = 0;
++	}
+ 	printf("SWEET TOUCH: TouchComm driver starting in %u s (flip %#x)\n", delay_s, ts_flip);
+ 	ts_wait(delay_s * 1000u);
+ 
+@@ -867,21 +1108,43 @@
+ 		ts_pins("failed");
+ 		goto out;
+ 	}
+-	printf("SWEET TOUCH: TouchComm ready (sda=%u scl=%u), max %ux%u, polling\n",
+-	    bb_sda_pin, bb_scl_pin, tcm.max_x, tcm.max_y);
++	printf("SWEET TOUCH: TouchComm ready (sda=%u scl=%u), max %ux%u, irq-mode=%d\n",
++	    bb_sda_pin, bb_scl_pin, tcm.max_x, tcm.max_y, ts_irq_requested);
++	if (ts_irq_requested) {
++		ts_gicd = ml_io_map(TS_GICD_PA, 0x10000);
++		ts_irq_ready = ts_gicd && ts_gic_configure() && ts_gic_probe();
++		if (!ts_irq_ready) {
++			printf("SWEET TOUCH IRQ: GIC probe unavailable; 10 ms polling retained\n");
++		} else if (ts_irq_requested == 1) {
++			printf("SWEET TOUCH IRQ: probe-only; TLMM pin interrupt disabled, 10 ms polling retained\n");
++		} else {
++			(void)ts_irq_arm();
++		}
++	}
+ 
+ 	unsigned errors = 0, ticks = 0, attn_low = 0, reports = 0;
++	unsigned last_irq = 0;
+ 	for (;;) {
++		unsigned observed = __atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE);
++		unsigned irqState = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);
+ 		bool attn = (ts_gpio_io_rd(TS_PIN_IRQ) & 1u) == 0;
++		uint32_t pinStatus = irqState == 1u || irqState == 2u ?
++		    ts_rd(ts_tiles[ts_tile(TS_PIN_IRQ)], TS_INTR_STATUS) & 1u : 0;
+ 		attn_low += attn;
+-		/* ATTN low means a report is waiting; every 10th tick reads anyway. */
+-		if (attn || (ticks % 10u) == 0) {
++		/* In IRQ mode, avoid the old forced I2C read every 100 ms.
++		 * A 200 ms recovery wake checks the ATTN level without I2C. */
++		bool did_message = false, did_report = false;
++		if (attn || ((irqState != 1u && irqState != 2u) && (ticks % 10u) == 0)) {
+ 			if (tcm.version == 2) {
+ 				tcm.command = 0x0a;
+ 			}
+ 			rc = message();
++			did_message = rc == 0;
+ 			if (rc == 0 && tcm.code == 0x10) {
+ 				printf("SWEET TOUCH: controller restarted; touch stopped\n");
++				if (irqState == 1u || irqState == 2u) {
++					ts_irq_fallback("controller restart");
++				}
+ 				ts_release_all();
+ 				goto out;
+ 			}
+@@ -889,7 +1152,15 @@
+ 				rc = tcm_decode(tcm.payload, tcm.length, ts_now);
+ 				if (rc == 0) {
+ 					reports++;
++					did_report = true;
+ 					ts_report();
++					if (irqState == 1u && observed == last_irq &&
++					    ++ts_irq_missed >= 8u) {
++						ts_irq_fallback("reports seen only by recovery polling");
++					}
++					if (irqState == 2u || observed != last_irq) {
++						ts_irq_missed = 0;
++					}
+ 				} else {
+ 					tcm.stage = "contacts";
+ 					tcm.detail = tcm.length;
+@@ -902,16 +1173,61 @@
+ 				if (errors == 10u) {
+ 					ts_release_all();
+ 					bb_recover();
++					if (irqState == 1u || irqState == 2u) {
++						ts_irq_fallback("10 I2C errors");
++					}
+ 				}
+ 			} else {
+ 				errors = 0;
+ 			}
+ 		}
+-		if ((++ticks % 1000u) == 0u) {  /* every 10 s */
++		if (irqState == 1u || irqState == 2u) {
++			if ((ts_gpio_io_rd(TS_PIN_IRQ) & 1u) == 0 &&
++			    did_message && !did_report && ++ts_irq_no_progress >= 16u) {
++				ts_irq_fallback("ATTN low without touch-report progress");
++			} else if (did_report || (ts_gpio_io_rd(TS_PIN_IRQ) & 1u) != 0) {
++				ts_irq_no_progress = 0;
++			}
++		}
++		unsigned period = irqState == 1u || irqState == 2u ? 50u : 1000u;
++		if ((++ticks % period) == 0u) {
+ 			printf("SWEET TOUCH: state reports=%u events=%u attn-low=%u i2c-errors=%u\n",
+ 			    reports, ts_events, attn_low, ts_i2c_errors);
+-		}
+-		ts_wait(10);
++			if (period == 50u) {
++				printf("SWEET TOUCH IRQ: counters hits=%u empty=%u missed=%u pin-status=%u attn=%u\n",
++				    __atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE),
++				    ts_irq_empty, ts_irq_missed, pinStatus, attn ? 1 : 0);
++			}
++		}
++		irqState = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);
++		if (irqState == 2u) {
++			if (!did_message && ++ts_irq_empty >= 16u) {
++				ts_irq_fallback("16 IRQ wakeups without a TouchComm message");
++			} else {
++				if (did_message) {
++					ts_irq_empty = 0;
++				}
++				vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
++				uint32_t status = ts_rd(tile, TS_INTR_STATUS);
++				ts_wr(tile, TS_INTR_STATUS, status & ~1u);
++				if (observed <= 16u || (observed & 255u) == 0) {
++					printf("SWEET TOUCH IRQ: hit irq=%u status=%#x attn=%u reports=%u\n",
++					    observed, status, attn ? 1 : 0, reports);
++				}
++				__atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
++				ts_gic_wr(0x100u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
++			}
++		}
++		last_irq = observed;
++		irqState = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);
++		if ((irqState == 1u || irqState == 2u) &&
++		    (ts_gpio_io_rd(TS_PIN_IRQ) & 1u) != 0) {
++			ts_irq_wait(observed);
++		} else if (irqState == 1u || irqState == 2u) {
++			continue; /* Drain a report while ATTN remains low. */
++		} else {
++			ts_wait(10);
++		}
+ 	}
+ out:
+ 	(void)thread_terminate(current_thread());
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1890,6 +1890,10 @@
+ 			extern bool sweet_usb_irq(unsigned int intid);
+ 			sweet_handled = sweet_usb_irq(intid);
+ 		}
++		if (!sweet_handled) {
++			extern bool sweet_touch_irq(unsigned int intid);
++			sweet_handled = sweet_touch_irq(intid);
++		}
+ #endif
+ 		if (!sweet_handled && cdp->interrupt_handler) {
+ 			cdp->interrupt_handler(cdp->interrupt_target,

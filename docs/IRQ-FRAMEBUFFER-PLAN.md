@@ -163,6 +163,11 @@ Windows 未识别设备在旧轮询驱动中已存在，列为独立 gadget 重�
 
 ### 子目标 3：将触摸改为 IRQ 驱动
 
+**0137 本地进度：** 已定位正在使用的 TouchComm 驱动、GPIO122 和 TLMM 汇总
+SPI 208（候选 INTID 240），并写好带 GIC 探针、真实 IRQ 与轮询回退的补丁。
+本地编译与补丁应用通过，仍待 CircleCI 和手机验证。寄存器与测试门槛见
+[`TOUCH-IRQ-HARDWARE-BASELINE.md`](TOUCH-IRQ-HARDWARE-BASELINE.md)。
+
 **目的：** 用触摸的 TLMM GPIO/TouchComm 中断通知替代当前 10 ms ATTN 采样和周期性
 强制传输的功能性回退。
 
