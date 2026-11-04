@@ -118,6 +118,17 @@ IOInterruptEventSource/IOWorkLoop 软件交接，`=2` 仅启用 Power IRQ，`=3`
 **目的：** 把当前已验证的 DWC3 CDC-ACM 轮询事件处理改为控制器 IRQ 驱动，同时
 保持既有 USB 设备模式和日志能力。
 
+**下一步的源码基线：** MH2LM 使用的 `sm8150-usb.dtsi` 中，主 USB
+`dwc3@a600000` 子节点列出 GIC SPI 133（INTID 165）；USB wrapper 另有
+`pwr_event_irq` 等中断，不能把它们当作 DWC3 事件缓冲区 IRQ。当前
+`sweet_usb.c` 在 `GEVNTSIZ` bit 31 屏蔽事件中断，并由 `ud_thread` 每
+1 ms 读取 `GEVNTCOUNT`。以上是源码映射和现有实现，尚非新 IRQ 的实机投递证据。
+先核对目标 DTS 与 GIC 路由，再在现有 CDC-ACM 驱动上加入可由启动参数选择的
+软件投递检查、DWC3 IRQ 上半部和既有事件处理 worker 的唤醒/回退。
+同一内核应能选择当前轮询路径、USB IRQ 路径，以及同时开启
+`sweetkeysirq=3` 的并发路径；USB 日志继续作为正常观测通道，早期或 USB
+中断故障仍从持久 SWEETLOG 取证。
+
 **实施边界：**
 
 - DWC3 不进入 `SweetSpmiInterruptMux`。它使用独立的 DWC3 GIC IRQ 与自己的短
