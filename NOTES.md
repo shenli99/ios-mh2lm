@@ -2,7 +2,8 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**0139 fixed IRQ candidate, commit `f90c4a3`, awaiting user push, CircleCI
+**0139 fixed IRQ candidate, commits `f90c4a3` and cleanup `c0c5602`, awaiting
+user push, CircleCI
 and phone test:** Following the
 0114a13 combined run, the user chose to remove silent runtime polling fallback
 from the MH2LM key, DWC3 USB and TouchComm drivers. New
@@ -13,15 +14,18 @@ GIC probe, arm or worker stops its function and logs the reason. The CDC log
 sender wakes on new ring bytes, USB configuration and TX completion rather
 than its old 20 ms timer. `tools/mk-mh2lm-event-matrix.sh --irq-only` packages
 one fixed IRQ image; legacy test profiles reject an 0139 kernel. USB changes
-are conditioned on `ARM64_BOARD_CONFIG_MH2LM` because `SWEET_DEV_USB=1` also
-holds on GUACAMOLE and SWEET. Other boards retain their previous code.
+are implemented in the shared key and USB sources. The user confirmed that
+only MH2LM needs support here, so the temporary legacy polling branches were
+removed instead of maintained for GUACAMOLE and SWEET.
 The patch applied to a copy of the exact 0114a13 source plus 0138, and all
 five resulting files byte-match the locally edited tree. All four changed C
 sources compiled as ARM64 Mach-O with CI-derived flags; the mux C++ source
 compiled before the final USB-only fixes, and its key symbols match the C
-objects. The USB source also compiled for GUACAMOLE and SWEET.
-Their final USB machine-code disassembly is identical to the pre-0139
-source. `bash -n` passed for the packer, and the tracked script/docs diff
+objects. The final simplified key and USB sources compiled for MH2LM, and
+their machine-code disassembly is identical to the prior MH2LM fixed-IRQ
+draft.
+GUACAMOLE and SWEET are outside the validation scope. `bash -n` passed for
+the packer, and the tracked script/docs diff
 passed `git diff --check` before commit.
 **No 0139 CircleCI or phone result exists yet.** After the user pushes the
 commit, check the CircleCI build, package the new kernel with `--irq-only`,
