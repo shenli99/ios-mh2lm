@@ -58,6 +58,12 @@ CircleCI 产物下载后运行
 日志无真实命中或 CDC-ACM 中断/按键异常，则先停止后续阶段并导出
 本轮持久 SWEETLOG。只在需要定位问题时再刷该内核的 `usb` 轮询镜像。
 
+0114a11 实测已证明软件 pending 和真实 DWC3 IRQ 都能到达、处理事件并
+重新使能，计数 `empty=0 missed=0`，没有回退。反复拔插后 Windows
+偶发报告未识别设备，用户确认旧轮询驱动也有相同问题；将其记作独立的
+USB gadget 重连缺陷。并行 IRQ 测试保持线缆连接，观察 USB IRQ 与
+`SWEET MUX: hit route=` 同时持续出现，再单独处理重连状态清理。
+
 ## 当前无需单独测试
 
 - DWC3 是 SoC 内置 IP，不经过外部 GPIO 或 pinctrl；不需要寻找“USB IRQ 引脚”。

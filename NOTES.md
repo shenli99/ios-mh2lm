@@ -2,7 +2,7 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**0114a11 real DWC3 IRQ phone result, USB link behavior under review:**
+**0114a11 real DWC3 IRQ phone result, proceed to combined IRQ test:**
 `logs/sweetlog-0114a11-usb-irq.bin` SHA256
 `eb2274f725285048fd27e1c2acde92e68ca052443d47e1a30c1e97ae4731de47`
 is a fresh version-1 SWEETLOG (ring 4 MiB, total 224043 bytes, flush 11,
@@ -14,7 +14,7 @@ there is no fallback or panic. The first two enumerations reach
 `ACM endpoints configured` and the log includes SpringBoard activity.
 This proves real DWC3 event IRQ delivery, drain/ack and rearm.
 
-The USB host behavior is **not yet a clean pass**: after the second ACM
+The USB host behavior has a known reconnect limitation: after the second ACM
 configuration, the log contains 13 additional bus reset/connect cycles
 (15 total, versus 2 in the GIC-only/polled 0114a11 run), no subsequent
 setup request or ACM configuration, and the last counters show
@@ -25,19 +25,22 @@ reporting no transfer resource per Linux DWC3 command-status handling;
 it appears after reset but also occurred in the healthy polled run and
 is not alone proof of cause.
 The user confirms repeated unplug/replug near the end and reports Windows
-eventually displayed "unrecognized USB device". This confirms a user-visible
-reconnect failure, but the current logs cannot attribute it to IRQ mode.
+eventually displayed "unrecognized USB device". The user also confirms that
+the same intermittent failure had already occurred after many reconnects
+with the old 1 ms polling driver. Treat this as a pre-existing USB gadget
+reconnect defect, not evidence of a new IRQ regression; the requested
+polling A/B retest is cancelled.
 The pre-existing `ud_event()` reset path only clears DCFG address and three
 software flags, then calls `ud_start_setup()`; it does not end old transfers
 or reset EP0/other endpoint resources as the reference Linux DWC3 reset
 handler does. That is a concrete candidate for a reconnect bug, not yet a
-proved cause. Hold the combined USB+key IRQ image. Next controlled A/B:
-boot `out-bs/boot-16k-0114a11-usb.img` (same kernel, default 1 ms polling),
-use the same Windows host/cable, repeat about three unplug/replug cycles,
-record whether Windows recognizes each reconnect, then pull a fresh
-SWEETLOG. If polling also fails, prioritize endpoint reset cleanup; if
-only IRQ mode fails, inspect IRQ worker wake/ack timing. No new cloud build
-is needed for this comparison.
+proved cause. Track endpoint reset cleanup as separate USB gadget work.
+The real IRQ path itself passed its first phone test (real hit/ack/rearm,
+no fallback); next boot `out-bs/boot-16k-0114a11-usb-irq-keys.img` with
+`sweetusbirq=2 sweetkeysirq=3`. Keep the cable connected for this IRQ
+concurrency test, confirm live USB console if available, exercise all three
+keys, and pull a fresh SWEETLOG. Require both `SWEET USB IRQ: hit` and
+`SWEET MUX: hit route=` with no IRQ fallback or key-function regression.
 
 **0114a11 GIC-only phone result:**
 `logs/sweetlog-0114a11-usb-irq-gic.bin` SHA256
