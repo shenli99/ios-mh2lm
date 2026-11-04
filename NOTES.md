@@ -2,7 +2,7 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**Current checkpoint (0134 mux staged locally, no CI/phone result):** 0114a7
+**Current checkpoint (0134 mux commit `e393921`, no CI/phone result):** 0114a7
 closed the PON/GPIO6 route and peripheral read-only
 preflight; both EE0 APIDs are accessible, but their PMIC interrupt gates
 remain off and keys still poll every 20 ms. The target SM8150 Linux source
