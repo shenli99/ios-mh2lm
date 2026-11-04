@@ -185,15 +185,16 @@ if [ "$KEY_IRQ_PROFILE" = '--key-irq-upstream' ]; then
 		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=3072"
 fi
 if [ "$KEY_IRQ_PROFILE" = '--key-irq-mux' ]; then
+	# CDC-ACM is the established live console for key IRQ bring-up.
 	make_profile key-irq-mux-soft \
 		"LG G8X - XNU key IRQ mux software handoff (${LABEL})" \
-		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirq=1"
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetkeysirq=1"
 	make_profile key-irq-power \
 		"LG G8X - XNU Power key IRQ (${LABEL})" \
-		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirq=2"
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetkeysirq=2"
 	make_profile key-irq-all \
 		"LG G8X - XNU all key IRQs (${LABEL})" \
-		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirq=3"
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetkeysirq=3"
 fi
 
 printf 'kernel SHA256: %s\n' "$KERNEL_SHA256"

@@ -117,17 +117,16 @@ repeated to diagnose this stage 3 failure. No hardware IRQ acceptance
 criterion is met yet.
 
 **Logging for the next key-IRQ iteration:** The 0114a9 key profiles used
-`sweetusb=0` solely to isolate their boot arguments. The CDC-ACM console
-was already shown working on MH2LM in 0112m10/m11 and again in 0113 USB
-and USB+battery tests; the current DWC3 event path is polled and has no
-known SPI 513 routing conflict with the PMIC key mux. The next single-kernel
-test matrix should include a key-IRQ profile with `sweetusb=2
-sweetusbstep=6 sweetvbus=1` as well as an isolated profile. Capture live
-output with `tools/sweet-usbacm-log.sh` (start it before `fastboot boot`),
-and retain the persistent SWEETLOG for the interval before USB enumeration
-or if enumeration never occurs. The USB-enabled profile is an integration
-test, so compare its result with the isolated profile before attributing a
-failure to the mux.
+`sweetusb=0` solely because the packaging script inherited an old isolation
+setting. CDC-ACM output was already validated on MH2LM in 0112m10/m11 and
+0113 USB and USB+battery tests. It is the normal live console for subsequent
+key-IRQ work, not another test target. The current DWC3 event path is polled
+and has no known SPI 513 routing conflict with the PMIC key mux. The
+`--key-irq-mux` packaging profiles now use `sweetusb=2 sweetusbstep=6
+sweetvbus=1` by default. Start `tools/sweet-usbacm-log.sh` before
+`fastboot boot` and read `/dev/ttyACM*` as soon as it enumerates. Keep
+the persistent SWEETLOG for the pre-enumeration interval or if USB never
+comes up. Do not schedule a separate USB verification round for this work.
 
 **Implementation roadmap:** `docs/IRQ-FRAMEBUFFER-PLAN.md` records the agreed
 two-stage order: first make the existing key, DWC3 USB and touch paths
