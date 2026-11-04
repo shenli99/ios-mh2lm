@@ -1,10 +1,9 @@
 # MH2LM DWC3 USB IRQ 硬件基线
 
-**状态（2026-11-04）：** 当前 CDC-ACM 已稳定输出日志，但已测试的 DWC3
-event buffer 仍每 1 ms 轮询。0136 增加可选 IRQ 路径；0114a11 的完整
-CircleCI 内核及 buildtree 已验证，三张测试镜像已生成，**尚未手机实测**。
-下面的中断映射来自目标 DTS 和 Linux 驱动，尚无 MH2LM 的 INTID 165
-投递实测。实测结果与镜像 SHA256 统一记入 `NOTES.md`。
+**状态（2026-11-04）：** 0136 的 INTID 165 软件 pending 探针、真实
+DWC3 事件 IRQ 和 USB＋三键 IRQ 并行均通过 0114a11 手机日志验证。
+CDC-ACM 实时输出在并行模式下持续工作。反复拔插后的旧有 gadget
+重连故障另列待修；证据与镜像 SHA256 见 `NOTES.md`。
 
 ## 已知、可直接用于实现
 
@@ -62,7 +61,11 @@ CircleCI 产物下载后运行
 重新使能，计数 `empty=0 missed=0`，没有回退。反复拔插后 Windows
 偶发报告未识别设备，用户确认旧轮询驱动也有相同问题；将其记作独立的
 USB gadget 重连缺陷。并行 IRQ 测试保持线缆连接，观察 USB IRQ 与
-`SWEET MUX: hit route=` 同时持续出现，再单独处理重连状态清理。
+`SWEET MUX: hit route=` 同时持续出现，已在 0114a11 日志验证：
+USB IRQ 至少 512 次、实时 CDC-ACM TX 超过 214 次、三键各有真实
+IRQ 与 HID 按下/松开，均无回退。一次音量上松开时 PMIC PON 读取
+失败，但 GPIO 状态与 HID 松开正常，见 `NOTES.md`。后续单独处理
+重连状态清理。
 
 ## 当前无需单独测试
 

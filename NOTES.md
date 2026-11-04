@@ -2,7 +2,44 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**0114a11 real DWC3 IRQ phone result, proceed to combined IRQ test:**
+**0114a11 USB+key IRQ parallel phone result; second child target reached:**
+`logs/sweetlog-0114a11-usb-irq-keys.bin` SHA256
+`43191eead2b3c3a054db873f3bd5c09268e2d072485826bf665f9cecf6cc3a1b`
+is a fresh version-1 SWEETLOG (4 MiB ring, total 265217, flush 10,
+no wrap) with `sweetusbirq=2 sweetkeysirq=3`. The matching live ACM
+capture `logs/live-0114a11-usb-irq-keys.txt` SHA256
+`56b2723cf1dc4b1dc008e7b55a094b2257a7bb389ccaaf4104b64cebbee1ad8d`
+contains the persistent log's final 4 KiB as a byte-exact substring.
+The phone reaches SpringBoard; the ACM port opens (`dtr=1`), console TX
+reaches 214/215 with zero errors, USB IRQ counters reach 470 with
+`empty=0 missed=0`, and a later hardware hit is printed at IRQ 512.
+USB resets twice and reconfigures ACM twice (no repeated-reconnect trial).
+No USB IRQ fallback appears.
+
+The SPI 513 mux arms three routes and logs real hits for Power (6),
+Volume Down (4) and Volume Up (7), with corresponding HID down/up records
+for all three. No mux fallback or stuck-pending message appears, and live
+USB output continues while keys are exercised. One Volume Up release
+contains `SWEET KEYS: read error pon-ok=0 gpio-ok=1 g2-ok=1
+arb-status=0x1`; the Volume Up GPIO sample and HID release still succeed.
+Keep this isolated PMIC PON read failure in the record for later monitoring;
+it did not prevent this key event or trigger a mux fallback. The user
+previously confirmed the repeated reconnect failure also exists with
+the old polled gadget and did not request a separate A/B test.
+
+The USB IRQ child goal is met on the tested scope: real device IRQ drives
+event consumption, live ACM output and all three key IRQ routes operate
+concurrently without conflict. Next planned child goal is touch IRQ;
+the active 0114a11 driver is `sweet_touch_tcm.c` (TouchComm ready in this
+log), which samples active-low TLMM GPIO122 every 10 ms and forces a read
+every tenth tick. The target touch DTS specifies `interrupt-parent=&tlmm`
+and `<122 0x2008>`; `sm8150-pinctrl.dtsi` lists a TLMM summary GIC SPI 208
+(candidate INTID 240), but GPIO122's actual TLMM/PDC routing still needs
+verification before arming. Stage touch IRQ behind a boot argument, keeping
+the currently working touch path as fallback.
+The separate USB gadget repeated-reconnect defect remains open.
+
+**0114a11 real DWC3 IRQ first phone result (prior stage):**
 `logs/sweetlog-0114a11-usb-irq.bin` SHA256
 `eb2274f725285048fd27e1c2acde92e68ca052443d47e1a30c1e97ae4731de47`
 is a fresh version-1 SWEETLOG (ring 4 MiB, total 224043 bytes, flush 11,

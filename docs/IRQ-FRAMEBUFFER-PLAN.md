@@ -119,14 +119,22 @@ IOInterruptEventSource/IOWorkLoop 软件交接，`=2` 仅启用 Power IRQ，`=3`
 
 ### 子目标 2：将 DWC3 USB 改为 IRQ 驱动
 
+**0114a11 结果（2026-11-04）：** 已验证 INTID 165 软件 pending 与真实
+DWC3 IRQ 投递、event buffer 处理、CDC-ACM 实时输出，以及与三键 IRQ
+并行。USB IRQ 计数至少到 512，无空中断、漏 IRQ 回退或 mux 回退；
+三键均有真实 mux 命中和 HID 按下/松开。一次音量上松开时 PON 读取失败，
+GPIO 与 HID 松开正常，详见 `NOTES.md`。用户确认多次拔插后偶发的
+Windows 未识别设备在旧轮询驱动中已存在，列为独立 gadget 重连缺陷。
+当前转入子目标 3。
+
 **目的：** 把当前已验证的 DWC3 CDC-ACM 轮询事件处理改为控制器 IRQ 驱动，同时
 保持既有 USB 设备模式和日志能力。
 
-**下一步的源码基线：** MH2LM 使用的 `sm8150-usb.dtsi` 中，主 USB
+**实施前的源码基线：** MH2LM 使用的 `sm8150-usb.dtsi` 中，主 USB
 `dwc3@a600000` 子节点列出 GIC SPI 133（INTID 165）；USB wrapper 另有
 `pwr_event_irq` 等中断，不能把它们当作 DWC3 事件缓冲区 IRQ。当前
 `sweet_usb.c` 在 `GEVNTSIZ` bit 31 屏蔽事件中断，并由 `ud_thread` 每
-1 ms 读取 `GEVNTCOUNT`。以上是源码映射和现有实现，尚非新 IRQ 的实机投递证据。
+1 ms 读取 `GEVNTCOUNT`。以上是当时的源码映射，实机投递结果见本节开头。
 先核对目标 DTS 与 GIC 路由，再在现有 CDC-ACM 驱动上加入可由启动参数选择的
 软件投递检查、DWC3 IRQ 上半部和既有事件处理 worker 的唤醒/回退。
 同一内核应能选择当前轮询路径、USB IRQ 路径，以及同时开启
