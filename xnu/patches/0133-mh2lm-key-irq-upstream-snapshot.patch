@@ -1,0 +1,93 @@
+mh2lm: snapshot PDC and GIC key IRQ upstream gates (0133)
+
+The 0114a7 probes established the EE0 PMIC-arb routes and peripheral
+configuration, but no PMIC IRQ gate is enabled. SM8150 routes the EE0
+PMIC peripheral interrupt through PDC pin 1 to GIC INTID 513. Before
+arming a source, record the live upstream enable, type, priority and
+route state on MH2LM.
+
+Add independent opt-in read-only diagnostic bits 0x400 (PDC) and 0x800
+(GIC) under sweetkeysirqdiag. A combined 0xc00 image is also available.
+No callback is registered, no gate is written, and the 20 ms key polling
+path remains active. PDC and GIC are mapped separately to isolate any
+failure at either controller.
+
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -26,6 +26,9 @@
+ #define KEYS_GPIO_RT     SWEET_DEV_VOL_GPIO_RT
+ #define KEYS_GPIO2_RT    SWEET_DEV_VOL_GPIO2_RT
+ #define KEYS_NO_APID     0xffffu
++#define KEYS_PDC_PA      0x0b220000u
++#define KEYS_GICD_PA     0x17a00000u
++#define KEYS_PMIC_INTID  513u
+ 
+ /* The SPMI arbiter selects a peripheral by PPID = (SID << 8) | (reg >> 8),
+  * and an observer command only carries the register's low byte. Every PMIC
+@@ -53,6 +56,52 @@
+ 	uint32_t v = *(volatile uint32_t *)(base + off);
+ 	__asm__ volatile("dmb oshld" ::: "memory");
+ 	return v;
++}
++
++/* Read-only snapshots of the two upstream gates. The SM8150 PDC pin map
++ * identifies pin 1 as the EE0 PMIC peripheral IRQ feeding GIC INTID 513.
++ * Keep these probes independent so a fault in either mapping is isolated. */
++static void
++keys_irq_diag_pdc(void)
++{
++	vm_offset_t pdc = ml_io_map(KEYS_PDC_PA, 0x400);
++	if (!pdc) {
++		printf("SWEET KEYS IRQ PDC: map failed pa=%#x\n", KEYS_PDC_PA);
++		return;
++	}
++	uint32_t enable = keys_rd(pdc, 0x10u);
++	uint32_t config = keys_rd(pdc, 0x114u);
++	printf("SWEET KEYS IRQ PDC: pin=1 intid=%u enable-bank=%#x enabled=%u config=%#x (read-only)\n",
++	    KEYS_PMIC_INTID, enable, (enable >> 1) & 1u, config);
++}
++
++static void
++keys_irq_diag_gic(void)
++{
++	vm_offset_t gicd = ml_io_map(KEYS_GICD_PA, 0x10000);
++	if (!gicd) {
++		printf("SWEET KEYS IRQ GIC: map failed pa=%#x\n", KEYS_GICD_PA);
++		return;
++	}
++	const uint32_t word = KEYS_PMIC_INTID / 32u;
++	const uint32_t bit = KEYS_PMIC_INTID % 32u;
++	const uint32_t group = keys_rd(gicd, 0x80u + 4u * word);
++	const uint32_t enabled = keys_rd(gicd, 0x100u + 4u * word);
++	const uint32_t pending = keys_rd(gicd, 0x200u + 4u * word);
++	const uint32_t active = keys_rd(gicd, 0x300u + 4u * word);
++	const uint32_t cfg = keys_rd(gicd, 0xc00u +
++	    4u * (KEYS_PMIC_INTID / 16u));
++	const uint32_t priorityWord = keys_rd(gicd,
++	    0x400u + (KEYS_PMIC_INTID & ~3u));
++	const uint32_t routerLo = keys_rd(gicd, 0x6000u + 8u * KEYS_PMIC_INTID);
++	const uint32_t routerHi = keys_rd(gicd, 0x6004u + 8u * KEYS_PMIC_INTID);
++	printf("SWEET KEYS IRQ GIC: intid=%u typer=%#x ctlr=%#x group=%u enabled=%u pending=%u active=%u cfg=%u priority=%#x router=%#x:%#x (read-only)\n",
++	    KEYS_PMIC_INTID, keys_rd(gicd, 0x004u), keys_rd(gicd, 0x000u),
++	    (group >> bit) & 1u, (enabled >> bit) & 1u,
++	    (pending >> bit) & 1u, (active >> bit) & 1u,
++	    (cfg >> (2u * (KEYS_PMIC_INTID % 16u))) & 3u,
++	    (priorityWord >> (8u * (KEYS_PMIC_INTID & 3u))) & 0xffu,
++	    routerHi, routerLo);
+ }
+ 
+ /* v5 can map one PPID more than once; prefer the apps-owned entry. */
+@@ -346,6 +395,13 @@
+ 			keys_irq_diag_line("volume-up", keys_gpio_apid, KEYS_GPIO_RT);
+ 		}
+ #endif
++		/* bits 10/11: independent read-only PDC and GIC snapshots. */
++		if ((mask & 0x400u) != 0) {
++			keys_irq_diag_pdc();
++		}
++		if ((mask & 0x800u) != 0) {
++			keys_irq_diag_gic();
++		}
+ 	}
+ 	kern_return_t kr = kernel_thread_start(keys_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {

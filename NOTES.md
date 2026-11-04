@@ -1,6 +1,23 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-11-02, latest)
+## Agent handoff / active work (2026-11-04, latest)
+
+**Current checkpoint:** 0114a7 closed the PON/GPIO6 route and peripheral
+read-only preflight; both EE0 APIDs are accessible, but their PMIC interrupt
+gates remain off and keys still poll every 20 ms. The target SM8150 Linux
+source maps PDC pin 1 to GIC INTID 513. Patch 0133 now adds independent
+read-only snapshots of PDC pin 1 (`sweetkeysirqdiag=1024`) and GIC SPI 513
+(`2048`), with a combined `3072` profile. It has not been cloud-built or
+phone-tested. After a successful CI build, package one artifact with
+`tools/mk-mh2lm-event-matrix.sh ARTIFACT LABEL --key-irq-upstream`; use
+`fastboot boot` for baseline, PDC, GIC, then combined only if the prior
+stages boot. The 0133 patch applies cleanly to the 0114a7 buildtree and
+`sweet_keys.c` passed a local single-file syntax check using that buildtree's
+CI flags and clang 19; this is not a full kernel build. Extract distinct
+fresh SWEETLOGs. No push has been performed;
+the user pushes when told. Only after those register values are known should
+the SPI callback, route-table mux, bounded Power-source test and polling
+fallback be armed.
 
 **Implementation roadmap:** `docs/IRQ-FRAMEBUFFER-PLAN.md` records the agreed
 two-stage order: first make the existing key, DWC3 USB and touch paths
@@ -9,7 +26,7 @@ framebuffer repair plan. It defines the `SweetSpmiInterruptMux` route-table
 boundary and the hardware acceptance criteria; keep measured observations and
 test results in this file.
 
-### IRQ migration / sub-goal 1: key-route preflight staged (2026-11-03)
+### IRQ migration / sub-goal 1: key-route preflight history (2026-11-03 onward)
 
 - **0128 staged locally, not yet through CI or hardware:**
   `0128-mh2lm-spmi-mux-key-preflight.patch` is the first deliberately
@@ -177,6 +194,25 @@ test results in this file.
   was the exact aborting read. This closes the read-only route preflight,
   not the key IRQ goal: arbiter and peripheral IRQ enable bits are still 0,
   with no GIC callback, PMIC mux, or IRQ-produced HID events yet.
+- **Key IRQ implementation readiness audit (2026-11-04):** the hardware
+  route is now specific: SM8150 `pdc-sm8150.c` maps PDC pin 1
+  (`ee0_apps_hlos_spmi_periph_irq`) to GIC INTID 513. PDC uses enable
+  bank `0x0b220000 + 0x10` bit 1 and pin config `0x0b220000 + 0x114`;
+  neither value has been read on MH2LM yet. Linux PMIC-arb v5 writes
+  32-bit `BIT(irq)` to the APID channel `IRQ_CLEAR` at `+0x108`, then
+  writes the PMIC peripheral `LATCHED_CLR` at `+0x14`; its unmask path
+  writes channel `ACC_ENABLE` at `+0x100` and clears the old latch before
+  setting `EN_SET` at `+0x15`. These are source facts, not yet validated
+  hardware writes. Critically, the 0114a7 *actual* kernel contains
+  built-in `SweetCPU`, `sleh_irq` and `pe_fiq`; it does not contain the
+  UniXNU reference driver's `armcpu_spi_attach` symbol. The existing
+  `sleh_irq` passes non-timer/non-SGI INTIDs to an optional per-CPU
+  interrupt handler and EOIs afterward. Implement a single SPI 513
+  registration/dispatch path in the current XNU before claiming that API.
+  Next safe step: read-only PDC pin 1 and GIC SPI 513 register snapshots,
+  then add a boot-arg-gated mux/one-source Power IRQ test with a bounded
+  callback, pending acknowledgement and polling fallback. Do not arm
+  PMIC/PDC/GIC gates from the 0114a7 read-only images.
 
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 

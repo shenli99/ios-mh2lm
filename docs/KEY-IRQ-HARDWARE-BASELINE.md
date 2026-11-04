@@ -2,7 +2,7 @@
 
 **状态：** 仅完成资料和运行时观察的汇总。按键仍由 20 ms 轮询驱动；
 `SweetSpmiInterruptMux` 尚未注册 GIC SPI 或写入任何 PMIC/PDC 中断寄存器。
-**更新日期：** 2026-11-03
+**更新日期：** 2026-11-04
 **目的：** 记录将 Power、Volume Down、Volume Up 转为 IRQ 模式所需的硬件事实、
 未知项和验证顺序，防止把其他设备、Linux irqdomain 或推测的寄存器值带入 XNU。
 
@@ -28,9 +28,10 @@ Volume Up:           PM8150 GPIO6 (SID 0, peripheral 0xc5)
                          -> 按键 worker / 既有 sweet_hid_key()
 ```
 
-三个来源共用 PMIC-arb 的上游 SPI；因此它只能有一个
-`armcpu_spi_attach(513, ...)` 所有者。按键、充电和未来 PMIC consumer 必须经 mux
-分发，不能分别直接绑定该 SPI。
+三个来源共用 PMIC-arb 的上游 SPI；当前 XNU 需建立一个独占的 SPI 513
+分发入口。按键、充电和未来 PMIC consumer 必须经 mux 分发，不能分别直接
+绑定该 SPI。`armcpu_spi_attach(513, ...)` 仅是 UniXNU 参考实现的接口，
+不在当前内核中。
 
 ## 一览：按键来源与已知 IRQ 位
 
@@ -58,14 +59,17 @@ APID 和电平来自 `sweetlog-0113-baseline.bin` 的运行时启动/按键记�
 | `GICD_IGROUPR[n]` | `+0x080 + 4*n` | 架构/源码确认 | 将 SPI 置为 Group 1 |
 | `GICD_ISENABLER[n]` | `+0x100 + 4*n` | 架构/源码确认 | 使能 SPI |
 | `GICD_ICENABLER[n]` | `+0x180 + 4*n` | 架构/源码确认 | 配置前关闭 / 未处理时关闭 |
-| `GICD_IPRIORITYR[intid]` | `+0x400 + intid` | 架构/源码确认 | 当前 helper 设为 `0xa0` |
+| `GICD_IPRIORITYR[intid]` | `+0x400 + intid` | 架构/源码确认 | UniXNU 参考 helper 设为 `0xa0`；当前 XNU 尚无该 helper |
 | `GICD_ICFGR[n]` | `+0xc00 + 4*(intid/16)` | 架构/源码确认 | edge/level 配置 |
 | `GICD_IROUTER[intid]` | `+0x6000 + 8*intid` | 架构/源码确认 | 路由至 boot CPU |
 | `GICD_PIDR2` | `+0xffe8` | 架构/源码确认 | `ArmCpu` 以 architecture field 3 验证 GICv3 |
 
-`ArmCpu::dispatch()` 在读取 `ICC_IAR1_EL1` 后、写 `ICC_EOIR1_EL1` 前调用 SPI
-callback。因此上半部必须短小，只记录/确认 pending 并调度 worker；不得在这里执行
-SPMI observer、HID、UI 或 IOKit 工作。
+UniXNU 的 `ArmCpu::dispatch()` 是 SPI callback 设计参考，但 0114a7 的实际
+XNU 内核链接的是 `SweetCPU`，没有 `armcpu_spi_attach` 符号。当前
+`osfmk/arm64/sleh.c` 在读取 `ICC_IAR1_EL1` 后把其他 INTID 传给可选的
+`cdp->interrupt_handler`，之后写 `ICC_EOIR1_EL1`。因此必须先为当前内核
+建立 SPI 513 的唯一分发入口；上半部仍需短小，不在其中执行 SPMI observer、
+HID、UI 或 IOKit 工作。
 
 ### INTID 分配规则及本项目映射
 
@@ -76,10 +80,10 @@ SPMI observer、HID、UI 或 IOKit 工作。
 | INTID 32--1019 | SPI | PMIC-arb 位于此范围 | 架构确认 |
 | DTS `<GIC_SPI N flags>` | `N` 是相对 SPI 号，XNU INTID 为 `32 + N` | `481 -> 513` | 已确认 |
 | PMIC-arb 输出 | DTS `interrupts = <GIC_SPI 481 IRQ_TYPE_NONE>` | mux 的唯一候选上游是 INTID 513 | 已确认 |
-| GIC trigger | `IRQ_TYPE_NONE` 不表达 edge/level | `armcpu_spi_attach(513, false, ...)` 是当前 level 候选，不得在 0128 前视为已验收 | 待实机预检 |
+| GIC trigger | `IRQ_TYPE_NONE` 不表达 edge/level | 经 PDC 转换后的 level-high 是实现候选；须读回 PDC/GIC 配置并做单源 IRQ 实机验证 | 待实机预检 |
 
-当前 `armcpu_spi_attach()` 仅接受实际 INTID、拒绝重复注册、最多有 16 个自定义 SPI
-slot，并将 callback 置于 EOI 前。这些约束是采用单一 PMIC mux 的直接原因。
+当前内核尚无上述 UniXNU SPI 注册 helper。未来的注册接口必须保证 SPI 513
+独占、在 GIC EOI 前分发、可在故障时屏蔽并回退到按键轮询。
 
 ### 已知 SoC 内置 IP 中断号
 
@@ -101,7 +105,11 @@ slot，并将 callback 置于 EOI 前。这些约束是采用单一 PMIC mux 的
 | Volume Up pinctrl | `key_vol_up_default`：`pins = "gpio6"`、`function = "normal"`、`input-enable`、`bias-pull-up`、`power-source = <1>` | 已确认 | 已由 Linux 描述；现有 XNU 轮询输入也正常 |
 | debounce / wake | `debounce-interval = <15>`、`gpio-key,wakeup`、`linux,can-disable` | 已确认 | 未来 IRQ worker 需保留等效去抖/唤醒语义 |
 | PON 配置 | `qcom,pon-dbc-delay = <15625>`、`kpdpwr-sw-debounce`，并配置 KPDPWR/RESIN | 已确认 | PON 可能由 PMIC 固件和 Android 留下的配置参与，不能盲改 |
-| PDC input / mapping | PDC 基址 `0x0b220000`，大小 `0x400` | 已确认其存在 | 哪个 PDC pin 对应按键源、是否需软件写入，均未知 |
+| PDC input / mapping | PDC 基址 `0x0b220000`，大小 `0x400`；pin 1 -> GIC INTID 513 | 源码确认 | `pdc-sm8150.c` 标注 pin 1 为 EE0 PMIC peripheral IRQ；实际 enable/config 尚待读回 |
+
+PDC Linux 驱动使用 `base + 0x10` 的 bit 1 控制 pin 1 enable，
+`base + 0x110 + 4*1 = base + 0x114` 配置该 pin 的类型/极性。当前硬件
+寄存器值尚未采样，不能假设 bootloader 已打开或设置为 level-high。
 
 ### GPIO 控制器寄存器：哪些需要、哪些不需要
 
@@ -120,13 +128,13 @@ slot，并将 callback 置于 EOI 前。这些约束是采用单一 PMIC mux 的
 | 外设基址偏移 | 名称 | 含义 | 按键 IRQ 的状态 |
 |---:|---|---|---|
 | `+0x10` | `RT_STS` | 实时输入电平；不等于 latched pending | 已确认可读，且三个按键电平行为已由实机日志验证 |
-| `+0x11` | `SET_TYPE` | bit=1 为 edge，0 为 level | 待 0128 采样；不得假定 |
-| `+0x12` | `POLARITY_HIGH` | 高极性选择 | 待 0128 采样 |
-| `+0x13` | `POLARITY_LOW` | 低极性选择 | 待 0128 采样 |
+| `+0x11` | `SET_TYPE` | bit=1 为 edge，0 为 level | 0114a7：PON `0x1`，GPIO6 `0` |
+| `+0x12` | `POLARITY_HIGH` | 高极性选择 | 0114a7：两者均 `0` |
+| `+0x13` | `POLARITY_LOW` | 低极性选择 | 0114a7：PON `0x3`，GPIO6 `0` |
 | `+0x14` | `LATCHED_CLR` | 向各 IRQ bit 写 1 清该外设 latch | 清除机制的外设一半已源码确认；在本机的完整 ack 顺序仍待验证 |
-| `+0x15` | `EN_SET` | 向各 IRQ bit 写 1 使能 | 位号已由 DTS 确认，现有 gate 状态待 0128 读取 |
+| `+0x15` | `EN_SET` | 向各 IRQ bit 写 1 使能 | 0114a7：PON/GPIO6 均为 `0`，IRQ gate 未开 |
 | `+0x16` | `EN_CLR` | 向各 IRQ bit 写 1 关闭 | 架构/源码确认；当前不应写入 |
-| `+0x18` | `LATCHED_STS` | latched pending 状态 | 待 0128 读取并在按下/释放时对照 |
+| `+0x18` | `LATCHED_STS` | latched pending 状态 | 0114a7 启动时两者均 `0`；按下/释放时仍待对照 |
 
 0128 的日志字段名 `latched=` 读取的是 `RT_STS + 0x08 = +0x18`，即
 `LATCHED_STS`；这是一项只读状态采样，不是对 `LATCHED_CLR (+0x14)` 的读取或写入。
@@ -151,12 +159,12 @@ slot，并将 callback 置于 EOI 前。这些约束是采用单一 PMIC mux 的
 | intr | `0x0e700000` | `4*(apid >> 5)` 的 owner/pending bitmap | 已确认其读取用途；bit 值需按各 source 日志确认 |
 | chnls | `0x0c600000`，`0x10000*apid` | `ACC_ENABLE +0x100`、`IRQ_STATUS +0x104` | 已确认可做只读预检 |
 | observer | `0x0e600000`，`0x80*apid` | 既有单字节 SPMI observer read | 已确认；不可作为 primary IRQ context 操作 |
-| channel IRQ clear | 候选 `+0x108` | 需要写 bit 清 PMIC-arb pending 的精确 v5 证据 | **未知，禁止写** |
+| channel IRQ clear | `+0x108` | Linux v5 以 32-bit `BIT(irq)` 写 channel `IRQ_CLEAR` | 源码确认，MH2LM 写入效果尚未实测 |
 
 当前运行时已确认 `PMIC-arb version=0x50000000`、APID count=512；PON 为 APID 248，
 GPIO6 为 APID 261。Linux 通用流程会先清 arbiter pending、再向外设
-`LATCHED_CLR` 写对应 bit；但目标 v5 channel clear 的偏移、写入宽度和 PDC/上游
-重新触发顺序尚未以 MH2LM 实机验证，不能直接搬用。
+`LATCHED_CLR` 写对应 bit；v5 channel clear 的偏移/宽度已有目标 Linux 源码依据，
+但写入效果和 PDC/上游重新触发顺序尚未以 MH2LM 实机验证，不能直接搬用。
 
 ## 启用与确认：已知流程和仍缺的证据
 
@@ -172,13 +180,13 @@ GPIO6 为 APID 261。Linux 通用流程会先清 arbiter pending、再向外设
 
 | 待测项目 | 为什么缺它 | 满足条件 |
 |---|---|---|
-| PON/GPIO6 的 `SET_TYPE`、极性、`EN_SET`、`LATCHED_STS` | 证实 Android/固件留在硬件中的实际配置与 DTS 位号一致 | 0128 在 idle、单键按下、松开三组采样均一致 |
-| APID owner、IRQ owner bit、intr owner bitmap、`ACC_ENABLE`、`IRQ_STATUS` | 证实 XNU 所在 EE 有资格接收两条 source | 0128 对 PON 和 GPIO6 均显示可路由，且无误写 |
-| PMIC-arb v5 clear | 不清 pending 将造成上游 level 重入/风暴 | 先定位 v5 定义或只读证据，再加入有计数器保护的单 source 写测试 |
-| PDC pin/预配置 | 某些 QCOM 路线需 PDC 才能从 PMIC-arb 送达 GIC | 证明现有固件已配置，或确认目标 pin/寄存器后才写 |
-| GIC 上游 trigger | DTS `IRQ_TYPE_NONE` 不指定 edge/level | GIC callback 完成受控单按键试验且无重复 / 未处理 disable |
+| PON/GPIO6 的 `SET_TYPE`、极性、`EN_SET`、`LATCHED_STS` | 证实 Android/固件留下的实际配置 | 0114a7 启动时只读值已取得；按下/释放时的 latch 变化仍待验证 |
+| APID owner、IRQ owner bit、intr owner bitmap、`ACC_ENABLE`、`IRQ_STATUS` | 证实 XNU 所在 EE 有资格接收两条 source | 0114a7 已取得只读值，两个 EE0 APID 均可读且 gate 为 0 |
+| PMIC-arb v5 clear | 不清 pending 将造成上游 level 重入/风暴 | Linux 源码已确认 `+0x108` 写法；实机效果仍待受控单源测试 |
+| PDC pin/预配置 | PMIC-arb 需经 PDC pin 1 到 GIC INTID 513 | pin 映射与寄存器偏移已从目标 Linux 源码确认；现有寄存器值待读回 |
+| GIC 上游 trigger | DTS `IRQ_TYPE_NONE` 不指定 edge/level | 读回 GIC/PDC 现有类型；SPI 513 callback 完成受控单键试验且无风暴 |
 
-## 下一次实机测试：0130 PON route 微阶段只读预检
+## 历史实机预检：0130/0131 PON route 微阶段
 
 0114a2 已经验证：`sweetkeysirqdiag=1`（helper init）可以进入 iOS，而
 `sweetkeysirqdiag=2`（PON 完整 route）直接回到 LG BSP。成功日志中的按键轮询已
@@ -237,6 +245,15 @@ channel 时回 LG BSP 是当前最强的故障解释；纯映射成功、跳过�
 现场日志，不能精确归因于 APID 1 或 19。按键目前仍靠轮询，硬件中断使能
 和 GIC/mux 注册尚未实施。
 
+下一轮 0133 将 PDC 与 GIC 的实机读回分离：`sweetkeysirqdiag=1024` 只映射并读取
+PDC pin 1 的 enable bank/config；`2048` 只读取 GICD 对 INTID 513 的 Group 1、
+enable、pending、active、trigger、priority、router 等状态；`3072` 组合两者。
+它不打开任何 gate、不注册 IRQ，也不改变按键轮询。CI 产物用
+`tools/mk-mh2lm-event-matrix.sh ARTIFACT LABEL --key-irq-upstream` 生成测试镜像；
+依次临时启动 baseline、PDC、GIC，前三项都进入 iOS 后再启动组合项。每项需提取
+新的 SWEETLOG，并核对对应 `SWEET KEYS IRQ PDC/GIC` 输出。实机值取得前，不能把
+源码中的配置候选当作本机已配置状态。
+
 ## 证据索引
 
 - 目标 SoC / PMIC DTS：`ref/lge-lineage-kernel/arch/arm64/boot/dts/qcom/sm8150.dtsi`、
@@ -245,8 +262,10 @@ channel 时回 LG BSP 是当前最强的故障解释；纯映射成功、跳过�
   与 `sm8150_common/sm8150_common-pm.dtsi`。
 - Linux QPNP/PMIC-arb 语义：`drivers/spmi/spmi-pmic-arb.c`。
 - XNU GIC helper：`ref/UniXNU-src/drivers/ArmCpu/ArmCpu.cpp`。
+- 当前 XNU GIC 分发：`xnu/osfmk/arm64/sleh.c`、`xnu/pexpert/arm/pe_fiq.c`。
 - 已验证的按键日志：`logs/sweetlog-0113-baseline.bin`，以及同轮 battery/USB 日志。
 - 只读 route-inspection 基础接口：`xnu/patches/0128-mh2lm-spmi-mux-key-preflight.patch`；
   当前分阶段预检：`xnu/patches/0129-mh2lm-key-irq-diag-stages.patch`；PON 微阶段：
   `xnu/patches/0130-mh2lm-pon-route-microdiag.patch`、
-  `xnu/patches/0131-mh2lm-pon-channel-map-probe.patch`。
+  `xnu/patches/0131-mh2lm-pon-channel-map-probe.patch`；上游控制器只读探针：
+  `xnu/patches/0133-mh2lm-key-irq-upstream-snapshot.patch`。

@@ -1,8 +1,8 @@
 # MH2LM IRQ 与 Framebuffer 路线图
 
-**状态：** 大目标一 / 子目标 1 已进入只读硬件预检；`SweetSpmiInterruptMux`
-尚未 arm，按键仍使用既有轮询回退。
-**更新日期：** 2026-11-03
+**状态：** 大目标一 / 子目标 1 的只读路由预检已完成；
+`SweetSpmiInterruptMux` 尚未 arm，按键仍使用既有轮询回退。
+**更新日期：** 2026-11-04
 **适用范围：** `ref/ios-mh2lm` 的 MH2LM XNU 驱动；本文是实施和验收计划，
 不替代 `NOTES.md` 中已经取得的硬件观察、日志结论和回归基线。
 
@@ -35,9 +35,10 @@ PMIC 外设 / 控制器
 
 - `SweetSpmiInterruptMux` 是板级 PMIC 源解复用器，不是 Linux
   `irqdomain`，也不取代 XNU 的 GIC 或 IOKit 中断管理。
-- 共享 PMIC SPI 的物理注册只能有一个拥有者。当前
-  `armcpu_spi_attach(...)` 对同一向量会返回独占访问错误，因此不能让按键、
-  充电/电池等消费者分别直接绑定同一 SPI。
+- 共享 PMIC SPI 的物理注册只能有一个拥有者，因此不能让按键、充电/电池等
+  consumer 分别直接绑定同一 SPI。UniXNU 的 `armcpu_spi_attach(...)` 是
+  参考实现；0114a7 实际内核使用内建 `SweetCPU`，不含这个符号，须先为当前
+  XNU 的 GIC IRQ 分发建立唯一的 SPI 513 注册与回退机制。
 - mux 的上游应是很短的 GIC callback：确认/分类待处理中断、按路由策略确认
   latch，并调度下半部。不得在该上下文直接执行 IOKit、SPMI observer 读取、
   HID、DSI 或 UI 工作。
@@ -62,6 +63,13 @@ EE1/EE4 的 APID 1/19 和 EE0 的 APID 248。旧探针读取外部 EE channel �
 外设 `EN_SET` 也为 0。下一阶段是核对上游 PDC/GIC、latch/clear 和使能
 顺序，再实现可回退的单 source Power IRQ 试验；当前 20 ms 轮询仍在工作。
 详见硬件基线文档和 `NOTES.md` 的 0114a7 实测记录。
+
+SM8150 PDC 源码已确认 pin 1 对应 PMIC EE0 IRQ / GIC INTID 513；Linux
+PMIC-arb v5 确认 channel clear 在 `+0x108`。这些是可用于实现的源码证据，
+但当前设备的 PDC pin 1 enable/config 与 GIC SPI 513 的实际寄存器状态仍待
+只读采样。首轮可写试验应先具备当前内核的 SPI callback、mux 路由表、
+中断风暴保护及轮询回退，然后才按单 Power source 开 gate。
+0133 已加入可独立选择的 PDC/GIC 只读快照代码，尚待 CI 和实机验证。
 
 **实施边界：**
 

@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream]\n' "$0" >&2
 	exit 2
 fi
 
@@ -20,6 +20,8 @@ case "$KEY_IRQ_PROFILE" in
 	--key-irq-diag-matrix)
 		;;
 	--key-irq-pon-route-micro)
+		;;
+	--key-irq-upstream)
 		;;
 	*)
 		printf 'unknown optional profile: %s\n' "$KEY_IRQ_PROFILE" >&2
@@ -166,6 +168,17 @@ if [ "$KEY_IRQ_PROFILE" = '--key-irq-pon-route-micro' ]; then
 		"LG G8X - XNU PON route IRQ_STATUS (${LABEL})" \
 		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=512"
 fi
+if [ "$KEY_IRQ_PROFILE" = '--key-irq-upstream' ]; then
+	make_profile key-irq-pdc \
+		"LG G8X - XNU key IRQ PDC snapshot (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=1024"
+	make_profile key-irq-gic \
+		"LG G8X - XNU key IRQ GIC snapshot (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=2048"
+	make_profile key-irq-upstream \
+		"LG G8X - XNU key IRQ upstream snapshot (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=0 sweetkeys=1 sweetkeysirqdiag=3072"
+fi
 
 printf 'kernel SHA256: %s\n' "$KERNEL_SHA256"
 printf 'created profiles for %s: baseline, battery-ui, battery-ui-preserve-off, usb, usb-battery-ui' "$LABEL"
@@ -177,5 +190,8 @@ if [ "$KEY_IRQ_PROFILE" = '--key-irq-diag-matrix' ]; then
 fi
 if [ "$KEY_IRQ_PROFILE" = '--key-irq-pon-route-micro' ]; then
 	printf ', key-irq-pon-route-meta, key-irq-pon-route-owner, key-irq-pon-route-map, key-irq-pon-route-enable, key-irq-pon-route-status'
+fi
+if [ "$KEY_IRQ_PROFILE" = '--key-irq-upstream' ]; then
+	printf ', key-irq-pdc, key-irq-gic, key-irq-upstream'
 fi
 printf '\n'
