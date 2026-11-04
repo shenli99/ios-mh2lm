@@ -2,6 +2,26 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**Current local checkpoint (DWC3 IRQ patch 0136, push needed):**
+`xnu/patches/0136-mh2lm-dwc3-irq.patch` adds optional `sweetusbirq=1`
+(GIC INTID 165 software-pending probe, DWC3 masked) and `sweetusbirq=2`
+(probe-gated real DWC3 IRQ). Default mode 0 retains the proven 1 ms USB
+polling path. The top half masks SPI 165 and wakes the existing USB event
+worker; that worker drains/acks `GEVNTCOUNT` and rearms the SPI. A 200 ms
+recovery check and bounded missing/empty IRQ thresholds fall back to the
+old poller. `tools/mk-mh2lm-event-matrix.sh --usb-irq` packages GIC-only,
+USB IRQ, and USB IRQ plus `sweetkeysirq=3` images from one CI artifact.
+The exact 0114a10 buildtree accepted the patch with `patch -p1`, and the
+resulting files byte-match the locally compiled sources. Both changed C
+files compiled as arm64 Mach-O objects with CI-derived 0114a7 flags;
+`_sweet_usb_irq` is defined in `sweet_usb.c` and referenced by `sleh.c`.
+`bash -n`, the non-patch staged whitespace check, and a `patch -p1` dry run
+passed. **No CircleCI build or phone test
+has yet run for 0136.** After the commit is pushed by the user, download
+the new kernel/buildtree; verify 0136 is present, then run the documented
+three-stage test in `docs/USB-IRQ-HARDWARE-BASELINE.md`. Start host ACM
+capture before each boot and extract fresh SWEETLOG after each stage.
+
 **Current checkpoint (0114a10 three-key IRQ routes passed on phone):**
 Power, Volume Down and Volume Up each have real SPI 513 route hits through
 `SweetSpmiInterruptMux`; USB CDC-ACM streamed concurrently. Mode 3 still

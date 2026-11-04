@@ -1,8 +1,10 @@
 # MH2LM DWC3 USB IRQ 硬件基线
 
-**状态（2026-11-04）：** 当前 CDC-ACM 已稳定输出日志，但 DWC3 event buffer
-仍每 1 ms 轮询；下面的中断映射来自目标 DTS 和 Linux 驱动，尚无 MH2LM 的
-INTID 165 投递实测。实测结果与镜像 SHA256 统一记入 `NOTES.md`。
+**状态（2026-11-04）：** 当前 CDC-ACM 已稳定输出日志，但已测试的 DWC3
+event buffer 仍每 1 ms 轮询。0136 增加可选 IRQ 路径，已在 0114a10 的
+buildtree 上本地编译并验证补丁应用；**尚未经过 CircleCI 或手机实测**。
+下面的中断映射来自目标 DTS 和 Linux 驱动，尚无 MH2LM 的 INTID 165
+投递实测。实测结果与镜像 SHA256 统一记入 `NOTES.md`。
 
 ## 已知、可直接用于实现
 
@@ -40,6 +42,21 @@ GIC SPI 165 并通过真实事件验证，不能只靠 DTS 的 flags 或 IGROUPR
 以上可放进**一次云端内核编译**，用启动参数选择现有轮询、GIC 投递探针、
 真实 USB IRQ 与 USB+按键 IRQ 配置。软件 pending 与真实事件的先后 gate
 由同一驱动控制，无需先刷只读寄存器镜像。
+
+0136 的启动参数为 `sweetusbirq=0`（默认，原 1 ms 轮询）、`1`（仅 GIC
+软件 pending 探针，DWC3 仍屏蔽并轮询）、`2`（探针通过后开放真实 IRQ）。
+IRQ 上半部只屏蔽 SPI 165 并唤醒事件线程；线程读取 event buffer、确认
+`GEVNTCOUNT`、重新使能 SPI。每 200 ms 做一次恢复检查；连续 8 次只由
+恢复检查发现事件，或 16 次空 IRQ 唤醒，则屏蔽 DWC3 IRQ 并恢复原
+1 ms 轮询。探针失败也保持原轮询。日志中的 `software-pending probe hits=1`
+只证明 GIC 软件路径；`SWEET USB IRQ: hit` 且有真实事件才证明设备路径。
+
+CircleCI 产物下载后运行
+`tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-<编号>.gz <编号> --usb-irq`。
+同一内核会生成 `usb-irq-gic`、`usb-irq`、`usb-irq-keys` 三张额外镜像。
+按这个顺序用 `fastboot boot` 测，若前一阶段无法进桌面、探针失败、
+日志无真实命中或 CDC-ACM 中断/按键异常，则先停止后续阶段并导出
+本轮持久 SWEETLOG。只在需要定位问题时再刷该内核的 `usb` 轮询镜像。
 
 ## 当前无需单独测试
 

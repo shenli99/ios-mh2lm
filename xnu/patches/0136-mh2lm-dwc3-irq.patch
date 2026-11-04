@@ -1,0 +1,395 @@
+mh2lm: stage DWC3 event IRQ on GIC INTID 165 (0136)
+
+Keep the proven CDC-ACM polling path as the default. sweetusbirq=1 proves
+GIC delivery with a bounded software-pending probe while DWC3 is masked;
+sweetusbirq=2 then unmasks the real DWC3 event IRQ. The IRQ top half masks
+SPI 165 and wakes the existing event worker, which drains and acknowledges
+GEVNTCOUNT before rearming. A 200 ms recovery check and bounded failure
+thresholds restore the existing 1 ms poller on a missing or noisy IRQ.
+
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -329,6 +329,13 @@
+ #define EP_TX           3               /* 0x81 bulk IN */
+ #define EP_INT          5               /* 0x82 interrupt IN */
+ 
++/* sm8150-usb.dtsi: dwc3@a600000 GIC_SPI 133 -> architectural INTID 165. */
++#define UD_IRQ_INTID    165u
++#define UD_IRQ_WORD     (UD_IRQ_INTID / 32u)
++#define UD_IRQ_BIT      (1u << (UD_IRQ_INTID % 32u))
++#define UD_GICD_PA      0x17a00000u
++#define UD_INTMASK      (1u << 31)
++
+ static struct {
+ 	vm_offset_t dwc;
+ 	vm_offset_t dma;
+@@ -348,6 +355,175 @@
+ 	uint64_t    log_pos;        /* committed console position */
+ 	uint64_t    log_pos_next;   /* position once the IN transfer completes */
+ } ud;
++static inline uint32_t dwc_rd(uint32_t off);
++
++/* 0: polling, 1: armed, 2: worker pending, 3: masked/fallback,
++ * 4: bounded software-pending GIC probe. */
++static volatile unsigned ud_irq_state;
++static volatile unsigned ud_irq_hits;
++static volatile unsigned ud_irq_probe_hits;
++static vm_offset_t ud_gicd;
++static int ud_irq_sleep_chan;
++static int ud_irq_requested;
++static bool ud_irq_ready;
++static unsigned ud_irq_empty, ud_irq_missed;
++
++static uint32_t
++ud_gic_rd(unsigned off)
++{
++	return usb_rd(ud_gicd, off);
++}
++
++static void
++ud_gic_wr(unsigned off, uint32_t value)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(ud_gicd + off) = value;
++	__asm__ volatile("dsb oshst" ::: "memory");
++}
++
++static uint64_t
++ud_gic_rd64(unsigned off)
++{
++	uint64_t value = *(volatile uint64_t *)(ud_gicd + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return value;
++}
++
++static void
++ud_gic_wr64(unsigned off, uint64_t value)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint64_t *)(ud_gicd + off) = value;
++	__asm__ volatile("dsb oshst" ::: "memory");
++}
++
++static bool
++ud_gic_wait(void)
++{
++	for (unsigned i = 0; i < 1000; ++i) {
++		if ((ud_gic_rd(0) & (1u << 31)) == 0) {
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++static bool
++ud_gic_configure(void)
++{
++	unsigned off = 4u * UD_IRQ_WORD;
++	uint32_t typer = ud_gic_rd(0x004u);
++	if (((typer & 0x1fu) + 1u) * 32u <= UD_IRQ_INTID) {
++		return false;
++	}
++	ud_gic_wr(0x180u + off, UD_IRQ_BIT);
++	if (!ud_gic_wait()) {
++		return false;
++	}
++	ud_gic_wr(0x080u + off, ud_gic_rd(0x080u + off) | UD_IRQ_BIT);
++	unsigned cfgOff = 0xc00u + 4u * (UD_IRQ_INTID / 16u);
++	unsigned cfgShift = 2u * (UD_IRQ_INTID % 16u);
++	ud_gic_wr(cfgOff, ud_gic_rd(cfgOff) & ~(3u << cfgShift));
++	unsigned priOff = 0x400u + (UD_IRQ_INTID & ~3u);
++	unsigned priShift = 8u * (UD_IRQ_INTID & 3u);
++	uint32_t priority = ud_gic_rd(priOff);
++	ud_gic_wr(priOff, (priority & ~(0xffu << priShift)) | (0xa0u << priShift));
++	ud_gic_wr64(0x6000u + 8u * UD_IRQ_INTID, 0); /* boot CPU MPIDR */
++	if (!ud_gic_wait()) {
++		return false;
++	}
++	uint32_t ctlr = ud_gic_rd(0);
++	uint32_t group = ud_gic_rd(0x080u + off);
++	uint32_t cfg = (ud_gic_rd(cfgOff) >> cfgShift) & 3u;
++	uint32_t pri = (ud_gic_rd(priOff) >> priShift) & 0xffu;
++	uint64_t route = ud_gic_rd64(0x6000u + 8u * UD_IRQ_INTID);
++	printf("SWEET USB IRQ: GIC intid=%u ctlr=%#x group-read=%u cfg=%u pri=%#x route=%#llx\n",
++	    UD_IRQ_INTID, ctlr, (group & UD_IRQ_BIT) ? 1 : 0, cfg, pri, route);
++	/* Non-secure IGROUPR readback was zero for the proven key SPI 513.
++	 * Real delivery is checked by the probe, never by this bit alone. */
++	return (ctlr & 2u) != 0 && cfg == 0 && pri == 0xa0u && route == 0;
++}
++
++/* Leave DWC3 INTMASK set: this checks only the GIC path, not the device. */
++static bool
++ud_gic_probe(void)
++{
++	unsigned off = 4u * UD_IRQ_WORD;
++	uint32_t pending = ud_gic_rd(0x200u + off) & UD_IRQ_BIT;
++	uint32_t active = ud_gic_rd(0x300u + off) & UD_IRQ_BIT;
++	if ((dwc_rd(GEVNTSIZ) & UD_INTMASK) == 0 || pending || active) {
++		printf("SWEET USB IRQ: GIC probe refused mask=%u pending=%u active=%u\n",
++		    (dwc_rd(GEVNTSIZ) & UD_INTMASK) ? 1 : 0,
++		    pending ? 1 : 0, active ? 1 : 0);
++		return false;
++	}
++	__atomic_store_n(&ud_irq_probe_hits, 0u, __ATOMIC_RELEASE);
++	__atomic_store_n(&ud_irq_state, 4u, __ATOMIC_RELEASE);
++	ud_gic_wr(0x100u + off, UD_IRQ_BIT);
++	if (!ud_gic_wait() || (ud_gic_rd(0x100u + off) & UD_IRQ_BIT) == 0) {
++		__atomic_store_n(&ud_irq_state, 3u, __ATOMIC_RELEASE);
++		ud_gic_wr(0x180u + off, UD_IRQ_BIT);
++		printf("SWEET USB IRQ: GIC probe enable/wait failed\n");
++		return false;
++	}
++	ud_gic_wr(0x200u + off, UD_IRQ_BIT);
++	for (unsigned i = 0; i < 1000; ++i) {
++		if (__atomic_load_n(&ud_irq_probe_hits, __ATOMIC_ACQUIRE)) {
++			break;
++		}
++		delay(100);
++	}
++	__atomic_store_n(&ud_irq_state, 3u, __ATOMIC_RELEASE);
++	ud_gic_wr(0x180u + off, UD_IRQ_BIT);
++	ud_gic_wr(0x280u + off, UD_IRQ_BIT);
++	bool clear = ud_gic_wait();
++	for (unsigned i = 0; clear && i < 1000; ++i) {
++		pending = ud_gic_rd(0x200u + off) & UD_IRQ_BIT;
++		active = ud_gic_rd(0x300u + off) & UD_IRQ_BIT;
++		if (!pending && !active) {
++			break;
++		}
++		if (i == 999) {
++			clear = false;
++		} else {
++			delay(1);
++		}
++	}
++	unsigned hits = __atomic_load_n(&ud_irq_probe_hits, __ATOMIC_ACQUIRE);
++	printf("SWEET USB IRQ: software-pending probe hits=%u clear=%u pending=%u active=%u\n",
++	    hits, clear ? 1 : 0, pending ? 1 : 0, active ? 1 : 0);
++	return hits == 1u && clear;
++}
++
++/* Called by sleh_irq before GIC EOI. No event-ring, DMA, or gadget work here. */
++bool
++sweet_usb_irq(unsigned int intid)
++{
++	if (intid != UD_IRQ_INTID) {
++		return false;
++	}
++	unsigned state = __atomic_load_n(&ud_irq_state, __ATOMIC_ACQUIRE);
++	if (state == 4u) {
++		ud_gic_wr(0x180u + 4u * UD_IRQ_WORD, UD_IRQ_BIT);
++		__atomic_add_fetch(&ud_irq_probe_hits, 1u, __ATOMIC_RELEASE);
++		return true;
++	}
++	unsigned expected = 1u;
++	if (__atomic_compare_exchange_n(&ud_irq_state, &expected, 2u, false,
++	    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++		ud_gic_wr(0x180u + 4u * UD_IRQ_WORD, UD_IRQ_BIT);
++		__atomic_add_fetch(&ud_irq_hits, 1u, __ATOMIC_RELEASE);
++		thread_wakeup(&ud_irq_sleep_chan);
++		return true;
++	}
++	if (expected == 2u || expected == 3u) {
++		ud_gic_wr(0x180u + 4u * UD_IRQ_WORD, UD_IRQ_BIT);
++		return true;
++	}
++	return false;
++}
+ 
+ static inline void
+ dwc_wr(uint32_t off, uint32_t v)
+@@ -375,6 +551,58 @@
+ 	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+ 	(void)assert_wait_deadline(&ud.sleep_chan, THREAD_UNINT, deadline);
+ 	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static void
++ud_irq_wait(unsigned observed)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(200, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&ud_irq_sleep_chan, THREAD_UNINT, deadline);
++	if (__atomic_load_n(&ud_irq_hits, __ATOMIC_ACQUIRE) != observed ||
++	    __atomic_load_n(&ud_irq_state, __ATOMIC_ACQUIRE) == 3u) {
++		clear_wait(current_thread(), THREAD_AWAKENED);
++	}
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static void
++ud_irq_fallback(const char *reason)
++{
++	__atomic_store_n(&ud_irq_state, 3u, __ATOMIC_RELEASE);
++	if (ud_gicd) {
++		ud_gic_wr(0x180u + 4u * UD_IRQ_WORD, UD_IRQ_BIT);
++	}
++	dwc_wr(GEVNTSIZ, dwc_rd(GEVNTSIZ) | UD_INTMASK);
++	printf("SWEET USB IRQ: fallback %s hits=%u empty=%u missed=%u; 1 ms polling restored\n",
++	    reason, __atomic_load_n(&ud_irq_hits, __ATOMIC_ACQUIRE),
++	    ud_irq_empty, ud_irq_missed);
++	thread_wakeup(&ud_irq_sleep_chan);
++}
++
++static bool
++ud_irq_arm(void)
++{
++	if (!ud_irq_ready || ud_irq_requested != 2) {
++		return false;
++	}
++	__atomic_store_n(&ud_irq_state, 1u, __ATOMIC_RELEASE);
++	ud_gic_wr(0x100u + 4u * UD_IRQ_WORD, UD_IRQ_BIT);
++	bool waited = ud_gic_wait();
++	bool enabled = (ud_gic_rd(0x100u + 4u * UD_IRQ_WORD) & UD_IRQ_BIT) != 0;
++	unsigned state = __atomic_load_n(&ud_irq_state, __ATOMIC_ACQUIRE);
++	if (!waited || (!enabled && state == 1u) || state == 3u) {
++		ud_irq_fallback("GIC enable readback");
++		return false;
++	}
++	dwc_wr(GEVNTSIZ, dwc_rd(GEVNTSIZ) & ~UD_INTMASK);
++	if (dwc_rd(GEVNTSIZ) & UD_INTMASK) {
++		ud_irq_fallback("DWC3 event unmask readback");
++		return false;
++	}
++	printf("SWEET USB IRQ: armed intid=%u size=%#x pending=%u\n",
++	    UD_IRQ_INTID, dwc_rd(GEVNTSIZ), dwc_rd(GEVNTCOUNT) & 0xffffu);
++	return true;
+ }
+ 
+ static int
+@@ -762,10 +990,19 @@
+ ud_thread(void *arg __unused, wait_result_t wr __unused)
+ {
+ 	uint32_t ticks = 0;
++	unsigned last_irq = 0;
+ 	bool complained = false;
+ 	for (;;) {
++		unsigned observed = __atomic_load_n(&ud_irq_hits, __ATOMIC_ACQUIRE);
++		unsigned irqState = __atomic_load_n(&ud_irq_state, __ATOMIC_ACQUIRE);
+ 		uint32_t count = dwc_rd(GEVNTCOUNT) & 0xffff;
+ 		if (count) {
++			if (irqState == 1u && observed == last_irq && ++ud_irq_missed >= 8u) {
++				ud_irq_fallback("events seen only by recovery polling");
++			}
++			if (irqState == 2u || observed != last_irq) {
++				ud_irq_missed = 0;
++			}
+ 			ud_sync(UD_EVT, UD_EVT_SIZE);
+ 			for (uint32_t done = 0; done < count; done += 4) {
+ 				uint32_t ev = *(volatile uint32_t *)(ud.dma + UD_EVT + ud.evt_pos);
+@@ -776,7 +1013,8 @@
+ 				ud_event(ev);
+ 			}
+ 			dwc_wr(GEVNTCOUNT, count);
+-		} else if (!complained && ticks > 3000) {
++		} else if (!complained && ud.events == 0 &&
++		    ticks > (irqState == 1u || irqState == 2u ? 15u : 3000u)) {
+ 			/* No event at all three seconds after RUN_STOP means the
+ 			 * controller never reached us: either the host has not
+ 			 * touched the link, or its event/DMA addresses land
+@@ -785,12 +1023,43 @@
+ 			printf("SWEET USB: no device events after 3 s (GEVNTCOUNT %u, DSTS 0x%08x)\n",
+ 			    dwc_rd(GEVNTCOUNT) & 0xffff, dwc_rd(DSTS));
+ 		}
+-		if ((++ticks % 30000) == 0) {
++		unsigned period = irqState == 1u || irqState == 2u ? 150u : 30000u;
++		if ((++ticks % period) == 0) {
+ 			printf("SWEET USB: console %u bytes, TX %u/%u err %u, events %u, configured %d, dtr %d\n",
+ 			    ud.posted, ud.tx_completed, ud.tx_submitted, ud.tx_errors,
+ 			    ud.events, ud.configured, ud.dtr);
+-		}
+-		ud_sleep_ms(1);
++			if (period == 150u) {
++				printf("SWEET USB IRQ: counters hits=%u empty=%u missed=%u count=%u\n",
++				    __atomic_load_n(&ud_irq_hits, __ATOMIC_ACQUIRE),
++				    ud_irq_empty, ud_irq_missed, dwc_rd(GEVNTCOUNT) & 0xffffu);
++			}
++		}
++		irqState = __atomic_load_n(&ud_irq_state, __ATOMIC_ACQUIRE);
++		if (irqState == 2u) {
++			if (count == 0 && ++ud_irq_empty >= 16u) {
++				ud_irq_fallback("16 empty IRQ wakeups");
++			} else {
++				if (count) {
++					ud_irq_empty = 0;
++				}
++				if (observed <= 16u || (observed & 255u) == 0) {
++					printf("SWEET USB IRQ: hit irq=%u bytes=%u events=%u empty=%u\n",
++					    observed, count, ud.events, ud_irq_empty);
++				}
++				__atomic_store_n(&ud_irq_state, 1u, __ATOMIC_RELEASE);
++				ud_gic_wr(0x100u + 4u * UD_IRQ_WORD, UD_IRQ_BIT);
++			}
++		}
++		last_irq = observed;
++		irqState = __atomic_load_n(&ud_irq_state, __ATOMIC_ACQUIRE);
++		if ((irqState == 1u || irqState == 2u) &&
++		    (dwc_rd(GEVNTCOUNT) & 0xffffu) == 0) {
++			ud_irq_wait(observed);
++		} else if (irqState == 1u || irqState == 2u) {
++			continue; /* Drain newly queued events before sleeping. */
++		} else {
++			ud_sleep_ms(1);
++		}
+ 	}
+ }
+ 
+@@ -820,6 +1089,12 @@
+ 	thread_t thread;
+ 
+ 	ud.dwc = dwc;
++	(void)PE_parse_boot_argn("sweetusbirq", &ud_irq_requested,
++	    sizeof(ud_irq_requested));
++	if (ud_irq_requested < 0 || ud_irq_requested > 2) {
++		printf("SWEET USB IRQ: invalid mode=%d; polling retained\n", ud_irq_requested);
++		ud_irq_requested = 0;
++	}
+ 	printf("SWEET USB: gadget step 0: DMA\n");
+ 	/*
+ 	 * All of XNU's DRAM is above 4 GiB. If the controller turns out to
+@@ -889,6 +1164,15 @@
+ 	ud.evt_pos = 0;
+ 	printf("SWEET USB: GEVNTADR readback 0x%08x%08x size 0x%08x\n",
+ 	    dwc_rd(GEVNTADRHI), dwc_rd(GEVNTADRLO), dwc_rd(GEVNTSIZ));
++	if (ud_irq_requested) {
++		ud_gicd = ml_io_map(UD_GICD_PA, 0x10000);
++		ud_irq_ready = ud_gicd && ud_gic_configure() && ud_gic_probe();
++		if (!ud_irq_ready) {
++			printf("SWEET USB IRQ: GIC probe unavailable; 1 ms polling retained\n");
++		} else if (ud_irq_requested == 1) {
++			printf("SWEET USB IRQ: probe-only mode; DWC3 interrupt masked, 1 ms polling retained\n");
++		}
++	}
+ 
+ 	/* High speed, address 0 */
+ 	uint32_t dcfg = dwc_rd(DCFG) & ~(7u | (0x7fu << 3));
+@@ -987,8 +1271,14 @@
+ 	printf("SWEET USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n", dwc_rd(DSTS), i, ud.dma_pa);
+ 	printf("SWEET USB:   - arming ep0 setup now that the controller runs\n");
+ 	ud_start_setup();
+-	if (kernel_thread_start(ud_thread, NULL, &thread) == KERN_SUCCESS) {
++	bool workerStarted = kernel_thread_start(ud_thread, NULL, &thread) == KERN_SUCCESS;
++	if (workerStarted) {
+ 		thread_deallocate(thread);
++	} else {
++		printf("SWEET USB: event worker failed to start\n");
++	}
++	if (workerStarted && ud_irq_requested == 2 && ud_irq_ready) {
++		(void)ud_irq_arm();
+ 	}
+ 	if (kernel_thread_start(ud_log_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1886,6 +1886,10 @@
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ 		extern bool sweet_spmi_mux_irq(unsigned int intid);
+ 		sweet_handled = sweet_spmi_mux_irq(intid);
++		if (!sweet_handled) {
++			extern bool sweet_usb_irq(unsigned int intid);
++			sweet_handled = sweet_usb_irq(intid);
++		}
+ #endif
+ 		if (!sweet_handled && cdp->interrupt_handler) {
+ 			cdp->interrupt_handler(cdp->interrupt_target,

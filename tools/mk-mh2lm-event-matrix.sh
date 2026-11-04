@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq]\n' "$0" >&2
 	exit 2
 fi
 
@@ -24,6 +24,8 @@ case "$KEY_IRQ_PROFILE" in
 	--key-irq-upstream)
 		;;
 	--key-irq-mux)
+		;;
+	--usb-irq)
 		;;
 	*)
 		printf 'unknown optional profile: %s\n' "$KEY_IRQ_PROFILE" >&2
@@ -67,13 +69,20 @@ grep -Fqx "$KERNEL_SHA256  kernel.development.mh2lm" "$TMPDIR/SHA256SUMS"
 
 # Avoid making a matrix from an artifact that did not actually include the
 # requested battery transition trace and the previously validated ACM driver.
-strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'SWEET BATT UI:'
-strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'ACM endpoints configured'
+grep -Fqa 'SWEET BATT UI:' "$TMPDIR/kernel.development.mh2lm"
+grep -Fqa 'ACM endpoints configured' "$TMPDIR/kernel.development.mh2lm"
 if [ -n "$KEY_IRQ_PROFILE" ]; then
-	strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'keys-volume-up'
+	grep -Fqa 'keys-volume-up' "$TMPDIR/kernel.development.mh2lm"
 fi
 if [ "$KEY_IRQ_PROFILE" = '--key-irq-mux' ]; then
-	strings -a "$TMPDIR/kernel.development.mh2lm" | grep -Fq 'SWEET MUX: armed mode='
+	grep -Fqa 'SWEET MUX: armed mode=' "$TMPDIR/kernel.development.mh2lm"
+fi
+if [ "$KEY_IRQ_PROFILE" = '--usb-irq' ]; then
+	if ! grep -Fqa 'SWEET USB IRQ: software-pending probe hits=' "$TMPDIR/kernel.development.mh2lm"; then
+		printf 'kernel artifact does not contain the DWC3 IRQ probe; check the CI buildtree\n' >&2
+		exit 1
+	fi
+	grep -Fqa 'SWEET MUX: armed mode=' "$TMPDIR/kernel.development.mh2lm"
 fi
 
 make_profile() {
@@ -196,6 +205,19 @@ if [ "$KEY_IRQ_PROFILE" = '--key-irq-mux' ]; then
 		"LG G8X - XNU all key IRQs (${LABEL})" \
 		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetkeysirq=3"
 fi
+if [ "$KEY_IRQ_PROFILE" = '--usb-irq' ]; then
+	# One kernel, staged GIC-only and real DWC3 IRQ tests. CDC-ACM remains
+	# enabled in all profiles and persistent SWEETLOG covers USB failures.
+	make_profile usb-irq-gic \
+		"LG G8X - XNU USB GIC probe (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetusbirq=1"
+	make_profile usb-irq \
+		"LG G8X - XNU DWC3 IRQ (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetusbirq=2"
+	make_profile usb-irq-keys \
+		"LG G8X - XNU DWC3 and key IRQ (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetusbirq=2 sweetkeys=1 sweetkeysirq=3"
+fi
 
 printf 'kernel SHA256: %s\n' "$KERNEL_SHA256"
 printf 'created profiles for %s: baseline, battery-ui, battery-ui-preserve-off, usb, usb-battery-ui' "$LABEL"
@@ -213,5 +235,8 @@ if [ "$KEY_IRQ_PROFILE" = '--key-irq-upstream' ]; then
 fi
 if [ "$KEY_IRQ_PROFILE" = '--key-irq-mux' ]; then
 	printf ', key-irq-mux-soft, key-irq-power, key-irq-all'
+fi
+if [ "$KEY_IRQ_PROFILE" = '--usb-irq' ]; then
+	printf ', usb-irq-gic, usb-irq, usb-irq-keys'
 fi
 printf '\n'
