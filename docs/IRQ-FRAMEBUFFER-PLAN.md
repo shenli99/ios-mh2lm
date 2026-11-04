@@ -21,6 +21,10 @@ Framebuffer 修复尚未启动。
 **适用范围：** `ref/ios-mh2lm` 的 MH2LM XNU 驱动；本文是实施和验收计划，
 不替代 `NOTES.md` 中已经取得的硬件观察、日志结论和回归基线。
 
+0114a15 当前 USB、按键、触摸、framebuffer、IOSurface 和背光的实际数据流、
+与 XNU/IOKit 常规方式的差距，见
+[`CURRENT-DRIVER-ARCHITECTURE.md`](CURRENT-DRIVER-ARCHITECTURE.md)。
+
 ## 总体顺序
 
 1. 先完成一部分既有驱动的 IRQ 化：按键、DWC3 USB、触摸。
