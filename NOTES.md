@@ -2,7 +2,39 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**Current local checkpoint (DWC3 IRQ patch 0136, push needed):**
+**0114a11 DWC3 IRQ artifact checkpoint (phone test pending):**
+The user pushed 0136 commit `9bbb03c` and downloaded
+`logs/xnu-kernel-0114a11.gz` (SHA256
+`fce642c79442fe143310f40daf08bc60309206e6b305ed2c93ec096801231238`)
+and `logs/xnu-buildtree-0114a11.gz` (SHA256
+`76d24fd0f6a193f90b6bff963c2af17fe1a0f48d3cdc2a427d16f73733192632`).
+The kernel manifest verifies Mach-O SHA256
+`99048ff11ca5a6ab3f0917faed55497aecd9e1042d037c92e843d2dbfc05b0b6`;
+both modified buildtree files byte-match the locally compiled 0136 sources.
+The linked kernel exports `_sweet_usb_irq` and `_sweet_spmi_mux_irq`.
+No `xnu-build-log-0114a11.txt` was downloaded, so the CI command transcript
+was not reviewed; the complete linked kernel is present.
+
+`tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-0114a11.gz 0114a11
+--usb-irq` generated and byte-verified three staged `fastboot boot` images:
+
+- `out-bs/boot-16k-0114a11-usb-irq-gic.img` SHA256
+  `be260789db02702a38beff6a288b5b3a2f36f833c0c1957dcc2edd47241f56c6`:
+  `sweetusbirq=1`, DWC3 IRQ masked, GIC-only probe and normal USB polling.
+- `out-bs/boot-16k-0114a11-usb-irq.img` SHA256
+  `c534b80d77b016b6b749094ab83d62e34c06f33c3dacff0ea177ea434b17063a`:
+  `sweetusbirq=2`, probe-gated real DWC3 IRQ.
+- `out-bs/boot-16k-0114a11-usb-irq-keys.img` SHA256
+  `061c02ad01f1bffd953cf916aa6239f412dd278e5c87ae1dfe52aca040ff3ef8`:
+  `sweetusbirq=2 sweetkeysirq=3`, both IRQ routes concurrently.
+
+Boot only the GIC image first. Require a fresh log with
+`software-pending probe hits=1 clear=1 pending=0 active=0`, a normal desktop,
+and working CDC-ACM before testing the real DWC3 IRQ image. `group-read=0`
+alone is expected in the non-secure view. Stop on failure and retain the
+fresh SWEETLOG. No phone result has been received for 0114a11 yet.
+
+**0136 implementation (historical local checkpoint):**
 `xnu/patches/0136-mh2lm-dwc3-irq.patch` adds optional `sweetusbirq=1`
 (GIC INTID 165 software-pending probe, DWC3 masked) and `sweetusbirq=2`
 (probe-gated real DWC3 IRQ). Default mode 0 retains the proven 1 ms USB
@@ -16,11 +48,8 @@ resulting files byte-match the locally compiled sources. Both changed C
 files compiled as arm64 Mach-O objects with CI-derived 0114a7 flags;
 `_sweet_usb_irq` is defined in `sweet_usb.c` and referenced by `sleh.c`.
 `bash -n`, the non-patch staged whitespace check, and a `patch -p1` dry run
-passed. **No CircleCI build or phone test
-has yet run for 0136.** After the commit is pushed by the user, download
-the new kernel/buildtree; verify 0136 is present, then run the documented
-three-stage test in `docs/USB-IRQ-HARDWARE-BASELINE.md`. Start host ACM
-capture before each boot and extract fresh SWEETLOG after each stage.
+passed. At this point no CircleCI build or phone test had run for 0136;
+the 0114a11 artifact verification above supersedes the build status.
 
 **Current checkpoint (0114a10 three-key IRQ routes passed on phone):**
 Power, Volume Down and Volume Up each have real SPI 513 route hits through

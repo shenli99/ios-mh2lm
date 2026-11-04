@@ -1,8 +1,8 @@
 # MH2LM DWC3 USB IRQ 硬件基线
 
 **状态（2026-11-04）：** 当前 CDC-ACM 已稳定输出日志，但已测试的 DWC3
-event buffer 仍每 1 ms 轮询。0136 增加可选 IRQ 路径，已在 0114a10 的
-buildtree 上本地编译并验证补丁应用；**尚未经过 CircleCI 或手机实测**。
+event buffer 仍每 1 ms 轮询。0136 增加可选 IRQ 路径；0114a11 的完整
+CircleCI 内核及 buildtree 已验证，三张测试镜像已生成，**尚未手机实测**。
 下面的中断映射来自目标 DTS 和 Linux 驱动，尚无 MH2LM 的 INTID 165
 投递实测。实测结果与镜像 SHA256 统一记入 `NOTES.md`。
 
