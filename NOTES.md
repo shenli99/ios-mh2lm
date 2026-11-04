@@ -2,8 +2,16 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**Current checkpoint (0114a10 three-key IRQ routes passed on phone):** 0114a7
-closed the PON/GPIO6 route and peripheral read-only
+**Current checkpoint (0114a10 three-key IRQ routes passed on phone):**
+Power, Volume Down and Volume Up each have real SPI 513 route hits through
+`SweetSpmiInterruptMux`; USB CDC-ACM streamed concurrently. Mode 3 still
+has a 200 ms recovery poll, and the default boot mode still has 20 ms
+polling. Next major child target is DWC3 USB INTID 165 IRQ; use
+`docs/USB-IRQ-HARDWARE-BASELINE.md` and `docs/IRQ-BRINGUP-LESSONS.md`.
+The remaining material in this section is the historical 0114a sequence.
+
+**Historical 0114a7 checkpoint:** 0114a7 closed the PON/GPIO6 route and
+peripheral read-only
 preflight; both EE0 APIDs are accessible, but their PMIC interrupt gates
 remain off and keys still poll every 20 ms. The target SM8150 Linux source
 maps PDC pin 1 to GIC INTID 513. Patch 0133 adds independent read-only
@@ -16,6 +24,12 @@ buildtree contains the probe source, the kernel manifest matches SHA256
 and the kernel binary contains the PDC/GIC diagnostic strings. The CircleCI
 build log was not supplied; the kernel artifact itself is complete. The
 PDC-only image was subsequently tested below.
+
+The reusable mistakes and gate order learned during 0114a–0114a10 are in
+`docs/IRQ-BRINGUP-LESSONS.md` (artifact provenance, fresh logs, EE ownership,
+GIC delivery versus IGROUPR readback, staged hardware enable, IRQ evidence,
+and USB logging). Apply it before the DWC3 and touch IRQ work. It is a
+process record; it does not change the already tested 0114a10 kernel.
 
 `tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-0114a8.gz 0114a8
 --key-irq-upstream` generated four temporary images from this single kernel:

@@ -1,7 +1,9 @@
 # MH2LM 硬件按键 IRQ 基线
 
-**状态：** 仅完成资料和运行时观察的汇总。按键仍由 20 ms 轮询驱动；
-`SweetSpmiInterruptMux` 尚未注册 GIC SPI 或写入任何 PMIC/PDC 中断寄存器。
+**状态：** 0114a10 已验证 Power、Volume Down、Volume Up 的真实 IRQ 路由；
+默认启动仍使用 20 ms 轮询，显式 `sweetkeysirq=3` 保留 200 ms 恢复轮询。
+下文预检表和“尚未启用”措辞保留当时的历史状态；以文末 0114a10 实测
+和 `NOTES.md` 当前检查点为准。复盘见 `IRQ-BRINGUP-LESSONS.md`。
 **更新日期：** 2026-11-04
 **目的：** 记录将 Power、Volume Down、Volume Up 转为 IRQ 模式所需的硬件事实、
 未知项和验证顺序，防止把其他设备、Linux irqdomain 或推测的寄存器值带入 XNU。

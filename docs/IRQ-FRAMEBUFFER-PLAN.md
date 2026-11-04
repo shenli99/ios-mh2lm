@@ -23,6 +23,10 @@
 
 ### 架构约束
 
+按键 0114a 系列的失败原因与可复用检查顺序见
+[`IRQ-BRINGUP-LESSONS.md`](IRQ-BRINGUP-LESSONS.md)；USB、触摸适配前先核对
+其中的产物来源、日志新鲜度、GIC 投递和真实设备事件四项。
+
 本项目采用下列 XNU/IOKit 路径：
 
 ```text
