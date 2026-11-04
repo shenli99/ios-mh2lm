@@ -128,6 +128,8 @@ IOInterruptEventSource/IOWorkLoop 软件交接，`=2` 仅启用 Power IRQ，`=3`
 同一内核应能选择当前轮询路径、USB IRQ 路径，以及同时开启
 `sweetkeysirq=3` 的并发路径；USB 日志继续作为正常观测通道，早期或 USB
 中断故障仍从持久 SWEETLOG 取证。
+已知值、必须实测的 SPI 165 投递/确认步骤及无需重复测试的项目见
+[`USB-IRQ-HARDWARE-BASELINE.md`](USB-IRQ-HARDWARE-BASELINE.md)。
 
 **实施边界：**
 
