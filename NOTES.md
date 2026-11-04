@@ -117,6 +117,16 @@ test results in this file.
   with `fastboot boot`, stopping if either returns to the LG BSP. A success
   would support, but not alone prove, that 0114a3 failed on an inaccessible
   foreign EE channel.
+- **0114a6 download provenance (2026-11-04):** all three files labelled
+  `0114a6` are byte-for-byte identical to the corresponding `0114a5` files:
+  build log SHA256 `7395210776bb6691473c43727452803fec0f05e2cade0a7e2b011c74a2d569f5`,
+  buildtree SHA256 `f70a60a3ab3fadab7ee822596ead939c63f775c7e62e492b009d35780bb5dae7`,
+  kernel gzip SHA256 `4a7813229260e18025c0087f393e589f1bb89aee29b006b710974ce572e4ca73`.
+  The build log ends its applied-patch list at 0131; the extracted
+  `sweet_spmi.c` lacks 0132's `channel skipped` logic. Do not package these
+  files as 0132 test images. Retrieve the CI artifacts from a run whose build
+  log explicitly applies `0132-mh2lm-key-irq-owned-channel-probe.patch`,
+  and verify the extracted source before testing `256` or `512`.
 
 ### Kernel replacement regression baseline (measured through 2026-11-03)
 
