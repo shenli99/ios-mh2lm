@@ -2,6 +2,23 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
+**0114a13 touch GIC-only phone result; advance to real GPIO122 IRQ:**
+`logs/live-0114a13-touch-irq-keys.txt` SHA-256
+`076631f8e9f2f7e2117e7aeeea7f85231c09c3e2867e6efc42d17923ea85f0af`
+contains boot args `sweettouchirq=1 sweetusbirq=2 sweetkeysirq=3`.
+TouchComm initialized, INTID 240 software pending returned exactly
+`hits=1 clear=1 pending=0 active=0`, and the log explicitly says the
+TLMM pin interrupt stayed disabled with 10 ms polling retained. Touch
+reports/events reached 37/37, `attn-low=37`, `i2c-errors=0`, with HID
+down/up and motion records. USB IRQ reached 366 hits with `empty=0
+missed=0`. No touch/USB fallback or kernel panic appeared in this live
+capture. It has no key IRQ event records, so it does not add new evidence
+for key operation. **This proves the GIC software path only.** Next test:
+`out-bs/boot-16k-0114a13-touch-irq.img` with `sweettouchirq=2` and key
+polling; capture USB live log. Check real `SWEET TOUCH IRQ: armed`/`hit`
+records, touch HID events and absence of fallback before trying
+`touch-irq-all`.
+
 **0114a13 build artifacts received; touch IRQ phone test pending:**
 `logs/xnu-buildtree-0114a13.gz` and `logs/xnu-kernel-0114a13.gz` are present.
 The build tree contains the `sweettouchirq` modes and touch IRQ probe code;
