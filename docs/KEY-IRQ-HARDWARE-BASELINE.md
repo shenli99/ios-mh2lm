@@ -272,6 +272,13 @@ gate 前退出，按键保持 20 ms 轮询；日志没有 `armed` 或 `hit route
 测试决策见 `NOTES.md`。三键第 4 项暂停，先查清 SPI 513 分组/安全域语义并设计
 有界诊断；目前不能把按键 IRQ 验收条件标为完成。
 
+0135 在本地加入 SPI 513 软件 pending 投递检查：PDC pin 1 与 SPI 513 必须先处于
+空闲，最多等待 100 ms 的 `sleh_irq` 命中，随后屏蔽并清除 pending；只有恰好一次
+命中且 pending/active 清零，才继续打开 PMIC/PDC gate。此时 Group 位的非安全侧
+读回仍记录在日志中，但不再单独决定测试结果。失败仍维持 20 ms 轮询。
+该补丁已通过 0114a9 buildtree 适配和本地单文件 arm64 编译；尚无新 CI/实机
+结果，Power IRQ 仍未验收。后续用已验证的 CDC-ACM 通道直接收集按键 IRQ 日志。
+
 ## 证据索引
 
 - 目标 SoC / PMIC DTS：`ref/lge-lineage-kernel/arch/arm64/boot/dts/qcom/sm8150.dtsi`、

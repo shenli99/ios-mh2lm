@@ -2,7 +2,7 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**Current checkpoint (0134 mux commit `e393921`, 0114a9 Power trial failed to arm):** 0114a7
+**Current checkpoint (0135 GIC delivery probe staged; 0114a9 Power trial failed to arm):** 0114a7
 closed the PON/GPIO6 route and peripheral read-only
 preflight; both EE0 APIDs are accessible, but their PMIC interrupt gates
 remain off and keys still poll every 20 ms. The target SM8150 Linux source
@@ -127,6 +127,27 @@ sweetvbus=1` by default. Start `tools/sweet-usbacm-log.sh` before
 `fastboot boot` and read `/dev/ttyACM*` as soon as it enumerates. Keep
 the persistent SWEETLOG for the pre-enumeration interval or if USB never
 comes up. Do not schedule a separate USB verification round for this work.
+
+**0135 next kernel change (local, not yet through CircleCI or phone):**
+`xnu/patches/0135-mh2lm-spmi-gic-delivery-probe.patch` keeps the SPI 513
+Group 1 write but no longer treats the non-secure IGROUPR readback alone as
+proof of delivery. Before any PMIC/PDC gate opens, it requires PDC pin 1 and
+SPI 513 to be idle, configures the SPI, software-pends it for at most 100 ms,
+and accepts the hardware key mode only if `sleh_irq` sees exactly one hit and
+pending/active state clears. Otherwise it masks/clears SPI 513 and retains
+20 ms polling. This directly tests the current blocker while preserving the
+existing bounded mux worker and key fallback. The patch applies byte-for-byte
+to the downloaded 0114a9 buildtree source; its changed C++ file produced an
+arm64 Mach-O object with `_sweet_spmi_mux_irq` and `_sweet_spmi_mux_start`
+using local CI-derived flags. **The user must push this code commit for the
+next CircleCI kernel.** Package that one kernel with `--key-irq-mux`; the key
+profiles now use the established CDC-ACM console by default. Start the USB
+reader before `fastboot boot`, and retain SWEETLOG as the early-boot fallback.
+First boot the new Power profile. Success requires `GIC software-pending
+probe hits=1 clear=1`, `SWEET MUX: armed mode=2`, and real
+`hit route=power` records with normal press/release; only then boot the
+three-key profile. Probe failure or absent route hits means stop and inspect
+that log, not repeat the software-only mode.
 
 **Implementation roadmap:** `docs/IRQ-FRAMEBUFFER-PLAN.md` records the agreed
 two-stage order: first make the existing key, DWC3 USB and touch paths

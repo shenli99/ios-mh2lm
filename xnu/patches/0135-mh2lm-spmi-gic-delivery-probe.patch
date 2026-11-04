@@ -1,0 +1,121 @@
+mh2lm: prove SPI 513 delivery before arming PMIC key IRQs (0135)
+
+The 0114a9 Power trial stopped because the non-secure GICD_IGROUPR readback
+remained zero. Earlier shim work showed that readback is not by itself a
+reliable delivery check. Keep the Group 1 write, configuration readbacks and
+hardware gate ordering, but software-pend SPI 513 with PDC disabled before
+opening any PMIC gate. Accept hardware mode only after sleh_irq observes one
+bounded probe hit and the pending/active state clears. On failure, leave the
+20 ms key poller in place. The established USB CDC-ACM console is enabled by
+the packaging profile for live diagnostics.
+
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -62,7 +62,8 @@
+ static vm_offset_t gicd, pdc, core, cfg, obs;
+ static IOWorkLoop *workLoop;
+ static IOInterruptEventSource *eventSource;
+-static volatile unsigned state; /* 0 off, 1 armed, 2 worker pending, 3 failed */
++static volatile unsigned state; /* 0 off, 1 armed, 2 worker pending, 3 off, 4 GIC probe */
++static volatile unsigned probeHits;
+ static unsigned irqCount, workCount, routeCount, faultCount;
+ static unsigned mode;
+ 
+@@ -248,14 +249,70 @@
+ 	uint32_t gotCfg = read32(gicd, cfgOff);
+ 	uint32_t gotPri = read32(gicd, priOff);
+ 	uint64_t gotRoute = read64(gicd, 0x6000u + 8u * MUX_INTID);
+-	IOLog("SWEET MUX: GIC intid=%u group=%u cfg=%u pri=%#x route=%#x:%#x\n",
+-	    MUX_INTID, (gotGroup & MUX_SPI_BIT) ? 1 : 0,
++	uint32_t ctlr = read32(gicd, 0x000u);
++	IOLog("SWEET MUX: GIC intid=%u ctlr=%#x group-read=%u cfg=%u pri=%#x route=%#x:%#x\n",
++	    MUX_INTID, ctlr, (gotGroup & MUX_SPI_BIT) ? 1 : 0,
+ 	    (gotCfg >> (2u * (MUX_INTID % 16u))) & 3u,
+ 	    (gotPri >> priShift) & 0xffu,
+ 	    (uint32_t)(gotRoute >> 32), (uint32_t)gotRoute);
+-	return (gotGroup & MUX_SPI_BIT) != 0 &&
++	/* Earlier non-secure IGROUPR reads were zero despite Group 1 PPI/SGI
++	 * delivery. That does not establish SPI 513 ownership. The bounded
++	 * software-pending probe below tests this SPI before PMIC/PDC gates. */
++	return (ctlr & 2u) != 0 &&
+ 	    ((gotCfg >> (2u * (MUX_INTID % 16u))) & 3u) == 0 &&
+ 	    ((gotPri >> priShift) & 0xffu) == 0xa0u && gotRoute == 0;
++}
++
++/* Prove SPI 513 reaches sleh_irq without enabling the PMIC or PDC source.
++ * Never infer delivery from the non-secure IGROUPR readback alone. */
++static bool
++probeGicDelivery(void)
++{
++	unsigned off = 4u * MUX_SPI_WORD;
++	uint32_t pending = read32(gicd, 0x200u + off) & MUX_SPI_BIT;
++	uint32_t active = read32(gicd, 0x300u + off) & MUX_SPI_BIT;
++	uint32_t pdcEnable = read32(pdc, 0x10u);
++	if (pending || active || (pdcEnable & 2u)) {
++		IOLog("SWEET MUX: GIC probe refused pending=%u active=%u pdc=%#x\n",
++		    pending ? 1 : 0, active ? 1 : 0, pdcEnable);
++		return false;
++	}
++	__atomic_store_n(&probeHits, 0u, __ATOMIC_RELEASE);
++	__atomic_store_n(&state, 4u, __ATOMIC_RELEASE);
++	write32(gicd, 0x100u + off, MUX_SPI_BIT);
++	if (!waitGic() || (read32(gicd, 0x100u + off) & MUX_SPI_BIT) == 0) {
++		__atomic_store_n(&state, 3u, __ATOMIC_RELEASE);
++		write32(gicd, 0x180u + off, MUX_SPI_BIT);
++		IOLog("SWEET MUX: GIC probe enable/wait failed\n");
++		return false;
++	}
++	write32(gicd, 0x200u + off, MUX_SPI_BIT);
++	for (unsigned i = 0; i < 1000; ++i) {
++		if (__atomic_load_n(&probeHits, __ATOMIC_ACQUIRE)) {
++			break;
++		}
++		delay(100);
++	}
++	__atomic_store_n(&state, 3u, __ATOMIC_RELEASE);
++	write32(gicd, 0x180u + off, MUX_SPI_BIT);
++	write32(gicd, 0x280u + off, MUX_SPI_BIT);
++	bool clear = waitGic();
++	for (unsigned i = 0; clear && i < 1000; ++i) {
++		pending = read32(gicd, 0x200u + off) & MUX_SPI_BIT;
++		active = read32(gicd, 0x300u + off) & MUX_SPI_BIT;
++		if (!pending && !active) {
++			break;
++		}
++		if (i == 999) {
++			clear = false;
++		} else {
++			delay(1);
++		}
++	}
++	unsigned hits = __atomic_load_n(&probeHits, __ATOMIC_ACQUIRE);
++	IOLog("SWEET MUX: GIC software-pending probe hits=%u clear=%u pending=%u active=%u\n",
++	    hits, clear ? 1 : 0, pending ? 1 : 0, active ? 1 : 0);
++	return hits == 1u && clear;
+ }
+ 
+ static bool
+@@ -385,6 +442,11 @@
+ 	if (intid != MUX_INTID) {
+ 		return false;
+ 	}
++	if (__atomic_load_n(&state, __ATOMIC_ACQUIRE) == 4u) {
++		write32(gicd, 0x180u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
++		__atomic_add_fetch(&probeHits, 1u, __ATOMIC_RELEASE);
++		return true;
++	}
+ 	unsigned expected = 1u;
+ 	if (!__atomic_compare_exchange_n(&state, &expected, 2u, false,
+ 	    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+@@ -454,8 +516,9 @@
+ 		}
+ 	}
+ 	/* No hardware gate is opened until callback, worker and all checks exist. */
+-	if ((read32(pdc, 0x114u) & 7u) != 4u || !configureGic()) {
+-		IOLog("SWEET MUX: PDC polarity or GIC config check failed; polling retained\n");
++	if ((read32(pdc, 0x114u) & 7u) != 4u || !configureGic() ||
++	    !probeGicDelivery()) {
++		IOLog("SWEET MUX: PDC polarity, GIC config or delivery probe failed; polling retained\n");
+ 		return -1;
+ 	}
+ 	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
