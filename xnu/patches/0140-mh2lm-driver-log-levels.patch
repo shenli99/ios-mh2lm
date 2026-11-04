@@ -1,0 +1,1264 @@
+From: ios-mh2lm
+Subject: mh2lm: classify IRQ driver logs and gate verbose records
+
+Add ERROR, WARN, INFO and DEBUG prefixes to the key, USB, touch and
+PMIC mux drivers. Default sweetloglevel=2 keeps faults and low-rate IRQ
+proof in the existing console, persistent ring and ACM stream, while
+verbose register and per-event data requires sweetloglevel=3. This does
+not change the format of the persistent log or classify unrelated XNU
+messages.
+
+--- /dev/null
++++ b/bsd/dev/sweet_log_level.h
+@@ -0,0 +1,39 @@
++/* MH2LM driver log severity. The existing console remains the transport. */
++#ifndef _SWEET_LOG_LEVEL_H_
++#define _SWEET_LOG_LEVEL_H_
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++int sweet_log_level_enabled(unsigned level);
++#ifdef __cplusplus
++}
++#endif
++
++/* C drivers use printf; C++ callers may define SWEET_LOG_SINK as IOLog. */
++#ifndef SWEET_LOG_SINK
++#define SWEET_LOG_SINK printf
++#endif
++
++#define SWEET_LOG_ERROR(...) do { \
++	if (sweet_log_level_enabled(0u)) { \
++		SWEET_LOG_SINK("[ERROR] " __VA_ARGS__); \
++	} \
++} while (0)
++#define SWEET_LOG_WARN(...) do { \
++	if (sweet_log_level_enabled(1u)) { \
++		SWEET_LOG_SINK("[WARN] " __VA_ARGS__); \
++	} \
++} while (0)
++#define SWEET_LOG_INFO(...) do { \
++	if (sweet_log_level_enabled(2u)) { \
++		SWEET_LOG_SINK("[INFO] " __VA_ARGS__); \
++	} \
++} while (0)
++#define SWEET_LOG_DEBUG(...) do { \
++	if (sweet_log_level_enabled(3u)) { \
++		SWEET_LOG_SINK("[DEBUG] " __VA_ARGS__); \
++	} \
++} while (0)
++
++#endif /* _SWEET_LOG_LEVEL_H_ */
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -14,6 +14,7 @@
+ #include <pexpert/pexpert.h>
+ #include <pexpert/arm64/sweet_dev.h>
+ #include "sweet_spmi.h"
++#include "sweet_log_level.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+@@ -86,12 +87,12 @@
+ {
+ 	vm_offset_t pdc = ml_io_map(KEYS_PDC_PA, 0x400);
+ 	if (!pdc) {
+-		printf("SWEET KEYS IRQ PDC: map failed pa=%#x\n", KEYS_PDC_PA);
++		SWEET_LOG_WARN("SWEET KEYS IRQ PDC: map failed pa=%#x\n", KEYS_PDC_PA);
+ 		return;
+ 	}
+ 	uint32_t enable = keys_rd(pdc, 0x10u);
+ 	uint32_t config = keys_rd(pdc, 0x114u);
+-	printf("SWEET KEYS IRQ PDC: pin=1 intid=%u enable-bank=%#x enabled=%u config=%#x (read-only)\n",
++	SWEET_LOG_DEBUG("SWEET KEYS IRQ PDC: pin=1 intid=%u enable-bank=%#x enabled=%u config=%#x (read-only)\n",
+ 	    KEYS_PMIC_INTID, enable, (enable >> 1) & 1u, config);
+ }
+ 
+@@ -100,7 +101,7 @@
+ {
+ 	vm_offset_t gicd = ml_io_map(KEYS_GICD_PA, 0x10000);
+ 	if (!gicd) {
+-		printf("SWEET KEYS IRQ GIC: map failed pa=%#x\n", KEYS_GICD_PA);
++		SWEET_LOG_WARN("SWEET KEYS IRQ GIC: map failed pa=%#x\n", KEYS_GICD_PA);
+ 		return;
+ 	}
+ 	const uint32_t word = KEYS_PMIC_INTID / 32u;
+@@ -115,7 +116,7 @@
+ 	    0x400u + (KEYS_PMIC_INTID & ~3u));
+ 	const uint32_t routerLo = keys_rd(gicd, 0x6000u + 8u * KEYS_PMIC_INTID);
+ 	const uint32_t routerHi = keys_rd(gicd, 0x6004u + 8u * KEYS_PMIC_INTID);
+-	printf("SWEET KEYS IRQ GIC: intid=%u typer=%#x ctlr=%#x group=%u enabled=%u pending=%u active=%u cfg=%u priority=%#x router=%#x:%#x (read-only)\n",
++	SWEET_LOG_DEBUG("SWEET KEYS IRQ GIC: intid=%u typer=%#x ctlr=%#x group=%u enabled=%u pending=%u active=%u cfg=%u priority=%#x router=%#x:%#x (read-only)\n",
+ 	    KEYS_PMIC_INTID, keys_rd(gicd, 0x004u), keys_rd(gicd, 0x000u),
+ 	    (group >> bit) & 1u, (enabled >> bit) & 1u,
+ 	    (pending >> bit) & 1u, (active >> bit) & 1u,
+@@ -175,7 +176,7 @@
+ {
+ 	uint8_t rt = 0, type = 0, high = 0, low = 0, enabled = 0, latched = 0;
+ 	if (apid == KEYS_NO_APID) {
+-		printf("SWEET KEYS IRQ CFG: %s skipped; no APID\n", name);
++		SWEET_LOG_WARN("SWEET KEYS IRQ CFG: %s skipped; no APID\n", name);
+ 		return;
+ 	}
+ 	bool ok = keys_read(apid, rtAddr, &rt) &&
+@@ -184,7 +185,7 @@
+ 	    keys_read(apid, (uint16_t)(rtAddr + 3u), &low) &&
+ 	    keys_read(apid, (uint16_t)(rtAddr + 5u), &enabled) &&
+ 	    keys_read(apid, (uint16_t)(rtAddr + 8u), &latched);
+-	printf("SWEET KEYS IRQ CFG: %s apid=%u rt=%#x edge=%#x high=%#x low=%#x "
++	SWEET_LOG_DEBUG("SWEET KEYS IRQ CFG: %s apid=%u rt=%#x edge=%#x high=%#x low=%#x "
+ 	    "enabled=%#x latched=%#x read-ok=%d\n", name, apid, rt, type, high,
+ 	    low, enabled, latched, ok ? 1 : 0);
+ }
+@@ -248,7 +249,7 @@
+ 					sweet_hid_key(k, 0);
+ 				}
+ 			}
+-			printf("SWEET KEYS IRQ: stopped after mux failure\n");
++			SWEET_LOG_ERROR("SWEET KEYS IRQ: stopped after mux failure\n");
+ 			(void)thread_terminate(current_thread());
+ 			thread_block(THREAD_CONTINUE_NULL);
+ 		}
+@@ -269,7 +270,7 @@
+ #endif
+ 		if (!pok || !gok || !g2ok) {
+ 			if ((errors++ % 250u) == 0) {
+-				printf("SWEET KEYS: read error pon-ok=%d gpio-ok=%d g2-ok=%d arb-status=%#x\n",
++				SWEET_LOG_WARN("SWEET KEYS: read error pon-ok=%d gpio-ok=%d g2-ok=%d arb-status=%#x\n",
+ 				    pok, gok, g2ok, keys_last_status);
+ 			}
+ 		} else {
+@@ -280,7 +281,7 @@
+ 			    (SWEET_DEV_VOL_DOWN_PON ? pok : g2ok));
+ 			if (ok && now[k] != state[k]) {
+ 				state[k] = now[k];
+-				printf("SWEET KEYS: key=%d down=%d pon=%#x gpio=%#x\n",
++				SWEET_LOG_DEBUG("SWEET KEYS: key=%d down=%d pon=%#x gpio=%#x\n",
+ 				    k, state[k], pon, gpio);
+ 				sweet_hid_key(k, state[k]);
+ 			}
+@@ -289,7 +290,7 @@
+ 		int now[3] = {!!(pon & 1u), 0, 0};
+ 		if (!pok) {
+ 			if ((errors++ % 250u) == 0) {
+-				printf("SWEET KEYS: read error pon-ok=%d arb-status=%#x\n",
++				SWEET_LOG_WARN("SWEET KEYS: read error pon-ok=%d arb-status=%#x\n",
+ 				    pok, keys_last_status);
+ 			}
+ 		} else {
+@@ -297,7 +298,7 @@
+ 		}
+ 		if (pok && now[0] != state[0]) {
+ 			state[0] = now[0];
+-			printf("SWEET KEYS: key=0 down=%d pon=%#x\n", state[0], pon);
++			SWEET_LOG_DEBUG("SWEET KEYS: key=0 down=%d pon=%#x\n", state[0], pon);
+ 			sweet_hid_key(0, state[0]);
+ 		}
+ #endif /* SWEET_DEV_KEYS_VOLUME */
+@@ -318,21 +319,21 @@
+ 	(void)PE_parse_boot_argn("sweetkeys", &enabled, sizeof(enabled));
+ 	(void)PE_parse_boot_argn("sweetkeysirqdiag", &irqDiag, sizeof(irqDiag));
+ 	if (!enabled) {
+-		printf("SWEET KEYS: disabled (sweetkeys=0)\n");
++		SWEET_LOG_INFO("SWEET KEYS: disabled (sweetkeys=0)\n");
+ 		return;
+ 	}
+ 	keys_core = ml_io_map(KEYS_CORE_PA, 0x2000);
+ 	keys_cnfg = ml_io_map(KEYS_CNFG_PA, 0x1000);
+ 	keys_obs = ml_io_map(KEYS_OBS_PA, 0x10000);
+ 	if (!keys_core || !keys_cnfg || !keys_obs) {
+-		printf("SWEET KEYS: MMIO mapping failed\n");
++		SWEET_LOG_ERROR("SWEET KEYS: MMIO mapping failed\n");
+ 		return;
+ 	}
+ 	keys_version = keys_rd(keys_core, 0);
+ 	uint32_t count = keys_rd(keys_core, 4) & 0x7ffu;
+ 	if (keys_version < 0x50000000u || keys_version >= 0x70000000u ||
+ 	    count == 0 || count > 512) {
+-		printf("SWEET KEYS: unsupported arbiter version=%#x apids=%u\n",
++		SWEET_LOG_ERROR("SWEET KEYS: unsupported arbiter version=%#x apids=%u\n",
+ 		    keys_version, count);
+ 		return;
+ 	}
+@@ -346,12 +347,12 @@
+ 	bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
+ 	bool up_ok = keys_gpio_input_ok(keys_gpio_apid, KEYS_GPIO_RT,
+ 	    &mode, &en, &subtype);
+-	printf("SWEET KEYS: arb=%#x apids=%u pon-apid=%u volup-ppid=%#x apid=%u pon=%#x/%d gpio=%#x/%d mode=%#x en=%#x subtype=%#x input=%d\n",
++	SWEET_LOG_DEBUG("SWEET KEYS: arb=%#x apids=%u pon-apid=%u volup-ppid=%#x apid=%u pon=%#x/%d gpio=%#x/%d mode=%#x en=%#x subtype=%#x input=%d\n",
+ 	    keys_version, count, keys_pon_apid, up_ppid, keys_gpio_apid,
+ 	    pon, pok, gpio, gok, mode, en, subtype, up_ok);
+ 	/* GPIO configuration belongs to firmware. Diagnose, never repair it here. */
+ 	if (!up_ok) {
+-		printf("SWEET KEYS: volume-up GPIO not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
++		SWEET_LOG_WARN("SWEET KEYS: volume-up GPIO not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
+ 		keys_gpio_apid = KEYS_NO_APID;
+ 	}
+ #if !SWEET_DEV_VOL_DOWN_PON
+@@ -361,39 +362,39 @@
+ 	bool g2ok = keys_read(keys_gpio2_apid, KEYS_GPIO2_RT, &gpio2);
+ 	bool down_ok = keys_gpio_input_ok(keys_gpio2_apid, KEYS_GPIO2_RT,
+ 	    &mode2, &en2, &subtype2);
+-	printf("SWEET KEYS: voldown-ppid=%#x apid=%u gpio=%#x/%d mode=%#x en=%#x subtype=%#x input=%d\n",
++	SWEET_LOG_DEBUG("SWEET KEYS: voldown-ppid=%#x apid=%u gpio=%#x/%d mode=%#x en=%#x subtype=%#x input=%d\n",
+ 	    down_ppid, keys_gpio2_apid, gpio2, g2ok, mode2, en2, subtype2, down_ok);
+ 	if (!down_ok) {
+-		printf("SWEET KEYS: volume-down GPIO not confirmed enabled as input; volume-down withheld, PMIC unchanged\n");
++		SWEET_LOG_WARN("SWEET KEYS: volume-down GPIO not confirmed enabled as input; volume-down withheld, PMIC unchanged\n");
+ 		keys_gpio2_apid = KEYS_NO_APID;
+ 	}
+ 	if (!pok && !gok && !g2ok) {
+ #else
+ 	if (!pok && !gok) {
+ #endif
+-		printf("SWEET KEYS: no readable keys\n");
++		SWEET_LOG_WARN("SWEET KEYS: no readable keys\n");
+ 	}
+ 	if (!pok || !gok || !up_ok) {
+-		printf("SWEET KEYS IRQ: initial PMIC state unavailable; keys disabled\n");
++		SWEET_LOG_ERROR("SWEET KEYS IRQ: initial PMIC state unavailable; keys disabled\n");
+ 		return;
+ 	}
+ #else /* !SWEET_DEV_KEYS_VOLUME */
+ 	/* Volume keys unmapped on this board yet: the PMIC GPIO (PM8150 GPIO6,
+ 	 * GPIO7 on guacamole) still has to be identified in the APID table.
+ 	 * Power (PON_REASON1 bit 0) is polled as usual. See GUACAMOLE.md. */
+-	printf("SWEET KEYS: arb=%#x apids=%u pon-apid=%u pon=%#x/%d (volume keys unmapped)\n",
++	SWEET_LOG_DEBUG("SWEET KEYS: arb=%#x apids=%u pon-apid=%u pon=%#x/%d (volume keys unmapped)\n",
+ 	    keys_version, count, keys_pon_apid, pon, pok);
+ 	if (!pok) {
+-		printf("SWEET KEYS: no readable power key\n");
++		SWEET_LOG_WARN("SWEET KEYS: no readable power key\n");
+ 	}
+ #endif /* SWEET_DEV_KEYS_VOLUME */
+ 	if (irqDiag != 0) {
+ 		unsigned mask = (unsigned)irqDiag;
+-		printf("SWEET KEYS IRQ: read-only diagnostic mask=%#x\n", mask);
++		SWEET_LOG_DEBUG("SWEET KEYS IRQ: read-only diagnostic mask=%#x\n", mask);
+ 		/* bit 0: helper init; bits 1/2 or 5..9: PMIC-arb route probes. */
+ 		if ((mask & 0x3e7u) != 0) {
+ 			if (sweet_spmi_init() != 0) {
+-				printf("SWEET KEYS IRQ: shared SPMI preflight unavailable\n");
++				SWEET_LOG_WARN("SWEET KEYS IRQ: shared SPMI preflight unavailable\n");
+ 			} else {
+ 				if ((mask & 0x02u) != 0) {
+ 					sweet_spmi_irq_diag_source(0u, KEYS_PON_RT >> 8,
+@@ -446,15 +447,15 @@
+ 	}
+ 	if (sweet_spmi_mux_start(3u) != 0 ||
+ 	    __atomic_load_n(&keys_irq_failed, __ATOMIC_ACQUIRE)) {
+-		printf("SWEET KEYS IRQ: mux setup failed; keys disabled\n");
+-		return;
+-	}
+-	printf("SWEET KEYS IRQ: three routes active; IRQ-only\n");
++		SWEET_LOG_ERROR("SWEET KEYS IRQ: mux setup failed; keys disabled\n");
++		return;
++	}
++	SWEET_LOG_INFO("SWEET KEYS IRQ: three routes active; IRQ-only\n");
+ 	kern_return_t kr = kernel_thread_start(keys_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	} else {
+-		printf("SWEET KEYS: kernel_thread_start failed %d\n", kr);
++		SWEET_LOG_ERROR("SWEET KEYS: kernel_thread_start failed %d\n", kr);
+ 	}
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -25,6 +25,7 @@
+ #include <vm/vm_kern.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/arm64/sweet_dev.h>
++#include "sweet_log_level.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+@@ -160,45 +161,45 @@
+ 
+ 	/* What the previous (possibly EDL'd) boot left in IMEM. */
+ 	uint32_t prev_mark = usb_mark_read();
+-	printf("SWEET USB: previous run marker 0x%08x (%s)\n", prev_mark, usb_mark_name(prev_mark));
++	SWEET_LOG_DEBUG("SWEET USB: previous run marker 0x%08x (%s)\n", prev_mark, usb_mark_name(prev_mark));
+ 	usb_mark(0x1);
+ 	if (!enabled) {
+ 		return;
+ 	}
+ 	vm_offset_t gcc = ml_io_map(GCC_PA, GCC_SIZE);
+ 	if (gcc == 0) {
+-		printf("SWEET USB: GCC map failed\n");
++		SWEET_LOG_ERROR("SWEET USB: GCC map failed\n");
+ 		return;
+ 	}
+ 	gdscr = usb_rd(gcc, GCC_USB30_PRIM_GDSCR);
+-	printf("SWEET USB: GDSC usb30_prim 0x%08x (%s)\n", gdscr, (gdscr & (1u << 31)) ? "on" : "off");
++	SWEET_LOG_DEBUG("SWEET USB: GDSC usb30_prim 0x%08x (%s)\n", gdscr, (gdscr & (1u << 31)) ? "on" : "off");
+ 	for (unsigned i = 0; i < sizeof(usb_cbcr) / sizeof(usb_cbcr[0]); i++) {
+ 		cbcr[i] = usb_rd(gcc, usb_cbcr[i].off);
+-		printf("SWEET USB: clk %-12s CBCR 0x%08x (%s)\n", usb_cbcr[i].name, cbcr[i],
++		SWEET_LOG_DEBUG("SWEET USB: clk %-12s CBCR 0x%08x (%s)\n", usb_cbcr[i].name, cbcr[i],
+ 		    (cbcr[i] & CBCR_CLK_OFF) ? "off" : "on");
+ 	}
+ 	/* DWC3 registers need the GDSC, the master clock and the config-NoC path. */
+ 	clocks_on = (gdscr & (1u << 31)) && !(cbcr[0] & CBCR_CLK_OFF) && !(cbcr[3] & CBCR_CLK_OFF);
+ 	if (!clocks_on) {
+-		printf("SWEET USB: controller unpowered or unclocked; DWC3 not read\n");
++		SWEET_LOG_WARN("SWEET USB: controller unpowered or unclocked; DWC3 not read\n");
+ 		return;
+ 	}
+ 	vm_offset_t dwc = ml_io_map(DWC3_PA, DWC3_SIZE);
+ 	if (dwc == 0) {
+-		printf("SWEET USB: DWC3 map failed\n");
+-		return;
+-	}
+-	printf("SWEET USB: DWC3 GSNPSID 0x%08x GCTL 0x%08x GSTS 0x%08x GUSB2PHYCFG 0x%08x\n",
++		SWEET_LOG_ERROR("SWEET USB: DWC3 map failed\n");
++		return;
++	}
++	SWEET_LOG_DEBUG("SWEET USB: DWC3 GSNPSID 0x%08x GCTL 0x%08x GSTS 0x%08x GUSB2PHYCFG 0x%08x\n",
+ 	    usb_rd(dwc, 0xc120), usb_rd(dwc, 0xc110), usb_rd(dwc, 0xc118), usb_rd(dwc, 0xc200));
+-	printf("SWEET USB: DWC3 DCFG 0x%08x DCTL 0x%08x DEVTEN 0x%08x DSTS 0x%08x DALEPENA 0x%08x\n",
++	SWEET_LOG_DEBUG("SWEET USB: DWC3 DCFG 0x%08x DCTL 0x%08x DEVTEN 0x%08x DSTS 0x%08x DALEPENA 0x%08x\n",
+ 	    usb_rd(dwc, 0xc700), usb_rd(dwc, 0xc704), usb_rd(dwc, 0xc708), usb_rd(dwc, 0xc70c),
+ 	    usb_rd(dwc, 0xc720));
+-	printf("SWEET USB: DWC3 GEVNTADR 0x%08x%08x GEVNTSIZ 0x%08x GEVNTCOUNT 0x%08x GHWPARAMS0 0x%08x\n",
++	SWEET_LOG_DEBUG("SWEET USB: DWC3 GEVNTADR 0x%08x%08x GEVNTSIZ 0x%08x GEVNTCOUNT 0x%08x GHWPARAMS0 0x%08x\n",
+ 	    usb_rd(dwc, 0xc404), usb_rd(dwc, 0xc400), usb_rd(dwc, 0xc408), usb_rd(dwc, 0xc40c),
+ 	    usb_rd(dwc, 0xc140));
+ 	/* GHWPARAMS0 encodes the bus widths: mode[1:0], MDWIDTH[15:8],
+ 	 * SDWIDTH[23:16], AWIDTH[31:24]. */
+-	printf("SWEET USB: GHWPARAMS0 mode=%u mwidth=%u swidth=%u awidth=%u\n",
++	SWEET_LOG_DEBUG("SWEET USB: GHWPARAMS0 mode=%u mwidth=%u swidth=%u awidth=%u\n",
+ 	    usb_rd(dwc, 0xc140) & 0x3, (usb_rd(dwc, 0xc140) >> 8) & 0xff,
+ 	    (usb_rd(dwc, 0xc140) >> 16) & 0xff, (usb_rd(dwc, 0xc140) >> 24) & 0xff);
+ 	if (enabled >= 2) {
+@@ -207,7 +208,7 @@
+ 		 * must never delay or block the boot. The requirement for this
+ 		 * board is that iOS comes up whatever USB does.
+ 		 */
+-		printf("SWEET USB: gadget on its own thread, deferred\n");
++		SWEET_LOG_INFO("SWEET USB: gadget on its own thread, deferred\n");
+ 		thread_t t;
+ 		if (kernel_thread_start(ud_bringup_thread, (void *)dwc, &t) == KERN_SUCCESS) {
+ 			thread_deallocate(t);
+@@ -215,7 +216,7 @@
+ 		return;
+ 	}
+ 	if (cbcr[5] & CBCR_CLK_OFF) {
+-		printf("SWEET USB: ahb2phy clock off; QUSB2 PHY not read\n");
++		SWEET_LOG_WARN("SWEET USB: ahb2phy clock off; QUSB2 PHY not read\n");
+ 		return;
+ 	}
+ 	vm_offset_t phy = ml_io_map(QUSB2_PA, QUSB2_SIZE);
+@@ -224,18 +225,18 @@
+ 	}
+ 	/* SM8150's HS PHY is the 7nm femto v2 (mainline phy-qcom-snps-femto-v2.c);
+ 	 * its registers live below 0xa4, unlike SM6150's qusb2-v2 layout. */
+-	printf("SWEET USB: PHY UTMI_CTRL0 0x%08x UTMI_CTRL1 0x%08x UTMI_CTRL5(POR) 0x%08x\n",
++	SWEET_LOG_DEBUG("SWEET USB: PHY UTMI_CTRL0 0x%08x UTMI_CTRL1 0x%08x UTMI_CTRL5(POR) 0x%08x\n",
+ 	    usb_rd(phy, 0x3c), usb_rd(phy, 0x40), usb_rd(phy, 0x50));
+-	printf("SWEET USB: PHY COMMON0 0x%08x COMMON1 0x%08x COMMON2 0x%08x CTRL1 0x%08x CTRL2 0x%08x\n",
++	SWEET_LOG_DEBUG("SWEET USB: PHY COMMON0 0x%08x COMMON1 0x%08x COMMON2 0x%08x CTRL1 0x%08x CTRL2 0x%08x\n",
+ 	    usb_rd(phy, 0x54), usb_rd(phy, 0x58), usb_rd(phy, 0x5c), usb_rd(phy, 0x60), usb_rd(phy, 0x64));
+-	printf("SWEET USB: PHY CFG0 0x%08x REFCLK_CTRL 0x%08x OVR 0x%08x/0x%08x/0x%08x/0x%08x\n",
++	SWEET_LOG_DEBUG("SWEET USB: PHY CFG0 0x%08x REFCLK_CTRL 0x%08x OVR 0x%08x/0x%08x/0x%08x/0x%08x\n",
+ 	    usb_rd(phy, 0x94), usb_rd(phy, 0xa0), usb_rd(phy, 0x6c), usb_rd(phy, 0x70),
+ 	    usb_rd(phy, 0x74), usb_rd(phy, 0x78));
+ 
+ 	/* USB3/QUSB2 wrapper (dwc3-msm QSCRATCH = core + 0xf8800): read-only. */
+ 	vm_offset_t qs = ml_io_map(QSCRATCH_PA, 0x100);
+ 	if (qs != 0) {
+-		printf("SWEET USB: QSCRATCH HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x GENERAL_CFG 0x%08x\n",
++		SWEET_LOG_DEBUG("SWEET USB: QSCRATCH HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x GENERAL_CFG 0x%08x\n",
+ 		    usb_rd(qs, QSCRATCH_HS_PHY_CTRL), usb_rd(qs, QSCRATCH_SS_PHY_CTRL), usb_rd(qs, 0x08));
+ 	}
+ }
+@@ -452,7 +453,7 @@
+ 	uint32_t cfg = (ud_gic_rd(cfgOff) >> cfgShift) & 3u;
+ 	uint32_t pri = (ud_gic_rd(priOff) >> priShift) & 0xffu;
+ 	uint64_t route = ud_gic_rd64(0x6000u + 8u * UD_IRQ_INTID);
+-	printf("SWEET USB IRQ: GIC intid=%u ctlr=%#x group-read=%u cfg=%u pri=%#x route=%#llx\n",
++	SWEET_LOG_DEBUG("SWEET USB IRQ: GIC intid=%u ctlr=%#x group-read=%u cfg=%u pri=%#x route=%#llx\n",
+ 	    UD_IRQ_INTID, ctlr, (group & UD_IRQ_BIT) ? 1 : 0, cfg, pri, route);
+ 	/* Non-secure IGROUPR readback was zero for the proven key SPI 513.
+ 	 * Real delivery is checked by the probe, never by this bit alone. */
+@@ -467,7 +468,7 @@
+ 	uint32_t pending = ud_gic_rd(0x200u + off) & UD_IRQ_BIT;
+ 	uint32_t active = ud_gic_rd(0x300u + off) & UD_IRQ_BIT;
+ 	if ((dwc_rd(GEVNTSIZ) & UD_INTMASK) == 0 || pending || active) {
+-		printf("SWEET USB IRQ: GIC probe refused mask=%u pending=%u active=%u\n",
++		SWEET_LOG_WARN("SWEET USB IRQ: GIC probe refused mask=%u pending=%u active=%u\n",
+ 		    (dwc_rd(GEVNTSIZ) & UD_INTMASK) ? 1 : 0,
+ 		    pending ? 1 : 0, active ? 1 : 0);
+ 		return false;
+@@ -478,7 +479,7 @@
+ 	if (!ud_gic_wait() || (ud_gic_rd(0x100u + off) & UD_IRQ_BIT) == 0) {
+ 		__atomic_store_n(&ud_irq_state, 3u, __ATOMIC_RELEASE);
+ 		ud_gic_wr(0x180u + off, UD_IRQ_BIT);
+-		printf("SWEET USB IRQ: GIC probe enable/wait failed\n");
++		SWEET_LOG_ERROR("SWEET USB IRQ: GIC probe enable/wait failed\n");
+ 		return false;
+ 	}
+ 	ud_gic_wr(0x200u + off, UD_IRQ_BIT);
+@@ -505,7 +506,7 @@
+ 		}
+ 	}
+ 	unsigned hits = __atomic_load_n(&ud_irq_probe_hits, __ATOMIC_ACQUIRE);
+-	printf("SWEET USB IRQ: software-pending probe hits=%u clear=%u pending=%u active=%u\n",
++	SWEET_LOG_INFO("SWEET USB IRQ: software-pending probe hits=%u clear=%u pending=%u active=%u\n",
+ 	    hits, clear ? 1 : 0, pending ? 1 : 0, active ? 1 : 0);
+ 	return hits == 1u && clear;
+ }
+@@ -588,7 +589,7 @@
+ 	__atomic_store_n(&ud_log_started, 0u, __ATOMIC_RELEASE);
+ 	thread_wakeup(&ud_irq_sleep_chan);
+ 	thread_wakeup(&ud_log_chan);
+-	printf("SWEET USB IRQ: FAILED %s hits=%u empty=%u; gadget stopped\n",
++	SWEET_LOG_ERROR("SWEET USB IRQ: FAILED %s hits=%u empty=%u; gadget stopped\n",
+ 	    reason, __atomic_load_n(&ud_irq_hits, __ATOMIC_ACQUIRE), ud_irq_empty);
+ }
+ 
+@@ -612,7 +613,7 @@
+ 		ud_irq_fail("DWC3 event unmask readback");
+ 		return false;
+ 	}
+-	printf("SWEET USB IRQ: armed intid=%u size=%#x pending=%u\n",
++	SWEET_LOG_INFO("SWEET USB IRQ: armed intid=%u size=%#x pending=%u\n",
+ 	    UD_IRQ_INTID, dwc_rd(GEVNTSIZ), dwc_rd(GEVNTCOUNT) & 0xffffu);
+ 	return true;
+ }
+@@ -630,14 +631,14 @@
+ 		if (!(v & DEPCMD_CMDACT)) {
+ 			uint32_t status = (v >> 12) & 0xf;
+ 			if (status) {
+-				printf("SWEET USB: ep%u cmd 0x%x status %u\n", ep, cmd & 0xf, status);
++				SWEET_LOG_WARN("SWEET USB: ep%u cmd 0x%x status %u\n", ep, cmd & 0xf, status);
+ 				return -1;
+ 			}
+ 			return 0;
+ 		}
+ 		delay(1);
+ 	}
+-	printf("SWEET USB: ep%u cmd 0x%x timeout\n", ep, cmd & 0xf);
++	SWEET_LOG_ERROR("SWEET USB: ep%u cmd 0x%x timeout\n", ep, cmd & 0xf);
+ 	return -1;
+ }
+ 
+@@ -766,14 +767,14 @@
+ 	    ud_epcmd(EP_INT, DEPCMD_SETEPCONFIG, (3u << 1) | (16u << 3) | (2u << 17),
+ 	    (1u << 8) | (7u << 16) | ((uint32_t)EP_INT << 25), 0) ||
+ 	    ud_epcmd(EP_INT, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
+-		printf("SWEET USB: data endpoints setup failed\n");
++		SWEET_LOG_ERROR("SWEET USB: data endpoints setup failed\n");
+ 		return;
+ 	}
+ 	dwc_wr(DALEPENA, dwc_rd(DALEPENA) | (1u << EP_RX) | (1u << EP_TX) | (1u << EP_INT));
+ 	ud.configured = true;
+ 	ud_rx_arm();
+ 	ud_notify_serial_state();
+-	printf("SWEET USB: ACM endpoints configured\n");
++	SWEET_LOG_INFO("SWEET USB: ACM endpoints configured\n");
+ }
+ 
+ static void
+@@ -789,7 +790,7 @@
+ 	bool ok = true;
+ 
+ 	if (ud.events <= 200) {
+-		printf("SWEET USB: setup %02x %02x %04x %04x len %u\n", type, req, value, index, length);
++		SWEET_LOG_DEBUG("SWEET USB: setup %02x %02x %04x %04x len %u\n", type, req, value, index, length);
+ 	}
+ 	ud.data_in = (type & 0x80) != 0;
+ 	if ((type & 0x60) == 0x20) {    /* CDC class request */
+@@ -809,7 +810,7 @@
+ 			ud.dtr = (value & 1) != 0;
+ 			ok = (length == 0);
+ 			if (ok) {
+-				printf("SWEET USB: port %s by the host\n", ud.dtr ? "opened" : "closed");
++				SWEET_LOG_INFO("SWEET USB: port %s by the host\n", ud.dtr ? "opened" : "closed");
+ 				ud_notify_serial_state();
+ 			}
+ 			break;
+@@ -832,13 +833,13 @@
+ 	} else if (req == 5) {          /* SET_ADDRESS: takes effect now (DWC3 handles the timing) */
+ 		uint32_t dcfg = dwc_rd(DCFG) & ~(0x7fu << 3);
+ 		dwc_wr(DCFG, dcfg | ((uint32_t)(value & 0x7f) << 3));
+-		printf("SWEET USB: address %u\n", value & 0x7f);
++		SWEET_LOG_DEBUG("SWEET USB: address %u\n", value & 0x7f);
+ 	} else if (req == 9) {          /* SET_CONFIGURATION */
+ 		if (value == 1) {
+ 			ud_configure();
+ 		}
+ 		sweet_usb_log_notify();
+-		printf("SWEET USB: configured (%u)\n", value);
++		SWEET_LOG_INFO("SWEET USB: configured (%u)\n", value);
+ 	} else if (req == 8) {          /* GET_CONFIGURATION */
+ 		data[0] = ud.configured ? 1 : 0; n = 1;
+ 	} else if (req == 0) {          /* GET_STATUS */
+@@ -851,7 +852,7 @@
+ 		ok = false;
+ 	}
+ 	if (!ok) {
+-		printf("SWEET USB: stall %02x %02x\n", type, req);
++		SWEET_LOG_WARN("SWEET USB: stall %02x %02x\n", type, req);
+ 		ud_stall();
+ 		return;
+ 	}
+@@ -910,13 +911,13 @@
+ 				ud.posted += n;
+ 				ud.tx_submitted++;
+ 				if (ud.tx_submitted <= 3) {
+-					printf("SWEET USB: console TX submit %u bytes\n", n);
++					SWEET_LOG_DEBUG("SWEET USB: console TX submit %u bytes\n", n);
+ 				}
+ 				if (ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, n,
+ 				    TRBCTL_NORMAL) != 0) {
+ 					ud.tx_busy = false;
+ 					if (++ud.tx_errors <= 3) {
+-						printf("SWEET USB: console TX submit failed\n");
++						SWEET_LOG_WARN("SWEET USB: console TX submit failed\n");
+ 					}
+ 				}
+ 			}
+@@ -945,7 +946,7 @@
+ 			ud.dtr = false;
+ 			ud.tx_busy = false;
+ 			sweet_usb_log_notify();
+-			printf("SWEET USB: bus reset\n");
++			SWEET_LOG_INFO("SWEET USB: bus reset\n");
+ 			ud_start_setup();
+ 		} else if (type == 2) { /* connect done */
+ 			uint32_t speed = dwc_rd(DSTS) & 7;
+@@ -954,9 +955,9 @@
+ 			    (1u << 8) | (1u << 10) | (0u << 25), 0);
+ 			ud_epcmd(1, DEPCMD_SETEPCONFIG, (0u << 1) | (64u << 3) | (2u << 30),
+ 			    (1u << 8) | (1u << 10) | (1u << 25), 0);
+-			printf("SWEET USB: connected, speed %u\n", speed);
++			SWEET_LOG_INFO("SWEET USB: connected, speed %u\n", speed);
+ 		} else if (type == 0) {
+-			printf("SWEET USB: disconnect\n");
++			SWEET_LOG_INFO("SWEET USB: disconnect\n");
+ 		}
+ 		return;
+ 	}
+@@ -973,7 +974,7 @@
+ 		ud.tx_busy = false;
+ 		sweet_usb_log_notify();
+ 		if (++ud.tx_completed <= 3) {
+-			printf("SWEET USB: console TX complete %u\n", ud.tx_completed);
++			SWEET_LOG_DEBUG("SWEET USB: console TX complete %u\n", ud.tx_completed);
+ 		}
+ 		return;
+ 	}
+@@ -1031,7 +1032,7 @@
+ 				uint32_t ev = *(volatile uint32_t *)(ud.dma + UD_EVT + ud.evt_pos);
+ 				ud.evt_pos = (ud.evt_pos + 4) % UD_EVT_SIZE;
+ 				if (ud.events++ < 200) {
+-					printf("SWEET USB: event 0x%08x\n", ev);
++					SWEET_LOG_DEBUG("SWEET USB: event 0x%08x\n", ev);
+ 				}
+ 				ud_event(ev);
+ 			}
+@@ -1049,11 +1050,11 @@
+ 				ud_irq_empty = 0;
+ 			}
+ 			if (observed <= 16u || (observed & 255u) == 0) {
+-				printf("SWEET USB IRQ: hit irq=%u bytes=%u events=%u empty=%u\n",
++				SWEET_LOG_INFO("SWEET USB IRQ: hit irq=%u bytes=%u events=%u empty=%u\n",
+ 				    observed, count, ud.events, ud_irq_empty);
+ 			}
+ 			if ((observed & 127u) == 0) {
+-				printf("SWEET USB IRQ: counters hits=%u empty=%u count=%u TX=%u/%u err=%u\n",
++				SWEET_LOG_INFO("SWEET USB IRQ: counters hits=%u empty=%u count=%u TX=%u/%u err=%u\n",
+ 				    observed, ud_irq_empty, dwc_rd(GEVNTCOUNT) & 0xffffu,
+ 				    ud.tx_completed, ud.tx_submitted, ud.tx_errors);
+ 			}
+@@ -1092,7 +1093,7 @@
+ 		delay_s = 0;
+ 	}
+ 	if (delay_s > 0) {
+-		printf("SWEET USB: waiting %d s before touching the controller\n", delay_s);
++		SWEET_LOG_INFO("SWEET USB: waiting %d s before touching the controller\n", delay_s);
+ 		ud_sleep_ms((unsigned)delay_s * 1000u);
+ 	}
+ 	sweet_usb_gadget_start((vm_offset_t)arg);
+@@ -1104,7 +1105,7 @@
+ 	thread_t thread;
+ 
+ 	ud.dwc = dwc;
+-	printf("SWEET USB: gadget step 0: DMA\n");
++	SWEET_LOG_DEBUG("SWEET USB: gadget step 0: DMA\n");
+ 	/*
+ 	 * All of XNU's DRAM is above 4 GiB. If the controller turns out to
+ 	 * implement fewer address bits, every DMA pointer it is handed is
+@@ -1119,51 +1120,53 @@
+ 		ud.dma_pa = (uint64_t)dma_mb << 20;
+ 		ud.dma = ml_io_map((vm_offset_t)ud.dma_pa, UD_SIZE);
+ 		if (ud.dma == 0) {
+-			printf("SWEET USB: cannot map DMA at 0x%llx\n", ud.dma_pa);
++			SWEET_LOG_ERROR("SWEET USB: cannot map DMA at 0x%llx\n", ud.dma_pa);
+ 			return;
+ 		}
+ 		bzero((void *)ud.dma, UD_SIZE);
+-		printf("SWEET USB: DMA forced to 0x%llx (sweetusbdma=%d)\n", ud.dma_pa, dma_mb);
++		SWEET_LOG_DEBUG("SWEET USB: DMA forced to 0x%llx (sweetusbdma=%d)\n", ud.dma_pa, dma_mb);
+ 	} else {
+ 		if (kmem_alloc_contig(kernel_map, &ud.dma, UD_SIZE, PAGE_MASK, 0, 0,
+ 		    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+-			printf("SWEET USB: no DMA memory\n");
++			SWEET_LOG_ERROR("SWEET USB: no DMA memory\n");
+ 			return;
+ 		}
+ 		ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)ud.dma);
+ 		if (!pn) {
+-			printf("SWEET USB: DMA memory has no physical page\n");
++			SWEET_LOG_ERROR("SWEET USB: DMA memory has no physical page\n");
+ 			return;
+ 		}
+ 		ud.dma_pa = ptoa_64(pn);
+-		printf("SWEET USB: DMA at 0x%llx (%s)\n", ud.dma_pa,
++		SWEET_LOG_DEBUG("SWEET USB: DMA at 0x%llx (%s)\n", ud.dma_pa,
+ 		    (ud.dma_pa + UD_SIZE - 1) >> 32 ? "above 4 GiB" : "below 4 GiB");
+ 	}
+ 
+ 	/* Device controller soft reset (PHY and global setup stay as ABL left them). */
+-	printf("SWEET USB: gadget step 1: DCTL soft reset (GCTL 0x%08x)\n", dwc_rd(GCTL));
++	SWEET_LOG_DEBUG("SWEET USB: gadget step 1: DCTL soft reset (GCTL 0x%08x)\n", dwc_rd(GCTL));
+ 	dwc_wr(DCTL, DCTL_CSFTRST);
+ 	int i;
+ 	for (i = 0; i < 500 && (dwc_rd(DCTL) & DCTL_CSFTRST); i++) {
+ 		delay(1000);
+ 	}
+-	printf("SWEET USB: soft reset %s after %d ms, GCTL 0x%08x DCFG 0x%08x\n",
+-	    (dwc_rd(DCTL) & DCTL_CSFTRST) ? "STUCK" : "done", i, dwc_rd(GCTL), dwc_rd(DCFG));
+ 	if (dwc_rd(DCTL) & DCTL_CSFTRST) {
+-		return;
+-	}
+-
+-	printf("SWEET USB: GTXFIFOSIZ %08x %08x %08x %08x GRXFIFOSIZ %08x GHWPARAMS3 %08x\n",
++		SWEET_LOG_ERROR("SWEET USB: soft reset stuck after %d ms, GCTL 0x%08x DCFG 0x%08x\n",
++		    i, dwc_rd(GCTL), dwc_rd(DCFG));
++		return;
++	}
++	SWEET_LOG_INFO("SWEET USB: soft reset done after %d ms, GCTL 0x%08x DCFG 0x%08x\n",
++	    i, dwc_rd(GCTL), dwc_rd(DCFG));
++
++	SWEET_LOG_DEBUG("SWEET USB: GTXFIFOSIZ %08x %08x %08x %08x GRXFIFOSIZ %08x GHWPARAMS3 %08x\n",
+ 	    dwc_rd(0xc300), dwc_rd(0xc304), dwc_rd(0xc308), dwc_rd(0xc30c),
+ 	    dwc_rd(0xc380), dwc_rd(0xc14c));
+-	printf("SWEET USB: gadget step 2: event buffer + DCFG/DEVTEN\n");
++	SWEET_LOG_DEBUG("SWEET USB: gadget step 2: event buffer + DCFG/DEVTEN\n");
+ 	/* How many address bits does the event-buffer register really keep?
+ 	 * 0xffffffff coming back means the core can be handed addresses above
+ 	 * 4 GiB; anything less means it cannot and the buffer has to be low. */
+ 	dwc_wr(GEVNTADRHI, 0xffffffffu);
+ 	uint32_t hi_probe = dwc_rd(GEVNTADRHI);
+ 	dwc_wr(GEVNTADRHI, 0);
+-	printf("SWEET USB: GEVNTADRHI kept 0x%08x of 0xffffffff (%s)\n", hi_probe,
++	SWEET_LOG_DEBUG("SWEET USB: GEVNTADRHI kept 0x%08x of 0xffffffff (%s)\n", hi_probe,
+ 	    (hi_probe >> 8) ? "64-bit addresses" : "32-bit addresses only");
+ 
+ 	dwc_wr(GEVNTADRLO, (uint32_t)(ud.dma_pa + UD_EVT));
+@@ -1171,12 +1174,12 @@
+ 	dwc_wr(GEVNTSIZ, (1u << 31) | UD_EVT_SIZE);     /* masked until IRQ arm */
+ 	dwc_wr(GEVNTCOUNT, dwc_rd(GEVNTCOUNT) & 0xffff);
+ 	ud.evt_pos = 0;
+-	printf("SWEET USB: GEVNTADR readback 0x%08x%08x size 0x%08x\n",
++	SWEET_LOG_DEBUG("SWEET USB: GEVNTADR readback 0x%08x%08x size 0x%08x\n",
+ 	    dwc_rd(GEVNTADRHI), dwc_rd(GEVNTADRLO), dwc_rd(GEVNTSIZ));
+ 	ud_gicd = ml_io_map(UD_GICD_PA, 0x10000);
+ 	ud_irq_ready = ud_gicd && ud_gic_configure() && ud_gic_probe();
+ 	if (!ud_irq_ready) {
+-		printf("SWEET USB IRQ: GIC setup failed; gadget disabled\n");
++		SWEET_LOG_ERROR("SWEET USB IRQ: GIC setup failed; gadget disabled\n");
+ 		return;
+ 	}
+ 
+@@ -1186,24 +1189,24 @@
+ 	/* Events: disconnect, USB reset, connect done */
+ 	dwc_wr(DEVTEN, 0x7);
+ 
+-	printf("SWEET USB: gadget step 3: endpoint 0 setup\n");
++	SWEET_LOG_DEBUG("SWEET USB: gadget step 3: endpoint 0 setup\n");
+ 	/* Endpoint 0 OUT/IN: start config, control type, max packet 512 until connect done. */
+ 	if (ud_epcmd(0, DEPCMD_DEPSTARTCFG, 0, 0, 0) ||
+ 	    ud_epcmd(0, DEPCMD_SETEPCONFIG, (0u << 1) | (64u << 3), (1u << 8) | (1u << 10) | (0u << 25), 0) ||
+ 	    ud_epcmd(0, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0) ||
+ 	    ud_epcmd(1, DEPCMD_SETEPCONFIG, (0u << 1) | (64u << 3), (1u << 8) | (1u << 10) | (1u << 25), 0) ||
+ 	    ud_epcmd(1, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
+-		printf("SWEET USB: endpoint 0 setup failed\n");
+-		return;
+-	}
+-	printf("SWEET USB: gadget step 4: DALEPENA + setup engine\n");
++		SWEET_LOG_ERROR("SWEET USB: endpoint 0 setup failed\n");
++		return;
++	}
++	SWEET_LOG_DEBUG("SWEET USB: gadget step 4: DALEPENA + setup engine\n");
+ 	int maxstep = 99;
+ 	(void)PE_parse_boot_argn("sweetusbstep", &maxstep, sizeof(maxstep));
+ 	if (maxstep < 4) {
+-		printf("SWEET USB: stopping before step 4 (sweetusbstep=%d)\n", maxstep);
+-		return;
+-	}
+-	printf("SWEET USB:   - DALEPENA write\n");
++		SWEET_LOG_INFO("SWEET USB: stopping before step 4 (sweetusbstep=%d)\n", maxstep);
++		return;
++	}
++	SWEET_LOG_DEBUG("SWEET USB:   - DALEPENA write\n");
+ 	usb_mark(SWEET_USB_MARK_DALE);
+ 	dwc_wr(DALEPENA, 0x3);
+ 	usb_mark(SWEET_USB_MARK_DALE_OK);
+@@ -1214,33 +1217,33 @@
+ 	 * in a bus error, not in a status code).
+ 	 */
+ 	usb_mark(SWEET_USB_MARK_STEP4_OK);
+-	printf("SWEET USB:   - step 4 done\n");
++	SWEET_LOG_DEBUG("SWEET USB:   - step 4 done\n");
+ 
+ 	int vbus = SWEET_DEV_USB_VBUS_DEFAULT;
+ 	(void)PE_parse_boot_argn("sweetvbus", &vbus, sizeof(vbus));
+ 	if (maxstep < 5) {
+-		printf("SWEET USB: stopping before step 5 (sweetusbstep=%d)\n", maxstep);
+-		return;
+-	}
+-	printf("SWEET USB: gadget step 5: QSCRATCH mode %d (0 none, 1 HS, 2 HS+SS)\n", vbus);
++		SWEET_LOG_INFO("SWEET USB: stopping before step 5 (sweetusbstep=%d)\n", maxstep);
++		return;
++	}
++	SWEET_LOG_DEBUG("SWEET USB: gadget step 5: QSCRATCH mode %d (0 none, 1 HS, 2 HS+SS)\n", vbus);
+ 	usb_mark(SWEET_USB_MARK_STEP5);
+ 	vm_offset_t qs = ml_io_map(QSCRATCH_PA, 0x100);
+ 	if (qs != 0) {
+ 		uint32_t hs = usb_rd(qs, QSCRATCH_HS_PHY_CTRL), ss = usb_rd(qs, QSCRATCH_SS_PHY_CTRL);
+-		printf("SWEET USB: QSCRATCH HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x GENERAL_CFG 0x%08x\n",
++		SWEET_LOG_DEBUG("SWEET USB: QSCRATCH HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x GENERAL_CFG 0x%08x\n",
+ 		    hs, ss, usb_rd(qs, 0x08));
+ 		if (vbus >= 1) {
+-			printf("SWEET USB:   - HS VBUS override write\n");
++			SWEET_LOG_DEBUG("SWEET USB:   - HS VBUS override write\n");
+ 			*(volatile uint32_t *)(qs + QSCRATCH_HS_PHY_CTRL) = hs | UTMI_OTG_VBUS_VALID | SW_SESSVLD_SEL;
+ 			__asm__ volatile ("dsb sy" ::: "memory");
+ 			hs = usb_rd(qs, QSCRATCH_HS_PHY_CTRL);
+-			printf("SWEET USB:   - HS_PHY_CTRL now 0x%08x\n", hs);
++			SWEET_LOG_DEBUG("SWEET USB:   - HS_PHY_CTRL now 0x%08x\n", hs);
+ 		}
+ 		if (vbus >= 2) {
+-			printf("SWEET USB:   - SS PHY write\n");
++			SWEET_LOG_DEBUG("SWEET USB:   - SS PHY write\n");
+ 			*(volatile uint32_t *)(qs + QSCRATCH_SS_PHY_CTRL) = ss | LANE0_PWR_PRESENT;
+ 			__asm__ volatile ("dsb sy" ::: "memory");
+-			printf("SWEET USB:   - SS_PHY_CTRL now 0x%08x\n", usb_rd(qs, QSCRATCH_SS_PHY_CTRL));
++			SWEET_LOG_DEBUG("SWEET USB:   - SS_PHY_CTRL now 0x%08x\n", usb_rd(qs, QSCRATCH_SS_PHY_CTRL));
+ 		}
+ 	}
+ 	if (vbus == 3) {
+@@ -1251,34 +1254,34 @@
+ 		if (phy2 != 0) {
+ 			uint8_t c1 = *(volatile uint8_t *)(phy2 + 0x58);
+ 			uint8_t c2 = *(volatile uint8_t *)(phy2 + 0x60);
+-			printf("SWEET USB:   - PHY VBUS override (COMMON1 0x%02x CTRL1 0x%02x)\n", c1, c2);
++			SWEET_LOG_DEBUG("SWEET USB:   - PHY VBUS override (COMMON1 0x%02x CTRL1 0x%02x)\n", c1, c2);
+ 			*(volatile uint8_t *)(phy2 + 0x58) = c1 | (1u << 4);
+ 			*(volatile uint8_t *)(phy2 + 0x60) = c2 | 1u;
+ 			__asm__ volatile ("dsb sy" ::: "memory");
+-			printf("SWEET USB:   - PHY now COMMON1 0x%02x CTRL1 0x%02x\n",
++			SWEET_LOG_DEBUG("SWEET USB:   - PHY now COMMON1 0x%02x CTRL1 0x%02x\n",
+ 			    *(volatile uint8_t *)(phy2 + 0x58), *(volatile uint8_t *)(phy2 + 0x60));
+ 		}
+ 	}
+ 
+ 	if (maxstep < 6) {
+-		printf("SWEET USB: stopping before step 6 (sweetusbstep=%d)\n", maxstep);
++		SWEET_LOG_INFO("SWEET USB: stopping before step 6 (sweetusbstep=%d)\n", maxstep);
+ 		return;
+ 	}
+ 	/* PRTCAPDIR: 2 = device only. Print what it was, then force it. */
+-	printf("SWEET USB: GCTL PRTCAPDIR was %u\n", (dwc_rd(GCTL) >> 12) & 3);
++	SWEET_LOG_DEBUG("SWEET USB: GCTL PRTCAPDIR was %u\n", (dwc_rd(GCTL) >> 12) & 3);
+ 	dwc_wr(GCTL, (dwc_rd(GCTL) & ~(3u << 12)) | (2u << 12));
+-	printf("SWEET USB: gadget step 6: RUN_STOP\n");
++	SWEET_LOG_DEBUG("SWEET USB: gadget step 6: RUN_STOP\n");
+ 	usb_mark(SWEET_USB_MARK_RUN);
+ 	dwc_wr(DCTL, dwc_rd(DCTL) | DCTL_RUN_STOP);
+ 	usb_mark(SWEET_USB_MARK_RUN_OK);
+ 	for (i = 0; i < 500 && (dwc_rd(DSTS) & DSTS_DEVCTRLHLT); i++) {
+ 		delay(1000);
+ 	}
+-	printf("SWEET USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n", dwc_rd(DSTS), i, ud.dma_pa);
+-	printf("SWEET USB:   - arming ep0 setup now that the controller runs\n");
++	SWEET_LOG_INFO("SWEET USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n", dwc_rd(DSTS), i, ud.dma_pa);
++	SWEET_LOG_DEBUG("SWEET USB:   - arming ep0 setup now that the controller runs\n");
+ 	ud_start_setup();
+ 	if (!ud_irq_arm()) {
+-		printf("SWEET USB IRQ: arm failed; gadget disabled\n");
++		SWEET_LOG_ERROR("SWEET USB IRQ: arm failed; gadget disabled\n");
+ 		return;
+ 	}
+ 	if (kernel_thread_start(ud_thread, NULL, &thread) == KERN_SUCCESS) {
+@@ -1302,6 +1305,6 @@
+ void
+ sweet_usb_probe(void)
+ {
+-	printf("SWEET USB: no driver for this board yet\n");
++	SWEET_LOG_INFO("SWEET USB: no driver for this board yet\n");
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/dev/sweet_touch_tcm.c
++++ b/bsd/dev/sweet_touch_tcm.c
+@@ -33,6 +33,7 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include "sweet_log_level.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ /* Mach MIG declaration is not included by BSD's exported thread.h. */
+@@ -196,7 +197,7 @@
+ 	uint32_t cfg = (ts_gic_rd(cfgOff) >> cfgShift) & 3u;
+ 	uint32_t pri = (ts_gic_rd(priOff) >> priShift) & 0xffu;
+ 	uint64_t route = ts_gic_rd64(0x6000u + 8u * TS_IRQ_INTID);
+-	printf("SWEET TOUCH IRQ: GIC intid=%u ctlr=%#x group-read=%u cfg=%u pri=%#x route=%#llx\n",
++	SWEET_LOG_DEBUG("SWEET TOUCH IRQ: GIC intid=%u ctlr=%#x group-read=%u cfg=%u pri=%#x route=%#llx\n",
+ 	    TS_IRQ_INTID, ctlr, (group & TS_IRQ_BIT) ? 1 : 0, cfg, pri, route);
+ 	/* IGROUPR readback was zero for proven key and USB Group 1 IRQs. */
+ 	return (ctlr & 2u) != 0 && cfg == 0 && pri == 0xa0u && route == 0;
+@@ -210,7 +211,7 @@
+ 	uint32_t pending = ts_gic_rd(0x200u + off) & TS_IRQ_BIT;
+ 	uint32_t active = ts_gic_rd(0x300u + off) & TS_IRQ_BIT;
+ 	if ((pinCfg & 1u) || pending || active) {
+-		printf("SWEET TOUCH IRQ: probe refused pin-enable=%u pending=%u active=%u\n",
++		SWEET_LOG_WARN("SWEET TOUCH IRQ: probe refused pin-enable=%u pending=%u active=%u\n",
+ 		    pinCfg & 1u, pending ? 1 : 0, active ? 1 : 0);
+ 		return false;
+ 	}
+@@ -220,7 +221,7 @@
+ 	if (!ts_gic_wait() || (ts_gic_rd(0x100u + off) & TS_IRQ_BIT) == 0) {
+ 		__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
+ 		ts_gic_wr(0x180u + off, TS_IRQ_BIT);
+-		printf("SWEET TOUCH IRQ: GIC probe enable failed\n");
++		SWEET_LOG_ERROR("SWEET TOUCH IRQ: GIC probe enable failed\n");
+ 		return false;
+ 	}
+ 	ts_gic_wr(0x200u + off, TS_IRQ_BIT);
+@@ -247,7 +248,7 @@
+ 		}
+ 	}
+ 	unsigned hits = __atomic_load_n(&ts_irq_probe_hits, __ATOMIC_ACQUIRE);
+-	printf("SWEET TOUCH IRQ: software-pending probe hits=%u clear=%u pending=%u active=%u\n",
++	SWEET_LOG_INFO("SWEET TOUCH IRQ: software-pending probe hits=%u clear=%u pending=%u active=%u\n",
+ 	    hits, clear ? 1 : 0, pending ? 1 : 0, active ? 1 : 0);
+ 	return hits == 1u && clear;
+ }
+@@ -301,7 +302,7 @@
+ 	if (ts_gicd) {
+ 		ts_gic_wr(0x180u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+ 	}
+-	printf("SWEET TOUCH IRQ: FAILED %s hits=%u empty=%u; touch stopped\n",
++	SWEET_LOG_ERROR("SWEET TOUCH IRQ: FAILED %s hits=%u empty=%u; touch stopped\n",
+ 	    reason, __atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE), ts_irq_empty);
+ }
+ 
+@@ -338,7 +339,7 @@
+ 		ts_irq_fail("TLMM enable readback");
+ 		return false;
+ 	}
+-	printf("SWEET TOUCH IRQ: armed gpio=%u intid=%u cfg=%#x status=%#x attn=%u\n",
++	SWEET_LOG_INFO("SWEET TOUCH IRQ: armed gpio=%u intid=%u cfg=%#x status=%#x attn=%u\n",
+ 	    TS_PIN_IRQ, TS_IRQ_INTID, ts_rd(tile, TS_INTR_CFG),
+ 	    ts_rd(tile, TS_INTR_STATUS), ts_gpio_io_rd(TS_PIN_IRQ) & 1u);
+ 	return true;
+@@ -835,7 +836,7 @@
+ static void
+ tcm_fail(int rc)
+ {
+-	printf("SWEET TOUCH: TouchComm v%u cmd %#x failed at \"%s\" rc=%d detail=%#x code=%#x len=%u i2c-errors=%u\n",
++	SWEET_LOG_WARN("SWEET TOUCH: TouchComm v%u cmd %#x failed at \"%s\" rc=%d detail=%#x code=%#x len=%u i2c-errors=%u\n",
+ 	    tcm.version, tcm.command, tcm.stage ? tcm.stage : "?", rc, tcm.detail, tcm.code,
+ 	    tcm.length, ts_i2c_errors);
+ }
+@@ -878,13 +879,13 @@
+ 	if (tcm.version == 2 && tcm.length >= 26) {
+ 		tcm.max_read = le16(tcm.payload + 24);
+ 	}
+-	printf("SWEET TOUCH: TouchComm v%u identify: proto %u mode %u part \"%s\" build %u max-write %u max-read %u crc %u\n",
++	SWEET_LOG_INFO("SWEET TOUCH: TouchComm v%u identify: proto %u mode %u part \"%s\" build %u max-write %u max-read %u crc %u\n",
+ 	    tcm.version, tcm.payload[0], tcm.mode, part,
+ 	    tcm.length >= 22 ? (unsigned)le32(tcm.payload + 18) : 0u, tcm.max_write, tcm.max_read, tcm.crc);
+ 	tcm.detail = tcm.mode;
+ 	if (tcm.mode != 1) {
+ 		/* Bootloader or another mode: the firmware is left untouched. */
+-		printf("SWEET TOUCH: controller not in application mode (%u); touch withheld\n", tcm.mode);
++		SWEET_LOG_ERROR("SWEET TOUCH: controller not in application mode (%u); touch withheld\n", tcm.mode);
+ 		return -19;
+ 	}
+ 	rc = command(0x20, NULL, 0);                /* GET_APPLICATION_INFO */
+@@ -901,7 +902,7 @@
+ 	tcm.max_x = le16(tcm.payload + 32);
+ 	tcm.max_y = le16(tcm.payload + 34);
+ 	unsigned objects = le16(tcm.payload + 36);
+-	printf("SWEET TOUCH: app info status %u config %u max %ux%u objects %u\n",
++	SWEET_LOG_INFO("SWEET TOUCH: app info status %u config %u max %ux%u objects %u\n",
+ 	    status, tcm.config_size, tcm.max_x, tcm.max_y, objects);
+ 	tcm.detail = status;
+ 	if (status) {
+@@ -1014,13 +1015,13 @@
+ 			ts_py[id] = y;
+ 			ts_events++;
+ 			if (!ts_prev[id].active || (++moves % 25u) == 0) {
+-				printf("SWEET TOUCH: f%u %s raw %u,%u -> %d,%d\n", id,
++				SWEET_LOG_DEBUG("SWEET TOUCH: f%u %s raw %u,%u -> %d,%d\n", id,
+ 				    ts_prev[id].active ? "move" : "down", ts_now[id].x, ts_now[id].y, x, y);
+ 			}
+ 			sweet_hid_touch((int)id, 1, x, y);
+ 		} else if (ts_prev[id].active) {
+ 			ts_events++;
+-			printf("SWEET TOUCH: f%u up %d,%d\n", id, ts_px[id], ts_py[id]);
++			SWEET_LOG_DEBUG("SWEET TOUCH: f%u up %d,%d\n", id, ts_px[id], ts_py[id]);
+ 			sweet_hid_touch((int)id, 0, ts_px[id], ts_py[id]);
+ 		}
+ 		ts_prev[id] = ts_now[id];
+@@ -1037,7 +1038,7 @@
+ static void
+ ts_pins(const char *when)
+ {
+-	printf("SWEET TOUCH: pins %s rst=%#x/%#x pwr59=%#x/%#x pwr152=%#x/%#x irq=%#x/%#x bus=%#x/%#x\n", when,
++	SWEET_LOG_DEBUG("SWEET TOUCH: pins %s rst=%#x/%#x pwr59=%#x/%#x pwr152=%#x/%#x irq=%#x/%#x bus=%#x/%#x\n", when,
+ 	    ts_gpio_rd(TS_PIN_RESET), ts_gpio_io_rd(TS_PIN_RESET),
+ 	    ts_gpio_rd(TS_PIN_PWR_A), ts_gpio_io_rd(TS_PIN_PWR_A),
+ 	    ts_gpio_rd(TS_PIN_PWR_B), ts_gpio_io_rd(TS_PIN_PWR_B),
+@@ -1051,7 +1052,7 @@
+ 	unsigned delay_s = 20;
+ 	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
+ 	(void)PE_parse_boot_argn("sweettouchflip", &ts_flip, sizeof(ts_flip));
+-	printf("SWEET TOUCH: TouchComm driver starting in %u s (flip %#x)\n", delay_s, ts_flip);
++	SWEET_LOG_INFO("SWEET TOUCH: TouchComm driver starting in %u s (flip %#x)\n", delay_s, ts_flip);
+ 	ts_wait(delay_s * 1000u);
+ 
+ 	ts_tiles[TS_TILE_WEST] = ml_io_map(SWEET_DEV_TOUCH_NORTH_PA + 0x00100000u, 0x100000);
+@@ -1059,7 +1060,7 @@
+ 	ts_tiles[TS_TILE_NORTH] = ml_io_map(SWEET_DEV_TOUCH_NORTH_PA + 0x00900000u, 0x100000);
+ 	ts_tiles[TS_TILE_SOUTH] = ml_io_map(SWEET_DEV_TOUCH_NORTH_PA + 0x00d00000u, 0x100000);
+ 	if (!ts_tiles[0] || !ts_tiles[1] || !ts_tiles[2] || !ts_tiles[3]) {
+-		printf("SWEET TOUCH: TLMM mapping failed\n");
++		SWEET_LOG_ERROR("SWEET TOUCH: TLMM mapping failed\n");
+ 		goto out;
+ 	}
+ 	ts_pins("before");
+@@ -1083,7 +1084,7 @@
+ 		rc = tcm_start();
+ 		if (rc == ENXIO && tcm.version == 0 && attempt == 0) {
+ 			/* Nothing acknowledged 0x20: the device tree does not say which pin is SDA. */
+-			printf("SWEET TOUCH: no ack with sda=%u scl=%u; swapping\n", bb_sda_pin, bb_scl_pin);
++			SWEET_LOG_WARN("SWEET TOUCH: no ack with sda=%u scl=%u; swapping\n", bb_sda_pin, bb_scl_pin);
+ 			unsigned t = bb_sda_pin;
+ 			bb_sda_pin = bb_scl_pin;
+ 			bb_scl_pin = t;
+@@ -1099,12 +1100,12 @@
+ 		ts_pins("failed");
+ 		goto out;
+ 	}
+-	printf("SWEET TOUCH: TouchComm ready (sda=%u scl=%u), max %ux%u, IRQ-only\n",
++	SWEET_LOG_INFO("SWEET TOUCH: TouchComm ready (sda=%u scl=%u), max %ux%u, IRQ-only\n",
+ 	    bb_sda_pin, bb_scl_pin, tcm.max_x, tcm.max_y);
+ 	ts_gicd = ml_io_map(TS_GICD_PA, 0x10000);
+ 	ts_irq_ready = ts_gicd && ts_gic_configure() && ts_gic_probe();
+ 	if (!ts_irq_ready || !ts_irq_arm()) {
+-		printf("SWEET TOUCH IRQ: setup failed; touch disabled\n");
++		SWEET_LOG_ERROR("SWEET TOUCH IRQ: setup failed; touch disabled\n");
+ 		goto out;
+ 	}
+ 
+@@ -1163,9 +1164,9 @@
+ 			ts_irq_no_progress = 0;
+ 		}
+ 		if ((++ticks % 50u) == 0u) {
+-			printf("SWEET TOUCH: state reports=%u events=%u attn-low=%u i2c-errors=%u\n",
++			SWEET_LOG_DEBUG("SWEET TOUCH: state reports=%u events=%u attn-low=%u i2c-errors=%u\n",
+ 			    reports, ts_events, attn_low, ts_i2c_errors);
+-			printf("SWEET TOUCH IRQ: counters hits=%u empty=%u pin-status=%u attn=%u\n",
++			SWEET_LOG_INFO("SWEET TOUCH IRQ: counters hits=%u empty=%u pin-status=%u attn=%u\n",
+ 			    __atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE),
+ 			    ts_irq_empty, pinStatus, attn ? 1 : 0);
+ 		}
+@@ -1181,7 +1182,7 @@
+ 			uint32_t status = ts_rd(tile, TS_INTR_STATUS);
+ 			ts_wr(tile, TS_INTR_STATUS, status & ~1u);
+ 			if (observed <= 16u || (observed & 255u) == 0) {
+-				printf("SWEET TOUCH IRQ: hit irq=%u status=%#x attn=%u reports=%u\n",
++				SWEET_LOG_INFO("SWEET TOUCH IRQ: hit irq=%u status=%#x attn=%u reports=%u\n",
+ 				    observed, status, attn ? 1 : 0, reports);
+ 			}
+ 			__atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
+@@ -1213,14 +1214,14 @@
+ 	started = true;
+ 	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
+ 	if (!enabled) {
+-		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
++		SWEET_LOG_INFO("SWEET TOUCH: disabled (sweettouch=0)\n");
+ 		return;
+ 	}
+ 	kern_return_t kr = kernel_thread_start(ts_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	} else {
+-		printf("SWEET TOUCH: kernel_thread_start failed %d\n", kr);
++		SWEET_LOG_ERROR("SWEET TOUCH: kernel_thread_start failed %d\n", kr);
+ 	}
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET && SWEET_DEV_TOUCH_TCM */
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -39,6 +39,7 @@
+ #include <pexpert/device_tree.h>
+ #include <libkern/libkern.h>
+ #include <machine/atomic.h>
++#include "sweet_log_level.h"
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ /* osfmk/arm/machine_routines.h, not exported to the BSD layer */
+@@ -693,6 +694,27 @@
+ static int sweet_log_chan;
+ static uint32_t sweet_log_secs = SWEET_LOG_SECS;
+ 
++/* Boot argument 0=ERROR, 1=WARN, 2=INFO (default), 3=DEBUG. This only
++ * filters Sweet driver call sites; XNU and userspace keep their own logs. */
++int
++sweet_log_level_enabled(unsigned level)
++{
++	static volatile unsigned threshold = ~0u;
++	unsigned current = __atomic_load_n(&threshold, __ATOMIC_ACQUIRE);
++	if (current == ~0u) {
++		int requested = 2;
++		(void)PE_parse_boot_argn("sweetloglevel", &requested, sizeof(requested));
++		if (requested < 0 || requested > 3) {
++			requested = 2;
++		}
++		unsigned expected = ~0u;
++		(void)__atomic_compare_exchange_n(&threshold, &expected,
++		    (unsigned)requested, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE);
++		current = __atomic_load_n(&threshold, __ATOMIC_ACQUIRE);
++	}
++	return level <= current;
++}
++
+ /* Called for all console output, any context: never blocks. */
+ extern void sweet_usb_log_notify(void);
+ void sweet_log_append(const char *c, int size);
+@@ -818,6 +840,7 @@
+ sweet_log_wanted(const char *l)
+ {
+ 	static const char * const keys[] = {
++		"[ERROR] ", "[WARN] ",
+ 		"CRASH ", "exited", "Exit", "failed", "Failed", "error", "Error",
+ 		"panic", "SpringBoard", "xpcproxy", "fairplayd", "bluetoothd",
+ 		"watchdog", "boot task", "mount", "fsck", "keybag", "AMFI", "abort",
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -15,6 +15,8 @@
+ #include <pexpert/pexpert.h>
+ #include <pexpert/arm64/sweet_dev.h>
+ #include <stdint.h>
++#define SWEET_LOG_SINK IOLog
++#include "../../../bsd/dev/sweet_log_level.h"
+ 
+ extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern "C" void sweet_keys_irq_notify(unsigned key);
+@@ -187,7 +189,7 @@
+ 		write32(route.channel, 0x108u, mask); /* v5 channel IRQ_CLEAR */
+ 		if (writePeripheral(route, 0x14u, (uint16_t)mask, 1)) {
+ 			if (attempt > 1) {
+-				IOLog("SWEET MUX: ack recovered route=%s attempts=%u\n",
++				SWEET_LOG_WARN("SWEET MUX: ack recovered route=%s attempts=%u\n",
+ 				    route.name, attempt);
+ 			}
+ 			return true;
+@@ -265,7 +267,7 @@
+ 	uint32_t gotPri = read32(gicd, priOff);
+ 	uint64_t gotRoute = read64(gicd, 0x6000u + 8u * MUX_INTID);
+ 	uint32_t ctlr = read32(gicd, 0x000u);
+-	IOLog("SWEET MUX: GIC intid=%u ctlr=%#x group-read=%u cfg=%u pri=%#x route=%#x:%#x\n",
++	SWEET_LOG_DEBUG("SWEET MUX: GIC intid=%u ctlr=%#x group-read=%u cfg=%u pri=%#x route=%#x:%#x\n",
+ 	    MUX_INTID, ctlr, (gotGroup & MUX_SPI_BIT) ? 1 : 0,
+ 	    (gotCfg >> (2u * (MUX_INTID % 16u))) & 3u,
+ 	    (gotPri >> priShift) & 0xffu,
+@@ -288,7 +290,7 @@
+ 	uint32_t active = read32(gicd, 0x300u + off) & MUX_SPI_BIT;
+ 	uint32_t pdcEnable = read32(pdc, 0x10u);
+ 	if (pending || active || (pdcEnable & 2u)) {
+-		IOLog("SWEET MUX: GIC probe refused pending=%u active=%u pdc=%#x\n",
++		SWEET_LOG_WARN("SWEET MUX: GIC probe refused pending=%u active=%u pdc=%#x\n",
+ 		    pending ? 1 : 0, active ? 1 : 0, pdcEnable);
+ 		return false;
+ 	}
+@@ -298,7 +300,7 @@
+ 	if (!waitGic() || (read32(gicd, 0x100u + off) & MUX_SPI_BIT) == 0) {
+ 		__atomic_store_n(&state, 3u, __ATOMIC_RELEASE);
+ 		write32(gicd, 0x180u + off, MUX_SPI_BIT);
+-		IOLog("SWEET MUX: GIC probe enable/wait failed\n");
++		SWEET_LOG_ERROR("SWEET MUX: GIC probe enable/wait failed\n");
+ 		return false;
+ 	}
+ 	write32(gicd, 0x200u + off, MUX_SPI_BIT);
+@@ -325,7 +327,7 @@
+ 		}
+ 	}
+ 	unsigned hits = __atomic_load_n(&probeHits, __ATOMIC_ACQUIRE);
+-	IOLog("SWEET MUX: GIC software-pending probe hits=%u clear=%u pending=%u active=%u\n",
++	SWEET_LOG_INFO("SWEET MUX: GIC software-pending probe hits=%u clear=%u pending=%u active=%u\n",
+ 	    hits, clear ? 1 : 0, pending ? 1 : 0, active ? 1 : 0);
+ 	return hits == 1u && clear;
+ }
+@@ -360,11 +362,11 @@
+ 	    (gotType & mask) == 0 || (gotHigh & mask) == 0 ||
+ 	    (gotLow & mask) == 0 || (gotEnable & mask) == 0 ||
+ 	    (read32(route.channel, 0x100u) & 1u) == 0) {
+-		IOLog("SWEET MUX: %s peripheral/channel readback failed type=%#x high=%#x low=%#x enable=%#x\n",
++		SWEET_LOG_ERROR("SWEET MUX: %s peripheral/channel readback failed type=%#x high=%#x low=%#x enable=%#x\n",
+ 		    route.name, gotType, gotHigh, gotLow, gotEnable);
+ 		return false;
+ 	}
+-	IOLog("SWEET MUX: route %s sid=%u per=%#x apid=%u bit=%u cfg=%#x/%#x/%#x old-enable=%#x\n",
++	SWEET_LOG_DEBUG("SWEET MUX: route %s sid=%u per=%#x apid=%u bit=%u cfg=%#x/%#x/%#x old-enable=%#x\n",
+ 	    route.name, route.sid, route.per, route.apid, route.bit,
+ 	    type, high, low, enabled);
+ 	return true;
+@@ -375,14 +377,14 @@
+ {
+ 	++workCount;
+ 	if (mode == 1) {
+-		IOLog("SWEET MUX: software event delivered on IOWorkLoop\n");
++		SWEET_LOG_DEBUG("SWEET MUX: software event delivered on IOWorkLoop\n");
+ 		return;
+ 	}
+ 	if (__atomic_load_n(&state, __ATOMIC_ACQUIRE) != 2u) {
+ 		return;
+ 	}
+ 	if (irqCount > MUX_IRQ_LIMIT) {
+-		IOLog("SWEET MUX: IRQ limit reached count=%u; IRQ disabled\n", irqCount);
++		SWEET_LOG_ERROR("SWEET MUX: IRQ limit reached count=%u; IRQ disabled\n", irqCount);
+ 		disableHardware();
+ 		return;
+ 	}
+@@ -396,7 +398,7 @@
+ 			}
+ 			uint32_t status = read32(route.channel, 0x104u);
+ 			if (status & ~allowedMaskForApid(route.apid)) {
+-				IOLog("SWEET MUX: unregistered PMIC pending apid=%u status=%#x; IRQ disabled\n",
++				SWEET_LOG_ERROR("SWEET MUX: unregistered PMIC pending apid=%u status=%#x; IRQ disabled\n",
+ 				    route.apid, status);
+ 				disableHardware();
+ 				return;
+@@ -406,7 +408,7 @@
+ 			}
+ 			pending = true;
+ 			if (!ackRoute(route)) {
+-				IOLog("SWEET MUX: ack failed route=%s status=%#x\n",
++				SWEET_LOG_ERROR("SWEET MUX: ack failed route=%s status=%#x\n",
+ 				    route.name, status);
+ 				disableHardware();
+ 				return;
+@@ -414,7 +416,7 @@
+ 			++routeCount;
+ 			route.consumer(route.context, route.key);
+ 			if (routeCount <= 32 || (routeCount & 63u) == 0) {
+-				IOLog("SWEET MUX: hit route=%s status=%#x irq=%u work=%u hits=%u\n",
++				SWEET_LOG_INFO("SWEET MUX: hit route=%s status=%#x irq=%u work=%u hits=%u\n",
+ 				    route.name, status, irqCount, workCount, routeCount);
+ 			}
+ 			handled = true;
+@@ -433,7 +435,7 @@
+ 	}
+ 	if (!handled || stillPending) {
+ 		++faultCount;
+-		IOLog("SWEET MUX: unhandled/stuck irq handled=%u pending=%u faults=%u; IRQ disabled\n",
++		SWEET_LOG_ERROR("SWEET MUX: unhandled/stuck irq handled=%u pending=%u faults=%u; IRQ disabled\n",
+ 		    handled ? 1 : 0, stillPending ? 1 : 0, faultCount);
+ 		disableHardware();
+ 		return;
+@@ -487,11 +489,11 @@
+ 	eventSource = IOInterruptEventSource::interruptEventSource(workLoop,
+ 	    workAction, NULL, 0);
+ 	if (!eventSource || workLoop->addEventSource(eventSource) != kIOReturnSuccess) {
+-		IOLog("SWEET MUX: software event source unavailable\n");
++		SWEET_LOG_ERROR("SWEET MUX: software event source unavailable\n");
+ 		return -1;
+ 	}
+ 	if (mode == 1) {
+-		IOLog("SWEET MUX: software handoff test queued; no PMIC/PDC/GIC gates\n");
++		SWEET_LOG_INFO("SWEET MUX: software handoff test queued; no PMIC/PDC/GIC gates\n");
+ 		eventSource->interruptOccurred(NULL, NULL, 0);
+ 		return 0;
+ 	}
+@@ -501,14 +503,14 @@
+ 	cfg = ml_io_map(SWEET_DEV_SPMI_CFG_PA, 0x1000);
+ 	obs = ml_io_map(SWEET_DEV_SPMI_OBS_PA, 0x10000);
+ 	if (!gicd || !pdc || !core || !cfg || !obs) {
+-		IOLog("SWEET MUX: upstream or PMIC map failed; IRQ unavailable\n");
++		SWEET_LOG_ERROR("SWEET MUX: upstream or PMIC map failed; IRQ unavailable\n");
+ 		return -1;
+ 	}
+ 	uint32_t version = read32(core, 0);
+ 	unsigned count = read32(core, 4) & 0x7ffu;
+ 	if (version < 0x50000000u || version >= 0x60000000u ||
+ 	    count == 0 || count > 512) {
+-		IOLog("SWEET MUX: unsupported arb=%#x count=%u\n", version, count);
++		SWEET_LOG_ERROR("SWEET MUX: unsupported arb=%#x count=%u\n", version, count);
+ 		return -1;
+ 	}
+ 	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+@@ -519,13 +521,13 @@
+ 		}
+ 		route.apid = findOwnedApid(route.sid, route.per, count);
+ 		if (route.apid == MUX_NO_APID) {
+-			IOLog("SWEET MUX: %s has no unique EE0 IRQ-owned APID\n", route.name);
++			SWEET_LOG_ERROR("SWEET MUX: %s has no unique EE0 IRQ-owned APID\n", route.name);
+ 			return -1;
+ 		}
+ 		route.channel = ml_io_map(SWEET_DEV_SPMI_CHNLS_PA +
+ 		    0x10000u * route.apid, 0x1000);
+ 		if (!route.channel) {
+-			IOLog("SWEET MUX: %s channel map failed apid=%u\n",
++			SWEET_LOG_ERROR("SWEET MUX: %s channel map failed apid=%u\n",
+ 			    route.name, route.apid);
+ 			return -1;
+ 		}
+@@ -533,13 +535,13 @@
+ 	/* No hardware gate is opened until callback, worker and all checks exist. */
+ 	if ((read32(pdc, 0x114u) & 7u) != 4u || !configureGic() ||
+ 	    !probeGicDelivery()) {
+-		IOLog("SWEET MUX: PDC polarity, GIC config or delivery probe failed; IRQ unavailable\n");
++		SWEET_LOG_ERROR("SWEET MUX: PDC polarity, GIC config or delivery probe failed; IRQ unavailable\n");
+ 		return -1;
+ 	}
+ 	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+ 		MuxRoute &route = routes[i];
+ 		if (route.active && !configureRoute(route)) {
+-			IOLog("SWEET MUX: route %s setup failed; IRQ disabled\n", route.name);
++			SWEET_LOG_ERROR("SWEET MUX: route %s setup failed; IRQ disabled\n", route.name);
+ 			disableHardware();
+ 			return -1;
+ 		}
+@@ -547,7 +549,7 @@
+ 	uint32_t enable = read32(pdc, 0x10u);
+ 	write32(pdc, 0x10u, enable | 2u);
+ 	if ((read32(pdc, 0x10u) & 2u) == 0) {
+-		IOLog("SWEET MUX: PDC pin 1 enable failed; IRQ disabled\n");
++		SWEET_LOG_ERROR("SWEET MUX: PDC pin 1 enable failed; IRQ disabled\n");
+ 		disableHardware();
+ 		return -1;
+ 	}
+@@ -559,11 +561,11 @@
+ 	/* An immediate valid IRQ may already have masked the SPI in the top
+ 	 * half. That is a successful enable, not a failed readback. */
+ 	if ((!enabledBit && currentState == 1u) || currentState == 3u) {
+-		IOLog("SWEET MUX: GIC SPI 513 enable failed; IRQ disabled\n");
++		SWEET_LOG_ERROR("SWEET MUX: GIC SPI 513 enable failed; IRQ disabled\n");
+ 		disableHardware();
+ 		return -1;
+ 	}
+-	IOLog("SWEET MUX: armed mode=%u intid=%u pdc=%#x routes=%u limit=%u state=%u\n",
++	SWEET_LOG_INFO("SWEET MUX: armed mode=%u intid=%u pdc=%#x routes=%u limit=%u state=%u\n",
+ 	    mode, MUX_INTID, read32(pdc, 0x10u), mode == 3 ? 3 : 1,
+ 	    MUX_IRQ_LIMIT, currentState);
+ 	return 0;

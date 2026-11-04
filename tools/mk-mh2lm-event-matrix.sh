@@ -153,7 +153,15 @@ if [ "$KEY_IRQ_PROFILE" = '--irq-only' ]; then
 	make_profile irq-only \
 		"LG G8X - XNU fixed key, USB and touch IRQ (${LABEL})" \
 		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1"
-	printf 'kernel SHA256: %s\ncreated fixed IRQ profile for %s\n' "$KERNEL_SHA256" "$LABEL"
+	if grep -Fqa 'sweetloglevel' "$TMPDIR/kernel.development.mh2lm" && \
+	    grep -Fqa '[DEBUG] SWEET USB' "$TMPDIR/kernel.development.mh2lm"; then
+		make_profile irq-only-debug \
+			"LG G8X - XNU fixed IRQ debug logs (${LABEL})" \
+			"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetloglevel=3"
+		printf 'kernel SHA256: %s\ncreated normal and debug fixed IRQ profiles for %s\n' "$KERNEL_SHA256" "$LABEL"
+	else
+		printf 'kernel SHA256: %s\ncreated fixed IRQ profile for %s; artifact has no log-level support\n' "$KERNEL_SHA256" "$LABEL"
+	fi
 	exit 0
 fi
 

@@ -1,0 +1,43 @@
+# MH2LM 驱动日志等级
+
+## 现状与范围
+
+0139 及之前，按键、USB、触摸和 PMIC mux 直接用 `printf` / `IOLog` 输出。
+SWEETLOG 持久环和 USB ACM 都转发控制台字节流，本身不区分等级。少数逐次
+事件有计数节流，但仍默认输出。XNU、IOKit、用户态和其他 Sweet 驱动也会写
+入同一流，它们的原始日志没有统一等级。
+
+0140 从当前 IRQ 链路开始：按键、DWC3 USB、TouchComm 和
+`SweetSpmiInterruptMux` 使用 `[ERROR]`、`[WARN]`、`[INFO]`、`[DEBUG]`
+前缀。原有 `SWEET KEYS` / `SWEET USB` / `SWEET TOUCH` / `SWEET MUX`
+子系统标识继续保留，便于按模块检索。日志仍进入同一控制台、持久 SWEETLOG
+和 USB ACM；无需更改提取脚本或持久环格式。其他日志暂保留原样，不能把
+没有前缀的行当作 INFO。
+`sweetlogdump=1` 的上一轮日志筛选也识别 `[ERROR]` 和 `[WARN]`，避免
+USB 已断开时漏掉新的故障行。
+
+| 等级 | 内容 | 默认输出 |
+| --- | --- | --- |
+| ERROR (0) | 初始化失败、IRQ 停止、不可恢复的驱动错误 | 是 |
+| WARN (1) | 瞬态读取错误、可恢复确认失败、异常但仍可继续 | 是 |
+| INFO (2) | 启动/就绪、枚举状态、低频 IRQ 命中与计数 | 是 |
+| DEBUG (3) | 寄存器快照、控制请求、逐次触摸坐标、细粒度事件 | 否 |
+
+启动参数 `sweetloglevel=0..3` 设置可输出的最高等级，默认 `2`。
+`0` 只输出这四个驱动中的 ERROR，`1` 加 WARN，`2` 加 INFO，`3`
+再加 DEBUG。它不筛选 XNU/IOKit/用户态或尚未迁移的 Sweet 日志。
+本轮固定 IRQ 验收的普通镜像用默认等级；打包脚本还会从**同一内核产物**
+生成 `irq-only-debug` 镜像并加入 `sweetloglevel=3`，需要细节时临时启动。
+
+IRQ 故障日志必须是 ERROR，并在屏蔽中断、停止功能之前或之后写入；
+瞬态 PMIC 读取错误和可恢复的确认重试为 WARN。按键、USB、触摸的
+硬件 IRQ 命中仍保留节流后的 INFO 记录，使默认日志可以证明事件路径
+在工作。详细坐标和 USB 事件编号进入 DEBUG，避免默认日志挤占持久环。
+
+## 验收
+
+0140 是 0139 之后的补丁，尚待 CircleCI 与实机验证。本地需确认两种
+镜像共用相同 kernel，普通日志含 INFO/WARN/ERROR 而不含这些驱动的
+DEBUG；DEBUG 镜像能看到详细事件；故障时 ERROR 同时进入持久日志，
+即使 USB ACM 已因 IRQ 故障断开也可提取。另需检查正常级别下三键、
+USB、触摸的 IRQ 命中与 HID/枚举功能没有回归。
