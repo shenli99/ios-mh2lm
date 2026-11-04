@@ -2,7 +2,7 @@
 
 ## Agent handoff / active work (2026-11-04, latest)
 
-**Current checkpoint (0134 mux commit `e393921`, no CI/phone result):** 0114a7
+**Current checkpoint (0134 mux commit `e393921`, 0114a9 packaged, no phone result):** 0114a7
 closed the PON/GPIO6 route and peripheral read-only
 preflight; both EE0 APIDs are accessible, but their PMIC interrupt gates
 remain off and keys still poll every 20 ms. The target SM8150 Linux source
@@ -62,13 +62,40 @@ feature switch. The exact 0114a8 buildtree accepted 0134 in `patch --dry-run`;
 the changed key C file, `sleh.c`, and new IOKit C++ file passed local
 single-file compilation against 0114a7 CI flags after the final route-table
 refinement; all three emitted Mach-O objects with matching C ABI symbols.
-The non-MH2LM stub also passed a local syntax/object check. CircleCI and
-device behavior remain unverified. No push was
-performed. After a CI artifact is available, package once with
-`tools/mk-mh2lm-event-matrix.sh ARTIFACT LABEL --key-irq-mux`, then use
-`fastboot boot` in order: baseline, software handoff, Power IRQ, all keys
-(stop on any failure). Distinct SWEETLOGs must show workloop delivery,
-GIC/route readbacks, route hits/ack, and normal HID press/release.
+The non-MH2LM stub also passed a local syntax/object check. The user pushed
+0134 and downloaded `logs/xnu-kernel-0114a9.gz` and
+`logs/xnu-buildtree-0114a9.gz`. The 0114a9 buildtree includes the mux source;
+the kernel contains `_sweet_spmi_mux_irq`, `_sweet_spmi_mux_start`, and the
+key notify/fallback symbols. Its manifest verifies kernel SHA256
+`a1e8d68b5f972d8672cb1a76a4735adfc6c868b5e68863e89e30b9b81892cd4d`.
+The downloaded `logs/xnu-build-log-0114a9.txt` is zero bytes, so no CI log
+detail could be reviewed. The complete kernel artifact establishes that a
+kernel was linked. Device behavior remains unverified.
+
+`tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-0114a9.gz 0114a9
+--key-irq-mux` generated and byte-verified these four relevant images from
+the same kernel, all Android boot header v1 / 2048-byte pages:
+
+- `out-bs/boot-16k-0114a9-baseline.img` SHA256
+  `c505be3f6a931fae61027166e641030cd639b216ad1bfd16e43edaf3881e519f`;
+  no `sweetkeysirq` argument.
+- `out-bs/boot-16k-0114a9-key-irq-mux-soft.img` SHA256
+  `2c0c5c7e6b2940e66bd0d609b562a5c222357d369ab17ffd8868c96517b0156f`;
+  `sweetkeysirq=1`, software event handoff only.
+- `out-bs/boot-16k-0114a9-key-irq-power.img` SHA256
+  `d03ebaf06022fee346c8b90944db5cec17b08de64c1c6cdb87308f35b8116c2a`;
+  `sweetkeysirq=2`, single Power hardware IRQ and 20 ms poll fallback.
+- `out-bs/boot-16k-0114a9-key-irq-all.img` SHA256
+  `134ba3c98c3f4acc52790bcce6581af7b299df4eafbfaebae58d6755a8d6a8f1`;
+  `sweetkeysirq=3`, three routes and 200 ms recovery polling.
+
+Test each with `fastboot boot` only, in that order. Extract a distinct fresh
+SWEETLOG after each stage, confirming its boot arg and later boot content.
+Stop on LG BSP return, lost key function, `SWEET MUX` fallback/stuck/ack
+failure, or absent `SWEET MUX: hit route=power` after repeated Power presses
+in mode 2. Only test mode 3 after mode 2 reports route hits and normal
+press/release. The local documentation-only commit for this packaging does
+not need to be pushed for the phone test.
 
 **Implementation roadmap:** `docs/IRQ-FRAMEBUFFER-PLAN.md` records the agreed
 two-stage order: first make the existing key, DWC3 USB and touch paths
