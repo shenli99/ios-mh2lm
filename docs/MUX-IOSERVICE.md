@@ -1,6 +1,6 @@
 # SweetSpmiInterruptMux 的 IOService 化
 
-2026-11-05，0144 本地实现；叠加 0142/0143，尚未通过新云端完整链接与实机测试。
+2026-11-05，0144 叠加 0142/0143，0117 原生内核已链接，实机测试待进行。
 用户要求进一步把 mux 变成 IOService，并评估 filter / interrupt controller。
 电池验收继续暂停，0115 的硬件证据与未知项不变。
 
@@ -15,6 +15,13 @@ ARM64 Mach-O；仅作本机路径/目标适配和 Apple 类型 builtin 的临时
 此前混合 BSD 与 IOKit 参数的交叉编译掩盖了依赖问题，不能作为此项验证。
 补丁顺序应用、board 与 mux/battery 回归通过；完整原生编译/链接与实机验收
 仍待下一轮。此次只改头文件，不调整 IRQ、匹配、生命周期或 consumer 接口。
+
+0117 更新：内核 SHA256 与产物清单一致，18 个相关最终源码文件与修复版
+逐字节一致；链接后的内核含 nub/mux 类、生命周期、board 入口和映射函数。
+已生成 `out-bs/boot-16k-0117-board-startup-{baseline,no-keys,usbin}.img`，
+核对 FAT 内容与最终 boot 的 kernel/ramdisk 字节。先验收 baseline 日志，再测
+独立电池与并行档。原生编译/链接这一关已过，真实匹配、按键回归和电池 IRQ
+尚未验收；未提供本轮构建日志，不能据产物声明无构建警告。
 
 ## 三种类型分别负责什么
 

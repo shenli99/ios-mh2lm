@@ -2,6 +2,40 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0117 native artifact verified; three board-startup boot images ready.**
+User downloaded logs/xnu-kernel-0117.gz and xnu-buildtree-0117.gz. No0117
+build log or CI run ID supplied; warning details not reviewed. Kernel SHA256
+`09940209c8cf7f343824910694b73edaa72de51b8c0c9228a483f1fbe04a82e3`
+matches archive SHA256SUMS. All18 relevant buildtree sources byte-match
+scratch/mux-service-0115/verify/xnu (0142/0143/fixed0144). Final ARM64 executable
+has no undefined symbols per Mach-O header, contains mux/nub metaclasses,
+start/stop/free/getWorkLoop, board init, C bridge and unmappable/unmap symbols;
+all packaging markers passed. Native artifact establishes compilation/linking,
+NOT successful runtime service matching or hardware IRQ delivery.
+
+Packaged via tools/mk-mh2lm-event-matrix.sh ...0117.gz 0117 --board-startup.
+Images in workspace out-bs/ (prefix boot-16k-0117-):
+- board-startup-baseline.img (keys1, batteryIRQ0):
+  `fe488db32a147cb5a28bda4238a9a8844e17001f677c9e916b11df3bdff7aaf7`
+- board-startup-no-keys.img (keys0, batteryIRQ2):
+  `0a4e977bef64032984dbe8367abbd9e33114ab76c82882b4ac0b5fd0877b30da`
+- board-startup-usbin.img (keys1, batteryIRQ2):
+  `d2b0b38ad166abc9be7934cf3132c9a62e69eace44cc6cf68085bae9067e31a6`
+FAT-extracted TOML/kernel/16K ADT match inputs; final Android v1 boot image
+kernel blob/ramdisk bytes match packaged inputs. Unique selectors and native
+kernel SHA checked in each profile. All retain real gauge selectors, USB ACM
+(sweetusb2/sweetvbus1), touch IRQ and8 CPUs. Scratch artifact-0117 contains
+selected final sources/native kernel/boot-manifest.json; generated files untracked.
+
+NEXT PHONE: FIRST baseline, check desktop/three keys/combination/touch/ACM and
+display sleep/wake, export fresh live+persistent logs. Require BOARD before
+root/UFS, mux infrastructure ready + IOService started, group0 attach/key armed.
+Inspect before no-keys then usbin. No-keys intentionally disables all key
+actions/wake/combination; use USB log/recovery and return to enabled profile.
+Those stages must show group1/USBIN armed then real route hits + battery refresh;
+no-keys must not attach group0. Battery IRQ remains UNVERIFIED; CHGR/MSOC not
+next yet. No code change, push, cloud trigger or device write this turn.
+
 **0116 build failure fixed locally: 0144 memory attribute header dependency.**
 Fix and validation/docs committed as `40f106d`; user push is next.
 Log `logs/xnu-build-log-0116.txt` confirms 0142/0143/0144 applied. Actual
