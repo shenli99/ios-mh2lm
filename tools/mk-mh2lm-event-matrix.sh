@@ -99,7 +99,8 @@ fi
 if [ "$KEY_IRQ_PROFILE" = '--irq-only' ]; then
 	for marker in 'SWEET KEYS IRQ: three routes active; IRQ-only' \
 	    'SWEET TOUCH: TouchComm ready (sda=%u scl=%u), max %ux%u, IRQ-only' \
-	    'SWEET USB IRQ: FAILED %s hits=%u empty=%u; gadget stopped'; do
+	    'SWEET USB IRQ: FAILED %s hits=%u empty=%u; gadget stopped' \
+	    'SWEET BATTERY SID2: msoc='; do
 		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
 			printf 'kernel artifact lacks fixed IRQ marker: %s\n' "$marker" >&2
 			exit 1
@@ -150,14 +151,17 @@ make_profile() {
 }
 
 if [ "$KEY_IRQ_PROFILE" = '--irq-only' ]; then
+	# Fixed IRQ images retain the validated PM8150B gauge/UI path. Without
+	# both battery arguments SweetBattery publishes the static 100% source.
+	IRQ_ARGS='ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1'
 	make_profile irq-only \
 		"LG G8X - XNU fixed key, USB and touch IRQ (${LABEL})" \
-		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1"
+		"$IRQ_ARGS"
 	if grep -Fqa 'sweetloglevel' "$TMPDIR/kernel.development.mh2lm" && \
 	    grep -Fqa '[DEBUG] SWEET USB' "$TMPDIR/kernel.development.mh2lm"; then
 		make_profile irq-only-debug \
 			"LG G8X - XNU fixed IRQ debug logs (${LABEL})" \
-			"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetloglevel=3"
+			"$IRQ_ARGS sweetloglevel=3"
 		printf 'kernel SHA256: %s\ncreated normal and debug fixed IRQ profiles for %s\n' "$KERNEL_SHA256" "$LABEL"
 	else
 		printf 'kernel SHA256: %s\ncreated fixed IRQ profile for %s; artifact has no log-level support\n' "$KERNEL_SHA256" "$LABEL"
