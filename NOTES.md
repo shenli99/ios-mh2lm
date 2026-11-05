@@ -3,6 +3,8 @@
 ## Agent handoff / active work (2026-11-05, latest)
 
 **CURRENT:0144 mux IOService conversion implemented locally; ready for user push.**
+Implementation/tests/docs committed as `f291397`; staged whitespace checks
+passed for all twelve files. No push or new native artifact/phone result yet.
 User explicitly requested IOService conversion and evaluation of filter/controller
 before testing0143. New additive0144-mh2lm-spmi-mux-ioservice.patch follows0142/0143.
 Board still runs in late BSD, independent of UFS/keys, but sweet_spmi_mux_start
