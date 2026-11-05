@@ -2,6 +2,56 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**CURRENT0119 charge-diag: NO ACTIVE CHARGE SAMPLED; next existing NO-USB CONTROL.**
+User supplied logs/sweetlog-0119-battery-charge-diag.bin, SHA256
+`36f445679818886a45e53eb1b44baa11750f3ec65efc6575d373ea1c44057875`.
+Header v1/ring4194304/total259899/flush49, NOTwrapped/no decodedNUL.
+scratch/artifact-0119/charge-diag-persistent.txt,analyze-charge-diag.py,
+charge-diag-analysis.json preserve exact evidence/counts/assertions.
+Actual bootargs mode4,keys1,realgauge,ACM2/vbus1,diag1; group1/eventsf and
+group0 attached, no2s poll.9samples allCHGR47/state7/en0/pause0/cfg2=2c,
+allconfig-ok1/current-ok1; matchedIBATT uA488,488,0,460448,460448,539550,
+488,0,466308: no negative charge-direction values. Gauge71->70%.
+ConnectedINPUT path95/USBselected+valid, unsuspended, ICLconfigured1500mA,
+AICLenabled; NOT actual measured inputcurrent. EarlyAPSD0 afterplug doesn't
+prove permanently incomplete; laterMSOC sample3428APSD21/done1/slowplugin1.
+Immediate observable blocker: charging enable remains off. Can't claim all
+walltime sampled, positive edge currents aren't steady supply-share proof.
+
+IMPORTANT initial112/114 state7/en0 occurs BEFORE board138/mux142 and
+USBcontroller1394. This doesn't support IRQ arm or gadget init causing initial
+disable; gadget may still affect later recovery, and boot/firmware/source
+conditions remain unresolved. No enable writes were added. SWEET BATT SMB
+read-ok0 all9times; don't infer TYPEC/SMBselect zeros as valid. SeparateDIAG
+config-ok1 DOES validate its own smben0 at0x1648;0x1690 select remains unknown.
+UIcurrent-valid0 is lack of standard current publication, NOT IBATTreadfailure.
+PM6150B old summary string is stale; REVID still proves PM8150B.
+
+6USBIN hits/refreshes3003,3067,3080,3093,3465,3600 external0/1/0/1/0/1;
+MSOC3425/refresh3431 events4 external1 drops71->70.7notifications/samples1..7,
+allhealthy1, notify-publish18011..18351us (diagnostic extra reads, NOT UIlatency).
+NoCHGR/READYhit. Keys4balancedpairs(power3/up1), no volume-downHID recorded;
+touch5balancedpairs/single slot,lastIRQ136/empty0. Onepoweroff/on, input
+recorded up to finalreplug (no laterHID in capture). No scopedERROR/muxfailure/
+isolation/panic;6existingUSBWARN; onlyearlyUSBcounter128/2ACMconfigs. Normal
+SpringBoard shutdownrequest3624, not completed service termination proof.
+
+NEXT USER: out-bs/boot-16k-0119-battery-charge-diag-no-usb.img, existing
+35667968bytes; SHA rechecked
+`90655d8c533a0e90d09705938b797dd41617a1a35dc55941ae84cde2a761ce5c`.
+Same0119 nativekernel/mode4/realgauge/diag/keys/touch; sweetusb0/no vbus or
+usbstep. NO ACM expected: this is charge comparison, not USBlog re-debug.
+Use SAME known-good independent charger/cable as primary; desktop->unplugPC
+20..30s->charger3..5min->unplug20..30s/optionalreplug. Export
+sweetlog-0119-battery-charge-diag-no-usb.bin via established persistent path;
+record source/cable/UI. Exact power source still not confirmed by user, don't
+infer PC vs wallcharger fromexternal. No need re-run all/preflight/baseline,
+push/cloudbuild or enablewrite. Ifchargepositive then separately isolate
+gadget/override vs inheritedbootstate; ifstillstate7, not solely gadget under
+this condition, proceed per-field read validity/chargeinit investigation.
+Updated testing/nextplan/IRQroadmap and handoff only, no driver/CI/boot edits.
+BatteryIRQgoal remains incomplete pendingCHGR; previousMSOC pass stands.
+
 **CURRENT0119 mode4 MSOC IRQ PASS; resume battery/physical-charge work; diagnostic boots READY.**
 User supplied logs/sweetlog-0119-battery-irq-all.bin and asks to continue battery
 driver if acceptable. SHA256

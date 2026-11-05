@@ -4,6 +4,12 @@
 IRQ刷新已通过；CHGR仅接入成功，没有自然状态转换/独立命中。SOC_READY一直
 ready，没有人为复位FG制造边沿。电池IRQ子目标保持未完成，暂不进入framebuffer。
 
+**最新诊断结果：** 0119主档九次config/current均有效，全部state7/en0、没有
+负IBATT；插线INPUT已有效、未suspend、ICL1500mA。禁充初态在board/mux/USB
+控制器启动前已存在，不能直接归因于IRQ化。下一步已备no-usb镜像做同电源
+对照，未修改充电使能或内核；完整证据和操作见
+[`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
+
 ## 已确定与仍缺的证据
 
 - 0119 mode4：3次独立MSOC命中，拔线期间真实gauge从74%降至73/72/71%，

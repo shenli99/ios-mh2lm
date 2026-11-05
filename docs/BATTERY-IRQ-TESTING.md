@@ -1,11 +1,63 @@
 # MH2LM 电池 IRQ：分阶段测试与结果
 
-**当前0119：mode4的MSOC真实IRQ通过；继续实际充电诊断，CHGR事件尚未覆盖。**
+**当前0119：充电诊断九笔均state7/en0、无负电流；下一步同内核no-usb对照。**
 0145 registry consumer、0146统一事务锁、0147按键workloop准备、0148隔离/日志
 已进入0119。下面0115/0141/0142段落保留为历史，旧baseline/no-keys流程不再
 作为当前前置要求。MSOC已实测，CHGR/SOC_READY变化事件未覆盖，IRQ大目标未结束。
 
-## 0119 mode4结果与当前下一步
+## 0119充电诊断结果与当前下一步
+
+已检查 `sweetlog-0119-battery-charge-diag.bin`，SHA256：
+`36f445679818886a45e53eb1b44baa11750f3ec65efc6575d373ea1c44057875`。
+头v1/ring4194304/total259899/flush49，未环绕、解码无NUL。实际参数保留
+mode4/keys1/真实gauge/ACM2/vbus1，并明确sweetbattdiag1；75行确认诊断开启。
+原始解码/逐行分析在工作区 `scratch/artifact-0119/charge-diag-persistent.txt`、
+`analyze-charge-diag.py` 与 `charge-diag-analysis.json`。
+
+- **九笔样本均未显示真实充电**：CHGR0x47/state7、CHARGING_ENABLE_CMD的en0、
+  pause0、cfg2=0x2c（inhibit bit0未置位）。全部DIAG config-ok1/current-ok1。
+  IBATT依次+488/+488/0/+460448/+460448/+539550/+488/0/+466308µA；未见
+  Qualcomm FG充电方向的负值。71%降至70%，无充电趋势证据。IRQ稀疏采样，
+  不能声称精确覆盖整段每一时刻或以插拔瞬间正电流推断长期供电比例。
+- 插线样本INPUT path0x95、use-usb1、valid-input1；path/cmd均未suspend，
+  ICL配置1500mA、AICL启用。当前有效输入已建立，直接可见的阻塞是充电使能
+  仍关闭；ICL配置不等于测得USB实际输入电流。插入瞬间APSD0、较后MSOC
+  样本APSD0x21/dtc-done1/slow-plugin1，不能用早期0就判检测一直失败。
+- **112/114行首笔采样已经state7/en0，早于138行board、142行mux服务启动，
+  以及1394行USB控制器初始化。** 禁充初态不能归因于之后的电池IRQ arm或
+  gadget初始化；这也不排除gadget/override影响稍后的充电恢复行为。
+- 156～177行两组接入正常，mode4/eventsf、无两秒轮询。六次USBIN刷新
+  3003/3067/3080/3093/3465/3600，external交替0/1；一次独立MSOC命中3425，
+  3431行events4刷新，连接期间71→70%。七次通知/采样1→7、全healthy1；
+  未见CHGR/READY独立命中。诊断增加读取后通知至发布18.011～18.351ms，
+  不是线缆到UI延迟，也不能与无诊断的约7ms直接归因于IRQ性能回退。
+- `SWEET BATT SMB`九次均read-ok0；该链中的Type-C/SMB未读零值不可当硬件
+  状态。与之区分，DIAG的config-ok1确实证明其0x1648 smben0已读成功；
+  但SMB选择配置0x1690是否被读到、Type-C哪个地址失败仍未知。
+  UI current-valid0表示现有驱动尚未把诊断电流发布到标准字段，不是IBATT读取失败。
+- 本轮记录power3对、volume-up1对，未记录volume-down HID；触摸5对/单槽，顺序
+  均配平，末次IRQ136/empty0。一次电源键息屏/亮屏，输入覆盖至最后一次插线前。
+  无相关驱动ERROR/mux失败/隔离/panic签名；6条WARN均为既有USB ep0/5cmd6。
+  USB只有早期计数/2次ACM配置，不能声称后段枚举全部正常。
+  SpringBoard发起关机3624，尾部未证明服务stop/free完整执行。
+
+**现在测已准备的对照镜像** `out-bs/boot-16k-0119-battery-charge-diag-no-usb.img`，
+SHA256 `90655d8c533a0e90d09705938b797dd41617a1a35dc55941ae84cde2a761ce5c`
+已再次核对。保留同0119内核、mode4/按键/触摸/真实电池和诊断；仅sweetusb0，
+去掉sweetvbus/usbstep，不启动gadget，没有USB live日志。这是电池充电对照，
+不是重新调试USB日志。无需push/云编译。
+
+使用与主档相同的独立充电器和线，尽量相同操作：进桌面后拔电脑20～30秒，
+接充电器3～5分钟，拔20～30秒，可再接一次；导出
+`sweetlog-0119-battery-charge-diag-no-usb.bin`。同时记录电源类型/线和UI现象，
+不从PMIC的external标志猜测是电脑还是独立充电器。
+
+对照若进入state3/负IBATT且有CHGR命中，继续拆分gadget/override与启动残留
+影响；若仍state7/en0，则USB gadget并非该条件下的唯一原因，推进逐字段
+有效性修复和充电初始化/控制设计。单次对照不能证明所有电源条件或唯一因果。
+不为取得CHGR事件直接写充电使能，不重复无诊断all档。
+
+## 0119 mode4结果与当时下一步（充电诊断已测，见上）
 
 `sweetlog-0119-battery-irq-all.bin` SHA256：
 `3ede5ea87e447b1b45e54627128b1361906112af0f4dc54b3468b11c567351aa`。

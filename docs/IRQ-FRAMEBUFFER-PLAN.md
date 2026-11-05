@@ -6,6 +6,8 @@
 按用户要求继续电池驱动：先用同0119内核的充电诊断镜像恢复物理充电/CHGR
 证据链，再完善采样有效性、真实遥测及容量/profile，见
 [`BATTERY-DRIVER-NEXT.md`](BATTERY-DRIVER-NEXT.md)。当前无需云编译。
+充电诊断主档已测：九笔state7/en0、无负IBATT，插线输入有效；禁充初态早于
+mux/USB初始化。下一步同内核no-usb对照，不能把禁充直接归因于IRQ化。
 电池IRQ子目标仍未完成，framebuffer继续排在IRQ验收之后。证据与镜像见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。0148故障隔离仍只有本地
 注入验证，未在手机触发；策略见 [`MUX-GROUP-ISOLATION.md`](MUX-GROUP-ISOLATION.md)。
