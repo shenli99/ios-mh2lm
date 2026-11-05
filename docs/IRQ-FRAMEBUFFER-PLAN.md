@@ -23,7 +23,10 @@ PMIC mux 路由共 32 次命中、触摸 689 次、USB 1536 次，含息屏唤�
 及少量触摸事件并行；本次未操作按键、未覆盖插拔转换，所以完整组合回归
 仍未覆盖。硬件报告 USB 存在但 state=7 未充电，未启用电流诊断。
 2026-11-05 路线调整：按用户要求，在 IRQ 阶段追加子目标 4“电池 IRQ 化”，
-在 framebuffer 之前实施。当前仅有计划和既有硬件预检，尚未实现电池 IRQ。
+在 framebuffer 之前实施。0141 已完成电池 IRQ 首版本地实现、交叉编译和模拟
+故障检查；尚未经过原生 CircleCI 完整构建与实机验证，不能视为子目标完成。
+同一内核的分阶段测试入口见
+[`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
 Framebuffer 修复尚未启动。
 **更新日期：** 2026-11-05
 **适用范围：** `ref/ios-mh2lm` 的 MH2LM XNU 驱动；本文是实施和验收计划，
@@ -235,7 +238,11 @@ SPI 208（候选 INTID 240），并写好带 GIC 探针、真实 IRQ 与轮询�
 
 ### 子目标 4（临时追加）：电池 IRQ 化
 
-**状态：** 2026-11-05 新增，尚未实现；既有两秒真实采样仍是当前运行基线。
+**状态：** 2026-11-05 新增；0141 首版实现已完成本地检查，待云编译和实机验证。
+已验证的运行基线仍是 0114a15 的两秒真实采样。测试参数 `sweetbattirq=0..4`
+支持显式轮询基线、只读预检、USBIN、USBIN+CHGR、全电池事件；IRQ 档无周期
+采样兜底。具体顺序、观测项与本地检查限制见
+[`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
 PMIC 型号证据、事件位置、既有 APID 预检和待测项见
 [`BATTERY-IRQ-HARDWARE-BASELINE.md`](BATTERY-IRQ-HARDWARE-BASELINE.md)。
 工作区 `docs/INDEX.md` 的电源六章报告已补充 ack/unmask 顺序、LG 0.3%

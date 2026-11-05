@@ -7,6 +7,15 @@
 但不是同一个驱动。`AI-GUIDE.md` 的 2026-10-30 启动状态已经过时，
 当前状态以本文件和 `NOTES.md` 顶部为准。
 
+**待验证变更（0141）：** 新补丁在现有唯一 PMIC mux 中增加电池路由和
+consumer 绑定接口，由 mux 仅排队唤醒 `SweetBattery` 自己的软件
+`IOInterruptEventSource/IOWorkLoop`，再执行真实采样与标准 `updateStatus()`。
+可分阶段启用 USBIN、CHGR、MSOC_DELTA/SOC_READY；IRQ 档停止两秒扫描，
+故障显式停用，没有静默轮询兜底。现有三键路由继续使用同一个 INTID513，
+USB 和触摸 IRQ 实现保持原样。该实现只完成本地编译与模拟检查，**尚未实机验收**；
+下文仍描述 0114a15 实测基线。详细数据流、故障边界与测试入口见
+[`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
+
 ## 一眼看清数据流
 
 ```mermaid

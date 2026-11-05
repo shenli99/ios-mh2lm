@@ -76,7 +76,7 @@ jobs:
             fi
             require_marker() {
               if ! grep -Fq "$2" "$1"; then
-                echo "ERROR: required 0139/0140 marker missing from $1: $2" >&2
+                echo "ERROR: required 0139/0140/0141 marker missing from $1: $2" >&2
                 exit 1
               fi
             }
@@ -84,6 +84,10 @@ jobs:
             require_marker xnu/bsd/dev/sweet_usb.c 'SWEET USB IRQ: FAILED'
             require_marker xnu/bsd/dev/sweet_touch_tcm.c 'SWEET TOUCH IRQ: FAILED'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET_LOG_ERROR'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET MUX: consumer attached group='
+            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT IRQ: armed mode='
+            require_marker xnu/bsd/dev/sweet_spmi.c 'sweet_spmi_irq_lock(void)'
+            require_marker xnu/bsd/dev/sweet_spmi_mux.h 'SWEET_BATT_IRQ_MSOC'
 
       # ── 以下步骤对应 if: always()，使用 when: always ──
 

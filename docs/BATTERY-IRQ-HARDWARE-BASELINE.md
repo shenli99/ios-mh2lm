@@ -1,7 +1,9 @@
 # MH2LM 电池 IRQ 硬件基线与资料缺口
 
-**日期：** 2026-11-05。当前电池仍是两秒只读采样，本文件不代表 IRQ 已实现。
-实施范围和验收见 `IRQ-FRAMEBUFFER-PLAN.md` 子目标 4。
+**日期：** 2026-11-05。已验证的 0114a15 电池仍是两秒只读采样；0141 已完成
+本地 IRQ 实现，尚无新内核实机读回，下面的未知项不能视为已经测得。
+实施范围和验收见 `IRQ-FRAMEBUFFER-PLAN.md` 子目标 4；新一轮测试入口见
+[`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
 
 ## PMIC 型号的证据等级
 
@@ -41,7 +43,7 @@ DT SPI481 / GIC INTID513，按键已经证明端到端投递；新增电池源�
    channel；当前 type/polarity/enable/latch；MSOC delta 阈值及运行中的 FG
    是否在不新增算法配置时产生事件。前两条充电源的旧预检已有，不必重做
    无关的 GIC/USB 功能试验，但 arm 前仍应核对当前配置。
-2. **已有源码依据，需落实到实现：** PMIC IRQ `RT_STS +0x10`、`SET_TYPE +0x11`、
+2. **已有源码依据，0141 已实现、仍待实机验证：** PMIC IRQ `RT_STS +0x10`、`SET_TYPE +0x11`、
    `POLARITY_HIGH/LOW +0x12/+0x13`、`LATCHED_CLR +0x14`、
    `EN_SET/CLR +0x15/+0x16`、`LATCHED_STS +0x18` 的位级行为；
    arb v5 channel `+0x100/+0x104/+0x108` 的 enable/status/clear 顺序。

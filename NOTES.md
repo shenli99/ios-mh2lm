@@ -2,6 +2,65 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**Battery IRQ first implementation ready for user push / native CI; NOT phone-tested:**
+User authorized implementation after the workspace power research review.
+New `xnu/patches/0141-mh2lm-battery-event-irqs.patch` is based on exact final
+0114a15 source, changes sweet_spmi.c/.h, SweetSpmiInterruptMux.cpp and
+SweetBattery.cpp, and adds bsd/dev/sweet_spmi_mux.h. Reuses the sole INTID513
+mux and route table; battery attach/detach is serialized on its workloop,
+notifications only queue the battery's own IOInterruptEventSource/IOWorkLoop,
+and IOPMPowerSource/updateStatus remains the publication path. Key/USB/touch
+IRQ and ACM remain enabled. New mode sweetbattirq=0 polling baseline,
+1 read-only identity/FG preflight + polling, 2 USBIN IRQ, 3 USBIN+CHGR,
+4 above +MSOC_DELTA/SOC_READY. Modes >=2 have no periodic sampling/fallback;
+initial and arm-sync samples plus at most one 100ms SOC-jump confirmation per
+event are explicit. Invalid gauge/charger or missing pack stops sampling,
+holds the last source and publishes an explicit unhealthy/invalid property.
+
+New routes resolve unique EE0 IRQ-owned APIDs before channel access, refuse
+already-enabled route takeover, preserve/restore unrelated trigger bits, and
+restrict writes to IRQ offsets11..16. Battery IRQ writes share the observer
+transport lock. RW timeout poisons that APID until reboot. Partial attach
+rollback preserves keys if cleanup succeeds; failed cleanup or shared fatal
+mux fault explicitly stops/notifies both groups, so key concurrency needs real
+regression. Fixed inherited lifetime256 IRQ cutoff to >256 IRQ/1-second window.
+No charger-policy/SRAM/profile/capacity/SOC-scaling changes. Identity still
+expects type51/subtype20/SOC subtype10; actual REVID, new FG APID/ownership/
+gates and inherited MSOC threshold remain UNMEASURED on phone.
+
+`tools/mk-mh2lm-event-matrix.sh ... LABEL --battery-irq` now packages one
+new compiled kernel into baseline/preflight/usbin/charger/all/all-debug images,
+retaining sweetbattery=1 sweetbatt=1 and ACM. Existing --irq-only remains mode0.
+`.github/workflows/circleci.yml` changed ONLY to add 0141 source marker gates;
+the native build command is unchanged. No push, cloud run or new boot image
+has been produced. Do not package the older 0114a15 as this test.
+
+Local checks: patch applies with whitespace=error-all to exact baseline;
+fresh applied five files byte-match edited/compiled sources. Three ARM64
+Mach-O translation units compile and C/C++ API symbol names match. Linux
+clang19 C++ required compile-only stand-ins for Apple's XNU type builtins;
+these are NOT in production and do not replace native CI/full link. Actual
+patch-applied mux source passes ASAN/UBSAN simulation: trigger masks, foreign
+EE rejection, unrelated-bit preservation, partial setup rollback, queued
+detach without stopping keys, 600 lifetime IRQs, dense storm stops both,
+and timeout poison/no reuse. Test script is
+`tools/tests/test-mh2lm-battery-irq.py EXTRACTED_XNU_DIRECTORY`; simulator
+cannot establish real delivery/timing or complete battery service lifecycle.
+Bash/Python syntax and CircleCI YAML parse pass; --battery-irq rejects old
+0114a15 missing markers before any image creation.
+
+Exact local sources/checks: workspace scratch/battery-irq-0114a15/ contains
+base/xnu (0114a15), xnu (edited), verify (fresh patch-applied byte-match),
+compile.py, compile-summary.txt, individual compile logs and objects. Do NOT
+rerun initial edit.py/edit_battery.py; later review fixes are not in them.
+Next action: user push then download fresh xnu-kernel and xnu-buildtree with
+the new label; verify native build/markers, package via --battery-irq, start
+baseline -> preflight -> USBIN -> CHGR -> all. USB ACM is the existing log
+channel, persistent SWEETLOG supplements unplug/startup faults. Full test
+guide and limits: docs/BATTERY-IRQ-TESTING.md. Plan, hardware baseline,
+architecture pending-change note and logging scope updated. Battery subgoal4
+is implemented locally but NOT accepted; framebuffer still waits.
+
 **Workspace power research reviewed and integrated into battery IRQ baseline:**
 User pointed to workspace docs/INDEX.md and its six static-analysis chapters.
 Checked the IRQ/FG/profile claims against new reference
