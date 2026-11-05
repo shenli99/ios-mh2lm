@@ -1,4 +1,4 @@
-# MH2LM 当前 USB、按键与屏幕驱动架构
+# MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
 **基线：** 0114a15 内核；以 `logs/xnu-buildtree-0114a15.gz` 中的最终 XNU
 源码为准，结合 `live-e-0114a15-irq-only-debug.txt`（默认 INFO 档）和
@@ -93,7 +93,7 @@ IOKit 事件源和 HID 发布都在使用；中断源的注册/路由尚未交�
 底部横条能出现而中间仍黑。这是**与现象吻合的源码解释**，不是已经
 通过图层抓取证明的唯一原因。触摸 IRQ/HID 路径不会自动修复这类渲染问题。
 
-## 电池在这轮镜像中的启用状态（2026-11-05 补充）
+## 电池采样、IOPM 通知与充电控制（2026-11-05 补充）
 
 原始 0114a15 的 `irq-only` 和 `irq-only-debug` 镜像都漏掉了
 `sweetbattery=1 sweetbatt=1`，实机日志的 boot-args 也确认缺少它们。
@@ -102,10 +102,63 @@ IOKit 事件源和 HID 发布都在使用；中断源的注册/路由尚未交�
 日志不能作为“真实电池轮询与按键 mux 并行已验收”的证据。
 
 打包脚本已在 `d84ac7f` 补回这两个参数，并用同一内核生成
-`0114a15-batt` 普通/DEBUG 镜像，等待实机复测。启用后的电池路径仍为
-`IOWorkLoop + IOTimerEventSource` 每两秒只读采样 PM8150B，再经
-`IOPMPowerSource::updateStatus()` 通知用户态；尚未接入 PMIC mux 的
-充电事件 route。当前修复改变的是启动配置，既有 MSOC 换算仍在。
+`0114a15-batt` 普通/DEBUG 镜像。随后实机日志
+`live-0114a15-batt-irq-only.txt` 确认参数生效并恢复真实采样，当前修复
+改变的是启动配置，既有 MSOC 换算仍在。
+
+```mermaid
+flowchart LR
+  PMIC[PM8150B USID 2] --> OBS[sweet_spmi observer 只读访问]
+  OBS --> TIMER[IOWorkLoop / IOTimerEventSource 每两秒采样]
+  TIMER --> PS[SweetBattery / IOPMPowerSource]
+  PS --> STATUS[updateStatus / 电池状态变更消息]
+  STATUS --> PD[powerd]
+  PD --> UI[iOS 电源 UI 与唤醒处理]
+```
+
+**标准框架部分：** `SweetBattery` 继承真正的 `IOPMPowerSource`。
+它先发布完整的初始状态，再 `registerService()`；后续在自己的 workloop
+上更新容量、电压、外接电源和充电状态，经 `setPSProperty` 等标准 setter
+写入，再调用 `updateStatus()`。0114a15 的 XNU 基类实现会在属性变化时
+更新 IORegistry 并调用 `messageClients(kIOPMMessageBatteryStatusHasChanged)`。
+这条通知链符合 XNU 电源源的常规方式；驱动不直接调用 SpringBoard 绘制
+充电图标。`AppleSmartBatteryManager : SweetBattery` 是为了让 iOS 匹配
+而使用的兼容类名，与上述电源源是同一个实例，不是另一个充电控制器。
+
+**采样仍是定时器：** 当前未把 USBIN_PLUGIN、CHG_STATE_CHANGE 等
+PMIC 事件接到 `SweetSpmiInterruptMux`；mux 的 consumer 仍只有按键。
+`pollSid2()` 每两秒校验 SOC_READY 和匹配的 MSOC shadow pair，读取电压
+与充电状态，再发布。只有电量计无效时才使用电压曲线估值。IOKit 定时器
+采样本身是合理的 XNU 驱动模式，但不能把后续 IOPM 事件通知等同于硬件
+已经 IRQ 化。未来可用 PMIC IRQ 触发状态刷新，低频定时器用于周期量测；
+这不要求改变上层 `IOPMPowerSource` 接口。
+
+**充电控制尚未接管：** 这条 `sweet_spmi` observer 路径只读；MMIO 写入
+用于提交读取命令，不向 PMIC 外设写充电使能、限流或温控配置。实际充电
+依赖进入 XNU 时继承的固件/PMIC 配置及硬件状态机。此前 0112m19/m20 的
+电流、电压和 SOC 变化证明那些测试期间存在真实充电，但不证明 XNU 已有
+完整充电策略，也不保证所有 USB 供电条件下都充电。
+
+目前还不能称为完整电池管理，以下字段与策略仍有明确缺口：
+
+| 项目 | 当前实现 |
+| --- | --- |
+| 电量与电压 | 来自真实 gauge/电压寄存器；容量按固定 5020 mAh 与百分比换算，未实现容量学习。 |
+| 电流 | SID2 发布值固定 0，`SweetBatteryCurrentValid=false`；可选诊断能读取电流，但没有送入标准电源字段。 |
+| 温度、循环次数、剩余时间 | 固定 25°C（带估计标记）、0 次、未知 -1；不是完整遥测。 |
+| 外接电源能力 | `ExternalChargeCapable` 暂随 VBUS 存在，未完整推导协商/限流能力。 |
+| 低电量与生命周期 | warn/critical 当前固定 false；尚无完整低电量关机、休眠恢复、热管理和充电策略。 |
+| Apple manager user client | 能匹配和打开，但所有 `externalMethod` selector 返回 unsupported；不是完整 AppleSmartBatteryManager ABI。日志中的 powerd selector 4 属于这一边界。 |
+
+**本次日志证据：** `live-0114a15-batt-irq-only.txt` 共 3017 行、63 次 SID2
+采样，SHA256 `1a1ed7062cec374202bcfbc6546073ef4da06f1be94b5f49e33693ed75eea62e`。
+所有样本均 `msoc=0xb4 scaled=70% ready=1 src=gauge held=0`，电压
+4012–4013 mV；`usb=0x10 external=1`，`chgr=0x47` 低三位为 7
+（DISABLE_CHARGE），发布 `charging=0 full=0`。因此真实采样已恢复且稳定，
+这份日志报告的是“已插 USB、当前未充电”。没有启用电流诊断，不能据此
+判断不充电的具体原因。USB 达 768 次 IRQ、TX 错误为 0，触摸有 down/up；
+没有按键 HID/mux route 命中，也没有插拔转换，完整的真实电池与三键并发
+及插拔通知回归仍未覆盖。
 
 ## 当前结论和证据
 
@@ -142,6 +195,9 @@ IRQ 已验证的事实。详细实施和验收仍由 `IRQ-FRAMEBUFFER-PLAN.md`
 | `xnu/iokit/Kernel/arm/SweetFramebuffer.cpp` | framebuffer 316–596；user client 597–763；背光 155–315。 |
 | `xnu/iokit/Kernel/arm/SweetSurface.cpp` | surface 管理 70–350；user client 380–884。 |
 | `xnu/bsd/dev/sweet_display_probe.c` | 显示状态探针 1–155；DCS 亮度 157–307。 |
+| `xnu/iokit/Kernel/arm/SweetBattery.cpp` | 继承/兼容类 83–130；user client 185–208；发布 275–359；SID2 采样 591–721；启动 734–788。 |
+| `xnu/bsd/dev/sweet_spmi.c` | 电池 observer 只读 SPMI 访问，文件头明确不写 PMIC 外设配置。 |
+| `xnu/iokit/Kernel/IOPMPowerSource.cpp` | 177–218：`updateStatus()` 发布属性并发送标准电池状态变更消息。 |
 
 相关历史、实机日志 SHA256 和后续目标见 `NOTES.md` 与
 `IRQ-FRAMEBUFFER-PLAN.md`。本次仅做架构核对和文档记录，没有改变内核代码。

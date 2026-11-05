@@ -2,16 +2,34 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
-**0114a15 IRQ image battery omission found and repackaged; combined real
-battery + fixed IRQ phone test pending:** The user reported that battery
+**Real battery restored; architecture boundary reviewed:**
+`logs/live-0114a15-batt-irq-only.txt` SHA256
+`1a1ed7062cec374202bcfbc6546073ef4da06f1be94b5f49e33693ed75eea62e`
+contains 3017 lines and 63 real SID2 samples. Boot args include both battery
+selectors. Every sample is gauge-ready MSOC 0xb4 / 70%, held=0, 4012–4013 mV;
+USB present (0x10), charger 0x47 / state 7 DISABLE_CHARGE, charging=0/full=0.
+This confirms the packaging fix restored hardware sampling. No current
+diagnostic or plug transition was captured, so this does not establish why
+charging is disabled. USB reaches 768 IRQs, TX err=0; touch down/up exists,
+but no key HID/mux route activity, so full real-battery + three-key concurrent
+regression remains uncovered. User primarily requested an architecture review,
+not another charging experiment. Expanded CURRENT-DRIVER-ARCHITECTURE.md:
+IOPMPowerSource/updateStatus notification is standard XNU; two-second IOKit
+polling is still active, battery PMIC IRQ routes are not installed; observer
+reads do not implement charging control. Fixed temperature/current/capacity
+metadata, unsupported manager user-client selectors and missing low-battery/
+thermal/lifecycle policy are documented. No kernel change, CI run or new boot
+is needed for this documentation review. Do not push; user controls pushes.
+
+**0114a15 IRQ image battery omission found and repackaged; initial diagnosis
+and packaging record (later phone result above):** The user reported that battery
 behavior looked abnormal again. Both original 0114a15 IRQ profile boot args
 and the two INFO/DEBUG live logs omit `sweetbattery=1 sweetbatt=1`.
 The exact 0114a15 `SweetBattery.cpp:739–746` defaults both selectors to zero;
 `poll()` then publishes static 100%, 4200 mV, external/capable/full true,
 charging false, and `start()` creates no sampling timer. The prior MSOC pair
 validation/scaling and IOPM notification fixes remain in the compiled source.
-This is a packaging regression, not evidence those fixes were removed. The
-user's exact observed symptom was requested and is not yet recorded.
+This is a packaging regression, not evidence those fixes were removed.
 
 Commit `d84ac7f` makes `--irq-only` normal and DEBUG profiles share the two
 real-battery arguments and requires the kernel's MSOC marker when packaging.
