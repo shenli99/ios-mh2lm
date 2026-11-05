@@ -2,6 +2,60 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**CURRENT0146..0148 READY FOR USER PUSH; per-group rollback isolation + log levels.**
+Implementation/tests/docs committed `1c9598b` (0148), after0147 `232b8b3` and
+0146 `93ccaeb`. User requests removeGroup failure prefer disabling only faulty
+group and ERROR always / WARN below / INFO lowest normal running severity.
+New0148-mh2lm-mux-group-isolation.patch changes5 XNU files. On attach rollback
+or detach cleanup failure, original removeGroup tries restoration; on failure
+isolateGroup under mux gate (GIC masked) closes each group's unique local
+APID ACC_ENABLE, clears only group bits, requires access0/pending0 readback.
+No SPMI command in isolation, poisoned RW lane not reused. Preserve other
+active groups if successful; sticky isolatedGroups mask (IORegistry
+SweetMuxIsolatedGroups, lifecycle degraded), no reattach/retry/fallback this
+boot. Any route from another group resolving an isolated APID also rejected.
+Cannot independently gate a cross-group active APID, gate readback failure or
+stuck pending -> original global disableHardware. Runtime ack exhaustion,
+unknown/stuck IRQ, storm, shared GIC/PDC failures remain global: this change
+is specifically failed rollback/detach containment, not blanket runtime policy.
+Normal successful cleanup unchanged; not complete PMIC state restoration.
+
+Existing ERROR/WARN/INFO/DEBUG macros already0140. ERROR now unconditional
+sink, no severity predicate. Battery and SPMI raw IOLog/printf converted to
+macros: init/map/timeout/static-fallback failures ERROR, diagnostic inability
+WARN, startup/samples/normal diagnostics INFO. Keys/mux/client already graded.
+0 ERROR;1+WARN;2+INFO default;3 explicit DEBUG. Whole XNU/userland and per-target
+logging management NOT claimed completed; future logging goal remains.
+
+Verification scratch/group-isolation-0118/: fresh0148 strict apply/byte compare,
+complete0142..0148 final replay matches23 files;8 ARM64 objects compile, using
+existing subsystem flags/Apple builtin local adaptations, NOT native CI/link.
+Registry suite actual mux/client/keys class + selected battery methods passes:
+SET_TYPE stale+restore-write failure isolates keys/battery remains sampled;
+detach EN_CLR failure or RW poison timeout isolates battery/keys still live;
+queued IRQ detach rearms surviving keys; gate refuses off or pending sticks ->
+global shutdown; synthetic shared active APID refused; another group cannot
+reopen isolated APID. Original lifecycle/hardware suite and80 extra races,
+ASAN/UBSAN + explicit object/notifier/MMIO counts pass. transport-tests covers
+actual init/key+battery lock/error paths and10 extra concurrency runs.
+New test-mh2lm-log-levels.py compiles actual macros+threshold in C/C++, checks
+all valid/invalid/default levels, forced all-filter-off still emits ERROR,
+filtered args not evaluated, six PMIC modules have no raw logging calls.
+CI source gate accepts0148/rejects0147; CircleCI build COMMAND UNCHANGED,
+only markers added. Packer board/battery requires new isolation string.
+Shell/Python syntax and diff whitespace pass. No native build/phone proof of
+ACC_ENABLE/pending isolation yet; no new native artifacts or boot generated.
+
+Docs/MUX-GROUP-ISOLATION.md current policy/severity/tests. MUX-CONSUMERS,
+SPMI-TRANSACTIONS and IRQ-FRAMEBUFFER-PLAN updated; SPMI-CALLSITE-AUDIT remains
+explicit0147 snapshot/hashes/line numbers, top links0148 changed behavior.
+NEXT: user push current HEAD -> one native kernel/buildtree -> direct keys1 /
+batteryIRQ2 combined real-gauge + ACM test, fixed USB/touch IRQ, all3 keys,
+USBIN unplug/replug, sleep/wake. No required skipped no-keys repeat; baseline
+optional anomaly control. Existing0118 lacks0146..0148. Do not claim original
+SET_TYPE42 hardware cause proven or native isolation validated. No push/cloud/
+device actions performed. Preserve user-owned push/fastboot procedure.
+
 **0147 source audit requested by user: no new kernel behavior change.**
 Verified exact consumer-prepare-0118/verify/xnu at implementation232b8b3.
 Added docs/SPMI-CALLSITE-AUDIT.md, linked from MUX-CONSUMERS.md: all95 static
