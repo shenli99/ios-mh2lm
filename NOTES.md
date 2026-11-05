@@ -3,6 +3,7 @@
 ## Agent handoff / active work (2026-11-05, latest)
 
 **CURRENT0118 combined FAILED keys attach;0146 transport fix/diagnostics ready for USER PUSH.**
+Implementation/tests/docs committed as `93ccaeb`; ready for user push, not pushed.
 User reports keys dead and asks if boot argument omitted. Persistent evidence
 logs/sweetlog-0118-board-startup-usbin.bin SHA256
 `c0cd6907da5bba7a12bfa656682384f7915794c03a2ace84ffec6dfb7e665578`;
