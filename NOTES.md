@@ -3,6 +3,8 @@
 ## Agent handoff / active work (2026-11-05, latest)
 
 **CURRENT: board startup ownership cleanup0143 implemented; ready for user push.**
+Implementation and validation/docs committed as `88fe6b2`; staged whitespace
+checks passed for all eleven files. No push, CI run or new phone test yet.
 User reprioritized startup architecture before battery acceptance. Additive
 xnu/patches/0143-mh2lm-board-driver-startup.patch builds on0142 and exact0115.
 New bsd/dev/sweet_board.c is called once by bsd_init AFTER bsd_autoconf/IOBSD
