@@ -2,6 +2,25 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**USER STEERING: skip no-keys persistent supplement; NEXT combined0118 USBIN.**
+User explicitly says stop spending time on this round and proceed with all
+consumers connected. Do NOT require no-keys persistent/repeat before next test.
+Existing live proves one real independent USBIN unplug/replug; early matching
+and second-cycle evidence remain incomplete, not silently marked fully passed.
+Proceed same0118 native kernel, existing out-bs/
+boot-16k-0118-board-startup-usbin.img. SHA256 rechecked
+`6702a2d82e7a8797ac07cdb7a93de9cda9fd288f57dc2b9261488a2789e273dd`.
+keys1 + batteryIRQ2 (USBIN), real gauge, ACM2/vbus1; fixed USB/touch IRQ stay
+enabled. Both group0 keys and group1 battery attach mux concurrently. This
+combines current consumers; CHGR/MSOC additional sources aren't enabled in
+this profile. No rebuild/repack needed. Start listener, test all3 keys/touch,
+two unplug5s/replug5s cycles with input in between, then power-key screen off/
+wake + touch. Save live-0118-board-startup-usbin.txt. Judge shared mux route
+counts/healthy, external transitions, balanced key HID, touch and ACM; known
+framebuffer redraw glitches and live replay should be separated from IRQ
+failure. No automatic request to repeat skipped no-keys stage. No code change,
+push, cloud or device action; only existing image checked and docs updated.
+
 **0118 no-keys LIVE: real independent USBIN IRQ observed; get persistent before acceptance.**
 logs/live-0118-board-startup-no-keys.txt SHA256
 `e93062b23cbfd0b8e0d61cce866e207da3d5b903f87583030a2b56c923f12e69`.

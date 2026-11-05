@@ -5,8 +5,9 @@
 包含 0145 和后续退出告警，三档 boot 已生成。0118 baseline 日志已确认
 group0 registry 匹配/接入、三键 IRQ/HID、触摸及 ACM 持续运行；补充的
 `live-0118-board-startup-wak.txt` 已确认单独电源键息屏/唤醒、唤醒后触摸和 USB。
-no-keys live 已记录独立 USBIN IRQ 与拔插状态发布，正等待同轮持久日志补齐
-启动接入和第二轮拔插证据；电池完整 IRQ 验收与原生终止清理仍待进行。
+no-keys live 已记录独立 USBIN IRQ 与拔插状态发布。用户决定跳过该轮持久日志
+补采，直接进入 keys+USBIN 组合档；其早期接入与第二轮拔插证据仍不完整，
+电池完整 IRQ 验收与原生终止清理仍待进行。
 0117 baseline 证明的是旧 0144 的正常启动，不能作为本次改造的实机验收。
 
 ## 当前服务与接口
@@ -179,5 +180,7 @@ no-keys，再根据 group1 独立接入结果决定 combined usbin；不需要�
 USBIN IRQ1/2 分别触发 external0/1、`updateStatus()`、healthy1。记录的通知至
 发布耗时约7.4ms，不等于物理插拔至 UI 延迟，charging0 也不代表已充电。
 live 缺早期匹配/arm 记录，重连后还完全重放了68行相同计数日志；只能确认
-一轮有效拔插，不能累计成两轮。下一步取同轮持久日志，核实 group1 接入、
-按键路由未接入及后续真实计数，再进入组合档。
+一轮有效拔插，不能累计成两轮。用户随后明确跳过该轮补采，下一步直接使用
+`boot-16k-0118-board-startup-usbin.img`，按键和电池 USBIN 同时接入 mux，
+USB/触摸 IRQ 保持开启。用组合档验证插拔与输入并行，原 no-keys 缺失证据保留
+为未覆盖，不再作为进入组合档的门槛；本档不启用额外 CHGR/MSOC 源。
