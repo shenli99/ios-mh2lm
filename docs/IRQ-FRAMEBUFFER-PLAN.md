@@ -1,5 +1,10 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
+**当前补充 0145：** 按用户要求，先完成 consumer 匹配通知、公开 C++ attach/
+detach 和 terminated 清理，移除全局单例桥接。本地实现/验证完成；待新原生
+构建，从新 baseline 开始三档回归，电池 IRQ 子目标仍未验收。当前架构见
+[`MUX-CONSUMERS.md`](MUX-CONSUMERS.md)，固定路由表与后续 framebuffer 顺序不变。
+
 **状态：** 0114a11 实机验证按键三路与 DWC3 USB IRQ 并行；0114a13 实机验证
 触摸 GPIO122 IRQ 与 USB 并行。0114a13 三路组合测试中音量上键的 PMIC
 确认写入失败，mux 回退轮询，所以尚未完成固定 IRQ 验收。0138 增加有界

@@ -1,5 +1,11 @@
 # MH2LM 驱动启动归属与依赖清理
 
+**0145 当前改造：** board 的 keys 入口改为发布晚期 nub，匹配 SweetPmicKeys
+IOService；按键与电池各自通过 registry 通知接入 mux，不再使用全局 C 桥接。
+实际按键 arm 在 consumer workloop 异步完成，不要求先于 UFS；board 发布仍在
+root lookup 前。新实现与 terminated 清理见 [`MUX-CONSUMERS.md`](MUX-CONSUMERS.md)。
+下一轮先测包含 0145 的新 baseline，再测 no-keys/usbin；下文保留此前基线证据。
+
 更新：2026-11-05。0143 基于 0115 最终源码叠加 0142；0117 原生内核已包含
 0142/0143/修正后的 0144，baseline 启动与输入/USB 实机回归通过。
 关闭按键时的电池独立接入及并行 USBIN 尚待测试。旧 0115 镜像不包含此变更。

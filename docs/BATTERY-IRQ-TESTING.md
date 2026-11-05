@@ -1,5 +1,10 @@
 # MH2LM 电池 IRQ：0141/0142 实现与测试
 
+**0145 当前实现：** 电池改为实例持有的 registry matching/terminated 订阅，
+调用 mux 公开 C++ 接口；旧全局 READY/C 桥接已移除。先等新云端内核并测新
+baseline → no-keys → usbin，判据和退出边界见
+[`MUX-CONSUMERS.md`](MUX-CONSUMERS.md)。0117 不含此修改，以下为之前的阶段记录。
+
 **日期：** 2026-11-05。补丁 `0141-mh2lm-battery-event-irqs.patch` 基于
 0114a15 最终 buildtree（0138→0139→0140 已生效）生成。完成本地检查；0115
 云端产物的最终源码、内核符号与标记已核对，六个测试镜像已生成并回读验证。

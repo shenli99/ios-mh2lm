@@ -76,11 +76,11 @@ jobs:
             fi
             require_marker() {
               if ! grep -Fq "$2" "$1"; then
-                echo "ERROR: required 0139..0144 marker missing from $1: $2" >&2
+                echo "ERROR: required 0139..0145 marker missing from $1: $2" >&2
                 exit 1
               fi
             }
-            require_marker xnu/bsd/dev/sweet_keys.c 'SWEET KEYS IRQ: three routes active; IRQ-only'
+            require_marker xnu/iokit/Kernel/arm/SweetPmicKeys.cpp 'SWEET KEYS IRQ: three routes active; IRQ-only'
             require_marker xnu/bsd/dev/sweet_usb.c 'SWEET USB IRQ: FAILED'
             require_marker xnu/bsd/dev/sweet_touch_tcm.c 'SWEET TOUCH IRQ: FAILED'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET_LOG_ERROR'
@@ -89,23 +89,34 @@ jobs:
             require_marker xnu/bsd/dev/sweet_spmi.c 'sweet_spmi_irq_lock(void)'
             require_marker xnu/bsd/dev/sweet_spmi_mux.h 'SWEET_BATT_IRQ_MSOC'
             require_marker xnu/bsd/dev/sweet_spmi_mux.h 'SWEET_MUX_READY'
-            require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'publishReadiness(1)'
-            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT IRQ: waiting for mux readiness event; no timer/status polling'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiMuxClient.cpp 'gIOFirstMatchNotification'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiMuxClient.cpp 'gIOTerminatedNotification'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiMuxClient.cpp 'mux->attachConsumer(owner, group, events'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiMuxClient.cpp 'mux->detachConsumer(owner, group, this)'
+            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT IRQ: waiting for mux registry match; no timer/status polling'
             require_marker xnu/bsd/dev/sweet_board.c 'SWEET BOARD: late init before root lookup; independent of UFS'
             require_marker xnu/bsd/kern/bsd_init.c 'sweet_board_init();'
             require_marker xnu/bsd/conf/files 'bsd/dev/sweet_board.c'
-            require_marker xnu/bsd/dev/sweet_keys.c 'sweet_spmi_mux_attach(SWEET_MUX_KEYS'
+            require_marker xnu/iokit/Kernel/arm/SweetPmicKeys.cpp 'class SweetPmicKeys : public IOService'
+            require_marker xnu/iokit/conf/files.arm64 'iokit/Kernel/arm/SweetSpmiMuxClient.cpp'
+            require_marker xnu/iokit/conf/files.arm64 'iokit/Kernel/arm/SweetPmicKeys.cpp'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET MUX: infrastructure ready intid='
-            require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'class SweetSpmiInterruptMux : public IOService'
+            require_marker xnu/bsd/dev/sweet_spmi_mux.h 'class SweetSpmiInterruptMux : public IOService'
+            require_marker xnu/bsd/dev/sweet_spmi_mux.h 'attachConsumer(IOService *consumer'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET MUX: IOService started; owns workloop, routes and MMIO'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'ml_io_map_unmappable(physical, size, VM_WIMG_IO)'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'nub->registerService(kIOServiceSynchronous)'
             require_marker xnu/iokit/KernelConfigTables.cpp "'IOProviderClass' = SweetSpmiMuxDevice;"
+            require_marker xnu/iokit/KernelConfigTables.cpp "'IOProviderClass' = SweetPmicKeysDevice;"
             # An applied board wrapper is insufficient if the old edges survived.
             if grep -Eq 'sweet_(keys_init|touch_init|usb_probe|sample_start|display_probe_init|gpu_init|board_init|spmi_mux_start)' xnu/bsd/dev/sweet_ufs.c ||
                grep -Fq 'sweet_spmi_mux_start' xnu/bsd/dev/sweet_keys.c ||
                grep -Fq 'sweet_keys_' xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp; then
               echo 'ERROR: stale UFS/device or keys/mux startup dependency remains' >&2
+              exit 1
+            fi
+            if grep -Eq 'muxService|readyLock|publishReadiness|sweet_spmi_mux_(attach|detach|watch_ready|unwatch_ready)' xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp xnu/bsd/dev/sweet_spmi_mux.h xnu/iokit/Kernel/arm/SweetBattery.cpp xnu/bsd/dev/sweet_keys.c; then
+              echo 'ERROR: global mux consumer bridge survived 0145' >&2
               exit 1
             fi
 

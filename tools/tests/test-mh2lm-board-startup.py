@@ -32,11 +32,20 @@ for name in ['sweet_keys_init', 'sweet_touch_init', 'sweet_usb_probe',
 assert 'sweet_log_start();' in ufs
 assert ufs.index('su.ready = true;') < ufs.index('sweet_log_start();')
 assert 'sweet_spmi_mux_start' not in keys
-assert 'sweet_spmi_mux_attach(SWEET_MUX_KEYS' in keys
-assert 'sweet_spmi_mux_detach(SWEET_MUX_KEYS' in keys
+registry_clients = (r/'iokit/Kernel/arm/SweetSpmiMuxClient.cpp').exists()
+if registry_clients:
+    client = (r/'iokit/Kernel/arm/SweetSpmiMuxClient.cpp').read_text()
+    key_service = (r/'iokit/Kernel/arm/SweetPmicKeys.cpp').read_text()
+    assert 'sweet_spmi_mux' not in keys
+    assert 'SweetSpmiMuxClient::withOwner' in key_service
+    assert 'mux->attachConsumer(owner, group, events' in client
+    assert 'mux->detachConsumer(owner, group, this)' in client
+else:
+    assert 'sweet_spmi_mux_attach(SWEET_MUX_KEYS' in keys
+    assert 'sweet_spmi_mux_detach(SWEET_MUX_KEYS' in keys
 assert 'sweet_keys_' not in mux
 assert 'keyConsumer' not in mux
-if 'class SweetSpmiInterruptMux : public IOService' in mux:
+if 'class SweetSpmiInterruptMux : public IOService' in mux or registry_clients:
     config = (r/'iokit/KernelConfigTables.cpp').read_text()
     assert "'IOProviderClass' = SweetSpmiMuxDevice;" in config
     assert "'IOClass'         = SweetSpmiInterruptMux;" in config

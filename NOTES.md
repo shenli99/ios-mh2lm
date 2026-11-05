@@ -2,6 +2,63 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**CURRENT:0145 registry consumers + terminated cleanup implemented locally.**
+User reprioritized consumer migration after0117 baseline. Additive0145-mh2lm-
+mux-consumer-matching.patch changes10 XNU files. Public mux class moved to
+sweet_spmi_mux.h; virtual IOReturn attachConsumer(IOService*,group,events,
+notify,context) / synchronized detachConsumer(IOService*,group,context) check
+both consumer and context identity. Removed muxService/retainMux/readyLock/
+publishReadiness and C attach/detach/watch_ready/unwatch_ready. Remaining C
+entries publish board nub / dispatch hardware IRQ only. irqService is private
+spin-locked GIC dispatch, not discovery. Boot claim prevents restart until
+reboot; seven fixed routes/two groups retained, not dynamic route registration.
+
+Each consumer owns SweetSpmiMuxClient with typed retained provider, first-match
+and terminated notifiers, lock and software IES on its own loop. Install
+terminated first; callbacks only retain/mark/queue. Consumer loop calls typed
+methods, terminated/FAILED -> detach/release/fail, no rebind or polling.
+stop marks stopping, synchronizes notifier removal outside gates, then gated
+detach/drain and event removal. Missing/unpublished mux remains explicitly
+waiting/unhealthy, no timer; no invented FAILED notification for a service
+never published. Board/mux startup errors distinguish that case. READY means
+this connection's routes are attached, not a global infrastructure rendezvous.
+
+SweetPmicKeys IOService matches a late keys nub, owns C observer preparation,
+worker and registry client. Backend no longer includes/calls mux. Stop joins
+the worker, releases pressed HID keys, then unmaps observer/core/cfg with full
+16K ranges. Partial prepare and temporary PDC/GIC maps also unwind. Backend
+still one physical key block; no automatic restart. Battery retains early
+IOResources personality/initial sample, connects via own registry client;
+willTerminate/stop/free stop timers/detach/remove notifications before freeing
+events/loop. Mux willTerminate uses same gated shutdown as stop; workloop and
+MMIO survive until last retained user releases. Charging/SOC policy and actual
+USB/touch/UFS/framebuffer processing unchanged.
+
+Validation: strict exact0117+0145 apply/byte comparison and0115->0142->0143->
+fixed0144->0145 sequence; seven final TUs produce ARM64 Mach-O with subsystem-
+correct IOKit/BSD flags, old consumer C symbols absent. Actual mux/connection/
+keys service and selected battery methods with host registry/MMIO/scheduler:
+early/late, cancel, terminated before/after attach, notifier/IES/mux startup
+failures, identity, independent/parallel and old owner/rollback/600IRQ/storm/
+timeout pass plus40 teardown races. Actual C key worker/start/stop with host
+thread/MMIO adapters passes IRQ wake, HID release, paused-read join, thread/
+three mapping failures,16K accounting and20 read/stop races. ASAN/UBSAN and
+explicit object/notifier/map counts; LSan unsupported in sandbox. Historical
+0117 suite and board fan-out pass. Full native CI/link and new phone results
+NONE; models do not prove native scheduling/lock order or hardware teardown.
+
+Scratch mux-consumers-0117/{base,edited,verify,full-sequence,full-final}/xnu, compile.py,
+make-patch.py, seven objects/logs, registry-tests.txt/key-lifecycle-tests.txt/
+historical-tests.txt, ci-source-gate.sh. Initial edit scripts are NOT final
+replay scripts. docs/MUX-CONSUMERS.md is current consumer architecture;0144
+MUX-IOSERVICE.md retained as historical bridge baseline. CI YAML changes ONLY
+final source gates; build command unchanged. Gate accepts0145/rejects0117;
+packer rejects old0117 without generating profiles. NEXT user push -> fresh
+native kernel/buildtree -> same THREE --board-startup profiles, FIRST new
+baseline then no-keys then usbin. Key arm now async, need not precede UFS;
+board publication still precedes root. Battery IRQ still UNVERIFIED. No push,
+cloud run/new boot/device write. No proactive phone terminate test requested.
+
 **0117 board-startup-baseline phone logs PASS; next no-keys USBIN profile.**
 Evidence: logs/sweetlog-0117-board-startup-baseline.bin SHA256
 `0a9bb4c205e83b0e62ac9a1b9a948f5e3dc3a97f971b126ef892d8ee6bd73ece`

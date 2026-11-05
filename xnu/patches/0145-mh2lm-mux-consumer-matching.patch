@@ -1,0 +1,1592 @@
+From: ios-mh2lm
+Subject: mh2lm: discover PMIC mux per consumer and synchronize termination
+
+Replace the C singleton/readiness bridge with matching and terminated
+notifications. Give keys an IOService owner and expose identity-checked
+C++ attachConsumer/detachConsumer. Quiesce consumers before releasing
+callbacks, notifiers, worker threads and releasable observer mappings.
+
+diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -11,16 +11,19 @@
+ #include <kern/thread.h>
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
++#include <mach/vm_param.h>
++#include <vm/memory_types.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/arm64/sweet_dev.h>
+ #include "sweet_spmi.h"
+-#include "sweet_spmi_mux.h"
++#include "sweet_keys.h"
+ #include "sweet_log_level.h"
+ 
+-extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned int);
++extern void ml_io_unmap(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+ extern void sweet_hid_key(int key, int down);
+-void sweet_keys_init(void);
++
+ 
+ #define KEYS_CORE_PA     SWEET_DEV_SPMI_CORE_PA
+ #define KEYS_OBS_PA      SWEET_DEV_SPMI_OBS_PA
+@@ -54,9 +57,25 @@
+ static int keys_sleep_chan;
+ static volatile unsigned keys_irq_events;
+ static volatile unsigned keys_irq_failed;
++static volatile unsigned keys_worker_running;
++
++/* Owned observer mappings: never pair permanent ml_io_map with unmap. */
++static vm_offset_t
++keys_map(vm_offset_t address, vm_size_t size)
++{
++	return ml_io_map_unmappable(address, size, VM_WIMG_IO);
++}
++
++static void
++keys_unmap(vm_offset_t address, vm_size_t size)
++{
++	if (address) {
++		ml_io_unmap(trunc_page(address), round_page(size + (address & PAGE_MASK)));
++	}
++}
+ 
+ /* Called only from the mux's IOWorkLoop, never from the GIC top half. */
+-void
++static void
+ sweet_keys_irq_notify(unsigned key)
+ {
+ 	(void)key;
+@@ -64,19 +83,18 @@
+ 	thread_wakeup(&keys_sleep_chan);
+ }
+ 
+-void
++static void
+ sweet_keys_irq_failed(void)
+ {
+ 	__atomic_store_n(&keys_irq_failed, 1u, __ATOMIC_RELEASE);
+ 	thread_wakeup(&keys_sleep_chan);
+ }
+ 
+-/* Registered by this consumer, not statically bound inside the mux. */
+-static void
+-keys_mux_notify(void *context, unsigned events)
+-{
+-	(void)context;
+-	if (events == SWEET_MUX_FAILED) {
++/* Called by the owning IOService on its workloop, never a mux singleton. */
++void
++sweet_keys_event(unsigned events)
++{
++	if (events & 0x80000000u) {
+ 		sweet_keys_irq_failed();
+ 	} else {
+ 		sweet_keys_irq_notify(events);
+@@ -97,7 +115,7 @@
+ static void
+ keys_irq_diag_pdc(void)
+ {
+-	vm_offset_t pdc = ml_io_map(KEYS_PDC_PA, 0x400);
++	vm_offset_t pdc = keys_map(KEYS_PDC_PA, 0x400);
+ 	if (!pdc) {
+ 		SWEET_LOG_WARN("SWEET KEYS IRQ PDC: map failed pa=%#x\n", KEYS_PDC_PA);
+ 		return;
+@@ -106,12 +124,13 @@
+ 	uint32_t config = keys_rd(pdc, 0x114u);
+ 	SWEET_LOG_DEBUG("SWEET KEYS IRQ PDC: pin=1 intid=%u enable-bank=%#x enabled=%u config=%#x (read-only)\n",
+ 	    KEYS_PMIC_INTID, enable, (enable >> 1) & 1u, config);
++	keys_unmap(pdc, 0x400);
+ }
+ 
+ static void
+ keys_irq_diag_gic(void)
+ {
+-	vm_offset_t gicd = ml_io_map(KEYS_GICD_PA, 0x10000);
++	vm_offset_t gicd = keys_map(KEYS_GICD_PA, 0x10000);
+ 	if (!gicd) {
+ 		SWEET_LOG_WARN("SWEET KEYS IRQ GIC: map failed pa=%#x\n", KEYS_GICD_PA);
+ 		return;
+@@ -135,6 +154,7 @@
+ 	    (cfg >> (2u * (KEYS_PMIC_INTID % 16u))) & 3u,
+ 	    (priorityWord >> (8u * (KEYS_PMIC_INTID & 3u))) & 0xffu,
+ 	    routerHi, routerLo);
++	keys_unmap(gicd, 0x10000);
+ }
+ 
+ /* v5 can map one PPID more than once; prefer the apps-owned entry. */
+@@ -261,7 +281,9 @@
+ 					sweet_hid_key(k, 0);
+ 				}
+ 			}
+-			SWEET_LOG_ERROR("SWEET KEYS IRQ: stopped after mux failure\n");
++			SWEET_LOG_INFO("SWEET KEYS IRQ: worker stopped; pressed HID keys released\n");
++			__atomic_store_n(&keys_worker_running, 0u, __ATOMIC_RELEASE);
++			thread_wakeup(&keys_worker_running);
+ 			(void)thread_terminate(current_thread());
+ 			thread_block(THREAD_CONTINUE_NULL);
+ 		}
+@@ -318,28 +340,29 @@
+ 	}
+ }
+ 
+-void
+-sweet_keys_init(void)
++bool
++sweet_keys_prepare(void)
+ {
+ 	int enabled = 1;
+ 	int irqDiag = 0;
+-	thread_t thread;
+ 	if (keys_started) {
+-		return;
++		return false;
+ 	}
+ 	keys_started = true;
+ 	(void)PE_parse_boot_argn("sweetkeys", &enabled, sizeof(enabled));
+ 	(void)PE_parse_boot_argn("sweetkeysirqdiag", &irqDiag, sizeof(irqDiag));
+ 	if (!enabled) {
+ 		SWEET_LOG_INFO("SWEET KEYS: disabled (sweetkeys=0)\n");
+-		return;
+-	}
+-	keys_core = ml_io_map(KEYS_CORE_PA, 0x2000);
+-	keys_cnfg = ml_io_map(KEYS_CNFG_PA, 0x1000);
+-	keys_obs = ml_io_map(KEYS_OBS_PA, 0x10000);
++		sweet_keys_stop();
++		return false;
++	}
++	keys_core = keys_map(KEYS_CORE_PA, 0x2000);
++	keys_cnfg = keys_map(KEYS_CNFG_PA, 0x1000);
++	keys_obs = keys_map(KEYS_OBS_PA, 0x10000);
+ 	if (!keys_core || !keys_cnfg || !keys_obs) {
+ 		SWEET_LOG_ERROR("SWEET KEYS: MMIO mapping failed\n");
+-		return;
++		sweet_keys_stop();
++		return false;
+ 	}
+ 	keys_version = keys_rd(keys_core, 0);
+ 	uint32_t count = keys_rd(keys_core, 4) & 0x7ffu;
+@@ -347,7 +370,8 @@
+ 	    count == 0 || count > 512) {
+ 		SWEET_LOG_ERROR("SWEET KEYS: unsupported arbiter version=%#x apids=%u\n",
+ 		    keys_version, count);
+-		return;
++		sweet_keys_stop();
++		return false;
+ 	}
+ 	keys_pon_apid = keys_find_apid(0x008, count);
+ 	uint8_t pon = 0;
+@@ -388,7 +412,8 @@
+ 	}
+ 	if (!pok || !gok || !up_ok) {
+ 		SWEET_LOG_ERROR("SWEET KEYS IRQ: initial PMIC state unavailable; keys disabled\n");
+-		return;
++		sweet_keys_stop();
++		return false;
+ 	}
+ #else /* !SWEET_DEV_KEYS_VOLUME */
+ 	/* Volume keys unmapped on this board yet: the PMIC GPIO (PM8150 GPIO6,
+@@ -457,21 +482,41 @@
+ 			keys_irq_diag_gic();
+ 		}
+ 	}
+-	if (sweet_spmi_mux_attach(SWEET_MUX_KEYS, SWEET_KEYS_IRQ_ALL,
+-	    keys_mux_notify, &keys_sleep_chan) != 0 ||
+-	    __atomic_load_n(&keys_irq_failed, __ATOMIC_ACQUIRE)) {
+-		sweet_spmi_mux_detach(SWEET_MUX_KEYS, &keys_sleep_chan);
+-		SWEET_LOG_ERROR("SWEET KEYS IRQ: consumer attach failed; keys disabled\n");
+-		return;
+-	}
+-	SWEET_LOG_INFO("SWEET KEYS IRQ: three routes active; IRQ-only\n");
++	return true;
++}
++
++bool
++sweet_keys_start(void)
++{
++	thread_t thread;
++	__atomic_store_n(&keys_worker_running, 1u, __ATOMIC_RELEASE);
+ 	kern_return_t kr = kernel_thread_start(keys_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+-	} else {
+-		sweet_spmi_mux_detach(SWEET_MUX_KEYS, &keys_sleep_chan);
+-		sweet_keys_irq_failed();
+-		SWEET_LOG_ERROR("SWEET KEYS: kernel_thread_start failed %d\n", kr);
+-	}
++		return true;
++	}
++	__atomic_store_n(&keys_worker_running, 0u, __ATOMIC_RELEASE);
++	sweet_keys_irq_failed();
++	SWEET_LOG_ERROR("SWEET KEYS: kernel_thread_start failed %d\n", kr);
++	return false;
++}
++
++void
++sweet_keys_stop(void)
++{
++	sweet_keys_irq_failed();
++	/* Join before the IOService/connection can disappear. Worker releases
++	 * every pressed HID key before publishing completion. No polling timer. */
++	while (__atomic_load_n(&keys_worker_running, __ATOMIC_ACQUIRE)) {
++		(void)assert_wait(&keys_worker_running, THREAD_UNINT);
++		if (!__atomic_load_n(&keys_worker_running, __ATOMIC_ACQUIRE)) {
++			thread_wakeup(&keys_worker_running);
++		}
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++	keys_unmap(keys_obs, 0x10000);
++	keys_unmap(keys_cnfg, 0x1000);
++	keys_unmap(keys_core, 0x2000);
++	keys_obs = keys_cnfg = keys_core = 0;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_keys.h b/bsd/dev/sweet_keys.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_keys.h
+@@ -0,0 +1,15 @@
++/* Private backend of SweetPmicKeys. The IOService owns its worker lifetime. */
++#ifndef SWEET_KEYS_H
++#define SWEET_KEYS_H
++#include <stdbool.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++bool sweet_keys_prepare(void);
++bool sweet_keys_start(void);
++void sweet_keys_event(unsigned events);
++void sweet_keys_stop(void);
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/bsd/dev/sweet_spmi_mux.h b/bsd/dev/sweet_spmi_mux.h
+--- a/bsd/dev/sweet_spmi_mux.h
++++ b/bsd/dev/sweet_spmi_mux.h
+@@ -1,4 +1,4 @@
+-/* MH2LM mux consumer interface. All calls are thread-context only.
++/* MH2LM mux service interface. All methods are thread-context only.
+  * Callbacks run on the mux workloop and MUST only queue work, never wait
+  * for the consumer workloop. detach synchronizes with all callbacks. */
+ #ifndef SWEET_SPMI_MUX_H
+@@ -7,7 +7,7 @@
+ extern "C" {
+ #endif
+ /* Board publishes the late nub; IOKit matches/starts the IOService.
+- * Synchronous matching returns READY/FAILED before BSD key init proceeds.
++ * Synchronous matching reports board startup success through the nub property.
+  * Consumers own only their route gates, never the parent lifecycle. */
+ int sweet_spmi_mux_start(void);
+ #define SWEET_MUX_KEYS 0u
+@@ -20,19 +20,93 @@
+ #define SWEET_MUX_READY     0x40000000u
+ #define SWEET_MUX_FAILED    0x80000000u
+ typedef void (*SweetMuxNotify)(void *context, unsigned events);
+-/* One-shot readiness subscription, usable before the mux workloop exists.
+- * Returns 0 when registered/queued, -1 on registration failure. If already
+- * ready/failed, queues that result immediately. Callback MUST only queue work.
+- * unwatch synchronizes with the callback; call before releasing context.
+- * The readiness lock is never held while waiting on either workloop. */
+-int sweet_spmi_mux_watch_ready(SweetMuxNotify notify, void *context);
+-void sweet_spmi_mux_unwatch_ready(void *context);
+-/* 0 attached, -2 mux not ready yet, -1 failure (never falls back).
+- * Consumer owns context until detach returns. No second GIC registration. */
+-int sweet_spmi_mux_attach(unsigned group, unsigned events,
+-    SweetMuxNotify notify, void *context);
+-void sweet_spmi_mux_detach(unsigned group, void *context);
++/* Consumers discover and retain the IOService through matching notifications.
++ * Only board publication and the GIC dispatch entry remain C interfaces. */
+ #ifdef __cplusplus
+ }
+-#endif
+-#endif
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include <IOKit/IOService.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOWorkLoop.h>
++#define SWEET_MUX_ROUTE_COUNT 7u
++enum { MUX_KEYS = SWEET_MUX_KEYS, MUX_BATTERY = SWEET_MUX_BATTERY, MUX_GROUPS = 2 };
++struct MuxRoute {
++	unsigned sid, per, bit, token, group;
++	/* Bit0 rising, bit1 falling. Configuration is route data, not a switch. */
++	unsigned edges;
++	const char *name;
++	uint16_t apid;
++	vm_offset_t channel;
++	bool active, touched, writePoisoned;
++	uint8_t oldType, oldHigh, oldLow;
++	uint32_t oldAccess;
++	unsigned hits;
++};
++struct MuxBinding {
++	IOService *consumer;
++	SweetMuxNotify notify;
++	void *context;
++	unsigned events;
++};
++
++struct BindingRequest {
++	unsigned group, events;
++	IOService *consumer;
++	SweetMuxNotify notify;
++	void *context;
++};
++
++class SweetSpmiInterruptMux : public IOService {
++	OSDeclareDefaultStructors(SweetSpmiInterruptMux);
++public:
++	bool init(OSDictionary *dictionary = NULL) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	bool willTerminate(IOService *provider, IOOptionBits options) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
++	IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE { return workLoop; }
++	bool irq(unsigned int intid);
++	/* Caller retains this service and owns consumer/context through detach.
++	 * detach synchronizes all callbacks. Both methods require thread context. */
++	virtual IOReturn attachConsumer(IOService *consumer, unsigned group, unsigned events, SweetMuxNotify notify, void *context);
++	virtual void detachConsumer(IOService *consumer, unsigned group, void *context);
++private:
++	MuxBinding bindings[MUX_GROUPS] = {};
++	MuxRoute routes[SWEET_MUX_ROUTE_COUNT] = {};
++	vm_offset_t gicd = 0, pdc = 0, core = 0, cfg = 0, obs = 0;
++	IOWorkLoop *workLoop = NULL;
++	IOInterruptEventSource *eventSource = NULL;
++	volatile unsigned state = 0; /* 0 off, 1 ready/idle, 2 pending, 3 failed, 4 probe, 5 maintenance */
++	volatile unsigned probeHits = 0;
++	unsigned irqCount = 0, workCount = 0, routeCount = 0, faultCount = 0;
++	uint64_t stormStartNs = 0;
++	unsigned stormBase = 0, apidCount = 0;
++	bool allowEmptyDrain = false;
++	bool eventAdded = false, stopping = false, quiesced = false;
++	bool claimed = false, superStarted = false, hardwareTouched = false;
++	int initializeHardware(void);
++	void shutdown(void);
++	void disconnectIRQ(void);
++	void releaseResources(void);
++	bool waitGic(void);
++	uint16_t findOwnedApid(unsigned sid, unsigned per, unsigned count);
++	bool readPeripheral(const MuxRoute &route, unsigned reg, uint8_t *out);
++	bool writePeripheral(MuxRoute &route, unsigned reg, uint16_t data, unsigned bytes);
++	bool ackRoute(MuxRoute &route);
++	uint32_t allowedMaskForApid(uint16_t apid);
++	void disableHardware(void);
++	bool configureGic(void);
++	bool probeGicDelivery(void);
++	bool configureRoute(MuxRoute &route);
++	void drainInterrupt(void);
++	bool beginRouteUpdate(void);
++	bool endRouteUpdate(void);
++	bool removeGroup(unsigned group);
++	IOReturn updateBinding(BindingRequest *request, bool detach);
++	static void workAction(OSObject *owner, IOInterruptEventSource *source, int count);
++	static IOReturn bindingAction(OSObject *owner, void *, void *, void *, void *);
++	static IOReturn stopAction(OSObject *owner, void *, void *, void *, void *);
++};
++#endif /* ARM64_BOARD_CONFIG_MH2LM */
++#endif /* __cplusplus */
++#endif /* SWEET_SPMI_MUX_H */
+diff --git a/bsd/dev/sweet_spmi_mux_client.h b/bsd/dev/sweet_spmi_mux_client.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_spmi_mux_client.h
+@@ -0,0 +1,40 @@
++/* Per-consumer IOKit subscription, not a global provider rendezvous.
++ * Match/terminated callbacks only retain/mark/queue. All route and owner work
++ * runs on the consumer's loop. Call stop OUTSIDE that loop before owner free. */
++#ifndef SWEET_SPMI_MUX_CLIENT_H
++#define SWEET_SPMI_MUX_CLIENT_H
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include "sweet_spmi_mux.h"
++#include <IOKit/IOLocks.h>
++#include <IOKit/IONotifier.h>
++class SweetSpmiMuxClient : public OSObject {
++	OSDeclareDefaultStructors(SweetSpmiMuxClient);
++public:
++	static SweetSpmiMuxClient *withOwner(IOService *owner, IOWorkLoop *loop,
++	    unsigned group, unsigned events, SweetMuxNotify notify, void *context);
++	void detach(void); /* consumer-loop action: terminal, no automatic rebind */
++	void stop(void);   /* remove notifiers synchronously, then detach/drain */
++	void free(void) APPLE_KEXT_OVERRIDE;
++private:
++	IOService *owner = NULL; /* owner outlives stop; no reference cycle */
++	IOWorkLoop *loop = NULL;
++	IOLock *lock = NULL;
++	IOInterruptEventSource *event = NULL;
++	IONotifier *matched = NULL, *terminated = NULL;
++	SweetSpmiInterruptMux *provider = NULL; /* retained until gated detach */
++	SweetMuxNotify notify = NULL;
++	void *context = NULL;
++	unsigned group = 0, events = 0;
++	volatile unsigned pending = 0;
++	bool stopping = false, terminal = false, providerGone = false;
++	bool attached = false, eventAdded = false;
++	static bool serviceMatched(void *, void *, IOService *, IONotifier *);
++	static bool serviceTerminated(void *, void *, IOService *, IONotifier *);
++	static void routeNotify(void *, unsigned);
++	static void eventAction(OSObject *, IOInterruptEventSource *, int);
++	static IOReturn detachAction(OSObject *, void *, void *, void *, void *);
++	void closeBinding(void);
++	void process(void);
++};
++#endif
++#endif
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -26,6 +26,8 @@
+ #include <kern/clock.h>
+ #include "../../../bsd/dev/sweet_spmi.h"
+ #include "../../../bsd/dev/sweet_spmi_mux.h"
++#include "../../../bsd/dev/sweet_spmi_mux_client.h"
++class SweetSpmiMuxClient;
+ #define SWEET_LOG_SINK IOLog
+ #include "../../../bsd/dev/sweet_log_level.h"
+ #include <IOKit/pwr_mgt/IOPMPowerSource.h>
+@@ -91,13 +93,15 @@
+ public:
+ 	bool init(OSDictionary *dictionary = NULL) APPLE_KEXT_OVERRIDE;
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	bool willTerminate(IOService *provider, IOOptionBits options) APPLE_KEXT_OVERRIDE;
+ 	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void free(void) APPLE_KEXT_OVERRIDE;
+ private:
+ 	IOWorkLoop *fLoop;
+ 	IOTimerEventSource *fTimer;
+ 	IOInterruptEventSource *fIrqEvent;
+-	bool fIrqEventAdded, fIrqAttached, fIrqFailed, fPreflightOk, fMuxWatching;
++	bool fIrqEventAdded, fIrqAttached, fIrqFailed, fPreflightOk;
++	SweetSpmiMuxClient *fMuxClient;
+ 	bool fSettlePending;
+ 	unsigned fIrqMode, fIrqSamples, fSettleBudget;
+ 	volatile unsigned fIrqPending, fIrqNotifications;
+@@ -238,7 +242,7 @@
+ 	fTimerAdded = fRunning = fReal = false;
+ 	fIrqEvent = NULL;
+ 	fIrqEventAdded = fIrqAttached = fIrqFailed = fPreflightOk = false;
+-	fMuxWatching = false;
++	fMuxClient = NULL;
+ 	fSettlePending = false;
+ 	fIrqMode = fIrqSamples = fSettleBudget = 0;
+ 	fIrqPending = fIrqNotifications = 0;
+@@ -806,14 +810,10 @@
+ 	putBool("SweetBatteryHardwareSampleValid", false);
+ 	updateStatus();
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+-	if (fMuxWatching) {
+-		sweet_spmi_mux_unwatch_ready(this);
+-		fMuxWatching = false;
+-	}
+-	if (fIrqAttached) {
+-		sweet_spmi_mux_detach(SWEET_MUX_BATTERY, this);
+-		fIrqAttached = false;
+-	}
++	if (fMuxClient) {
++		fMuxClient->detach();
++	}
++	fIrqAttached = false;
+ #endif
+ }
+ 
+@@ -828,7 +828,7 @@
+ 		__atomic_add_fetch(&self->fIrqNotifications, 1u, __ATOMIC_RELAXED);
+ 	}
+ 	__atomic_fetch_or(&self->fIrqPending, events, __ATOMIC_RELEASE);
+-	/* Called under mux gate or readiness lock. Only queue; never wait. */
++	/* Per-consumer connection delivers on our loop. Only queue this action. */
+ 	self->fIrqEvent->interruptOccurred(NULL, NULL, 0);
+ }
+ 
+@@ -845,7 +845,7 @@
+ 		return;
+ 	}
+ 	if (pending & SWEET_MUX_READY) {
+-		SWEET_LOG_INFO("SWEET BATT IRQ: mux readiness event received; attaching routes\n");
++		SWEET_LOG_INFO("SWEET BATT IRQ: registry provider matched; routes already attached\n");
+ 		self->tryAttachIrq();
+ 	}
+ 	pending &= 0x0fu;
+@@ -877,11 +877,6 @@
+ 	}
+ 	if (fIrqMode >= 4) {
+ 		events |= SWEET_BATT_IRQ_MSOC | SWEET_BATT_IRQ_READY;
+-	}
+-	int result = sweet_spmi_mux_attach(SWEET_MUX_BATTERY, events, irqNotify, this);
+-	if (result != 0) {
+-		failIrq("route attach failed after mux readiness event");
+-		return;
+ 	}
+ 	fIrqAttached = true;
+ 	putBool("SweetBatteryIRQWaitingForMux", false);
+@@ -908,11 +903,18 @@
+ 	self->putBool("SweetBatteryIRQWaitingForMux", true);
+ 	self->putBool("SweetBatteryIRQHealthy", false);
+ 	self->updateStatus();
+-	self->fMuxWatching = true;
+-	SWEET_LOG_INFO("SWEET BATT IRQ: waiting for mux readiness event; no timer/status polling\n");
+-	if (sweet_spmi_mux_watch_ready(irqNotify, self) != 0) {
+-		self->fMuxWatching = false;
+-		self->failIrq("mux readiness subscription failed");
++	unsigned events = SWEET_BATT_IRQ_USB;
++	if (self->fIrqMode >= 3) {
++		events |= SWEET_BATT_IRQ_CHG;
++	}
++	if (self->fIrqMode >= 4) {
++		events |= SWEET_BATT_IRQ_MSOC | SWEET_BATT_IRQ_READY;
++	}
++	SWEET_LOG_INFO("SWEET BATT IRQ: waiting for mux registry match; no timer/status polling\n");
++	self->fMuxClient = SweetSpmiMuxClient::withOwner(self, self->fLoop,
++	    SWEET_MUX_BATTERY, events, irqNotify, self);
++	if (!self->fMuxClient) {
++		self->failIrq("mux registry subscriptions unavailable");
+ 	}
+ #endif
+ 	return kIOReturnSuccess;
+@@ -1029,12 +1031,31 @@
+ 	return true;
+ }
+ 
++bool
++SweetBattery::willTerminate(IOService *provider, IOOptionBits options)
++{
++	if (fLoop && fTimerAdded) {
++		(void)fLoop->runAction(&SweetBattery::stopPolling, this);
++	}
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	if (fMuxClient) {
++		fMuxClient->stop();
++	}
++#endif
++	return IOPMPowerSource::willTerminate(provider, options);
++}
++
+ void
+ SweetBattery::stop(IOService *provider)
+ {
+ 	if (fLoop && fTimerAdded) {
+ 		/* Serialize against a running timer callback, including rearming. */
+ 		(void)fLoop->runAction(&SweetBattery::stopPolling, this);
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++		if (fMuxClient) {
++			fMuxClient->stop();
++		}
++#endif
+ 		fLoop->removeEventSource(fTimer);
+ 		fTimerAdded = false;
+ 	}
+@@ -1054,14 +1075,10 @@
+ 	}
+ 	self->fRunning = false;
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+-	if (self->fMuxWatching) {
+-		sweet_spmi_mux_unwatch_ready(self);
+-		self->fMuxWatching = false;
+-	}
+-	if (self->fIrqAttached) {
+-		sweet_spmi_mux_detach(SWEET_MUX_BATTERY, self);
+-		self->fIrqAttached = false;
+-	}
++	if (self->fMuxClient) {
++		self->fMuxClient->detach();
++	}
++	self->fIrqAttached = false;
+ #endif
+ 	if (self->fIrqEvent) {
+ 		self->fIrqEvent->disable();
+@@ -1079,6 +1096,12 @@
+ 		(void)fLoop->runAction(&SweetBattery::stopPolling, this);
+ 		fLoop->removeEventSource(fTimer);
+ 	}
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	if (fMuxClient) {
++		fMuxClient->stop();
++		OSSafeReleaseNULL(fMuxClient);
++	}
++#endif
+ 	if (fLoop && fIrqEventAdded) {
+ 		fLoop->removeEventSource(fIrqEvent);
+ 	}
+diff --git a/iokit/Kernel/arm/SweetPmicKeys.cpp b/iokit/Kernel/arm/SweetPmicKeys.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetPmicKeys.cpp
+@@ -0,0 +1,157 @@
++/* Late board nub -> keys IOService -> registry-discovered PMIC mux.
++ * The C backend retains only observer/HID/worker state, never a mux pointer. */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include <IOKit/IOLib.h>
++#include <IOKit/IOPlatformExpert.h>
++#include <pexpert/pexpert.h>
++#include "../../../bsd/dev/sweet_spmi_mux_client.h"
++#include "../../../bsd/dev/sweet_keys.h"
++#define SWEET_LOG_SINK IOLog
++#include "../../../bsd/dev/sweet_log_level.h"
++
++class SweetPmicKeysDevice : public IOService {
++	OSDeclareDefaultStructors(SweetPmicKeysDevice);
++};
++OSDefineMetaClassAndStructors(SweetPmicKeysDevice, IOService);
++class SweetPmicKeys : public IOService {
++	OSDeclareDefaultStructors(SweetPmicKeys);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	bool willTerminate(IOService *provider, IOOptionBits options) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
++	IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE { return loop; }
++private:
++	IOWorkLoop *loop = NULL;
++	SweetSpmiMuxClient *connection = NULL;
++	bool backendPrepared = false;
++	static void muxEvent(void *, unsigned);
++	static IOReturn subscribeAction(OSObject *, void *, void *, void *, void *);
++	void shutdown(void);
++};
++OSDefineMetaClassAndStructors(SweetPmicKeys, IOService);
++
++void
++SweetPmicKeys::muxEvent(void *context, unsigned events)
++{
++	SweetPmicKeys *self = (SweetPmicKeys *)context;
++	if (events & SWEET_MUX_FAILED) {
++		self->setProperty("SweetKeysIRQHealthy", false);
++		sweet_keys_stop(); /* releases pressed HID keys and joins the worker */
++		return;
++	}
++	if (events & SWEET_MUX_READY) {
++		if (!sweet_keys_start()) {
++			self->connection->detach();
++			sweet_keys_stop();
++			self->setProperty("SweetKeysIRQHealthy", false);
++			return;
++		}
++		self->setProperty("SweetKeysIRQHealthy", true);
++		SWEET_LOG_INFO("SWEET KEYS IRQ: three routes active; IRQ-only\n");
++	}
++	if (events & SWEET_KEYS_IRQ_ALL) {
++		sweet_keys_event(events);
++	}
++}
++
++bool
++SweetPmicKeys::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	backendPrepared = sweet_keys_prepare();
++	if (backendPrepared) {
++		loop = IOWorkLoop::workLoop();
++		/* Hold the loop gate across installation and pointer publication: an
++		 * immediate existing-service replay must not observe connection=NULL. */
++		if (loop) {
++			(void)loop->runAction(subscribeAction, this);
++		}
++	}
++	if (!connection) {
++		shutdown();
++		IOService::stop(provider);
++		SWEET_LOG_ERROR("SWEET KEYS IRQ: consumer matching setup failed; keys disabled\n");
++		return false;
++	}
++	provider->setProperty("SweetKeysClientStarted", true);
++	registerService();
++	return true;
++}
++
++IOReturn
++SweetPmicKeys::subscribeAction(OSObject *owner, void *, void *, void *, void *)
++{
++	SweetPmicKeys *self = OSDynamicCast(SweetPmicKeys, owner);
++	self->connection = SweetSpmiMuxClient::withOwner(self, self->loop,
++	    SWEET_MUX_KEYS, SWEET_KEYS_IRQ_ALL, muxEvent, self);
++	return self->connection ? kIOReturnSuccess : kIOReturnNoMemory;
++}
++
++void
++SweetPmicKeys::shutdown(void)
++{
++	if (connection) {
++		connection->stop(); /* synchronize matching, detach, and drain loop */
++	}
++	if (backendPrepared) {
++		sweet_keys_stop();
++		backendPrepared = false;
++	}
++}
++
++bool
++SweetPmicKeys::willTerminate(IOService *provider, IOOptionBits options)
++{
++	shutdown();
++	return IOService::willTerminate(provider, options);
++}
++
++void
++SweetPmicKeys::stop(IOService *provider)
++{
++	shutdown();
++	IOService::stop(provider);
++}
++
++void
++SweetPmicKeys::free(void)
++{
++	shutdown();
++	OSSafeReleaseNULL(connection);
++	OSSafeReleaseNULL(loop);
++	IOService::free();
++}
++
++extern "C" void
++sweet_keys_init(void)
++{
++	int enabled = 1;
++	(void)PE_parse_boot_argn("sweetkeys", &enabled, sizeof(enabled));
++	if (!enabled) {
++		SWEET_LOG_INFO("SWEET KEYS: disabled (sweetkeys=0)\n");
++		return;
++	}
++	IOPlatformExpert *platform = IOService::getPlatform();
++	SweetPmicKeysDevice *nub = new SweetPmicKeysDevice;
++	if (!platform || !nub) {
++		OSSafeReleaseNULL(nub);
++		return;
++	}
++	if (!nub->init() || !nub->attach(platform)) {
++		nub->release();
++		return;
++	}
++	nub->setName("mh2lm-pmic-keys");
++	nub->registerService(kIOServiceSynchronous);
++	if (nub->getProperty("SweetKeysClientStarted") != kOSBooleanTrue) {
++		SWEET_LOG_ERROR("SWEET KEYS IRQ: consumer IOService failed to match/start\n");
++		(void)nub->terminate(kIOServiceSynchronous);
++	}
++	nub->release();
++}
++#else
++extern "C" void sweet_keys_init(void) { }
++#endif
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -39,27 +39,6 @@
+ #define MUX_IRQ_OWNER_BIT 0x01000000u
+ #define MUX_IRQ_LIMIT     256u
+ 
+-enum { MUX_KEYS = SWEET_MUX_KEYS, MUX_BATTERY = SWEET_MUX_BATTERY, MUX_GROUPS = 2 };
+-struct MuxRoute {
+-	unsigned sid, per, bit, token, group;
+-	/* Bit0 rising, bit1 falling. Configuration is route data, not a switch. */
+-	unsigned edges;
+-	const char *name;
+-	uint16_t apid;
+-	vm_offset_t channel;
+-	bool active, touched, writePoisoned;
+-	uint8_t oldType, oldHigh, oldLow;
+-	uint32_t oldAccess;
+-	unsigned hits;
+-};
+-struct MuxBinding {
+-	SweetMuxNotify notify;
+-	void *context;
+-	unsigned events;
+-};
+-
+-/* Tokens are event bitmasks; callbacks and contexts belong to consumers.
+- * No route is armed until its consumer attaches on the mux workloop. */
+ static const MuxRoute routeTemplates[] = {
+ 	{0, 0x08, 0, 1u << 0, MUX_KEYS, 3, "power"},
+ 	{0, 0x08, 1, 1u << 2, MUX_KEYS, 3, "volume-down"},
+@@ -69,12 +48,8 @@
+ 	{2, 0x40, 3, SWEET_BATT_IRQ_MSOC, MUX_BATTERY, 1, "battery-msoc"},
+ 	{2, 0x40, 1, SWEET_BATT_IRQ_READY, MUX_BATTERY, 3, "battery-ready"},
+ };
+-
+-struct BindingRequest {
+-	unsigned group, events;
+-	SweetMuxNotify notify;
+-	void *context;
+-};
++static_assert(sizeof(routeTemplates) / sizeof(routeTemplates[0]) == SWEET_MUX_ROUTE_COUNT,
++    "route layout must match the instance storage");
+ 
+ /* The board publishes a late nub. IOKit matches and owns this service. */
+ class SweetSpmiMuxDevice : public IOService {
+@@ -82,152 +57,14 @@
+ };
+ OSDefineMetaClassAndStructors(SweetSpmiMuxDevice, IOService);
+ 
+-class SweetSpmiInterruptMux : public IOService {
+-	OSDeclareDefaultStructors(SweetSpmiInterruptMux);
+-public:
+-	bool init(OSDictionary *dictionary = NULL) APPLE_KEXT_OVERRIDE;
+-	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+-	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
+-	void free(void) APPLE_KEXT_OVERRIDE;
+-	IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE { return workLoop; }
+-	bool irq(unsigned int intid);
+-	int attachConsumer(unsigned group, unsigned events, SweetMuxNotify notify, void *context);
+-	void detachConsumer(unsigned group, void *context);
+-private:
+-	MuxBinding bindings[MUX_GROUPS] = {};
+-	MuxRoute routes[sizeof(routeTemplates) / sizeof(routeTemplates[0])] = {};
+-	vm_offset_t gicd = 0, pdc = 0, core = 0, cfg = 0, obs = 0;
+-	IOWorkLoop *workLoop = NULL;
+-	IOInterruptEventSource *eventSource = NULL;
+-	volatile unsigned state = 0; /* 0 off, 1 ready/idle, 2 pending, 3 failed, 4 probe, 5 maintenance */
+-	volatile unsigned probeHits = 0;
+-	unsigned irqCount = 0, workCount = 0, routeCount = 0, faultCount = 0;
+-	uint64_t stormStartNs = 0;
+-	unsigned stormBase = 0, apidCount = 0;
+-	bool allowEmptyDrain = false;
+-	bool eventAdded = false, stopping = false, quiesced = false;
+-	bool claimed = false, superStarted = false, hardwareTouched = false;
+-	int initializeHardware(void);
+-	void shutdown(void);
+-	void disconnectIRQ(void);
+-	void releaseResources(void);
+-	bool waitGic(void);
+-	uint16_t findOwnedApid(unsigned sid, unsigned per, unsigned count);
+-	bool readPeripheral(const MuxRoute &route, unsigned reg, uint8_t *out);
+-	bool writePeripheral(MuxRoute &route, unsigned reg, uint16_t data, unsigned bytes);
+-	bool ackRoute(MuxRoute &route);
+-	uint32_t allowedMaskForApid(uint16_t apid);
+-	void disableHardware(void);
+-	bool configureGic(void);
+-	bool probeGicDelivery(void);
+-	bool configureRoute(MuxRoute &route);
+-	void drainInterrupt(void);
+-	bool beginRouteUpdate(void);
+-	bool endRouteUpdate(void);
+-	bool removeGroup(unsigned group);
+-	IOReturn updateBinding(BindingRequest *request, bool detach);
+-	static void workAction(OSObject *owner, IOInterruptEventSource *source, int count);
+-	static IOReturn bindingAction(OSObject *owner, void *, void *, void *, void *);
+-	static IOReturn stopAction(OSObject *owner, void *, void *, void *, void *);
+-};
+ OSDefineMetaClassAndStructors(SweetSpmiInterruptMux, IOService);
+ 
+-/* Only the pre-service rendezvous and the IRQ dispatch pointer are global.
+- * Registry/provider ownership keeps the service alive until stop. C API users
+- * retain under readyLock; stop clears bindings under the gate before unpublish.
+- * The spin lock synchronizes the IRQ pointer with stop, never SPMI or workloops. */
+-static SweetSpmiInterruptMux *muxService;
++/* The only service pointer global is the physical GIC dispatch slot. It is
++ * not a consumer discovery API. Registry notifications own consumer references.
++ * The spin lock synchronizes the top half with stop; never SPMI/workloop waits. */
+ static SweetSpmiInterruptMux *irqService;
+ static IOSimpleLock *irqLock;
+-static volatile int published; /* 0 not started, -1 failed/stopped, 1 ready */
+-static IOLock *readyLock;
+-static SweetMuxNotify readyNotify;
+-static void *readyContext;
+-
+-/* Battery may start in IOKit before BSD starts shared board infrastructure.
+- * Keep the one-shot subscription independent of the mux workloop. This lock protects callback
+- * lifetime only; no MMIO, workloop waits or consumer work runs under it. */
+-static IOLock *
+-readinessLock(void)
+-{
+-	IOLock *lock = __atomic_load_n(&readyLock, __ATOMIC_ACQUIRE);
+-	if (!lock) {
+-		IOLock *candidate = IOLockAlloc();
+-		if (!candidate) {
+-			return NULL;
+-		}
+-		if (__atomic_compare_exchange_n(&readyLock, &lock, candidate, false,
+-		    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+-			lock = candidate;
+-		} else {
+-			IOLockFree(candidate);
+-		}
+-	}
+-	return lock;
+-}
+-
+-static void
+-publishReadiness(int result)
+-{
+-	IOLock *lock = readinessLock();
+-	if (!lock) {
+-		__atomic_store_n(&published, -1, __ATOMIC_RELEASE);
+-		return;
+-	}
+-	IOLockLock(lock);
+-	__atomic_store_n(&published, result, __ATOMIC_RELEASE);
+-	if (readyNotify) {
+-		readyNotify(readyContext, result == 1 ? SWEET_MUX_READY : SWEET_MUX_FAILED);
+-		readyNotify = NULL;
+-		readyContext = NULL;
+-	}
+-	IOLockUnlock(lock);
+-}
+-
+-extern "C" int
+-sweet_spmi_mux_watch_ready(SweetMuxNotify notify, void *context)
+-{
+-	IOLock *lock = readinessLock();
+-	if (!lock || !notify || !context) {
+-		return -1;
+-	}
+-	IOLockLock(lock);
+-	if (readyNotify) {
+-		IOLockUnlock(lock);
+-		return -1; /* one battery instance, never replace a live context */
+-	}
+-	int result = __atomic_load_n(&published, __ATOMIC_ACQUIRE);
+-	if (result == 0) {
+-		readyNotify = notify;
+-		readyContext = context;
+-	} else {
+-		notify(context, result == 1 ? SWEET_MUX_READY : SWEET_MUX_FAILED);
+-	}
+-	IOLockUnlock(lock);
+-	return 0;
+-}
+-
+-extern "C" void
+-sweet_spmi_mux_unwatch_ready(void *context)
+-{
+-	IOLock *lock = __atomic_load_n(&readyLock, __ATOMIC_ACQUIRE);
+-	if (!lock) {
+-		return;
+-	}
+-	IOLockLock(lock);
+-	if (readyContext == context) {
+-		readyNotify = NULL;
+-		readyContext = NULL;
+-	}
+-	IOLockUnlock(lock);
+-}
+-
+-static int
+-startFailed(void)
+-{
+-	publishReadiness(-1);
+-	return -1;
+-}
++static bool bootClaimed; /* protected by irqLock; terminal until reboot */
+ 
+ /* ml_io_map uses a permanent io_submap allocation in this XNU version.
+  * Service-owned mappings must instead come from kernel_map's unmappable path.
+@@ -421,7 +258,6 @@
+ {
+ 	__atomic_store_n(&state, 3u, __ATOMIC_RELEASE);
+ 	setProperty("SweetMuxLifecycle", "failed");
+-	publishReadiness(-1);
+ 	if (gicd) {
+ 		write32(gicd, 0x180u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
+ 	}
+@@ -714,13 +550,13 @@
+ {
+ 	workLoop = IOWorkLoop::workLoop();
+ 	if (!workLoop) {
+-		return startFailed();
++		return -1;
+ 	}
+ 	eventSource = IOInterruptEventSource::interruptEventSource(this,
+ 	    workAction, NULL, 0);
+ 	if (!eventSource || workLoop->addEventSource(eventSource) != kIOReturnSuccess) {
+ 		SWEET_LOG_ERROR("SWEET MUX: software event source unavailable\n");
+-		return startFailed();
++		return -1;
+ 	}
+ 	eventAdded = true;
+ 	gicd = mapMMIO(MUX_GICD_PA, 0x10000);
+@@ -730,24 +566,24 @@
+ 	obs = mapMMIO(SWEET_DEV_SPMI_OBS_PA, 0x10000);
+ 	if (!gicd || !pdc || !core || !cfg || !obs) {
+ 		SWEET_LOG_ERROR("SWEET MUX: upstream or PMIC map failed; IRQ unavailable\n");
+-		return startFailed();
++		return -1;
+ 	}
+ 	uint32_t version = read32(core, 0);
+ 	unsigned count = read32(core, 4) & 0x7ffu;
+ 	if (version < 0x50000000u || version >= 0x60000000u ||
+ 	    count == 0 || count > 512) {
+ 		SWEET_LOG_ERROR("SWEET MUX: unsupported arb=%#x count=%u\n", version, count);
+-		return startFailed();
++		return -1;
+ 	}
+ 	apidCount = count;
+ 	if ((read32(pdc, 0x114u) & 7u) != 4u) {
+ 		SWEET_LOG_ERROR("SWEET MUX: PDC polarity invalid; IRQ unavailable\n");
+-		return startFailed();
++		return -1;
+ 	}
+ 	hardwareTouched = true;
+ 	if (!configureGic() || !probeGicDelivery()) {
+ 		SWEET_LOG_ERROR("SWEET MUX: PDC polarity, GIC config or delivery probe failed; IRQ unavailable\n");
+-		return startFailed();
++		return -1;
+ 	}
+ 	/* Idle but ready: GIC remains masked and PDC stays closed until attach.
+ 	 * Thus disabled/failed keys never leave unconsumed key routes enabled. */
+@@ -844,7 +680,7 @@
+ 	unsigned group = request->group;
+ 	MuxBinding &binding = bindings[group];
+ 	if (detach) {
+-		if (binding.context != request->context || !binding.notify) {
++		if (binding.consumer != request->consumer || binding.context != request->context || !binding.notify) {
+ 			return kIOReturnSuccess;
+ 		}
+ 		bool running = beginRouteUpdate();
+@@ -852,6 +688,7 @@
+ 			SWEET_LOG_ERROR("SWEET MUX: detach cleanup failed; all PMIC consumers stopped\n");
+ 			disableHardware();
+ 		}
++		binding.consumer = NULL;
+ 		binding.notify = NULL;
+ 		binding.context = NULL;
+ 		binding.events = 0;
+@@ -861,7 +698,7 @@
+ 		return kIOReturnSuccess;
+ 	}
+ 	unsigned current = __atomic_load_n(&state, __ATOMIC_ACQUIRE);
+-	if (stopping || binding.notify || (current != 1u && current != 2u)) {
++	if (stopping || isInactive() || request->consumer->isInactive() || binding.notify || (current != 1u && current != 2u)) {
+ 		return kIOReturnNotReady;
+ 	}
+ 	/* Resolve only unique EE0 IRQ-owned channels before reading channel MMIO. */
+@@ -891,6 +728,7 @@
+ 	if (found != request->events || !beginRouteUpdate()) {
+ 		return kIOReturnNotReady;
+ 	}
++	binding.consumer = request->consumer;
+ 	binding.notify = request->notify;
+ 	binding.context = request->context;
+ 	binding.events = request->events;
+@@ -906,6 +744,7 @@
+ 				SWEET_LOG_ERROR("SWEET MUX: attach rollback failed; all PMIC consumers stopped\n");
+ 				disableHardware();
+ 			}
++			binding.consumer = NULL;
+ 			binding.notify = NULL;
+ 			binding.context = NULL;
+ 			binding.events = 0;
+@@ -920,6 +759,7 @@
+ 		 * not own a binding: erase it before returning, even after fatal IRQ
+ 		 * gating errors, so stop/free cannot leave a dangling context. */
+ 		(void)removeGroup(group);
++		binding.consumer = NULL;
+ 		binding.notify = NULL;
+ 		binding.context = NULL;
+ 		binding.events = 0;
+@@ -928,30 +768,30 @@
+ 	return kIOReturnSuccess;
+ }
+ 
+-int
+-SweetSpmiInterruptMux::attachConsumer(unsigned group, unsigned events, SweetMuxNotify notify,
++IOReturn
++SweetSpmiInterruptMux::attachConsumer(IOService *consumer, unsigned group, unsigned events, SweetMuxNotify notify,
+     void *context)
+ {
+-	if (group >= MUX_GROUPS || !events || !notify || !context ||
++	if (!consumer || group >= MUX_GROUPS || !events || !notify || !context ||
+ 	    (group == MUX_KEYS ? events != SWEET_KEYS_IRQ_ALL : (events & ~0x0fu) != 0)) {
+-		return -1;
++		return kIOReturnBadArgument;
+ 	}
+ 	if (!workLoop) {
+-		return -1;
+-	}
+-	BindingRequest request = {group, events, notify, context};
+-	return workLoop->runAction(bindingAction, this, &request) == kIOReturnSuccess ? 0 : -1;
++		return kIOReturnNotReady;
++	}
++	BindingRequest request = {group, events, consumer, notify, context};
++	return workLoop->runAction(bindingAction, this, &request);
+ }
+ 
+ void
+-SweetSpmiInterruptMux::detachConsumer(unsigned group, void *context)
+-{
+-	/* A runtime fault publishes FAILED, but an attached context still must
++SweetSpmiInterruptMux::detachConsumer(IOService *consumer, unsigned group, void *context)
++{
++	/* A runtime fault reports FAILED, but an attached context still must
+ 	 * be removed under the existing gate before its owner is released. */
+ 	if (group >= MUX_GROUPS || !workLoop) {
+ 		return;
+ 	}
+-	BindingRequest request = {group, 0, NULL, context};
++	BindingRequest request = {group, 0, consumer, NULL, context};
+ 	(void)workLoop->runAction(bindingAction, this, &request, context);
+ }
+ 
+@@ -991,29 +831,25 @@
+ 		return false;
+ 	}
+ 	superStarted = true;
+-	IOLock *lock = readinessLock();
+ 	IOSimpleLock *dispatch = irqDispatchLock();
+-	if (!lock || !dispatch) {
+-		publishReadiness(-1);
++	if (!dispatch) {
+ 		IOService::stop(provider);
+ 		superStarted = false;
+ 		return false;
+ 	}
+-	IOLockLock(lock);
+-	if (muxService || __atomic_load_n(&published, __ATOMIC_ACQUIRE) != 0) {
+-		IOLockUnlock(lock);
+-		IOService::stop(provider);
+-		superStarted = false;
+-		return false; /* never replace an active/failed boot instance */
+-	}
+-	muxService = this;
+-	claimed = true;
+-	IOLockUnlock(lock);
+ 	setProperty("SweetMuxLifecycle", "starting");
+ 	setProperty("SweetMuxIntID", MUX_INTID, 32);
+ 	setProperty("SweetMuxHardwareProvider", false);
+ 	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(dispatch);
+-	irqService = this; /* probe delivery needs this pointer before READY */
++	if (bootClaimed) {
++		IOSimpleLockUnlockEnableInterrupt(dispatch, saved);
++		IOService::stop(provider);
++		superStarted = false;
++		return false;
++	}
++	irqService = this; /* private to physical interrupt dispatch */
++	claimed = true;
++	bootClaimed = true;
+ 	IOSimpleLockUnlockEnableInterrupt(dispatch, saved);
+ 	if (initializeHardware() != 0) {
+ 		shutdown();
+@@ -1022,9 +858,9 @@
+ 		return false;
+ 	}
+ 	setProperty("SweetMuxLifecycle", "ready");
++	provider->setProperty("SweetMuxReady", true);
+ 	registerService();
+ 	SWEET_LOG_INFO("SWEET MUX: IOService started; owns workloop, routes and MMIO\n");
+-	publishReadiness(1);
+ 	return true;
+ }
+ 
+@@ -1047,13 +883,12 @@
+ 	self->disconnectIRQ();
+ 	if (self->hardwareTouched) {
+ 		self->disableHardware();
+-	} else {
+-		publishReadiness(-1);
+ 	}
+ 	for (unsigned i = 0; i < MUX_GROUPS; ++i) {
+ 		if (!self->removeGroup(i)) {
+ 			SWEET_LOG_ERROR("SWEET MUX: IOService stop route cleanup failed group=%u; IRQ stays off\n", i);
+ 		}
++		self->bindings[i].consumer = NULL;
+ 		self->bindings[i].notify = NULL;
+ 		self->bindings[i].context = NULL;
+ 		self->bindings[i].events = 0;
+@@ -1098,18 +933,19 @@
+ 			(void)workLoop->runAction(stopAction, this);
+ 		} else {
+ 			disconnectIRQ();
+-			publishReadiness(-1);
+-		}
+-		/* Keep the C API lookup valid UNTIL all callbacks are cleared.
+-		 * detach racing stop can then synchronize on the same workloop. */
+-		IOLock *lock = readinessLock();
+-		IOLockLock(lock);
+-		if (muxService == this) {
+-			muxService = NULL;
+-		}
+-		IOLockUnlock(lock);
++		}
++		if (getProvider()) {
++			getProvider()->setProperty("SweetMuxReady", false);
++		}
+ 		claimed = false;
+ 	}
++}
++
++bool
++SweetSpmiInterruptMux::willTerminate(IOService *provider, IOOptionBits options)
++{
++	shutdown();
++	return IOService::willTerminate(provider, options);
+ }
+ 
+ void
+@@ -1155,54 +991,6 @@
+ 	IOService::free();
+ }
+ 
+-/* C consumers do not own or start the parent service. This lookup takes a
+- * transient reference under the rendezvous lock, then drops the lock before
+- * any workloop wait. The loop lives until free, so stop cannot invalidate a
+- * caller's retained service/loop while its gate action is pending. */
+-static SweetSpmiInterruptMux *
+-retainMux(bool detach, int *result)
+-{
+-	IOLock *lock = readinessLock();
+-	if (!lock) {
+-		*result = -1;
+-		return NULL;
+-	}
+-	IOLockLock(lock);
+-	int ready = __atomic_load_n(&published, __ATOMIC_ACQUIRE);
+-	SweetSpmiInterruptMux *service = muxService;
+-	if (service && (ready == 1 || (detach && ready != 0))) {
+-		service->retain();
+-	} else {
+-		service = NULL;
+-	}
+-	*result = ready == 0 ? -2 : -1;
+-	IOLockUnlock(lock);
+-	return service;
+-}
+-
+-extern "C" int
+-sweet_spmi_mux_attach(unsigned group, unsigned events, SweetMuxNotify notify, void *context)
+-{
+-	int result;
+-	SweetSpmiInterruptMux *service = retainMux(false, &result);
+-	if (service) {
+-		result = service->attachConsumer(group, events, notify, context);
+-		service->release();
+-	}
+-	return result;
+-}
+-
+-extern "C" void
+-sweet_spmi_mux_detach(unsigned group, void *context)
+-{
+-	int result;
+-	SweetSpmiInterruptMux *service = retainMux(true, &result);
+-	if (service) {
+-		service->detachConsumer(group, context);
+-		service->release();
+-	}
+-}
+-
+ extern "C" bool
+ sweet_spmi_mux_irq(unsigned int intid)
+ {
+@@ -1223,43 +1011,36 @@
+ extern "C" int
+ sweet_spmi_mux_start(void)
+ {
+-	/* Late board publication, NOT a direct call to hardware initialization.
+-	 * Synchronous matching ensures the following BSD key init sees a final
+-	 * READY/FAILED result. Battery may subscribe before or after matching. */
+-	static volatile unsigned requested;
+-	unsigned expected = 0;
+-	if (!__atomic_compare_exchange_n(&requested, &expected, 1u, false,
+-	    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+-		return __atomic_load_n(&published, __ATOMIC_ACQUIRE) == 1 ? 0 : -1;
+-	}
++	/* Board publication only. Consumers discover the service via IOKit;
++	 * this one-shot scalar is not a provider lookup or readiness rendezvous. */
++	static bool requested;
++	if (requested) {
++		return 0;
++	}
++	requested = true;
+ 	IOPlatformExpert *platform = IOService::getPlatform();
+ 	if (!platform) {
+-		return startFailed();
++		return -1;
+ 	}
+ 	SweetSpmiMuxDevice *nub = new SweetSpmiMuxDevice;
+ 	if (!nub) {
+-		return startFailed();
++		return -1;
+ 	}
+ 	if (!nub->init() || !nub->attach(platform)) {
+ 		nub->release();
+-		return startFailed();
++		return -1;
+ 	}
+ 	nub->setName("mh2lm-spmi-mux");
+ 	nub->registerService(kIOServiceSynchronous);
+-	bool ready = __atomic_load_n(&published, __ATOMIC_ACQUIRE) == 1;
++	bool ready = nub->getProperty("SweetMuxReady") == kOSBooleanTrue;
+ 	if (!ready) {
+ 		SWEET_LOG_ERROR("SWEET MUX: IOService matching/start failed; no polling fallback\n");
+-		publishReadiness(-1);
+ 		(void)nub->terminate(kIOServiceSynchronous);
+ 	}
+-	nub->release(); /* service plane owns the successfully published nub */
++	nub->release();
+ 	return ready ? 0 : -1;
+ }
+ 
+ #else
+-/* Shared BSD sources remain linkable; only MH2LM has this IRQ backend. */
+ extern "C" int sweet_spmi_mux_start(void) { return -1; }
+-extern "C" int sweet_spmi_mux_attach(unsigned, unsigned,
+-    void (*)(void *, unsigned), void *) { return -1; }
+-extern "C" void sweet_spmi_mux_detach(unsigned, void *) { }
+ #endif /* ARM64_BOARD_CONFIG_MH2LM */
+diff --git a/iokit/Kernel/arm/SweetSpmiMuxClient.cpp b/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
+@@ -0,0 +1,231 @@
++/* Registry discovery and termination synchronization shared by PMIC consumers.
++ * There is one of these objects per consumer, with no global service pointer. */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include <IOKit/IOLib.h>
++#include "../../../bsd/dev/sweet_spmi_mux_client.h"
++#define SWEET_LOG_SINK IOLog
++#include "../../../bsd/dev/sweet_log_level.h"
++OSDefineMetaClassAndStructors(SweetSpmiMuxClient, OSObject);
++
++SweetSpmiMuxClient *
++SweetSpmiMuxClient::withOwner(IOService *owner, IOWorkLoop *loop,
++    unsigned group, unsigned events, SweetMuxNotify notify, void *context)
++{
++	if (!owner || !loop || !notify || !context) {
++		return NULL;
++	}
++	SweetSpmiMuxClient *self = new SweetSpmiMuxClient;
++	if (!self) {
++		return NULL;
++	}
++	if (!self->init()) {
++		self->release();
++		return NULL;
++	}
++	self->owner = owner;
++	self->loop = loop;
++	loop->retain();
++	self->group = group;
++	self->events = events;
++	self->notify = notify;
++	self->context = context;
++	self->lock = IOLockAlloc();
++	self->event = IOInterruptEventSource::interruptEventSource(self, eventAction, NULL, 0);
++	if (!self->lock || !self->event) {
++		self->release();
++		return NULL;
++	}
++	/* addMatchingNotification can synchronously replay existing services.
++	 * Install every field and both subscriptions before enabling processing. */
++	self->event->disable();
++	if (loop->addEventSource(self->event) != kIOReturnSuccess) {
++		self->release();
++		return NULL;
++	}
++	self->eventAdded = true;
++	OSDictionary *matching = IOService::serviceMatching("SweetSpmiInterruptMux");
++	if (matching) {
++		self->terminated = IOService::addMatchingNotification(gIOTerminatedNotification,
++		    matching, serviceTerminated, self);
++		if (self->terminated) {
++			self->matched = IOService::addMatchingNotification(gIOFirstMatchNotification,
++			    matching, serviceMatched, self);
++		}
++		matching->release(); /* API retains, does NOT consume this dictionary */
++	}
++	if (!self->terminated || !self->matched) {
++		self->release();
++		return NULL;
++	}
++	SWEET_LOG_INFO("SWEET MUX CLIENT: watching registry group=%u; no global lookup\n", group);
++	self->event->enable();
++	self->event->interruptOccurred(NULL, NULL, 0);
++	return self;
++}
++
++bool
++SweetSpmiMuxClient::serviceMatched(void *target, void *, IOService *service, IONotifier *)
++{
++	SweetSpmiMuxClient *self = (SweetSpmiMuxClient *)target;
++	SweetSpmiInterruptMux *mux = OSDynamicCast(SweetSpmiInterruptMux, service);
++	if (!mux) {
++		return true;
++	}
++	IOLockLock(self->lock);
++	if (!self->stopping && !self->terminal && !self->provider && !mux->isInactive()) {
++		mux->retain();
++		self->provider = mux;
++		self->event->interruptOccurred(NULL, NULL, 0);
++	}
++	IOLockUnlock(self->lock);
++	return true;
++}
++
++bool
++SweetSpmiMuxClient::serviceTerminated(void *target, void *, IOService *service, IONotifier *)
++{
++	SweetSpmiMuxClient *self = (SweetSpmiMuxClient *)target;
++	IOLockLock(self->lock);
++	if (!self->stopping && self->provider == service) {
++		self->providerGone = true;
++		self->event->interruptOccurred(NULL, NULL, 0);
++	}
++	IOLockUnlock(self->lock);
++	return true;
++}
++
++void
++SweetSpmiMuxClient::routeNotify(void *context, unsigned events)
++{
++	SweetSpmiMuxClient *self = (SweetSpmiMuxClient *)context;
++	/* Mux gate context: only atomics and a software event, no consumer gate. */
++	__atomic_fetch_or(&self->pending, events, __ATOMIC_RELEASE);
++	self->event->interruptOccurred(NULL, NULL, 0);
++}
++
++void
++SweetSpmiMuxClient::eventAction(OSObject *owner, IOInterruptEventSource *, int)
++{
++	SweetSpmiMuxClient *self = OSDynamicCast(SweetSpmiMuxClient, owner);
++	if (self) {
++		self->process();
++	}
++}
++
++void
++SweetSpmiMuxClient::process(void)
++{
++	unsigned pending = __atomic_exchange_n(&this->pending, 0u, __ATOMIC_ACQ_REL);
++	IOLockLock(lock);
++	bool done = stopping || terminal;
++	SweetSpmiInterruptMux *mux = provider;
++	bool gone = providerGone;
++	IOLockUnlock(lock);
++	if (done || !mux) {
++		return;
++	}
++	if (gone || mux->isInactive() || (pending & SWEET_MUX_FAILED)) {
++		SWEET_LOG_ERROR("SWEET MUX CLIENT: provider terminated/failed group=%u; detaching\n", group);
++		closeBinding();
++		notify(context, SWEET_MUX_FAILED);
++		return;
++	}
++	if (!attached) {
++		IOReturn result = mux->attachConsumer(owner, group, events, routeNotify, this);
++		if (result != kIOReturnSuccess) {
++			SWEET_LOG_ERROR("SWEET MUX CLIENT: attachConsumer failed group=%u result=%#x\n", group, result);
++			closeBinding();
++			notify(context, SWEET_MUX_FAILED);
++			return;
++		}
++		attached = true;
++		IOLockLock(lock);
++		gone = providerGone;
++		IOLockUnlock(lock);
++		if (gone || mux->isInactive()) {
++			closeBinding();
++			notify(context, SWEET_MUX_FAILED);
++			return;
++		}
++		SWEET_LOG_INFO("SWEET MUX CLIENT: matched and attached group=%u\n", group);
++		notify(context, SWEET_MUX_READY);
++	}
++	if (pending & 0x0fu) {
++		notify(context, pending & 0x0fu);
++	}
++}
++
++void
++SweetSpmiMuxClient::closeBinding(void)
++{
++	/* Only the consumer workloop mutates attached or releases provider. */
++	IOLockLock(lock);
++	terminal = true;
++	SweetSpmiInterruptMux *mux = provider;
++	provider = NULL;
++	IOLockUnlock(lock);
++	if (mux) {
++		if (attached) {
++			mux->detachConsumer(owner, group, this); /* synchronizes routeNotify */
++		}
++		mux->release();
++	}
++	attached = false;
++	__atomic_store_n(&pending, 0u, __ATOMIC_RELEASE);
++}
++
++IOReturn
++SweetSpmiMuxClient::detachAction(OSObject *owner, void *, void *, void *, void *)
++{
++	SweetSpmiMuxClient *self = OSDynamicCast(SweetSpmiMuxClient, owner);
++	self->closeBinding();
++	return kIOReturnSuccess;
++}
++
++void
++SweetSpmiMuxClient::detach(void)
++{
++	if (lock && loop) {
++		(void)loop->runAction(detachAction, this);
++	}
++}
++
++void
++SweetSpmiMuxClient::stop(void)
++{
++	if (lock) {
++		IOLockLock(lock);
++		stopping = true;
++		IOLockUnlock(lock);
++	}
++	/* remove synchronizes callbacks; never hold lock or a workloop gate.
++	 * Notifier::remove consumes the notifier, so no extra release follows. */
++	if (matched) {
++		matched->remove();
++		matched = NULL;
++	}
++	if (terminated) {
++		terminated->remove();
++		terminated = NULL;
++	}
++	detach();
++	if (event && loop && eventAdded) {
++		event->disable();
++		loop->removeEventSource(event);
++		eventAdded = false;
++	}
++}
++
++void
++SweetSpmiMuxClient::free(void)
++{
++	stop();
++	OSSafeReleaseNULL(event);
++	OSSafeReleaseNULL(loop);
++	if (lock) {
++		IOLockFree(lock);
++		lock = NULL;
++	}
++	OSObject::free();
++}
++#endif
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -40,6 +40,11 @@
+     "     'IOClass'         = SweetSpmiInterruptMux;"
+     "     'IOProviderClass' = SweetSpmiMuxDevice;"
+     "     'IOMatchCategory' = SweetSpmiInterruptMux;"
++    "   },"
++    "   {"
++    "     'IOClass'         = SweetPmicKeys;"
++    "     'IOProviderClass' = SweetPmicKeysDevice;"
++    "     'IOMatchCategory' = SweetPmicKeys;"
+     "   },"
+     "   {"
+     "     'IOClass'         = SweetPlatformExpert;"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -11,6 +11,8 @@
+ 
+ iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
+ iokit/Kernel/arm/SweetSpmiInterruptMux.cpp                       optional iokitcpp
++iokit/Kernel/arm/SweetSpmiMuxClient.cpp                          optional iokitcpp
++iokit/Kernel/arm/SweetPmicKeys.cpp                               optional iokitcpp
+ iokit/Kernel/arm/SweetEntitlements.cpp                           optional iokitcpp
+ iokit/Kernel/arm/SweetKeyStore.cpp                               optional iokitcpp
+ iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitcpp

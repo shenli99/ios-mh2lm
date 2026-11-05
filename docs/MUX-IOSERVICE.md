@@ -1,5 +1,10 @@
 # SweetSpmiInterruptMux 的 IOService 化
 
+**0145 更新：** consumer 已实现匹配/terminated 通知和公开 C++ attach/detach，
+移除本页描述的全局 C 桥接与 readiness rendezvous；本地验证通过，待新原生
+产物及实机回归。当前 consumer 架构与完整清理顺序见
+[`MUX-CONSUMERS.md`](MUX-CONSUMERS.md)。下文保留为 0144 基线记录。
+
 2026-11-05，0144 叠加 0142/0143，0117 原生内核及 baseline 实机启动通过。
 电池独立接入/并行 USBIN 与真实 stop/free 尚未验收。
 用户要求进一步把 mux 变成 IOService，并评估 filter / interrupt controller。

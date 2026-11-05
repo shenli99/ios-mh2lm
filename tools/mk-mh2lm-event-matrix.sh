@@ -117,8 +117,8 @@ if [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--board-s
 	for marker in 'SWEET BATT IRQ: armed mode=' \
 	    'SWEET BATT IRQ: REVID sid=2' 'battery-msoc' \
 	    'SWEET MUX: consumer attached group=' \
-	    'SWEET BATT IRQ: waiting for mux readiness event; no timer/status polling' \
-	    'SWEET BATT IRQ: mux readiness event received; attaching routes'; do
+	    'SWEET BATT IRQ: waiting for mux registry match; no timer/status polling' \
+	    'SWEET BATT IRQ: registry provider matched; routes already attached'; do
 		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
 			printf 'kernel artifact lacks battery IRQ marker: %s\n' "$marker" >&2
 			exit 1
@@ -130,7 +130,8 @@ if [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 	for marker in 'SWEET BOARD: late init before root lookup; independent of UFS' \
 	    'SWEET MUX: infrastructure ready intid=' \
 	    'SWEET MUX: IOService started; owns workloop, routes and MMIO' \
-	    'SWEET KEYS IRQ: consumer attach failed; keys disabled'; do
+	    'SWEET MUX CLIENT: matched and attached group=' \
+	    'SWEET KEYS IRQ: consumer matching setup failed; keys disabled'; do
 		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
 			printf 'kernel artifact lacks board startup marker: %s\n' "$marker" >&2
 			exit 1
