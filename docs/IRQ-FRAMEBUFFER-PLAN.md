@@ -2,7 +2,7 @@
 
 **当前阻塞：** 0118组合档按键初始化读回失败。0146补统一SPMI事务锁，0147将
 按键准备移到consumer workloop；0148追加回滚失败优先按组隔离及PMIC日志等级。
-本地验证通过，待一次新构建直接复测keys+USBIN组合，不重跑已跳过的no-keys。
+0119原生构建及boot核对通过，待直接实机复测keys+USBIN组合，不重跑已跳过的no-keys。
 见 [`SPMI-TRANSACTIONS.md`](SPMI-TRANSACTIONS.md) 和
 [`MUX-GROUP-ISOLATION.md`](MUX-GROUP-ISOLATION.md)。Framebuffer仍排在IRQ验收之后。
 

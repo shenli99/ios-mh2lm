@@ -1,7 +1,8 @@
 # PMIC mux 回滚失败隔离与日志等级
 
 2026-11-05，新增 `0148-mh2lm-mux-group-isolation.patch`，接在0147之后。
-本地实现和验证完成；尚无新原生构建或实机结果。0118镜像不含0146～0148。
+0119原生内核及buildtree已核对：23个最终源文件与0148树逐字节一致，
+新符号存在、无未定义符号；组合boot已生成，尚待实机。0118镜像不含0146～0148。
 
 ## 故障范围与恢复规则
 
@@ -81,3 +82,23 @@ compile-results、registry-tests、transport-tests、log-tests及CI gate结果�
 这些模型不能证明真实 ACC_ENABLE/pending 的硬件行为；下一轮新内核直接测
 keys+USBIN组合，保留三键、USB/触摸IRQ、ACM、息屏唤醒回归。不重跑用户已跳过
 的 no-keys 阶段；无新内核前不生成声称包含0148的boot。
+
+## 0119 原生产物与下一步
+
+`logs/xnu-kernel-0119.gz`、`logs/xnu-buildtree-0119.gz`核对通过；内核SHA256：
+`81074d86d567d0f4b7804fdf983f108aa7e50a53f6b6b91292a581466c3c3ae2`。
+这证明0146共享锁、0147workloop准备、0148隔离/日志修改进入原生构建，
+不证明0118的实机错误已解决，也不证明硬件隔离路径已触发/有效。
+
+下一步直接使用 `out-bs/boot-16k-0119-board-startup-usbin.img`，
+SHA256 `c79a86a52d7cbd04fdd5d198ac3244df8040aa87dfe4cc5ed574e324786b2d05`。
+keys1、batteryIRQ2、真实gauge、ACM2/vbus1，固定USB/触摸IRQ，默认INFO。
+测试三键/触摸、两轮拔插（每次等5秒）、独立电源键息屏/唤醒后输入。
+导出 `live-0119-board-startup-usbin.txt` 和
+`sweetlog-0119-board-startup-usbin.bin`。重点检查两组均attach成功、
+三键HID成对、USBIN状态变化及并行输入；如触发隔离，必须区分“故障已隔离”
+与“按键完整功能通过”。baseline仅作异常对照，不要求no-keys重测。
+
+三个同内核profile及最终Android镜像内嵌kernel/ADT/TOML、参数唯一性已独立
+解析核验；清单和核验脚本在 `scratch/artifact-0119/`。未提供本轮CI run ID或
+build log；未执行push、云端操作或设备写入。
