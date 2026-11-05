@@ -71,3 +71,15 @@ attach/drain 在窗口内重新开 IRQ。C 兼容 API 需先取得服务引用�
 到 free，才能支持并发 detach/stop。当前 XNU 的 ml_io_map 是永久分配；需要
 释放时用 unmappable 路径，按 16K 页对齐包含地址偏移的完整范围。详见
 [`MUX-IOSERVICE.md`](MUX-IOSERVICE.md)。
+
+## 0116 编译复盘：保持编译单元自己的参数环境
+
+0144 补丁正常应用，但 mux 直接包含 ARM memory_types，未引入通用
+`VM_MEM_*`，导致 `VM_WIMG_IO` 展开失败。使用 `<vm/memory_types.h>`
+可同时获得通用位定义和机器相关定义，无需硬编码数值或改变 MMIO 属性。
+
+旧本地检查把 BSD 的参数/头文件路径叠加到 IOKit，掩盖了缺失依赖。
+以后单文件交叉编译优先从实际 CI 对应编译单元提取完整命令，保留该子系统
+的 include 顺序和 private 宏；本机适配单独记录。此次同一 IOKit 命令下
+修正前复现、修正后通过，才构成编译修复的证据。剥离 include 的 mock
+运行测试不能验证真实头文件依赖；本地交叉编译也不能替代原生完整链接。

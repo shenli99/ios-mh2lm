@@ -4,6 +4,18 @@
 用户要求进一步把 mux 变成 IOService，并评估 filter / interrupt controller。
 电池验收继续暂停，0115 的硬件证据与未知项不变。
 
+0116 云端编译在 `SweetSpmiInterruptMux.cpp:239` 失败：`VM_WIMG_IO` 展开所需的
+`VM_MEM_COHERENT`、`VM_MEM_NOT_CACHEABLE`、`VM_MEM_GUARDED` 未定义。
+0144 已应用，问题是直接包含了 `<arm/memory_types.h>`，遗漏通用定义。
+修正为包含 `<vm/memory_types.h>`；该头文件同时引入机器相关定义。
+继续使用 `ml_io_map_unmappable(..., VM_WIMG_IO)` 与完整页范围释放。
+
+本地提取 0116 的实际 IOKit 编译参数，修正前复现三个错误，修正后生成
+ARM64 Mach-O；仅作本机路径/目标适配和 Apple 类型 builtin 的临时替代。
+此前混合 BSD 与 IOKit 参数的交叉编译掩盖了依赖问题，不能作为此项验证。
+补丁顺序应用、board 与 mux/battery 回归通过；完整原生编译/链接与实机验收
+仍待下一轮。此次只改头文件，不调整 IRQ、匹配、生命周期或 consumer 接口。
+
 ## 三种类型分别负责什么
 
 | 类型 | 实际职责 | 本轮决定 |

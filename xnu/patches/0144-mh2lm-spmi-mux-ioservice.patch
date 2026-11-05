@@ -48,7 +48,7 @@ diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/Sweet
  #include <pexpert/arm64/sweet_dev.h>
  #include <stdint.h>
 +#include <mach/vm_param.h>
-+#include <arm/memory_types.h>
++#include <vm/memory_types.h>
  #include <kern/clock.h>
  #include "../../../bsd/dev/sweet_spmi.h"
  #include "../../../bsd/dev/sweet_spmi_mux.h"

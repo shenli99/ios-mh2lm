@@ -2,6 +2,34 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0116 build failure fixed locally: 0144 memory attribute header dependency.**
+Log `logs/xnu-build-log-0116.txt` confirms 0142/0143/0144 applied. Actual
+compiler failure is SweetSpmiInterruptMux.cpp:239: VM_WIMG_IO expands to
+undeclared VM_MEM_COHERENT / VM_MEM_NOT_CACHEABLE / VM_MEM_GUARDED; its object
+fails, then make errors cascade. Historical optional/upstream patch skip
+warnings are separate. No evidence of a cloud infrastructure failure.
+0144 now includes `<vm/memory_types.h>` instead of `<arm/memory_types.h>`:
+the generic header supplies VM_MEM_* and includes the architecture header.
+Only this source include changed; unmappable MMIO attributes/lifetime,
+startup, C consumer bridge and runtime IRQ behavior retained. CI YAML unchanged.
+
+Validation: extracted the actual 0116 IOKit clang++ command; translated local
+paths/Darwin target/resource headers and supplied scratch-only Apple type
+builtin stand-ins. Original source reproduces exactly the three errors; fixed
+source generates ARM64 Mach-O with the same flags. Previous compile.py mixed
+BSD flags/includes into IOKit and masked this dependency: DO NOT use that
+mixed command as evidence for native IOKit header correctness. New scratch
+`mux-service-0115/compile-native-0116.py`, native-0116-command.txt and
+native0116-{before,after}.compile.txt record the check. Cached headers are
+from 0114a13; full native CI/link is still required. Exact0115 ->0142 ->0143 ->
+fixed0144 applies with whitespace=error-all and byte-matches compiled verify.
+Board and mux/battery ASAN/UBSAN regression suites pass, including20 extra
+lifetime races; mocks strip headers and cannot catch this compile dependency.
+
+NEXT: user push and fresh native build, then original three --board-startup
+profiles. No 0116 artifact needed to fix this compile error. No push, cloud
+run, boot packaging or phone write performed. Battery IRQ remains unverified.
+
 **CURRENT:0144 mux IOService conversion implemented locally; ready for user push.**
 Implementation/tests/docs committed as `f291397`; staged whitespace checks
 passed for all twelve files. No push or new native artifact/phone result yet.
