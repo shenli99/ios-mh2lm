@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--board-startup]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--board-startup]\n' "$0" >&2
 	exit 2
 fi
 
@@ -31,7 +31,7 @@ case "$KEY_IRQ_PROFILE" in
 		;;
 	--irq-only)
 		;;
-	--battery-irq|--board-startup)
+	--battery-irq|--battery-charge-check|--board-startup)
 		;;
 	*)
 		printf 'unknown optional profile: %s\n' "$KEY_IRQ_PROFILE" >&2
@@ -98,7 +98,7 @@ if [ "$KEY_IRQ_PROFILE" = '--touch-irq' ]; then
 	grep -Fqa 'SWEET USB IRQ: software-pending probe hits=' "$TMPDIR/kernel.development.mh2lm"
 	grep -Fqa 'SWEET MUX: armed mode=' "$TMPDIR/kernel.development.mh2lm"
 fi
-if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
+if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 	for marker in 'SWEET KEYS IRQ: three routes active; IRQ-only' \
 	    'SWEET TOUCH: TouchComm ready (sda=%u scl=%u), max %ux%u, IRQ-only' \
 	    'SWEET USB IRQ: FAILED %s hits=%u empty=%u; gadget stopped' \
@@ -110,10 +110,10 @@ if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-ir
 	done
 elif grep -Fqa 'SWEET KEYS IRQ: three routes active; IRQ-only' \
     "$TMPDIR/kernel.development.mh2lm"; then
-	printf 'fixed IRQ kernel requires --irq-only, --battery-irq or --board-startup packaging profile\n' >&2
+	printf 'fixed IRQ kernel requires --irq-only, --battery-irq, --battery-charge-check or --board-startup packaging profile\n' >&2
 	exit 1
 fi
-if [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
+if [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 	for marker in 'SWEET BATT IRQ: armed mode=' \
 	    'SWEET MUX: controller transactions serialized across keys and battery' \
 	    'SWEET MUX: isolated group=%u; other groups remain available' \
@@ -124,6 +124,16 @@ if [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--board-s
 	    'SWEET BATT IRQ: registry provider matched; routes already attached'; do
 		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
 			printf 'kernel artifact lacks battery IRQ marker: %s\n' "$marker" >&2
+			exit 1
+		fi
+	done
+fi
+
+if [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ]; then
+	for marker in 'charger/current diagnostics enabled (read-only)' \
+	    'SWEET BATT DIAG:' 'SWEET BATT INPUT:' 'SWEET BATT TYPEC:' 'SWEET BATT SMB:'; do
+		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+			printf 'kernel artifact lacks charge diagnostic marker: %s\n' "$marker" >&2
 			exit 1
 		fi
 	done
@@ -180,10 +190,25 @@ make_profile() {
 	sha256sum "$image"
 }
 
-if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
+if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 	# Fixed IRQ images retain the validated PM8150B gauge/UI path. Without
 	# both battery arguments SweetBattery publishes the static 100% source.
 	IRQ_ARGS='ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1'
+
+	if [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ]; then
+		# Keep mode4 and all input IRQs; enable existing read-only diagnostics.
+		make_profile battery-charge-diag \
+			"LG G8X - XNU battery charge diagnostics (${LABEL})" \
+			"$IRQ_ARGS sweetbattirq=4 sweetbattuidiag=1 sweetbattdiag=1"
+		# Optional control only: compare gadget/VBUS override with the earlier
+		# charge-positive configuration. No ACM in this profile; use SWEETLOG.
+		CHARGE_NO_USB_ARGS=${IRQ_ARGS/sweetusb=2 sweetusbstep=6 sweetvbus=1/sweetusb=0}
+		make_profile battery-charge-diag-no-usb \
+			"LG G8X - XNU battery charge diagnostics without gadget (${LABEL})" \
+			"$CHARGE_NO_USB_ARGS sweetbattirq=4 sweetbattuidiag=1 sweetbattdiag=1"
+		printf 'kernel SHA256: %s\ncreated charge diagnostic profiles for %s; no-usb is an optional control\n' "$KERNEL_SHA256" "$LABEL"
+		exit 0
+	fi
 
 	if [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 		# Separate startup ownership regression from battery IRQ delivery.

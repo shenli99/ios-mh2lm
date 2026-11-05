@@ -4,9 +4,10 @@
 USBIN/CHGR接入，按键在consumer workloop准备后group0接入；20次USBIN发布、
 三键/触摸及息屏拔插唤屏正常。CHGR始终state7/charging0，没有独立命中。
 0118 SET_TYPE读回失败未复现；未触发0148隔离。USB后段枚举缺少完整证据。
-完整计数、边界及同内核下一档mode4见
-[`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。电池CHGR/MSOC和真实服务
-退出仍未验收。0148隔离/日志策略见
+随后mode4又验证三次独立MSOC中断与真实电量刷新，未影响按键。
+完整计数、边界及同内核下一档充电诊断见
+[`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。电池CHGR/SOC_READY变化和
+真实服务退出仍未验收。0148隔离/日志策略见
 [`MUX-GROUP-ISOLATION.md`](MUX-GROUP-ISOLATION.md)。
 
 2026-11-05，新增补丁 `0145-mh2lm-mux-consumer-matching.patch`，基于已核对的

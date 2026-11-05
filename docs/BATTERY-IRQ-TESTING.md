@@ -1,11 +1,77 @@
 # MH2LM 电池 IRQ：分阶段测试与结果
 
-**当前0119：mode3接入和并行回归通过，CHGR事件尚未覆盖；下一步同内核mode4。**
+**当前0119：mode4的MSOC真实IRQ通过；继续实际充电诊断，CHGR事件尚未覆盖。**
 0145 registry consumer、0146统一事务锁、0147按键workloop准备、0148隔离/日志
 已进入0119。下面0115/0141/0142段落保留为历史，旧baseline/no-keys流程不再
-作为当前前置要求。CHGR/MSOC/SOC_READY尚未验收，IRQ大目标未结束。
+作为当前前置要求。MSOC已实测，CHGR/SOC_READY变化事件未覆盖，IRQ大目标未结束。
 
-## 0119 mode3结果与当前下一步
+## 0119 mode4结果与当前下一步
+
+`sweetlog-0119-battery-irq-all.bin` SHA256：
+`3ede5ea87e447b1b45e54627128b1361906112af0f4dc54b3468b11c567351aa`。
+头v1/ring4194304/total288962/flush86，未环绕、解码无NUL。原始记录/计数在
+工作区 `scratch/artifact-0119/all-persistent.txt`、`all-analysis.json` 和
+`analyze-all.py`；只使用持久日志，不要求补USB live。
+
+- 98行mode4/preflight1；139～154行USBIN269、CHGR266、MSOC/READY283全部接入，
+  group1/events0xf，armed且关闭两秒轮询。group0三键也成功接入。bootargs
+  保留真实gauge、keys1、ACM2/vbus1、mode4；未开启sweetbattdiag。
+- 四次独立USBIN刷新在3413/3431/3474/4123行，external依次0/1/0/1。
+  第三次拔线之后、第四次插线之前有三次**独立MSOC硬件事件**：
+
+  | mux命中行 / IRQ | 刷新行 / event | 原始MSOC / 发布电量 | 外接电源 |
+  | --- | --- | --- | --- |
+  | 3604 / 20 | 3606 / 0x4 | 0xbc / 73% | 0 |
+  | 3824 / 21 | 3826 / 0x4 | 0xb9 / 72% | 0 |
+  | 4020 / 22 | 4022 / 0x4 | 0xb7 / 71% | 0 |
+
+  中间没有USBIN事件；不是插拔代采样或周期轮询。七次IRQ通知/采样严格1→7，
+  全部healthy1，通知至发布7.269～7.399ms。三次FG刷新即完成真实电量发布；
+  BATT UI诊断只记录电源连接/充电flag变化，未打印这三次percent变化是日志
+  筛选条件，不代表跳过updateStatus。源码publish每次都调用updateStatus。
+- 初始+arm-sync+七次IRQ共九笔采样，电量74→73→72→71%，最后接线原始MSOC
+  0xb5仍取整71%。CHGR九笔均0x47/state7/charging0；无battery-chgr或
+  battery-ready命中，不能把“全事件配置”记为“所有事件已验证”。MSOC固件
+  门限仍未知，三次命中足以证明当前配置能自然触发，无需为门限读取SRAM。
+- 三键11对（power5/up2/down4），触摸9对/单槽，顺序全部配平；输入在最后
+  插线后仍继续。touch末次IRQ158/empty0。一次电源键display-off/on已覆盖，
+  本日志未覆盖息屏插线唤醒（以前述mode3为证）。未见相关驱动ERROR、mux
+  失败/隔离或panic签名；14条WARN全是既有USB ep0/ep5 cmd6/status1。
+  USB只有早期hits128计数及2次ACM配置，不能声称后段枚举/实时日志无问题。
+  日志尾部未记录系统完成关机，不能用其验证服务stop/free。
+
+**当前进入实际充电与电池驱动完善。** 先复用0119现有只读诊断，核对已知能
+真实充电的电源条件，见 [`BATTERY-DRIVER-NEXT.md`](BATTERY-DRIVER-NEXT.md)。
+新打包入口（不编译内核）：
+
+```bash
+ref/ios-mh2lm/tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-0119.gz 0119 --battery-charge-check
+```
+
+- **先测** `out-bs/boot-16k-0119-battery-charge-diag.img`：保留mode4、三键、
+  触摸和USB ACM，只增加sweetbattdiag1。SHA256：
+  `c33d8d49eaffdfeb8859f9a211afc2599e791c7599833790bf3f72518e711f41`。
+- **仅作后续可选对照** `out-bs/boot-16k-0119-battery-charge-diag-no-usb.img`：
+  mode4/输入/真实gauge/诊断相同，但sweetusb0，移除sweetvbus/usbstep，没有ACM。
+  SHA256 `90655d8c533a0e90d09705938b797dd41617a1a35dc55941ae84cde2a761ce5c`。
+  不预判USB是原因，不要求现在同时测；先看主档与电源类型，再决定是否需要。
+
+两张最终Android v1镜像的嵌入FAT/kernel/ADT/TOML及唯一参数已独立回读核验，
+同一native kernel SHA81074d86…6c3c3ae2；完整清单、脚本和验证在工作区
+`scratch/artifact-0119/charge-boot-manifest.json`、`verify-charge-boots.py` 和
+`charge-boot-verification.txt`。不需要push/云编译，未改CI或驱动写路径。
+
+主档测试：进桌面后拔电脑线留20～30秒，接曾确认能充电的独立充电器3～5分钟，
+再拔20～30秒，可再接一次；记录充电器/线、亮屏或息屏、UI现象。导出
+`sweetlog-0119-battery-charge-diag.bin`；USB live可选。IRQ模式并非每两秒打印
+DIAG；数据来自初始/arm-sync和实际USBIN/CHGR/MSOC事件，等待时无新行不等于
+日志失效。一次样本可能早于充电状态稳定，后续FG/CHGR证据须一起看。
+
+注意旧DIAG的config-ok与SMB/read-ok是短路读取链的合并结果：失败时其后零值
+不可解读为“寄存器为零”，read-ok0不可指认具体失败地址。current-ok单独验证
+一致IBATT pair；必须结合state、USB、持续电流方向及SOC/电压趋势判断充电。
+
+## 0119 mode3结果与当时下一步（mode4已测，见上）
 
 已检查 `sweetlog-0119-battery-irq-charger.bin`；本轮未导出USB live，持久日志
 足以分析现有事件，不要求补采。SHA256：

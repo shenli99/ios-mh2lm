@@ -2,6 +2,59 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**CURRENT0119 mode4 MSOC IRQ PASS; resume battery/physical-charge work; diagnostic boots READY.**
+User supplied logs/sweetlog-0119-battery-irq-all.bin and asks to continue battery
+driver if acceptable. SHA256
+`3ede5ea87e447b1b45e54627128b1361906112af0f4dc54b3468b11c567351aa`.
+Header v1/ring4194304/total288962/flush86; not wrapped/no decoded NUL.
+scratch/artifact-0119/{all-persistent.txt,analyze-all.py,all-analysis.json}.
+Actual args keys1/realgauge/ACM2/vbus1/mode4; NO sweetbattdiag yet.
+139..154 USBIN269/CHGR266/MSOC+READY283, group1/eventsf attached/armed/no2s
+poll; group0 keys attached160.4USBIN refreshes3413/3431/3474/4123,external0/1/0/1.
+INDEPENDENT FG MSOC hits3604/3824/4020, IRQ20/21/22, refresh3606/3826/4022,
+events4, raw0xbc/0xb9/0xb7 ->73/72/71%, all unplugged with NO USBIN event
+between.7IRQ notifications/samples1..7 allhealthy1; notify-publish7269..7399us.
+9total samples(initial+arm-sync+7IRQ), allCHGR47/state7/charging0, voltage3910..
+4037mV. No CHGR/READY hit. FG end-to-end normal path accepted, unknown firmware
+threshold NOT blocker to demonstrated delivery; don't add SRAM reads for it.
+UI tracing logs only flag transitions, not each percent; actual publish calls
+updateStatus unconditionally, so absent BATT UI line on MSOC isn't missed publish.
+
+Keys11balanced pairs(power5/up2/down4),touch9balanced pairs/single slot, last
+touchIRQ158/empty0; input after finalreplug present.1power off/on covered,
+NO cable wake in THIS log(mode3 covered it). No scopedERROR/muxfailure/
+isolation/panic;14existingUSBWARN ep0/5cmd6status1.USB onlyearlyhits128 and2ACM
+configs, can't claim full later enumeration. No completedshutdown/stopfree
+evidence. BatteryIRQ goal remains incomplete pendingCHGR; READY stable/uncovered.
+
+NEXT: same native0119 kernel + existing read-only sweetbattdiag1, preserve
+mode4/input/ACM. Extended packer with --battery-charge-check; actual generated
+and independently parsed final Androidv1/FAT/kernel/16KADT/TOML/unique selectors
+verified, Bashsyntax/diffcheck passed. No driver/CI change or cloudbuild needed.
+out-bs/boot-16k-0119-battery-charge-diag.img (PRIMARY):35667968bytes
+`c33d8d49eaffdfeb8859f9a211afc2599e791c7599833790bf3f72518e711f41`.
+Optional ONLY IF NEEDED out-bs/boot-16k-0119-battery-charge-diag-no-usb.img:
+`90655d8c533a0e90d09705938b797dd41617a1a35dc55941ae84cde2a761ce5c`;
+same mode4/gauge/keys/touch/diag, sweetusb0 with vbus/usbstep absent, noACM.
+Do not require both tests up front. charge-boot-manifest.json,
+verify-charge-boots.py, charge-boot-verification.txt in artifact-0119.
+PRIMARY test: desktop/input, unplugPC20..30s, knowncharge-good wallcharger
+3..5min, unplug20..30s/optionallyreplug; export
+sweetlog-0119-battery-charge-diag.bin, live optional. Capture CHGR state/IBATT,
+CHGR IRQ/events2 and physical charge vs VBUS only. IRQdiag isn't periodic;
+no new sample on quiet cable doesn't alone prove failure. Optional async
+question asked whether current0119 source is PC, prior m19/m20 charger or
+different charger; answer not yet provided. Don't assume source from logs.
+
+New docs/BATTERY-DRIVER-NEXT.md records resumed plan: recover charge evidence
+first, then independent per-field read validity (existing DIAG/logChargePolicy
+short-circuit chains can print unread zero fields; SMB/read-ok0 is invalid),
+real IBATT/temp publishing with validity/sign/age, pack profile/capacity, then
+separate charge arbitration/control. Oldm19/m20 actualcharge state3/en1/-2.2..
+-2.3A already proved; do NOT claim charge neverworked or blindlywrite0x1042.
+No new PMIC writes/SRAM/profile/pollfallback. Updated testing/hardware/roadmap/
+architecture/consumer/isolation docs. User pushes/fastboots; no device actions.
+
 **0119 ARCHITECTURE SNAPSHOT refreshed (documentation only).** User asks current
 driver architecture. CURRENT-DRIVER-ARCHITECTURE.md now leads with0119 service
 tree, IRQ/data paths, shared transport locking and failure/verification limits;

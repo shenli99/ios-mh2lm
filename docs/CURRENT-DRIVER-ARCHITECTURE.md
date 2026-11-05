@@ -82,7 +82,8 @@ profile/SRAM管理或完整遥测；固定容量/部分占位字段等缺口见�
 屏幕仍有完整图层状态、息屏后重绘及真实呈现时序缺口，framebuffer修复尚未开始。
 
 实机边界：0119 mode3已验证两组接入、20次USBIN刷新及三键/触摸/息屏唤屏，
-没有CHGR独立命中；mode4全事件镜像已准备，FG事件待实测。故障隔离与真实
+没有CHGR独立命中；随后mode4已验证三次独立MSOC中断和73/72/71%刷新，
+CHGR/SOC_READY变化仍未覆盖，现转入同内核实际充电诊断。故障隔离与真实
 服务stop/free不能以正常使用或本地模拟通过替代验收。最新结果见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)，接口细节见
 [`MUX-CONSUMERS.md`](MUX-CONSUMERS.md)。

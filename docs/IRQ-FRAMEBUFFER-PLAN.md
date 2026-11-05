@@ -1,9 +1,11 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
-**当前进度：** 0119 mode2组合通过，随后mode3的USBIN/CHGR路由均接入，
-20次USBIN状态刷新、三键/触摸及息屏插拔唤屏正常；0118读回失败未复现。
-CHGR采样始终state7/charging0，没有独立CHGR命中，因此充电状态IRQ仍未验收。
-下一步同0119内核现有mode4镜像测FG电量事件，无需云编译；CHGR保留待验证。
+**当前进度：** 0119 mode4已实测三次独立MSOC中断，拔线期间电量由74%下降至
+73/72/71%，与四次USBIN刷新区分，三键/触摸继续工作；之前mode3息屏插拔唤屏
+已有证据。CHGR仍state7/charging0、没有独立命中，充电状态IRQ尚未验收。
+按用户要求继续电池驱动：先用同0119内核的充电诊断镜像恢复物理充电/CHGR
+证据链，再完善采样有效性、真实遥测及容量/profile，见
+[`BATTERY-DRIVER-NEXT.md`](BATTERY-DRIVER-NEXT.md)。当前无需云编译。
 电池IRQ子目标仍未完成，framebuffer继续排在IRQ验收之后。证据与镜像见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。0148故障隔离仍只有本地
 注入验证，未在手机触发；策略见 [`MUX-GROUP-ISOLATION.md`](MUX-GROUP-ISOLATION.md)。
@@ -270,17 +272,17 @@ SPI 208（候选 INTID 240），并写好带 GIC 探针、真实 IRQ 与轮询�
 
 ### 子目标 4（临时追加）：电池 IRQ 化
 
-**当前状态：** 0119已验证0145～0148的新启动与consumer架构，USBIN mode2
-和三键并行通过，两轮拔插均由真实IRQ刷新。下一步同内核mode3 USBIN+CHGR，
-再mode4 MSOC/SOC_READY。充电状态与电量事件仍未验收；不重跑已跳过的no-keys。
-mode2稳定75%不是电量事件证据，CHGR state7/charging0不是实际充电证据。
+**当前状态：** 0119已验证0145～0148的新启动与consumer架构，mode2/3的USBIN
+和三键并行通过；mode4又实测三次独立MSOC命中与73/72/71%刷新，电量事件
+正常路径已通过。CHGR/SOC_READY变化事件尚未覆盖，CHGR state7/charging0
+不是实际充电证据。下一步同内核充电诊断，不重跑已跳过的no-keys。
 完整历史、镜像和观测判据见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
 PMIC 型号证据、事件位置、既有 APID 预检和待测项见
 [`BATTERY-IRQ-HARDWARE-BASELINE.md`](BATTERY-IRQ-HARDWARE-BASELINE.md)。
 工作区 `docs/INDEX.md` 的电源六章报告已补充 ack/unmask 顺序、LG 0.3%
-MSOC delta 配置及 SRAM 事务依据；这些是源码参考，实际门限与 FG channel/
-事件仍需实测，REVID 和 FG APID/owner 已由上述日志确认。先沿用固件现有
+MSOC delta 配置及 SRAM 事务依据；这些是源码参考，实际门限仍未知，但FG
+channel接入与MSOC自然事件已有0119实测，无需为测门限访问SRAM。沿用固件现有
 FG 状态验证事件，不为 IRQ 化重载 profile；
 需要 SRAM 访问时单独设计授权、版本 workaround 与释放路径。
 

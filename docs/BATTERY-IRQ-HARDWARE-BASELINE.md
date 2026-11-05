@@ -1,5 +1,13 @@
 # MH2LM 电池 IRQ 硬件基线与资料缺口
 
+**0119实测更新：** FG APID283的MSOC/READY路由均成功接入mode4/events0xf；
+三次独立MSOC IRQ触发拔线期间73/72/71%刷新，证明FG channel接入与自然事件
+投递正常。USBIN已在mode2/3/4实测；CHGR路由已接入但state7不变、没有独立
+命中，SOC_READY一直ready1也没有变化事件。固件MSOC门限仍未知，不将LG的
+0.3%静态配置当作本机读回；无需为已成功的MSOC事件访问SRAM。当前继续实际
+充电诊断，结果及下一步见 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
+下方0115预检原始值与“开gate前”检查点保留为历史，待测状态以上述更新为准。
+
 **日期：** 2026-11-05。0115 mode1 持久日志已补齐只读预检：PM8150B 身份、
 FG APID/owner 与外设配置现在已有实机读回。该模式仍是两秒采样，未开启电池
 IRQ；FG channel 访问、MSOC 门限及真实事件仍待测试，不能视为已经测得。
