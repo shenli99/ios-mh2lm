@@ -2,6 +2,58 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**CURRENT0118 combined FAILED keys attach;0146 transport fix/diagnostics ready for USER PUSH.**
+User reports keys dead and asks if boot argument omitted. Persistent evidence
+logs/sweetlog-0118-board-startup-usbin.bin SHA256
+`c0cd6907da5bba7a12bfa656682384f7915794c03a2ace84ffec6dfb7e665578`;
+header v1/ring4MiB/total277831/flush37,not wrapped. Decoded artifact-0118/
+usbin-persistent.txt. Bootargs line261 have keys1/batteryIRQ2; existing image
+SHA6702a2d8...e273dd rechecked. NOT missing args. Battery subscribes group1 at
+116-117, mux service starts133-136, battery APID269/group1 attach+arm147-150.
+Keys registers watcher138; power/down APID248 and up261 configure151-153.
+Line154 volume-up readback type42/high1/low1/enable1, required edge bit0 absent;
+group0 rollback then attachConsumer result0xe00002ca at156. NO keys armed/HID
+or worker started. group1 survives: IRQ1/2 at3456/3469 refresh external0/1,
+healthy1. This is group0 initialization failure, not global mux stop. Original
+log lacks expected initial trigger values, channel/read success detail and
+per-command status, so cannot prove a dropped write or stale read mechanism.
+Initial battery samples report charging1 at66->67%,4164mV; after unplug/replug
+charging0,67%,4046/3990mV. No current diagnostic/physical charging proof.
+
+Found concrete synchronization gap: battery observer/RW take sp_lock; key
+observer (mux/C worker) and key RW bypass it. Separate workloops permit key
+setup concurrent with battery arm-sync sampling. LG reference spmi-pmic-arb.c
+uses ONE controller lock around read/write transactions even across APIDs.
+New additive0146-mh2lm-spmi-transaction-serialization.patch (4 files) makes key
+observer/RW use same thread IOLock, serializes init via CAS-published lock and
+locked attempted/ready/mappings, initializes transport from late mux/keys too.
+No battery-first dependency, no new earlier hardware phase. RW timeout poisons
+all routes sharing APID including key lanes. Log write/observer errors plus
+expected/mask/access/read-ok on config failure. Preserve strict readback,
+group rollback, registry consumer lifecycle, IRQ-only behavior, existing ack
+retry, USB/touch and charging/SOC policy. No new configuration retry/fallback.
+This fixes a real code gap; whether it resolves this exact phone failure is
+UNVERIFIED until new native build+phone. Do not claim hardware root cause proven.
+
+Validation: exact0118+0146 strict apply/byte compare and full0142..0146 chain
+matches23 final source files;8 ARM64 objects compile with subsystem flags.
+Registry suite enforces locks on key observer/RW; injected SET_TYPE still42
+after DONE must reject/rollback group0 while USBIN remains live. Existing
+identity/lifecycle/40race/APID/rollback/storm/timeout suite passes. New actual
+SPMI init/lock/key+battery read host test covers16-way init, single map set,
+both disjoint read lanes blocked by held lock, concurrent reads, error/timeout
+unlock, allocation/map failure, battery timeout poison;10 extra race runs.
+Actual key worker/HID/join/maps suite+20 read/stop races and board tests pass.
+ASAN/UBSAN and counts, not native MMIO timing/scheduling proof; LSan unavailable.
+CI YAML only source gates updated (accept0146/reject0118), build command
+UNCHANGED. Packer rejects original0118 before creating fake corrected profiles.
+Scratch spmi-serialization-0118/{base,edited,verify,full-chain}/xnu plus replay/
+compile.py and results, registry/key/transport tests, gate and rejection log.
+docs/SPMI-TRANSACTIONS.md records cause/evidence/limitations.
+NEXT: USER PUSH -> fresh native kernel/buildtree -> direct keys+USBIN combined
+test; baseline available as anomaly control, no required no-keys repeat per
+user steering. No new kernel/boot yet, no push/cloud/device action performed.
+
 **USER STEERING: skip no-keys persistent supplement; NEXT combined0118 USBIN.**
 User explicitly says stop spending time on this round and proceed with all
 consumers connected. Do NOT require no-keys persistent/repeat before next test.

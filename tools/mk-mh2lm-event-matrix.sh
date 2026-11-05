@@ -115,6 +115,7 @@ elif grep -Fqa 'SWEET KEYS IRQ: three routes active; IRQ-only' \
 fi
 if [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 	for marker in 'SWEET BATT IRQ: armed mode=' \
+	    'SWEET MUX: controller transactions serialized across keys and battery' \
 	    'SWEET BATT IRQ: REVID sid=2' 'battery-msoc' \
 	    'SWEET MUX: consumer attached group=' \
 	    'SWEET BATT IRQ: waiting for mux registry match; no timer/status polling' \

@@ -1,0 +1,304 @@
+From: ios-mh2lm
+Subject: mh2lm: serialize key and battery SPMI transactions
+
+Use one thread-context controller lock for observer and RW commands.
+Serialize transport initialization and diagnose route configuration failures.
+Keep fail-closed IRQ behavior and the consumer registry lifecycle.
+
+diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -181,6 +181,7 @@
+ 	if (apid == KEYS_NO_APID) {
+ 		return false;
+ 	}
++	sweet_spmi_irq_lock();
+ 	uint32_t off = 0x80u * apid; /* obs + EE(0)*0x10000 */
+ 	uint32_t cmd = (1u << 27) | ((uint32_t)(addr & 0xffu) << 4);
+ 	__asm__ volatile("dmb oshst" ::: "memory");
+@@ -190,13 +191,16 @@
+ 		keys_last_status = keys_rd(keys_obs, off + 0x08u);
+ 		if (keys_last_status & 1u) {
+ 			if (keys_last_status & 0x0eu) {
++				sweet_spmi_irq_unlock();
+ 				return false;
+ 			}
+ 			*out = (uint8_t)keys_rd(keys_obs, off + 0x18u);
++			sweet_spmi_irq_unlock();
+ 			return true;
+ 		}
+ 		delay(1);
+ 	}
++	sweet_spmi_irq_unlock();
+ 	return false;
+ }
+ 
+@@ -354,6 +358,10 @@
+ 	if (!enabled) {
+ 		SWEET_LOG_INFO("SWEET KEYS: disabled (sweetkeys=0)\n");
+ 		sweet_keys_stop();
++		return false;
++	}
++	if (sweet_spmi_init() != 0) {
++		SWEET_LOG_ERROR("SWEET KEYS IRQ: shared SPMI transport unavailable; keys disabled\n");
+ 		return false;
+ 	}
+ 	keys_core = keys_map(KEYS_CORE_PA, 0x2000);
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -1,9 +1,9 @@
+ /*
+- * Battery-only adaptation of input/sweet_keys.c, observer EXT_READL.
+- * Observer API remains read only. Mux IRQ writes share its transaction lock.
++ * Battery observer EXT_READL and shared PMIC-arb transaction serialization.
++ * Observer API remains read only. Keys and mux IRQ writes share its lock.
+  * No charger configuration or PMIC write API is provided here.
+- * Init is serialized by the single built-in SweetBattery personality.
+- * Battery APIDs are disjoint from the existing keys' 008/4c1 APIDs.
++ * Initialization is serialized across battery and late board services.
++ * Disjoint APIDs do not exempt commands from controller serialization.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -136,7 +136,7 @@
+ void
+ sweet_spmi_irq_diag(void)
+ {
+-	if (!sp_ready) {
++	if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) {
+ 		printf("SWEET SPMI IRQ: skipped; arbiter is not ready\n");
+ 		return;
+ 	}
+@@ -159,7 +159,7 @@
+ 	const char *name, unsigned parts)
+ {
+ 	parts &= SWEET_SPMI_IRQ_DIAG_ROUTE_ALL;
+-	if (!sp_ready) {
++	if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) {
+ 		printf("SWEET SPMI IRQ: %s skipped; arbiter is not ready\n",
+ 		    name ? name : "source");
+ 		return;
+@@ -181,17 +181,37 @@
+ 	IOLockUnlock(sp_lock);
+ }
+ 
+-int
+-sweet_spmi_init(void)
++/* Allocate once without depending on which IOService starts first. Allocation
++ * happens outside the controller lock; losing candidates are freed. */
++static IOLock *
++sp_get_lock(void)
++{
++	IOLock *lock = __atomic_load_n(&sp_lock, __ATOMIC_ACQUIRE);
++	if (!lock) {
++		IOLock *candidate = IOLockAlloc();
++		if (!candidate) {
++			return NULL;
++		}
++		IOLock *expected = NULL;
++		if (__atomic_compare_exchange_n(&sp_lock, &expected, candidate, false,
++		    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++			lock = candidate;
++		} else {
++			IOLockFree(candidate);
++			lock = expected;
++		}
++	}
++	return lock;
++}
++
++/* Called with the shared lock held, including the attempted/ready checks. */
++static int
++sp_initialize(void)
+ {
+ 	if (sp_attempted) {
+ 		return sp_ready ? 0 : -1;
+ 	}
+ 	sp_attempted = true;
+-	sp_lock = IOLockAlloc();
+-	if (!sp_lock) {
+-		return -1;
+-	}
+ 	sp_core = ml_io_map(SP_CORE_PA, 0x2000);
+ 	sp_cfg = ml_io_map(SP_CFG_PA, 0x1000);
+ 	sp_obs = ml_io_map(SP_OBS_PA, 0x10000); /* EE 0, 512 * 0x80 */
+@@ -207,10 +227,23 @@
+ 		    arb_version, sp_count);
+ 		return -1;
+ 	}
+-	sp_ready = true;
++	__atomic_store_n(&sp_ready, true, __ATOMIC_RELEASE);
+ 	printf("SWEET BATTERY: SPMI arb=%#x APIDs=%u, observer reads only\n",
+ 	    arb_version, sp_count);
+ 	return 0;
++}
++
++int
++sweet_spmi_init(void)
++{
++	IOLock *lock = sp_get_lock();
++	if (!lock) {
++		return -1;
++	}
++	IOLockLock(lock);
++	int result = sp_initialize();
++	IOLockUnlock(lock);
++	return result;
+ }
+ 
+ void
+@@ -239,7 +272,7 @@
+ 	 * Read-only: this widens a predicate, it adds no write path, and the
+ 	 * timeout rule below (one lane poisoned for the boot) is untouched. */
+ 	unsigned peripheral = addr >> 8;
+-	if (!sp_ready || !out || sid > 15u || addr > 0xffffu ||
++	if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE) || !out || sid > 15u || addr > 0xffffu ||
+ 	    (!(sid == 2u && peripheral == 0x01u) &&
+ 	    peripheral != 0x10 && peripheral != 0x11 && peripheral != 0x12 &&
+ 	    peripheral != 0x13 && peripheral != 0x16 && peripheral != 0x40 &&
+diff --git a/bsd/dev/sweet_spmi.h b/bsd/dev/sweet_spmi.h
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -1,4 +1,4 @@
+-/* Shared C/C++ interface. Init once, on the SweetBattery start thread. */
++/* Shared C/C++ interface. Init is safe across late board/battery threads. */
+ #ifndef SWEET_BATTERY_SPMI_H
+ #define SWEET_BATTERY_SPMI_H
+ #include <stdint.h>
+@@ -11,8 +11,10 @@
+  * on guacamole) and addr selects the peripheral: only the DT-declared PM8150B
+  * blocks are routed, and every call is a single read. */
+ int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
+-/* Shared observer/RW transaction serialization for mux battery routes only.
++/* Controller-wide observer/RW transaction serialization for keys and battery.
+  * Init must have succeeded; acquire/release in thread context, never in IRQ.
++ * Cover command/data programming through completion and result extraction.
++ * Never call sweet_spmi_read while holding this lock; it locks internally.
+  * This does not authorize arbitrary PMIC writes. */
+ void sweet_spmi_irq_lock(void);
+ void sweet_spmi_irq_unlock(void);
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -148,8 +148,8 @@
+ 	return result;
+ }
+ 
+-/* Battery observer reads share the battery transport lock. Key lanes stay
+- * disjoint and retain the proven setup path. */
++/* Every controller transaction shares the transport lock, including keys.
++ * Battery's observer API locks internally; key reads retain their owned APID. */
+ bool
+ SweetSpmiInterruptMux::readPeripheral(const MuxRoute &route, unsigned reg, uint8_t *out)
+ {
+@@ -159,19 +159,26 @@
+ 	if (route.group != MUX_KEYS) {
+ 		return sweet_spmi_read(route.sid, (route.per << 8) | reg, out) == 0;
+ 	}
++	sweet_spmi_irq_lock();
+ 	vm_offset_t lane = obs + 0x80u * route.apid;
+ 	write32(lane, 0, (1u << 27) | ((reg & 0xffu) << 4));
+ 	for (unsigned i = 0; i < 1000; ++i) {
+ 		uint32_t status = read32(lane, 0x08u);
+ 		if (status & 1u) {
+ 			if (status & 0x0eu) {
++				sweet_spmi_irq_unlock();
++				SWEET_LOG_WARN("SWEET MUX: observer error route=%s reg=%#x status=%#x\n",
++				    route.name, reg, status);
+ 				return false;
+ 			}
+ 			*out = (uint8_t)read32(lane, 0x18u);
++			sweet_spmi_irq_unlock();
+ 			return true;
+ 		}
+ 		delay(1);
+ 	}
++	sweet_spmi_irq_unlock();
++	SWEET_LOG_ERROR("SWEET MUX: observer timeout route=%s reg=%#x\n", route.name, reg);
+ 	return false;
+ }
+ 
+@@ -189,30 +196,30 @@
+ 	    (bytes == 2 && reg != 0x14u))) {
+ 		return false;
+ 	}
+-	if (shared) {
+-		sweet_spmi_irq_lock();
+-	}
++	sweet_spmi_irq_lock();
+ 	write32(route.channel, 0x10u, data);
+ 	write32(route.channel, 0x00u, ((reg & 0xffu) << 4) | (bytes - 1u));
+ 	for (unsigned i = 0; i < 1000; ++i) {
+ 		uint32_t status = read32(route.channel, 0x08u);
+ 		if (status & 1u) {
+-			if (shared) {
+-				sweet_spmi_irq_unlock();
++			sweet_spmi_irq_unlock();
++			if (status & 0x0eu) {
++				SWEET_LOG_WARN("SWEET MUX: write error route=%s reg=%#x data=%#x status=%#x\n",
++				    route.name, reg, data, status);
+ 			}
+ 			return (status & 0x0eu) == 0;
+ 		}
+ 		delay(1);
+ 	}
+-	if (shared) {
+-		/* A timed-out RW command can complete late. Never reuse that APID. */
+-		for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+-			if (routes[i].group != MUX_KEYS && routes[i].apid == route.apid) {
+-				routes[i].writePoisoned = true;
+-			}
+-		}
+-		sweet_spmi_irq_unlock();
+-	}
++	/* A timed-out RW command can complete late. Never reuse that APID,
++	 * including the power/volume-down pair which shares a key lane. */
++	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
++		if (routes[i].apid == route.apid) {
++			routes[i].writePoisoned = true;
++		}
++	}
++	sweet_spmi_irq_unlock();
++	SWEET_LOG_ERROR("SWEET MUX: write timeout route=%s reg=%#x; APID poisoned\n", route.name, reg);
+ 	return false;
+ }
+ 
+@@ -409,15 +416,18 @@
+ 		return false; /* LATCHED_CLR + EN_SET in one v5 transaction */
+ 	}
+ 	uint8_t gotType = 0, gotHigh = 0, gotLow = 0, gotEnable = 0;
+-	if (!readPeripheral(route, 0x11u, &gotType) ||
+-	    !readPeripheral(route, 0x12u, &gotHigh) ||
+-	    !readPeripheral(route, 0x13u, &gotLow) ||
+-	    !readPeripheral(route, 0x15u, &gotEnable) ||
++	bool typeOk = readPeripheral(route, 0x11u, &gotType);
++	bool highOk = readPeripheral(route, 0x12u, &gotHigh);
++	bool lowOk = readPeripheral(route, 0x13u, &gotLow);
++	bool enableOk = readPeripheral(route, 0x15u, &gotEnable);
++	uint32_t access = read32(route.channel, 0x100u);
++	if (!typeOk || !highOk || !lowOk || !enableOk ||
+ 	    (gotType & mask) == 0 || (gotLow & mask) != (wantLow & mask) ||
+ 	    (gotHigh & mask) != (wantHigh & mask) || (gotEnable & mask) == 0 ||
+-	    (read32(route.channel, 0x100u) & 1u) == 0) {
+-		SWEET_LOG_ERROR("SWEET MUX: %s peripheral/channel readback failed type=%#x high=%#x low=%#x enable=%#x\n",
+-		    route.name, gotType, gotHigh, gotLow, gotEnable);
++	    (access & 1u) == 0) {
++		SWEET_LOG_ERROR("SWEET MUX: %s peripheral/channel readback failed type=%#x high=%#x low=%#x enable=%#x expected=%#x/%#x/%#x mask=%#x access=%#x reads=%u/%u/%u/%u\n",
++		    route.name, gotType, gotHigh, gotLow, gotEnable, type | mask,
++		    wantHigh, wantLow, mask, access, typeOk, highOk, lowOk, enableOk);
+ 		return false;
+ 	}
+ 	SWEET_LOG_DEBUG("SWEET MUX: route %s sid=%u per=%#x apid=%u bit=%u cfg=%#x/%#x/%#x old-enable=%#x\n",
+@@ -548,6 +558,11 @@
+ int
+ SweetSpmiInterruptMux::initializeHardware(void)
+ {
++	if (sweet_spmi_init() != 0) {
++		SWEET_LOG_ERROR("SWEET MUX: shared SPMI transport unavailable\n");
++		return -1;
++	}
++	SWEET_LOG_INFO("SWEET MUX: controller transactions serialized across keys and battery\n");
+ 	workLoop = IOWorkLoop::workLoop();
+ 	if (!workLoop) {
+ 		return -1;

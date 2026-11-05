@@ -1,5 +1,10 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
+**当前阻塞：** 0118 keys+USBIN 组合档中按键 group0 因 volume-up 配置读回失败
+没有接入，电池 group1 仍正常。0146 补共享 SPMI 事务锁和诊断，本地验证通过，
+待新构建直接复测组合档；不重跑已跳过的 no-keys 阶段。详见
+[`SPMI-TRANSACTIONS.md`](SPMI-TRANSACTIONS.md)。Framebuffer 仍排在 IRQ 验收之后。
+
 **当前补充 0145：** 按用户要求，先完成 consumer 匹配通知、公开 C++ attach/
 detach 和 terminated 清理，移除全局单例桥接。本地实现/验证完成；0118 原生
 构建已核对，baseline 的新 registry 接入、三键/触摸/ACM 已有实机证据；

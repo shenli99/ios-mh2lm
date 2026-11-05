@@ -1,5 +1,10 @@
 # PMIC mux consumer：匹配通知与终止清理
 
+**最新：0118组合档按键接入失败，0146 已补统一 SPMI 事务串行化和诊断，
+待新原生构建/实机。** 实际 `sweetkeys=1`；电池先 attach 后，volume-up 的
+SET_TYPE 读回校验失败，group0 回滚，group1 继续工作。已确认故障、并发缺口及
+修正边界见 [`SPMI-TRANSACTIONS.md`](SPMI-TRANSACTIONS.md)。以下为0145架构和阶段证据。
+
 2026-11-05，新增补丁 `0145-mh2lm-mux-consumer-matching.patch`，基于已核对的
 0117 最终源码。实现与本地验证完成；0118 原生云端内核及 buildtree 已核对，
 包含 0145 和后续退出告警，三档 boot 已生成。0118 baseline 日志已确认

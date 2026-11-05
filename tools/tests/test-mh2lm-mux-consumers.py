@@ -145,6 +145,20 @@ static void registryTerminated(IOService *s) {
 # IOService is referenced by the notification callback typedef.
 registry=registry.replace('struct IONotifier;', 'struct IOService;\nstruct IONotifier;',1)
 prelude=prelude[:a]+registry+prelude[b:]
+if 'controller transactions serialized across keys and battery' in mux:
+    prelude=prelude.replace('static unsigned lockDepth, lockedWrites, failReadPer, timeoutApid;',
+        'static thread_local unsigned lockDepth; static unsigned lockedWrites, failReadPer, timeoutApid;\nstatic std::mutex controllerLock;')
+    prelude=prelude.replace('extern "C" void sweet_spmi_irq_lock() { assert(lockDepth++ == 0); }',
+        'extern "C" int sweet_spmi_init() { return 0; }\nextern "C" void sweet_spmi_irq_lock() { controllerLock.lock(); assert(lockDepth++ == 0); }')
+    prelude=prelude.replace('extern "C" void sweet_spmi_irq_unlock() { assert(--lockDepth == 0); }',
+        'extern "C" void sweet_spmi_irq_unlock() { assert(--lockDepth == 0); controllerLock.unlock(); }')
+    prelude=prelude.replace('if (reg==0 && ppids.count(apid)) {',
+        'if (reg==0 && ppids.count(apid)) {\n            assert(lockDepth==1); // key RW commands must use the same lock too')
+    prelude=prelude.replace('unsigned apid=(a-obs)/0x80, byte=(value>>4)&255;',
+        'assert(lockDepth==1); // key observer command through final data read\n        unsigned apid=(a-obs)/0x80, byte=(value>>4)&255;')
+prelude=prelude.replace('static bool dropPdcEnable;', 'static bool dropPdcEnable, dropKeyTypeWrite;')
+prelude=prelude.replace('else pmic[address]=dataByte;',
+    'else if (dropKeyTypeWrite && apid==261 && byte+i==0x11) { dropKeyTypeWrite=false; }\n                else pmic[address]=dataByte;')
 prelude=prelude.replace('#define SWEET_LOG_WARN(...) ((void)0)', r'''
 static std::atomic<unsigned> boundShutdownWarnings{0};
 template<typename... Args> static void testWarn(const char *format, Args...) {
@@ -290,6 +304,19 @@ int main(int argc,char **argv) {
         platform.children.back()->terminate(2);pump();
         assert(!backendRunning && !testInstance->bindings[0].notify);
         endProvider();assert(!boundShutdownWarnings);assertNoLeaks();
+    } else if (!std::strcmp(mode,"key-type-mismatch")) {
+        SweetBattery b;startBattery(b);assert(startMux()==0);pump();assert(b.fIrqAttached);
+        // Model this phone's exact symptom: successful command status but
+        // SET_TYPE remains 0x42 instead of 0x43. Never accept a wrong edge.
+        pmic[(0x0c5<<8)|0x11]=0x42;dropKeyTypeWrite=true;
+        sweet_keys_init();pump();
+        assert(!backendRunning && !backendStarts && !testInstance->bindings[0].notify);
+        assert(pmic[(0x0c5<<8)|0x11]==0x42);
+        assert(testInstance->bindings[1].notify && b.healthy);
+        inject(269,0x10);pump();assert(b.fIrqSamples==1 && !b.fIrqFailed);
+        cleanupBattery(b);endProvider();
+        while (!platform.children.empty()) platform.children.back()->terminate(2);
+        assertNoLeaks();
     }
     else if (!std::strcmp(mode,"cancel-before-match")) {
         SweetBattery b;startBattery(b);pump();cleanupBattery(b);assert(startMux()==0);pump();
@@ -391,6 +418,7 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-mux-consumers-') as d:
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-O1','-g','-pthread',
                     '-fsanitize=address,undefined',str(src),'-o',str(binary)],check=True)
     scenarios=['early','late','cancel-before-match','term-before-attach','term-after-attach',
+               'key-type-mismatch',
                'term-before-provider-stop','provider-stop-with-consumers','owner-stop-before-provider',
                'notifier-fail-first','notifier-fail-second','attach-fail','keys','keys-worker-fail',
                'parallel','identity','notifier-stop-race','provider-stop-race','client-event-fail',
