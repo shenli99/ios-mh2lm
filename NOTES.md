@@ -2,6 +2,27 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0145 teardown audit follow-up: `ee92128`; ready for USER PUSH, no push.**
+Reviewed outside advice against XNU IOService::terminatePhase1 and notifier
+remove: terminated is phase-1 inactive notification, can precede stop; removing
+a notifier waits/removes/releases it and does NOT generate service termination.
+Current notification callback only marks/queues, never dereferences/calls mux
+or releases the retained provider before synchronized detach. Consumer loop
+may detach an inactive/stopped mux by explicit teardown contract; gate/MMIO
+survive to free. Keys normal shutdown stops connection delivery, removes
+notifiers, drains/detaches/releases mux, then requests worker exit; worker
+releases pressed HID before publishing completion, owner waits then unmaps.
+No cleanup-order change was necessary. Added per-bound-group WARN at gated
+mux shutdown before revocation/clearing; no empty assertion at entry because
+registry consumers aren't mux IOService children and cleanup is asynchronous.
+Three extra host scenarios pass: notification/consumer cleanup before provider
+stop, provider stop before consumer cleanup (two WARNs), key owner stop before
+provider (no WARN). Registry suite/40 races, seven ARM64 objects, strict full
+0142->0145 replay, syntax/diff checks pass. Logs in mux-consumers-0117/
+termination-audit-{tests,compile}.txt. Docs/MUX-CONSUMERS.md records exact order.
+Only diagnostics/comments/tests/docs changed this follow-up; CI unchanged.
+Native build/phone still pending; same new baseline/no-keys/usbin sequence.
+
 **CURRENT:0145 registry consumers + terminated cleanup implemented locally.**
 Implementation/tests/docs committed as `6a2a552`; final strict full-chain replay,
 seven ARM64 objects, registry/key lifecycle suites and source/syntax gates pass.
