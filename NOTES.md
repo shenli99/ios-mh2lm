@@ -2,6 +2,36 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0118 no-keys LIVE: real independent USBIN IRQ observed; get persistent before acceptance.**
+logs/live-0118-board-startup-no-keys.txt SHA256
+`e93062b23cbfd0b8e0d61cce866e207da3d5b903f87583030a2b56c923f12e69`.
+220798 bytes,2 NUL in an AKS prefix. Bootargs at13/148 confirm keys0,
+real gauge, batteryIRQ2, ACM2/vbus1. Capture starts in launchd: no BOARD/mux
+registry/group1 attach/armed/arm-sync or keys-disabled startup lines. No runtime
+key HID/group0. At2913-2918 battery-usbin status0x10 irq1 -> observer usb0x26,
+external0/capable0,69%,3996mV -> updateStatus -> notifications1/samples1,
+healthy1. At2967-2971 irq2 -> observer usb0x10 external1/capable1,69%,3921mV
+-> updateStatus notifications2/samples2 healthy1. Recorded consumer notify-
+to-publish7.393/7.434ms, NOT physical cable-to-UI latency. charging0 in both;
+this establishes cable sensing/event-driven publication, not actual charging.
+First successful real USBIN delivery evidence with keys disabled; no claim
+yet of full battery IRQ/charging/MSOC acceptance.
+
+Important live replay: lines2914-2981 equal2982-3049 (EXACT68-line block,
+same battery samples, IRQ1/2 and timing, same USB counter768). Also adjacent
+duplicate irq1 at2913/2914. Count only TWO unique IRQ observations, not5 route
+lines or4 refresh lines. Re-enumeration/ACM reconfiguration present; cannot
+infer kernel restart or four cable edges from replay. No unique irq3/4 in
+capture, so requested two full unplug/replug cycles not established. No scoped
+driver ERROR/FAILED/stop/storm/timeout or panic signature. USB has existing
+ep0/ep5 cmd6/status1 WARNs, last counter1024/empty0/TX546/550 err0, not proof
+of lossless logging. Raw analysis scratch/artifact-0118/no-keys-live-analysis.json.
+NEXT USER: extract sweetlog-0118-board-startup-no-keys.bin from THIS SAME boot
+using existing procedure; no need repeat test/reflash yet. Need startup
+registry/group1/USBIN arm, no group0, and unique subsequent route/refresh
+records to distinguish live capture loss/replay from absent second IRQ cycle.
+Inspect before combined usbin. No code change/rebuild/push/device action.
+
 **0118 supplemental power sleep/wake PASS; NEXT no-keys USBIN profile.**
 User reports screen can turn off; logs/live-0118-board-startup-wak.txt (exact
 filename without final e) SHA256
