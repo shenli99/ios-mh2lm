@@ -613,7 +613,7 @@ diff --git a/iokit/Kernel/arm/SweetPmicKeys.cpp b/iokit/Kernel/arm/SweetPmicKeys
 new file mode 100644
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetPmicKeys.cpp
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,161 @@
 +/* Late board nub -> keys IOService -> registry-discovered PMIC mux.
 + * The C backend retains only observer/HID/worker state, never a mux pointer. */
 +#if defined(ARM64_BOARD_CONFIG_MH2LM)
@@ -709,6 +709,10 @@ new file mode 100644
 +void
 +SweetPmicKeys::shutdown(void)
 +{
++	/* Detach first: stop blocks owner dispatch, removes/synchronizes registry
++	 * notifications, and drains mux callbacks before releasing the provider.
++	 * Only then stop/join the worker (which emits final HID key-up), and unmap
++	 * this backend's MMIO. These mappings are separate from the mux's own. */
 +	if (connection) {
 +		connection->stop(); /* synchronize matching, detach, and drain loop */
 +	}
@@ -1171,8 +1175,19 @@ diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/Sweet
  	return true;
  }
  
-@@ -1047,13 +883,12 @@
+@@ -1045,15 +881,23 @@
+ 	}
+ 	self->stopping = true;
  	self->disconnectIRQ();
++	/* Registry watchers are not IOService children. Their queued detach may
++	 * follow willTerminate/stop, so diagnose and revoke instead of asserting
++	 * an empty table here. Workloop/MMIO live until the last retain is gone. */
++	for (unsigned i = 0; i < MUX_GROUPS; ++i) {
++		if (self->bindings[i].consumer || self->bindings[i].notify || self->bindings[i].context) {
++			SWEET_LOG_WARN("SWEET MUX: shutdown revoking attached consumer group=%u events=%#x\n",
++			    i, self->bindings[i].events);
++		}
++	}
  	if (self->hardwareTouched) {
  		self->disableHardware();
 -	} else {
@@ -1186,7 +1201,7 @@ diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/Sweet
  		self->bindings[i].notify = NULL;
  		self->bindings[i].context = NULL;
  		self->bindings[i].events = 0;
-@@ -1098,18 +933,19 @@
+@@ -1098,18 +942,19 @@
  			(void)workLoop->runAction(stopAction, this);
  		} else {
  			disconnectIRQ();
@@ -1216,7 +1231,7 @@ diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/Sweet
  }
  
  void
-@@ -1155,54 +991,6 @@
+@@ -1155,54 +1000,6 @@
  	IOService::free();
  }
  
@@ -1271,7 +1286,7 @@ diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/Sweet
  extern "C" bool
  sweet_spmi_mux_irq(unsigned int intid)
  {
-@@ -1223,43 +1011,36 @@
+@@ -1223,43 +1020,36 @@
  extern "C" int
  sweet_spmi_mux_start(void)
  {
@@ -1331,7 +1346,7 @@ diff --git a/iokit/Kernel/arm/SweetSpmiMuxClient.cpp b/iokit/Kernel/arm/SweetSpm
 new file mode 100644
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,236 @@
 +/* Registry discovery and termination synchronization shared by PMIC consumers.
 + * There is one of these objects per consumer, with no global service pointer. */
 +#if defined(ARM64_BOARD_CONFIG_MH2LM)
@@ -1418,6 +1433,9 @@ new file mode 100644
 +bool
 +SweetSpmiMuxClient::serviceTerminated(void *target, void *, IOService *service, IONotifier *)
 +{
++	/* This is phase-1 inactive notification, not proof that mux stop ran.
++	 * Never call the mux or release our provider reference here. Queue the
++	 * consumer loop, which synchronizes detach before releasing that reference. */
 +	SweetSpmiMuxClient *self = (SweetSpmiMuxClient *)target;
 +	IOLockLock(self->lock);
 +	if (!self->stopping && self->provider == service) {
@@ -1500,6 +1518,8 @@ new file mode 100644
 +	IOLockUnlock(lock);
 +	if (mux) {
 +		if (attached) {
++			/* Inactive does not invalidate this retained object: the mux keeps
++			 * its gate/MMIO through free and accepts detach after stop too. */
 +			mux->detachConsumer(owner, group, this); /* synchronizes routeNotify */
 +		}
 +		mux->release();

@@ -145,6 +145,13 @@ static void registryTerminated(IOService *s) {
 # IOService is referenced by the notification callback typedef.
 registry=registry.replace('struct IONotifier;', 'struct IOService;\nstruct IONotifier;',1)
 prelude=prelude[:a]+registry+prelude[b:]
+prelude=prelude.replace('#define SWEET_LOG_WARN(...) ((void)0)', r'''
+static std::atomic<unsigned> boundShutdownWarnings{0};
+template<typename... Args> static void testWarn(const char *format, Args...) {
+    if (std::strstr(format, "shutdown revoking attached consumer group=")) ++boundShutdownWarnings;
+}
+#define SWEET_LOG_WARN(...) testWarn(__VA_ARGS__)
+''')
 
 startup_adapter=startup_adapter.replace('class SweetBattery : public OSObject','class SweetBattery : public IOService')
 startup_adapter=startup_adapter.replace('fMuxWatching=false','fTimerAdded=true')
@@ -254,6 +261,36 @@ static void ownerCleanup(const char *mode) {
 int main(int argc,char **argv) {
     assert(argc>1);const char *mode=argv[1];initialize();
     if (!std::strcmp(mode,"early") || !std::strcmp(mode,"late")) ownerCleanup(mode);
+    else if (!std::strcmp(mode,"term-before-provider-stop")) {
+        SweetBattery b;startBattery(b);assert(startMux()==0);sweet_keys_init();pump();
+        auto *mux=testInstance;mux->retain();
+        assert(b.fIrqAttached && backendRunning && mux->bindings[0].notify && mux->bindings[1].notify);
+        // Native phase 1 can notify inactive before provider willTerminate/stop.
+        // The notification itself must only queue, retaining both bindings.
+        mux->inactive=true;registryTerminated(mux);
+        assert(mux->bindings[0].notify && mux->bindings[1].notify && backendRunning);
+        pump();assert(!mux->bindings[0].notify && !mux->bindings[1].notify);
+        assert(b.fIrqFailed && !backendRunning && !boundShutdownWarnings);
+        cleanupBattery(b);endProvider();
+        while (!platform.children.empty()) platform.children.back()->terminate(2);
+        mux->release();assert(!boundShutdownWarnings);assertNoLeaks();
+    } else if (!std::strcmp(mode,"provider-stop-with-consumers")) {
+        SweetBattery b;startBattery(b);assert(startMux()==0);sweet_keys_init();pump();
+        auto *mux=testInstance;mux->retain();
+        // Opposite scheduling: provider stops before consumer loops can detach.
+        endProvider();assert(boundShutdownWarnings==2);
+        assert(!mux->bindings[0].consumer && !mux->bindings[0].notify && !mux->bindings[0].context);
+        assert(!mux->bindings[1].consumer && !mux->bindings[1].notify && !mux->bindings[1].context);
+        assert(b.fIrqFailed && !backendRunning);
+        cleanupBattery(b);
+        while (!platform.children.empty()) platform.children.back()->terminate(2);
+        mux->release();assertNoLeaks();
+    } else if (!std::strcmp(mode,"owner-stop-before-provider")) {
+        assert(startMux()==0);sweet_keys_init();pump();assert(backendRunning);
+        platform.children.back()->terminate(2);pump();
+        assert(!backendRunning && !testInstance->bindings[0].notify);
+        endProvider();assert(!boundShutdownWarnings);assertNoLeaks();
+    }
     else if (!std::strcmp(mode,"cancel-before-match")) {
         SweetBattery b;startBattery(b);pump();cleanupBattery(b);assert(startMux()==0);pump();
         assert(!testInstance->bindings[1].notify && b.reads==1);endProvider();assertNoLeaks();
@@ -354,6 +391,7 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-mux-consumers-') as d:
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-O1','-g','-pthread',
                     '-fsanitize=address,undefined',str(src),'-o',str(binary)],check=True)
     scenarios=['early','late','cancel-before-match','term-before-attach','term-after-attach',
+               'term-before-provider-stop','provider-stop-with-consumers','owner-stop-before-provider',
                'notifier-fail-first','notifier-fail-second','attach-fail','keys','keys-worker-fail',
                'parallel','identity','notifier-stop-race','provider-stop-race','client-event-fail',
                'mux-fail-missing','mux-fail-init','mux-fail-loop','mux-fail-event','mux-fail-map',

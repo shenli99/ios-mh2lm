@@ -105,6 +105,39 @@ consumer gate → mux gate；没有反向等待。IRQ 自身仍只短暂持 GIC 
 可释放映射使用 `ml_io_map_unmappable(..., VM_WIMG_IO)`；解除包含页偏移的完整
 16K 范围，特别是 cfg 的 `0x2000` 偏移。临时 PDC/GIC 诊断映射读完即释放。
 
+### 对退出顺序的补充核对
+
+本项目 XNU 的 `IOService::terminatePhase1()` 先标记 inactive，再投递
+`gIOTerminatedNotification`；不能用该通知推断 mux 的 `stop()` 已经完成。
+`_IOServiceNotifier::remove()` 是停用订阅、等待正在执行的回调并释放 notifier，
+不会触发 service terminated。因此通知回调本身只标记/排队，不调用 mux 方法、
+不读 mux 成员，也不提前释放尚有绑定的 provider 引用。
+
+后续 consumer workloop 在持有引用期间执行 `detachConsumer()`，再释放 mux。
+这是本接口明确允许的 teardown 操作：inactive/已 stop 的 mux 仍保留 gate 和
+映射直到 `free()`；detach 由同一个 gate 与正在执行的 callback/stop 串行。
+这项约定不表示可以任意调用已经 inactive 的 IOKit 服务方法。
+
+按键 owner 正常退出的准确顺序是：
+
+1. 连接在锁内标记 stopping，阻止后续匹配和 owner 事件投递。
+2. 同步移除两个 notifier。
+3. 在 consumer gate 上 detach，等待 mux 回调结束，释放持有的 mux 引用，
+   禁用并移除连接软件事件源；已在执行的 owner 动作也已完成。
+4. 设置后端退出原子标志并唤醒 worker；worker 补发仍按下键的 HID key-up，
+   然后发布完成。owner 等待此完成，再解除后端 MMIO。
+5. `IOService::stop()`。
+
+这里先断开 IRQ 路由，再停止采样线程。补 key-up 在 worker 发布完成之前，
+其按键状态是 worker 的局部数据。mux 与按键后端各自拥有独立映射，且解绑时
+callback context/事件源仍有效；不存在先 unmap、后允许 mux 调用 consumer 的窗口。
+
+当前 consumer 通过 registry 持有 mux，并非 mux 的 IOService 子节点，IOKit
+不会自动保证它们在 mux stop 前全部 detach。mux 的 gated shutdown 会对仍有
+绑定的每个 group 输出 WARN，然后撤回回调并清空身份/context；不能在入口直接
+assert 表为空。此告警用于观察未主动解绑的绑定，也可能来自合法的异步退出时序，
+本身不证明引用泄漏。对象/notifier/MMIO 计数测试另行检查释放平衡。
+
 ## 验证与下一轮
 
 - 精确 0117 + 0145 严格重放；最终源码与编译输入逐字节比较。
@@ -115,6 +148,9 @@ consumer gate → mux gate；没有反向等待。IRQ 自身仍只短暂持 GIC 
   方法的 registry 测试；对旧树保留原回归。覆盖先/后匹配、取消、attach 前后
   terminated、notifier/IES/启动失败、身份校验、并行 consumer，以及原有 APID/
   rollback/600 IRQ/storm/timeout；另跑 40 次通知/IRQ/退出竞争。
+- 退出顺序复核增加三项：terminated 先于 provider stop 且 consumer 先处理、
+  provider stop 先于 consumer 处理，以及按键 owner 先退出。检查通知回调只排队、
+  两个绑定撤回及 WARN、正常先 detach 无 WARN，并保持引用/映射平衡。
 - `test-mh2lm-key-lifecycle.py` 运行实际 C worker/start/stop（替换 MMIO/线程原语），
   验证 IRQ 唤醒、按下键释放、读取中退出等待、线程/三处映射分配失败、诊断映射
   回收；另跑 20 次读取/退出竞争。ASAN/UBSAN 与显式对象/映射/notifier 计数通过。
