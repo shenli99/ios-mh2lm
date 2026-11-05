@@ -61,3 +61,13 @@ USB/触摸实现及充电/SOC 策略均保持。共享底层事务锁不是全�
 组合档（三键/触摸与USB拔插并行、息屏/唤醒）。baseline 可留作异常对照，不要求
 重跑用户已跳过的 no-keys 阶段。出现 readback 失败时用新诊断细分原因。
 0146 尚无原生构建/实机结果，现有0118镜像不含修正。
+
+## 0147：避免在匹配通知或 start 中做按键准备
+
+后续采用 consumer 自己的 workloop 准备，不增加 mux 的整段初始化队列。
+matched/terminated 回调仍只 retain/标记/排队；按键 `sweet_keys_prepare()`
+从同步 `start()` 移到匹配后的 consumer loop，先准备、再经 mux gate attach、
+成功后发 READY。准备期间退出会在返回后被复查，禁止再接入。
+电池早期真实采样保留；所有相关 SPMI 事务继续由0146统一加锁。
+准确顺序、资源归属与验证见 [`MUX-CONSUMERS.md`](MUX-CONSUMERS.md)。
+0146和0147可合入同一轮云编译，直接复测 keys+USBIN；现有0118均不含这两项。

@@ -1,0 +1,138 @@
+From: ios-mh2lm
+Subject: mh2lm: prepare key consumer on its own workloop after registry match
+
+Keep matching callbacks lightweight. Run optional consumer preparation
+on the owner loop before serialized route attach and READY publication.
+
+diff --git a/bsd/dev/sweet_spmi_mux_client.h b/bsd/dev/sweet_spmi_mux_client.h
+--- a/bsd/dev/sweet_spmi_mux_client.h
++++ b/bsd/dev/sweet_spmi_mux_client.h
+@@ -7,11 +7,16 @@
+ #include "sweet_spmi_mux.h"
+ #include <IOKit/IOLocks.h>
+ #include <IOKit/IONotifier.h>
++/* Optional owner preparation. Runs on the consumer loop after a live provider
++ * match, before attach/READY; never in registry notification or mux context.
++ * Owner retains partial-resource cleanup responsibility until stop returns. */
++typedef bool (*SweetMuxPrepare)(void *context);
+ class SweetSpmiMuxClient : public OSObject {
+ 	OSDeclareDefaultStructors(SweetSpmiMuxClient);
+ public:
+ 	static SweetSpmiMuxClient *withOwner(IOService *owner, IOWorkLoop *loop,
+-	    unsigned group, unsigned events, SweetMuxNotify notify, void *context);
++	    unsigned group, unsigned events, SweetMuxNotify notify, void *context,
++	    SweetMuxPrepare prepare = NULL);
+ 	void detach(void); /* consumer-loop action: terminal, no automatic rebind */
+ 	void stop(void);   /* remove notifiers synchronously, then detach/drain */
+ 	void free(void) APPLE_KEXT_OVERRIDE;
+@@ -23,6 +28,7 @@
+ 	IONotifier *matched = NULL, *terminated = NULL;
+ 	SweetSpmiInterruptMux *provider = NULL; /* retained until gated detach */
+ 	SweetMuxNotify notify = NULL;
++	SweetMuxPrepare prepare = NULL;
+ 	void *context = NULL;
+ 	unsigned group = 0, events = 0;
+ 	volatile unsigned pending = 0;
+diff --git a/iokit/Kernel/arm/SweetPmicKeys.cpp b/iokit/Kernel/arm/SweetPmicKeys.cpp
+--- a/iokit/Kernel/arm/SweetPmicKeys.cpp
++++ b/iokit/Kernel/arm/SweetPmicKeys.cpp
+@@ -25,6 +25,7 @@
+ 	IOWorkLoop *loop = NULL;
+ 	SweetSpmiMuxClient *connection = NULL;
+ 	bool backendPrepared = false;
++	static bool prepareBackend(void *);
+ 	static void muxEvent(void *, unsigned);
+ 	static IOReturn subscribeAction(OSObject *, void *, void *, void *, void *);
+ 	void shutdown(void);
+@@ -61,14 +62,13 @@
+ 	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
+-	backendPrepared = sweet_keys_prepare();
+-	if (backendPrepared) {
+-		loop = IOWorkLoop::workLoop();
+-		/* Hold the loop gate across installation and pointer publication: an
+-		 * immediate existing-service replay must not observe connection=NULL. */
+-		if (loop) {
+-			(void)loop->runAction(subscribeAction, this);
+-		}
++	setProperty("SweetKeysIRQHealthy", false);
++	loop = IOWorkLoop::workLoop();
++	/* Hold the loop gate across installation and pointer publication: an
++	 * immediate existing-service replay must not observe connection=NULL.
++	 * Preparation runs later via the software event on this owner's loop. */
++	if (loop) {
++		(void)loop->runAction(subscribeAction, this);
+ 	}
+ 	if (!connection) {
+ 		shutdown();
+@@ -81,12 +81,21 @@
+ 	return true;
+ }
+ 
++bool
++SweetPmicKeys::prepareBackend(void *context)
++{
++	SweetPmicKeys *self = (SweetPmicKeys *)context;
++	SWEET_LOG_INFO("SWEET KEYS IRQ: preparing backend on consumer workloop before attach\n");
++	self->backendPrepared = sweet_keys_prepare();
++	return self->backendPrepared;
++}
++
+ IOReturn
+ SweetPmicKeys::subscribeAction(OSObject *owner, void *, void *, void *, void *)
+ {
+ 	SweetPmicKeys *self = OSDynamicCast(SweetPmicKeys, owner);
+ 	self->connection = SweetSpmiMuxClient::withOwner(self, self->loop,
+-	    SWEET_MUX_KEYS, SWEET_KEYS_IRQ_ALL, muxEvent, self);
++	    SWEET_MUX_KEYS, SWEET_KEYS_IRQ_ALL, muxEvent, self, prepareBackend);
+ 	return self->connection ? kIOReturnSuccess : kIOReturnNoMemory;
+ }
+ 
+diff --git a/iokit/Kernel/arm/SweetSpmiMuxClient.cpp b/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
+--- a/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
++++ b/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
+@@ -9,7 +9,8 @@
+ 
+ SweetSpmiMuxClient *
+ SweetSpmiMuxClient::withOwner(IOService *owner, IOWorkLoop *loop,
+-    unsigned group, unsigned events, SweetMuxNotify notify, void *context)
++    unsigned group, unsigned events, SweetMuxNotify notify, void *context,
++    SweetMuxPrepare prepare)
+ {
+ 	if (!owner || !loop || !notify || !context) {
+ 		return NULL;
+@@ -28,6 +29,7 @@
+ 	self->group = group;
+ 	self->events = events;
+ 	self->notify = notify;
++	self->prepare = prepare;
+ 	self->context = context;
+ 	self->lock = IOLockAlloc();
+ 	self->event = IOInterruptEventSource::interruptEventSource(self, eventAction, NULL, 0);
+@@ -134,6 +136,25 @@
+ 		return;
+ 	}
+ 	if (!attached) {
++		/* Owner-specific reads/maps/calibration belong here, outside registry
++		 * notification locks and before enabling this consumer's routes.
++		 * SPMI work uses the transport's controller-wide transaction lock. */
++		if (prepare && !prepare(context)) {
++			SWEET_LOG_ERROR("SWEET MUX CLIENT: consumer preparation failed group=%u\n", group);
++			closeBinding();
++			notify(context, SWEET_MUX_FAILED);
++			return;
++		}
++		/* Provider or owner termination may have happened during preparation.
++		 * Keep callbacks/resources alive but do not attach a disappearing owner. */
++		IOLockLock(lock);
++		gone = stopping || providerGone;
++		IOLockUnlock(lock);
++		if (gone || mux->isInactive() || owner->isInactive()) {
++			closeBinding();
++			notify(context, SWEET_MUX_FAILED);
++			return;
++		}
+ 		IOReturn result = mux->attachConsumer(owner, group, events, routeNotify, this);
+ 		if (result != kIOReturnSuccess) {
+ 			SWEET_LOG_ERROR("SWEET MUX CLIENT: attachConsumer failed group=%u result=%#x\n", group, result);

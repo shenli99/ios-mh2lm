@@ -179,11 +179,21 @@ adapters=r'''
 static SweetSpmiInterruptMux *testInstance;
 static bool testDriverInitFail;
 static bool hasIrqOwner() { return irqService!=nullptr; }
-static unsigned backendStarts,backendStops,backendEvents;
+static unsigned backendPrepares,backendStarts,backendStops,backendEvents;
+static bool holdPrepare;
+static std::atomic<bool> prepareEntered{false},prepareProceed{false};
 static bool backendPrepare=true,backendStart=true,backendRunning=false;
 static bool PE_parse_boot_argn(const char *,void *,size_t) { return false; }
-extern "C" bool sweet_keys_prepare() { return backendPrepare; }
-extern "C" bool sweet_keys_start() { ++backendStarts;backendRunning=backendStart;return backendStart; }
+extern "C" bool sweet_keys_prepare() {
+    ++backendPrepares;
+    assert(!testInstance->bindings[0].notify && !backendStarts);
+    if (holdPrepare) {
+        prepareEntered=true;
+        while (!prepareProceed.load()) std::this_thread::yield();
+    }
+    return backendPrepare;
+}
+extern "C" bool sweet_keys_start() { assert(backendPrepares==1 && testInstance->bindings[0].notify); ++backendStarts;backendRunning=backendStart;return backendStart; }
 extern "C" void sweet_keys_stop() { ++backendStops;backendRunning=false; }
 extern "C" void sweet_keys_event(unsigned) { assert(backendRunning); ++backendEvents; }
 '''
@@ -359,7 +369,8 @@ int main(int argc,char **argv) {
         cleanupBattery(b);assertNoLeaks();
     } else if (!std::strcmp(mode,"keys") || !std::strcmp(mode,"keys-worker-fail")) {
         assert(startMux()==0);backendStart=std::strcmp(mode,"keys-worker-fail")!=0;
-        sweet_keys_init();pump();assert(backendStarts==1);
+        sweet_keys_init();assert(!backendPrepares && !backendStarts);
+        pump();assert(backendPrepares==1 && backendStarts==1);
         if (backendStart) {
             assert(testInstance->bindings[0].notify && backendRunning);
             inject(248,1);pump();assert(backendEvents==1);
@@ -370,6 +381,47 @@ int main(int argc,char **argv) {
         while (!platform.children.empty()) platform.children.back()->terminate(2);
         assert(backendStops>0);
         assertNoLeaks();
+    } else if (!std::strcmp(mode,"keys-prepare-fail")) {
+        SweetBattery b;startBattery(b);assert(startMux()==0);pump();assert(b.fIrqAttached);
+        backendPrepare=false;sweet_keys_init();assert(!backendPrepares);pump();
+        assert(backendPrepares==1 && !backendStarts && !backendRunning);
+        assert(!testInstance->bindings[0].notify && testInstance->bindings[1].notify);
+        inject(269,0x10);pump();assert(b.fIrqSamples==1 && b.healthy);
+        cleanupBattery(b);endProvider();
+        while (!platform.children.empty()) platform.children.back()->terminate(2);
+        assertNoLeaks();
+    } else if (!std::strcmp(mode,"keys-late-match") || !std::strcmp(mode,"keys-cancel-before-match")) {
+        sweet_keys_init();pump();assert(!backendPrepares && !backendStarts);
+        bool cancel=!std::strcmp(mode,"keys-cancel-before-match");
+        if (cancel) platform.children.back()->terminate(2);
+        assert(startMux()==0);assert(!backendPrepares);pump();
+        assert(backendPrepares==(cancel?0u:1u) && backendRunning==!cancel);
+        while (!platform.children.empty()) platform.children.back()->terminate(2);
+        pump();assertNoLeaks();
+    } else if (!std::strcmp(mode,"keys-term-during-prepare") || !std::strcmp(mode,"keys-stop-during-prepare")) {
+        assert(startMux()==0);holdPrepare=true;sweet_keys_init();assert(!backendPrepares);
+        auto *keys=static_cast<SweetPmicKeys *>(platform.children.back()->children.front());
+        auto *client=keys->connection;
+        std::thread dispatch([] { pump(); });
+        while (!prepareEntered.load()) std::this_thread::yield();
+        // Preparation holds the consumer gate, but not registry/mux locks.
+        assert(!backendStarts && !testInstance->bindings[0].notify);
+        if (!std::strcmp(mode,"keys-term-during-prepare")) {
+            testInstance->inactive=true;registryTerminated(testInstance);
+            prepareProceed=true;dispatch.join();
+        } else {
+            std::thread stop([&] { keys->stop(keys->getProvider()); });
+            for (;;) {
+                IOLockLock(client->lock);bool stopping=client->stopping;IOLockUnlock(client->lock);
+                if (stopping) break;
+                std::this_thread::yield();
+            }
+            prepareProceed=true;dispatch.join();stop.join();
+        }
+        assert(backendPrepares==1 && !backendStarts && !backendRunning);
+        assert(!testInstance->bindings[0].notify);
+        while (!platform.children.empty()) platform.children.back()->terminate(2);
+        pump();assert(backendStops>0);assertNoLeaks();
     } else if (!std::strcmp(mode,"parallel")) {
         SweetBattery b;startBattery(b);assert(startMux()==0);sweet_keys_init();pump();
         assert(b.fIrqAttached && backendRunning && testInstance->bindings[0].notify);
@@ -408,7 +460,7 @@ int main(int argc,char **argv) {
 '''
 # Private layout is exposed only for host assertions; actual sources stay private.
 units=strip(header).replace('private:','public:')+strip(mux)+strip(client_header).replace('private:','public:')+strip(client)
-units+=adapters+strip(keys)+startup_adapter+registry_impl
+units+=adapters+strip(keys).replace('private:','public:')+startup_adapter+registry_impl
 units+='\n#define state (testInstance->state)\n#define routes (testInstance->routes)\n#define bindings (testInstance->bindings)\n#define ackRoute(r) testInstance->ackRoute(r)\n'
 # Field aliases are only for unchanged legacy scenarios, never new lifecycle code.
 units+=legacy_board+legacy_checks+'\n#undef state\n#undef routes\n#undef bindings\n#undef ackRoute\n'+checks
@@ -418,7 +470,8 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-mux-consumers-') as d:
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-O1','-g','-pthread',
                     '-fsanitize=address,undefined',str(src),'-o',str(binary)],check=True)
     scenarios=['early','late','cancel-before-match','term-before-attach','term-after-attach',
-               'key-type-mismatch',
+               'key-type-mismatch','keys-prepare-fail','keys-late-match','keys-cancel-before-match',
+               'keys-term-during-prepare','keys-stop-during-prepare',
                'term-before-provider-stop','provider-stop-with-consumers','owner-stop-before-provider',
                'notifier-fail-first','notifier-fail-second','attach-fail','keys','keys-worker-fail',
                'parallel','identity','notifier-stop-race','provider-stop-race','client-event-fail',
@@ -431,6 +484,6 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-mux-consumers-') as d:
     for case in scenarios:
         subprocess.run([str(binary),case],env=env,check=True)
     for _ in range(20):
-        for case in ['notifier-stop-race','provider-stop-race']:
+        for case in ['notifier-stop-race','provider-stop-race','keys-term-during-prepare','keys-stop-during-prepare']:
             subprocess.run([str(binary),case],env=env,check=True,stdout=subprocess.DEVNULL)
-    print('PASS: 40 additional notification/IRQ/provider/consumer teardown races')
+    print('PASS: 80 additional notification/IRQ/provider/consumer preparation and teardown races')

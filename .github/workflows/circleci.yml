@@ -76,11 +76,13 @@ jobs:
             fi
             require_marker() {
               if ! grep -Fq "$2" "$1"; then
-                echo "ERROR: required 0139..0146 marker missing from $1: $2" >&2
+                echo "ERROR: required 0139..0147 marker missing from $1: $2" >&2
                 exit 1
               fi
             }
             require_marker xnu/iokit/Kernel/arm/SweetPmicKeys.cpp 'SWEET KEYS IRQ: three routes active; IRQ-only'
+            require_marker xnu/iokit/Kernel/arm/SweetPmicKeys.cpp 'SWEET KEYS IRQ: preparing backend on consumer workloop before attach'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiMuxClient.cpp 'if (prepare && !prepare(context))'
             require_marker xnu/bsd/dev/sweet_usb.c 'SWEET USB IRQ: FAILED'
             require_marker xnu/bsd/dev/sweet_touch_tcm.c 'SWEET TOUCH IRQ: FAILED'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET_LOG_ERROR'

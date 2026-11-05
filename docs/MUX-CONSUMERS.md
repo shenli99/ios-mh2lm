@@ -1,9 +1,9 @@
 # PMIC mux consumer：匹配通知与终止清理
 
-**最新：0118组合档按键接入失败，0146 已补统一 SPMI 事务串行化和诊断，
-待新原生构建/实机。** 实际 `sweetkeys=1`；电池先 attach 后，volume-up 的
+**最新：0118组合档按键接入失败；0146 补统一 SPMI 事务锁及诊断，
+0147 将按键准备移至匹配后的 consumer workloop。本地验证通过，待新原生构建/实机。** 实际 `sweetkeys=1`；电池先 attach 后，volume-up 的
 SET_TYPE 读回校验失败，group0 回滚，group1 继续工作。已确认故障、并发缺口及
-修正边界见 [`SPMI-TRANSACTIONS.md`](SPMI-TRANSACTIONS.md)。以下为0145架构和阶段证据。
+修正边界见 [`SPMI-TRANSACTIONS.md`](SPMI-TRANSACTIONS.md)。以下包含0145架构、0147初始化边界和阶段证据。
 
 2026-11-05，新增补丁 `0145-mh2lm-mux-consumer-matching.patch`，基于已核对的
 0117 最终源码。实现与本地验证完成；0118 原生云端内核及 buildtree 已核对，
@@ -28,7 +28,7 @@ flowchart TD
   B --> BC[电池自己的 SweetSpmiMuxClient]
   KC -. IOKit first-match / terminated 通知 .-> M
   BC -. IOKit first-match / terminated 通知 .-> M
-  KC --> KM[按键 workloop：attach / detach]
+  KC --> KM[按键 workloop：prepare / attach / detach]
   BC --> BM[电池 workloop：attach / detach]
   KM --> M
   BM --> M
@@ -71,13 +71,15 @@ SID/peripheral/bit/edges 固定，APID 仍在接入时解析唯一 IRQ owner。
 - 注册期间事件源保持禁用，字段与两个 notifier 建立完成后启用并排队。
   匹配回调只在锁内验证状态、retain 服务、记录引用和排队。terminated 回调
   只标记被选择的 provider 已离线并排队；均不等待 consumer/mux workloop。
-- consumer workloop 调用 `mux->attachConsumer(...)`。返回成功且 provider
+- consumer workloop 先执行可选的 `prepare(context)`，成功后调用
+  `mux->attachConsumer(...)`。返回成功且 provider
   仍有效后，才通知 owner 已接入；原 `SWEET_MUX_READY` 位只用作这条本地
   “路由已接入”通知，不再是全局基础设施就绪回调。
 - `SweetBattery` 保留早期发布初始真实采样，IRQ mode2+ 通过匹配通知接入。
   接入后保留一次 arm-sync 采样和原有有界确认，mode0/1 对照轮询不变。
-- `SweetPmicKeys` 通过 personality 匹配晚期 keys nub，准备观察寄存器，
-  注册自己的连接；路由接入后才启动原 C 采样/HID 线程。board 不再直接启动
+- `SweetPmicKeys` 通过 personality 匹配晚期 keys nub，`start()` 只建立 loop
+  和连接；匹配后的 consumer loop 准备观察寄存器、读固件 GPIO 状态，路由接入
+  后才启动原 C 采样/HID 线程并标记 healthy。board 不再直接启动
   C worker。按键关闭时不创建 keys nub，mux/电池匹配不受影响。
 
 mux 可能先存在，也可能晚于 consumer。若 mux 根本没有成功发布，registry
@@ -88,6 +90,46 @@ board/mux 启动错误日志用于区分“服务不存在”和“已接入后�
 
 按键真实 arm 在 consumer workloop 异步完成，不要求它先于 UFS 日志；仍要求
 board 发布 mux/keys nub 在根查找前，mux 硬件只在原晚期可睡眠阶段初始化。
+
+## 0147：consumer 初始化职责和串行边界
+
+采用“轻量匹配通知 + consumer 自己的 workloop”方案，不增加 mux 整段初始化队列。
+这里甚至不在原始 matched 回调中直接 `attachConsumer()`：attach 会读写 SPMI、
+配置路由，应当留到可睡眠的 workloop。精确顺序为：
+
+1. matched 回调只验证状态、retain provider、记录引用并排队。
+2. consumer loop 调用可选 `SweetMuxPrepare`。按键在这里执行
+   `sweet_keys_prepare()`：建立自己的映射、解析 APID、读取/验证 GPIO 输入状态。
+   GPIO 配置仍由固件负责，本次不写新的 GPIO 模式或增加校准读取。
+3. 同一个 consumer loop 调用 mux 的 gated `attachConsumer()`；mux loop 串行
+   配置该组路由。准备成功且 attach 成功后，才发本地 READY；按键随后启动 worker。
+4. 初始化/采样所用的每笔 SPMI 事务，统一使用0146的 controller lock。
+   consumer 的读 API 内部取锁，mux 的硬件操作也取同一锁；不让 consumer
+   为了读外设而反向依赖 mux 的服务发现或手工嵌套加锁。
+
+这是“路由配置串行 + 控制器事务串行”，不是所有 consumer 的整段初始化互斥。
+不同 consumer 的独立计算、映射准备可以并行；读/写事务不能交叠。
+已有 mux gate 本身已经保证一次只配置一组路由，另加整个初始化队列仍不能
+保护初始化结束后的电池采样与按键读取，不能替代底层锁。
+若未来某个设备明确要求多笔命令不可插入，再设计有界批量/原子初始化接口，
+当前没有硬件证据要求把所有 consumer 初始化封进一个全局队列。
+
+电池保留发布前的首笔真实采样，避免改变既有 UI/启动语义；它不依赖 mux
+中断路由。匹配后的 arm-sync、事件刷新仍在电池自己的 loop。未声称所有
+电池初始化已移到 matched 之后；早期采样同样受底层事务锁保护。
+
+prepare 执行时不持连接锁，也不持 registry/mux gate。退出先标记 stopping、
+同步移除 notifier，再等待 consumer gate，保证 prepare/context 活到完成。
+prepare 返回后重新检查 stopping、providerGone 和双方 inactive，离线时不能
+attach/发 READY。失败终止此次绑定，不自动重试/回退；部分 prepare 资源由
+owner 后端清理，成功准备的资源活到失败处理或 owner stop。
+
+0147 在实际 C++ 类的 host harness 验证：通知回放后 pump 前未 prepare、
+晚匹配才准备、匹配前取消不准备、prepare 失败不 attach/启 worker且电池继续工作、
+prepare 中 provider 终止/owner stop 不 attach/发 READY，以及原 worker失败和
+双 consumer 回归；80次额外通知/IRQ/准备/退出竞争通过 ASAN/UBSAN 和显式
+资源计数。八个 ARM64 编译单元通过，0142→0147 严格重放与23个最终源文件
+一致。以上不能替代新原生构建及真实 MMIO/IOKit 调度验收。
 
 ## terminated、退出及锁顺序
 
