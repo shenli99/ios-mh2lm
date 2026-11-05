@@ -2,6 +2,42 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0118 baseline logs: registry/key/USB/touch smoke PASS; sleep/wake NOT covered.**
+Evidence logs/live-0118-board-startup-baseline.txt SHA256
+`1163c24fd2105dd39eaf59019d7e4502e9adb480dfbdcfc9102ce53417502207`
+and logs/sweetlog-0118-board-startup-baseline.bin SHA256
+`9dbcfabc992e1c91898fed6b186342e29852f11d6c58a3d455db8300cc7fe3af`.
+Persistent header v1/ring4194304/total378593/flush86, not wrapped. Decoded
+scratch/artifact-0118/baseline-persistent.txt; counts/hashes baseline-analysis.json.
+Boot args keys1/real gauge/IRQ0/ACM2/vbus1 agree baseline. Persistent lines137-154:
+BOARD once -> GIC probe hits1/clear1 -> mux infrastructure+IOService -> group0
+watching registry -> consumer attached events7 -> matched and attached -> keys
+three routes IRQ-only. UFS root log is interleaved at147/149; async key arm
+after it is expected. No remaining dependency on keys to start mux.
+
+16 real mux hits (power6/up6/down4) match16 HID transitions, balanced3/3/2
+press-release pairs. Combination overlaps present; screenshot service also
+starts. No claim that a shutdown slider was visually correct. Touch48 down/up
+pairs across5 slots, last IRQ counter468/empty0. USB last4480/empty0,
+TX4243/4244 err0, ACM configured twice. Three existing ep0/ep5 cmd6 status1
+WARNs; no scoped driver ERROR/FAILED/stop/timeout/storm or panic signature.
+Live has duplicated early kernel prefix and THREE NUL bytes replacing 'SWE'
+in one volume-up key-up prefix at offset292856; persistent has intact matching
+HID release and no NUL. Treat as live-log corruption, not a stuck key; err0
+does not prove lossless ACM. Keep for future log/USB review, cause not proven.
+
+444 persistent battery samples69%,3995-3997mV external1/charging0; no battery
+group1/IRQ records (mode0 intended). Does NOT prove battery IRQ or charging.
+Both logs contain only display on, NO display off. All power press groups in
+this capture overlap volume keys; standalone power sleep/wake not evidenced.
+No native terminated/stop/free exercise; WARN branch not exercised.
+NEXT: same0118 baseline, ONLY short-press power (no volume) -> observe screen
+off, wait5s -> short-press power wake -> check touch; export new
+live-0118-board-startup-wake.txt + sweetlog-0118-board-startup-wake.bin.
+If screen fails to sleep/wake report actual observation; do not infer from
+missing logs alone. Inspect before existing no-keys then usbin profiles.
+No new compile/push/repack or device action this turn. Battery IRQ unverified.
+
 **0118 native consumer artifact verified; THREE boot profiles ready, phone pending.**
 User downloaded logs/xnu-kernel-0118.gz and xnu-buildtree-0118.gz. No build log
 or CI run ID supplied. Kernel SHA256
