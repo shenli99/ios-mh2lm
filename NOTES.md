@@ -2,6 +2,27 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0147 source audit requested by user: no new kernel behavior change.**
+Verified exact consumer-prepare-0118/verify/xnu at implementation232b8b3.
+Added docs/SPMI-CALLSITE-AUDIT.md, linked from MUX-CONSUMERS.md: all95 static
+call sites (battery51 incl5 helper calls, keys19 incl4 wrappers, mux25 incl
+ack wrappers) with function/line/expression, source hashes and scope.
+Correct architectural wording: NO mux spmiRead/spmiWrite public API exists;
+battery sweet_spmi_read, keys keys_read, mux private readPeripheral/
+writePeripheral share one transport IOLock. Hard IRQ sends no SPMI command;
+local controller IRQ/ACC MMIO isn't a PMIC transaction and isn't all locked.
+No fReady field in these23 final sources: sp_ready is bool with atomic
+release/acquire publication, init plain read under lock; mux state atomic
+unsigned, READY event delivered on consumer loop; client lifecycle bools
+under IOLock/gate, keys backendPrepared synchronized by stop/drain.
+Prepare NEVER configures GPIO: validation fail stops/unmaps before attach.
+Attach config rollback exists but is BEST EFFORT: restore type/high/low bits
+and unused APID oldAccess, disable IRQ, clear latch; doesn't restore original
+PMIC enable/latches or read-verify restoration. Failed/poisoned write cleanup
+stops entire mux. Do not call this complete hardware rollback.
+Only documentation/NOTES modified; no new test run needed for read-only audit.
+Implementation0146+0147 and next direct native keys+USBIN test remain as below.
+
 **CURRENT0146+0147 READY FOR USER PUSH; direct combined keys+USBIN next.**
 User proposes lightweight consumer matched callbacks/own-loop preparation or a
 mux whole-initialization queue. Chose own-loop preparation; raw notification

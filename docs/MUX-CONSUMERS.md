@@ -93,6 +93,9 @@ board 发布 mux/keys nub 在根查找前，mux 硬件只在原晚期可睡眠�
 
 ## 0147：consumer 初始化职责和串行边界
 
+准备失败的清理、路由回滚边界、所有 SPMI 调用点和 ready 同步方式，见
+[`SPMI-CALLSITE-AUDIT.md`](SPMI-CALLSITE-AUDIT.md)。
+
 采用“轻量匹配通知 + consumer 自己的 workloop”方案，不增加 mux 整段初始化队列。
 这里甚至不在原始 matched 回调中直接 `attachConsumer()`：attach 会读写 SPMI、
 配置路由，应当留到可睡眠的 workloop。精确顺序为：
