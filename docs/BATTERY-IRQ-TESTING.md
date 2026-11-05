@@ -1,11 +1,60 @@
 # MH2LM 电池 IRQ：分阶段测试与结果
 
-**当前0119：USBIN + 三键组合实机通过；下一步同内核 mode3（USBIN+CHGR）。**
+**当前0119：mode3接入和并行回归通过，CHGR事件尚未覆盖；下一步同内核mode4。**
 0145 registry consumer、0146统一事务锁、0147按键workloop准备、0148隔离/日志
 已进入0119。下面0115/0141/0142段落保留为历史，旧baseline/no-keys流程不再
 作为当前前置要求。CHGR/MSOC/SOC_READY尚未验收，IRQ大目标未结束。
 
-## 0119 mode2组合结果与下一步
+## 0119 mode3结果与当前下一步
+
+已检查 `sweetlog-0119-battery-irq-charger.bin`；本轮未导出USB live，持久日志
+足以分析现有事件，不要求补采。SHA256：
+`26f7a12e66338e12efde80ed0c834a444bb9256b208ca1bae1f55ce950f40629`。
+头v1/ring4194304/total317377/flush47，未环绕，解码无NUL。解码、分析脚本及
+逐行证据在工作区 `scratch/artifact-0119/charger-{persistent.txt,analysis.json}`
+和 `analyze-charger.py`。
+
+- 89/98行身份预检通过、mode3/preflight1；139/148行分别接入USBIN APID269和
+  CHGR APID266，149行group1/events0x3接入，152行armed且关闭两秒轮询。
+  按键在自己的workloop准备后，153～160行三路/group0接入；实际bootargs
+  保留keys1、真实gauge、ACM2/vbus1、sweetbattirq3。
+- 3444～4399行共20次独立battery-usbin命中，各有events0x1/sourceIRQ刷新，
+  notifications/samples严格1→20，全部healthy1。external交替0/1共十轮，
+  每次均完成updateStatus。通知至发布7.103～7.780ms，不等于线缆到UI延迟。
+- **未见battery-chgr运行时命中或含0x2刷新。** 初始、arm-sync加20次IRQ共22笔
+  采样，CHGR全部0x47/state7、charging0。因此只能验收CHGR路由配置及共存，
+  不能验收其硬件事件，也不能证明真实充电。本日志没有采到充电状态转换，
+  暂不能判定是未产生转换还是CHGR投递异常；不因此盲改触发方式/充电控制。
+- gauge显示始终74%，21笔原始MSOC0xbe、末笔0xbd，3953～4040mV。原始SOC
+  已有变化但取整百分比相同；mode3未订阅FG事件，不能据此评价MSOC IRQ。
+  电压随负载/插拔变化未导致百分比跳变。
+- 三键HID共32条，power9对、volume-up3对、volume-down4对，顺序配平；触摸
+  五槽54对且顺序配平，末次IRQ629/empty0。最后输入均在SpringBoard正常关机
+  之前，未见0-client键事件。多次息屏拔插后出现display on及后续输入；例如
+  off3968→拔线4035→on4045、off4064→插线4078→on4090。此为display-off
+  唤屏，未验收整机深度休眠或修复既有锁屏渲染。
+- 未见相关驱动ERROR、mux读回/隔离/停用或panic签名。13条WARN均为既有USB
+  ep0/ep5 cmd0x6/status1。USB计数仅早期一笔hits128/empty0、TX0/1 err0，
+  ACM配置2次；不足以声称反复插拔后每次USB枚举/实时日志均正常。
+  0148隔离与真实服务stop/free仍未触发验收。
+
+**下一步直接使用现有镜像** `out-bs/boot-16k-0119-battery-irq-all.img`，SHA256：
+`320ff213e595a3aea0cc80e1eec5f5135f04921e9f4e7f3242d389e54e85c1dd`。
+同一0119内核，sweetbattirq4，events0xf；保留三键、USB/触摸固定IRQ、真实gauge
+和ACM，新增FG APID283的MSOC_DELTA/SOC_READY。无需push或云编译。
+
+1. 启动后检查三键/触摸及一次拔插、息屏插线唤屏。
+2. 拔线正常使用一段时间，使真实电量有机会自然下降；期间避免频繁插拔，
+   以免USBIN采样掩盖“是否由FG自身事件刷新”。可先观察10～20分钟再导出，
+   该时长不保证跨过固件未知的MSOC门限，不要求人为耗尽电池。
+3. 导出 `sweetlog-0119-battery-irq-all.bin`；live可选。分析必须看到FG接入/
+   mode4 armed，并区分battery-msoc/含0x4与USBIN刷新；SOC_READY含0x8按实际
+   覆盖记录。CHGR继续保持未验收，不能因mode4启动正常或电量UI变化就勾选。
+
+不重跑同样的mode3拔插来代替CHGR证据，不通过写SRAM/profile或充电控制制造
+事件，也不加轮询兜底。电池IRQ目标仍未完成。
+
+## 0119 mode2组合结果与当时下一步（mode3已测，见上）
 
 用户反馈本轮未感到异常。`live-0119-board-startup-usbin.txt` 与
 `sweetlog-0119-board-startup-usbin.bin` 已核对；持久头v1/ring4MiB，

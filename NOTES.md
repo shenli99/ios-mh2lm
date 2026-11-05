@@ -2,6 +2,54 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**CURRENT0119 mode3 routes/coexistence PASS; CHGR EVENT UNCOVERED; next existing mode4.**
+User supplied only logs/sweetlog-0119-battery-irq-charger.bin; no live USB log.
+Persistent sufficient; don't request redundant live/baseline/no-keys retest.
+SHA256 `26f7a12e66338e12efde80ed0c834a444bb9256b208ca1bae1f55ce950f40629`.
+Header v1/ring4194304/total317377/flush47, not wrapped, decoded no NUL.
+scratch/artifact-0119/charger-persistent.txt, analyze-charger.py and
+charger-analysis.json preserve counts, hashes, line evidence and assertions.
+
+89/98 identity preflight1/mode3;139 USBIN APID269,148 CHGR APID266;
+149 group1/events3 attached,152 armed/no2s poll. Keys prepared on own loop,
+153..160 three routes/group0 attached. Actual bootargs keys1,realgauge,
+ACM2/vbus1,batteryIRQ3.20 distinct USBIN hits3444..4395 and20 IRQ refreshes
+3448..4399, notifications/samples1..20, all events1/healthy1; external0/1
+alternates ten cycles, each updateStatus complete. Notify-to-publish7103..7780us
+NOT cable/UI latency. No runtime battery-chgr hit or mask containing2.
+22samples (initial+arm-sync+20IRQ), all CHGR47/state7,charging0,gauge74%,
+3953..4040mV. RawMSOC0xbe21times then0xbd once; actual raw SOC changed but
+integer percentage unchanged. Mode3 doesn't subscribe FG, no FG conclusion.
+CHGR configuration/coexistence only accepted; no sampled natural CHGR
+transition, cannot distinguish absent transition vs failed CHGR delivery.
+Do NOT claim real charging, complete battery IRQ or change IRQ polarity/
+charger control merely because CHGR had no hit.
+
+Keys32 balanced transitions power9pairs/up3/down4; touch54 balanced pairs
+across5slots, lastIRQ629/empty0. All recorded key/touch sequences valid,
+no0clients, lastkey4474/lasttouch4480 before SpringBoard shutdown4489.
+Displayoff6/on7; e.g off3968/unplug4035/on4045 and off4064/plug4078/on4090,
+input continues. No scoped ERROR/mux failure/isolation/panic signatures.
+13WARN all existing USBep0/ep5cmd6status1. Only early USB counter hits128/
+empty0,TX0/1err0 and2ACM configurations: NOT proof every later cable cycle
+enumerated/logged. No live supplement needed to assess captured battery IRQ.
+Native service stop/free and0148 fault isolation still unexercised; existing
+FB lockscreen rendering/deep-sleep remain outside this test.
+
+NEXT USER: same-kernel out-bs/boot-16k-0119-battery-irq-all.img (already
+packaged/independently verified; SHA rechecked this turn)
+`320ff213e595a3aea0cc80e1eec5f5135f04921e9f4e7f3242d389e54e85c1dd`.
+mode4/events0xf adds FG APID283 MSOC_DELTA/SOC_READY, keeps keys/gauge/ACM
+and fixed USB/touch IRQ. Check desktop/keys/touch, one cable cycle/off-plug
+wake; then unplugged normal use with a quiet cable interval, initially
+10..20min observation (NOT guaranteed threshold; firmware MSOC delta unknown).
+Export sweetlog-0119-battery-irq-all.bin; live optional. Require FG attach,
+mode4 arm and independent MSOC hit/mask4; SOC_READY8/CHGR2 only if actually
+observed. No SRAM/profile/charger writes to manufacture IRQ, no polling
+fallback. CHGR stays pending while testing FG independently. No rebuild,
+push or device actions this turn; driver/CI unchanged. Updated battery test,
+IRQ roadmap, consumer and isolation docs; battery goal remains incomplete.
+
 **CURRENT0119 combined keys+USBIN PASS; next SAME KERNEL batteryIRQ3 boot ready.**
 User reports test felt normal. Logs/live-0119-board-startup-usbin.txt SHA256
 `e9c7f5c3badc8fde7d0ade276db19f88dd77939573bd8c4a068f7a01f7df1b86`;

@@ -109,5 +109,7 @@ build log；未执行push、云端操作或设备写入。
 两组接入、三键/触摸/USB、息屏唤醒及两轮USBIN拔插均通过，未出现相关驱动
 ERROR/SET_TYPE读回失败。没有隔离事件，因此本轮不能作为故障隔离硬件路径
 的验收。正常INFO与12条既有USB WARN可见，ERROR必出/阈值过滤仍以前述本地
-宏测试及原生源码为证据。下一步同内核mode3，细节见
+宏测试及原生源码为证据。随后mode3持久日志中两组正常接入、20次USBIN刷新，
+三键/触摸/息屏拔插唤屏正常，仍未触发隔离；13条既有USB WARN，无相关ERROR。
+CHGR路由已接入但没有独立事件，不能称为CHGR IRQ已通过。下一步同内核mode4，细节见
 [BATTERY-IRQ-TESTING.md](BATTERY-IRQ-TESTING.md)。

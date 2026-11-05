@@ -1,8 +1,9 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
-**当前进度：** 0119的keys+USBIN组合实机通过：group0/1均接入，四次USBIN
-IRQ完成两轮external0→1转换，按键/触摸/USB及息屏唤醒正常；0118读回失败
-未复现。下一步同0119内核测mode3充电状态事件，再mode4电量事件，无需云编译。
+**当前进度：** 0119 mode2组合通过，随后mode3的USBIN/CHGR路由均接入，
+20次USBIN状态刷新、三键/触摸及息屏插拔唤屏正常；0118读回失败未复现。
+CHGR采样始终state7/charging0，没有独立CHGR命中，因此充电状态IRQ仍未验收。
+下一步同0119内核现有mode4镜像测FG电量事件，无需云编译；CHGR保留待验证。
 电池IRQ子目标仍未完成，framebuffer继续排在IRQ验收之后。证据与镜像见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。0148故障隔离仍只有本地
 注入验证，未在手机触发；策略见 [`MUX-GROUP-ISOLATION.md`](MUX-GROUP-ISOLATION.md)。
