@@ -37,6 +37,10 @@ BSD 晚期板级入口；keys/battery 各自 attach 路由。保留 0142 就绪�
 UFS 只保留存储及分区持久日志。此项本地实现，仍待新 CI 与实机回归。
 电池检查点、前后调用链、故障边界及同内核三档回归见
 [`DRIVER-STARTUP.md`](DRIVER-STARTUP.md)。
+随后按用户要求追加 0144：mux IOService 化，晚期 nub + personality 正常匹配，
+实例拥有资源、consumer 与 stop/free；保留原 GIC callback/软件 IES。
+filter 与 controller 的职责/选择、退出并发规则见
+[`MUX-IOSERVICE.md`](MUX-IOSERVICE.md)。当前仍先验收启动及服务匹配，再继续电池。
 Framebuffer 修复尚未启动。
 **更新日期：** 2026-11-05
 **适用范围：** `ref/ios-mh2lm` 的 MH2LM XNU 驱动；本文是实施和验收计划，

@@ -2,6 +2,80 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**CURRENT:0144 mux IOService conversion implemented locally; ready for user push.**
+User explicitly requested IOService conversion and evaluation of filter/controller
+before testing0143. New additive0144-mh2lm-spmi-mux-ioservice.patch follows0142/0143.
+Board still runs in late BSD, independent of UFS/keys, but sweet_spmi_mux_start
+now only publishes SweetSpmiMuxDevice under IOService::getPlatform(). Its
+registerService(kIOServiceSynchronous) uses a MH2LM-only KernelConfigTables
+personality to instantiate/start SweetSpmiInterruptMux : IOService. It is NOT
+a manual call to driver start or an early MMIO init. Init/start/stop/free and
+getWorkLoop are real overrides; mutable routes/bindings/state/counts/MMIO/
+software IES/workloop belong to instance. Existing C APIs and key/battery group
+interfaces retained; keys/USB/touch/battery processing code unchanged.
+
+DECISION: keep GIC callback + ordinary provider-less software IES. IOFilter
+is technically callable manually with provider=NULL (base interruptOccurred
+calls virtual normalInterruptOccurred), but this adds no hardware provider or
+mask/rearm management. Pending source detection can use arb MMIO; the SPMI
+ack/config/state transactions remain bottom-half work. No normal IRQ class
+can presently be discarded safely. Upstream still lacks a GIC IOKit interrupt
+controller/specifiers; building that controller is separate work, NOT claimed
+done. IOService, IOFilterIES and IOInterruptController serve different layers.
+No fake provider=this or new PMIC domain. Keys are BSD clients, battery still
+IOResources-matched, NOT newly matched mux child IOService drivers.
+
+Lifecycle: C lookup retains service under rendezvous IOLock then drops lock
+before gate wait. Workloop lives through stop until final free. stop takes
+workloop gate FIRST, sets stopping, takes IRQ spin lock briefly to mask and
+clear/synchronize top-half pointer, then stops hardware, notifies/clears groups,
+disables/removes IES. Only afterwards hide C lookup. This prevents attach/drain
+re-enabling SPI after disconnect and detach missing a live callback. Free
+releases IES/loop/mappings after outstanding API refs drain. Partial starts
+clean up too. Stop/failed remains terminal for this boot; no automatic restart
+or polling fallback. Global locks/boot rendezvous remain pinned for C/IRQ calls.
+
+IMPORTANT mapping fact checked in XNU arm/io_map.c/machine_routines.c: late
+ml_io_map uses io_submap + KMA_PERMANENT and cannot pair with ml_io_unmap.
+0144 uses ml_io_map_unmappable(...,VM_WIMG_IO) for owned mappings, same physical
+spans/device attributes. Release trunc_page(VA), round_page(size+page_offset),
+including CFG0x0c40a000's offset0x2000 on16K pages. Channel mappings cached per
+route across attach, owner/APID revalidated before reuse. Old0115 linked kernel
+contains both map_unmappable/unmap symbols. Do not revert to freeing permanent
+mappings or free only the raw sub-page register size.
+
+Validation PASS: fresh exact0115 +0142 +0143 +0144 apply whitespace=error-all;
+all edited/source files byte-match verify. Mux/KernelConfigTables/board generate
+ARM64 Mach-O objects; class metaclasses/start/stop/free and C symbols checked.
+Linux C++ still uses scratch-only Apple type-builtin stand-ins; native full
+CI/link required. ASAN/UBSAN compiles actual service and old mux/battery paths,
+with mocked registry/matching/scheduler/MMIO/time/sampling: old rollback/foreignEE/
+storm/600IRQ/timeout/readiness cases pass. New missing match, init/loop/event/map
+failure cleanup, queued stop, battery stop race, IRQ/API/stop/free race pass,
+plus20 extra lifetime races. Models really delete service/IES and verify no
+late callback; track balanced full-page mappings including CFG offset/cache.
+Mock MMIO access is locked for stress; cannot establish native matching or real
+hardware teardown timing. Board test enforces phase/nub matching and old edges.
+Actual CircleCI source gate accepts0144 and rejects0143; Bash/Python syntax,
+YAML and diff whitespace pass. Packer --board-startup now additionally requires
+compiled IOService-start marker. Native kernel/boot image/phone results NONE.
+Scratch: workspace scratch/mux-service-0115/{base,edited,verify}/xnu, make_patch.py,
+compile.py, individual compile logs/objects, board-tests.txt, mux-tests.txt.
+Initial edit.py predates review fixes: do not rerun it as final implementation.
+
+Docs:docs/MUX-IOSERVICE.md (decision, exact hierarchy, lifecycle, limitations);
+startup/architecture/IRQ plan/battery guide/lessons updated. CI build command
+unchanged; only source marker gates added. NEXT user push -> fresh CI kernel+
+buildtree label -> validate final source/classes/markers -> package SAME THREE
+--board-startup profiles (baseline, no-keys, usbin). First baseline must show
+BOARD before root/UFS, infrastructure ready, IOService started, keys attach.
+Then check no-keys battery independently and combined USBIN, requiring real
+route/refresh evidence. No proactive runtime terminate test on phone. Battery
+checkpoint remains0115 preflight passed, mode2 never attached; actual battery
+IRQ still UNVERIFIED. No charging policy/profile/capacity/SRAM/framebuffer work.
+No push, cloud run, device write or generated image performed this turn.
+
+
 **CURRENT: board startup ownership cleanup0143 implemented; ready for user push.**
 Implementation and validation/docs committed as `88fe6b2`; staged whitespace
 checks passed for all eleven files. No push, CI run or new phone test yet.

@@ -63,3 +63,11 @@ consumer 自己 attach/detach；无 consumer 时不 arm，最后退出后不重�
 失败，以及 root 重试不重复启动。调用链与限制见
 [`DRIVER-STARTUP.md`](DRIVER-STARTUP.md)。就绪回调解决阶段交接，不能代替
 初始化归属清理；二者都不等于真实硬件 IRQ 已通过。
+
+
+0144 IOService 化新增约束：stop 必须先取得 mux gate，在 gate 内断开 IRQ
+指针并同步上半部，再清理 route/context；先断开指针再等 gate，可能让并发的
+attach/drain 在窗口内重新开 IRQ。C 兼容 API 需先取得服务引用，workloop 保留
+到 free，才能支持并发 detach/stop。当前 XNU 的 ml_io_map 是永久分配；需要
+释放时用 unmappable 路径，按 16K 页对齐包含地址偏移的完整范围。详见
+[`MUX-IOSERVICE.md`](MUX-IOSERVICE.md)。

@@ -29,6 +29,15 @@ workloop 接入，取消订阅同步回调寿命；等待不设置重试定时�
 数据通路继续保留。完整前后调用链与电池暂停点见
 [`DRIVER-STARTUP.md`](DRIVER-STARTUP.md)。
 
+**当前追加变更（0144，尚未实机验证）：** mux 已继承 IOService，
+层级为 `SweetPlatformExpert -> SweetSpmiMuxDevice -> SweetSpmiInterruptMux`。
+board 只发布晚期 nub，IOKit 同步匹配并 start；mux 实例拥有 route、consumer、
+MMIO、workloop 与软件事件源，stop/free 同步 IRQ 和回调后清理。按键与电池
+仍经 C 接口 attach，不是新建的子 IOService。上游继续是专用 GIC callback，
+尚无通用 GIC IOInterruptController；评估后保留普通软件事件源，不引入无实际
+筛选收益的 filter。源码依据、16K 可释放映射与完整边界见
+[`MUX-IOSERVICE.md`](MUX-IOSERVICE.md)。
+
 ## 一眼看清数据流
 
 ```mermaid

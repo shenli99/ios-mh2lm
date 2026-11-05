@@ -129,6 +129,7 @@ fi
 if [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 	for marker in 'SWEET BOARD: late init before root lookup; independent of UFS' \
 	    'SWEET MUX: infrastructure ready intid=' \
+	    'SWEET MUX: IOService started; owns workloop, routes and MMIO' \
 	    'SWEET KEYS IRQ: consumer attach failed; keys disabled'; do
 		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
 			printf 'kernel artifact lacks board startup marker: %s\n' "$marker" >&2

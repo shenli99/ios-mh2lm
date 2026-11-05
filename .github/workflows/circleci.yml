@@ -76,7 +76,7 @@ jobs:
             fi
             require_marker() {
               if ! grep -Fq "$2" "$1"; then
-                echo "ERROR: required 0139..0143 marker missing from $1: $2" >&2
+                echo "ERROR: required 0139..0144 marker missing from $1: $2" >&2
                 exit 1
               fi
             }
@@ -96,6 +96,11 @@ jobs:
             require_marker xnu/bsd/conf/files 'bsd/dev/sweet_board.c'
             require_marker xnu/bsd/dev/sweet_keys.c 'sweet_spmi_mux_attach(SWEET_MUX_KEYS'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET MUX: infrastructure ready intid='
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'class SweetSpmiInterruptMux : public IOService'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET MUX: IOService started; owns workloop, routes and MMIO'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'ml_io_map_unmappable(physical, size, VM_WIMG_IO)'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'nub->registerService(kIOServiceSynchronous)'
+            require_marker xnu/iokit/KernelConfigTables.cpp "'IOProviderClass' = SweetSpmiMuxDevice;"
             # An applied board wrapper is insufficient if the old edges survived.
             if grep -Eq 'sweet_(keys_init|touch_init|usb_probe|sample_start|display_probe_init|gpu_init|board_init|spmi_mux_start)' xnu/bsd/dev/sweet_ufs.c ||
                grep -Fq 'sweet_spmi_mux_start' xnu/bsd/dev/sweet_keys.c ||

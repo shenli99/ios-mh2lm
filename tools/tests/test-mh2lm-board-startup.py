@@ -36,6 +36,16 @@ assert 'sweet_spmi_mux_attach(SWEET_MUX_KEYS' in keys
 assert 'sweet_spmi_mux_detach(SWEET_MUX_KEYS' in keys
 assert 'sweet_keys_' not in mux
 assert 'keyConsumer' not in mux
+if 'class SweetSpmiInterruptMux : public IOService' in mux:
+    config = (r/'iokit/KernelConfigTables.cpp').read_text()
+    assert "'IOProviderClass' = SweetSpmiMuxDevice;" in config
+    assert "'IOClass'         = SweetSpmiInterruptMux;" in config
+    assert 'nub->attach(platform)' in mux
+    assert 'nub->registerService(kIOServiceSynchronous)' in mux
+    assert 'IOInterruptEventSource::interruptEventSource(this,' in mux
+    assert 'static MuxBinding bindings' not in mux
+    assert 'ml_io_map_unmappable(physical, size, VM_WIMG_IO)' in mux
+    assert 'ml_io_map(' not in mux
 body = re.sub(r'^#include .*$', '', board, flags=re.M)
 prelude = r'''
 #include <cassert>

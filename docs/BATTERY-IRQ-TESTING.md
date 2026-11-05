@@ -14,6 +14,11 @@ mux 不再等待 keys 或 UFS。下一轮先用 `--board-startup` 的三个镜�
 归属与关闭按键时的独立接入，再推进本文 CHGR/MSOC 阶段。电池检查点及测试
 顺序见 [`DRIVER-STARTUP.md`](DRIVER-STARTUP.md)。0142/0143 均未实机验证。
 
+0144 又将 mux 变为 IOService，由 board 发布晚期 nub 后正常匹配，资源归
+服务实例；电池接口和 IRQ 路由不变。先按 `--board-startup` 验收新匹配/启动链，
+不要把本地生命周期模拟通过当作真实 USBIN 已通过。见
+[`MUX-IOSERVICE.md`](MUX-IOSERVICE.md)。
+
 ## 实现路径与边界
 
 ```text

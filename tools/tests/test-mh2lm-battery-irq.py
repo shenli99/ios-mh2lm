@@ -21,6 +21,10 @@ header = (root / 'bsd/dev/sweet_spmi_mux.h').read_text()
 source = re.sub(r'^#include .*$', '', source, flags=re.M)
 startup_tests = 'sweet_spmi_mux_watch_ready' in source
 board_startup = 'sweet_spmi_mux_start(void)' in source
+service_mux = 'class SweetSpmiInterruptMux : public IOService' in source
+if service_mux:
+    # Expose fields only to the host assertions; production stays private.
+    source = source.replace('private:', 'public:')
 
 def substitute_function(text, name, replacement):
     match = re.search(r'\n' + name + r'\([^)]*\)\n\{', text)
@@ -52,11 +56,17 @@ prelude = r'''
 #include <atomic>
 #include <thread>
 #include <vector>
+#include <algorithm>
+#include <string>
 #define ARM64_BOARD_CONFIG_MH2LM 1
 #define SWEET_DEV_SPMI_CORE_PA 0x0c440000u
 #define SWEET_DEV_SPMI_CFG_PA 0x0c40a000u
 #define SWEET_DEV_SPMI_OBS_PA 0x0e600000u
 #define SWEET_DEV_SPMI_CHNLS_PA 0x0c600000u
+#define PAGE_MASK 0x3fffu
+#define trunc_page(x) ((x)&~uintptr_t(PAGE_MASK))
+#define round_page(x) (((x)+PAGE_MASK)&~uintptr_t(PAGE_MASK))
+#define VM_WIMG_IO 7u
 using vm_offset_t = uintptr_t;
 using vm_size_t = size_t;
 using IOReturn = int;
@@ -67,34 +77,123 @@ static IOLock *IOLockAlloc() { return new IOLock; }
 static void IOLockFree(IOLock *p) { delete p; }
 static void IOLockLock(IOLock *p) { p->lock(); }
 static void IOLockUnlock(IOLock *p) { p->unlock(); }
-struct OSObject {};
+#define OSDeclareDefaultStructors(name)
+#define OSDefineMetaClassAndStructors(name, base)
+#define APPLE_KEXT_OVERRIDE override
+struct OSObject {
+    std::atomic<unsigned> refs{1};
+    virtual ~OSObject() = default;
+    virtual void free() {}
+    void retain() { assert(refs.fetch_add(1)>0); }
+    void release() { if (refs.fetch_sub(1)==1) { free(); delete this; } }
+};
+struct OSDictionary {};
+using IOSimpleLock = std::mutex;
+using IOInterruptState = bool;
+static IOSimpleLock *IOSimpleLockAlloc() { return new IOSimpleLock; }
+static void IOSimpleLockFree(IOSimpleLock *p) { delete p; }
+static IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock *p) { p->lock(); return false; }
+static void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock *p, IOInterruptState) { p->unlock(); }
 #define OSDynamicCast(type, object) static_cast<type *>(object)
 struct IOInterruptEventSource;
+static unsigned testLoopFail, testAddFail;
 struct IOWorkLoop : OSObject {
+    std::recursive_mutex gate;
     using Action = IOReturn (*)(OSObject *, void *, void *, void *, void *);
-    static IOWorkLoop *workLoop() { return new IOWorkLoop; }
-    int addEventSource(IOInterruptEventSource *) { return 0; }
+    static IOWorkLoop *workLoop() {
+        if (testLoopFail && --testLoopFail==0) return nullptr;
+        return new IOWorkLoop;
+    }
+    int addEventSource(IOInterruptEventSource *);
+    void removeEventSource(IOInterruptEventSource *);
     int runAction(Action a, OSObject *o, void *x=nullptr, void *y=nullptr) {
+        std::lock_guard<std::recursive_mutex> lock(gate);
         return a(o,x,y,nullptr,nullptr);
     }
 };
 static std::vector<IOInterruptEventSource *> queue;
-struct IOInterruptEventSource {
+static std::mutex queueLock;
+struct IOInterruptEventSource : OSObject {
     using Action = void (*)(OSObject *, IOInterruptEventSource *, int);
     OSObject *owner; Action action;
-    bool enabled = true;
+    IOWorkLoop *loop=nullptr;
+    std::atomic<bool> enabled{true};
+    IOInterruptEventSource(OSObject *o, Action a) : owner(o), action(a) {}
     static IOInterruptEventSource *interruptEventSource(OSObject *o, Action a, void *, int) {
-        return new IOInterruptEventSource{o,a};
+        return new IOInterruptEventSource(o,a);
     }
-    void interruptOccurred(void *, void *, int) { queue.push_back(this); }
+    void interruptOccurred(void *, void *, int) {
+        std::lock_guard<std::mutex> lock(queueLock); queue.push_back(this);
+    }
     void disable() { enabled=false; }
 };
+int IOWorkLoop::addEventSource(IOInterruptEventSource *e) {
+    if (testAddFail && --testAddFail==0) return -1;
+    std::lock_guard<std::mutex> lock(queueLock); e->loop=this; return 0;
+}
+void IOWorkLoop::removeEventSource(IOInterruptEventSource *e) {
+    std::lock_guard<std::mutex> lock(queueLock); e->loop=nullptr;
+    queue.erase(std::remove(queue.begin(),queue.end(),e),queue.end());
+}
 static void pump() {
-    while (!queue.empty()) {
-        auto *e=queue.front(); queue.erase(queue.begin());
-        if (e->enabled) e->action(e->owner,e,1);
+    for (;;) {
+        IOInterruptEventSource *e; IOWorkLoop *loop;
+        {
+            std::lock_guard<std::mutex> lock(queueLock);
+            if (queue.empty()) return;
+            e=queue.front(); queue.erase(queue.begin()); e->retain();
+            loop=e->loop; if (loop) loop->retain();
+        }
+        if (loop) {
+            {
+                std::lock_guard<std::recursive_mutex> lock(loop->gate);
+                if (e->enabled && e->loop==loop) e->action(e->owner,e,1);
+            }
+            loop->release();
+        } else if (e->enabled) {
+            e->action(e->owner,e,1); // legacy battery adapter has no loop binding
+        }
+        e->release();
     }
 }
+struct IOPlatformExpert;
+static constexpr unsigned kIOServiceSynchronous=2;
+static bool testMatchDriver=true, testInitFail=false;
+static unsigned testMapFail, testStops, testFrees;
+static std::map<uintptr_t,unsigned> mappings;
+static std::map<uintptr_t,size_t> mappingSizes;
+struct IOService : OSObject {
+    IOService *parent=nullptr;
+    std::vector<IOService *> children;
+    std::map<std::string,std::string> properties;
+    bool mockStarted=false;
+    virtual bool init(OSDictionary * = nullptr) { return !testInitFail; }
+    virtual bool start(IOService *) { return true; }
+    virtual void stop(IOService *) {}
+    virtual IOWorkLoop *getWorkLoop() const { return nullptr; }
+    void free() override { ++testFrees; }
+    bool attach(IOService *p) { parent=p; p->children.push_back(this); retain(); return true; }
+    void registerService(unsigned=0);
+    static IOPlatformExpert *getPlatform();
+    void setName(const char *) {}
+    bool setProperty(const char *k,const char *v) { properties[k]=v; return true; }
+    bool setProperty(const char *k,bool v) { properties[k]=v?"true":"false"; return true; }
+    bool setProperty(const char *k,uint64_t v,unsigned) { properties[k]=std::to_string(v); return true; }
+    bool terminate(unsigned) {
+        retain();
+        while (!children.empty()) children.back()->terminate(2);
+        if (mockStarted) { ++testStops; stop(parent); mockStarted=false; }
+        if (parent) {
+            auto &v=parent->children;
+            v.erase(std::remove(v.begin(),v.end(),this),v.end());
+            parent=nullptr; release();
+        }
+        release(); return true;
+    }
+};
+struct IOPlatformExpert : IOService {};
+static IOPlatformExpert platform;
+IOPlatformExpert *IOService::getPlatform() { return &platform; }
 #define SWEET_LOG_INFO(...) ((void)0)
 #define SWEET_LOG_DEBUG(...) ((void)0)
 #define SWEET_LOG_WARN(...) ((void)0)
@@ -104,15 +203,33 @@ static void clock_get_uptime(uint64_t *v) { *v=fakeNs; }
 static void absolutetime_to_nanoseconds(uint64_t v, uint64_t *n) { *n=v; }
 static void delay(unsigned) {}
 static std::map<uintptr_t,uint32_t> mmio;
+static std::recursive_mutex hwLock;
 static std::map<unsigned,uint8_t> pmic;
 static std::map<unsigned,unsigned> ppids;
 static unsigned keyEvents, keyFailures, batteryEvents, batteryFailures;
 static unsigned lockDepth, lockedWrites, failReadPer, timeoutApid;
 static bool dropPdcEnable;
+#ifdef SWEET_MUX_SERVICE_TEST
+static bool hasIrqOwner();
+#endif
 extern "C" bool sweet_spmi_mux_irq(unsigned);
 extern "C" void sweet_keys_irq_notify(unsigned) { ++keyEvents; }
 extern "C" void sweet_keys_irq_failed() { ++keyFailures; }
-extern "C" vm_offset_t ml_io_map(vm_offset_t a, vm_size_t) { return a; }
+extern "C" vm_offset_t ml_io_map(vm_offset_t a, vm_size_t) {
+    if (testMapFail && --testMapFail==0) return 0;
+    ++mappings[a]; return a;
+}
+extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t a, vm_size_t n, unsigned flags) {
+    assert(flags==VM_WIMG_IO);
+    if (testMapFail && --testMapFail==0) return 0;
+    ++mappings[trunc_page(a)]; mappingSizes[trunc_page(a)]=round_page(n+(a&PAGE_MASK));
+    return a;
+}
+extern "C" void ml_io_unmap(vm_offset_t a, vm_size_t n) {
+    assert(!(a&PAGE_MASK) && !(n&PAGE_MASK) && n==mappingSizes.at(a));
+    auto p=mappings.find(a); assert(p!=mappings.end() && p->second);
+    if (!--p->second) mappings.erase(p);
+}
 extern "C" void sweet_spmi_irq_lock() { assert(lockDepth++ == 0); }
 extern "C" void sweet_spmi_irq_unlock() { assert(--lockDepth == 0); }
 extern "C" int sweet_spmi_read(unsigned sid, unsigned a, uint8_t *v) {
@@ -126,14 +243,22 @@ static void batteryNotify(void *, unsigned event) {
 static void keyNotify(void *, unsigned event) {
     if (event == 0x80000000u) ++keyFailures; else ++keyEvents;
 }
-static uint32_t hwRead(uintptr_t b,unsigned off) { return mmio[b+off]; }
+static uint32_t hwRead(uintptr_t b,unsigned off) {
+    std::lock_guard<std::recursive_mutex> lock(hwLock); return mmio[b+off];
+}
 static void hwWrite(uintptr_t b,unsigned off,uint32_t value) {
+    std::lock_guard<std::recursive_mutex> lock(hwLock);
     uintptr_t a=b+off;
     const uintptr_t gd=0x17a00000, core=SWEET_DEV_SPMI_CORE_PA;
     const uintptr_t ch=SWEET_DEV_SPMI_CHNLS_PA, obs=SWEET_DEV_SPMI_OBS_PA;
     unsigned spiOff=4*(513/32), spiBit=1u<<(513%32);
     if (a==0x0b220000+0x10 && dropPdcEnable && (value&2)) return;
-    if (a == gd+0x100+spiOff) { mmio[a] |= value; return; }
+    if (a == gd+0x100+spiOff) {
+#ifdef SWEET_MUX_SERVICE_TEST
+        assert(hasIrqOwner()); // attach/drain cannot reopen SPI after unpublish
+#endif
+        mmio[a] |= value; return;
+    }
     if (a == gd+0x180+spiOff) { mmio[gd+0x100+spiOff] &= ~value; return; }
     if (a == gd+0x280+spiOff) { mmio[gd+0x200+spiOff] &= ~value; return; }
     if (a == gd+0x200+spiOff) {
@@ -334,6 +459,9 @@ static void inject(unsigned apid,unsigned bits) {
 }
 int main(int argc,char **argv) {
     initialize();
+#ifdef SWEET_MUX_SERVICE_TEST
+    if (argc>1 && !std::strncmp(argv[1],"service-",8)) return serviceCheck(argv[1]);
+#endif
 #ifdef SWEET_MUX_READY
     if (argc>1 && !std::strncmp(argv[1],"startup-",8)) return startupCheck(argv[1]);
 #endif
@@ -446,6 +574,114 @@ static int boardCheck(const char *scenario) {
     return 0;
 }
 '''
+service_adapter = r'''
+#define SWEET_MUX_SERVICE_TEST 1
+static SweetSpmiInterruptMux *testInstance;
+static bool testServiceInitFail;
+static bool hasIrqOwner() { return irqService!=nullptr; }
+void IOService::registerService(unsigned) {
+    if (!dynamic_cast<SweetSpmiMuxDevice *>(this) || !testMatchDriver) return;
+    auto *service=new SweetSpmiInterruptMux;
+    testInstance=service;
+    testInitFail=testServiceInitFail;
+    bool initialized=service->init(); testInitFail=false;
+    if (!initialized) { service->release(); return; }
+    assert(service->attach(this));
+    if (service->start(this)) service->mockStarted=true;
+    else service->terminate(2);
+    service->release();
+}
+// Assertions inspect the actual instance fields, not a shadow implementation.
+#define state (testInstance->state)
+#define routes (testInstance->routes)
+#define bindings (testInstance->bindings)
+#define ackRoute(r) testInstance->ackRoute(r)
+'''
+service_checks = r'''
+static int serviceCheck(const char *scenario) {
+    bool failure=std::strstr(scenario,"fail") || std::strstr(scenario,"missing");
+    if (!std::strcmp(scenario,"service-match-missing")) testMatchDriver=false;
+    if (!std::strcmp(scenario,"service-init-fail")) testServiceInitFail=true;
+    if (!std::strcmp(scenario,"service-loop-fail")) testLoopFail=1;
+    if (!std::strcmp(scenario,"service-event-fail")) testAddFail=1;
+    if (!std::strcmp(scenario,"service-map-fail")) testMapFail=3;
+    if (failure) {
+        assert(sweet_spmi_mux_watch_ready(batteryNotify,&batteryEvents)==0);
+        assert(startMux()==-1);
+        assert(published==-1 && !muxService && !irqService);
+        assert(mappings.empty() && platform.children.empty() && batteryFailures==1);
+        pump();
+        std::printf("PASS: %s; FAILED delivered, partial resources released\n",scenario);
+        return 0;
+    }
+    assert(startMux()==0 && muxService && irqService);
+    assert(testInstance->getWorkLoop());
+    assert(testInstance->properties["SweetMuxLifecycle"]=="ready");
+    assert(testInstance->properties["SweetMuxHardwareProvider"]=="false");
+    assert(startMux()==0); // publishing twice cannot create another owner
+    assert(platform.children.size()==1);
+    assert(attachKeys()==0);
+    if (!std::strcmp(scenario,"service-stop-pending") ||
+        !std::strcmp(scenario,"service-stop-battery-race")) {
+        SweetBattery battery;
+        battery.poll();
+        assert(SweetBattery::startIrqAction(&battery,nullptr,nullptr,nullptr,nullptr)==0);
+        pump(); assert(battery.fIrqAttached && battery.reads==2);
+        auto mapped=mappings;
+        sweet_spmi_mux_detach(0,&keyContext);
+        assert(attachKeys()==0 && mappings==mapped); // cached channels do not leak
+        bool pending=!std::strcmp(scenario,"service-stop-pending");
+        if (pending) {
+            inject(248,1); // stop with mux action queued; consumer still alive
+            platform.children.back()->terminate(2);
+        } else {
+            std::atomic<bool> go{false};
+            std::thread consumer([&] {
+                while (!go.load()) std::this_thread::yield();
+                battery.fLoop->runAction(SweetBattery::stopPolling,&battery);
+            });
+            go=true;
+            platform.children.back()->terminate(2);
+            consumer.join();
+        }
+        assert(!muxService && !irqService && mappings.empty());
+        pump();
+        assert(keyFailures==1 && !battery.fRunning && battery.reads==2);
+        if (pending) assert(battery.fIrqFailed);
+        assert(testStops==1 && testFrees==2);
+    } else {
+        // API references and the IRQ dispatch pointer must survive/reject stop
+        // safely; ASAN sees real deletion of the mock service and event source.
+        std::atomic<bool> running{true};
+        std::atomic<unsigned> calls{0};
+        std::thread client([&] {
+            int context=3;
+            while (running.load()) {
+                if (sweet_spmi_mux_attach(1,1,batteryNotify,&context)==0)
+                    sweet_spmi_mux_detach(1,&context);
+                ++calls;
+            }
+        });
+        std::thread irq([&] { while (running.load()) sweet_spmi_mux_irq(513); });
+        while (calls.load()<10) std::this_thread::yield();
+        platform.children.back()->terminate(2);
+        running=false; client.join(); irq.join();
+        assert(!muxService && !irqService && mappings.empty());
+        assert(testStops==1 && testFrees==2);
+        auto events=keyEvents+keyFailures+batteryEvents+batteryFailures;
+        for (unsigned i=0;i<100;++i) assert(sweet_spmi_mux_irq(513));
+        pump(); assert(events==keyEvents+keyFailures+batteryEvents+batteryFailures);
+        int context=0;
+        assert(sweet_spmi_mux_attach(1,1,batteryNotify,&context)==-1);
+        sweet_spmi_mux_detach(1,&context);
+    }
+    assert(platform.children.empty());
+    std::printf("PASS: %s; stop clears IRQ/callbacks, final free releases all MMIO\n",scenario);
+    return 0;
+}
+'''
+if not service_mux:
+    service_adapter = service_checks = ''
 if not board_startup:
     consumer_adapter = '''static int startMux() { return sweet_spmi_mux_start(3); }
 static int attachKeys() { return 0; }
@@ -454,7 +690,9 @@ static int boardCheck(const char *) { return 1; }
 with tempfile.TemporaryDirectory(prefix='mh2lm-batt-irq-') as temporary:
     test = Path(temporary) / 'mux.cpp'
     binary = Path(temporary) / 'mux-test'
-    test.write_text(prelude + header + source + consumer_adapter + startup_adapter + startup_checks + checks)
+    prefix = '#define SWEET_MUX_SERVICE_TEST 1\n' if service_mux else ''
+    test.write_text(prefix + prelude + header + source + service_adapter + consumer_adapter +
+                    startup_adapter + startup_checks + service_checks + checks)
     subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17', '-O1', '-g',
                     '-pthread', '-fsanitize=address,undefined', str(test), '-o', str(binary)], check=True)
     # Minimal IOKit mocks intentionally live until process exit.
@@ -464,6 +702,14 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-batt-irq-') as temporary:
     if board_startup:
         for scenario in ['no-keys', 'key-fail', 'key-rollback', 'key-detach', 'arm-fail']:
             subprocess.run([str(binary), 'board-' + scenario], env=env, check=True)
+    if service_mux:
+        for scenario in ['match-missing', 'init-fail', 'loop-fail', 'event-fail',
+                         'map-fail', 'stop-pending', 'stop-battery-race', 'stop-race']:
+            subprocess.run([str(binary), 'service-' + scenario], env=env, check=True)
+        for _ in range(20):
+            subprocess.run([str(binary), 'service-stop-race'], env=env,
+                           stdout=subprocess.DEVNULL, check=True)
+        print('PASS: 20 additional IRQ/API/stop lifetime races')
     if startup_tests:
         for scenario in ['late', 'early', 'fail', 'failed-first', 'cancel',
                          'queued-stop', 'races']:

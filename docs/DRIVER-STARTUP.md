@@ -3,6 +3,12 @@
 更新：2026-11-05。0143 是本地实现，基于 0115 最终源码叠加 0142；
 尚未通过新一轮 CircleCI 完整构建或实机验证。旧 0115 镜像不包含此变更。
 
+**0144 继续改造：** 共享 mux 现已在本地实现为真正的 IOService。
+board 原入口改为发布晚期 `SweetSpmiMuxDevice` nub，由 KernelConfigTables
+同步匹配；路由、状态及资源归 mux 实例，并补齐 stop/free。0143 与 0144
+都尚未实机验证。最新匹配层级、filter/controller 选择和生命周期规则见
+[`MUX-IOSERVICE.md`](MUX-IOSERVICE.md)。下文的 0143 是本次改造的基线。
+
 ## 电池进度检查点
 
 按用户要求，先暂停电池 IRQ 验收，清理错误的启动调用关系。
