@@ -1,0 +1,393 @@
+diff --git a/bsd/dev/sweet_spmi_mux.h b/bsd/dev/sweet_spmi_mux.h
+--- a/bsd/dev/sweet_spmi_mux.h
++++ b/bsd/dev/sweet_spmi_mux.h
+@@ -11,8 +11,16 @@
+ #define SWEET_BATT_IRQ_CHG   0x02u
+ #define SWEET_BATT_IRQ_MSOC  0x04u
+ #define SWEET_BATT_IRQ_READY 0x08u
++#define SWEET_MUX_READY     0x40000000u
+ #define SWEET_MUX_FAILED    0x80000000u
+ typedef void (*SweetMuxNotify)(void *context, unsigned events);
++/* One-shot readiness subscription, usable before the mux workloop exists.
++ * Returns 0 when registered/queued, -1 on registration failure. If already
++ * ready/failed, queues that result immediately. Callback MUST only queue work.
++ * unwatch synchronizes with the callback; call before releasing context.
++ * The readiness lock is never held while waiting on either workloop. */
++int sweet_spmi_mux_watch_ready(SweetMuxNotify notify, void *context);
++void sweet_spmi_mux_unwatch_ready(void *context);
+ /* 0 attached, -2 keys/mux not ready yet, -1 failure (never falls back).
+  * Consumer owns context until detach returns. No second GIC registration. */
+ int sweet_spmi_mux_attach(unsigned group, unsigned events,
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -10,6 +10,7 @@
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ #include <device/device_types.h>
+ #include <IOKit/IOLib.h>
++#include <IOKit/IOLocks.h>
+ #include <IOKit/IOInterruptEventSource.h>
+ #include <IOKit/IOWorkLoop.h>
+ #include <machine/machine_routines.h>
+@@ -86,10 +87,98 @@
+ static unsigned irqCount, workCount, routeCount, faultCount;
+ static unsigned mode;
+ static volatile int published; /* 0 not started, -1 failed, 1 workloop ready */
++static IOLock *readyLock;
++static SweetMuxNotify readyNotify;
++static void *readyContext;
+ static uint64_t stormStartNs;
+ static unsigned stormBase;
+ static unsigned apidCount;
+ static bool allowEmptyDrain; /* a maintenance detach may consume queued pending */
++
++/* Battery starts in IOKit before BSD starts the key mux. Keep the one-shot
++ * subscription independent of the mux workloop. This lock protects callback
++ * lifetime only; no MMIO, workloop waits or consumer work runs under it. */
++static IOLock *
++readinessLock(void)
++{
++	IOLock *lock = __atomic_load_n(&readyLock, __ATOMIC_ACQUIRE);
++	if (!lock) {
++		IOLock *candidate = IOLockAlloc();
++		if (!candidate) {
++			return NULL;
++		}
++		if (__atomic_compare_exchange_n(&readyLock, &lock, candidate, false,
++		    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++			lock = candidate;
++		} else {
++			IOLockFree(candidate);
++		}
++	}
++	return lock;
++}
++
++static void
++publishReadiness(int result)
++{
++	IOLock *lock = readinessLock();
++	if (!lock) {
++		__atomic_store_n(&published, -1, __ATOMIC_RELEASE);
++		return;
++	}
++	IOLockLock(lock);
++	__atomic_store_n(&published, result, __ATOMIC_RELEASE);
++	if (readyNotify) {
++		readyNotify(readyContext, result == 1 ? SWEET_MUX_READY : SWEET_MUX_FAILED);
++		readyNotify = NULL;
++		readyContext = NULL;
++	}
++	IOLockUnlock(lock);
++}
++
++extern "C" int
++sweet_spmi_mux_watch_ready(SweetMuxNotify notify, void *context)
++{
++	IOLock *lock = readinessLock();
++	if (!lock || !notify || !context) {
++		return -1;
++	}
++	IOLockLock(lock);
++	if (readyNotify) {
++		IOLockUnlock(lock);
++		return -1; /* one battery instance, never replace a live context */
++	}
++	int result = __atomic_load_n(&published, __ATOMIC_ACQUIRE);
++	if (result == 0) {
++		readyNotify = notify;
++		readyContext = context;
++	} else {
++		notify(context, result == 1 ? SWEET_MUX_READY : SWEET_MUX_FAILED);
++	}
++	IOLockUnlock(lock);
++	return 0;
++}
++
++extern "C" void
++sweet_spmi_mux_unwatch_ready(void *context)
++{
++	IOLock *lock = __atomic_load_n(&readyLock, __ATOMIC_ACQUIRE);
++	if (!lock) {
++		return;
++	}
++	IOLockLock(lock);
++	if (readyContext == context) {
++		readyNotify = NULL;
++		readyContext = NULL;
++	}
++	IOLockUnlock(lock);
++}
++
++static int
++startFailed(void)
++{
++	publishReadiness(-1);
++	return -1;
++}
+ 
+ static uint32_t
+ read32(vm_offset_t base, unsigned off)
+@@ -266,6 +355,7 @@
+ disableHardware(void)
+ {
+ 	__atomic_store_n(&state, 3u, __ATOMIC_RELEASE);
++	publishReadiness(-1);
+ 	if (gicd) {
+ 		write32(gicd, 0x180u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
+ 	}
+@@ -556,20 +646,20 @@
+ 	if (requestedMode < 1u || requestedMode > 3u || workLoop) {
+ 		return -1;
+ 	}
+-	__atomic_store_n(&published, -1, __ATOMIC_RELEASE);
+ 	mode = requestedMode;
+ 	workLoop = IOWorkLoop::workLoop();
+ 	if (!workLoop) {
+-		return -1;
++		return startFailed();
+ 	}
+ 	eventSource = IOInterruptEventSource::interruptEventSource(workLoop,
+ 	    workAction, NULL, 0);
+ 	if (!eventSource || workLoop->addEventSource(eventSource) != kIOReturnSuccess) {
+ 		SWEET_LOG_ERROR("SWEET MUX: software event source unavailable\n");
+-		return -1;
++		return startFailed();
+ 	}
+ 	if (mode == 1) {
+ 		SWEET_LOG_INFO("SWEET MUX: software handoff test queued; no PMIC/PDC/GIC gates\n");
++		publishReadiness(-1); /* diagnostic mode has no hardware routes */
+ 		eventSource->interruptOccurred(NULL, NULL, 0);
+ 		return 0;
+ 	}
+@@ -580,14 +670,14 @@
+ 	obs = ml_io_map(SWEET_DEV_SPMI_OBS_PA, 0x10000);
+ 	if (!gicd || !pdc || !core || !cfg || !obs) {
+ 		SWEET_LOG_ERROR("SWEET MUX: upstream or PMIC map failed; IRQ unavailable\n");
+-		return -1;
++		return startFailed();
+ 	}
+ 	uint32_t version = read32(core, 0);
+ 	unsigned count = read32(core, 4) & 0x7ffu;
+ 	if (version < 0x50000000u || version >= 0x60000000u ||
+ 	    count == 0 || count > 512) {
+ 		SWEET_LOG_ERROR("SWEET MUX: unsupported arb=%#x count=%u\n", version, count);
+-		return -1;
++		return startFailed();
+ 	}
+ 	apidCount = count;
+ 	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+@@ -599,28 +689,28 @@
+ 		route.apid = findOwnedApid(route.sid, route.per, count);
+ 		if (route.apid == MUX_NO_APID) {
+ 			SWEET_LOG_ERROR("SWEET MUX: %s has no unique EE0 IRQ-owned APID\n", route.name);
+-			return -1;
++			return startFailed();
+ 		}
+ 		route.channel = ml_io_map(SWEET_DEV_SPMI_CHNLS_PA +
+ 		    0x10000u * route.apid, 0x1000);
+ 		if (!route.channel) {
+ 			SWEET_LOG_ERROR("SWEET MUX: %s channel map failed apid=%u\n",
+ 			    route.name, route.apid);
+-			return -1;
++			return startFailed();
+ 		}
+ 	}
+ 	/* No hardware gate is opened until callback, worker and all checks exist. */
+ 	if ((read32(pdc, 0x114u) & 7u) != 4u || !configureGic() ||
+ 	    !probeGicDelivery()) {
+ 		SWEET_LOG_ERROR("SWEET MUX: PDC polarity, GIC config or delivery probe failed; IRQ unavailable\n");
+-		return -1;
++		return startFailed();
+ 	}
+ 	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+ 		MuxRoute &route = routes[i];
+ 		if (route.active && !configureRoute(route)) {
+ 			SWEET_LOG_ERROR("SWEET MUX: route %s setup failed; IRQ disabled\n", route.name);
+ 			disableHardware();
+-			return -1;
++			return startFailed();
+ 		}
+ 	}
+ 	uint32_t enable = read32(pdc, 0x10u);
+@@ -628,7 +718,7 @@
+ 	if ((read32(pdc, 0x10u) & 2u) == 0) {
+ 		SWEET_LOG_ERROR("SWEET MUX: PDC pin 1 enable failed; IRQ disabled\n");
+ 		disableHardware();
+-		return -1;
++		return startFailed();
+ 	}
+ 	__atomic_store_n(&state, 1u, __ATOMIC_RELEASE);
+ 	write32(gicd, 0x100u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
+@@ -640,12 +730,12 @@
+ 	if ((!enabledBit && currentState == 1u) || currentState == 3u) {
+ 		SWEET_LOG_ERROR("SWEET MUX: GIC SPI 513 enable failed; IRQ disabled\n");
+ 		disableHardware();
+-		return -1;
+-	}
+-	__atomic_store_n(&published, 1, __ATOMIC_RELEASE);
++		return startFailed();
++	}
+ 	SWEET_LOG_INFO("SWEET MUX: armed mode=%u intid=%u pdc=%#x routes=%u limit=%u state=%u\n",
+ 	    mode, MUX_INTID, read32(pdc, 0x10u), mode == 3 ? 3 : 1,
+ 	    MUX_IRQ_LIMIT, currentState);
++	publishReadiness(1);
+ 	return 0;
+ }
+ struct BindingRequest {
+@@ -812,7 +902,10 @@
+ extern "C" void
+ sweet_spmi_mux_detach(unsigned group, void *context)
+ {
+-	if (group != MUX_BATTERY || __atomic_load_n(&published, __ATOMIC_ACQUIRE) != 1) {
++	/* A runtime fault publishes FAILED, but an attached context still must
++	 * be removed under the existing gate before its owner is released. */
++	if (group != MUX_BATTERY ||
++	    __atomic_load_n(&published, __ATOMIC_ACQUIRE) == 0 || !workLoop) {
+ 		return;
+ 	}
+ 	BindingRequest request = {group, 0, NULL, context};
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -97,9 +97,9 @@
+ 	IOWorkLoop *fLoop;
+ 	IOTimerEventSource *fTimer;
+ 	IOInterruptEventSource *fIrqEvent;
+-	bool fIrqEventAdded, fIrqAttached, fIrqFailed, fPreflightOk;
++	bool fIrqEventAdded, fIrqAttached, fIrqFailed, fPreflightOk, fMuxWatching;
+ 	bool fSettlePending;
+-	unsigned fIrqMode, fAttachTries, fIrqSamples, fSettleBudget;
++	unsigned fIrqMode, fIrqSamples, fSettleBudget;
+ 	volatile unsigned fIrqPending, fIrqNotifications;
+ 	volatile uint64_t fIrqNotifyTime;
+ 	bool fTimerAdded, fRunning, fReal;
+@@ -238,8 +238,9 @@
+ 	fTimerAdded = fRunning = fReal = false;
+ 	fIrqEvent = NULL;
+ 	fIrqEventAdded = fIrqAttached = fIrqFailed = fPreflightOk = false;
++	fMuxWatching = false;
+ 	fSettlePending = false;
+-	fIrqMode = fAttachTries = fIrqSamples = fSettleBudget = 0;
++	fIrqMode = fIrqSamples = fSettleBudget = 0;
+ 	fIrqPending = fIrqNotifications = 0;
+ 	fIrqNotifyTime = 0;
+ 	fSid2 = fDiag = fUiDiag = false;
+@@ -801,9 +802,14 @@
+ 	SWEET_LOG_ERROR("SWEET BATT IRQ: FAILED %s mode=%u notifications=%u samples=%u; no polling fallback\n",
+ 	    reason, fIrqMode, __atomic_load_n(&fIrqNotifications, __ATOMIC_ACQUIRE), fIrqSamples);
+ 	putBool("SweetBatteryIRQHealthy", false);
++	putBool("SweetBatteryIRQWaitingForMux", false);
+ 	putBool("SweetBatteryHardwareSampleValid", false);
+ 	updateStatus();
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
++	if (fMuxWatching) {
++		sweet_spmi_mux_unwatch_ready(this);
++		fMuxWatching = false;
++	}
+ 	if (fIrqAttached) {
+ 		sweet_spmi_mux_detach(SWEET_MUX_BATTERY, this);
+ 		fIrqAttached = false;
+@@ -815,12 +821,14 @@
+ SweetBattery::irqNotify(void *context, unsigned events)
+ {
+ 	SweetBattery *self = (SweetBattery *)context;
+-	uint64_t now;
+-	clock_get_uptime(&now);
+-	__atomic_store_n(&self->fIrqNotifyTime, now, __ATOMIC_RELEASE);
+-	__atomic_add_fetch(&self->fIrqNotifications, 1u, __ATOMIC_RELAXED);
++	if (events & 0x0fu) {
++		uint64_t now;
++		clock_get_uptime(&now);
++		__atomic_store_n(&self->fIrqNotifyTime, now, __ATOMIC_RELEASE);
++		__atomic_add_fetch(&self->fIrqNotifications, 1u, __ATOMIC_RELAXED);
++	}
+ 	__atomic_fetch_or(&self->fIrqPending, events, __ATOMIC_RELEASE);
+-	/* Called under mux gate. Never wait for our own workloop here. */
++	/* Called under mux gate or readiness lock. Only queue; never wait. */
+ 	self->fIrqEvent->interruptOccurred(NULL, NULL, 0);
+ }
+ 
+@@ -828,7 +836,7 @@
+ SweetBattery::irqAction(OSObject *owner, IOInterruptEventSource *, int count)
+ {
+ 	SweetBattery *self = OSDynamicCast(SweetBattery, owner);
+-	if (!self || !self->fRunning || !self->fIrqAttached) {
++	if (!self || !self->fRunning) {
+ 		return;
+ 	}
+ 	unsigned pending = __atomic_exchange_n(&self->fIrqPending, 0u, __ATOMIC_ACQ_REL);
+@@ -836,7 +844,12 @@
+ 		self->failIrq("shared PMIC mux stopped; keys may also be unavailable");
+ 		return;
+ 	}
+-	if (!pending) {
++	if (pending & SWEET_MUX_READY) {
++		SWEET_LOG_INFO("SWEET BATT IRQ: mux readiness event received; attaching routes\n");
++		self->tryAttachIrq();
++	}
++	pending &= 0x0fu;
++	if (!pending || !self->fRunning || !self->fIrqAttached) {
+ 		return;
+ 	}
+ 	uint64_t notified = __atomic_load_n(&self->fIrqNotifyTime, __ATOMIC_ACQUIRE);
+@@ -866,16 +879,12 @@
+ 		events |= SWEET_BATT_IRQ_MSOC | SWEET_BATT_IRQ_READY;
+ 	}
+ 	int result = sweet_spmi_mux_attach(SWEET_MUX_BATTERY, events, irqNotify, this);
+-	if (result == -2 && ++fAttachTries < 100u) {
+-		/* Bounded startup handoff only, no PMIC reads or status polling. */
+-		fTimer->setTimeoutMS(100);
+-		return;
+-	}
+ 	if (result != 0) {
+-		failIrq(result == -2 ? "mux not ready within 10s" : "route attach failed");
++		failIrq("route attach failed after mux readiness event");
+ 		return;
+ 	}
+ 	fIrqAttached = true;
++	putBool("SweetBatteryIRQWaitingForMux", false);
+ 	putBool("SweetBatteryIRQHealthy", true);
+ 	putNumber("SweetBatteryIRQEvents", events);
+ 	SWEET_LOG_INFO("SWEET BATT IRQ: armed mode=%u events=%#x; 2s polling disabled\n",
+@@ -895,7 +904,17 @@
+ 	if (!self) {
+ 		return kIOReturnBadArgument;
+ 	}
+-	self->tryAttachIrq();
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	self->putBool("SweetBatteryIRQWaitingForMux", true);
++	self->putBool("SweetBatteryIRQHealthy", false);
++	self->updateStatus();
++	self->fMuxWatching = true;
++	SWEET_LOG_INFO("SWEET BATT IRQ: waiting for mux readiness event; no timer/status polling\n");
++	if (sweet_spmi_mux_watch_ready(irqNotify, self) != 0) {
++		self->fMuxWatching = false;
++		self->failIrq("mux readiness subscription failed");
++	}
++#endif
+ 	return kIOReturnSuccess;
+ }
+ 
+@@ -907,9 +926,7 @@
+ 		return;
+ 	}
+ 	if (self->fIrqMode >= 2) {
+-		if (!self->fIrqAttached) {
+-			self->tryAttachIrq();
+-		} else if (self->fSettlePending && self->fSettleBudget) {
++		if (self->fIrqAttached && self->fSettlePending && self->fSettleBudget) {
+ 			self->fSettlePending = false;
+ 			--self->fSettleBudget;
+ 			self->poll();
+@@ -1037,6 +1054,10 @@
+ 	}
+ 	self->fRunning = false;
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
++	if (self->fMuxWatching) {
++		sweet_spmi_mux_unwatch_ready(self);
++		self->fMuxWatching = false;
++	}
+ 	if (self->fIrqAttached) {
+ 		sweet_spmi_mux_detach(SWEET_MUX_BATTERY, self);
+ 		self->fIrqAttached = false;

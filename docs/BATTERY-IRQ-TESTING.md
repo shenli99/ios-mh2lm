@@ -1,11 +1,13 @@
-# MH2LM 电池 IRQ：0141 首版实现与测试
+# MH2LM 电池 IRQ：0141/0142 实现与测试
 
 **日期：** 2026-11-05。补丁 `0141-mh2lm-battery-event-irqs.patch` 基于
 0114a15 最终 buildtree（0138→0139→0140 已生效）生成。完成本地检查；0115
 云端产物的最终源码、内核符号与标记已核对，六个测试镜像已生成并回读验证。
 mode1 的 live 与持久日志已核对，采样和既有三路 IRQ 正常，启动记录明确
-`preflight=1`，只读预检通过。尚未开启电池路由，不能宣称电池 IRQ 成功。
-已验证的真实电池基线仍是 `live-0114a15-batt-irq-only.txt`。
+`preflight=1`，只读预检通过。但 0115 mode2 在 mux 启动之前耗尽十秒等待，
+电池服务停用、路由未接入。0142 已改为就绪事件交接并通过本地检查，待新一轮
+云编译与实机验证。**暂停测试旧 0115 的 charger/all 档，不代表硬件 IRQ 已失败。**
+已验证的真实采样包括 0114a15 和 0115 mode1，尚未验收电池 IRQ。
 
 ## 实现路径与边界
 
@@ -26,7 +28,18 @@ route 表与两个 consumer group，不是完整的可枚举 PMIC 子驱动 prov
 新增 `sweet_spmi_mux_attach/detach()` 在 mux workloop 下串行执行。回调只向
 电池事件源排队，不能等待电池 workloop；detach 返回后才允许释放 consumer
 和事件源，避免交叉 workloop 死锁或释放后回调。电池先发布初始采样，再 arm，
-arm 后补读一次关闭启动窗口；mux 未启动时最多等待约十秒，不在等待中采样。
+arm 后补读一次关闭启动窗口。0141 原有的十秒重试已在实机暴露启动顺序问题；
+0142 改用 `sweet_spmi_mux_watch_ready/unwatch_ready()` 单次订阅，battery
+启动后立即返回，不阻塞 BSD 初始化。mux 硬件就绪后通知电池自己的 workloop
+接入路由；mux 先启动或已失败时立即排队相应结果。
+
+就绪通知与订阅取消由独立 IOLock 同步，锁内回调只能排队，不等待任何 workloop。
+退出前先取消订阅、同步回调，再 detach 和释放事件源；就绪事件不计入硬件 IRQ
+计数。等待期间不设置重试定时器、不扫描状态，属性
+`SweetBatteryIRQWaitingForMux=true`、`SweetBatteryIRQHealthy=false` 明确
+表示未就绪。若 mux 永远未启动，就保持显式等待；mux 实际初始化失败则 ERROR
+停用，不能伪装健康或改成轮询。测试配置保留 `sweetkeys=1`，由既有 BSD 路径
+启动唯一 mux，不将 GIC/MMIO 初始化提前到电池早期启动阶段。
 
 新增路由先解析唯一 EE0 IRQ-owned APID，再访问该 channel。拒绝接管已经
 使能的对应外设 IRQ 位；保存并恢复自己的触发位，保留其他位。电池 observer
@@ -95,8 +108,8 @@ MSOC delta 沿用固件现有配置，不访问 MEMIF/SRAM。LG 源码 0.3% 是�
 完整镜像 SHA256 记录在 `NOTES.md` 和
 工作区 `scratch/battery-irq-0115/boot-verification.json`。
 用户已跳过 baseline 直接测试 preflight：运行段未见新增驱动故障，因此不要求
-补测 baseline。持久日志补齐后预检明确通过，**当前使用现成的 usbin 镜像测试 mode2。**
-无需再次 push 或云编译，真实中断接入仍待确认。
+补测 baseline。持久日志补齐后预检明确通过；随后 mode2 暴露下面的启动等待
+错误。**当前需要 push 0142、下载新内核后重测 USBIN，不继续测试旧 0115 IRQ 档。**
 
 `live-0115-battery-irq-preflight.txt` 的 boot-args 确认 mode1；54 次真实采样
 稳定 70%、4009mV，三键 12 次路由与成对 HID、触摸及 USB ACM 均继续运行，
@@ -109,15 +122,23 @@ FG 外设 edge/high/low/enable/latch 字节均为 0，RT=0x2；
 `selected mode=1 preflight=1`。FG route-parts=0x3 没有访问 channel，
 打印的 acc-enable/status=0 不能作为它们已测得为零的证据。详细值见硬件基线。
 
-下一步命令（工作区根目录）：
+### 0115 USBIN 失败与 0142 修正
 
-```bash
-fastboot boot out-bs/boot-16k-0115-battery-irq-usbin.img
-```
+`sweetlog-0115-battery-irq-usbin.bin` 解码后第 98 行为 `mode=2 preflight=1`，
+111 行初始采样 70%/4009mV/外接电源，116 行出现
+`FAILED mux not ready within 10s ... notifications=0 samples=0`；134/135 行
+才出现按键 mux 探针和 arm 成功。没有任何电池 attach/arm/事件刷新。
+电池在早期 IOKit 启动，mux 在后续 BSD 按键初始化才启动，固定十秒等待
+使电池提前放弃。这足以解释插拔状态冻结和缺少电池事件唤屏，尚不能评价
+USBIN 的真实投递、极性或 ack。三键/USB/触摸仍在工作。
+
+0142 修正上述就绪交接，尚未进入已验证的实机镜像。新产物下载后使用下方
+通用命令打包，再 `fastboot boot out-bs/boot-16k-LABEL-battery-irq-usbin.img`。
+不因这次错误重复完整预检；mode2 自身仍会核对身份与外设状态。
 
 插拔约三轮，每次停留 5–10 秒；同时回归三键/组合键和触摸，再覆盖一次
 display-off 插拔。mode2 没有两秒电池采样，重点看插拔事件与状态通知；
-导出 `sweetlog-0115-battery-irq-usbin.bin`，有 live ACM 日志也一并保留。
+导出新编号的 `sweetlog-LABEL-battery-irq-usbin.bin`，有 live ACM 日志也一并保留。
 拔线中断 ACM 是正常现象，早期 arm/拔线段以持久日志补齐。未接 CHGR/MSOC，
 所以本档不能验收充电状态和电量变化事件。
 
@@ -128,7 +149,8 @@ ref/ios-mh2lm/tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-LABEL.gz LABEL --ba
 ```
 
 生成位置为 `out-bs/boot-16k-LABEL-battery-irq-*.img`。脚本检查 kernel manifest、
-0141 标记、ramdisk 回读与 payload 一致性；旧 0114a15 内核会被明确拒绝。
+0141/0142 标记、ramdisk 回读与 payload 一致性；旧 0114a15 和未修复的 0115
+内核会被明确拒绝，不产生新镜像。旧 0115 镜像不删除，保留为失败对照。
 所有测试仅 `fastboot boot`，不刷启动分区。
 
 按顺序推进，每步保留原始日志和现象；有异常先停在该步分析，使用同一内核
@@ -155,6 +177,9 @@ ref/ios-mh2lm/tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-LABEL.gz LABEL --ba
 日志至少保留：`selected mode`、`REVID`、`attach route`、
 `consumer attached`、`armed mode`、`hit route=battery-*`、
 `refresh events`、`SWEET BATTERY SID2`、`SWEET BATT UI`、ERROR/WARN。
+重测还须看到启动交接：`waiting for mux readiness event` → mux armed →
+`mux readiness event received` → consumer attached → 电池 armed → arm-sync。
+如果 mux 先就绪，先后顺序可不同；必须最终接上，不能只有等待或初始采样。
 `route-to-publish-us` 从 mux 通知时刻近似计时，不包括硬件到 GIC/mux 的延迟，
 事件合并时也不能解读成每个边沿的精确耗时。记录 IRQ 通知/采样次数、产物和
 镜像 SHA256、boot arguments、线缆状态、操作顺序与原始日志名到 `NOTES.md`。
@@ -176,12 +201,20 @@ display-off 只指现有逻辑息屏，不代表深度休眠；已知锁屏局�
   保留、外部 EE 拒绝、部分接入失败回滚、带 queued IRQ detach、累计 600 次
   正常 IRQ 不停用、密集风暴显式停止、超时 APID 禁止复用及通知两个 consumer。
   模拟器不能证明真实 PMIC 时序、硬件投递或完整电池服务生命周期。
+- 0142 对精确 0115 基线应用后，三个文件与编译源逐字节一致，两个 C++ 单元
+  ARM64 对象检查通过，C 链接符号匹配；原生 CircleCI 完整构建和实机仍待验证。
+  测试新增提取实际 battery 的七个就绪/IRQ/退出函数，仅替代采样、属性发布
+  和调度环境；验证 mux 晚 30 秒启动时无定时重试/状态读取、mux 先启动、
+  订阅前后初始化失败、取消待就绪与已排队通知、正常 IRQ 刷新和退出同步，
+  以及 200 组注册/发布与取消并发竞争。使用 ASAN/UBSAN；不等同原生 workloop
+  并发或完整服务生命周期测试。
 - 打包脚本语法、Python 语法、CircleCI YAML 解析通过；旧内核缺少标记时
   打包被拒绝且未生成镜像。CircleCI 实际使用的
-  `.github/workflows/circleci.yml` 增加 0141 源码门禁，原编译命令未改。
+  `.github/workflows/circleci.yml` 增加 0141/0142 源码门禁，原编译命令未改。
 
 源码工作目录为工作区 `scratch/battery-irq-0114a15/xnu/`；精确基线在
 `base/xnu/`，补丁应用核对目录为 `verify/`，编译脚本/日志/对象在同级 scratch。
 这些本地产物不进 git；仓库提交补丁、打包入口、测试脚本与文档。
 0115 产物源码核对目录为工作区 `scratch/battery-irq-0115/xnu/`。
-0115 preflight 持久记录已补齐；下一步使用已经生成的 USBIN 镜像验证真实投递。
+0142 的精确 0115 基线、修改源、应用核对与编译记录在工作区
+`scratch/battery-irq-startup-0115/`。下一步由用户 push，下载新产物后重测 USBIN。

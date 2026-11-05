@@ -36,3 +36,21 @@
 PMIC EE/APID 过滤是按键/电池共享 PMIC-arb 的专属规则，**DWC3 本身
 不走 PMIC-arb**；不要把它机械套用到 USB 或触摸。USB、触摸各自的
 设备侧 ack、mask 和可投递性仍需以本机真实事件验证。
+
+## 0115 电池新增复盘：先核对初始化依赖
+
+`sweetlog-0115-battery-irq-usbin.bin` 中，电池 `preflight=1`、初始采样
+正常，但十秒后记录 mux not ready 并停用；随后 BSD 按键初始化才成功
+启动 mux。电池路由一次也没接上，插拔不刷新、息屏不因电源事件唤醒，
+不能据此诊断为 USBIN 极性、ack 或 framebuffer 问题。
+
+早期 IOKit consumer 依赖晚期 BSD 初始化的共享服务时，应订阅就绪事件、
+立即返回，让后续启动阶段推进；不要提前执行有阶段要求的 GIC/MMIO，也
+不要以固定短超时猜测依赖何时存在。0142 使用单次 READY/FAILED 回调只排队，
+真实工作仍在 consumer 自己的 workloop，取消订阅必须同步回调寿命。
+等待必须可观察，实际初始化失败必须显式报告，均不能切换静默轮询。
+
+新增测试不仅模拟“mux 先启动”，还覆盖 consumer 先启动且 mux 晚于原超时、
+订阅与发布竞争、订阅前后初始化失败、等待期间退出和通知排队后退出。
+本地测试通过仍不证明实际外设 IRQ 投递，下一轮必须先看到 attach/armed，
+再用真实插拔证明 route → worker → IOPM 全链路。

@@ -116,7 +116,9 @@ fi
 if [ "$KEY_IRQ_PROFILE" = '--battery-irq' ]; then
 	for marker in 'SWEET BATT IRQ: armed mode=' \
 	    'SWEET BATT IRQ: REVID sid=2' 'battery-msoc' \
-	    'SWEET MUX: consumer attached group='; do
+	    'SWEET MUX: consumer attached group=' \
+	    'SWEET BATT IRQ: waiting for mux readiness event; no timer/status polling' \
+	    'SWEET BATT IRQ: mux readiness event received; attaching routes'; do
 		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
 			printf 'kernel artifact lacks battery IRQ marker: %s\n' "$marker" >&2
 			exit 1

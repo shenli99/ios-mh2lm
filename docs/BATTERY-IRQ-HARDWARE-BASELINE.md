@@ -3,6 +3,8 @@
 **日期：** 2026-11-05。0115 mode1 持久日志已补齐只读预检：PM8150B 身份、
 FG APID/owner 与外设配置现在已有实机读回。该模式仍是两秒采样，未开启电池
 IRQ；FG channel 访问、MSOC 门限及真实事件仍待测试，不能视为已经测得。
+随后 0115 mode2 在 mux 启动前耗尽十秒等待，电池路由未接入；这是软件
+启动依赖错误，不把该轮失败归因于 IRQ 极性或硬件线路。0142 本地修正待重测。
 实施范围和验收见 `IRQ-FRAMEBUFFER-PLAN.md` 子目标 4；新一轮测试入口见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
 

@@ -2,8 +2,9 @@
 """Exercise the actual mux source with a simulated PMIC/GIC backend.
 
 Usage: test-mh2lm-battery-irq.py EXTRACTED_XNU_DIRECTORY
-Only MMIO/time/IOKit scheduling are substituted. These checks do not validate
-real IRQ delivery, PMIC transaction timing, or the complete XNU battery service.
+Substitutes MMIO/time/IOKit scheduling and, for the selected actual battery
+lifecycle methods, sampling/property publication. These checks do not validate
+real IRQ delivery, PMIC timing, or the complete XNU battery service.
 """
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ root = Path(sys.argv[1]).resolve()
 source = (root / 'iokit/Kernel/arm/SweetSpmiInterruptMux.cpp').read_text()
 header = (root / 'bsd/dev/sweet_spmi_mux.h').read_text()
 source = re.sub(r'^#include .*$', '', source, flags=re.M)
+startup_tests = 'sweet_spmi_mux_watch_ready' in source
 
 def substitute_function(text, name, replacement):
     match = re.search(r'\n' + name + r'\([^)]*\)\n\{', text)
@@ -45,6 +47,9 @@ prelude = r'''
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
+#include <atomic>
+#include <thread>
 #include <vector>
 #define ARM64_BOARD_CONFIG_MH2LM 1
 #define SWEET_DEV_SPMI_CORE_PA 0x0c440000u
@@ -55,8 +60,14 @@ using vm_offset_t = uintptr_t;
 using vm_size_t = size_t;
 using IOReturn = int;
 static constexpr int kIOReturnSuccess=0, kIOReturnNotReady=1,
-    kIOReturnNotPermitted=2, kIOReturnIOError=3;
+    kIOReturnNotPermitted=2, kIOReturnIOError=3, kIOReturnBadArgument=4;
+using IOLock = std::mutex;
+static IOLock *IOLockAlloc() { return new IOLock; }
+static void IOLockFree(IOLock *p) { delete p; }
+static void IOLockLock(IOLock *p) { p->lock(); }
+static void IOLockUnlock(IOLock *p) { p->unlock(); }
 struct OSObject {};
+#define OSDynamicCast(type, object) static_cast<type *>(object)
 struct IOInterruptEventSource;
 struct IOWorkLoop : OSObject {
     using Action = IOReturn (*)(OSObject *, void *, void *, void *, void *);
@@ -70,14 +81,17 @@ static std::vector<IOInterruptEventSource *> queue;
 struct IOInterruptEventSource {
     using Action = void (*)(OSObject *, IOInterruptEventSource *, int);
     OSObject *owner; Action action;
+    bool enabled = true;
     static IOInterruptEventSource *interruptEventSource(OSObject *o, Action a, void *, int) {
         return new IOInterruptEventSource{o,a};
     }
     void interruptOccurred(void *, void *, int) { queue.push_back(this); }
+    void disable() { enabled=false; }
 };
 static void pump() {
     while (!queue.empty()) {
-        auto *e=queue.front(); queue.erase(queue.begin()); e->action(e->owner,e,1);
+        auto *e=queue.front(); queue.erase(queue.begin());
+        if (e->enabled) e->action(e->owner,e,1);
     }
 }
 #define SWEET_LOG_INFO(...) ((void)0)
@@ -161,6 +175,150 @@ static void initialize() {
     pmic[(0x210<<8)|0x12]=0x80; pmic[(0x210<<8)|0x13]=0x80;
 }
 '''
+startup_adapter = r'''
+// Compile the real battery readiness/IRQ/lifecycle methods below. Only PMIC
+// sampling/property publication and the IOKit scheduler are adapters.
+struct IOTimerEventSource {
+    unsigned requests=0;
+    bool enabled=true;
+    void setTimeoutMS(unsigned) { ++requests; }
+    void cancelTimeout() {}
+    void disable() { enabled=false; }
+};
+class SweetBattery : public OSObject {
+public:
+    IOWorkLoop *fLoop=IOWorkLoop::workLoop();
+    IOTimerEventSource *fTimer=new IOTimerEventSource;
+    IOInterruptEventSource *fIrqEvent;
+    bool fRunning=true, fIrqAttached=false, fIrqFailed=false, fMuxWatching=false;
+    bool fSettlePending=false, healthy=false, waiting=false, valid=true;
+    unsigned fIrqMode=2, fIrqSamples=0, fSettleBudget=0, reads=0, publications=0;
+    volatile unsigned fIrqPending=0, fIrqNotifications=0;
+    volatile uint64_t fIrqNotifyTime=0;
+    SweetBattery() {
+        fIrqEvent=IOInterruptEventSource::interruptEventSource(this, irqAction, nullptr, 0);
+    }
+    void poll() { ++reads; }
+    void updateStatus() { ++publications; }
+    void putNumber(const char *, unsigned) {}
+    void putBool(const char *key, bool value) {
+        if (!std::strcmp(key,"SweetBatteryIRQHealthy")) healthy=value;
+        if (!std::strcmp(key,"SweetBatteryIRQWaitingForMux")) waiting=value;
+        if (!std::strcmp(key,"SweetBatteryHardwareSampleValid")) valid=value;
+    }
+    void failIrq(const char *);
+    static void irqNotify(void *, unsigned);
+    static void irqAction(OSObject *, IOInterruptEventSource *, int);
+    void tryAttachIrq();
+    static IOReturn startIrqAction(OSObject *, void *, void *, void *, void *);
+    static void timerFired(OSObject *, IOTimerEventSource *);
+    static IOReturn stopPolling(OSObject *, void *, void *, void *, void *);
+};
+'''
+startup_checks = r'''
+struct ReadyContext {
+    std::atomic<unsigned> result{0};
+    std::atomic<bool> dead{false};
+};
+static void readyCallback(void *context, unsigned event) {
+    auto *c=static_cast<ReadyContext *>(context);
+    assert(!c->dead.load());
+    assert(!c->result.exchange(event)); // one-shot, never duplicate
+}
+static void readinessRaces() {
+    for (unsigned i=0;i<200;++i) {
+        publishReadiness(0);
+        ReadyContext c;
+        std::thread publisher([&] { publishReadiness(1); });
+        assert(sweet_spmi_mux_watch_ready(readyCallback,&c)==0);
+        publisher.join();
+        assert(c.result.load()==SWEET_MUX_READY);
+        sweet_spmi_mux_unwatch_ready(&c);
+        publishReadiness(0);
+        ReadyContext stopped;
+        assert(sweet_spmi_mux_watch_ready(readyCallback,&stopped)==0);
+        std::thread late([&] { publishReadiness(1); });
+        sweet_spmi_mux_unwatch_ready(&stopped);
+        stopped.dead.store(true); // callback after unwatch would assert
+        late.join();
+    }
+    std::puts("PASS: readiness registration/publication and cancellation races");
+}
+static int startupCheck(const char *scenario) {
+    if (!std::strcmp(scenario,"startup-races")) { readinessRaces(); return 0; }
+    bool early=!std::strcmp(scenario,"startup-early");
+    bool fail=!std::strcmp(scenario,"startup-fail");
+    bool failedFirst=!std::strcmp(scenario,"startup-failed-first");
+    bool cancel=!std::strcmp(scenario,"startup-cancel");
+    bool queuedStop=!std::strcmp(scenario,"startup-queued-stop");
+    if (early) assert(sweet_spmi_mux_start(3)==0);
+    if (failedFirst) {
+        mmio[SWEET_DEV_SPMI_CORE_PA]=0;
+        assert(sweet_spmi_mux_start(3)==-1);
+    }
+    SweetBattery battery;
+    battery.poll(); // the complete service's initial sample before registration
+    assert(SweetBattery::startIrqAction(&battery,nullptr,nullptr,nullptr,nullptr)==0);
+    assert(battery.waiting && !battery.fIrqFailed && battery.fTimer->requests==0);
+    if (!early && !failedFirst) {
+        fakeNs+=30000000000ULL; // the real failure: BSD mux starts after 10s
+        pump();
+        assert(battery.reads==1 && !battery.fIrqAttached && !battery.fIrqFailed);
+        assert(!lockedWrites && !battery.fTimer->requests);
+        if (cancel) {
+            SweetBattery::stopPolling(&battery,nullptr,nullptr,nullptr,nullptr);
+        }
+        if (fail) mmio[SWEET_DEV_SPMI_CORE_PA]=0;
+        assert(sweet_spmi_mux_start(3)==(fail?-1:0));
+        if (queuedStop) {
+            SweetBattery::stopPolling(&battery,nullptr,nullptr,nullptr,nullptr);
+        }
+    }
+    pump();
+    if (fail || failedFirst) {
+        assert(battery.fIrqFailed && !battery.fRunning && !battery.healthy);
+        assert(!battery.waiting && !battery.valid && !battery.fIrqAttached);
+        assert(battery.reads==1 && !battery.fTimer->requests);
+    } else if (cancel || queuedStop) {
+        assert(!battery.fIrqAttached && !bindings[1].notify);
+        assert(battery.reads==1 && !lockedWrites);
+    } else {
+        assert(battery.fIrqAttached && battery.healthy && !battery.waiting);
+        assert(battery.reads==2 && battery.fIrqNotifications==0);
+        assert(!battery.fTimer->requests && !battery.fIrqFailed);
+        mmio[SWEET_DEV_SPMI_CHNLS_PA+269*0x10000+0x104]=0x10;
+        assert(sweet_spmi_mux_irq(513)); pump();
+        assert(battery.reads==3 && battery.fIrqNotifications==1 && battery.fIrqSamples==1);
+        // Stop with a battery IRQ queued in the mux worker.
+        mmio[SWEET_DEV_SPMI_CHNLS_PA+269*0x10000+0x104]=0x10;
+        assert(sweet_spmi_mux_irq(513));
+        SweetBattery::stopPolling(&battery,nullptr,nullptr,nullptr,nullptr); pump();
+        assert(state==1 && !keyFailures && !bindings[1].notify && battery.reads==3);
+    }
+    std::printf("PASS: actual battery methods %s; no startup timer/poll fallback\n",scenario);
+    return 0;
+}
+'''
+
+if startup_tests:
+    battery_source = (root / 'iokit/Kernel/arm/SweetBattery.cpp').read_text()
+    startup_adapter = re.search(r'^#define SWEET_BATT_POLL_MS\b.*$',
+                                battery_source, re.M).group(0) + '\n' + startup_adapter
+    for name in ['failIrq', 'irqNotify', 'irqAction', 'tryAttachIrq',
+                 'startIrqAction', 'timerFired', 'stopPolling']:
+        match = re.search(r'\nSweetBattery::' + name + r'\([^)]*\)\n\{', battery_source)
+        if not match:
+            raise RuntimeError('missing battery method: ' + name)
+        opening = battery_source.index('{', match.start())
+        level, closing = 1, opening + 1
+        while level:
+            level += (battery_source[closing] == '{') - (battery_source[closing] == '}')
+            closing += 1
+        definition = battery_source.rfind('\n\n', 0, match.start()) + 2
+        startup_adapter += battery_source[definition:closing] + '\n'
+else:
+    startup_adapter = startup_checks = ''
+
 checks = r'''
 static void inject(unsigned apid,unsigned bits) {
     mmio[SWEET_DEV_SPMI_CHNLS_PA+apid*0x10000+0x104] |= bits;
@@ -168,6 +326,9 @@ static void inject(unsigned apid,unsigned bits) {
 }
 int main(int argc,char **argv) {
     initialize();
+#ifdef SWEET_MUX_READY
+    if (argc>1 && !std::strncmp(argv[1],"startup-",8)) return startupCheck(argv[1]);
+#endif
     assert(sweet_spmi_mux_start(3)==0); assert(state==1);
     int context=7;
     if (argc>1 && std::strcmp(argv[1],"timeout")==0) {
@@ -177,6 +338,8 @@ int main(int argc,char **argv) {
         assert(routes[3].writePoisoned);
         auto writes=lockedWrites;
         assert(!ackRoute(routes[3])); assert(lockedWrites==writes);
+        sweet_spmi_mux_detach(1,&context);
+        assert(!bindings[1].notify && !bindings[1].context);
         std::puts("PASS: timeout poisons RW lane; failure reported to both consumers");
         return 0;
     }
@@ -213,6 +376,8 @@ int main(int argc,char **argv) {
     assert(sweet_spmi_mux_attach(1,1,batteryNotify,&context)==0);
     for (unsigned i=0;i<300 && state!=3;++i) { inject(248,1); pump(); }
     assert(state==3 && keyFailures==1 && batteryFailures==1);
+    sweet_spmi_mux_detach(1,&context);
+    assert(!bindings[1].notify && !bindings[1].context);
     assert(lockedWrites>0 && lockDepth==0);
     std::puts("PASS: trigger masks, owned routes, rollback, queued detach, 600 IRQs and storm shutdown");
 }
@@ -220,10 +385,14 @@ int main(int argc,char **argv) {
 with tempfile.TemporaryDirectory(prefix='mh2lm-batt-irq-') as temporary:
     test = Path(temporary) / 'mux.cpp'
     binary = Path(temporary) / 'mux-test'
-    test.write_text(prelude + header + source + checks)
+    test.write_text(prelude + header + source + startup_adapter + startup_checks + checks)
     subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17', '-O1', '-g',
-                    '-fsanitize=address,undefined', str(test), '-o', str(binary)], check=True)
+                    '-pthread', '-fsanitize=address,undefined', str(test), '-o', str(binary)], check=True)
     # Minimal IOKit mocks intentionally live until process exit.
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0')
     subprocess.run([str(binary)], env=env, check=True)
     subprocess.run([str(binary), 'timeout'], env=env, check=True)
+    if startup_tests:
+        for scenario in ['late', 'early', 'fail', 'failed-first', 'cancel',
+                         'queued-stop', 'races']:
+            subprocess.run([str(binary), 'startup-' + scenario], env=env, check=True)

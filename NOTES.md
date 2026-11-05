@@ -2,6 +2,69 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0115 USBIN failed BEFORE route attach; startup readiness fix 0142 ready for user push:**
+User saw the UI stay at70% with an external-power/charging symbol regardless
+of unplug/replug and no display-off cable wake. Persistent log
+logs/sweetlog-0115-battery-irq-usbin.bin SHA256
+`150d0bbbc938ce875a4ee1456f81a8fac81784f75f19761f9f23c4c3bb7d3705`,
+v1 ring4194304 total269111 flush36, not wrapped; decoded3922 lines at
+scratch/battery-irq-0115/usbin-persistent.txt. Mode2/preflight1 at line98,
+ONE initial gauge sample at111 (70%,4009mV,external1,charging0,state7), then
+ERROR116: FAILED mux not ready within10s notifications0 samples0; no polling
+fallback. Only AFTER that does mux arm3 key routes at INTID513 (lines134/135).
+ZERO battery attach/arm/route/refresh records. Diagnosis: early IOKit battery
+exhausted its arbitrary10s retry budget before BSD key initialization called
+sweet_spmi_mux_start. Thus frozen initial external state/no cable wake follows
+an unarmed stopped battery service; NOT evidence of USBIN polarity/ack/GIC
+failure, and not a framebuffer regression. Mode2 lacks MSOC IRQ by design,
+so percentage staying70 alone is not the failed criterion. Other paths stay
+alive:31 key route records(power19/down6/up6), USB1024 hits TX758/760 err0,
+touch408 hits, multiple display off/on. Seven known USB command WARNs.
+
+New additive patch xnu/patches/0142-mh2lm-battery-mux-readiness.patch applies
+AFTER0141 to exact0115 source. Only header, mux and SweetBattery change.
+Replaces100ms retry/deadline with a one-shot watch_ready/unwatch_ready API,
+usable before mux workloop exists. Battery registers after its own event
+source is ready and returns immediately; mux publishes READY only after
+hardware/workloop initialization, or FAILED for actual initialization/fatal
+failure. Callback only queues; battery's own loop attaches then arm-sync reads.
+Already-ready/already-failed mux delivers the corresponding event immediately.
+Readiness is NOT counted as a hardware battery IRQ notification. IOLock guards
+one-shot callback/context lifetime; publication/registration race cannot lose
+the event, and cancellation synchronizes with callbacks before context free.
+Failure/stop/free unsubscribe before detach/event release. Runtime fatal
+FAILED publication still permits gated detach to erase the old consumer
+context; tests cover removal after storm and RW timeout. Waiting publishes
+SweetBatteryIRQWaitingForMux=true, IRQHealthy=false; there is no startup timer,
+status polling or silent fallback. If mux is never invoked, waiting remains
+explicit, not healthy; the fixed profiles keep sweetkeys=1. Do not move mux
+GIC/MMIO initialization into early IOKit to work around lifecycle ordering.
+
+Checks PASS:0142 whitespace=error-all apply to0115, fresh verify source byte-
+matches all3 edited/compiled files; both C++ units generate ARM64 objects,
+watch/unwatch C linkage matches. Local clang19 still uses compile-only Apple
+type-builtin stand-ins as before; native full CI/link and phone remain pending.
+ASAN/UBSAN test now compiles7 REAL battery readiness/IRQ/lifecycle methods
+with mocked sample/property/scheduler adapters, plus the actual mux. Covers
+late mux(+30s,no timer/status reads), mux-first, startup failure before/after
+subscription, cancellation before mux start and after queued READY, IRQ-driven
+read/stop with pending IRQ, and200 registration/publication plus cancellation
+races. Existing rollback,foreignEE,600 IRQ,storm,timeout tests still pass.
+Mocks do NOT validate real PMIC/GIC timing or complete IOKit scheduling.
+Bash/Python syntax and CircleCI YAML parse passed. Packer now rejects old0115
+missing readiness markers before creating images; no new boot was generated.
+
+Scratch source/base/verify, compile.py/logs/objects:
+workspace scratch/battery-irq-startup-0115/. CI .github/workflows/circleci.yml
+adds0142 marker checks only; build command unchanged. One-build six-profile
+matrix preserved; --battery-irq now requires0142 (old0115 images retained as
+failure evidence). Tests/docs/IRQ lessons updated. NEXT: user push, native
+CircleCI build, download fresh kernel+buildtree under a NEW label, verify and
+package, then repeat USBIN mode2 first; require waiting -> mux armed -> READY
+received -> consumer attached -> battery armed -> arm-sync -> real plug IRQ.
+Do not test0115 charger/all/debug: same startup bug. Baseline/preflight need
+not be repeated without a new concern. No push/device write performed here.
+
 **0115 persistent preflight PASSED; PM8150B identity/FG mapping now measured:**
 Reviewed logs/sweetlog-0115-battery-irq-preflight.bin, SHA256
 `ff7c67cba070256e558e5272f5e6eb0e1ceced9756c4c58a53e8a18265c5fc92`.
