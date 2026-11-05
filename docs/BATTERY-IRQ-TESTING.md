@@ -1,4 +1,54 @@
-# MH2LM 电池 IRQ：0141/0142 实现与测试
+# MH2LM 电池 IRQ：分阶段测试与结果
+
+**当前0119：USBIN + 三键组合实机通过；下一步同内核 mode3（USBIN+CHGR）。**
+0145 registry consumer、0146统一事务锁、0147按键workloop准备、0148隔离/日志
+已进入0119。下面0115/0141/0142段落保留为历史，旧baseline/no-keys流程不再
+作为当前前置要求。CHGR/MSOC/SOC_READY尚未验收，IRQ大目标未结束。
+
+## 0119 mode2组合结果与下一步
+
+用户反馈本轮未感到异常。`live-0119-board-startup-usbin.txt` 与
+`sweetlog-0119-board-startup-usbin.bin` 已核对；持久头v1/ring4MiB，
+total329685、flush37，未环绕。两份均无NUL；live覆盖前段，完整启动/拔插
+以持久日志为准，不重复累计live回放。bootargs明确keys1/batteryIRQ2、真实
+gauge、ACM2/vbus1，默认INFO。原始日志SHA及逐项计数保存于
+`scratch/artifact-0119/usbin-analysis.json`。
+
+- 持久139～160行：电池先接入group1；按键在自己的workloop准备后接入group0，
+  两组均matched/attached。armed mode2，三键IRQ-only；未见0118的SET_TYPE
+  读回失败、组隔离、停用或相关驱动ERROR。
+- 3825、3996、4200、4406行有四个独立battery-usbin命中；notifications和
+  samples均单调1→4，external依次0→1→0→1，各自updateStatus且healthy1。
+  启动/arm-sync两笔加四笔IRQ，共六次真实采样，无周期轮询记录。
+  通知至发布约7.217～7.504ms，不是物理插拔至UI延迟。
+- 三键/组合及电源键息屏唤醒正常：最后一次touch前56条HID严格成对，power10对、
+  volume-up10对、volume-down8对；其后关机前另有volume-down按下，SpringBoard
+  发起正常关机后出现0-client up/down，尾部不完整，未将整段称为全部配平。
+  关机尾部不等于IOService terminated/stop/free已经被真实验证。
+- touch五槽共40对down/up，末次计数563/empty0；插拔后和唤醒后仍有触摸/键事件。
+  显示3次off、4次on，其中一次息屏后replug经电池发布后亮屏。此为display-off，
+  不是整机深度睡眠验收。
+- USB末次计数1920/empty0，TX1276/1281、err0，ACM配置6次。12条WARN均为既有
+  ep0/ep5 cmd0x6/status1；未见相关驱动ERROR、IRQ storm/timeout或panic签名。
+  不据err0声称live无丢失；本次live未覆盖后段，持久已补齐。
+- gauge始终75%，charging0/CHGR0x47；验证了USB存在变化和事件发布，未证明真实
+  充电，也没有在mode2验证充电状态或电量变化事件。0148隔离路径未触发；0118
+  故障未复现，不把控制器并发认定为已证明的唯一硬件原因。
+
+同一0119原生内核已用 `--battery-irq` 生成六个分阶段镜像，所有最终Android
+镜像内kernel/ADT/TOML、唯一启动参数和INFO/DEBUG选择均独立回读核验；清单见
+`scratch/artifact-0119/battery-boot-manifest.json`。无需push/云编译。
+
+**下一档：** `out-bs/boot-16k-0119-battery-irq-charger.img`，SHA256：
+`f6a80c553288cb37523d4d4d7fa972aab85c5e62795005c9fafc3ff9e4006ad3`。
+keys1、真实gauge、USB/触摸固定IRQ、ACM、`sweetbattirq=3`（events=0x3）。
+先确认启动/三键/触摸正常，再两轮拔插并留线观察自然充电状态变化，覆盖一次
+息屏插线/电源键唤醒。保存 `live-0119-battery-irq-charger.txt` 和
+`sweetlog-0119-battery-irq-charger.bin`。必须区分USBIN事件与battery-chgr
+独立命中/含0x2刷新；若CHGR始终state7、没有自然状态转换，记录未覆盖，
+不强行写充电控制寄存器制造IRQ。看完此档，再进入已准备的mode4全事件镜像。
+
+## 历史实现与测试记录
 
 **0145 当前实现：** 电池改为实例持有的 registry matching/terminated 订阅，
 调用 mux 公开 C++ 接口；旧全局 READY/C 桥接已移除。先等新云端内核并测新

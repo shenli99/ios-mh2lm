@@ -1,10 +1,12 @@
 # PMIC mux consumer：匹配通知与终止清理
 
-**最新：0146共享事务锁、0147 consumer workloop准备、0148回滚失败按组隔离
-及PMIC日志等级整理均已本地验证，待新原生构建/实机。** 0118组合档中
-volume-up读回失败、group0回滚、group1继续工作的原始证据见
-[`SPMI-TRANSACTIONS.md`](SPMI-TRANSACTIONS.md)；0148的隔离条件、全局停止边界
-和日志阈值见 [`MUX-GROUP-ISOLATION.md`](MUX-GROUP-ISOLATION.md)。
+**最新：0119 keys+USBIN组合实机通过。** group1电池先接入，按键在consumer
+workloop准备后group0接入；两组并行工作，四次USBIN IRQ完成两轮拔插发布，
+三键/触摸/USB及息屏唤醒正常。0118 SET_TYPE读回失败未复现；未触发0148隔离。
+完整计数、边界及同内核下一档mode3见
+[`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。电池CHGR/MSOC和真实服务
+退出仍未验收。0148隔离/日志策略见
+[`MUX-GROUP-ISOLATION.md`](MUX-GROUP-ISOLATION.md)。
 
 2026-11-05，新增补丁 `0145-mh2lm-mux-consumer-matching.patch`，基于已核对的
 0117 最终源码。实现与本地验证完成；0118 原生云端内核及 buildtree 已核对，

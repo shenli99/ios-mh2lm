@@ -2,6 +2,62 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**CURRENT0119 combined keys+USBIN PASS; next SAME KERNEL batteryIRQ3 boot ready.**
+User reports test felt normal. Logs/live-0119-board-startup-usbin.txt SHA256
+`e9c7f5c3badc8fde7d0ade276db19f88dd77939573bd8c4a068f7a01f7df1b86`;
+logs/sweetlog-0119-board-startup-usbin.bin SHA256
+`ecda21c3e3c4f7658164f96dd6c89235b5666cac5d095ffeacd1124e3bc64743`.
+Persistent header v1/ring4194304/total329685/flush37, NOT wrapped, no NUL in
+either capture. Decoded scratch/artifact-0119/usbin-persistent.txt; actual
+bootargs keys1/batteryIRQ2, realgauge,ACM2/vbus1. Live has no BATT IRQ records
+and covers early interaction only; persistent supplies startup and later
+cable/sleep/wake. Do not require live recapture or re-debug USB logging.
+
+Persistent139..160 group1 attaches first, keys prepare on owner workloop,
+then group0 attaches/three IRQ routes healthy. Original0118 SET_TYPE readback
+failure NOT reproduced. No scoped driver ERROR, readback failure, isolate,
+timeout/storm or panic signature. This does not prove unique hardware cause
+of0118 or native failure-containment path. Four DISTINCT USBIN hits at
+3825/3996/4200/4406, IRQ numbers34/42/43/55, notifications/samples1..4,
+external0/1/0/1 and updateStatus healthy1. Two complete cycles established.
+Notify-to-publish7504/7217/7219/7444us, NOT physical/UI latency. Startup+
+arm-sync+4IRQ gives6 samples, all gauge75%, CHGR0x47/charging0; stable SOC
+and USBIN sensing proven, NOT real charging or CHGR/MSOC event validation.
+
+Keys through last touch:56 balanced HID transitions, power10pairs/up10/down8,
+combinations and standalone sleep/wake present. Tail4644 extra volume-down
+press before SpringBoard initiated shutdown4655;4772up/4773down with0clients,
+final tail incomplete; DON'T claim entire file fully balanced or infer key
+stuck solely from end-of-shutdown. Touch40balanced pairs across5slots, last
+IRQ563/empty0. Displayoff3176/3957/4341 and on2218/3196/4011/4361;
+replug3996 beforedisplayon4011 while no intervening powerHID. Input after
+cable events/wakes continues. USB last1920/empty0 TX1276/1281err0,
+ACM configured6times.12WARN all existing ep0/ep5cmd6status1. Do not claim
+err0 guarantees lossless live logging or native service stop/free exercised.
+Analysis script+hashes/counts/line refs in usbin-analysis.json and analyze-usbin.py.
+
+Generated SIX additional temporary profiles from same0119.gz using existing
+--battery-irq packer; no source/kernel rebuild/push. All independently parsed
+Androidv1; embedded FAT/kernel/16KADT/TOML byte-match, selectors unique, real
+gauge/keys/ACM retained, defaultINFO except explicit all-debug3. Records and
+scripts in artifact-0119/battery-{packaging.txt,boot-manifest.json,
+boot-verification.txt},verify-battery-boots.py. Native kernel remains
+SHA81074d86...6c3c3ae2 (full SHA below).
+NEXT USER: out-bs/boot-16k-0119-battery-irq-charger.img, SHA256
+`f6a80c553288cb37523d4d4d7fa972aab85c5e62795005c9fafc3ff9e4006ad3`.
+keys1/batteryIRQ3 events3 adds CHGR to USBIN, USB/touch IRQ fixed, ACM enabled.
+Test desktop/three keys/touch,2unplug5s/replug5s cycles, leave connected for
+natural charge-state change, one display-off plug/wake. Save
+live-0119-battery-irq-charger.txt AND sweetlog-0119-battery-irq-charger.bin.
+Require group1 includes battery-chgr APID266 and arm mode3, distinguish real
+CHGR hit/events2/charger-state transition from USBIN-only. If CHGR staysstate7
+without natural transition, mark event uncovered, don't write charger control
+to manufacture event. Inspect before already-prepared mode4 FG test. No
+baseline/no-keys repeat or cloud build needed. IRQ big goal remains incomplete
+until CHGR/MSOC validation; framebuffer still later. No device actions/push.
+Updated BATTERY-IRQ-TESTING, IRQ-FRAMEBUFFER-PLAN, MUX-CONSUMERS and
+MUX-GROUP-ISOLATION docs with current phone acceptance/limits/next profile.
+
 **CURRENT0119 NATIVE VERIFIED; direct combined keys+USBIN BOOT READY, phone pending.**
 User downloaded logs/xnu-kernel-0119.gz and xnu-buildtree-0119.gz; no CI run ID
 or build log supplied. Extracted kernel SHA256

@@ -2,7 +2,8 @@
 
 2026-11-05，新增 `0148-mh2lm-mux-group-isolation.patch`，接在0147之后。
 0119原生内核及buildtree已核对：23个最终源文件与0148树逐字节一致，
-新符号存在、无未定义符号；组合boot已生成，尚待实机。0118镜像不含0146～0148。
+新符号存在、无未定义符号；随后keys+USBIN组合实机通过，未触发隔离路径。
+0148异常隔离仍待硬件取证；0118镜像不含0146～0148。
 
 ## 故障范围与恢复规则
 
@@ -102,3 +103,11 @@ keys1、batteryIRQ2、真实gauge、ACM2/vbus1，固定USB/触摸IRQ，默认INF
 三个同内核profile及最终Android镜像内嵌kernel/ADT/TOML、参数唯一性已独立
 解析核验；清单和核验脚本在 `scratch/artifact-0119/`。未提供本轮CI run ID或
 build log；未执行push、云端操作或设备写入。
+
+## 0119组合实测补充
+
+两组接入、三键/触摸/USB、息屏唤醒及两轮USBIN拔插均通过，未出现相关驱动
+ERROR/SET_TYPE读回失败。没有隔离事件，因此本轮不能作为故障隔离硬件路径
+的验收。正常INFO与12条既有USB WARN可见，ERROR必出/阈值过滤仍以前述本地
+宏测试及原生源码为证据。下一步同内核mode3，细节见
+[BATTERY-IRQ-TESTING.md](BATTERY-IRQ-TESTING.md)。

@@ -1,10 +1,11 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
-**当前阻塞：** 0118组合档按键初始化读回失败。0146补统一SPMI事务锁，0147将
-按键准备移到consumer workloop；0148追加回滚失败优先按组隔离及PMIC日志等级。
-0119原生构建及boot核对通过，待直接实机复测keys+USBIN组合，不重跑已跳过的no-keys。
-见 [`SPMI-TRANSACTIONS.md`](SPMI-TRANSACTIONS.md) 和
-[`MUX-GROUP-ISOLATION.md`](MUX-GROUP-ISOLATION.md)。Framebuffer仍排在IRQ验收之后。
+**当前进度：** 0119的keys+USBIN组合实机通过：group0/1均接入，四次USBIN
+IRQ完成两轮external0→1转换，按键/触摸/USB及息屏唤醒正常；0118读回失败
+未复现。下一步同0119内核测mode3充电状态事件，再mode4电量事件，无需云编译。
+电池IRQ子目标仍未完成，framebuffer继续排在IRQ验收之后。证据与镜像见
+[`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。0148故障隔离仍只有本地
+注入验证，未在手机触发；策略见 [`MUX-GROUP-ISOLATION.md`](MUX-GROUP-ISOLATION.md)。
 
 **当前补充 0145：** 按用户要求，先完成 consumer 匹配通知、公开 C++ attach/
 detach 和 terminated 清理，移除全局单例桥接。本地实现/验证完成；0118 原生
@@ -268,14 +269,11 @@ SPI 208（候选 INTID 240），并写好带 GIC 探针、真实 IRQ 与轮询�
 
 ### 子目标 4（临时追加）：电池 IRQ 化
 
-**状态：** 2026-11-05 新增；0141 首版实现已完成本地检查与 0115 云产物核对，
-六个临时测试镜像已回读验证。用户跳过 baseline 直接测试 mode1，运行段无新增
-驱动故障，不要求为此补测 baseline；同次持久日志已确认 PM8150B 身份、FG
-APID283/EE0 与外设配置，预检通过。mode2 实测发现启动等待超时，路由根本
-未接入；0142 改为非阻塞就绪通知。当前先完成 0143 板级启动归属清理及回归，再继续 mode2；均未实机验收。
-两秒真实采样已由 0115 mode1 复核，电池 IRQ 仍待实机验证。测试参数 `sweetbattirq=0..4`
-支持显式轮询基线、只读预检、USBIN、USBIN+CHGR、全电池事件；IRQ 档无周期
-采样兜底。具体顺序、观测项与本地检查限制见
+**当前状态：** 0119已验证0145～0148的新启动与consumer架构，USBIN mode2
+和三键并行通过，两轮拔插均由真实IRQ刷新。下一步同内核mode3 USBIN+CHGR，
+再mode4 MSOC/SOC_READY。充电状态与电量事件仍未验收；不重跑已跳过的no-keys。
+mode2稳定75%不是电量事件证据，CHGR state7/charging0不是实际充电证据。
+完整历史、镜像和观测判据见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
 PMIC 型号证据、事件位置、既有 APID 预检和待测项见
 [`BATTERY-IRQ-HARDWARE-BASELINE.md`](BATTERY-IRQ-HARDWARE-BASELINE.md)。
