@@ -2,6 +2,54 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**CURRENT0146+0147 READY FOR USER PUSH; direct combined keys+USBIN next.**
+User proposes lightweight consumer matched callbacks/own-loop preparation or a
+mux whole-initialization queue. Chose own-loop preparation; raw notification
+must not even call attachConsumer (it writes hardware). Prior0145 already
+retains/queues matched/terminated and attaches on consumer loop, while mux
+gate serializes route setup. New0147 committed `232b8b3` moves synchronous
+sweet_keys_prepare out of SweetPmicKeys::start into optional per-client
+SweetMuxPrepare on owner loop AFTER live match and BEFORE attach/READY.
+start only installs loop/connection; initial healthy=false. Preparation reads
+and validates firmware GPIO configuration, does NOT reconfigure GPIO/add
+calibration/charging policy. Battery early real sample remains for startup/UI;
+postmatch arm-sync/event sampling stays battery loop. All SPMI transactions
+use0146 shared controller lock; do NOT add a mux whole-init queue/global
+consumer bridge. Independent initialization work may overlap; hardware
+transactions cannot. Multi-command atomic init only if later hardware needs it.
+
+Prepare runs without registry/mux/connection locks; client stop marks stopping,
+removes notifiers, then drains consumer gate. After prepare, recheck stopping,
+providerGone, mux/owner inactive before attach. Failure terminates binding;
+no config retry/poll fallback. Owner resources/context remain valid until loop
+completion and backend stop. Existing prepared-backend/worker/HID teardown
+remains. Hardware cause of0118 SET_TYPE42 readback still UNPROVEN; unified lock
+fixes a concrete code gap, not yet a confirmed native phone resolution.
+
+Local verification in scratch/consumer-prepare-0118/: fresh0147 apply and
+byte compare; prior strict0142..0146 final chain +0147 matches all23 sources.
+8 ARM64 Mach-O TUs compile (real subsystem flags/local Apple builtin/path
+adaptations, NOT native CI/link proof); compile-results.txt. Actual registry/
+client/keys C++ harness + selected battery methods passes ASAN/UBSAN and
+explicit object/notifier/MMIO counts. Added delayed preparation/no hardware
+in immediate matched callback; late match; pre-match cancel; prepare failure
+with battery still live; provider terminate/owner stop DURING preparation,
+no attach/READY/worker; existing worker-fail/type-mismatch/parallel regressions.
+80 extra notification/IRQ/preparation/teardown races pass, registry-tests.txt.
+C key/backend/transport unchanged since0146, prior tests still recorded above.
+CI source gate accepts0147 verify tree and rejects0146 base at new key marker;
+ci-gate-results.txt. CircleCI build COMMAND UNCHANGED, only source gates.
+Packer battery/board profiles require new key preparation marker; bash syntax,
+Python syntax/diff whitespace pass. Docs/MUX-CONSUMERS.md records boundaries,
+SPMI-TRANSACTIONS.md and IRQ-FRAMEBUFFER-PLAN.md updated.
+
+NEXT: user pushes current HEAD including0146 `93ccaeb` +0147 `232b8b3` ->
+fresh native kernel/buildtree -> direct combined keys1/batteryIRQ2 profile,
+real gauge+ACM, fixed USB/touch IRQ. Validate both groups attach, all3 keys,
+touch/USB unplug/replug, sleep/wake. Baseline optional anomaly control;
+do not require skipped no-keys repeat. Existing0118 artifacts lack0146/0147;
+no corrected boot image yet. No push/cloud/device action performed this turn.
+
 **CURRENT0118 combined FAILED keys attach;0146 transport fix/diagnostics ready for USER PUSH.**
 Implementation/tests/docs committed as `93ccaeb`; ready for user push, not pushed.
 User reports keys dead and asks if boot argument omitted. Persistent evidence
