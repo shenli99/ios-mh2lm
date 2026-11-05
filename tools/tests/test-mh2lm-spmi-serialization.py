@@ -96,6 +96,16 @@ int main(int argc,char **argv) {
     assert(done==16 && mapCalls==3 && lockAllocations-lockFrees==1);
     if(!failMap) {
         uint8_t key=0,battery=0;
+        // A valid-looking Type-C APID must not bypass the observer whitelist.
+        // This is the known software cause of the old diagnostic short circuit;
+        // a rejected read must not acquire the lane or touch its command MMIO.
+        coreMemory[(0x900+4*270)/4]=0x01000000|(0x215<<8);
+        obsMemory[(270*0x80+8)/4]=1;
+        unsigned beforeReject=lockAttempts;battery=9;
+        for(unsigned address:{0x1506u,0x1509u,0x150bu}) {
+            assert(sweet_spmi_read(2,address,&battery)==-1 && battery==9);
+            assert(lockAttempts==beforeReject && !obsMemory[270*0x80/4]);
+        }
         // Hold the real transport lock: both real observer methods must wait
         // before programming even disjoint command lanes.
         sweet_spmi_irq_lock();unsigned attempts=lockAttempts;

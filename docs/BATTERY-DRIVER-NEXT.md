@@ -5,9 +5,11 @@ IRQ刷新已通过；CHGR仅接入成功，没有自然状态转换/独立命中
 ready，没有人为复位FG制造边沿。电池IRQ子目标保持未完成，暂不进入framebuffer。
 
 **最新诊断结果：** 0119主档九次config/current均有效，全部state7/en0、没有
-负IBATT；插线INPUT已有效、未suspend、ICL1500mA。禁充初态在board/mux/USB
-控制器启动前已存在，不能直接归因于IRQ化。下一步已备no-usb镜像做同电源
-对照，未修改充电使能或内核；完整证据和操作见
+负IBATT；no-usb对照十一笔同样state7/en0、无负IBATT，九次USBIN刷新正常。
+插线INPUT有效、未suspend、ICL配置1500mA，禁充初态早于board/mux/USB初始化。
+关闭当前启动的gadget未解决问题，不能只归因于gadget或IRQ化；电源/线一致性
+尚待用户确认。0149诊断有效性修复已完成本地验证，待用户push/云编译；未修改
+充电使能。完整证据见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
 
 ## 已确定与仍缺的证据
@@ -24,8 +26,9 @@ ready，没有人为复位FG制造边沿。电池IRQ子目标保持未完成，�
 
 ## 当前先做：同内核恢复充电证据链
 
-使用 `--battery-charge-check` 的主档（保留ACM、mode4与输入IRQ），只开启
-现有sweetbattdiag1。以已知可用独立充电器/线重现插入、持续、拔出、再次接入；
+0119主档和no-usb对照已完成，不重复旧镜像。先构建0149，再使用
+`--battery-charge-check` 的主档（保留ACM、mode4与输入IRQ），开启sweetbattdiag1。
+以已知可用独立充电器/线重现插入、持续、拔出、再次接入；
 保留原始持久日志和电源类型。流程、镜像SHA见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
 
@@ -33,17 +36,18 @@ ready，没有人为复位FG制造边沿。电池IRQ子目标保持未完成，�
 IBATT pair且current-ok1、持续方向与SOC/电压相互支持。一个瞬时负小电流或
 插线UI不足以结案。IRQ采样是事件驱动，没有承诺每两秒取得遥测。
 
-主档仍state7时，先从有效的INPUT/CHGR/IBATT记录区分电源输入和充电使能；
-必要时才用已备的no-usb对照，隔离gadget/VBUS override这组软件条件。
-相同充电器/线/操作比较，单次差异仍不能排除启动固件残留状态。no-usb没有ACM，
-以持久日志取证。不回刷旧0112内核、不改分区，也不盲写0x1042制造状态转换。
+新诊断优先补齐SMB_CFG和逐字段有效性，再沿禁充初态调查继承的充电配置。
+Type-C当前被软件白名单拒绝，不将unknown当成零，也不为补日志盲目扩大访问。
+如后续需要对照，同一次内核编译可生成多档；no-usb以持久日志取证。
+不回刷旧0112内核、不改分区，也不盲写0x1042制造状态转换。
 
 ## 下一批源码工作：先提高数据可信度，再增加控制
 
-1. **独立采样有效性。** 拆开现有 `logChargePolicy()` 与DIAG的布尔短路读取链，
-   每个输入/Type-C/SMB/CHGR字段保留自己的read-ok及错误信息。失败之后不能
-   把未读取的零值打印成已知状态。首次新patch应优先完成此项，而不是以合并
-   read-ok0推断SMB_EN。依据：0112m19已记录此缺口，0119源码仍存在。
+1. **独立采样有效性：0149本地完成，待原生构建/实机。** 已拆开
+   `logChargePolicy()` 与DIAG的短路链，逐字段读取并保留错误/有效性；失败显示
+   unknown，不伪造零值。已确认Type-C外设0x15被软件白名单拒绝、后续SMB_CFG
+   被短路，此次保留访问边界。实现/掩码/测试见
+   [`BATTERY-DIAGNOSTIC-VALIDITY.md`](BATTERY-DIAGNOSTIC-VALIDITY.md)。
 2. **真实遥测发布。** 在验证寄存器、单位和一致性后，将IBATT/电池温度作为
    带有效性及采样来源的数据接入标准电源字段。FG负电流表示充电，IOPM发布
    符号需要转换；读取失败不能标记有效或触发错误的充电状态。温度映射与LG

@@ -1,11 +1,54 @@
 # MH2LM 电池 IRQ：分阶段测试与结果
 
-**当前0119：充电诊断九笔均state7/en0、无负电流；下一步同内核no-usb对照。**
+**当前0119：主档与no-usb对照均未采到真实充电；0149已修复诊断有效性，待云编译。**
 0145 registry consumer、0146统一事务锁、0147按键workloop准备、0148隔离/日志
 已进入0119。下面0115/0141/0142段落保留为历史，旧baseline/no-keys流程不再
 作为当前前置要求。MSOC已实测，CHGR/SOC_READY变化事件未覆盖，IRQ大目标未结束。
 
-## 0119充电诊断结果与当前下一步
+## 0119 no-usb结果与0149下一步
+
+`sweetlog-0119-battery-charge-diag-no-usb.bin` SHA256：
+`b045d42e38a41b27e36a99c469e55f9b25794186007eccae2acbdedbbec11b96`。
+头v1/ring4194304/total255185/flush47，未环绕、解码无NUL。实际bootargs为
+sweetusb0/keys1/真实gauge/mode4/diag1，无vbus/usbstep；未见USB控制器或ACM
+初始化。解码和独立计数保存在工作区 `scratch/artifact-0119/` 的
+`charge-diag-no-usb-persistent.txt`、`analyze-charge-diag-no-usb.py`、
+`charge-diag-no-usb-analysis.json`。
+
+- 初始、arm-sync、九次USBIN刷新共十一笔，全部CHGR0x47/state7、charging0、
+  enable0/pause0/cfg2=0x2c/smben0，DIAG config-ok1/current-ok1。IBATT依次
+  +65917/+488/0/+463378/+463378/+465820/+465820/+580566/0/+421386/0µA，
+  无负充电方向；电压3910～3990mV。原始SOC九笔0xb3、两笔0xb2，均取整70%，
+  此处不变不能证明SOC冻结，也不推翻此前三次独立MSOC实测。
+- 接线时INPUT path0x95/use-usb1/valid-input1，未suspend，ICL配置1500mA、
+  AICL0xd4。禁充初态112/114行已经存在，早于138行board/mux；此次整个运行
+  不启动gadget，仍未恢复充电。**当前启动禁用gadget没有解决已采样的禁充，
+  gadget不是该捕获条件下的唯一解释。** 用户尚未明确电源/线是否与主档相同；
+  固件继承状态、其他电源条件及唯一因果均不能由本次对照排除。
+- USBIN APID269、CHGR266、MSOC/READY283成功接入，group1/events0xf/armed；
+  group0按键接入。九次USBIN刷新行2852/2942/2956/2975/2988/3001/3480/3556/3576，
+  external交替0/1、最终0；notifications/samples1～9，全healthy1。
+  未见CHGR/MSOC/READY运行期命中，无两秒轮询。
+- 按键power三对/down一对、无up记录；触摸十个完整按下/抬起对，最后3583行
+  又一次按下后文件结束（十一down/十up，无顺序错乱）。不能把截断处判成卡触，
+  也不能称全文件输入配平。一次息屏3225/亮屏3369。未见相关ERROR/WARN、mux
+  失败/隔离或panic签名；未见完整关机。用户看到的具体界面/输入异常仍待描述，
+  缺少panic并不排除卡顿、界面或采样间隙问题。
+
+源码已明确旧诊断的缺陷：`sweet_spmi_read()`白名单拒绝外设0x15，因而Type-C
+0x1506/0x1509/0x150b在获取事务锁、访问MMIO之前就返回-1。原 `&&` 链随即
+短路，后面的SMB_CFG0x1690根本不读，却打印初始化零值。不能再把这些零解释
+为硬件测值或把失败笼统归因于硬件权限。独立DIAG的config-ok1仍有效，确实
+证明0x1648 SMB_EN为0。
+
+0149只修只读诊断：逐字段尝试读取，WARN记录失败地址/错误，raw显示unknown、
+解码位显示-1；INPUT/TYPEC/SMB分别输出read-ok掩码，DIAG增加config-valid，
+IBATT失败显示unknown。保留白名单和原采样/发布/IRQ路径，不写充电使能。
+具体掩码与本地验证见 [`BATTERY-DIAGNOSTIC-VALIDITY.md`](BATTERY-DIAGNOSTIC-VALIDITY.md)。
+下一步用户push、一次云编译后再打包多档充电诊断；不重复两张旧0119镜像。
+本修改尚未证明充电恢复，CHGR验收仍待自然状态转换。
+
+## 0119主档充电诊断结果与当时下一步（no-usb已完成，见上）
 
 已检查 `sweetlog-0119-battery-charge-diag.bin`，SHA256：
 `36f445679818886a45e53eb1b44baa11750f3ec65efc6575d373ea1c44057875`。
@@ -33,7 +76,7 @@ mode4/keys1/真实gauge/ACM2/vbus1，并明确sweetbattdiag1；75行确认诊断
   不是线缆到UI延迟，也不能与无诊断的约7ms直接归因于IRQ性能回退。
 - `SWEET BATT SMB`九次均read-ok0；该链中的Type-C/SMB未读零值不可当硬件
   状态。与之区分，DIAG的config-ok1确实证明其0x1648 smben0已读成功；
-  但SMB选择配置0x1690是否被读到、Type-C哪个地址失败仍未知。
+  当时尚未确定失败地址；上方源码复查现已确认Type-C被软件拒绝、0x1690被短路。
   UI current-valid0表示现有驱动尚未把诊断电流发布到标准字段，不是IBATT读取失败。
 - 本轮记录power3对、volume-up1对，未记录volume-down HID；触摸5对/单槽，顺序
   均配平，末次IRQ136/empty0。一次电源键息屏/亮屏，输入覆盖至最后一次插线前。
@@ -41,7 +84,7 @@ mode4/keys1/真实gauge/ACM2/vbus1，并明确sweetbattdiag1；75行确认诊断
   USB只有早期计数/2次ACM配置，不能声称后段枚举全部正常。
   SpringBoard发起关机3624，尾部未证明服务stop/free完整执行。
 
-**现在测已准备的对照镜像** `out-bs/boot-16k-0119-battery-charge-diag-no-usb.img`，
+**当时准备的对照镜像（现已测）** `out-bs/boot-16k-0119-battery-charge-diag-no-usb.img`，
 SHA256 `90655d8c533a0e90d09705938b797dd41617a1a35dc55941ae84cde2a761ce5c`
 已再次核对。保留同0119内核、mode4/按键/触摸/真实电池和诊断；仅sweetusb0，
 去掉sweetvbus/usbstep，不启动gadget，没有USB live日志。这是电池充电对照，

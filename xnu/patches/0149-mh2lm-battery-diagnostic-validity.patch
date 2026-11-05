@@ -1,0 +1,232 @@
+From: ios-mh2lm
+Subject: mh2lm: keep battery diagnostic fields independently valid
+
+Read each existing diagnostic register independently; log failed bytes as
+unknown with address/error and per-group validity masks. Do not widen the
+SPMI observer whitelist, write PMIC state, or change sampling/publication.
+
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -134,6 +134,7 @@
+ 	static unsigned scaleMsoc(uint8_t raw);
+ 	static void logIrqLines(void);
+ 	static void logChargePolicy(void);
++	static void logChargeDiagnostics(unsigned state);
+ 	static unsigned estimatePercent(unsigned mv);
+ };
+ OSDefineMetaClassAndStructors(SweetBattery, IOPMPowerSource);
+@@ -503,42 +504,145 @@
+ 	}
+ }
+ 
++/* A failed read is unknown, never a decoded zero. Each diagnostic register is
++ * attempted independently so inaccessible Type-C fields cannot hide SMB_CFG.
++ * The observer API owns the controller transaction lock; diagnostics add no
++ * PMIC writes, polling, retries, or changes to published power-source state. */
++struct SweetBattDiagByte {
++	uint8_t value;
++	int error;
++};
++
++static SweetBattDiagByte
++sweet_batt_diag_read(unsigned address)
++{
++	SweetBattDiagByte sample = {0, 0};
++	sample.error = sweet_spmi_read(SWEET_BATT_SID, address, &sample.value);
++	if (sample.error) {
++		SWEET_LOG_WARN("SWEET BATT DIAG READ: sid=%u addr=%#x error=%d; value=unknown\n",
++		    SWEET_BATT_SID, address, sample.error);
++	}
++	return sample;
++}
++
++static const char *
++sweet_batt_diag_raw(const SweetBattDiagByte &sample, char *buffer)
++{
++	if (sample.error) {
++		return "unknown";
++	}
++	snprintf(buffer, 16, "%#x", (unsigned)sample.value);
++	return buffer;
++}
++
++static int
++sweet_batt_diag_bit(const SweetBattDiagByte &sample, unsigned mask)
++{
++	return sample.error ? -1 : ((sample.value & mask) ? 1 : 0);
++}
++
++static unsigned
++sweet_batt_diag_mask(const SweetBattDiagByte *samples, unsigned count)
++{
++	unsigned mask = 0;
++	for (unsigned i = 0; i < count; ++i) {
++		if (!samples[i].error) {
++			mask |= 1u << i;
++		}
++	}
++	return mask;
++}
++
+ void
+ SweetBattery::logChargePolicy(void)
+ {
+-	/* Linux's PM8150B SMB5 probe sets these before releasing CHG_DISABLE.
+-	 * The port only reads them here, so a log can distinguish an explicit
+-	 * charger disable from an input suspend, absent Type-C sink, zero ICL, or
+-	 * disabled AICL. It deliberately cannot identify Linux's high-level voter. */
+-	uint8_t path = 0, apsd = 0, cmdIl = 0, icl = 0, aicl = 0;
+-	uint8_t sink = 0, typec = 0, misc = 0, smbEn = 0, smbCfg = 0;
+-	bool ok = !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_DCDC_PATH, &path) &&
+-	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_USBIN_APSD, &apsd) &&
+-	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_USBIN_CMD_IL, &cmdIl) &&
+-	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_USBIN_ICL, &icl) &&
+-	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_USBIN_AICL, &aicl) &&
+-	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_TYPEC_SNK, &sink) &&
+-	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_TYPEC_STATE, &typec) &&
+-	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_TYPEC_MISC, &misc) &&
+-	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_SMB_EN, &smbEn) &&
+-	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_SMB_CFG, &smbCfg);
+-	SWEET_LOG_INFO("SWEET BATT INPUT: path=%#x use-usb=%u valid-input=%u path-suspend=%u "
+-	    "cmd-il=%#x cmd-suspend=%u icl=%umA apsd=%#x dtc-done=%u enum=%u slow-plugin=%u\n",
+-	    (unsigned)path, (path & 0x10u) ? 1 : 0, (path & 0x01u) ? 1 : 0,
+-	    (path & 0x40u) ? 1 : 0, (unsigned)cmdIl, (cmdIl & 0x01u) ? 1 : 0,
+-	    (unsigned)icl * 50u, (unsigned)apsd, (apsd & 0x01u) ? 1 : 0,
+-	    (apsd & 0x10u) ? 1 : 0, (apsd & 0x20u) ? 1 : 0);
+-	SWEET_LOG_INFO("SWEET BATT TYPEC: aicl=%#x aicl-en=%u aicl-adc=%u aicl-rerun=%u "
+-	    "collapse-suspend=%u sink=%#x typec=%#x state-attached=%u misc=%#x "
+-	    "cc-attached=%u vbus=%u\n",
+-	    (unsigned)aicl, (aicl & 0x04u) ? 1 : 0, (aicl & 0x08u) ? 1 : 0,
+-	    (aicl & 0x10u) ? 1 : 0, (aicl & 0x80u) ? 1 : 0, (unsigned)sink,
+-	    (unsigned)typec, (typec & 0x20u) ? 1 : 0, (unsigned)misc,
+-	    (misc & 0x01u) ? 1 : 0, (misc & 0x20u) ? 1 : 0);
+-	SWEET_LOG_INFO("SWEET BATT SMB: en=%#x override=%u override-val=%u cfg=%#x "
+-	    "smb-sel=%u read-ok=%d\n", (unsigned)smbEn,
+-	    (smbEn & 0x08u) ? 1 : 0, (smbEn & 0x10u) ? 1 : 0,
+-	    (unsigned)smbCfg, (smbCfg & 0x10u) ? 1 : 0, ok ? 1 : 0);
++	/* Bit positions in each read-ok mask follow the fields' raw read order:
++	 * INPUT path, APSD, CMD_IL, ICL; TYPEC AICL, sink, state, misc;
++	 * SMB enable, configuration. A decoded -1 means unknown.
++	 * The current observer whitelist rejects Type-C peripheral 0x15 in
++	 * software. Preserve that access boundary; do not mistake its failures
++	 * for measured zero or skip the separately readable SMB fields. */
++	const SweetBattDiagByte input[] = {
++		sweet_batt_diag_read(SWEET_BATT_DCDC_PATH),
++		sweet_batt_diag_read(SWEET_BATT_USBIN_APSD),
++		sweet_batt_diag_read(SWEET_BATT_USBIN_CMD_IL),
++		sweet_batt_diag_read(SWEET_BATT_USBIN_ICL),
++	};
++	const SweetBattDiagByte typec[] = {
++		sweet_batt_diag_read(SWEET_BATT_USBIN_AICL),
++		sweet_batt_diag_read(SWEET_BATT_TYPEC_SNK),
++		sweet_batt_diag_read(SWEET_BATT_TYPEC_STATE),
++		sweet_batt_diag_read(SWEET_BATT_TYPEC_MISC),
++	};
++	const SweetBattDiagByte smb[] = {
++		sweet_batt_diag_read(SWEET_BATT_SMB_EN),
++		sweet_batt_diag_read(SWEET_BATT_SMB_CFG),
++	};
++	char raw[4][16];
++	SWEET_LOG_INFO("SWEET BATT INPUT: path=%s use-usb=%d valid-input=%d path-suspend=%d "
++	    "cmd-il=%s cmd-suspend=%d icl=%dmA apsd=%s dtc-done=%d enum=%d slow-plugin=%d read-ok=%#x/0xf\n",
++	    sweet_batt_diag_raw(input[0], raw[0]), sweet_batt_diag_bit(input[0], 0x10u),
++	    sweet_batt_diag_bit(input[0], 0x01u), sweet_batt_diag_bit(input[0], 0x40u),
++	    sweet_batt_diag_raw(input[2], raw[1]), sweet_batt_diag_bit(input[2], 0x01u),
++	    input[3].error ? -1 : (int)input[3].value * 50,
++	    sweet_batt_diag_raw(input[1], raw[2]), sweet_batt_diag_bit(input[1], 0x01u),
++	    sweet_batt_diag_bit(input[1], 0x10u), sweet_batt_diag_bit(input[1], 0x20u),
++	    sweet_batt_diag_mask(input, 4));
++	SWEET_LOG_INFO("SWEET BATT TYPEC: aicl=%s aicl-en=%d aicl-adc=%d aicl-rerun=%d "
++	    "collapse-suspend=%d sink=%s typec=%s state-attached=%d misc=%s "
++	    "cc-attached=%d vbus=%d read-ok=%#x/0xf\n",
++	    sweet_batt_diag_raw(typec[0], raw[0]), sweet_batt_diag_bit(typec[0], 0x04u),
++	    sweet_batt_diag_bit(typec[0], 0x08u), sweet_batt_diag_bit(typec[0], 0x10u),
++	    sweet_batt_diag_bit(typec[0], 0x80u), sweet_batt_diag_raw(typec[1], raw[1]),
++	    sweet_batt_diag_raw(typec[2], raw[2]), sweet_batt_diag_bit(typec[2], 0x20u),
++	    sweet_batt_diag_raw(typec[3], raw[3]), sweet_batt_diag_bit(typec[3], 0x01u),
++	    sweet_batt_diag_bit(typec[3], 0x20u), sweet_batt_diag_mask(typec, 4));
++	SWEET_LOG_INFO("SWEET BATT SMB: en=%s override=%d override-val=%d cfg=%s "
++	    "smb-sel=%d read-ok=%#x/0x3\n", sweet_batt_diag_raw(smb[0], raw[0]),
++	    sweet_batt_diag_bit(smb[0], 0x08u), sweet_batt_diag_bit(smb[0], 0x10u),
++	    sweet_batt_diag_raw(smb[1], raw[1]), sweet_batt_diag_bit(smb[1], 0x10u),
++	    sweet_batt_diag_mask(smb, 2));
++}
++
++void
++SweetBattery::logChargeDiagnostics(unsigned state)
++{
++	/* config-valid bits: STATUS2, STATUS5, STATUS7, ENABLE, PAUSE, CFG2, SMB_EN.
++	 * Keep the aggregate config-ok for old capture readers, but never let one
++	 * failed field suppress the remaining configuration or IBATT reads. */
++	const SweetBattDiagByte config[] = {
++		sweet_batt_diag_read(SWEET_BATT_CHGR_STATUS2),
++		sweet_batt_diag_read(SWEET_BATT_CHGR_STATUS5),
++		sweet_batt_diag_read(SWEET_BATT_CHGR_STATUS7),
++		sweet_batt_diag_read(SWEET_BATT_CHGR_ENABLE),
++		sweet_batt_diag_read(SWEET_BATT_CHGR_PAUSE),
++		sweet_batt_diag_read(SWEET_BATT_CHGR_CFG2),
++		sweet_batt_diag_read(SWEET_BATT_SMB_EN),
++	};
++	uint16_t rawCurrent = 0;
++	bool currentOk = readWordPair(SWEET_BATT_SID, SWEET_BATT_IBATT,
++	    SWEET_BATT_IBATT_CP, &rawCurrent);
++	char raw[7][16], ibatt[16], signedValue[16], ua[16];
++	if (currentOk) {
++		int signedCurrent = (rawCurrent & 0x8000u) ? (int)rawCurrent - 65536 :
++		    (int)rawCurrent;
++		/* Qualcomm FG convention: 488.281 uA/step, negative charges the pack. */
++		int currentUa = (int)(((int64_t)signedCurrent * 488281) / 1000);
++		snprintf(ibatt, sizeof(ibatt), "%#x", (unsigned)rawCurrent);
++		snprintf(signedValue, sizeof(signedValue), "%d", signedCurrent);
++		snprintf(ua, sizeof(ua), "%d", currentUa);
++	}
++	unsigned valid = sweet_batt_diag_mask(config, 7);
++	SWEET_LOG_INFO("SWEET BATT DIAG: state=%u st2=%s st5=%s st7=%s en=%s "
++	    "pause=%s cfg2=%s smben=%s ibatt=%s signed=%s ua=%s "
++	    "config-ok=%d current-ok=%d config-valid=%#x/0x7f\n", state,
++	    sweet_batt_diag_raw(config[0], raw[0]), sweet_batt_diag_raw(config[1], raw[1]),
++	    sweet_batt_diag_raw(config[2], raw[2]), sweet_batt_diag_raw(config[3], raw[3]),
++	    sweet_batt_diag_raw(config[4], raw[4]), sweet_batt_diag_raw(config[5], raw[5]),
++	    sweet_batt_diag_raw(config[6], raw[6]), currentOk ? ibatt : "unknown",
++	    currentOk ? signedValue : "unknown", currentOk ? ua : "unknown",
++	    valid == 0x7fu ? 1 : 0, currentOk ? 1 : 0, valid);
++	logChargePolicy();
+ }
+ 
+ unsigned
+@@ -730,31 +834,9 @@
+ 	 * register. It exists solely to distinguish VBUS presence from a real charge
+ 	 * current and to expose the hardware gates behind DISABLE_CHARGE. */
+ 	if (fDiag) {
+-		uint8_t status2 = 0, status5 = 0, status7 = 0, enable = 0, pause = 0;
+-		uint8_t cfg2 = 0, smbEn = 0;
+-		uint16_t rawCurrent = 0;
+-		bool configOk = !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_CHGR_STATUS2,
+-		    &status2) && !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_CHGR_STATUS5,
+-		    &status5) && !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_CHGR_STATUS7,
+-		    &status7) && !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_CHGR_ENABLE,
+-		    &enable) && !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_CHGR_PAUSE,
+-		    &pause) && !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_CHGR_CFG2,
+-		    &cfg2) && !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_SMB_EN, &smbEn);
+-		bool currentOk = readWordPair(SWEET_BATT_SID, SWEET_BATT_IBATT,
+-		    SWEET_BATT_IBATT_CP, &rawCurrent);
+-		int signedCurrent = (rawCurrent & 0x8000u) ? (int)rawCurrent - 65536 :
+-		    (int)rawCurrent;
+-		/* Qualcomm FG's signed raw unit is 488.281 uA; negative is charging. */
+-		int currentUa = (int)(((int64_t)signedCurrent * 488281) / 1000);
+-		SWEET_LOG_INFO("SWEET BATT DIAG: state=%u st2=%#x st5=%#x st7=%#x en=%#x "
+-		    "pause=%#x cfg2=%#x smben=%#x ibatt=%#x signed=%d ua=%d "
+-		    "config-ok=%d current-ok=%d\n", state, (unsigned)status2,
+-		    (unsigned)status5, (unsigned)status7, (unsigned)enable,
+-		    (unsigned)pause, (unsigned)cfg2, (unsigned)smbEn,
+-		    (unsigned)rawCurrent, signedCurrent, currentUa, configOk ? 1 : 0,
+-		    currentOk ? 1 : 0);
+-		logChargePolicy();
+-	}
++		logChargeDiagnostics(state);
++	}
++
+ 	publish(published, fLastMv, 0, external, external, charging, full,
+ 	    measured, false);
+ }

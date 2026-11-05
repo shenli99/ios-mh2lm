@@ -2,6 +2,58 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**CURRENT: 0119 no-usb still DISABLE_CHARGE; 0149 diagnostic validity ready for USER PUSH.**
+User supplied logs/sweetlog-0119-battery-charge-diag-no-usb.bin, SHA256
+`b045d42e38a41b27e36a99c469e55f9b25794186007eccae2acbdedbbec11b96`.
+Header v1/ring4194304/total255185/flush47/notwrapped/no decodedNUL. Exact
+decode/analysis in scratch/artifact-0119/charge-diag-no-usb-persistent.txt,
+analyze-charge-diag-no-usb.py,charge-diag-no-usb-analysis.json. Actualargs
+sweetusb0/keys1/realgauge/mode4/diag1, no vbus/usbstep, no USB/ACM init.
+11samples(initial+armsync+9USBIN) allCHGR47/state7/en0/pause0/cfg2=2c/smben0,
+allconfig/current-ok1. IBATTua65917,488,0,463378,463378,465820,465820,580566,
+0,421386,0: no negative charge direction. Connectedpath95/validinput1/no
+suspend/ICLconfigured1500mA/AICLd4. Gauge b3x9->b2x2, both70%;3910..3990mV.
+No active charging sampled with gadget OFF: not solely gadget under captured
+conditions. Same source/cable not confirmed, cannot eliminate inherited
+firmware state or claim unique cause. Initial112/114 stillprecedesboard138.
+
+Bothgroupsattached;9USBINrefreshes2852/2942/2956/2975/2988/3001/3480/3556/3576,
+notification/sample1..9/allhealthy1/externalalternates->0. NoCHGR/MSOC/READYhit
+here; previous3independentMSOCpass STILL STANDS. No2spoll. Keyspower3pairs/
+down1pair/noup. Touch10completepairs+lastdown3583atEOF(11down/10up), nosequence
+error: neither call stuck nor fullybalanced. Displayoff3225/on3369. No scoped
+ERROR/WARN/muxfailure/isolation/panic; incomplete tail cannot exclude user GUI
+or hang anomaly. Async question asks exact observed anomaly; no answer yet.
+
+SOURCE FACT: sweet_spmi_read whitelist EXCLUDES peripheral0x15, so TypeC
+1506/1509/150b return-1 beforelock/MMIO, NOT evidence of hardware permissions.
+Oldpolicy&& chain skips subsequentSMB_CFG1690 and emitsfakezeros. Separate
+DIAGconfig-ok1 DOES validateSMB_EN1648=0. Don't widenwhitelist blindly, write
+1042enable, readSRAM/profile or addpollfallback.
+
+0149 xnu/patches/0149-mh2lm-battery-diagnostic-validity.patch fixes ONLY
+SweetBattery read-onlydiag: independentexistingfields, WARNaddress/error,
+rawunknown/decoded-1, pergroupmasks, invalidIBATTunknown. Sameacquisition/
+publication/IRQs/properties/transportboundary; formerlyskippedlaterreads now
+attempted. CI addsfourrequiredsource markers0139..0149; actualbuildcommand
+unchanged. Newtools/tests/test-mh2lm-battery-diagnostics.py actualfunctions
+ASAN/UBSAN failureinjection PASS; transporttest addsactualTypeCwhitelistreject
+beforelock/MMIO, suite+10concurrencyrunsPASS; actualmux/consumer suite+80race
+runsPASS. YAMLparse/sourcegatePASS0149/FAILold0119 as intended. Strictapply,
+23filebytecomparison, ARM64singlefilecompilePASS; localLinuxcompatflags,
+NOTnativefullbuild/link. snprintf alreadyexportednative0119. Scratch exact
+base/edited/verify/object/compile/tests: scratch/battery-diag-validity-0119/.
+Docs BATTERY-IRQ-TESTING/BATTERY-DRIVER-NEXT/IRQ-FRAMEBUFFER-PLAN updated;
+new BATTERY-DIAGNOSTIC-VALIDITY.md recordsmasks/limits.
+
+NEXT: userpush thencloudbuild; awaitnewnumberedartifacts, verify0149 and
+packoncemultiplechargeprofiles. Prioritize independentlyvalidSMB_CFG and
+inheriteddisableconfiguration;0149doesNOTclaimchargefix. Don'trepeatold0119
+primary/noUSBboots or re-debugUSBlogging. Userfastboots/pushes; agentdoesnot.
+BatteryIRQgoal remainsincompletependingCHGR; framebufferafterIRQacceptance.
+
+### Previous handoff (superseded by no-usb result above)
+
 **0119 USB lifecycle clarification (source review, no driver change).** User
 asks whether gadget exists/alwaysenabled vs cable-triggered. DirectDWC3 driver
 implements device-side CDC-ACM itself, no Linuxgadget/configfs framework; host
