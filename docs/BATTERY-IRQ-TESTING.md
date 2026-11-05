@@ -1,8 +1,9 @@
 # MH2LM 电池 IRQ：0141 首版实现与测试
 
 **日期：** 2026-11-05。补丁 `0141-mh2lm-battery-event-irqs.patch` 基于
-0114a15 最终 buildtree（0138→0139→0140 已生效）生成。完成本地检查，
-尚无 CircleCI 完整构建结果或新内核实机日志，不能宣称电池 IRQ 已成功。
+0114a15 最终 buildtree（0138→0139→0140 已生效）生成。完成本地检查；0115
+云端产物的最终源码、内核符号与标记已核对，六个测试镜像已生成并回读验证。
+尚无新内核实机日志，不能宣称电池 IRQ 已成功。
 已验证的真实电池基线仍是 `live-0114a15-batt-irq-only.txt`。
 
 ## 实现路径与边界
@@ -80,9 +81,20 @@ MSOC delta 沿用固件现有配置，不访问 MEMIF/SRAM。LG 源码 0.3% 是�
 
 ## 产物打包与实机顺序
 
-现在需由用户 push 触发云编译。下载新一轮 `xnu-kernel-编号.gz` 和
-`xnu-buildtree-编号.gz`（实际下载文件名可能略有不同），核对源码和内核标记后，
-在工作区根目录执行，`LABEL` 替换为实际产物编号：
+0115 的 `logs/xnu-kernel-0115.gz` 和 `logs/xnu-buildtree-0115.gz` 已核对：
+五个 0141 文件与本地实现逐字节一致，按键/USB/触摸/日志等级源码保持既有版本，
+最终内核包含电池 IRQ 符号与标记，manifest 校验通过。kernel SHA256 为
+`a601cb597d38697832e4324fbb4341c75810034722ed95b139472bdb65dae6f2`。
+本次未提供构建日志或 CI run ID，尚未审查完整构建警告。
+
+六个临时镜像已生成于工作区 `out-bs/boot-16k-0115-battery-irq-*.img`；
+最终 Android boot 镜像的 ramdisk、FAT 中的 kernel/ADT/启动参数均已回读核对，
+完整镜像 SHA256 记录在 `NOTES.md` 和
+工作区 `scratch/battery-irq-0115/boot-verification.json`。
+**当前先测 baseline，正常再测 preflight，导出日志分析后再进入 usbin。**
+无需再次 push 或云编译，实际中断接入与硬件身份仍待实测。
+
+后续需要重打包时，在工作区根目录执行，`LABEL` 替换为实际产物编号：
 
 ```bash
 ref/ios-mh2lm/tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-LABEL.gz LABEL --battery-irq
@@ -90,7 +102,7 @@ ref/ios-mh2lm/tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-LABEL.gz LABEL --ba
 
 生成位置为 `out-bs/boot-16k-LABEL-battery-irq-*.img`。脚本检查 kernel manifest、
 0141 标记、ramdisk 回读与 payload 一致性；旧 0114a15 内核会被明确拒绝。
-无新产物前没有本轮 boot 镜像。所有测试仅 `fastboot boot`，不刷启动分区。
+所有测试仅 `fastboot boot`，不刷启动分区。
 
 按顺序推进，每步保留原始日志和现象；有异常先停在该步分析，使用同一内核
 的其他档位定位，无需为了换参数重复云编译：
@@ -144,4 +156,5 @@ display-off 只指现有逻辑息屏，不代表深度休眠；已知锁屏局�
 源码工作目录为工作区 `scratch/battery-irq-0114a15/xnu/`；精确基线在
 `base/xnu/`，补丁应用核对目录为 `verify/`，编译脚本/日志/对象在同级 scratch。
 这些本地产物不进 git；仓库提交补丁、打包入口、测试脚本与文档。
-下一步是用户 push、CircleCI 完整构建，再按上述顺序取实机证据。
+0115 产物源码核对目录为工作区 `scratch/battery-irq-0115/xnu/`。
+下一步使用已经生成的 0115 镜像，按上述顺序取实机证据。

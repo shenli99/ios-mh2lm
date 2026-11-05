@@ -2,6 +2,51 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0115 battery IRQ artifact verified; six temporary images ready, NOT phone-tested:**
+User downloaded logs/xnu-kernel-0115.gz and logs/xnu-buildtree-0115.gz.
+No 0115 build log or CI run ID was provided; do not claim a warning-free build.
+Kernel manifest SHA256 verified:
+`a601cb597d38697832e4324fbb4341c75810034722ed95b139472bdb65dae6f2`.
+All five 0141 files in the final buildtree byte-match the implementation in
+scratch/battery-irq-0114a15/xnu; keys/USB/touch/log-level files byte-match the
+previous verified source. Kernel contains battery mode/REVID/arm/route markers,
+and linked SweetBattery IRQ methods plus mux attach/detach and transport-lock
+symbols. Thus the native artifact includes 0141, not merely a successful
+build of skipped patches. No code change or new CI run was needed here.
+
+Packaged with tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-0115.gz 0115
+--battery-irq. Images in workspace out-bs/ (prefix boot-16k-0115-):
+- battery-irq-baseline.img (mode0)
+  SHA256 0124ec14946051d951f75ea40aadffa917ccfa673e4f1e4580995b3e2f180883
+- battery-irq-preflight.img (mode1)
+  SHA256 5d3bdb71e1fea360f735d609289fb815218988f0e6a2eb23a6a029961929ab2a
+- battery-irq-usbin.img (mode2)
+  SHA256 1f9569ad0e3d52428d8e5209338c845875af2d74f9d4f698aaaf53432dd680ff
+- battery-irq-charger.img (mode3)
+  SHA256 6d819d324c7b9cdec1b40192a5a8257291ccbf39e1e4ca50bfd7eebcfecf7db5
+- battery-irq-all.img (mode4)
+  SHA256 ae33c014aa8ee78378ec7282e4cf571bf7ff6c0f053e8c504502df36a671dab9
+- battery-irq-all-debug.img (mode4, sweetloglevel=3)
+  SHA256 157c5bceb5772c6dd9886f9fd16312bffcbf80ac0da4e5b38147e0f9fb8053d8
+
+Read back ALL SIX FINAL Android boot images (not only source ramdisks): boot
+header/page, firmware kernel blob, embedded ramdisk, FAT TOML/kernel/ADT all
+verified; exact shared XNU kernel hash and intended unique sweetbattirq mode
+confirmed. Each retains sweetbattery=1 sweetbatt=1, key/USB/touch IRQ and ACM;
+only DEBUG profile has sweetloglevel=3. Preflight has irqdiag/uidiag. Evidence:
+scratch/battery-irq-0115/xnu (extracted source), kernel (kernel/manifest),
+artifact-verification.txt, boot-verification.json (all hashes and boot args).
+
+NEXT PHONE STEP: fastboot boot out-bs/boot-16k-0115-battery-irq-baseline.img;
+check desktop, real battery, three keys/combination, touch and USB ACM. If
+normal, boot battery-irq-preflight.img and export fresh persistent SWEETLOG
+(plus ACM if useful) for REVID/FG/APID configuration review. Stop there for
+analysis before mode2 USBIN. Baseline/preflight explicitly retain two-second
+battery polling; modes2..4 disable it. Remaining stages use the SAME compiled
+kernel; do not push/recompile for these parameter changes. No new phone log,
+REVID readback or real battery IRQ proof exists yet. Subgoal4 stays open.
+User controls fastboot and push; no push or device/partition write was done.
+
 **Battery IRQ first implementation ready for user push / native CI; NOT phone-tested:**
 Implementation committed as `c7c02d4`; staged whitespace checks passed for all
 ten files. User retains push control; no remote action was taken.
