@@ -51,6 +51,17 @@ stop/free先停止事件并同步回调，再释放线程/MMIO。真实手机终
 | 显示 | CoreAnimation软件渲染 → 本项目IOSurface/IOMobileFramebuffer兼容接口 → AppleCLCD定时模拟vsync与CPU图层复制 → ABL已配置的framebuffer/面板扫描。0119参数sweetfb_hz30；未接管完整MDSS/GPU呈现。 |
 | 背光 | CoreBrightness → AppleARMBacklight自己的workloop/fade定时器 → DSI DCS0x51。亮度写入仍有有界硬件状态等待，不是显示IRQ改造。 |
 
+USB连接生命周期补充：这里的gadget指手机作为USB设备向电脑提供CDC-ACM功能，
+不是额外的Linux gadget/configfs框架。驱动直接操作DWC3、提供descriptor及
+EP0/数据端点，电脑的CDC-ACM驱动再创建ttyACM设备节点，并非物理UART直通。
+0119 sweetusb2在启动时默认延迟15秒后初始化一次，不等待PMIC插线事件；
+sweetvbus1在QSCRATCH置UTMI_OTG_VBUS_VALID/SW_SESSVLD_SEL，随后RUN_STOP启动。
+本版没有将电池USBIN事件接到DWC3启停/override撤销，也没有拔线后runtime suspend。
+设备线程空闲时等待IRQ，不是持续扫描；初始化/运行状态与主机完成枚举是两回事。
+ud_event处理reset/connect/disconnect，但disconnect分支目前只打印，没有清
+configured/dtr/tx_busy或停止控制器；reset分支才清这些状态。该缺口可能与既有
+重连问题有关，尚未证明是重连失败或当前禁充的原因。本次只记录，不修改驱动。
+
 上游仍使用板级 `sleh_irq` 分派与直接GIC寄存器管理，没有GIC
 `IOInterruptController` provider。mux采用普通软件IES，**未改成
 IOFilterInterruptEventSource**。其保留的受锁GIC服务槽仅用于物理投递，不用于

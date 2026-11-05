@@ -2,6 +2,18 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0119 USB lifecycle clarification (source review, no driver change).** User
+asks whether gadget exists/alwaysenabled vs cable-triggered. DirectDWC3 driver
+implements device-side CDC-ACM itself, no Linuxgadget/configfs framework; host
+CDCACM creates ttyACM. sweetusb2 init once after default15s, sets persistent
+QSCRATCH VBUSVALID+SWSESSVLD for sweetvbus1, startsRUN_STOP; no PMICUSBIN->USB
+session start/stop link. IRQworker sleeps when idle, not polling. disconnect
+only logs, doesn't reset configured/dtr/tx_busy or stopcore; reset DOES reset
+those flags. RuntimePM/full reconnect lifecycle missing, causal role in old
+enumeration failures/charging not established. Architecture doc updated;
+noUSBcontrol below remains next test. Don't conflate forced controller session
+valid with physical PMICVBUS or supply/chargeenable.
+
 **CURRENT0119 charge-diag: NO ACTIVE CHARGE SAMPLED; next existing NO-USB CONTROL.**
 User supplied logs/sweetlog-0119-battery-charge-diag.bin, SHA256
 `36f445679818886a45e53eb1b44baa11750f3ec65efc6575d373ea1c44057875`.
