@@ -3,6 +3,9 @@
 ## Agent handoff / active work (2026-11-05, latest)
 
 **CURRENT:0145 registry consumers + terminated cleanup implemented locally.**
+Implementation/tests/docs committed as `6a2a552`; final strict full-chain replay,
+seven ARM64 objects, registry/key lifecycle suites and source/syntax gates pass.
+Ready for USER PUSH; no push performed. New native build and phone baseline pending.
 User reprioritized consumer migration after0117 baseline. Additive0145-mh2lm-
 mux-consumer-matching.patch changes10 XNU files. Public mux class moved to
 sweet_spmi_mux.h; virtual IOReturn attachConsumer(IOService*,group,events,
