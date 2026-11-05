@@ -9,6 +9,11 @@ mode1 的 live 与持久日志已核对，采样和既有三路 IRQ 正常，启
 云编译与实机验证。**暂停测试旧 0115 的 charger/all 档，不代表硬件 IRQ 已失败。**
 已验证的真实采样包括 0114a15 和 0115 mode1，尚未验收电池 IRQ。
 
+**当前先做启动链清理：** 用户暂缓电池测试。0143 增加独立板级入口，
+mux 不再等待 keys 或 UFS。下一轮先用 `--board-startup` 的三个镜像验收启动
+归属与关闭按键时的独立接入，再推进本文 CHGR/MSOC 阶段。电池检查点及测试
+顺序见 [`DRIVER-STARTUP.md`](DRIVER-STARTUP.md)。0142/0143 均未实机验证。
+
 ## 实现路径与边界
 
 ```text
@@ -38,8 +43,9 @@ arm 后补读一次关闭启动窗口。0141 原有的十秒重试已在实机�
 计数。等待期间不设置重试定时器、不扫描状态，属性
 `SweetBatteryIRQWaitingForMux=true`、`SweetBatteryIRQHealthy=false` 明确
 表示未就绪。若 mux 永远未启动，就保持显式等待；mux 实际初始化失败则 ERROR
-停用，不能伪装健康或改成轮询。测试配置保留 `sweetkeys=1`，由既有 BSD 路径
-启动唯一 mux，不将 GIC/MMIO 初始化提前到电池早期启动阶段。
+停用，不能伪装健康或改成轮询。0143 由独立 BSD 板级入口
+启动唯一 mux，既不依赖 `sweetkeys=1` 也不提前到电池早期启动阶段；按键与
+电池分别接入，consumer 先后可互换。
 
 新增路由先解析唯一 EE0 IRQ-owned APID，再访问该 channel。拒绝接管已经
 使能的对应外设 IRQ 位；保存并恢复自己的触发位，保留其他位。电池 observer

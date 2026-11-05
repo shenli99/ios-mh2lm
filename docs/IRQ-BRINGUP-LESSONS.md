@@ -54,3 +54,12 @@ PMIC EE/APID 过滤是按键/电池共享 PMIC-arb 的专属规则，**DWC3 本�
 订阅与发布竞争、订阅前后初始化失败、等待期间退出和通知排队后退出。
 本地测试通过仍不证明实际外设 IRQ 投递，下一轮必须先看到 attach/armed，
 再用真实插拔证明 route → worker → IOPM 全链路。
+
+
+0143 继续处理就绪机制背后的归属错误：公共 mux 不能让某个 consumer 启动，
+无存储依赖的外设也不能让 UFS root 初始化启动。改成独立晚期 board 入口，
+consumer 自己 attach/detach；无 consumer 时不 arm，最后退出后不重开 SPI。
+测试需覆盖 keys=0、按键预检/接入失败、最后一个 pending detach、上游 arm
+失败，以及 root 重试不重复启动。调用链与限制见
+[`DRIVER-STARTUP.md`](DRIVER-STARTUP.md)。就绪回调解决阶段交接，不能代替
+初始化归属清理；二者都不等于真实硬件 IRQ 已通过。

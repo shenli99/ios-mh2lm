@@ -1,0 +1,530 @@
+From: ios-mh2lm
+Subject: mh2lm: own shared mux and device startup at board level
+
+Call late board initialization from BSD before root lookup. Keep UFS startup
+storage-only, including its partition-backed persistent logger. Start the PMIC
+mux independently of keys; keys and battery attach their own route groups.
+Infrastructure readiness leaves upstream IRQ masked until a consumer attaches.
+No change to charger policy, HID processing or USB/touch IRQ handlers.
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -104,6 +104,7 @@
+ bsd/dev/random/randomdev.c		standard
+ 
+ bsd/dev/memdev.c			standard
++bsd/dev/sweet_board.c			standard
+ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+diff --git a/bsd/dev/sweet_board.c b/bsd/dev/sweet_board.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_board.c
+@@ -0,0 +1,51 @@
++/* Board-owned late initialization. Called once from bsd_init, after
++ * bsd_autoconf/IOBSD and inittodr, before root lookup/mount. Do not call
++ * this from a leaf driver or move GIC probing into early IOKit matching. */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include "sweet_spmi_mux.h"
++#include "sweet_log_level.h"
++
++void sweet_board_init(void);
++extern void sweet_keys_init(void);
++extern void sweet_touch_init(void);
++extern void sweet_usb_probe(void);
++extern void sweet_sample_start(void);
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++extern void sweet_display_probe_init(void);
++#endif
++#if defined(ARM64_BOARD_CONFIG_GUACAMOLE)
++extern void sweet_gpu_init(void);
++#endif
++
++void
++sweet_board_init(void)
++{
++	static bool started;
++	/* Single caller on the BSD startup thread, outside the root retry loop. */
++	if (started) {
++		return;
++	}
++	started = true;
++	SWEET_LOG_INFO("SWEET BOARD: late init before root lookup; independent of UFS\n");
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	/* Shared infrastructure starts even with sweetkeys=0. Consumers arm
++	 * their own route groups only after their notification state exists. */
++	if (sweet_spmi_mux_start() != 0) {
++		SWEET_LOG_ERROR("SWEET BOARD: shared PMIC mux unavailable; continuing independent devices\n");
++	}
++#endif
++	sweet_keys_init();
++	sweet_touch_init();
++	sweet_usb_probe();
++	sweet_sample_start();
++#if defined(ARM64_BOARD_CONFIG_GUACAMOLE)
++	sweet_gpu_init();
++#endif
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	sweet_display_probe_init();
++#endif
++	SWEET_LOG_INFO("SWEET BOARD: device init dispatched; storage remains root-owned\n");
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -14,12 +14,12 @@
+ #include <pexpert/pexpert.h>
+ #include <pexpert/arm64/sweet_dev.h>
+ #include "sweet_spmi.h"
++#include "sweet_spmi_mux.h"
+ #include "sweet_log_level.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+ extern void sweet_hid_key(int key, int down);
+-extern int sweet_spmi_mux_start(unsigned mode);
+ void sweet_keys_init(void);
+ 
+ #define KEYS_CORE_PA     SWEET_DEV_SPMI_CORE_PA
+@@ -69,6 +69,18 @@
+ {
+ 	__atomic_store_n(&keys_irq_failed, 1u, __ATOMIC_RELEASE);
+ 	thread_wakeup(&keys_sleep_chan);
++}
++
++/* Registered by this consumer, not statically bound inside the mux. */
++static void
++keys_mux_notify(void *context, unsigned events)
++{
++	(void)context;
++	if (events == SWEET_MUX_FAILED) {
++		sweet_keys_irq_failed();
++	} else {
++		sweet_keys_irq_notify(events);
++	}
+ }
+ 
+ static uint32_t
+@@ -445,9 +457,11 @@
+ 			keys_irq_diag_gic();
+ 		}
+ 	}
+-	if (sweet_spmi_mux_start(3u) != 0 ||
++	if (sweet_spmi_mux_attach(SWEET_MUX_KEYS, SWEET_KEYS_IRQ_ALL,
++	    keys_mux_notify, &keys_sleep_chan) != 0 ||
+ 	    __atomic_load_n(&keys_irq_failed, __ATOMIC_ACQUIRE)) {
+-		SWEET_LOG_ERROR("SWEET KEYS IRQ: mux setup failed; keys disabled\n");
++		sweet_spmi_mux_detach(SWEET_MUX_KEYS, &keys_sleep_chan);
++		SWEET_LOG_ERROR("SWEET KEYS IRQ: consumer attach failed; keys disabled\n");
+ 		return;
+ 	}
+ 	SWEET_LOG_INFO("SWEET KEYS IRQ: three routes active; IRQ-only\n");
+@@ -455,6 +469,8 @@
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	} else {
++		sweet_spmi_mux_detach(SWEET_MUX_KEYS, &keys_sleep_chan);
++		sweet_keys_irq_failed();
+ 		SWEET_LOG_ERROR("SWEET KEYS: kernel_thread_start failed %d\n", kr);
+ 	}
+ }
+diff --git a/bsd/dev/sweet_spmi_mux.h b/bsd/dev/sweet_spmi_mux.h
+--- a/bsd/dev/sweet_spmi_mux.h
++++ b/bsd/dev/sweet_spmi_mux.h
+@@ -6,6 +6,10 @@
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
++/* Board starts infrastructure; consumer attach/detach owns route gates. */
++int sweet_spmi_mux_start(void);
++#define SWEET_MUX_KEYS 0u
++#define SWEET_KEYS_IRQ_ALL 0x07u
+ #define SWEET_MUX_BATTERY 1u
+ #define SWEET_BATT_IRQ_USB   0x01u
+ #define SWEET_BATT_IRQ_CHG   0x02u
+@@ -21,7 +25,7 @@
+  * The readiness lock is never held while waiting on either workloop. */
+ int sweet_spmi_mux_watch_ready(SweetMuxNotify notify, void *context);
+ void sweet_spmi_mux_unwatch_ready(void *context);
+-/* 0 attached, -2 keys/mux not ready yet, -1 failure (never falls back).
++/* 0 attached, -2 mux not ready yet, -1 failure (never falls back).
+  * Consumer owns context until detach returns. No second GIC registration. */
+ int sweet_spmi_mux_attach(unsigned group, unsigned events,
+     SweetMuxNotify notify, void *context);
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -50,12 +50,6 @@
+ extern void thread_deallocate(thread_t);
+ extern int hz;
+ static void sweet_log_start(void);
+-extern void sweet_sample_start(void);
+-extern void sweet_keys_init(void);
+-void sweet_gpu_init(void);
+-void sweet_display_probe_init(void);
+-extern void sweet_touch_init(void);
+-extern void sweet_usb_probe(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -657,18 +651,8 @@
+ 	printf("SWEET UFS: \"%s\" on LUN %u: first block 0x%llx, %llu MiB, %s, DMA at 0x%llx\n",
+ 	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
++	/* Persistent logging needs this partition and write bounds. */
+ 	sweet_log_start();
+-	sweet_sample_start();
+-	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+-	sweet_keys_init();
+-	sweet_touch_init();
+-	sweet_usb_probe();
+-#if defined(ARM64_BOARD_CONFIG_GUACAMOLE)
+-	sweet_gpu_init();	/* no-op unless sweetgpu=N is on the command line */
+-#endif
+-#if defined(ARM64_BOARD_CONFIG_MH2LM)
+-	sweet_display_probe_init();	/* read-only MDSS/DSI state; sweetdispprobe=0 skips */
+-#endif
+ 	return 0;
+ }
+ 
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -868,6 +868,13 @@
+ 	bsd_init_kprintf("calling inittodr\n");
+ 	inittodr(0);
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* Scheduler, IOKit and BSD autoconfiguration are live. Board devices
++	 * are independent of the selected root device and UFS success. */
++	extern void sweet_board_init(void);
++	sweet_board_init();
++#endif
++
+ 	/* Mount the root file system. */
+ 	while (TRUE) {
+ 		int err;
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -4,8 +4,8 @@
+  * and SPMI work runs on its IOWorkLoop. The table is independent of the
+  * physical GIC handoff so future PMIC consumers can be registered here.
+  *
+- * MH2LM arms all three key routes. Battery attaches through the route table
+- * after its consumer is ready. A fatal shared mux error notifies both groups.
++ * Board startup owns infrastructure; keys and battery attach through the
++ * route table after their consumer is ready. A fatal shared mux error notifies both groups.
+  */
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ #include <device/device_types.h>
+@@ -24,8 +24,6 @@
+ #include "../../../bsd/dev/sweet_log_level.h"
+ 
+ extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+-extern "C" void sweet_keys_irq_notify(unsigned key);
+-extern "C" void sweet_keys_irq_failed(void);
+ 
+ #define MUX_GICD_PA       0x17a00000u
+ #define MUX_PDC_PA        0x0b220000u
+@@ -36,9 +34,9 @@
+ #define MUX_IRQ_OWNER_BIT 0x01000000u
+ #define MUX_IRQ_LIMIT     256u
+ 
+-enum { MUX_KEYS = 0, MUX_BATTERY = SWEET_MUX_BATTERY, MUX_GROUPS = 2 };
++enum { MUX_KEYS = SWEET_MUX_KEYS, MUX_BATTERY = SWEET_MUX_BATTERY, MUX_GROUPS = 2 };
+ struct MuxRoute {
+-	unsigned sid, per, bit, token, armMode, group;
++	unsigned sid, per, bit, token, group;
+ 	/* Bit0 rising, bit1 falling. Configuration is route data, not a switch. */
+ 	unsigned edges;
+ 	const char *name;
+@@ -55,37 +53,25 @@
+ 	unsigned events;
+ };
+ 
+-static void
+-keyConsumer(void *context, unsigned key)
+-{
+-	(void)context;
+-	if (key == SWEET_MUX_FAILED) {
+-		sweet_keys_irq_failed();
+-	} else {
+-		sweet_keys_irq_notify(key);
+-	}
+-}
+-
+-static MuxBinding bindings[MUX_GROUPS] = {{keyConsumer, NULL, 0}, {NULL, NULL, 0}};
+-/* All three keys are fixed. Battery routes are attached only after its own
+- * workloop, event source and initial source data exist. */
++static MuxBinding bindings[MUX_GROUPS];
++/* Tokens are event bitmasks; callbacks and contexts belong to consumers.
++ * No route is armed until its consumer attaches on the mux workloop. */
+ static MuxRoute routes[] = {
+-	{0, 0x08, 0, 0, 2, MUX_KEYS, 3, "power"},
+-	{0, 0x08, 1, 2, 3, MUX_KEYS, 3, "volume-down"},
+-	{0, 0xc5, 0, 1, 3, MUX_KEYS, 3, "volume-up"},
+-	{2, 0x13, 4, SWEET_BATT_IRQ_USB, 0, MUX_BATTERY, 3, "battery-usbin"},
+-	{2, 0x10, 1, SWEET_BATT_IRQ_CHG, 0, MUX_BATTERY, 1, "battery-chgr"},
+-	{2, 0x40, 3, SWEET_BATT_IRQ_MSOC, 0, MUX_BATTERY, 1, "battery-msoc"},
+-	{2, 0x40, 1, SWEET_BATT_IRQ_READY, 0, MUX_BATTERY, 3, "battery-ready"},
++	{0, 0x08, 0, 1u << 0, MUX_KEYS, 3, "power"},
++	{0, 0x08, 1, 1u << 2, MUX_KEYS, 3, "volume-down"},
++	{0, 0xc5, 0, 1u << 1, MUX_KEYS, 3, "volume-up"},
++	{2, 0x13, 4, SWEET_BATT_IRQ_USB, MUX_BATTERY, 3, "battery-usbin"},
++	{2, 0x10, 1, SWEET_BATT_IRQ_CHG, MUX_BATTERY, 1, "battery-chgr"},
++	{2, 0x40, 3, SWEET_BATT_IRQ_MSOC, MUX_BATTERY, 1, "battery-msoc"},
++	{2, 0x40, 1, SWEET_BATT_IRQ_READY, MUX_BATTERY, 3, "battery-ready"},
+ };
+ 
+ static vm_offset_t gicd, pdc, core, cfg, obs;
+ static IOWorkLoop *workLoop;
+ static IOInterruptEventSource *eventSource;
+-static volatile unsigned state; /* 0 off, 1 armed, 2 worker pending, 3 off, 4 GIC probe, 5 route maintenance */
++static volatile unsigned state; /* 0 off, 1 ready (SPI may be idle), 2 pending, 3 failed, 4 probe, 5 maintenance */
+ static volatile unsigned probeHits;
+ static unsigned irqCount, workCount, routeCount, faultCount;
+-static unsigned mode;
+ static volatile int published; /* 0 not started, -1 failed, 1 workloop ready */
+ static IOLock *readyLock;
+ static SweetMuxNotify readyNotify;
+@@ -95,8 +81,8 @@
+ static unsigned apidCount;
+ static bool allowEmptyDrain; /* a maintenance detach may consume queued pending */
+ 
+-/* Battery starts in IOKit before BSD starts the key mux. Keep the one-shot
+- * subscription independent of the mux workloop. This lock protects callback
++/* Battery may start in IOKit before BSD starts shared board infrastructure.
++ * Keep the one-shot subscription independent of the mux workloop. This lock protects callback
+  * lifetime only; no MMIO, workloop waits or consumer work runs under it. */
+ static IOLock *
+ readinessLock(void)
+@@ -528,10 +514,6 @@
+ drainInterrupt(void)
+ {
+ 	++workCount;
+-	if (mode == 1) {
+-		SWEET_LOG_DEBUG("SWEET MUX: software event delivered on IOWorkLoop\n");
+-		return;
+-	}
+ 	if (__atomic_load_n(&state, __ATOMIC_ACQUIRE) != 2u) {
+ 		return;
+ 	}
+@@ -606,7 +588,12 @@
+ 		return;
+ 	}
+ 	__atomic_store_n(&state, 1u, __ATOMIC_RELEASE);
+-	write32(gicd, 0x100u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
++	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
++		if (routes[i].active) {
++			write32(gicd, 0x100u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
++			break;
++		}
++	}
+ }
+ 
+ static void
+@@ -641,12 +628,12 @@
+ }
+ 
+ extern "C" int
+-sweet_spmi_mux_start(unsigned requestedMode)
+-{
+-	if (requestedMode < 1u || requestedMode > 3u || workLoop) {
++sweet_spmi_mux_start(void)
++{
++	/* Sole caller is the board startup thread. No consumer starts its parent. */
++	if (workLoop || __atomic_load_n(&published, __ATOMIC_ACQUIRE) != 0) {
+ 		return -1;
+ 	}
+-	mode = requestedMode;
+ 	workLoop = IOWorkLoop::workLoop();
+ 	if (!workLoop) {
+ 		return startFailed();
+@@ -656,12 +643,6 @@
+ 	if (!eventSource || workLoop->addEventSource(eventSource) != kIOReturnSuccess) {
+ 		SWEET_LOG_ERROR("SWEET MUX: software event source unavailable\n");
+ 		return startFailed();
+-	}
+-	if (mode == 1) {
+-		SWEET_LOG_INFO("SWEET MUX: software handoff test queued; no PMIC/PDC/GIC gates\n");
+-		publishReadiness(-1); /* diagnostic mode has no hardware routes */
+-		eventSource->interruptOccurred(NULL, NULL, 0);
+-		return 0;
+ 	}
+ 	gicd = ml_io_map(MUX_GICD_PA, 0x10000);
+ 	pdc = ml_io_map(MUX_PDC_PA, 0x400);
+@@ -680,62 +661,16 @@
+ 		return startFailed();
+ 	}
+ 	apidCount = count;
+-	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+-		MuxRoute &route = routes[i];
+-		route.active = route.group == MUX_KEYS && mode >= route.armMode;
+-		if (!route.active) {
+-			continue;
+-		}
+-		route.apid = findOwnedApid(route.sid, route.per, count);
+-		if (route.apid == MUX_NO_APID) {
+-			SWEET_LOG_ERROR("SWEET MUX: %s has no unique EE0 IRQ-owned APID\n", route.name);
+-			return startFailed();
+-		}
+-		route.channel = ml_io_map(SWEET_DEV_SPMI_CHNLS_PA +
+-		    0x10000u * route.apid, 0x1000);
+-		if (!route.channel) {
+-			SWEET_LOG_ERROR("SWEET MUX: %s channel map failed apid=%u\n",
+-			    route.name, route.apid);
+-			return startFailed();
+-		}
+-	}
+-	/* No hardware gate is opened until callback, worker and all checks exist. */
+ 	if ((read32(pdc, 0x114u) & 7u) != 4u || !configureGic() ||
+ 	    !probeGicDelivery()) {
+ 		SWEET_LOG_ERROR("SWEET MUX: PDC polarity, GIC config or delivery probe failed; IRQ unavailable\n");
+ 		return startFailed();
+ 	}
+-	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+-		MuxRoute &route = routes[i];
+-		if (route.active && !configureRoute(route)) {
+-			SWEET_LOG_ERROR("SWEET MUX: route %s setup failed; IRQ disabled\n", route.name);
+-			disableHardware();
+-			return startFailed();
+-		}
+-	}
+-	uint32_t enable = read32(pdc, 0x10u);
+-	write32(pdc, 0x10u, enable | 2u);
+-	if ((read32(pdc, 0x10u) & 2u) == 0) {
+-		SWEET_LOG_ERROR("SWEET MUX: PDC pin 1 enable failed; IRQ disabled\n");
+-		disableHardware();
+-		return startFailed();
+-	}
++	/* Idle but ready: GIC remains masked and PDC stays closed until attach.
++	 * Thus disabled/failed keys never leave unconsumed key routes enabled. */
+ 	__atomic_store_n(&state, 1u, __ATOMIC_RELEASE);
+-	write32(gicd, 0x100u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
+-	uint32_t enabledBit = read32(gicd, 0x100u + 4u * MUX_SPI_WORD) &
+-	    MUX_SPI_BIT;
+-	unsigned currentState = __atomic_load_n(&state, __ATOMIC_ACQUIRE);
+-	/* An immediate valid IRQ may already have masked the SPI in the top
+-	 * half. That is a successful enable, not a failed readback. */
+-	if ((!enabledBit && currentState == 1u) || currentState == 3u) {
+-		SWEET_LOG_ERROR("SWEET MUX: GIC SPI 513 enable failed; IRQ disabled\n");
+-		disableHardware();
+-		return startFailed();
+-	}
+-	SWEET_LOG_INFO("SWEET MUX: armed mode=%u intid=%u pdc=%#x routes=%u limit=%u state=%u\n",
+-	    mode, MUX_INTID, read32(pdc, 0x10u), mode == 3 ? 3 : 1,
+-	    MUX_IRQ_LIMIT, currentState);
+-	publishReadiness(1);
++	SWEET_LOG_INFO("SWEET MUX: infrastructure ready intid=%u; waiting for consumers\n", MUX_INTID);
++	publishReadiness(1); /* callbacks only queue; no subsequent route mutation */
+ 	return 0;
+ }
+ struct BindingRequest {
+@@ -760,14 +695,37 @@
+ 	return false;
+ }
+ 
+-static void
++static bool
+ endRouteUpdate(void)
+ {
+ 	unsigned expected = 5u;
+ 	if (__atomic_compare_exchange_n(&state, &expected, 1u, false,
+ 	    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++		bool active = false;
++		for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
++			active |= routes[i].active;
++		}
++		if (!active) {
++			/* Last consumer detached. Keep the upstream SPI masked. */
++			return true;
++		}
++		write32(pdc, 0x10u, read32(pdc, 0x10u) | 2u);
++		if ((read32(pdc, 0x10u) & 2u) == 0) {
++			SWEET_LOG_ERROR("SWEET MUX: PDC pin 1 enable failed; IRQ disabled\n");
++			disableHardware();
++			return false;
++		}
+ 		write32(gicd, 0x100u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
+-	}
++		uint32_t enabled = read32(gicd, 0x100u + 4u * MUX_SPI_WORD) & MUX_SPI_BIT;
++		unsigned current = __atomic_load_n(&state, __ATOMIC_ACQUIRE);
++		/* Immediate IRQ masking is a successful enable, as in the old path. */
++		if ((!enabled && current == 1u) || current == 3u) {
++			SWEET_LOG_ERROR("SWEET MUX: GIC SPI 513 enable failed; IRQ disabled\n");
++			disableHardware();
++			return false;
++		}
++	}
++	return __atomic_load_n(&state, __ATOMIC_ACQUIRE) != 3u;
+ }
+ 
+ static bool
+@@ -866,7 +824,7 @@
+ 		}
+ 		route.active = true;
+ 		if (!configureRoute(route)) {
+-			SWEET_LOG_ERROR("SWEET MUX: attach setup failed route=%s; battery IRQ unavailable\n", route.name);
++			SWEET_LOG_ERROR("SWEET MUX: attach setup failed route=%s; consumer IRQ unavailable\n", route.name);
+ 			if (!removeGroup(group)) {
+ 				SWEET_LOG_ERROR("SWEET MUX: attach rollback failed; all PMIC consumers stopped\n");
+ 				disableHardware();
+@@ -880,7 +838,16 @@
+ 	}
+ 	SWEET_LOG_INFO("SWEET MUX: consumer attached group=%u events=%#x intid=%u\n",
+ 	    group, found, MUX_INTID);
+-	endRouteUpdate();
++	if (!endRouteUpdate()) {
++		/* Attach failed after installing the callback. A failed caller does
++		 * not own a binding: erase it before returning, even after fatal IRQ
++		 * gating errors, so stop/free cannot leave a dangling context. */
++		(void)removeGroup(group);
++		binding.notify = NULL;
++		binding.context = NULL;
++		binding.events = 0;
++		return kIOReturnIOError;
++	}
+ 	return kIOReturnSuccess;
+ }
+ 
+@@ -888,7 +855,8 @@
+ sweet_spmi_mux_attach(unsigned group, unsigned events, SweetMuxNotify notify,
+     void *context)
+ {
+-	if (group != MUX_BATTERY || !events || (events & ~0x0fu) || !notify || !context) {
++	if (group >= MUX_GROUPS || !events || !notify || !context ||
++	    (group == MUX_KEYS ? events != SWEET_KEYS_IRQ_ALL : (events & ~0x0fu) != 0)) {
+ 		return -1;
+ 	}
+ 	int ready = __atomic_load_n(&published, __ATOMIC_ACQUIRE);
+@@ -904,7 +872,7 @@
+ {
+ 	/* A runtime fault publishes FAILED, but an attached context still must
+ 	 * be removed under the existing gate before its owner is released. */
+-	if (group != MUX_BATTERY ||
++	if (group >= MUX_GROUPS ||
+ 	    __atomic_load_n(&published, __ATOMIC_ACQUIRE) == 0 || !workLoop) {
+ 		return;
+ 	}
+@@ -913,10 +881,9 @@
+ }
+ 
+ #else
+-/* The shared sweet_keys.c is also linked for sweet and guacamole. Those
+- * boards remain linkable without MH2LM hardware. */
+-extern "C" int sweet_spmi_mux_start(unsigned)
+-{
+-	return -1;
+-}
++/* Shared BSD sources remain linkable; only MH2LM has this IRQ backend. */
++extern "C" int sweet_spmi_mux_start(void) { return -1; }
++extern "C" int sweet_spmi_mux_attach(unsigned, unsigned,
++    void (*)(void *, unsigned), void *) { return -1; }
++extern "C" void sweet_spmi_mux_detach(unsigned, void *) { }
+ #endif /* ARM64_BOARD_CONFIG_MH2LM */

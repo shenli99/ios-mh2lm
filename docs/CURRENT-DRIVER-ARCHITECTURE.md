@@ -21,6 +21,14 @@ workloop 接入，取消订阅同步回调寿命；等待不设置重试定时�
 下文仍描述 0114a15 实测基线。详细数据流、故障边界与测试入口见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
 
+**当前追加变更（0143，尚未实机验证）：** 共享 mux 改由独立
+`sweet_board_init()` 启动，入口在 BSD autoconf/inittodr 后、root lookup 前。
+按键与电池均注册到 mux，mux 不再引用按键函数；关闭按键不阻止公共设施启动。
+触摸、USB、sampler 和显示探针也从 UFS 移至板级入口，UFS 保留存储与持久日志。
+这次只调整启动归属和 consumer 路由生命周期，下文实测基线中的 IRQ/HID/显示
+数据通路继续保留。完整前后调用链与电池暂停点见
+[`DRIVER-STARTUP.md`](DRIVER-STARTUP.md)。
+
 ## 一眼看清数据流
 
 ```mermaid

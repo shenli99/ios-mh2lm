@@ -20,6 +20,7 @@ source = (root / 'iokit/Kernel/arm/SweetSpmiInterruptMux.cpp').read_text()
 header = (root / 'bsd/dev/sweet_spmi_mux.h').read_text()
 source = re.sub(r'^#include .*$', '', source, flags=re.M)
 startup_tests = 'sweet_spmi_mux_watch_ready' in source
+board_startup = 'sweet_spmi_mux_start(void)' in source
 
 def substitute_function(text, name, replacement):
     match = re.search(r'\n' + name + r'\([^)]*\)\n\{', text)
@@ -107,6 +108,7 @@ static std::map<unsigned,uint8_t> pmic;
 static std::map<unsigned,unsigned> ppids;
 static unsigned keyEvents, keyFailures, batteryEvents, batteryFailures;
 static unsigned lockDepth, lockedWrites, failReadPer, timeoutApid;
+static bool dropPdcEnable;
 extern "C" bool sweet_spmi_mux_irq(unsigned);
 extern "C" void sweet_keys_irq_notify(unsigned) { ++keyEvents; }
 extern "C" void sweet_keys_irq_failed() { ++keyFailures; }
@@ -121,12 +123,16 @@ extern "C" int sweet_spmi_read(unsigned sid, unsigned a, uint8_t *v) {
 static void batteryNotify(void *, unsigned event) {
     if (event == 0x80000000u) ++batteryFailures; else batteryEvents |= event;
 }
+static void keyNotify(void *, unsigned event) {
+    if (event == 0x80000000u) ++keyFailures; else ++keyEvents;
+}
 static uint32_t hwRead(uintptr_t b,unsigned off) { return mmio[b+off]; }
 static void hwWrite(uintptr_t b,unsigned off,uint32_t value) {
     uintptr_t a=b+off;
     const uintptr_t gd=0x17a00000, core=SWEET_DEV_SPMI_CORE_PA;
     const uintptr_t ch=SWEET_DEV_SPMI_CHNLS_PA, obs=SWEET_DEV_SPMI_OBS_PA;
     unsigned spiOff=4*(513/32), spiBit=1u<<(513%32);
+    if (a==0x0b220000+0x10 && dropPdcEnable && (value&2)) return;
     if (a == gd+0x100+spiOff) { mmio[a] |= value; return; }
     if (a == gd+0x180+spiOff) { mmio[gd+0x100+spiOff] &= ~value; return; }
     if (a == gd+0x280+spiOff) { mmio[gd+0x200+spiOff] &= ~value; return; }
@@ -158,7 +164,8 @@ static void hwWrite(uintptr_t b,unsigned off,uint32_t value) {
         }
     } else if (a>=obs && a<obs+0x10000 && (a-obs)%0x80==0) {
         unsigned apid=(a-obs)/0x80, byte=(value>>4)&255;
-        mmio[a+8]=1; mmio[a+0x18]=pmic[(ppids[apid]<<8)|byte];
+        mmio[a+8]=((ppids[apid]&255)==failReadPer)?3:1;
+        mmio[a+0x18]=pmic[(ppids[apid]<<8)|byte];
     }
     (void)core;
 }
@@ -251,10 +258,10 @@ static int startupCheck(const char *scenario) {
     bool failedFirst=!std::strcmp(scenario,"startup-failed-first");
     bool cancel=!std::strcmp(scenario,"startup-cancel");
     bool queuedStop=!std::strcmp(scenario,"startup-queued-stop");
-    if (early) assert(sweet_spmi_mux_start(3)==0);
+    if (early) { assert(startMux()==0); assert(attachKeys()==0); }
     if (failedFirst) {
         mmio[SWEET_DEV_SPMI_CORE_PA]=0;
-        assert(sweet_spmi_mux_start(3)==-1);
+        assert(startMux()==-1);
     }
     SweetBattery battery;
     battery.poll(); // the complete service's initial sample before registration
@@ -269,7 +276,8 @@ static int startupCheck(const char *scenario) {
             SweetBattery::stopPolling(&battery,nullptr,nullptr,nullptr,nullptr);
         }
         if (fail) mmio[SWEET_DEV_SPMI_CORE_PA]=0;
-        assert(sweet_spmi_mux_start(3)==(fail?-1:0));
+        assert(startMux()==(fail?-1:0));
+        if (!fail) assert(attachKeys()==0);
         if (queuedStop) {
             SweetBattery::stopPolling(&battery,nullptr,nullptr,nullptr,nullptr);
         }
@@ -329,7 +337,9 @@ int main(int argc,char **argv) {
 #ifdef SWEET_MUX_READY
     if (argc>1 && !std::strncmp(argv[1],"startup-",8)) return startupCheck(argv[1]);
 #endif
-    assert(sweet_spmi_mux_start(3)==0); assert(state==1);
+    assert(startMux()==0); assert(state==1);
+    if (argc>1 && !std::strncmp(argv[1],"board-",6)) return boardCheck(argv[1]);
+    assert(attachKeys()==0);
     int context=7;
     if (argc>1 && std::strcmp(argv[1],"timeout")==0) {
         assert(sweet_spmi_mux_attach(1,1,batteryNotify,&context)==0);
@@ -382,16 +392,78 @@ int main(int argc,char **argv) {
     std::puts("PASS: trigger masks, owned routes, rollback, queued detach, 600 IRQs and storm shutdown");
 }
 '''
+consumer_adapter = r'''
+static int keyContext;
+static int startMux() { return sweet_spmi_mux_start(); }
+static int attachKeys() {
+    return sweet_spmi_mux_attach(SWEET_MUX_KEYS, SWEET_KEYS_IRQ_ALL, keyNotify, &keyContext);
+}
+static void inject(unsigned apid, unsigned bits);
+static int boardCheck(const char *scenario) {
+    // Starting infrastructure never touches a key channel or enables its IRQs.
+    assert(!bindings[0].notify && !bindings[1].notify);
+    for (auto &r:routes) assert(!r.active && !r.touched && !r.channel);
+    unsigned spiOff=4*(513/32), spiBit=1u<<(513%32);
+    assert(!(mmio[0x17a00000+0x100+spiOff]&spiBit));
+    assert(!(mmio[0x0b220000+0x10]&2));
+    int context=9;
+    if (!std::strcmp(scenario,"board-arm-fail")) {
+        dropPdcEnable=true;
+        assert(sweet_spmi_mux_attach(1,1,batteryNotify,&context)==-1);
+        assert(state==3 && published==-1 && batteryFailures==1);
+        assert(!bindings[1].notify && !bindings[1].context);
+        for (auto &r:routes) assert(!r.active);
+        std::puts("PASS: upstream arm failure leaves no failed-attach context");
+        return 0;
+    }
+    assert(sweet_spmi_mux_attach(1,1,batteryNotify,&context)==0);
+    if (!std::strcmp(scenario,"board-key-fail")) {
+        // A missing/foreign key APID cannot suppress the battery consumer.
+        mmio[SWEET_DEV_SPMI_CFG_PA+0x700+4*261]=1;
+        assert(attachKeys()==-1);
+        assert(state==1 && !bindings[0].notify && bindings[1].notify);
+    } else if (!std::strcmp(scenario,"board-key-rollback")) {
+        // Power/down configured first, then GPIO6 fails before its writes.
+        failReadPer=0xc5;
+        assert(attachKeys()==-1);
+        failReadPer=0;
+        assert(state==1 && !bindings[0].notify && bindings[1].notify);
+        assert(!(pmic[(0x008<<8)|0x15]&3));
+    } else if (!std::strcmp(scenario,"board-key-detach")) {
+        assert(attachKeys()==0);
+        assert(sweet_spmi_mux_attach(0,7,keyNotify,&keyContext)==-1);
+        inject(248,1); sweet_spmi_mux_detach(0,&keyContext); pump();
+        assert(state==1 && !bindings[0].notify && bindings[1].notify);
+    }
+    // Also covers sweetkeys=0: battery IRQ works without any key binding.
+    inject(269,0x10); pump();
+    assert(batteryEvents==1 && !keyEvents && !keyFailures && !batteryFailures);
+    inject(269,0x10); sweet_spmi_mux_detach(1,&context); pump();
+    assert(state==1 && !bindings[1].notify);
+    assert(!(mmio[0x17a00000+0x100+spiOff]&spiBit));
+    assert(attachKeys()==0 || !std::strcmp(scenario,"board-key-fail"));
+    std::printf("PASS: %s; idle mux / independent consumers / last queued detach\n",scenario);
+    return 0;
+}
+'''
+if not board_startup:
+    consumer_adapter = '''static int startMux() { return sweet_spmi_mux_start(3); }
+static int attachKeys() { return 0; }
+static int boardCheck(const char *) { return 1; }
+'''
 with tempfile.TemporaryDirectory(prefix='mh2lm-batt-irq-') as temporary:
     test = Path(temporary) / 'mux.cpp'
     binary = Path(temporary) / 'mux-test'
-    test.write_text(prelude + header + source + startup_adapter + startup_checks + checks)
+    test.write_text(prelude + header + source + consumer_adapter + startup_adapter + startup_checks + checks)
     subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17', '-O1', '-g',
                     '-pthread', '-fsanitize=address,undefined', str(test), '-o', str(binary)], check=True)
     # Minimal IOKit mocks intentionally live until process exit.
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0')
     subprocess.run([str(binary)], env=env, check=True)
     subprocess.run([str(binary), 'timeout'], env=env, check=True)
+    if board_startup:
+        for scenario in ['no-keys', 'key-fail', 'key-rollback', 'key-detach', 'arm-fail']:
+            subprocess.run([str(binary), 'board-' + scenario], env=env, check=True)
     if startup_tests:
         for scenario in ['late', 'early', 'fail', 'failed-first', 'cancel',
                          'queued-stop', 'races']:

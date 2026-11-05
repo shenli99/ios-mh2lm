@@ -2,6 +2,67 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**CURRENT: board startup ownership cleanup0143 implemented; ready for user push.**
+User reprioritized startup architecture before battery acceptance. Additive
+xnu/patches/0143-mh2lm-board-driver-startup.patch builds on0142 and exact0115.
+New bsd/dev/sweet_board.c is called once by bsd_init AFTER bsd_autoconf/IOBSD
+and inittodr, BEFORE root lookup/mount retry loop. It starts shared mux, keys,
+touch, USB/ACM, sampler and display diagnostics independently of root/UFS.
+UFS retains storage and partition-backed persistent SWEETLOG (real dependency).
+Mux start(void) only initializes shared workloop/MMIO/GIC probe, publishes
+READY with no key routes/gates armed. Keys now attach/detach group0 through
+the same table API as battery group1; mux has NO references to key functions.
+Key tokens are bitmasks1/2/4 (Power/Up/Down), handler still coalesces/reads levels.
+No consumers -> SPI masked; first attach configures routes then opens PDC/GIC;
+last detach keeps SPI masked even with pending worker. Disabled/failed keys
+cannot prevent battery attach. Partial failure rolls back own group; shared
+fatal errors still stop both. Failed upstream arm clears new binding/context
+before returning error, avoiding an unowned callback after consumer free.
+Old startup mode/armMode scaffolding removed; all runtime IRQ handlers and
+HID/IOPM interfaces preserved. No silent polling fallback introduced.
+
+Battery CHECKPOINT:0115 preflight PASSED, PM8150B confirmed, USBIN269/CHGR266/
+FG283 metadata ownership measured. FG channel/gates, SRAM threshold and actual
+battery IRQ delivery remain untested. USBIN mode2 FAILED before attach because
+its old10s wait expired before UFS->keys->mux. Only one initial70%/external1/
+charging0 sample; this is not physical IRQ evidence.0142 readiness(a312626)
+remains base, not phone-tested. Do NOT resume old0115 charger/all tests or
+claim charging/SOC policy fixed. Current work does not alter policy/profile/
+SRAM/capacity/scaling. Framebuffer remains later; display probe is diagnostics,
+not actual framebuffer/backlight service ownership.
+
+Validation PASS: exact0115 ->0142 ->0143 strict whitespace apply; fresh verify
+byte-matches edited inputs. Six final fresh-applied TUs produce ARM64 Mach-O
+objects (bsd_init/board/UFS/keys/mux/battery); nm confirms C API links and no
+keys startup reference from mux. C++ Linux compilation uses scratch-only
+Apple type-builtin stand-ins; full native link still required. Actual board
+fanout ASAN/UBSAN test covers one-shot, child key disable/fail and mux failure;
+source checks enforce phase/removed edges. Actual mux/battery simulation
+passes no-key, missing key APID, partial key rollback, pending detach/idle,
+upstream arm failure/context cleanup, old rollback/foreignEE/600IRQ/storm/
+timeout and readiness lifecycle/races. Mocks do NOT prove hardware timing.
+Python/Bash syntax/YAML parse pass. Actual CircleCI post-build gate accepts
+fresh source; old0115 is rejected by --board-startup before creating images.
+Packaging dispatch smoke checks unique selectors and retained real battery/ACM.
+Scratch: workspace scratch/driver-startup-0115/{base,post0142,edited,verify}/xnu,
+compile.py, six compile logs/objects, profile-dispatch.json. No new native
+kernel, boot image, CI run or phone result. No push/device write performed.
+
+CI .github/workflows/circleci.yml changes only post-build marker/old-edge gates;
+build command unchanged. New --board-startup packages THREE profiles from one
+fresh kernel: board-startup-baseline(keys1,battirq0); board-startup-no-keys
+(keys0,battirq2); board-startup-usbin(keys1,battirq2). All retain real battery,
+USB ACM/touch IRQ. No-keys deliberately disables key wake/combination; use
+ACM/recovery export then restore enabled profile. Existing --battery-irq six
+profiles retained. NEXT: user push, native CI, fresh kernel+buildtree label;
+verify final source/symbols, package --board-startup. FIRST test baseline
+startup/devices/persistent log; inspect before no-keys and parallel USBIN.
+Require BOARD before UFS root, mux infrastructure ready, correct groups,
+key/battery armed. Only then judge actual USBIN events/IOPM transition.
+Detailed old/new graph, battery pause point and limits:docs/DRIVER-STARTUP.md;
+architecture/IRQ plan/battery guide/lessons updated. Full board startup and
+battery IRQ acceptance remain OPEN until real logs.
+
 **0115 USBIN failed BEFORE route attach; startup readiness fix 0142 ready for user push:**
 Fix committed as `a312626`; all ten staged files passed whitespace checks.
 No push was performed; native CI and new phone logs remain the next gate.
