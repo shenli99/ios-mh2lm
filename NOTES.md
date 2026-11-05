@@ -2,6 +2,24 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**Plan amended at user's request: battery IRQ before framebuffer:**
+IRQ-FRAMEBUFFER-PLAN.md now adds subgoal 4 after keys/USB/touch; the overall
+IRQ goal requires all four plus combined regression. Reuse the sole INTID513
+SweetSpmiInterruptMux route table; stage USBIN_PLUGIN and CHG_STATE_CHANGE,
+then FG MSOC_DELTA (SOC_READY if needed), with handoff to the battery's own
+workloop and standard IOPMPowerSource notification. No silent timer fallback;
+any low-frequency telemetry must be explicit and cannot substitute for IRQ
+acceptance. Charging policy/control remains out of scope. No battery IRQ code
+has been implemented in this documentation milestone. New
+docs/BATTERY-IRQ-HARDWARE-BASELINE.md distinguishes target DTS + matching SID2
+hardware evidence for PM8150B from the still-unread REVID/subtype/revision.
+USBIN APID269/bit4 and CHGR APID266/bit1 were checked in 0112m17; FG PPID0x240
+APID/ownership/gates/threshold remain to verify. PM8150B subtype0x20 is a
+Linux-defined expected value, not a phone readback. Existing local Linux
+sources are enough to start; user can optionally help find PM8150B register
+reference/errata or existing device revision logs. No CI or push needed for
+these docs; user retains control of pushes.
+
 **Real battery restored; architecture boundary reviewed:**
 `logs/live-0114a15-batt-irq-only.txt` SHA256
 `1a1ed7062cec374202bcfbc6546073ef4da06f1be94b5f49e33693ed75eea62e`

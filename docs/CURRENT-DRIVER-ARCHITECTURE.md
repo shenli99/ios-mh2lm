@@ -171,10 +171,13 @@ PMIC 事件接到 `SweetSpmiInterruptMux`；mux 的 consumer 仍只有按键。
 | 显示正确性 | iOS UI 已可见，既往 0113 锁屏/充电唤醒出现局部黑屏 | IOMFB/IOSurface 兼容层足以启动 UI；完整重绘、真实 vsync 和显示电源管理未达到原生水准。 |
 
 **优先级判断：** 输入和 USB 的 IRQ 执行模型符合这轮计划，可以固定为
-目前基线。下一个目标的主要结构性缺口在 framebuffer：保留现有
+目前基线。2026-11-05 用户追加电池 IRQ 子目标，先按
+`IRQ-FRAMEBUFFER-PLAN.md` 子目标 4 完成，再进入 framebuffer。
+显示的主要结构性缺口在 framebuffer：保留现有
 IOMFB/IOSurface 用户态接口，先解决完整图层状态/唤醒重绘，再评估真实
 TE/vblank 和 MDSS 提交。PMIC 未来接入充电事件或更多传感器时，需要
-完善中断注册与 mux consumer 接口；这属于后续扩展，不影响当前三键
+完善中断注册与 mux consumer 接口；电池的本轮扩展见
+`BATTERY-IRQ-HARDWARE-BASELINE.md`，不影响当前三键
 IRQ 已验证的事实。详细实施和验收仍由 `IRQ-FRAMEBUFFER-PLAN.md`
 另行制定。
 
