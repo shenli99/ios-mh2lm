@@ -1,5 +1,94 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+## 当前架构：0119 / 0146～0148
+
+2026-11-05核对0119最终源码。当前采用 **IOKit服务匹配/生命周期 + 板级GIC
+分派 + 各设备下半部**，不是完整的通用GIC/总线provider树。0119各测试镜像
+使用同一内核，电池mode2/3/4只改变所订阅事件；以下架构不因换档位重建。
+旧阶段说明从下一节开始保留，不能把其中“仍为C桥接”“仅按键consumer”或
+“电池固定两秒轮询”视为0119 IRQ档现状。
+
+### 启动与服务归属
+
+```mermaid
+flowchart TD
+  BSD[bsd_init 晚期 / 根查找前] --> BOARD[sweet_board_init]
+  BOARD --> MN[发布 SweetSpmiMuxDevice nub]
+  PE[SweetPlatformExpert] --> MN
+  MN --> M[IOKit匹配 SweetSpmiInterruptMux : IOService]
+  BOARD --> KN[发布 SweetPmicKeysDevice nub]
+  PE --> KN
+  KN --> K[IOKit匹配 SweetPmicKeys : IOService]
+  R[IOResources / 早期匹配] --> B[SweetBattery : IOPMPowerSource]
+  K -. 独立 SweetSpmiMuxClient / registry通知 .-> M
+  B -. 独立 SweetSpmiMuxClient / registry通知 .-> M
+  BOARD --> UT[触摸 / USB / 诊断项的板级入口]
+  BSD --> ROOT[根查找 / UFS存储]
+  ROOT --> LOG[分区就绪后持久SWEETLOG]
+```
+
+图中实线表示启动/发布关系，虚线表示服务发现，不表示consumer挂在mux下成为
+子设备。mux和按键各自有nub及匹配服务；电池仍由IOResources匹配。
+UFS只保留存储及依赖分区的持久日志，不能再把mux或兄弟外设的初始化放回UFS。
+关闭按键不会阻止mux/电池启动。USB ACM使用内存console ring，不等待持久线程。
+
+每个按键/电池consumer持有自己的 `SweetSpmiMuxClient`。matched通知只retain、
+记录和排队；自己的workloop再prepare（按键）及调用mux公开C++
+`attachConsumer()`。mux在自己的gate串行配置路由，成功后consumer才进入READY。
+没有全局C单例查询桥接，也没有 `waitForService()` 或定时重试发现服务。
+terminated通知只标记离线并排队，detach同步与引用释放在consumer loop执行；
+stop/free先停止事件并同步回调，再释放线程/MMIO。真实手机终止路径仍未验收。
+
+### 运行期路径
+
+| 部件 | 0119实际数据流与资源归属 |
+| --- | --- |
+| 共享PMIC中断 | PMIC-arb/PDC → GIC INTID513 → 短callback屏蔽SPI并排队 → mux软件IOInterruptEventSource/IOWorkLoop扫描路由、确认/清除中断 → 通知consumer自己的loop。mux实例拥有路由状态、绑定、MMIO和workloop。 |
+| 按键 | mux group0 → 按键consumer loop → 唤醒原C后端worker读取真实键电平 → SweetHIDButtons → backboardd。SweetPmicKeys拥有连接、workloop和后端退出流程。 |
+| 电池 | mux group1 → 电池consumer loop/软件IES → 真实gauge/USB/CHGR采样 → IOPMPowerSource属性与updateStatus → powerd及iOS电源UI。驱动不直接调用SpringBoard画图标。 |
+| USB | GIC INTID165 → 短callback → BSD事件worker处理DWC3 event buffer、EP0及CDC-ACM，确认后重开IRQ；独立日志发送线程由日志/配置/TX完成事件唤醒。仍是板级gadget，没有通用IOKit USB provider栈。 |
+| 触摸 | TLMM GPIO122 / INTID240 → 短callback → BSD触摸worker → GPIO模拟I²C读取TouchComm → SweetHIDTouch → backboardd。仍无独立通用I²C/GPIO provider。 |
+| 显示 | CoreAnimation软件渲染 → 本项目IOSurface/IOMobileFramebuffer兼容接口 → AppleCLCD定时模拟vsync与CPU图层复制 → ABL已配置的framebuffer/面板扫描。0119参数sweetfb_hz30；未接管完整MDSS/GPU呈现。 |
+| 背光 | CoreBrightness → AppleARMBacklight自己的workloop/fade定时器 → DSI DCS0x51。亮度写入仍有有界硬件状态等待，不是显示IRQ改造。 |
+
+上游仍使用板级 `sleh_irq` 分派与直接GIC寄存器管理，没有GIC
+`IOInterruptController` provider。mux采用普通软件IES，**未改成
+IOFilterInterruptEventSource**。其保留的受锁GIC服务槽仅用于物理投递，不用于
+consumer发现。IOService身份并不自动赋予通用中断控制器能力。
+
+路由仍是 **七项固定硬件描述、两个consumer group**：三键及USBIN/CHGR/
+MSOC_DELTA/SOC_READY；不是硬编码功能switch。attach/detach注册的是消费者身份、
+事件mask和回调，尚不接受任意新外设的动态路由描述。未来扩展provider时应保留
+consumer接口，另行抽出硬件描述和上游中断注册。
+
+### 事务、事件与故障边界
+
+- SPMI由底层controller级IOLock保护每笔命令提交、完成等待和数据读取；按键、
+  电池observer与mux IRQ配置共用同一锁。mux gate串行路由接入/撤回，consumer
+  独立计算可并行。不是所有读取必须调用mux实例的spmiRead/spmiWrite；公共
+  transport在自己的API内部加锁，早期电池采样无需等待mux服务。
+- 按键、USB、触摸固定IRQ，无静默轮询回退。电池mode2+停止两秒扫描，保留
+  初始采样、arm-sync以及必要时一次有界确认；mode0/1仍是显式对照轮询档。
+  framebuffer/fade定时器与硬件输入轮询是不同用途，并未被本轮IRQ化删除。
+- attach回滚/detach清理失败优先验证隔离单个group/APID；验证失败或共享硬件
+  故障仍停整个mux，可能同时影响按键和电池。运行期ack耗尽、未知pending、
+  storm等并未全部改成单组隔离。USB/触摸有各自显式故障停止路径。
+- Sweet驱动日志ERROR始终输出，WARN/INFO/DEBUG按sweetloglevel阈值控制；默认
+  INFO。尚未统一整个XNU/userland日志，也未完成按目标独立开关的大计划。
+
+电池当前属于真实状态采集与标准IOPM发布，**充电策略尚未接管**：充电仍依赖
+继承的固件/PMIC配置。IRQ配置会写中断寄存器，但没有因此实现限流、温控、
+profile/SRAM管理或完整遥测；固定容量/部分占位字段等缺口见下方历史电池说明。
+屏幕仍有完整图层状态、息屏后重绘及真实呈现时序缺口，framebuffer修复尚未开始。
+
+实机边界：0119 mode3已验证两组接入、20次USBIN刷新及三键/触摸/息屏唤屏，
+没有CHGR独立命中；mode4全事件镜像已准备，FG事件待实测。故障隔离与真实
+服务stop/free不能以正常使用或本地模拟通过替代验收。最新结果见
+[`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)，接口细节见
+[`MUX-CONSUMERS.md`](MUX-CONSUMERS.md)。
+
+## 历史阶段说明：0114a15～0118（以下状态不代表0119）
+
 **0145 当前实现：** mux consumer 已改为 registry matching/terminated 通知与
 公开 C++ 接口，按键新增 IOService owner，全局 mux C 桥接已移除。本地验证
 通过；0118 原生构建已核对，三档 boot 已生成，实机待进行。当前服务关系、引用和退出边界见

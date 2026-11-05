@@ -2,6 +2,18 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0119 ARCHITECTURE SNAPSHOT refreshed (documentation only).** User asks current
+driver architecture. CURRENT-DRIVER-ARCHITECTURE.md now leads with0119 service
+tree, IRQ/data paths, shared transport locking and failure/verification limits;
+older0114a15..0118 descriptions explicitly marked historical. Checked actual
+0119 board/mux/client/keys/battery and USB/touch constants. Board independent
+ofUFS; mux+keys IOService matched nubs, battery IOResources/IOPMPowerSource,
+per-consumer registry connection and typed attach/detach;7static routes/2groups.
+GIC remains board callbacks (no generic IOInterruptController/filter), USB/touch
+still event-driven BSD workers. Display remains software-vsync/CPU-copy and
+charger policy inherited. No kernel/CI/image changes; git diff --check passed.
+Next phone action remains existing mode4 below; no push/build/device action.
+
 **CURRENT0119 mode3 routes/coexistence PASS; CHGR EVENT UNCOVERED; next existing mode4.**
 User supplied only logs/sweetlog-0119-battery-irq-charger.bin; no live USB log.
 Persistent sufficient; don't request redundant live/baseline/no-keys retest.
