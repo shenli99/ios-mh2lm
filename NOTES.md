@@ -2,6 +2,28 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**CURRENT USER TASK: battery implementation PLANNING ONLY, six segments documented.**
+User requests task breakdown after historical explanation. New active plan
+docs/BATTERY-IMPLEMENTATION-PLAN.md:1sharedtransport/controlinterfaces,
+2realtelemetry/config/topology,3policy/protectiondryrun,4firstcontrolledcharge,
+5runtimeevents/thermal/recovery,6IOPM/capacitycleanup/regression. Each has
+deliverables/exitcriteria. NEXTimplementationstage1+stage2evidencelist, not
+anothernoUSBtest. This turn changes ONLYdocs; no implementation/boot/control.
+0149diagnostics canjoinfirstbatch, don'tinsistonstandalonecloudbuild.
+PreserveIOResourcesbattery/registrymuxclient/sharedtransportlock/ownworkloop/
+IOPMPowerSource; no newglobals. Chargingwriter belongs transport,notmuxIRQAPI.
+Telemetryrequiresrealtemp(validatedSRAMsessionorprovenRRADC),IBATTpair,
+ICLmode/settled,FCC/FV/ITERM/recharge/protection/watchdog,physicalbatterybounds
+andparallelpath. Unknownsblockcontrol;controlrequiresallguardsBEFOREenable.
+NoassumptionunmanagedSMB1355inactiveorVBUS5VjustbecauseXNUdidn'tnegotiate.
+Stage4limitedsessionwithactivethermal/expiry/faultstop alreadyimplemented;
+notenablefirstandaddprotectionlater. Stage5timersforthermals/telemetry/WDOG
+allowed&explicit,NOT2spollfallback. Failurecan'tguaranteeIObusdisable;logfault.
+Batch1aimstages1..3withmultipleprofiles;controlprofiledefaultoffandmustpass
+preconditions. No fixedCIroundpromise. Advancedlearning/profilewrites/fast/
+wireless aren'tIRQclosureblockers. UpdatesNEXT/IRQroadmap,preserveframebuffer
+afterbasicIRQacceptance. Userpush/fastboot;doNOTstartdriverworkthisplanningturn.
+
 **LATEST historical charging audit: inherited-enabled hypothesis supported, NO new boot/build needed.**
 User corrected framing: XNU never enablescharging, so en0 persistence is expected,
 not itself a newlyproven fault. Now requests oldsuccess explanation BEFORE work.

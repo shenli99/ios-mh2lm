@@ -1,5 +1,12 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
+**2026-11-06计划更新：** 已确认当前缺少主动充电控制，旧成功来自首次采样前
+已经允许充电的状态，具体启动writer未定。按用户要求将电池实现划为六段，
+详见 [`BATTERY-IMPLEMENTATION-PLAN.md`](BATTERY-IMPLEMENTATION-PLAN.md)。
+先完成共享访问、真实测量与保护策略，再验证受控充电/CHGR事件及运行期恢复。
+容量学习、profile重载、快充/无线等后续扩展不作为本轮IRQ验收前置。framebuffer
+继续按原顺序在IRQ基本验收后推进；本轮仅写计划。
+
 **当前进度：** 0119 mode4已实测三次独立MSOC中断，拔线期间电量由74%下降至
 73/72/71%，与四次USBIN刷新区分，三键/触摸继续工作；之前mode3息屏插拔唤屏
 已有证据。CHGR仍state7/charging0、没有独立命中，充电状态IRQ尚未验收。
@@ -278,7 +285,8 @@ SPI 208（候选 INTID 240），并写好带 GIC 探针、真实 IRQ 与轮询�
 **当前状态：** 0119已验证0145～0148的新启动与consumer架构，mode2/3的USBIN
 和三键并行通过；mode4又实测三次独立MSOC命中与73/72/71%刷新，电量事件
 正常路径已通过。CHGR/SOC_READY变化事件尚未覆盖，CHGR state7/charging0
-不是实际充电证据。下一步同内核充电诊断，不重跑已跳过的no-keys。
+不是实际充电证据。0119充电诊断主档/no-usb已完成；下一步按六段电池实现
+计划补主动控制，之后验证CHGR，不重跑已跳过的no-keys。
 完整历史、镜像和观测判据见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
 PMIC 型号证据、事件位置、既有 APID 预检和待测项见
