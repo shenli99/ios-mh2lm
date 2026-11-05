@@ -1,12 +1,14 @@
 # MH2LM 驱动启动归属与依赖清理
 
-更新：2026-11-05。0143 是本地实现，基于 0115 最终源码叠加 0142；
-尚未通过新一轮 CircleCI 完整构建或实机验证。旧 0115 镜像不包含此变更。
+更新：2026-11-05。0143 基于 0115 最终源码叠加 0142；0117 原生内核已包含
+0142/0143/修正后的 0144，baseline 启动与输入/USB 实机回归通过。
+关闭按键时的电池独立接入及并行 USBIN 尚待测试。旧 0115 镜像不包含此变更。
 
-**0144 继续改造：** 共享 mux 现已在本地实现为真正的 IOService。
+**0144 继续改造：** 共享 mux 已实现为真正的 IOService。
 board 原入口改为发布晚期 `SweetSpmiMuxDevice` nub，由 KernelConfigTables
 同步匹配；路由、状态及资源归 mux 实例，并补齐 stop/free。0143 与 0144
-都尚未实机验证。最新匹配层级、filter/controller 选择和生命周期规则见
+已在 0117 baseline 验证正常启动和按键接入，stop/free 尚未实机验证。
+最新匹配层级、filter/controller 选择和生命周期规则见
 [`MUX-IOSERVICE.md`](MUX-IOSERVICE.md)。下文的 0143 是本次改造的基线。
 
 ## 电池进度检查点
@@ -103,6 +105,13 @@ IOKit 服务匹配；搬出的 display probe 只是诊断，不能把它当作�
 未来再抽出 GIC/总线 provider 时，保留 consumer 回调与 route 描述接口。
 
 ## 本地检查与下一轮测试
+
+0117 baseline 的完整持久日志显示 BOARD → mux infrastructure ready →
+IOService started → group0/三键 armed → UFS userdata/root，确认新启动顺序。
+三键真实路由命中 18 次并产生 18 条成对 HID 事件，含息屏后电源键亮屏；
+触摸 115 次 IRQ，USB live 达 1664 次 IRQ、TX err=0。四条已有 USB endpoint
+WARN 未中断传输，未见相关驱动 ERROR 或 panic。下一档是 no-keys，再测 usbin；
+baseline 的 battery IRQ mode0 不能证明电池接入/事件交接已成功。
 
 本地源目录：`scratch/driver-startup-0115/`（工作区，未入 git）。补丁在 0115
 精确源码上先应用 0142 再应用 0143；新鲜应用结果需与编译输入逐字节一致。

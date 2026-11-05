@@ -2,6 +2,41 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0117 board-startup-baseline phone logs PASS; next no-keys USBIN profile.**
+Evidence: logs/sweetlog-0117-board-startup-baseline.bin SHA256
+`0a9bb4c205e83b0e62ac9a1b9a948f5e3dc3a97f971b126ef892d8ee6bd73ece`
+and logs/live-0117-board-startup-baseline.txt. Persistent header v1/ring4MiB/
+total296753/flush35, NOT wrapped; decoded scratch/artifact-0117/baseline-persistent.txt.
+Boot args confirm keys1, real battery selectors, sweetbattirq0, USB ACM2.
+Persistent lines137-145: BOARD -> GIC probe hits1/clear1 -> infrastructure
+ready INTID513 -> IOService started -> power/down APID248, up APID261 ->
+group0 events7 -> three routes IRQ-only. UFS userdata/root/log start follows
+at150-152. One BOARD invocation in persistent; live repeats an early prefix,
+so do not double-count initialization from live output.
+
+Runtime persistent:18 real mux hits(power6/down4/up8), matching18 HID events
+with balanced down/up(3/2/4 pairs). FB off3128 -> power IRQ/HID3146-47 ->
+on3150. Final Power+Up overlapping down/up recorded; later SpringBoard initiates
+shutdown, not a panic. Touch115 IRQs/empty0,8 balanced touch down/up pairs.
+USB INTID165 armed and ACM configured/reconfigured; persistent1536 hits,
+TX1301/1303 err0; live continues to1664 hits TX1429/1430 err0/empty0.
+Four existing ep0/ep5 cmd6 status1 WARNs; no scoped driver ERROR/FAILED/timeout/
+stop or kernel panic signature. This accepts normal matching/startup and input/
+USB smoke regression, not native terminate/stop/free or all USB reconnect cases.
+
+Battery mode0 intentionally has NO group1 or BATT IRQ records.190 persistent
+samples show69%,3996-3997mV,external1/charging0; no cable-state transition
+recorded. This is neither battery IRQ nor physical charging proof.0142 readiness
+delivery to battery and independent no-key attach remain UNVERIFIED.
+NEXT: existing out-bs/boot-16k-0117-board-startup-no-keys.img. Keep display on,
+start host ACM listener before boot, unplug5s/replug and wait5s, twice. Keys
+are deliberately disabled(including software wake/combination); use existing
+recovery/log-export procedure and restore enabled profile afterwards. Save
+live-0117-board-startup-no-keys.txt + sweetlog-0117-board-startup-no-keys.bin.
+Require mux IOService ready with NO group0, battery readiness -> group1 USBIN
+armed, real USBIN route hits -> refresh/IOPM. Inspect before combined usbin.
+No new compile/push needed; no code or device writes performed this turn.
+
 **0117 native artifact verified; three board-startup boot images ready.**
 User downloaded logs/xnu-kernel-0117.gz and xnu-buildtree-0117.gz. No0117
 build log or CI run ID supplied; warning details not reviewed. Kernel SHA256

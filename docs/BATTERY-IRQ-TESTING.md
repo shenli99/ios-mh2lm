@@ -12,7 +12,11 @@ mode1 的 live 与持久日志已核对，采样和既有三路 IRQ 正常，启
 **当前先做启动链清理：** 用户暂缓电池测试。0143 增加独立板级入口，
 mux 不再等待 keys 或 UFS。下一轮先用 `--board-startup` 的三个镜像验收启动
 归属与关闭按键时的独立接入，再推进本文 CHGR/MSOC 阶段。电池检查点及测试
-顺序见 [`DRIVER-STARTUP.md`](DRIVER-STARTUP.md)。0142/0143 均未实机验证。
+顺序见 [`DRIVER-STARTUP.md`](DRIVER-STARTUP.md)。0117 baseline 已验证独立
+board/mux IOService 正常启动及三键/触摸/USB 回归；该档 battery IRQ=0，
+尚未验证电池 READY 交接或实际 USBIN。下一档是同内核 board-startup-no-keys，
+保持亮屏做两次拔线/接回（各等 5 秒），保留 live 与持久日志后再测并行档。
+本档按键/组合键/软件按键唤醒被主动关闭，按既有恢复流程导出日志后切回有按键镜像。
 
 0144 又将 mux 变为 IOService，由 board 发布晚期 nub 后正常匹配，资源归
 服务实例；电池接口和 IRQ 路由不变。先按 `--board-startup` 验收新匹配/启动链，

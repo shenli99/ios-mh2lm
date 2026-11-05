@@ -1,6 +1,7 @@
 # SweetSpmiInterruptMux 的 IOService 化
 
-2026-11-05，0144 叠加 0142/0143，0117 原生内核已链接，实机测试待进行。
+2026-11-05，0144 叠加 0142/0143，0117 原生内核及 baseline 实机启动通过。
+电池独立接入/并行 USBIN 与真实 stop/free 尚未验收。
 用户要求进一步把 mux 变成 IOService，并评估 filter / interrupt controller。
 电池验收继续暂停，0115 的硬件证据与未知项不变。
 
@@ -120,6 +121,14 @@ KMA_PERMANENT，不能配对 `ml_io_unmap()`；0144 使用
 唯一 EE0 IRQ owner，拒绝缓存 APID 与新解析结果不一致，避免复用错误映射。
 
 ## 验证与后续实机
+
+0117 baseline 持久日志确认 BOARD 与 mux IOService 在根挂载之前就绪，
+随后 group0 events=0x7 接入。Power/Down/Up 的真实 IRQ 命中分别为 6/4/8，
+HID 按下/松开成对；触摸/USB 同时工作，息屏后电源键能唤醒显示。
+未见 mux/按键/触摸/USB 的 ERROR 或停止，保留四条已有 USB endpoint WARN。
+这证明正常匹配/start 与按键路径；baseline 关闭电池 IRQ，尚不证明 READY
+通知到电池或 group1 独立工作。接下来使用同内核 no-keys → usbin，stop/free
+仍以本地模拟为证据，未在手机主动 terminate。原始日志与计数见 `NOTES.md`。
 
 本地输入/基线/重放/编译证据放在工作区 `scratch/mux-service-0115/`。
 ARM64 编译检查 mux、KernelConfigTables 和 board；Linux Apple type builtin

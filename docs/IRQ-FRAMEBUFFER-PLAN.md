@@ -42,6 +42,9 @@ UFS 只保留存储及分区持久日志。此项本地实现，仍待新 CI 与
 filter 与 controller 的职责/选择、退出并发规则见
 [`MUX-IOSERVICE.md`](MUX-IOSERVICE.md)。当前仍先验收启动及服务匹配，再继续电池。
 Framebuffer 修复尚未启动。
+0117 baseline 已确认新 board 入口先于根挂载、mux IOService 成功启动，
+三键真实 IRQ/HID、触摸、USB 日志与电源键息屏唤醒回归通过。电池 IRQ=0，
+子目标 4 仍未完成；下一步同内核 no-keys 独立 USBIN，再测 keys+USBIN。
 **更新日期：** 2026-11-05
 **适用范围：** `ref/ios-mh2lm` 的 MH2LM XNU 驱动；本文是实施和验收计划，
 不替代 `NOTES.md` 中已经取得的硬件观察、日志结论和回归基线。
