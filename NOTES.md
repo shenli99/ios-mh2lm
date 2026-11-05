@@ -2,6 +2,42 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0118 native consumer artifact verified; THREE boot profiles ready, phone pending.**
+User downloaded logs/xnu-kernel-0118.gz and xnu-buildtree-0118.gz. No build log
+or CI run ID supplied. Kernel SHA256
+`04dd80a939c584c834030d8fa5eecc36dbae5ffc682909311c1712eae898fb45`
+matches archive SHA256SUMS. All23 relevant final files byte-match current0145
+verify tree plus unchanged0117 USB/touch/storage/startup sources; includes
+ee92128 shutdown warning/comments. ARM64 Mach-O executable MH_NOUNDEFS, no
+undefined symbols. Native symbols include per-consumer matching/terminated,
+typed attachConsumer/detachConsumer, keys service/C backend; old consumer C
+bridge/global readiness symbols absent. This proves native compile/link and
+source inclusion, NOT runtime registry matching/IRQ or stop/free correctness.
+
+Packaged same kernel via tools/mk-mh2lm-event-matrix.sh ...0118.gz 0118
+--board-startup into workspace out-bs/ (prefix boot-16k-0118-):
+- board-startup-baseline.img (keys1, batteryIRQ0):
+  `823a6a8e6a86f008cbe63466796b90e4ebbaf8fe734200a29370b9d8c89e7991`
+- board-startup-no-keys.img (keys0, batteryIRQ2):
+  `efca21c10e99d09dd74d4d7279f3accdedd7a46bcc9725210da43073d744fbed`
+- board-startup-usbin.img (keys1, batteryIRQ2):
+  `6702a2d82e7a8797ac07cdb7a93de9cda9fd288f57dc2b9261488a2789e273dd`
+Independent final Android v1 image parsing verifies loader blob/ramdisk;
+FAT-extracted native kernel/16K ADT/TOML byte-match inputs, every selector is
+unique/correct (real battery, ACM2/vbus1,8CPUs). Source/boot manifests, native
+kernel, symbols and packaging log under scratch/artifact-0118; outputs untracked.
+
+NEXT PHONE: FIRST out-bs/boot-16k-0118-board-startup-baseline.img, desktop,
+three keys/combination/touch, ACM, display sleep and power-key wake. Export
+live-0118-board-startup-baseline.txt and sweetlog-0118-board-startup-baseline.bin.
+Require board/mux IOService startup, group0 registry matched/attached, key IRQ
+armed and balanced HID; actual key arm is async and needn't precede UFS.
+Baseline batteryIRQ0 deliberately retains real periodic samples; not battery
+IRQ proof. Inspect logs before no-keys (display ON, two5s unplug/replug cycles,
+keys/wake disabled; existing recovery/export then restore key-enabled profile),
+then combined usbin. Battery IRQ remains UNVERIFIED; no CHGR/MSOC yet. No push,
+cloud run, source changes or device write this turn. No phone terminate test.
+
 **0145 teardown audit follow-up: `ee92128`; ready for USER PUSH, no push.**
 Reviewed outside advice against XNU IOService::terminatePhase1 and notifier
 remove: terminated is phase-1 inactive notification, can precede stop; removing

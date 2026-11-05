@@ -1,7 +1,8 @@
 # PMIC mux consumer：匹配通知与终止清理
 
 2026-11-05，新增补丁 `0145-mh2lm-mux-consumer-matching.patch`，基于已核对的
-0117 最终源码。实现与本地验证完成，尚无包含 0145 的原生云端内核或实机结果。
+0117 最终源码。实现与本地验证完成；0118 原生云端内核及 buildtree 已核对，
+包含 0145 和后续退出告警，三档 boot 已生成，实机结果待验证。
 0117 baseline 证明的是旧 0144 的正常启动，不能作为本次改造的实机验收。
 
 ## 当前服务与接口
@@ -158,7 +159,7 @@ assert 表为空。此告警用于观察未主动解绑的绑定，也可能来�
 - 实际 CircleCI 最终源码 gate 接受新树、拒绝 0117 旧树。编译命令不变，仅更新
   校验路径和标记。packer 拒绝没有 registry 消费路径的旧内核，不生成假新镜像。
 
-用户 push → 新原生编译/链接 → 同一内核 `--board-startup` 三档：baseline、
-no-keys、usbin。先看 baseline 的 mux started、group0 matched/attached、三键/HID、
-触摸/ACM 与息屏唤醒，再验证 group1 独立接入与真实 USBIN。未收到新产物前不重打包
-0117。正常手机回归不主动 terminate 核心服务；真实 stop/free 的硬件验收仍未进行。
+0118 原生源码与符号已核对，`out-bs/boot-16k-0118-board-startup-*.img` 三档：
+baseline、no-keys、usbin。先看 baseline 的 mux started、group0 matched/attached、三键/HID、
+触摸/ACM 与息屏唤醒，再验证 group1 独立接入与真实 USBIN。镜像清单和 SHA256 见
+`NOTES.md`。正常手机回归不主动 terminate 核心服务；真实 stop/free 的硬件验收仍未进行。

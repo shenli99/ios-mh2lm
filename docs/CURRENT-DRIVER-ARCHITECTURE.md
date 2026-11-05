@@ -2,7 +2,7 @@
 
 **0145 当前实现：** mux consumer 已改为 registry matching/terminated 通知与
 公开 C++ 接口，按键新增 IOService owner，全局 mux C 桥接已移除。本地验证
-通过，原生新构建与实机待进行。当前服务关系、引用和退出边界见
+通过；0118 原生构建已核对，三档 boot 已生成，实机待进行。当前服务关系、引用和退出边界见
 [`MUX-CONSUMERS.md`](MUX-CONSUMERS.md)；以下保留各阶段实测基线。
 
 **基线：** 0114a15 内核；以 `logs/xnu-buildtree-0114a15.gz` 中的最终 XNU
