@@ -3,6 +3,20 @@
 ## Agent handoff / active work (2026-11-05, latest)
 
 **CURRENT: 0119 no-usb still DISABLE_CHARGE; 0149 diagnostic validity ready for USER PUSH.**
+User follow-up audit: root cause NOT closed; don't call en0 a complete cause.
+Workspace docs/INDEX + chapters1/3/5/6 rechecked with actual LGsource:
+qpnp-smb5.c:smb5_init_hw enables via DEFAULT_VOTER false;
+smb5-lib.c:smblib_chg_disable_vote_callback writes inverse effective disable
+to1042bit0. XNU lacks equivalent chargingpolicysetter; mux batterywrites
+limitedIRQoffset11..16. This explains no active recovery, NOT who cleared
+enable initially or why oldm19/m20charged. Only partial documentchecklist
+implemented: ICLmode1366/1342/1365,settled1108,temp,FCC/FV,parallelstate and
+controlwritepermission/readback remain unresolved. SMB_EN1648=0 means no
+softwareoverride, NOT proofSMB1355disabled (reference disablefalse also
+clearsbit3). BATTERY-DRIVER-NEXT has explicit audit/status/sourceanchors.
+Don't claim whole chargingplan followed or 0149fixescharge; don't reduce
+all missingproof to SMB_CFG or waitforCI for source/historyanalysis.
+
 User supplied logs/sweetlog-0119-battery-charge-diag-no-usb.bin, SHA256
 `b045d42e38a41b27e36a99c469e55f9b25794186007eccae2acbdedbbec11b96`.
 Header v1/ring4194304/total255185/flush47/notwrapped/no decodedNUL. Exact
