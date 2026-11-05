@@ -3,6 +3,7 @@
 ## Agent handoff / active work (2026-11-05, latest)
 
 **0116 build failure fixed locally: 0144 memory attribute header dependency.**
+Fix and validation/docs committed as `40f106d`; user push is next.
 Log `logs/xnu-build-log-0116.txt` confirms 0142/0143/0144 applied. Actual
 compiler failure is SweetSpmiInterruptMux.cpp:239: VM_WIMG_IO expands to
 undeclared VM_MEM_COHERENT / VM_MEM_NOT_CACHEABLE / VM_MEM_GUARDED; its object
