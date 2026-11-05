@@ -1,6 +1,41 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-11-05, latest)
+## Agent handoff / active work (2026-11-06, latest)
+
+**LATEST historical charging audit: inherited-enabled hypothesis supported, NO new boot/build needed.**
+User corrected framing: XNU never enablescharging, so en0 persistence is expected,
+not itself a newlyproven fault. Now requests oldsuccess explanation BEFORE work.
+Read-only audit in docs/BATTERY-CHARGING-HISTORY.md; scratch/charge-history-0119/
+holds rawdecodes,summary.json,m19-timeline.json,source-comparison.json and
+firmware-module-match.json. m19 SHA8071ed68c6b3be36f5efc72f4f3dabec02275d479d7ef8e10d53a1404915da0e,
+ring4M/total438739 NOTwrapped/noNUL. Oldwrap disclaimer was wrong for currentfile.
+First112/114external0/state7/en1(valid);all248DIAGen1 (247config-ok1,1config0
+laterCFG2failure3865;allcurrentok1). Pairedruns121unplugged/state7/en1 ->
+65plugged/state3/en1(3730..4316,negativecurrent,63->66%) ->16plugged/state7/en1
+(4325..4430,path95/no suspend/ICLconfigured1500) ->46unplugged/state7/en1.
+Thus enablewasalready1 atfirstobservation;no0->1event; enable1 NOTsufficient.
+
+Actual0113-battery-ui(noUSB)alreadyfirst113/115en0,124samples,PREmux/batteryIRQ.
+Available nativebuildtree0112k5 actualsourceincludes0125;applyONLY0126 then
+battery/SPMI/USBbyteequalnative0113. Not exactoldkernelprovenance just fromname.
+Oldm19sweetusbunsetdefaults1readonlyprobe,NOTactiveACM;don'tcallallUSBhardwareoff.
+Finalbootimages0112k6primary/0119charge/0119noUSB have IDENTICALkernelfield
+BootShim+compressedMu+DTB,2111336bytes/SHA80b40a0fd2dbcd79d87f4a7e45d9b93e8ef6ba9d661599f4ee6e4e09df68b1bd.
+DecompressedactualFV FULLmatcheslocalmh2QcomChargerDxeLA,ChargerExDxe,QcomChargerCfg.
+Binaryenable/disable/exitstrings+APRIORI provecontrolcapability/inclusion, NOT
+whichbranchran. EnableChargerWdog1disableonexit meansWDOG,NOTchargerdisable.
+StrongestexplanationpreXNUenablefrombootenvironment; exactABL/UEFI/priorOS/
+coldwarmreset/source/thermalconditions unknown. Don'timputeAndroidvotesinXNU,
+firmwarelock or soleIRQ/gadgetcause. No needoldkernelbootsorAndroidboot.
+
+IMPORTANT currentlogs/sweetlog-0112m20.bin SHA6fffa51f4d791c9eb233fa82ad96a33024d4ace23ca641cb99a1ec0c47ea0c47
+byteEQUALSsweetlog-0113-battery-ui.bin(124samples/en0), NOT historicalm20SHA
+ef270d05c9d4f770299d679bd8c4e332edcacf21dba271d015dd2b4e3342414a/83charge.
+DoNOTclaimcurrentfileproves83chargeorrefutesoldrecord;identitymismatchreason
+unknown,doNOTrename/overwrite. Oldm19independentlyconfirmsphysicalcharging.
+0149 remainsdiagnostics-only/readypushasbelow;useraskedhistoricalreview,
+notauthorizingblind1042enable. Needrealtemp/currentlimits/FV/parallelerrors
+beforecontrolimplementation. Userdoespush/fastboot;noneperformedhere.
 
 **CURRENT: 0119 no-usb still DISABLE_CHARGE; 0149 diagnostic validity ready for USER PUSH.**
 User follow-up audit: root cause NOT closed; don't call en0 a complete cause.
@@ -2804,9 +2839,10 @@ circular, so its exported line order alone cannot prove a transition order.
   `path=0x95`, USB selected and valid, neither suspend bit set, 1500 mA ICL,
   AICL enabled/rerun enabled, and APSD `0x1` with `dtc-done=1`. The persistent
   ring also contains cable-present noncharging samples (`state=7`,
-  `charging=0`, near-zero current); its wrap order cannot establish a precise
-  transition sequence, so repeat long-duration plug/unplug testing before
-  claiming stable re-charge behavior across every source and temperature.
+  `charging=0`, near-zero current). Correction on 2026-11-06: the current
+  m19 header is NOT wrapped; its ordered timeline and en1 before insertion
+  are now documented in docs/BATTERY-CHARGING-HISTORY.md. Broad source and
+  temperature stability was not established by that capture.
 
   The short records fixed the APSD decode and log interleaving, but every
   `SWEET BATT SMB` line has `read-ok=0`. Its zeroed override/select fields are
@@ -2818,6 +2854,9 @@ circular, so its exported line order alone cannot prove a transition order.
   behavior and, separately, finish event-driven battery state notification.
 
 - **0112m20: stable charge retained through display-off testing (2026-11-03):**
+  **2026-11-06 identity warning:** this paragraph describes the historical
+  SHA below; the current file differs and equals 0113-battery-ui. Keep this
+  as an archived observation, not a freshly revalidated m20 result.
   `logs/sweetlog-0112m20.bin` (SHA256
   `ef270d05c9d4f770299d679bd8c4e332edcacf21dba271d015dd2b4e3342414a`)
   strengthens the m19 result. It contains 83 matched active-charge records:

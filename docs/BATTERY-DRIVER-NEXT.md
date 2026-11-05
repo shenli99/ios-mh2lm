@@ -4,6 +4,12 @@
 IRQ刷新已通过；CHGR仅接入成功，没有自然状态转换/独立命中。SOC_READY一直
 ready，没有人为复位FG制造边沿。电池IRQ子目标保持未完成，暂不进入framebuffer。
 
+2026-11-06先完成历史复核：m19首次采样已enable1，后续才插线进入真实充电；
+0113无USB档首次已enable0，说明禁充初态早于IRQ/mux改造。旧成功/当前镜像
+沿用完全相同的Mu固件，实际包含高通充电模块，具体启动writer/分支未证明。
+当前m20文件与历史SHA不符且等同0113日志，不能继续把它当作已复核的旧成功
+证据。详见 [`BATTERY-CHARGING-HISTORY.md`](BATTERY-CHARGING-HISTORY.md)。
+
 **最新诊断结果：** 0119主档九次config/current均有效，全部state7/en0、没有
 负IBATT；no-usb对照十一笔同样state7/en0、无负IBATT，九次USBIN刷新正常。
 插线INPUT有效、未suspend、ICL配置1500mA，禁充初态早于board/mux/USB初始化。
