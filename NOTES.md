@@ -3,6 +3,8 @@
 ## Agent handoff / active work (2026-11-05, latest)
 
 **Battery IRQ first implementation ready for user push / native CI; NOT phone-tested:**
+Implementation committed as `c7c02d4`; staged whitespace checks passed for all
+ten files. User retains push control; no remote action was taken.
 User authorized implementation after the workspace power research review.
 New `xnu/patches/0141-mh2lm-battery-event-irqs.patch` is based on exact final
 0114a15 source, changes sweet_spmi.c/.h, SweetSpmiInterruptMux.cpp and
