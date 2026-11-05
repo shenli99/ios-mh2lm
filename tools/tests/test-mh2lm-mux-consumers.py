@@ -159,6 +159,17 @@ if 'controller transactions serialized across keys and battery' in mux:
 prelude=prelude.replace('static bool dropPdcEnable;', 'static bool dropPdcEnable, dropKeyTypeWrite;')
 prelude=prelude.replace('else pmic[address]=dataByte;',
     'else if (dropKeyTypeWrite && apid==261 && byte+i==0x11) { dropKeyTypeWrite=false; }\n                else pmic[address]=dataByte;')
+prelude=prelude.replace('static bool dropPdcEnable, dropKeyTypeWrite;',
+    'static bool dropPdcEnable, dropKeyTypeWrite;\nstatic unsigned failPmicApid=~0u, failPmicReg, failPmicData=256, failCloseApid=~0u, stickyPendingApid=~0u;')
+prelude=prelude.replace('    mmio[a]=value;\n    if (a>=ch',
+    '    if (a>=ch && a<ch+512*0x10000ULL) {\n'
+    '        unsigned apid=(a-ch)/0x10000, reg=(a-ch)%0x10000;\n'
+    '        if (reg==0x100 && value==0 && apid==failCloseApid) return;\n'
+    '        if (reg==0x108 && apid==stickyPendingApid) return;\n'
+    '    }\n    mmio[a]=value;\n    if (a>=ch')
+prelude=prelude.replace('            uint32_t data=mmio[b+0x10];',
+    '            uint32_t data=mmio[b+0x10];\n'
+    '            if (apid==failPmicApid && byte==failPmicReg && (failPmicData==256 || (data&255)==failPmicData)) { mmio[b+8]=3; return; }')
 prelude=prelude.replace('#define SWEET_LOG_WARN(...) ((void)0)', r'''
 static std::atomic<unsigned> boundShutdownWarnings{0};
 template<typename... Args> static void testWarn(const char *format, Args...) {
@@ -422,6 +433,71 @@ int main(int argc,char **argv) {
         assert(!testInstance->bindings[0].notify);
         while (!platform.children.empty()) platform.children.back()->terminate(2);
         pump();assert(backendStops>0);assertNoLeaks();
+    } else if (!std::strcmp(mode,"rollback-isolate-keys")) {
+        SweetBattery b;startBattery(b);assert(startMux()==0);pump();assert(b.fIrqAttached);
+        pmic[(0x0c5<<8)|0x11]=0x42;dropKeyTypeWrite=true;
+        // Desired SET_TYPE write is dropped; restoring the old byte also fails.
+        failPmicApid=261;failPmicReg=0x11;failPmicData=0x42;
+        sweet_keys_init();pump();
+        assert(testInstance->state==1 && testInstance->isolatedGroups==1);
+        assert(!backendStarts && !backendRunning && !testInstance->bindings[0].notify);
+        assert(hwRead(SWEET_DEV_SPMI_CHNLS_PA+248*0x10000,0x100)==0);
+        assert(hwRead(SWEET_DEV_SPMI_CHNLS_PA+261*0x10000,0x100)==0);
+        assert(testInstance->bindings[1].notify && b.healthy);
+        inject(269,0x10);pump();assert(b.fIrqSamples==1 && !b.fIrqFailed);
+        assert(testAttach(0,7,keyNotify,&keyContext)!=0); // no silent rebind
+        failPmicApid=~0u;cleanupBattery(b);endProvider();
+        while (!platform.children.empty()) platform.children.back()->terminate(2);
+        assertNoLeaks();
+    } else if (!std::strncmp(mode,"detach-isolate-",15)) {
+        SweetBattery b;startBattery(b);assert(startMux()==0);sweet_keys_init();pump();
+        assert(backendRunning && b.fIrqAttached);
+        bool timedOut=!std::strcmp(mode,"detach-isolate-timeout");
+        bool gateFail=!std::strcmp(mode,"detach-isolate-gate-fail");
+        bool pendingFail=!std::strcmp(mode,"detach-isolate-pending-fail");
+        if (timedOut) timeoutApid=269;
+        if (gateFail) failCloseApid=269;
+        if (pendingFail) stickyPendingApid=269;
+        // EN_CLR fails while an IRQ is already queued. Containment must clear
+        // the pending local source and preserve the queued worker's rearm.
+        failPmicApid=269;failPmicReg=0x16;inject(269,0x10);
+        cleanupBattery(b);pump();
+        assert(!testInstance->bindings[1].notify);
+        if (gateFail || pendingFail) {
+            assert(testInstance->state==3 && !backendRunning);
+            assert(!hwRead(0x17a00000,0x100+4*(513/32)));
+        } else {
+            assert(testInstance->state==1 && backendRunning && testInstance->isolatedGroups==2);
+            assert(hwRead(SWEET_DEV_SPMI_CHNLS_PA+269*0x10000,0x100)==0);
+            assert(!hwRead(SWEET_DEV_SPMI_CHNLS_PA+269*0x10000,0x104));
+            if (timedOut) {
+                assert(testInstance->routes[3].writePoisoned);unsigned before=lockedWrites;
+                assert(!testInstance->ackRoute(testInstance->routes[3]));assert(lockedWrites==before);
+            }
+            unsigned before=backendEvents;inject(248,1);pump();assert(backendEvents==before+1);
+            int context=1;assert(testAttach(1,1,batteryNotify,&context)!=0);
+        }
+        timeoutApid=0;failPmicApid=failCloseApid=stickyPendingApid=~0u;
+        while (!platform.children.empty()) platform.children.back()->terminate(2);
+        pump();assertNoLeaks();
+    } else if (!std::strcmp(mode,"isolated-apid-rebind")) {
+        assert(startMux()==0);int context=1;assert(testAttach(1,1,batteryNotify,&context)==0);
+        failPmicApid=269;failPmicReg=0x16;testDetach(1,&context);
+        assert(testInstance->isolatedGroups==2 && testInstance->state==1);
+        // A future route in another group must not reopen an isolated APID.
+        testInstance->routes[0].sid=2;testInstance->routes[0].per=0x13;
+        assert(attachKeys()!=0 && !testInstance->bindings[0].notify);
+        assert(hwRead(SWEET_DEV_SPMI_CHNLS_PA+269*0x10000,0x100)==0);
+        failPmicApid=~0u;endProvider();assertNoLeaks();
+    } else if (!std::strcmp(mode,"isolate-shared-apid")) {
+        assert(startMux()==0);assert(attachKeys()==0);int context=1;
+        assert(testAttach(1,1,batteryNotify,&context)==0);
+        auto &route=testInstance->routes[3];route.active=false;
+        unsigned original=route.apid;route.apid=248; // synthetic future cross-group APID
+        assert(!testInstance->isolateGroup(1));
+        assert(hwRead(SWEET_DEV_SPMI_CHNLS_PA+248*0x10000,0x100)==1);
+        route.apid=original;testDetach(1,&context);testDetach(0,&keyContext);
+        endProvider();assertNoLeaks();
     } else if (!std::strcmp(mode,"parallel")) {
         SweetBattery b;startBattery(b);assert(startMux()==0);sweet_keys_init();pump();
         assert(b.fIrqAttached && backendRunning && testInstance->bindings[0].notify);
@@ -470,6 +546,8 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-mux-consumers-') as d:
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-O1','-g','-pthread',
                     '-fsanitize=address,undefined',str(src),'-o',str(binary)],check=True)
     scenarios=['early','late','cancel-before-match','term-before-attach','term-after-attach',
+               'rollback-isolate-keys','detach-isolate-ok','detach-isolate-timeout','detach-isolate-gate-fail',
+               'detach-isolate-pending-fail','isolate-shared-apid','isolated-apid-rebind',
                'key-type-mismatch','keys-prepare-fail','keys-late-match','keys-cancel-before-match',
                'keys-term-during-prepare','keys-stop-during-prepare',
                'term-before-provider-stop','provider-stop-with-consumers','owner-stop-before-provider',

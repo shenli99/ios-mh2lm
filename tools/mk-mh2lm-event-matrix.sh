@@ -116,6 +116,7 @@ fi
 if [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 	for marker in 'SWEET BATT IRQ: armed mode=' \
 	    'SWEET MUX: controller transactions serialized across keys and battery' \
+	    'SWEET MUX: isolated group=%u; other groups remain available' \
 	    'SWEET KEYS IRQ: preparing backend on consumer workloop before attach' \
 	    'SWEET BATT IRQ: REVID sid=2' 'battery-msoc' \
 	    'SWEET MUX: consumer attached group=' \

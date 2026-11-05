@@ -57,6 +57,7 @@ static uint32_t coreMemory[0x2000/4],cfgMemory[0x1000/4],obsMemory[0x10000/4];
 #define SP_OWNERSHIP_OFF 0x700u
 #define KEYS_NO_APID 0xffffu
 #define SWEET_LOG_ERROR(...) ((void)0)
+#define SWEET_LOG_INFO(...) ((void)0)
 static vm_offset_t ml_io_map(vm_offset_t a,vm_size_t) {
     auto n=++mapCalls;if(failMap && n==failMap)return 0;
     if(a==SP_CORE_PA)return reinterpret_cast<vm_offset_t>(coreMemory);

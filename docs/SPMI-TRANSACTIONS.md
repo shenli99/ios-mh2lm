@@ -71,3 +71,11 @@ matched/terminated 回调仍只 retain/标记/排队；按键 `sweet_keys_prepar
 电池早期真实采样保留；所有相关 SPMI 事务继续由0146统一加锁。
 准确顺序、资源归属与验证见 [`MUX-CONSUMERS.md`](MUX-CONSUMERS.md)。
 0146和0147可合入同一轮云编译，直接复测 keys+USBIN；现有0118均不含这两项。
+
+## 0148：回滚失败优先隔离单组，PMIC日志补齐等级
+
+attach回滚或detach清理失败后，先验证失败组的APID中断门已关闭且pending清零，
+确认成功才恢复其它组。隔离组本次启动禁止再接入；无法独立隔离或读回不通过
+才停整个mux。ERROR改为不受等级过滤，电池/SPMI的直接输出改为等级宏。
+细节及验证边界见 [`MUX-GROUP-ISOLATION.md`](MUX-GROUP-ISOLATION.md)。
+0146～0148可使用同一轮新云产物复测；当前0118均不含这些修改。

@@ -1,0 +1,427 @@
+From: ios-mh2lm
+Subject: mh2lm: contain rollback failures by group and enforce PMIC log severity
+
+Quarantine independently gateable APIDs when PMIC restoration fails.
+Keep shared IRQ shutdown for unverified isolation. Grade all PMIC logs.
+
+diff --git a/bsd/dev/sweet_log_level.h b/bsd/dev/sweet_log_level.h
+--- a/bsd/dev/sweet_log_level.h
++++ b/bsd/dev/sweet_log_level.h
+@@ -15,10 +15,9 @@
+ #define SWEET_LOG_SINK printf
+ #endif
+ 
++/* ERROR is unconditional; severity filtering must never hide a failure. */
+ #define SWEET_LOG_ERROR(...) do { \
+-	if (sweet_log_level_enabled(0u)) { \
+-		SWEET_LOG_SINK("[ERROR] " __VA_ARGS__); \
+-	} \
++	SWEET_LOG_SINK("[ERROR] " __VA_ARGS__); \
+ } while (0)
+ #define SWEET_LOG_WARN(...) do { \
+ 	if (sweet_log_level_enabled(1u)) { \
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -12,6 +12,7 @@
+ #include <IOKit/IOLocks.h>
+ #include <pexpert/arm64/sweet_dev.h>
+ #include "sweet_spmi.h"
++#include "sweet_log_level.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+@@ -76,7 +77,7 @@
+ 	if ((parts & SWEET_SPMI_IRQ_DIAG_ROUTE_OWNER) != 0) {
+ 		intr = ml_io_map(SP_INTR_PA, 0x1000);
+ 		if (!intr) {
+-			printf("SWEET SPMI IRQ: %s ppid=%#x intr mapping failed\n", name,
++			SWEET_LOG_WARN("SWEET SPMI IRQ: %s ppid=%#x intr mapping failed\n", name,
+ 			    ppid);
+ 			return;
+ 		}
+@@ -101,7 +102,7 @@
+ 		    SWEET_SPMI_IRQ_DIAG_ROUTE_ENABLE |
+ 		    SWEET_SPMI_IRQ_DIAG_ROUTE_STATUS)) != 0 &&
+ 		    (owner != 0u || (map & SP_IRQ_OWNER_BIT) == 0)) {
+-			printf("SWEET SPMI IRQ: %s ppid=%#x apid=%u channel skipped owner=%u irq-owner=%u (EE0 IRQ owner required)\n",
++			SWEET_LOG_INFO("SWEET SPMI IRQ: %s ppid=%#x apid=%u channel skipped owner=%u irq-owner=%u (EE0 IRQ owner required)\n",
+ 			    name, ppid, apid, owner, (map & SP_IRQ_OWNER_BIT) ? 1 : 0);
+ 			continue;
+ 		}
+@@ -111,7 +112,7 @@
+ 			vm_offset_t chnls = ml_io_map(
+ 			    SP_CHNLS_PA + SP_CHNLS_APID_STRIDE * apid, 0x1000);
+ 			if (!chnls) {
+-				printf("SWEET SPMI IRQ: %s ppid=%#x apid=%u chnls mapping failed\n",
++				SWEET_LOG_WARN("SWEET SPMI IRQ: %s ppid=%#x apid=%u chnls mapping failed\n",
+ 				    name, ppid, apid);
+ 				continue;
+ 			}
+@@ -122,14 +123,14 @@
+ 				status = sp_rd(chnls, SP_IRQ_STATUS_OFF);
+ 			}
+ 		}
+-		printf("SWEET SPMI IRQ: %s route-parts=%#x ppid=%#x apid=%u map=%#x owner=%u "
++		SWEET_LOG_INFO("SWEET SPMI IRQ: %s route-parts=%#x ppid=%#x apid=%u map=%#x owner=%u "
+ 		    "irq-owner=%u owner-word=%u owner-mask=%#x owner-bit=%u active=%u "
+ 		    "acc-enable=%#x irq-status=%#x\n", name, parts, ppid, apid, map, owner,
+ 		    (map & SP_IRQ_OWNER_BIT) ? 1 : 0, ownerWord, ownerMask, ownerBit,
+ 		    (ownerMask >> ownerBit) & 1u, enable, status);
+ 	}
+ 	if (!found) {
+-		printf("SWEET SPMI IRQ: %s ppid=%#x has no APID mapping\n", name, ppid);
++		SWEET_LOG_WARN("SWEET SPMI IRQ: %s ppid=%#x has no APID mapping\n", name, ppid);
+ 	}
+ }
+ 
+@@ -137,11 +138,11 @@
+ sweet_spmi_irq_diag(void)
+ {
+ 	if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) {
+-		printf("SWEET SPMI IRQ: skipped; arbiter is not ready\n");
++		SWEET_LOG_WARN("SWEET SPMI IRQ: skipped; arbiter is not ready\n");
+ 		return;
+ 	}
+ 	IOLockLock(sp_lock);
+-	printf("SWEET SPMI IRQ: PMIC-arb v5 read-only preflight; no GIC handler, no enable, no clear\n");
++	SWEET_LOG_INFO("SWEET SPMI IRQ: PMIC-arb v5 read-only preflight; no GIC handler, no enable, no clear\n");
+ 	sp_irq_diag_peripheral(2, 0x13, "usbin", SWEET_SPMI_IRQ_DIAG_ROUTE_ALL);
+ 	sp_irq_diag_peripheral(2, 0x10, "chgr", SWEET_SPMI_IRQ_DIAG_ROUTE_ALL);
+ 	IOLockUnlock(sp_lock);
+@@ -160,22 +161,22 @@
+ {
+ 	parts &= SWEET_SPMI_IRQ_DIAG_ROUTE_ALL;
+ 	if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) {
+-		printf("SWEET SPMI IRQ: %s skipped; arbiter is not ready\n",
++		SWEET_LOG_WARN("SWEET SPMI IRQ: %s skipped; arbiter is not ready\n",
+ 		    name ? name : "source");
+ 		return;
+ 	}
+ 	if (sid > 15u || peripheral > 0xffu) {
+-		printf("SWEET SPMI IRQ: %s invalid sid=%u peripheral=%#x\n",
++		SWEET_LOG_WARN("SWEET SPMI IRQ: %s invalid sid=%u peripheral=%#x\n",
+ 		    name ? name : "source", sid, peripheral);
+ 		return;
+ 	}
+ 	if (!parts) {
+-		printf("SWEET SPMI IRQ: %s requested no route parts\n",
++		SWEET_LOG_INFO("SWEET SPMI IRQ: %s requested no route parts\n",
+ 		    name ? name : "source");
+ 		return;
+ 	}
+ 	IOLockLock(sp_lock);
+-	printf("SWEET SPMI IRQ: %s read-only route parts=%#x; no GIC handler, no enable, no clear\n",
++	SWEET_LOG_INFO("SWEET SPMI IRQ: %s read-only route parts=%#x; no GIC handler, no enable, no clear\n",
+ 	    name ? name : "source", parts);
+ 	sp_irq_diag_peripheral(sid, peripheral, name ? name : "source", parts);
+ 	IOLockUnlock(sp_lock);
+@@ -216,19 +217,19 @@
+ 	sp_cfg = ml_io_map(SP_CFG_PA, 0x1000);
+ 	sp_obs = ml_io_map(SP_OBS_PA, 0x10000); /* EE 0, 512 * 0x80 */
+ 	if (!sp_core || !sp_cfg || !sp_obs) {
+-		printf("SWEET BATTERY: SPMI mapping failed\n");
++		SWEET_LOG_ERROR("SWEET BATTERY: SPMI mapping failed\n");
+ 		return -1;
+ 	}
+ 	uint32_t arb_version = sp_rd(sp_core, 0);
+ 	sp_count = sp_rd(sp_core, 4) & 0x7ffu;
+ 	if (arb_version < 0x50000000u || arb_version >= 0x70000000u ||
+ 	    !sp_count || sp_count > 512) {
+-		printf("SWEET BATTERY: unsupported SPMI arb=%#x APIDs=%u\n",
++		SWEET_LOG_ERROR("SWEET BATTERY: unsupported SPMI arb=%#x APIDs=%u\n",
+ 		    arb_version, sp_count);
+ 		return -1;
+ 	}
+ 	__atomic_store_n(&sp_ready, true, __ATOMIC_RELEASE);
+-	printf("SWEET BATTERY: SPMI arb=%#x APIDs=%u, observer reads only\n",
++	SWEET_LOG_INFO("SWEET BATTERY: SPMI arb=%#x APIDs=%u, observer reads only\n",
+ 	    arb_version, sp_count);
+ 	return 0;
+ }
+@@ -305,7 +306,7 @@
+ 		delay(1);
+ 	}
+ 	sp_poisoned[apid] = true;
+-	printf("SWEET BATTERY: SPMI timeout sid=%u addr=%#x APID=%u disabled\n",
++	SWEET_LOG_ERROR("SWEET BATTERY: SPMI timeout sid=%u addr=%#x APID=%u disabled\n",
+ 	    sid, addr, apid);
+ 	IOLockUnlock(sp_lock);
+ 	return -1;
+diff --git a/bsd/dev/sweet_spmi_mux.h b/bsd/dev/sweet_spmi_mux.h
+--- a/bsd/dev/sweet_spmi_mux.h
++++ b/bsd/dev/sweet_spmi_mux.h
+@@ -81,6 +81,7 @@
+ 	unsigned irqCount = 0, workCount = 0, routeCount = 0, faultCount = 0;
+ 	uint64_t stormStartNs = 0;
+ 	unsigned stormBase = 0, apidCount = 0;
++	unsigned isolatedGroups = 0; /* gate-owned; no reattach until reboot */
+ 	bool allowEmptyDrain = false;
+ 	bool eventAdded = false, stopping = false, quiesced = false;
+ 	bool claimed = false, superStarted = false, hardwareTouched = false;
+@@ -102,6 +103,7 @@
+ 	bool beginRouteUpdate(void);
+ 	bool endRouteUpdate(void);
+ 	bool removeGroup(unsigned group);
++	bool isolateGroup(unsigned group);
+ 	IOReturn updateBinding(BindingRequest *request, bool detach);
+ 	static void workAction(OSObject *owner, IOInterruptEventSource *source, int count);
+ 	static IOReturn bindingAction(OSObject *owner, void *, void *, void *, void *);
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -184,7 +184,7 @@
+ 	}
+ 	char name[32];
+ 	proc_selfname(name, sizeof(name));
+-	IOLog("SWEET BATT UC: %s open type %u\n", name, type);
++	SWEET_LOG_INFO("SWEET BATT UC: %s open type %u\n", name, type);
+ 	return true;
+ }
+ 
+@@ -221,7 +221,7 @@
+ 		uint32_t structOut = args->structureOutputDescriptor != NULL ?
+ 		    (uint32_t)args->structureOutputDescriptor->getLength() : args->structureOutputSize;
+ 		uint64_t scalar0 = args->scalarInputCount ? args->scalarInput[0] : 0;
+-		IOLog("SWEET BATT UC: %s sel %u in %u/%u arg0=%#llx out %u/%u -> unsupported\n",
++		SWEET_LOG_INFO("SWEET BATT UC: %s sel %u in %u/%u arg0=%#llx out %u/%u -> unsupported\n",
+ 		    name, selector, args->scalarInputCount, structIn,
+ 		    (unsigned long long)scalar0, args->scalarOutputCount, structOut);
+ 	}
+@@ -361,7 +361,7 @@
+ 	    full != fUiFull;
+ 	if (fUiDiag && uiChanged) {
+ 		fUiSequence++;
+-		IOLog("SWEET BATT UI: event=%u publish external=%d capable=%d charging=%d "
++		SWEET_LOG_INFO("SWEET BATT UI: event=%u publish external=%d capable=%d charging=%d "
+ 		    "full=%d percent=%u mv=%u sample=%d current-valid=%d\n",
+ 		    fUiSequence, external ? 1 : 0, capable ? 1 : 0,
+ 		    charging ? 1 : 0, full ? 1 : 0, percent, mv,
+@@ -369,7 +369,7 @@
+ 	}
+ 	updateStatus(); /* Flush PS properties and send 0xe0024100 on change. */
+ 	if (fUiDiag && uiChanged) {
+-		IOLog("SWEET BATT UI: event=%u updateStatus complete\n", fUiSequence);
++		SWEET_LOG_INFO("SWEET BATT UI: event=%u updateStatus complete\n", fUiSequence);
+ 	}
+ 	fUiPublished = true;
+ 	fUiExternal = external;
+@@ -378,7 +378,7 @@
+ 	fUiFull = full;
+ 	int mode = measured ? 1 : 0;
+ 	if (mode != fLastMode) {
+-		IOLog("SWEET BATTERY: %s, %u%% %umV external=%d charging=%d\n",
++		SWEET_LOG_INFO("SWEET BATTERY: %s, %u%% %umV external=%d charging=%d\n",
+ 		    !measured ? "static fallback" :
+ 		    (fSid2 ? "PM6150B / gauge SOC" : "PM6150 / estimated SOC"),
+ 		    percent, mv, external, charging);
+@@ -494,7 +494,7 @@
+ 		    !sweet_spmi_read(SWEET_BATT_SID, base + 0x15u, &enabled) &&
+ 		    !sweet_spmi_read(SWEET_BATT_SID, base + 0x18u, &latched);
+ 		unsigned mask = 1u << line->bit;
+-		IOLog("SWEET BATT IRQ CFG: %s bit=%u rt=%u edge=%u high=%u low=%u "
++		SWEET_LOG_INFO("SWEET BATT IRQ CFG: %s bit=%u rt=%u edge=%u high=%u low=%u "
+ 		    "enabled=%u latched=%u read-ok=%d\n", line->name, line->bit,
+ 		    ((unsigned)rt & mask) ? 1 : 0, ((unsigned)type & mask) ? 1 : 0,
+ 		    ((unsigned)high & mask) ? 1 : 0, ((unsigned)low & mask) ? 1 : 0,
+@@ -522,20 +522,20 @@
+ 	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_TYPEC_MISC, &misc) &&
+ 	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_SMB_EN, &smbEn) &&
+ 	    !sweet_spmi_read(SWEET_BATT_SID, SWEET_BATT_SMB_CFG, &smbCfg);
+-	IOLog("SWEET BATT INPUT: path=%#x use-usb=%u valid-input=%u path-suspend=%u "
++	SWEET_LOG_INFO("SWEET BATT INPUT: path=%#x use-usb=%u valid-input=%u path-suspend=%u "
+ 	    "cmd-il=%#x cmd-suspend=%u icl=%umA apsd=%#x dtc-done=%u enum=%u slow-plugin=%u\n",
+ 	    (unsigned)path, (path & 0x10u) ? 1 : 0, (path & 0x01u) ? 1 : 0,
+ 	    (path & 0x40u) ? 1 : 0, (unsigned)cmdIl, (cmdIl & 0x01u) ? 1 : 0,
+ 	    (unsigned)icl * 50u, (unsigned)apsd, (apsd & 0x01u) ? 1 : 0,
+ 	    (apsd & 0x10u) ? 1 : 0, (apsd & 0x20u) ? 1 : 0);
+-	IOLog("SWEET BATT TYPEC: aicl=%#x aicl-en=%u aicl-adc=%u aicl-rerun=%u "
++	SWEET_LOG_INFO("SWEET BATT TYPEC: aicl=%#x aicl-en=%u aicl-adc=%u aicl-rerun=%u "
+ 	    "collapse-suspend=%u sink=%#x typec=%#x state-attached=%u misc=%#x "
+ 	    "cc-attached=%u vbus=%u\n",
+ 	    (unsigned)aicl, (aicl & 0x04u) ? 1 : 0, (aicl & 0x08u) ? 1 : 0,
+ 	    (aicl & 0x10u) ? 1 : 0, (aicl & 0x80u) ? 1 : 0, (unsigned)sink,
+ 	    (unsigned)typec, (typec & 0x20u) ? 1 : 0, (unsigned)misc,
+ 	    (misc & 0x01u) ? 1 : 0, (misc & 0x20u) ? 1 : 0);
+-	IOLog("SWEET BATT SMB: en=%#x override=%u override-val=%u cfg=%#x "
++	SWEET_LOG_INFO("SWEET BATT SMB: en=%#x override=%u override-val=%u cfg=%#x "
+ 	    "smb-sel=%u read-ok=%d\n", (unsigned)smbEn,
+ 	    (smbEn & 0x08u) ? 1 : 0, (smbEn & 0x10u) ? 1 : 0,
+ 	    (unsigned)smbCfg, (smbCfg & 0x10u) ? 1 : 0, ok ? 1 : 0);
+@@ -661,7 +661,7 @@
+ 		 * static source, so an absent charger is never reported as absent
+ 		 * battery. */
+ 		publish(100, 4200, 0, true, true, false, true, false, false);
+-		IOLog("SWEET BATTERY SID2: every read failed, static fallback\n");
++		SWEET_LOG_ERROR("SWEET BATTERY SID2: every read failed, static fallback\n");
+ 		return;
+ 	}
+ 	/* A gauge-less or pack-less sample must never become a 0% shutdown. */
+@@ -717,7 +717,7 @@
+ 	 * (src=gauge is 0x4009, src=curve is the fallback table) and the one
+ 	 * actually published, so a photo of the log proves both what was read and
+ 	 * what iOS was told. held=1 means the guard kept the previous value. */
+-	IOLog("SWEET BATTERY SID2: msoc=%#x scaled=%u%% sts=%#x ready=%d "
++	SWEET_LOG_INFO("SWEET BATTERY SID2: msoc=%#x scaled=%u%% sts=%#x ready=%d "
+ 	    "vbatt=%#x mv=%u uv=%u curve=%u%% chgr=%#x usb=%#x sysbatt=%#x "
+ 	    "raw=%u%% src=%s held=%d "
+ 	    "-> %u%% %umV external=%d charging=%d full=%d\n",
+@@ -746,7 +746,7 @@
+ 		    (int)rawCurrent;
+ 		/* Qualcomm FG's signed raw unit is 488.281 uA; negative is charging. */
+ 		int currentUa = (int)(((int64_t)signedCurrent * 488281) / 1000);
+-		IOLog("SWEET BATT DIAG: state=%u st2=%#x st5=%#x st7=%#x en=%#x "
++		SWEET_LOG_INFO("SWEET BATT DIAG: state=%u st2=%#x st5=%#x st7=%#x en=%#x "
+ 		    "pause=%#x cfg2=%#x smben=%#x ibatt=%#x signed=%d ua=%d "
+ 		    "config-ok=%d current-ok=%d\n", state, (unsigned)status2,
+ 		    (unsigned)status5, (unsigned)status7, (unsigned)enable,
+@@ -974,17 +974,17 @@
+ 	int irqDiag = 0;
+ 	(void)PE_parse_boot_argn("sweetbattirqdiag", &irqDiag, sizeof(irqDiag));
+ 	if (fSid2) {
+-		IOLog("SWEET BATTERY: PM8150B SID %u read path enabled (sweetbatt=1)\n",
++		SWEET_LOG_INFO("SWEET BATTERY: PM8150B SID %u read path enabled (sweetbatt=1)\n",
+ 		    SWEET_BATT_SID);
+ 	}
+ 	if (fDiag) {
+-		IOLog("SWEET BATTERY: charger/current diagnostics enabled (read-only)\n");
++		SWEET_LOG_INFO("SWEET BATTERY: charger/current diagnostics enabled (read-only)\n");
+ 	}
+ 	if (fUiDiag) {
+-		IOLog("SWEET BATT UI: transition/user-client tracing enabled (read-only)\n");
++		SWEET_LOG_INFO("SWEET BATT UI: transition/user-client tracing enabled (read-only)\n");
+ 	}
+ 	if (fSid2 && irqDiag == 1) {
+-		IOLog("SWEET BATTERY: PMIC-arb IRQ preflight enabled (read-only)\n");
++		SWEET_LOG_INFO("SWEET BATTERY: PMIC-arb IRQ preflight enabled (read-only)\n");
+ 		sweet_spmi_irq_diag();
+ 		logIrqLines();
+ 	}
+@@ -1024,7 +1024,7 @@
+ 		} else {
+ 			fReal = false;
+ 			poll();
+-			IOLog("SWEET BATTERY: timer unavailable; static fallback\n");
++			SWEET_LOG_ERROR("SWEET BATTERY: timer unavailable; static fallback\n");
+ 		}
+ 	}
+ 	registerService();
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -689,6 +689,59 @@
+ 	return ok;
+ }
+ 
++/* A failed PMIC restore need not take unrelated APIDs offline. Keep GIC
++ * masked (beginRouteUpdate) while closing each affected local arbiter gate.
++ * No SPMI command is issued here: a poisoned RW lane must never be reused.
++ * Cross-group APIDs cannot be gated independently, so fail closed in that case.
++ * Successful isolation is terminal for this group for the rest of this boot. */
++bool
++SweetSpmiInterruptMux::isolateGroup(unsigned group)
++{
++	bool isolated = true;
++	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
++		MuxRoute &route = routes[i];
++		if (route.group != group || !route.channel) {
++			continue;
++		}
++		bool seen = false;
++		for (unsigned j = 0; j < i; ++j) {
++			seen |= routes[j].group == group && routes[j].channel &&
++			    routes[j].apid == route.apid;
++		}
++		if (seen) {
++			continue;
++		}
++		if (allowedMaskForApid(route.apid)) {
++			SWEET_LOG_ERROR("SWEET MUX: cannot isolate group=%u shared active APID=%u\n",
++			    group, route.apid);
++			isolated = false;
++			continue;
++		}
++		uint32_t mask = 0;
++		for (unsigned j = 0; j < sizeof(routes) / sizeof(routes[0]); ++j) {
++			if (routes[j].group == group && routes[j].apid == route.apid) {
++				mask |= 1u << routes[j].bit;
++			}
++		}
++		write32(route.channel, 0x100u, 0); /* ACC_ENABLE: close this APID */
++		write32(route.channel, 0x108u, mask); /* clear only this group's bits */
++		uint32_t access = read32(route.channel, 0x100u);
++		uint32_t pending = read32(route.channel, 0x104u);
++		if (access != 0 || pending != 0) {
++			SWEET_LOG_ERROR("SWEET MUX: isolation readback failed group=%u apid=%u access=%#x pending=%#x\n",
++			    group, route.apid, access, pending);
++			isolated = false;
++		}
++	}
++	if (isolated) {
++		isolatedGroups |= 1u << group;
++		setProperty("SweetMuxIsolatedGroups", (uint64_t)isolatedGroups, 32);
++		setProperty("SweetMuxLifecycle", "degraded");
++		SWEET_LOG_WARN("SWEET MUX: isolated group=%u; other groups remain available\n", group);
++	}
++	return isolated;
++}
++
+ IOReturn
+ SweetSpmiInterruptMux::updateBinding(BindingRequest *request, bool detach)
+ {
+@@ -699,9 +752,12 @@
+ 			return kIOReturnSuccess;
+ 		}
+ 		bool running = beginRouteUpdate();
+-		if (!removeGroup(group) && running) {
+-			SWEET_LOG_ERROR("SWEET MUX: detach cleanup failed; all PMIC consumers stopped\n");
+-			disableHardware();
++		if (!removeGroup(group)) {
++			SWEET_LOG_ERROR("SWEET MUX: detach cleanup failed group=%u; attempting group isolation\n", group);
++			if (!isolateGroup(group)) {
++				SWEET_LOG_ERROR("SWEET MUX: detach isolation failed; shared IRQ stays off\n");
++				disableHardware();
++			}
+ 		}
+ 		binding.consumer = NULL;
+ 		binding.notify = NULL;
+@@ -713,7 +769,8 @@
+ 		return kIOReturnSuccess;
+ 	}
+ 	unsigned current = __atomic_load_n(&state, __ATOMIC_ACQUIRE);
+-	if (stopping || isInactive() || request->consumer->isInactive() || binding.notify || (current != 1u && current != 2u)) {
++	if (stopping || isInactive() || request->consumer->isInactive() || binding.notify ||
++	    (isolatedGroups & (1u << group)) || (current != 1u && current != 2u)) {
+ 		return kIOReturnNotReady;
+ 	}
+ 	/* Resolve only unique EE0 IRQ-owned channels before reading channel MMIO. */
+@@ -728,6 +785,15 @@
+ 		if (resolved == MUX_NO_APID || (route.channel && route.apid != resolved)) {
+ 			SWEET_LOG_ERROR("SWEET MUX: %s has no unique EE0 IRQ-owned APID\n", route.name);
+ 			return kIOReturnNotPermitted;
++		}
++		/* An isolated APID must not be reopened through another group's route,
++		 * even if that group was inactive when isolation completed. */
++		for (unsigned j = 0; j < sizeof(routes) / sizeof(routes[0]); ++j) {
++			if ((isolatedGroups & (1u << routes[j].group)) && routes[j].apid == resolved) {
++				SWEET_LOG_ERROR("SWEET MUX: attach refused group=%u quarantined APID=%u\n",
++				    group, resolved);
++				return kIOReturnNotReady;
++			}
+ 		}
+ 		route.apid = resolved;
+ 		if (!route.channel) {
+@@ -756,8 +822,11 @@
+ 		if (!configureRoute(route)) {
+ 			SWEET_LOG_ERROR("SWEET MUX: attach setup failed route=%s; consumer IRQ unavailable\n", route.name);
+ 			if (!removeGroup(group)) {
+-				SWEET_LOG_ERROR("SWEET MUX: attach rollback failed; all PMIC consumers stopped\n");
+-				disableHardware();
++				SWEET_LOG_ERROR("SWEET MUX: attach rollback failed group=%u; attempting group isolation\n", group);
++				if (!isolateGroup(group)) {
++					SWEET_LOG_ERROR("SWEET MUX: attach isolation failed; shared IRQ stays off\n");
++					disableHardware();
++				}
+ 			}
+ 			binding.consumer = NULL;
+ 			binding.notify = NULL;
