@@ -2,6 +2,40 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0115 preflight live capture: runtime healthy, early preflight evidence MISSING:**
+User skipped mode0 baseline and tested mode1 directly; do not require baseline
+unless a concrete regression needs comparison. Reviewed
+logs/live-0115-battery-irq-preflight.txt, 3401 lines, SHA256
+`c72a47a28d9174853d00471d1fef829279960b42a5550f3999f4af041198acd1`.
+Launchd args at lines10/151 confirm sweetbattirq=1, real battery selectors,
+irqdiag/uidiag and the intended key/USB/ACM configuration. Capture begins near
+launchd and contains ZERO SWEET BATT IRQ, REVID, battery-fg-soc, SPMI or BATT UI
+lines; startup preflight results are not present. Source runs preflight before
+initial sample/registerService, and mode1 deliberately continues polling even
+if preflight returns false. Thus successful boot/real samples CANNOT prove
+identity matched or preflight passed. Do not infer REVID/APID values or move
+this evidence to the verified hardware column.
+
+Runtime: 54 samples, all gauge-ready MSOC b4/70%, 4009mV, held0, USB10,
+CHGR47/state7, external1/charging0/full0, pack not reported missing. Confirms
+real gauge polling, not battery IRQ or real charging. State7 matches prior
+0114a15 real-battery capture; no plug transition in this capture. Mux recorded
+12 routes: power6, vol-down4, vol-up2, all matching balanced HID down/up;
+power+vol-down concurrent events at lines3262/3269/3292/3294. Display off3121,
+on3150 with later touch. USB reached1152 hits, TX904/905 err0; touch reached
+141 hits, one earlier empty1 returned to0. No scoped driver ERROR, FAILED,
+stop, fallback, ack failure or timeout appears. Six USB EP cmd status1 WARN
+lines match existing warning class. Eighteen HFS clonefile cluster_write -34
+records are also a class present in older 0114a15 captures (11/3 records in
+normal/debug), not evidence of a new PMIC IRQ regression; not fixed here.
+
+NEXT: export persistent SWEETLOG for this SAME preflight boot, e.g.
+sweetlog-0115-battery-irq-preflight.bin, before replacing the current boot/log.
+No need to re-run baseline, recompile, push, or re-debug ACM. Read early REVID,
+FG ownership/config and selected mode/preflight result before recommending
+mode2 USBIN. Runtime smoke coverage is good; preflight and battery IRQ
+acceptance remain OPEN. Only docs changed in this review.
+
 **0115 battery IRQ artifact verified; six temporary images ready, NOT phone-tested:**
 User downloaded logs/xnu-kernel-0115.gz and logs/xnu-buildtree-0115.gz.
 No 0115 build log or CI run ID was provided; do not claim a warning-free build.

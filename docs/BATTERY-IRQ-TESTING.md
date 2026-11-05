@@ -3,7 +3,8 @@
 **日期：** 2026-11-05。补丁 `0141-mh2lm-battery-event-irqs.patch` 基于
 0114a15 最终 buildtree（0138→0139→0140 已生效）生成。完成本地检查；0115
 云端产物的最终源码、内核符号与标记已核对，六个测试镜像已生成并回读验证。
-尚无新内核实机日志，不能宣称电池 IRQ 已成功。
+已收到 mode1 的运行段 live 日志，采样和既有三路 IRQ 正常，但启动预检记录
+未包含在内；需补看同次启动的持久 SWEETLOG，不能宣称预检通过或电池 IRQ 成功。
 已验证的真实电池基线仍是 `live-0114a15-batt-irq-only.txt`。
 
 ## 实现路径与边界
@@ -91,8 +92,16 @@ MSOC delta 沿用固件现有配置，不访问 MEMIF/SRAM。LG 源码 0.3% 是�
 最终 Android boot 镜像的 ramdisk、FAT 中的 kernel/ADT/启动参数均已回读核对，
 完整镜像 SHA256 记录在 `NOTES.md` 和
 工作区 `scratch/battery-irq-0115/boot-verification.json`。
-**当前先测 baseline，正常再测 preflight，导出日志分析后再进入 usbin。**
-无需再次 push 或云编译，实际中断接入与硬件身份仍待实测。
+用户已跳过 baseline 直接测试 preflight：运行段未见新增驱动故障，因此不要求
+补测 baseline。**当前补取同次 preflight 启动的持久日志，分析早期结果后再进入 usbin。**
+无需再次 push 或云编译，实际中断接入与硬件身份仍待确认。
+
+`live-0115-battery-irq-preflight.txt` 的 boot-args 确认 mode1；54 次真实采样
+稳定 70%、4009mV，三键 12 次路由与成对 HID、触摸及 USB ACM 均继续运行，
+未见驱动 ERROR/停用。插线但 CHGR state7 未充电，与前一真实采样基线一致。
+该文件从 launchd 附近开始，未包含 REVID、FG 路由和 `selected mode/preflight`
+输出。mode1 即使预检失败也会保留轮询，因此不能用成功启动代替预检结果。
+需导出同次启动的 `sweetlog-0115-battery-irq-preflight.bin` 补齐记录。
 
 后续需要重打包时，在工作区根目录执行，`LABEL` 替换为实际产物编号：
 
@@ -157,4 +166,4 @@ display-off 只指现有逻辑息屏，不代表深度休眠；已知锁屏局�
 `base/xnu/`，补丁应用核对目录为 `verify/`，编译脚本/日志/对象在同级 scratch。
 这些本地产物不进 git；仓库提交补丁、打包入口、测试脚本与文档。
 0115 产物源码核对目录为工作区 `scratch/battery-irq-0115/xnu/`。
-下一步使用已经生成的 0115 镜像，按上述顺序取实机证据。
+下一步先补取 0115 preflight 的持久日志，再使用已经生成的镜像继续分阶段验证。
