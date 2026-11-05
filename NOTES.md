@@ -2,6 +2,35 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0118 supplemental power sleep/wake PASS; NEXT no-keys USBIN profile.**
+User reports screen can turn off; logs/live-0118-board-startup-wak.txt (exact
+filename without final e) SHA256
+`21c6d41ea55f206a3546f413350c500278a02240efc62cd202134854e5b706f5`.
+272526 bytes, no NUL. Capture starts mid userspace boot, no early board/boot
+args; previous baseline pair supplies matching/identity/startup evidence.
+Lines3014-3023 power IRQ1/2 + balanced HID down/up ->3044 FB display off;
+3267-3277 power IRQ3/4 + balanced HID ->3272 FB display on. Backlight fades
+to0/restores1088. After wake42 touch down/up pairs across5 slots, counter195
+empty0; USB continues during off and after wake, last1408 empty0 TX1161/1162
+err0. Four existing USB ep0/ep5 cmd6/status1 WARNs; no scoped driver ERROR/
+FAILED/stop/timeout/storm or panic signature. No need persistent supplement:
+live fully covers targeted transitions; this isn't native mux teardown proof.
+Unrelated userland vmd[226] CPU-budget warning (>50%/180s) at3666 recorded,
+cause not investigated, no evidence tying it to IRQ consumers. Analysis saved
+scratch/artifact-0118/wake-analysis.json. Baseline normal path now accepted
+across original persistent/live and supplemental wake live; batteryIRQ0 only.
+
+NEXT PHONE: out-bs/boot-16k-0118-board-startup-no-keys.img, SHA256
+efca21c10e99d09dd74d4d7279f3accdedd7a46bcc9725210da43073d744fbed rechecked.
+keys0/real gauge/batteryIRQ2/ACM2/vbus1. Start listener before boot. Keep
+screen ON; two unplug5s/replug5s cycles. Keys, software power wake and key
+combination deliberately disabled; use existing recovery/export procedure,
+then return key-enabled profile. Export live-0118-board-startup-no-keys.txt;
+if capture lacks early mux/battery matching or cable transitions, get
+sweetlog-0118-board-startup-no-keys.bin. Need group1 registry match/attach,
+USBIN armed/hits -> battery refresh; NO group0/keys routes. Inspect before
+combined usbin. No compile/push/repack/device write; battery IRQ unverified.
+
 **0118 baseline logs: registry/key/USB/touch smoke PASS; sleep/wake NOT covered.**
 Evidence logs/live-0118-board-startup-baseline.txt SHA256
 `1163c24fd2105dd39eaf59019d7e4502e9adb480dfbdcfc9102ce53417502207`

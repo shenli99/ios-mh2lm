@@ -3,8 +3,9 @@
 2026-11-05，新增补丁 `0145-mh2lm-mux-consumer-matching.patch`，基于已核对的
 0117 最终源码。实现与本地验证完成；0118 原生云端内核及 buildtree 已核对，
 包含 0145 和后续退出告警，三档 boot 已生成。0118 baseline 日志已确认
-group0 registry 匹配/接入、三键 IRQ/HID、触摸及 ACM 持续运行；本轮未记录
-display off，单独电源键息屏/唤醒待补测。电池 IRQ 与原生终止清理仍待验证。
+group0 registry 匹配/接入、三键 IRQ/HID、触摸及 ACM 持续运行；补充的
+`live-0118-board-startup-wak.txt` 已确认单独电源键息屏/唤醒、唤醒后触摸和 USB。
+下一档 no-keys 独立接入；电池 IRQ 与原生终止清理仍待验证。
 0117 baseline 证明的是旧 0144 的正常启动，不能作为本次改造的实机验收。
 
 ## 当前服务与接口
@@ -168,5 +169,7 @@ baseline、no-keys、usbin。先看 baseline 的 mux started、group0 matched/at
 
 0118 baseline 已记录 16 次按键路由命中与 16 条完整成对 HID、48 对触摸、
 USB IRQ 4480 次（empty0/TX err0）。live 一条 HID key-up 前缀有三个 NUL，
-持久日志中的对应行完整，不能据 live 严格前缀计数认定丢 key-up。下一步先补
-同镜像单独电源键息屏/唤醒，再进入 no-keys/usbin；不需要重新编译。
+持久日志中的对应行完整，不能据 live 严格前缀计数认定丢 key-up。补充 wake live
+已覆盖 `power IRQ/HID → display off → power IRQ/HID → display on`，唤醒后
+42 对多点触摸及 USB 输出继续，无需为该补测额外提取持久日志。下一步进入
+no-keys，再根据 group1 独立接入结果决定 combined usbin；不需要重新编译。
