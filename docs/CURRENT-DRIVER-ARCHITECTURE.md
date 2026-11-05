@@ -143,7 +143,7 @@ PMIC 事件接到 `SweetSpmiInterruptMux`；mux 的 consumer 仍只有按键。
 
 | 项目 | 当前实现 |
 | --- | --- |
-| 电量与电压 | 来自真实 gauge/电压寄存器；容量按固定 5020 mAh 与百分比换算，未实现容量学习。 |
+| 电量与电压 | 来自真实 gauge/电压寄存器；容量按固定 5020 mAh 与百分比换算，未实现容量学习。5020 是移植占位值；目标 mh2lm DTS 实际引用 BLT42 4000mAh 命名的 profile，电池 ID/加载状态仍需核对。 |
 | 电流 | SID2 发布值固定 0，`SweetBatteryCurrentValid=false`；可选诊断能读取电流，但没有送入标准电源字段。 |
 | 温度、循环次数、剩余时间 | 固定 25°C（带估计标记）、0 次、未知 -1；不是完整遥测。 |
 | 外接电源能力 | `ExternalChargeCapable` 暂随 VBUS 存在，未完整推导协商/限流能力。 |

@@ -238,6 +238,10 @@ SPI 208（候选 INTID 240），并写好带 GIC 探针、真实 IRQ 与轮询�
 **状态：** 2026-11-05 新增，尚未实现；既有两秒真实采样仍是当前运行基线。
 PMIC 型号证据、事件位置、既有 APID 预检和待测项见
 [`BATTERY-IRQ-HARDWARE-BASELINE.md`](BATTERY-IRQ-HARDWARE-BASELINE.md)。
+工作区 `docs/INDEX.md` 的电源六章报告已补充 ack/unmask 顺序、LG 0.3%
+MSOC delta 配置及 SRAM 事务依据；这些是源码参考，实际门限、REVID 与新 FG
+路由仍需实测。先沿用固件现有 FG 状态验证事件，不为 IRQ 化重载 profile；
+需要 SRAM 访问时单独设计授权、版本 workaround 与释放路径。
 
 **目的：** 让插拔电源、充电状态和电量变化经 PMIC IRQ 触发状态刷新，继续通过
 `IOPMPowerSource::updateStatus()` 通知 iOS，降低两秒定时采样带来的状态延迟。

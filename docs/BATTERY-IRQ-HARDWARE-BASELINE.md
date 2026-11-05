@@ -41,7 +41,7 @@ DT SPI481 / GIC INTID513，按键已经证明端到端投递；新增电池源�
    channel；当前 type/polarity/enable/latch；MSOC delta 阈值及运行中的 FG
    是否在不新增算法配置时产生事件。前两条充电源的旧预检已有，不必重做
    无关的 GIC/USB 功能试验，但 arm 前仍应核对当前配置。
-2. **源码语义需落实：** PMIC IRQ `RT_STS +0x10`、`SET_TYPE +0x11`、
+2. **已有源码依据，需落实到实现：** PMIC IRQ `RT_STS +0x10`、`SET_TYPE +0x11`、
    `POLARITY_HIGH/LOW +0x12/+0x13`、`LATCHED_CLR +0x14`、
    `EN_SET/CLR +0x15/+0x16`、`LATCHED_STS +0x18` 的位级行为；
    arb v5 channel `+0x100/+0x104/+0x108` 的 enable/status/clear 顺序。
@@ -50,9 +50,53 @@ DT SPI481 / GIC INTID513，按键已经证明端到端投递；新增电池源�
    链路、事件消退、快速连续变化、MSOC 跨阈值、与三键共享 SPI 时的并发及
    故障隔离。没有原理图或手册能替代这些运行结果。
 
+## 工作区电源资料已补齐的内容
+
+已核对工作区根目录的 `docs/INDEX.md` 及相关章节，并针对本轮关键项回查
+`ref/android_kernel_lge_sm8150/`，HEAD 为
+`d4f335e13d73c4aa2af85581a6ec11b670ee5b94`。该目录是新增资料的主源；
+它的 `pm8150b.dtsi` 与此前 `ref/lge-lineage-kernel/` 的该文件逐字节相同。
+以下属于**源码事实**，不把它们升级为本机当前寄存器读回：
+
+- `docs/charging-logic.md` §3.3：`qpnpint_irq_ack()` 先清 arb APID pending，
+  再写该 peripheral `+0x14` 的事件 BIT；`qpnpint_irq_unmask()` 先开 arb
+  access gate，若外设原来未使能，则清 latch 并置 enable。本轮已有准确
+  参考分支，不再将“缺少 clear/enable 文档”列作开工阻塞。
+- `docs/fuel-gauge-logic.md` §4.1：LG common 的 `fg-delta-soc-thr=3`
+  是 0.3%，通用默认 5 是 0.5%。`DELTA_MSOC_THR` 位于十进制 SRAM
+  word32:byte1，BSOC 是 word30:byte1；参数值 3/5 分别编码为 raw6/raw10。
+  已回查参数宏、DT 覆盖及编码函数；**当前 XNU 继承的实际阈值仍未知**。
+- 同章 §4.2：读 SRAM 也需 MEMIF 请求/grant/release，以及按硅版本选择
+  workaround；它不是普通 observer 连续读。第一步先验证固件现有阈值能否
+  产生 MSOC IRQ；若必须读取或改阈值，要单独设计 SRAM 事务，不为获取
+  一个阈值直接照搬整个 FG probe、重载 profile 或 restart 算法。
+- `docs/open-questions.md`：write ownership 与 IRQ ownership 分开核对，
+  同 PPID 可有多个 APID；observer 可读不代表允许写 IRQ 配置。
+  该静态报告没有本项目 XNU 运行上下文；其中“当前只读根因未知”等措辞
+  不能覆盖这里已经确认的事实：电池 observer 有意只读，而按键 mux 已有
+  经实机验证的 IRQ 写入/确认路径。
+
+因此，本轮真正缺少的是 REVID、FG 当前路由/门限/状态及新增 consumer 的
+端到端实测；不需要用户先补一份完整 PMIC 手册才能开始实现。
+
+### 与 IRQ 分开跟踪的差异
+
+`docs/hardware-facts.md` 和 `docs/devicetree-map.md` 记录目标 DTS 还配置
+SMB1355 并联充电器与 P9222 无线接收器；这不是两者已在 XNU 驱动或实机
+枚举成功的证据，本轮不顺带接管这些路径。
+
+目标 mh2lm DTS 引用 BLT42 Tocad/LGC 两份 **4000mAh 命名的 profile**，
+LG supplement `capacity-mah-min=3880`、`capacity-raw-full=247`。
+目前 0114a15 `SweetBattery::publish()` 却固定使用 **5020 mAh**，SOC 则按
+通用 MSOC 0..255 缩放。已回查两份 profile 和 XNU 最终源码，确有差异。
+5020 是当前移植占位基准，不是本机电池容量的探测结果；但容量分子和分母
+使用同一基准，不能单凭该差异断言百分比跳变由此造成。
+真实电池厂商/ID、实际加载 profile、学习容量及 LG UI 满量程要另行验证，
+不在电池 IRQ 补丁中盲改容量、重缩放 SOC 或重载 profile。
+
 ## 用户可协助寻找的资料
 
-现有目标 Linux 源码足以开展设计，不需要先等外部资料。若能找到以下资料，
+现有目标 Linux 源码和工作区上述六章资料已足以开展设计，不需要先等外部资料。若能找到以下资料，
 可帮助核对硬件语义和 revision 差异：
 
 - **PM8150B register reference / programming guide**，优先找 SMB5 CHGR
@@ -66,7 +110,13 @@ DT SPI481 / GIC INTID513，按键已经证明端到端投递；新增电池源�
 
 ## 本地资料定位
 
-均位于工作区 `ref/lge-lineage-kernel/`：
+本轮新增报告的阅读入口是工作区 `docs/INDEX.md`（不在 ios-mh2lm git
+仓库内）；六章分别是 `hardware-facts.md`、`architecture.md`、
+`charging-logic.md`、`fuel-gauge-logic.md`、`devicetree-map.md` 和
+`open-questions.md`。其中的源码路径、commit 和静态/实测边界需要保留。
+
+以下文件可在 `ref/android_kernel_lge_sm8150/` 查阅；此前预检使用的
+`ref/lge-lineage-kernel/` 也保留作为历史参考：
 
 - `arch/arm64/boot/dts/qcom/pm8150b.dtsi`：USID/REVID、SMB5、FG GEN4 IRQ。
 - `arch/arm64/boot/dts/qcom/sm8150-pmic-overlay.dtsi`：PMIC 组合与平台配置。

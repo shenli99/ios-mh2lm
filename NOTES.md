@@ -2,6 +2,25 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**Workspace power research reviewed and integrated into battery IRQ baseline:**
+User pointed to workspace docs/INDEX.md and its six static-analysis chapters.
+Checked the IRQ/FG/profile claims against new reference
+ref/android_kernel_lge_sm8150 HEAD d4f335e13d73c4aa2af85581a6ec11b670ee5b94;
+its pm8150b.dtsi byte-matches the previously used lge-lineage-kernel file.
+Ack clears arb APID pending then peripheral +0x14 BIT; unmask opens ACC and
+clears/enables a previously disabled source. LG delta config 3 = 0.3%, default
+5 = 0.5%; MSOC SRAM word32:byte1, BSOC word30:byte1. These are source facts,
+not current phone readbacks. SRAM reads require grant/release and silicon
+workarounds; first try inherited FG configuration, do not reload/restart the
+profile just to obtain IRQs. Remaining hardware evidence: REVID, FG mapping/
+ownership/gates/current threshold and real delivery. PMIC manuals are optional
+cross-checks, not blockers. Documented independent data-quality issue: target
+DTS uses BLT42 Tocad/LGC 4000mAh-named profiles and LG UI full raw247, whereas
+0114a15 XNU fixes capacity at 5020mAh and uses generic MSOC scaling. No current
+pack ID/profile readback exists; do not change capacity/SOC or infer jump cause
+solely from that mismatch. SMB1355/P9222 are DTS topology, not XNU enumeration.
+Only repository docs changed; original workspace reports and kernel unchanged.
+
 **Plan amended at user's request: battery IRQ before framebuffer:**
 IRQ-FRAMEBUFFER-PLAN.md now adds subgoal 4 after keys/USB/touch; the overall
 IRQ goal requires all four plus combined regression. Reuse the sole INTID513
