@@ -2,6 +2,50 @@
 
 ## Agent handoff / active work (2026-11-05, latest)
 
+**0115 persistent preflight PASSED; PM8150B identity/FG mapping now measured:**
+Reviewed logs/sweetlog-0115-battery-irq-preflight.bin, SHA256
+`ff7c67cba070256e558e5272f5e6eb0e1ceced9756c4c58a53e8a18265c5fc92`.
+Decoder tools/sweet-log.py reports v1, ring4194304, total301479, flush28,
+not wrapped; decoded4087 lines stored outside git at
+scratch/battery-irq-0115/preflight-persistent.txt. Boot args at line261 match
+the earlier mode1 live capture; missing early records are now recovered.
+Line106: REVID SID2 rev1..4=00/00/00/02, type51/subtype20, FG SOC subtype10,
+read-ok1/1, pm8150b1. This is direct hardware identification, not just DTS;
+do not assign a marketing silicon revision name without source mapping.
+Line117 explicitly selected mode1 preflight1. No new kernel build needed.
+
+USBIN line78: PPID213/APID269, EE0 owner0 IRQ-owner1, ACC0/status0/active0;
+line92 bit4 rt1 edge1 high1 low1 enabled0 latched0 read-ok1.
+CHGR line79: PPID210/APID266, EE0 IRQ-owner1, ACC0/status0/active0;
+line99 bit1 rt0 edge1 high1 low0 enabled0 latched0 read-ok1.
+FG line114: PPID240/APID283 map01024000 EE0 owner0 IRQ-owner1, owner-word8,
+owner-bit27, active0. IMPORTANT: FG route-parts03 inspects META+OWNER ONLY;
+acc-enable0/irq-status0 in this line are initialized placeholders, NOT channel
+readbacks. FG channel access/gate/status remains untested until mode4.
+Line116 observer reads: RT02 (SOC_READY), edge00/high00/low00/enable00/latch00,
+read-ok1. These are actual peripheral register bytes: FG IRQs are currently
+unconfigured/disabled, not proof of broken delivery. Mode4 configures the
+MSOC rising and READY both-edge route bits. SRAM threshold remains unknown.
+
+154 real samples, all MSOCb4/70%/held0; 4008..4009mV, external1/charging0/full0,
+USB10/CHGR47 state7. Key mux22 hits (power10/down4/up8), balanced key HID22;
+USB1152 hits TX904/905 err0, touch218 hits, display off/on. No scoped driver
+ERROR, stop or timeout; six known EP command WARNs. Early mux probe passed
+and arms three key routes at INTID513. No battery route is armed in mode1;
+passing preflight does NOT validate battery IRQ delivery or real charging.
+
+NEXT: use EXISTING out-bs/boot-16k-0115-battery-irq-usbin.img (mode2), SHA256
+1f9569ad0e3d52428d8e5209338c845875af2d74f9d4f698aaaf53432dd680ff.
+Test cable insertion/removal ~3 cycles with5..10s dwell, three keys/combination,
+touch and one display-off insertion/removal. Mode2 disables two-second battery
+polling; only USBIN plus initial/arm-sync/bounded-confirm samples. Require
+battery-usbin route -> refresh events01/sourceirq -> real external change
+and IOPM UI transition records, plus shared keys intact. Export persistent
+sweetlog-0115-battery-irq-usbin.bin and retain live ACM if available. Disconnect
+interrupts ACM normally; persistent log is required for early arm/unplug.
+No baseline repeat, push or cloud compile needed. CHGR/MSOC modes still wait.
+Hardware baseline, test guide and plan updated; only docs changed this turn.
+
 **0115 preflight live capture: runtime healthy, early preflight evidence MISSING:**
 User skipped mode0 baseline and tested mode1 directly; do not require baseline
 unless a concrete regression needs comparison. Reviewed

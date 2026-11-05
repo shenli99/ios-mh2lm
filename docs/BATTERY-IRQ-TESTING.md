@@ -3,8 +3,8 @@
 **日期：** 2026-11-05。补丁 `0141-mh2lm-battery-event-irqs.patch` 基于
 0114a15 最终 buildtree（0138→0139→0140 已生效）生成。完成本地检查；0115
 云端产物的最终源码、内核符号与标记已核对，六个测试镜像已生成并回读验证。
-已收到 mode1 的运行段 live 日志，采样和既有三路 IRQ 正常，但启动预检记录
-未包含在内；需补看同次启动的持久 SWEETLOG，不能宣称预检通过或电池 IRQ 成功。
+mode1 的 live 与持久日志已核对，采样和既有三路 IRQ 正常，启动记录明确
+`preflight=1`，只读预检通过。尚未开启电池路由，不能宣称电池 IRQ 成功。
 已验证的真实电池基线仍是 `live-0114a15-batt-irq-only.txt`。
 
 ## 实现路径与边界
@@ -70,9 +70,11 @@ IRQ 档遇到 gauge/charger 无效或 pack missing，保留上次已发布状态
 旧 `--irq-only` 入口默认仍是 mode0；测试时必须核对实际 boot arguments。
 
 预检读取 SID2 `0100..0105`，要求 type=`0x51`、subtype=`0x20`，FG
-`4005` subtype=`0x10`；这些仍是源码预期，尚未由本机新日志证明。
-mode≥2 不匹配或配置读取失败就拒绝 arm。FG 只读预检仅查看全局 APID/owner
-元数据和 observer 寄存器，不读取新的 FG channel MMIO；FG channel 的核对和
+`4005` subtype=`0x10`。
+0115 持久日志已实测确认上述 type/subtype 和 FG subtype，revision1..4 为
+`0/0/0/0x2`，不是推测值。mode≥2 不匹配或配置读取失败就拒绝 arm。
+FG 只读预检仅查看全局 APID/owner 元数据和 observer 寄存器，不读取新的
+FG channel MMIO；FG channel 的核对和
 使能留到 mode4。USBIN/CHGR 两条历史安全路径仍按当次状态重新核对。
 
 MSOC delta 沿用固件现有配置，不访问 MEMIF/SRAM。LG 源码 0.3% 是静态参考，
@@ -93,15 +95,31 @@ MSOC delta 沿用固件现有配置，不访问 MEMIF/SRAM。LG 源码 0.3% 是�
 完整镜像 SHA256 记录在 `NOTES.md` 和
 工作区 `scratch/battery-irq-0115/boot-verification.json`。
 用户已跳过 baseline 直接测试 preflight：运行段未见新增驱动故障，因此不要求
-补测 baseline。**当前补取同次 preflight 启动的持久日志，分析早期结果后再进入 usbin。**
-无需再次 push 或云编译，实际中断接入与硬件身份仍待确认。
+补测 baseline。持久日志补齐后预检明确通过，**当前使用现成的 usbin 镜像测试 mode2。**
+无需再次 push 或云编译，真实中断接入仍待确认。
 
 `live-0115-battery-irq-preflight.txt` 的 boot-args 确认 mode1；54 次真实采样
 稳定 70%、4009mV，三键 12 次路由与成对 HID、触摸及 USB ACM 均继续运行，
 未见驱动 ERROR/停用。插线但 CHGR state7 未充电，与前一真实采样基线一致。
 该文件从 launchd 附近开始，未包含 REVID、FG 路由和 `selected mode/preflight`
 输出。mode1 即使预检失败也会保留轮询，因此不能用成功启动代替预检结果。
-需导出同次启动的 `sweetlog-0115-battery-irq-preflight.bin` 补齐记录。
+随后 `sweetlog-0115-battery-irq-preflight.bin` 已补齐记录：REVID 确认
+PM8150B，USBIN APID269、CHGR APID266、FG APID283 均为 EE0 IRQ owner。
+FG 外设 edge/high/low/enable/latch 字节均为 0，RT=0x2；
+`selected mode=1 preflight=1`。FG route-parts=0x3 没有访问 channel，
+打印的 acc-enable/status=0 不能作为它们已测得为零的证据。详细值见硬件基线。
+
+下一步命令（工作区根目录）：
+
+```bash
+fastboot boot out-bs/boot-16k-0115-battery-irq-usbin.img
+```
+
+插拔约三轮，每次停留 5–10 秒；同时回归三键/组合键和触摸，再覆盖一次
+display-off 插拔。mode2 没有两秒电池采样，重点看插拔事件与状态通知；
+导出 `sweetlog-0115-battery-irq-usbin.bin`，有 live ACM 日志也一并保留。
+拔线中断 ACM 是正常现象，早期 arm/拔线段以持久日志补齐。未接 CHGR/MSOC，
+所以本档不能验收充电状态和电量变化事件。
 
 后续需要重打包时，在工作区根目录执行，`LABEL` 替换为实际产物编号：
 
@@ -166,4 +184,4 @@ display-off 只指现有逻辑息屏，不代表深度休眠；已知锁屏局�
 `base/xnu/`，补丁应用核对目录为 `verify/`，编译脚本/日志/对象在同级 scratch。
 这些本地产物不进 git；仓库提交补丁、打包入口、测试脚本与文档。
 0115 产物源码核对目录为工作区 `scratch/battery-irq-0115/xnu/`。
-下一步先补取 0115 preflight 的持久日志，再使用已经生成的镜像继续分阶段验证。
+0115 preflight 持久记录已补齐；下一步使用已经生成的 USBIN 镜像验证真实投递。

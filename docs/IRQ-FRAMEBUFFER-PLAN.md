@@ -25,8 +25,9 @@ PMIC mux 路由共 32 次命中、触摸 689 次、USB 1536 次，含息屏唤�
 2026-11-05 路线调整：按用户要求，在 IRQ 阶段追加子目标 4“电池 IRQ 化”，
 在 framebuffer 之前实施。0141 已完成电池 IRQ 首版本地实现、交叉编译和模拟
 故障检查；0115 云端产物的最终源码、符号与标记核对通过，六个临时镜像已生成。
-0115 mode1 实机 live 日志显示真实采样与三键/USB/触摸正常，但缺少启动时的
-REVID/FG 预检记录，需补持久日志；电池路由尚未实测，不能视为子目标完成。
+0115 mode1 实机 live 日志显示真实采样与三键/USB/触摸正常，随后持久日志
+补齐 REVID/FG 信息并明确 preflight=1。下一步测试 mode2 USBIN；电池路由
+尚未实测，不能视为子目标完成。
 同一内核的分阶段测试入口见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
 Framebuffer 修复尚未启动。
@@ -242,17 +243,18 @@ SPI 208（候选 INTID 240），并写好带 GIC 探针、真实 IRQ 与轮询�
 
 **状态：** 2026-11-05 新增；0141 首版实现已完成本地检查与 0115 云产物核对，
 六个临时测试镜像已回读验证。用户跳过 baseline 直接测试 mode1，运行段无新增
-驱动故障，不要求为此补测 baseline；当前先补同次启动的持久 SWEETLOG，
-取得早期预检结果后再进入 mode2，电池 IRQ 仍待实机验证。
-已验证的运行基线仍是 0114a15 的两秒真实采样。测试参数 `sweetbattirq=0..4`
+驱动故障，不要求为此补测 baseline；同次持久日志已确认 PM8150B 身份、FG
+APID283/EE0 与外设配置，预检通过，当前进入 mode2 USBIN 投递测试。
+两秒真实采样已由 0115 mode1 复核，电池 IRQ 仍待实机验证。测试参数 `sweetbattirq=0..4`
 支持显式轮询基线、只读预检、USBIN、USBIN+CHGR、全电池事件；IRQ 档无周期
 采样兜底。具体顺序、观测项与本地检查限制见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
 PMIC 型号证据、事件位置、既有 APID 预检和待测项见
 [`BATTERY-IRQ-HARDWARE-BASELINE.md`](BATTERY-IRQ-HARDWARE-BASELINE.md)。
 工作区 `docs/INDEX.md` 的电源六章报告已补充 ack/unmask 顺序、LG 0.3%
-MSOC delta 配置及 SRAM 事务依据；这些是源码参考，实际门限、REVID 与新 FG
-路由仍需实测。先沿用固件现有 FG 状态验证事件，不为 IRQ 化重载 profile；
+MSOC delta 配置及 SRAM 事务依据；这些是源码参考，实际门限与 FG channel/
+事件仍需实测，REVID 和 FG APID/owner 已由上述日志确认。先沿用固件现有
+FG 状态验证事件，不为 IRQ 化重载 profile；
 需要 SRAM 访问时单独设计授权、版本 workaround 与释放路径。
 
 **目的：** 让插拔电源、充电状态和电量变化经 PMIC IRQ 触发状态刷新，继续通过

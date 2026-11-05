@@ -1,7 +1,8 @@
 # MH2LM 电池 IRQ 硬件基线与资料缺口
 
-**日期：** 2026-11-05。已验证的 0114a15 电池仍是两秒只读采样；0141 已完成
-本地 IRQ 实现，尚无新内核实机读回，下面的未知项不能视为已经测得。
+**日期：** 2026-11-05。0115 mode1 持久日志已补齐只读预检：PM8150B 身份、
+FG APID/owner 与外设配置现在已有实机读回。该模式仍是两秒采样，未开启电池
+IRQ；FG channel 访问、MSOC 门限及真实事件仍待测试，不能视为已经测得。
 实施范围和验收见 `IRQ-FRAMEBUFFER-PLAN.md` 子目标 4；新一轮测试入口见
 [`BATTERY-IRQ-TESTING.md`](BATTERY-IRQ-TESTING.md)。
 
@@ -13,13 +14,16 @@
   同平台 DTS 还包括 PM8150、PM8150L；现有三键在 PM8150 SID0。
 - **实机功能匹配：** SID2 的 MSOC、VBATT、USBIN、CHGR 和既往 IBATT 数据
   可读，且与插拔、真实充电行为吻合；现有 APID 预检与目标寄存器布局匹配。
-- **尚未直接识别：** 当前 XNU 日志没有 REVID type/subtype/revision 的原始
-  读数。因此可以按 PM8150B 准备驱动，不能声称已通过芯片 ID 探测确认具体
-  硅版本，也不能把日志中的 PM6150/PM6150B 历史字符串当作本机型号。
+- **0115 实机直接识别：** `sweetlog-0115-battery-irq-preflight.bin` 中
+  REVID revision1..4=`0/0/0/0x2`、type=`0x51`、subtype=`0x20`；
+  FG SOC subtype=`0x10`，两项读取均成功，`pm8150b=1`。
+  `selected mode=1 preflight=1` 明确通过身份和 FG 配置检查。
+  原始 revision 字节保留，不未经对应表就命名硅版本；日志中 PM6150/PM6150B
+  的历史字符串仍不能用于识别本机型号。
 
-Linux 的 REVID 定义提供了下一次只读识别依据：SID2 `0x0100..0x0103`
+Linux 的 REVID 定义提供只读识别依据：SID2 `0x0100..0x0103`
 为 revision1..4，`0x0104` 为 type，`0x0105` 为 subtype。
-`PMIC_TYPE=0x51`，`PM8150B_SUBTYPE=0x20` 是源码预期值，**不是实测值**。
+`PMIC_TYPE=0x51`，`PM8150B_SUBTYPE=0x20` 的源码预期已由上述本机读回确认。
 访问 REVID 前仍须按已有规则解析其 EE/observer APID；不可为识别型号遍历读取
 外部 EE channel。revision 对应的 workaround 需按实测版本选择。
 
@@ -27,22 +31,22 @@ Linux 的 REVID 定义提供了下一次只读识别依据：SID2 `0x0100..0x010
 
 | 事件 | SID / peripheral / bit | PPID | 目标 DTS 触发 | 当前证据 |
 | --- | --- | --- | --- | --- |
-| USBIN_PLUGIN | 2 / 0x13 / 4 | 0x213 | 双边沿 | 0112m17 预检：EE0 IRQ-owned APID 269；外设 enable 与 arb access gate 均为 0；配置为 edge/high/low。 |
-| CHG_STATE_CHANGE | 2 / 0x10 / 1 | 0x210 | 上升沿 | 同轮预检：EE0 IRQ-owned APID 266；两级 gate 均为 0；配置为 edge/high。 |
-| MSOC_DELTA | 2 / 0x40 / 3 | 0x240 | 上升沿 | 目标 DTS 与 FG GEN4 Linux handler 已定位；本机 APID、ownership、gate、阈值及真实事件尚未核对。 |
-| SOC_READY（候选） | 2 / 0x40 / 1 | 0x240 | 双边沿 | DTS 与现有 SOC_READY 读取已知；IRQ 配置与事件尚未验证。 |
+| USBIN_PLUGIN | 2 / 0x13 / 4 | 0x213 | 双边沿 | 0115 复核：EE0 IRQ-owned APID 269；外设 enable、arb access gate、latch/status 均 0；rt=1，edge/high/low 均 1，read-ok=1。 |
+| CHG_STATE_CHANGE | 2 / 0x10 / 1 | 0x210 | 上升沿 | 0115 复核：EE0 IRQ-owned APID 266；两级 gate、latch/status 均 0；rt=0，edge/high=1、low=0，read-ok=1。 |
+| MSOC_DELTA | 2 / 0x40 / 3 | 0x240 | 上升沿 | 0115 元数据确认 EE0 IRQ-owned APID 283；外设 edge/high/low/enable/latch 原始字节均 0；channel gate/status、SRAM 阈值及真实投递待测。 |
+| SOC_READY | 2 / 0x40 / 1 | 0x240 | 双边沿 | 同一 APID 283；外设 RT=0x2 表示 ready，IRQ 配置字节均 0。0141 mode4 会配置双边沿；真实投递待测。 |
 
-前两行的 APID 是历史实测值；新增驱动仍运行时解析并核对 owner，不将数值
+上述 APID 是本次实测值；新增驱动仍运行时解析并核对 owner，不将数值
 当作所有固件版本的固定映射。已有共享上游是 PMIC-arb v5 → PDC pin1 →
 DT SPI481 / GIC INTID513，按键已经证明端到端投递；新增电池源要验证自己的
 外设到 mux 路由，不能以按键成功或 GIC 软件 pending 代替。
 
 ## 开 gate 前还需要什么
 
-1. **本机待测：** REVID；新 FG peripheral 的 APID/EE0/IRQ-owner、可访问
-   channel；当前 type/polarity/enable/latch；MSOC delta 阈值及运行中的 FG
-   是否在不新增算法配置时产生事件。前两条充电源的旧预检已有，不必重做
-   无关的 GIC/USB 功能试验，但 arm 前仍应核对当前配置。
+1. **本机待测：** FG APID 283 的实际 channel 访问/gate/status、MSOC delta
+   阈值及运行中的 FG 是否在不新增算法配置时产生事件。REVID、FG 元数据
+   和当前外设 IRQ 字节已测得，不再列为未知。USBIN/CHGR 本次只读配置也已
+   复核，下一步进入 mode2 USBIN，arm 前驱动仍自动核对当次状态。
 2. **已有源码依据，0141 已实现、仍待实机验证：** PMIC IRQ `RT_STS +0x10`、`SET_TYPE +0x11`、
    `POLARITY_HIGH/LOW +0x12/+0x13`、`LATCHED_CLR +0x14`、
    `EN_SET/CLR +0x15/+0x16`、`LATCHED_STS +0x18` 的位级行为；
@@ -78,8 +82,23 @@ DT SPI481 / GIC INTID513，按键已经证明端到端投递；新增电池源�
   不能覆盖这里已经确认的事实：电池 observer 有意只读，而按键 mux 已有
   经实机验证的 IRQ 写入/确认路径。
 
-因此，本轮真正缺少的是 REVID、FG 当前路由/门限/状态及新增 consumer 的
-端到端实测；不需要用户先补一份完整 PMIC 手册才能开始实现。
+因此，当前缺少的是 FG channel/门限及新增 consumer 的端到端实测；
+不需要用户先补一份完整 PMIC 手册才能继续验证。
+
+### 0115 预检记录的读取边界
+
+原始持久日志 SHA256 为
+`ff7c67cba070256e558e5272f5e6eb0e1ceced9756c4c58a53e8a18265c5fc92`，
+解码后工作区 `scratch/battery-irq-0115/preflight-persistent.txt` 的
+78/79 行为 USBIN/CHGR、106 行为 REVID、114/116/117 行为 FG 和预检结果。
+ring 未绕回，启动记录完整。FG 使用 `route-parts=0x3`，只读取 META/OWNER；
+该行打印的 `acc-enable=0 irq-status=0` 是未读取字段的初始值，**不是 FG
+channel 实测为零**。独立 `FG preflight` 行的 edge/high/low/enable/latch
+来自 observer，是真实外设字节。不可混淆这两类记录。
+
+本次仍是 mode1，未执行电池 IRQ arm；现有按键的 INTID513 成功也不能替代
+USBIN/CHGR/FG 的投递验收。154 次真实采样稳定 70%、4008–4009mV，
+external=1、charging=0、CHGR state7，不代表真实充电或电池 IRQ 已成功。
 
 ### 与 IRQ 分开跟踪的差异
 
@@ -128,6 +147,6 @@ LG supplement `capacity-mah-min=3880`、`capacity-raw-full=247`。
 - `drivers/power/supply/qcom/qpnp-fg-gen4.c`、`fg-reg.h`：MSOC 事件、阈值与状态寄存器。
 - `drivers/spmi/spmi-pmic-arb.c`：共享 IRQ、owner、ack 和 mask/unmask 语义。
 
-原始预检与真实充电证据见 `NOTES.md` 的 0112m17、0112m19/m20；最新真实
-采样恢复见 `live-0114a15-batt-irq-only.txt`。最新这份日志未启用 IRQ 预检，
-不能把旧 gate=0 记录冒充为本次启动的读回。
+原始预检与真实充电证据见 `NOTES.md` 的 0112m17、0112m19/m20；真实采样
+恢复见 `live-0114a15-batt-irq-only.txt`。最新预检采用上面的 0115 持久日志；
+同次 `live-0115-battery-irq-preflight.txt` 缺少启动段，不能独立提供这些硬件值。
