@@ -3,6 +3,8 @@
 ## Agent handoff / active work (2026-11-05, latest)
 
 **0115 USBIN failed BEFORE route attach; startup readiness fix 0142 ready for user push:**
+Fix committed as `a312626`; all ten staged files passed whitespace checks.
+No push was performed; native CI and new phone logs remain the next gate.
 User saw the UI stay at70% with an external-power/charging symbol regardless
 of unplug/replug and no display-off cable wake. Persistent log
 logs/sweetlog-0115-battery-irq-usbin.bin SHA256
