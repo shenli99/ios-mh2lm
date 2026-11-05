@@ -1,6 +1,37 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-11-04, latest)
+## Agent handoff / active work (2026-11-05, latest)
+
+**0114a15 IRQ image battery omission found and repackaged; combined real
+battery + fixed IRQ phone test pending:** The user reported that battery
+behavior looked abnormal again. Both original 0114a15 IRQ profile boot args
+and the two INFO/DEBUG live logs omit `sweetbattery=1 sweetbatt=1`.
+The exact 0114a15 `SweetBattery.cpp:739–746` defaults both selectors to zero;
+`poll()` then publishes static 100%, 4200 mV, external/capable/full true,
+charging false, and `start()` creates no sampling timer. The prior MSOC pair
+validation/scaling and IOPM notification fixes remain in the compiled source.
+This is a packaging regression, not evidence those fixes were removed. The
+user's exact observed symptom was requested and is not yet recorded.
+
+Commit `d84ac7f` makes `--irq-only` normal and DEBUG profiles share the two
+real-battery arguments and requires the kernel's MSOC marker when packaging.
+Using the SAME 0114a15 kernel, label `0114a15-batt` created:
+`out-bs/boot-16k-0114a15-batt-irq-only.img` SHA256
+`33f8d1287e78328efbb0add119f8d14b2d241aa5363425e357802eb5804b6006`,
+and `out-bs/boot-16k-0114a15-batt-irq-only-debug.img` SHA256
+`2940b199209135610d469533e9b741ad8bfd37b76aa3a02c6bf0a6611ad88f2c`.
+Both retain kernel SHA256
+`bc596ce6d81bd24b3cdbb24cf78260c70df4133eff2b7174e4ca2e385d1e00cf`.
+Readback from both final Android boot images verified the two added battery
+arguments, the unchanged remaining arguments and kernel hash. `bash -n` and
+patch whitespace checks passed. No cloud compile or push is required to test.
+Boot the normal `0114a15-batt` image, check `SWEET BATTERY SID2` with
+`src=gauge`, percentage and cable transitions plus key/touch/ACM concurrency.
+The older fixed-IRQ captures prove three-driver concurrency with a STATIC
+battery service only; they do not validate concurrent real battery polling.
+Current charger current/physical charging cannot be inferred from the old
+0114a15 static battery icon; the older 0112m19/m20 charging evidence remains
+valid for those tests.
 
 **0114a15 driver architecture reviewed; documentation only:**
 `docs/CURRENT-DRIVER-ARCHITECTURE.md` (commit `98199bf`) now maps the exact
