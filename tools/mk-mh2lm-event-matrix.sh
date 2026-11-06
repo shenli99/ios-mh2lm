@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--board-startup]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--board-startup]\n' "$0" >&2
 	exit 2
 fi
 
@@ -31,7 +31,7 @@ case "$KEY_IRQ_PROFILE" in
 		;;
 	--irq-only)
 		;;
-	--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--board-startup)
+	--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--board-startup)
 		;;
 	*)
 		printf 'unknown optional profile: %s\n' "$KEY_IRQ_PROFILE" >&2
@@ -98,7 +98,7 @@ if [ "$KEY_IRQ_PROFILE" = '--touch-irq' ]; then
 	grep -Fqa 'SWEET USB IRQ: software-pending probe hits=' "$TMPDIR/kernel.development.mh2lm"
 	grep -Fqa 'SWEET MUX: armed mode=' "$TMPDIR/kernel.development.mh2lm"
 fi
-if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--battery-transport' ] || [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
+if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--battery-transport' ] || [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-consumer' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 	for marker in 'SWEET KEYS IRQ: three routes active; IRQ-only' \
 	    'SWEET TOUCH: TouchComm ready (sda=%u scl=%u), max %ux%u, IRQ-only' \
 	    'SWEET USB IRQ: FAILED %s hits=%u empty=%u; gadget stopped' \
@@ -110,10 +110,10 @@ if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-ir
 	done
 elif grep -Fqa 'SWEET KEYS IRQ: three routes active; IRQ-only' \
     "$TMPDIR/kernel.development.mh2lm"; then
-	printf 'fixed IRQ kernel requires --irq-only, --battery-irq, --battery-charge-check, --battery-transport, --battery-runtime, --battery-adc5-conversion or --board-startup packaging profile\n' >&2
+	printf 'fixed IRQ kernel requires --irq-only, --battery-irq, --battery-charge-check, --battery-transport, --battery-runtime, --battery-adc5-conversion, --battery-adc5-consumer or --board-startup packaging profile\n' >&2
 	exit 1
 fi
-if [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--battery-transport' ] || [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
+if [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--battery-transport' ] || [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-consumer' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 	for marker in 'SWEET BATT IRQ: armed mode=' \
 	    'SWEET MUX: controller transactions serialized across keys and battery' \
 	    'SWEET MUX: isolated group=%u; other groups remain available' \
@@ -146,7 +146,7 @@ if [ "$KEY_IRQ_PROFILE" = '--battery-transport' ]; then
 	fi
 fi
 
-if [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ]; then
+if [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-consumer' ]; then
 	for marker in 'SWEET BATT RUNTIME: v1 mode=' 'SWEET BATT SAMPLE: v2 id=' \
 	    'SWEET BATT POLICY: v1 mode=' 'battery-source' 'battery-fault' \
 	    'SWEET FG ACCESS: v2 field=' 'SWEET BATT CONFIG: v3 id=' \
@@ -159,13 +159,22 @@ if [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ]; then
 	done
 fi
 
-if [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ]; then
+if [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-consumer' ]; then
 	for marker in 'SWEET ADC5 SERVICE: v1 mode=' 'SWEET ADC5 EOC:' 'SWEET ADC5 SAMPLE:'; do
 		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
 			printf 'kernel lacks ADC5 provider marker: %s\n' "$marker" >&2
 			exit 1
 		fi
 	done
+fi
+
+if [ "$KEY_IRQ_PROFILE" = '--battery-adc5-consumer' ]; then
+ for marker in 'SWEET BATT ADC: v1 registry consumer' 'SWEET BATT ADC: sample channel='; do
+  if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+   printf 'kernel lacks 0156 ADC consumer marker: %s\n' "$marker" >&2
+   exit 1
+  fi
+ done
 fi
 
 if [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
@@ -219,10 +228,18 @@ make_profile() {
 	sha256sum "$image"
 }
 
-if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--battery-transport' ] || [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
+if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--battery-transport' ] || [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-consumer' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 	# Fixed IRQ images retain the validated PM8150B gauge/UI path. Without
 	# both battery arguments SweetBattery publishes the static 100% source.
 	IRQ_ARGS='ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1'
+
+	if [ "$KEY_IRQ_PROFILE" = '--battery-adc5-consumer' ]; then
+  make_profile battery-adc5-consumer \
+   "LG G8X - XNU battery ADC5 consumer (${LABEL})" \
+   "$IRQ_ARGS sweetbattirq=4 sweetbattuidiag=1 sweetbattruntime=1 sweetbattadcconv=0"
+  printf 'kernel SHA256: %s\ncreated battery ADC5 consumer profile for %s; charging remains interlocked\n' "$KERNEL_SHA256" "$LABEL"
+  exit 0
+ fi
 
 	if [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ]; then
 		make_profile battery-adc5-conversion \

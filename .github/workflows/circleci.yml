@@ -76,7 +76,7 @@ jobs:
             fi
             require_marker() {
               if ! grep -Fq "$2" "$1"; then
-                echo "ERROR: required 0139..0155 marker missing from $1: $2" >&2
+                echo "ERROR: required 0139..0156 marker missing from $1: $2" >&2
                 exit 1
               fi
             }
@@ -119,6 +119,12 @@ jobs:
             require_marker xnu/bsd/dev/sweet_board.c 'sweet_adc5_init()'
             require_marker xnu/iokit/KernelConfigTables.cpp "'IOProviderClass' = SweetPmicAdc5Device;"
             require_marker xnu/bsd/dev/sweet_spmi_mux.h 'SWEET_MUX_ADC5'
+            require_marker xnu/bsd/dev/sweet_adc5_client.h 'class SweetAdc5Client : public OSObject'
+            require_marker xnu/iokit/Kernel/arm/SweetAdc5Client.cpp 'SWEET BATT ADC: v1 registry consumer'
+            require_marker xnu/iokit/Kernel/arm/SweetAdc5Client.cpp 'result.sequence == token'
+            require_marker xnu/iokit/Kernel/arm/SweetPmicAdc5.cpp 'SweetPmicAdc5::statusAction'
+            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SweetBattery::publishAdc(void)'
+            require_marker xnu/iokit/conf/files.arm64 'iokit/Kernel/arm/SweetAdc5Client.cpp'
             require_marker xnu/bsd/dev/sweet_spmi.c 'sp_fg_dma_command_locked(unsigned apid'
             require_marker xnu/bsd/dev/sweet_spmi.c 'SWEET FG DMA: v3 phase=recovery'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT SAMPLE: v2 id='

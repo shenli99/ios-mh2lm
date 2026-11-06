@@ -194,6 +194,11 @@ if 'SweetBattery::stopRuntime' in battery:
         'IOInterruptEventSource *fIrqEvent; IOTimerEventSource *fMonitor=nullptr;')
 
 startup_adapter=startup_adapter.replace('IOInterruptEventSource *fIrqEvent;', 'IOInterruptEventSource *fIrqEvent;\n    SweetSpmiMuxClient *fMuxClient=nullptr;')
+# ADC subscription is covered by its own actual-client suite; this adapter tests
+# only battery's mux/IRQ lifecycle, keeping the optional ADC binding absent.
+if 'SweetBattery::publishAdc' in battery:
+    startup_adapter=startup_adapter.replace('public:', 'public: struct AdcStub { void invalidate() {} }; AdcStub *fAdcClient=nullptr; void publishAdc() {}\n',1)
+
 startup_adapter=startup_adapter.replace('fIrqEvent=IOInterruptEventSource::interruptEventSource(this, irqAction, nullptr, 0);','fIrqEvent=IOInterruptEventSource::interruptEventSource(this, irqAction, nullptr, 0);\n        assert(fLoop->addEventSource(fIrqEvent)==0);')
 startup_adapter=re.sub(r'struct IOTimerEventSource \{.*?\n\};', r"""
 struct IOTimerEventSource : IOInterruptEventSource {
@@ -391,7 +396,7 @@ static void adcCheck(const char *mode) {
         assert(a->failed && !a->session.active && adcBegins==1 && !testInstance->bindings[2].notify);
     } else if (!std::strcmp(mode,"adc-idle")) {
         assert(a->ready && !a->session.active && !adcBegins);
-        assert(!a->requestSample(SWEET_ADC5_BAT_ID));assert(adcBegins==1);
+        unsigned token=0;assert(!a->requestSample(SWEET_ADC5_BAT_ID,&token));assert(adcBegins==1 && token==1);
     } else assert(a->ready && a->session.active && adcBegins==1);
     if(!adcBeginFail) {
         assert(a->requestSample(SWEET_ADC5_BAT_ID)==kIOReturnBusy);
@@ -419,16 +424,17 @@ static void adcCheck(const char *mode) {
             else {
                 unsigned channel=adcMode==2?2:1;
                 assert(!a->copySample(static_cast<sweet_adc5_channel>(channel),&sample));
+                assert(sample.sequence==1 && a->status()==kIOReturnSuccess);
                 assert(sample.microvolts==(channel==2?5000000u:800000u) && (sequence || (!a->session.active && !a->timer->armed)));
-                assert(a->messages==1);
+                assert(a->messages==2); // READY plus first completed sample
                 assert(a->properties[adcMode==2?"SweetADC5USBINValid":"SweetADC5BATIDValid"]=="true");
                 if(sequence) {
                     assert(a->session.active && a->session.channel==SWEET_ADC5_USBIN && adcBegins==2);
                     a->loop->runAction(fireAdcTimer,a);inject(280,1);pump();inject(280,1);pump();
-                    assert(a->valid[0] && a->valid[1] && !a->session.active && a->messages==2);
+                    assert(a->valid[0] && a->valid[1] && !a->session.active && a->messages==3);
                 }
                 // Unsolicited EOC cannot overwrite the cached sample or start another request.
-                inject(280,1);pump();assert(a->strayEoc==1 && adcBegins==(sequence?2u:1u) && a->messages==(sequence?2u:1u));
+                inject(280,1);pump();assert(a->strayEoc==1 && adcBegins==(sequence?2u:1u) && a->messages==(sequence?3u:2u));
             }
         }
     }

@@ -1,0 +1,550 @@
+diff --git a/bsd/dev/sweet_adc5.h b/bsd/dev/sweet_adc5.h
+index 685cacf9420a8859970cff70652194b8a6b0ab51..7833fc3fe014857396307a3d2ac6e92079527c00 100644
+--- a/bsd/dev/sweet_adc5.h
++++ b/bsd/dev/sweet_adc5.h
+@@ -58,6 +58,7 @@ struct sweet_adc5_session {
+ };
+ struct sweet_adc5_measurement {
+  unsigned channel, microvolts, eoc_count;
++ unsigned sequence; /* provider request token, assigned after restored completion */
+  uint16_t raw;
+  uint64_t started_ns, completed_ns;
+ };
+diff --git a/bsd/dev/sweet_adc5_client.h b/bsd/dev/sweet_adc5_client.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d09c3ee025689baee5b0d82c073a99038c5b22d
+--- /dev/null
++++ b/bsd/dev/sweet_adc5_client.h
+@@ -0,0 +1,39 @@
++/* Per-consumer ADC service discovery. Owner calls update/copyFresh on its own
++ * workloop. Registry/interest callbacks only mark/queue, never enter a gate.
++ * stop must run outside that gate and precede owner/event-source destruction. */
++#ifndef SWEET_ADC5_CLIENT_H
++#define SWEET_ADC5_CLIENT_H
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include "sweet_adc5_service.h"
++typedef void (*SweetAdcNotify)(void *);
++class SweetAdc5Client : public OSObject {
++ OSDeclareDefaultStructors(SweetAdc5Client);
++public:
++ static SweetAdc5Client *withOwner(IOWorkLoop *, SweetAdcNotify, void *);
++ void update(bool inputPresent, bool inputChanged, bool batteryChanged, uint64_t now);
++ bool copyFresh(enum sweet_adc5_channel, uint64_t now, struct sweet_adc5_measurement *);
++ void invalidate(void); /* own loop, terminal; keeps notifiers until stop */
++ void stop(void); /* outside gate, synchronizes notifiers and queued work */
++ void free(void) APPLE_KEXT_OVERRIDE;
++private:
++ IOWorkLoop *loop = NULL;
++ IOInterruptEventSource *event = NULL;
++ IOLock *lock = NULL;
++ SweetPmicAdc5 *provider = NULL;
++ IONotifier *matched = NULL, *terminated = NULL, *interest = NULL;
++ SweetAdcNotify notify = NULL;
++ void *context = NULL;
++ bool stopping = false, terminal = false, gone = false, eventAdded = false;
++ bool present = false, blocked = false, providerReady = false, valid[2] = {};
++ unsigned needed = 1, active = 0, token = 0, epoch[2] = {}, activeEpoch = 0;
++ struct sweet_adc5_measurement samples[2] = {};
++ static bool serviceMatched(void *, void *, IOService *, IONotifier *);
++ static bool serviceTerminated(void *, void *, IOService *, IONotifier *);
++ static IOReturn serviceMessage(void *, void *, UInt32, IOService *, void *, vm_size_t);
++ static void eventAction(OSObject *, IOInterruptEventSource *, int);
++ static IOReturn stopAction(OSObject *, void *, void *, void *, void *);
++ bool live(void);
++ void process(void);
++};
++#endif
++#endif
+diff --git a/bsd/dev/sweet_adc5_service.h b/bsd/dev/sweet_adc5_service.h
+index d46faf0e7d7e63a5823a3e0ee35ba0b8d19da6a5..27aae84894d92c2de9ad65e12cbaabe70ae89fae 100644
+--- a/bsd/dev/sweet_adc5_service.h
++++ b/bsd/dev/sweet_adc5_service.h
+@@ -18,7 +18,10 @@ public:
+  void stop(IOService *) APPLE_KEXT_OVERRIDE;
+  void free(void) APPLE_KEXT_OVERRIDE;
+  IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE { return loop; }
+- virtual IOReturn requestSample(enum sweet_adc5_channel channel);
++ /* A successful request assigns token; copySample.sequence must match it.
++  * Failed/Busy requests leave token unchanged. Completion/READY wake interest. */
++ virtual IOReturn requestSample(enum sweet_adc5_channel channel, unsigned *token = NULL);
++ virtual IOReturn status(void); /* Success ready, NotReady pending/stop, IOError failed */
+  virtual IOReturn copySample(enum sweet_adc5_channel channel,
+      struct sweet_adc5_measurement *out);
+ private:
+@@ -31,6 +34,7 @@ private:
+  volatile unsigned stopping = 0;
+  unsigned diagnostics = 0, sequence = 0, strayEoc = 0;
+  static IOReturn subscribeAction(OSObject *, void *, void *, void *, void *);
++ static IOReturn statusAction(OSObject *, void *, void *, void *, void *);
+  static IOReturn sampleAction(OSObject *, void *, void *, void *, void *);
+  static IOReturn copyAction(OSObject *, void *, void *, void *, void *);
+  static IOReturn stopAction(OSObject *, void *, void *, void *, void *);
+diff --git a/iokit/Kernel/arm/SweetAdc5Client.cpp b/iokit/Kernel/arm/SweetAdc5Client.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..f10b0f637a92c4604559dc8faf1f2dac9aa051dd
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetAdc5Client.cpp
+@@ -0,0 +1,216 @@
++/* ADC measurements consumed through IOKit, never a global service bridge. */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include <IOKit/IOLib.h>
++#include <IOKit/IOMessage.h>
++#include <kern/clock.h>
++#include "../../../bsd/dev/sweet_adc5_client.h"
++#define SWEET_LOG_SINK IOLog
++#include "../../../bsd/dev/sweet_log_level.h"
++OSDefineMetaClassAndStructors(SweetAdc5Client, OSObject);
++static uint64_t adcClientNow(void)
++{
++ uint64_t ticks, ns; clock_get_uptime(&ticks); absolutetime_to_nanoseconds(ticks, &ns); return ns;
++}
++SweetAdc5Client *
++SweetAdc5Client::withOwner(IOWorkLoop *loop, SweetAdcNotify notify, void *context)
++{
++ if (!loop || !notify || !context) { return NULL; }
++ SweetAdc5Client *self = new SweetAdc5Client;
++ if (!self) { return NULL; }
++ if (!self->init()) { self->release(); return NULL; }
++ self->loop = loop; loop->retain(); self->notify = notify; self->context = context;
++ self->lock = IOLockAlloc();
++ self->event = IOInterruptEventSource::interruptEventSource(self, eventAction, NULL, 0);
++ if (!self->lock || !self->event) { self->release(); return NULL; }
++ self->event->disable();
++ if (loop->addEventSource(self->event) != kIOReturnSuccess) { self->release(); return NULL; }
++ self->eventAdded = true;
++ OSDictionary *matching = IOService::serviceMatching("SweetPmicAdc5");
++ if (matching) {
++  self->terminated = IOService::addMatchingNotification(gIOTerminatedNotification, matching, serviceTerminated, self);
++  if (self->terminated) { self->matched = IOService::addMatchingNotification(gIOFirstMatchNotification, matching, serviceMatched, self); }
++  matching->release();
++ }
++ if (!self->terminated || !self->matched) { self->release(); return NULL; }
++ self->event->enable(); self->event->interruptOccurred(NULL, NULL, 0);
++ SWEET_LOG_INFO("SWEET BATT ADC: v1 registry consumer; measured voltages grant no charging permission\n");
++ return self;
++}
++bool
++SweetAdc5Client::serviceMatched(void *target, void *, IOService *service, IONotifier *)
++{
++ SweetAdc5Client *self = (SweetAdc5Client *)target;
++ SweetPmicAdc5 *adc = OSDynamicCast(SweetPmicAdc5, service);
++ if (!adc) { return true; }
++ IOLockLock(self->lock);
++ if (!self->stopping && !self->terminal && !self->provider && !adc->isInactive()) {
++  adc->retain(); self->provider = adc; self->event->interruptOccurred(NULL, NULL, 0);
++ }
++ IOLockUnlock(self->lock); return true;
++}
++bool
++SweetAdc5Client::serviceTerminated(void *target, void *, IOService *service, IONotifier *)
++{
++ SweetAdc5Client *self = (SweetAdc5Client *)target;
++ IOLockLock(self->lock);
++ if (!self->stopping && self->provider == service) {
++  self->gone = true; self->event->interruptOccurred(NULL, NULL, 0);
++ }
++ IOLockUnlock(self->lock); return true;
++}
++IOReturn
++SweetAdc5Client::serviceMessage(void *target, void *, UInt32, IOService *, void *, vm_size_t)
++{
++ SweetAdc5Client *self = (SweetAdc5Client *)target;
++ /* Provider gate context: no consumer gate, no provider API, no SPMI. */
++ IOLockLock(self->lock);
++ if (!self->stopping && !self->terminal) { self->event->interruptOccurred(NULL, NULL, 0); }
++ IOLockUnlock(self->lock); return kIOReturnSuccess;
++}
++bool
++SweetAdc5Client::live(void)
++{
++ IOLockLock(lock);
++ bool ok = !stopping && !terminal && !gone && provider;
++ IOLockUnlock(lock);
++ return ok && !provider->isInactive();
++}
++void
++SweetAdc5Client::update(bool inputPresent, bool inputChanged, bool batteryChanged, uint64_t now)
++{
++ /* Called only on the owner loop, from source IRQ or its protection monitor.
++  * Periodic conversion monitors voltage, never discovers plug state. */
++ if (inputChanged || inputPresent != present) {
++  ++epoch[1]; valid[1] = false;
++  needed = inputPresent ? needed | 2 : needed & ~2u;
++  SWEET_LOG_INFO("SWEET BATT ADC: invalidate channel=2 epoch=%u present=%u\n", epoch[1], inputPresent);
++ }
++ present = inputPresent;
++ if (batteryChanged) { ++epoch[0]; valid[0] = false; needed |= 1; }
++ if (terminal) { return; }
++ if (valid[0] && (now < samples[0].started_ns || now - samples[0].started_ns >= 30000000000ULL)) { needed |= 1; }
++ if (present && valid[1] && (now < samples[1].started_ns || now - samples[1].started_ns >= 2000000000ULL)) { needed |= 2; }
++ if (needed && !active && !blocked) { event->interruptOccurred(NULL, NULL, 0); }
++}
++bool
++SweetAdc5Client::copyFresh(enum sweet_adc5_channel channel, uint64_t now, struct sweet_adc5_measurement *out)
++{
++ if (!out || (channel != SWEET_ADC5_BAT_ID && channel != SWEET_ADC5_USBIN) || !live()) { return false; }
++ unsigned i = channel - 1;
++ uint64_t ageLimit = i ? 3000000000ULL : 60000000000ULL;
++ const struct sweet_adc5_measurement &s = samples[i];
++ if (!valid[i] || (i && !present) || !s.completed_ns || s.completed_ns < s.started_ns ||
++     now < s.completed_ns || now < s.started_ns || now - s.started_ns > ageLimit) { return false; }
++ *out = s; return true;
++}
++void
++SweetAdc5Client::invalidate(void)
++{
++ IOLockLock(lock); terminal = true; IOLockUnlock(lock);
++ valid[0] = valid[1] = false; needed = active = 0;
++}
++void
++SweetAdc5Client::eventAction(OSObject *owner, IOInterruptEventSource *, int)
++{
++ SweetAdc5Client *self = OSDynamicCast(SweetAdc5Client, owner); self->process();
++}
++void
++SweetAdc5Client::process(void)
++{
++ if (!live()) {
++  IOLockLock(lock); bool lost = gone; IOLockUnlock(lock);
++  if (lost || (provider && provider->isInactive())) {
++   invalidate(); notify(context);
++   SWEET_LOG_ERROR("SWEET BATT ADC: provider terminated; measurements revoked\n");
++  }
++  return;
++ }
++ if (!interest) {
++  interest = provider->registerInterest(gIOGeneralInterest, serviceMessage, this);
++  if (!interest) {
++   invalidate(); notify(context);
++   SWEET_LOG_ERROR("SWEET BATT ADC: interest registration failed; measurements unavailable\n");
++   return;
++  }
++ }
++ IOReturn status = provider->status();
++ if (!live()) { invalidate(); notify(context); return; }
++ if (status == kIOReturnNotReady) {
++  blocked = true;
++  if (providerReady) {
++   invalidate(); notify(context);
++   SWEET_LOG_ERROR("SWEET BATT ADC: provider lost readiness; measurements revoked\n");
++  }
++  return;
++ }
++ if (status != kIOReturnSuccess) {
++  invalidate(); notify(context);
++  SWEET_LOG_ERROR("SWEET BATT ADC: provider failed; measurements revoked\n"); return;
++ }
++ providerReady = true; blocked = false; /* READY or conversion completion notification */
++ if (active) {
++  struct sweet_adc5_measurement result = {};
++  IOReturn rc = provider->copySample((enum sweet_adc5_channel)active, &result);
++  if (!live()) { invalidate(); notify(context); return; }
++  if (rc == kIOReturnNotReady) { return; } /* our EOC still pending */
++  unsigned i = active - 1;
++  uint64_t now = adcClientNow();
++  if (rc == kIOReturnSuccess && result.sequence == token && result.channel == active &&
++      activeEpoch == epoch[i] && (!i || present) && result.completed_ns &&
++      result.completed_ns >= result.started_ns && now >= result.completed_ns &&
++      now >= result.started_ns && now - result.started_ns <= (i ? 3000000000ULL : 60000000000ULL)) {
++   samples[i] = result; valid[i] = true;
++   SWEET_LOG_INFO("SWEET BATT ADC: sample channel=%u token=%u epoch=%u uv=%u valid=1\n", active, token, epoch[i], result.microvolts);
++  } else {
++   valid[i] = false;
++   if (!i || present) { needed |= 1u << i; }
++   SWEET_LOG_WARN("SWEET BATT ADC: discarded channel=%u token=%u result=%u epoch=%u/%u error=%#x\n", active, token, result.sequence, activeEpoch, epoch[i], rc);
++  }
++  active = 0; notify(context);
++ }
++ if (!needed) { return; }
++ unsigned channel = needed & 1 ? 1 : 2;
++ unsigned nextToken = 0;
++ IOReturn rc = provider->requestSample((enum sweet_adc5_channel)channel, &nextToken);
++ if (!live()) { invalidate(); notify(context); return; }
++ if (rc == kIOReturnBusy || rc == kIOReturnNotReady) {
++  /* Wait for provider READY/completion, never spin or poll-retry. */
++  blocked = true; return;
++ }
++ if (rc != kIOReturnSuccess) {
++  invalidate(); notify(context);
++  SWEET_LOG_ERROR("SWEET BATT ADC: sample request failed channel=%u error=%#x\n", channel, rc);
++  return;
++ }
++ active = channel; token = nextToken; activeEpoch = epoch[channel - 1]; needed &= ~(1u << (channel - 1));
++}
++IOReturn
++SweetAdc5Client::stopAction(OSObject *owner, void *, void *, void *, void *)
++{
++ SweetAdc5Client *self = OSDynamicCast(SweetAdc5Client, owner);
++ self->invalidate();
++ if (self->event) { self->event->disable(); }
++ return kIOReturnSuccess;
++}
++void
++SweetAdc5Client::stop(void)
++{
++ if (lock) { IOLockLock(lock); stopping = true; IOLockUnlock(lock); }
++ /* No gate/lock held while remove synchronizes callbacks. First drain gated
++  * process (which alone can install interest), then synchronize all notices. */
++ if (loop && lock) { (void)loop->runAction(stopAction, this); }
++ if (matched) { matched->remove(); matched = NULL; }
++ if (terminated) { terminated->remove(); terminated = NULL; }
++ if (interest) { interest->remove(); interest = NULL; }
++ /* Keep the service retained until its interest callback is synchronized. */
++ OSSafeReleaseNULL(provider);
++ if (loop && eventAdded) { loop->removeEventSource(event); eventAdded = false; }
++}
++void
++SweetAdc5Client::free(void)
++{
++ stop(); OSSafeReleaseNULL(event); OSSafeReleaseNULL(loop);
++ if (lock) { IOLockFree(lock); lock = NULL; }
++ OSObject::free();
++}
++#endif
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 27070030ebc3aa2782b676a82187bacb25dbf00e..cf1824d79ff2e0ef0d5f2f345746f4b2b03c823c 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -29,6 +29,9 @@
+ #include <kern/clock.h>
+ #include "../../../bsd/dev/sweet_spmi.h"
+ #include "../../../bsd/dev/sweet_adc5.h"
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include "../../../bsd/dev/sweet_adc5_client.h"
++#endif
+ #include "../../../bsd/dev/sweet_battery_runtime.h"
+ #include "../../../bsd/dev/sweet_pmic_power.h"
+ #include "../../../bsd/dev/sweet_spmi_mux.h"
+@@ -112,6 +115,11 @@ private:
+ 	static IOReturn runtimePowerNotice(void *, void *, UInt32, IOService *, void *, vm_size_t);
+ 	bool fMonitorAdded;
+ 	bool fAdcPreflightRequested;
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ SweetAdc5Client *fAdcClient;
++ static void adcChanged(void *);
++ void publishAdc(void);
++#endif
+ 	SweetBattSnapshot fSnapshot;
+ 	SweetBattLimits fLimits;
+ 	SweetBattController fController;
+@@ -279,6 +287,9 @@ SweetBattery::init(OSDictionary *dictionary)
+ 	fMonitorAdded = false;
+ 	fSnapshot = {};
+ 	fLimits = {};
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ fAdcClient = NULL;
++#endif
+ 	fController = {};
+ 	fLoop = NULL;
+ 	fTimer = NULL;
+@@ -1137,8 +1148,16 @@ SweetBattery::sampleRuntime(bool refreshInput)
+ 	next.startedNs = sweet_batt_now_ns();
+ 	sweet_pmic_power_read_snapshot(next, refreshInput, refreshInput || !fMonitorSamples, fLastPercent);
+ 	next.completedNs = sweet_batt_now_ns();
+-	fSnapshot = next;
+-	++fMonitorSamples;
++	bool batteryChanged = next.presentValid != fSnapshot.presentValid || next.present != fSnapshot.present;
++ fSnapshot = next;
++ if (fAdcClient) {
++  IOLockLock(fControlLock); bool stopping = fPowerStopping; IOLockUnlock(fControlLock);
++  if (stopping) { fAdcClient->invalidate(); }
++  fAdcClient->update(sb_valid(next, SB_USB) && (next.raw[SB_USB] & 16),
++      refreshInput, batteryChanged, next.completedNs);
++  publishAdc();
++ }
++ ++fMonitorSamples;
+ 	/* Keep each console record below 255 bytes, including severity/newline.
+ 	 * A shared sample id joins the independently complete records. */
+ 	SWEET_LOG_INFO("SWEET BATT SAMPLE: v2 id=%u source=%s valid=%#llx mv=%u v-ok=%u ma=%d i-ok=%u\n",
+@@ -1165,6 +1184,48 @@ SweetBattery::sampleRuntime(bool refreshInput)
+ #endif
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++void
++SweetBattery::adcChanged(void *context)
++{
++ SweetBattery *self = (SweetBattery *)context;
++ /* Delivered only on the battery loop, never synchronously by ADC provider. */
++ if (!self->fRunning || !self->fRuntimeMode || self->fController.stopped) { return; }
++ IOLockLock(self->fControlLock);
++ bool stopping = self->fPowerStopping;
++ IOLockUnlock(self->fControlLock);
++ if (stopping) { self->fAdcClient->invalidate(); }
++ self->publishAdc();
++ self->runRuntimePolicy();
++ self->updateStatus();
++}
++void
++SweetBattery::publishAdc(void)
++{
++ struct sweet_adc5_measurement id = {}, vbus = {};
++ uint64_t now = sweet_batt_now_ns();
++ bool idOk = fAdcClient && fAdcClient->copyFresh(SWEET_ADC5_BAT_ID, now, &id);
++ bool vbusOk = fAdcClient && fAdcClient->copyFresh(SWEET_ADC5_USBIN, now, &vbus);
++ putBool("SweetBatteryBATIDMeasured", idOk);
++ putBool("SweetBatteryVBUSMeasured", vbusOk);
++ if (idOk) {
++  putNumber("SweetBatteryBATIDMicrovolts", id.microvolts);
++  putNumber("SweetBatteryBATIDAgeMS", (UInt32)((now - id.started_ns) / 1000000ULL));
++ } else {
++  removePowerValue("SweetBatteryBATIDMicrovolts"); removePowerValue("SweetBatteryBATIDAgeMS");
++ }
++ if (vbusOk) {
++  putNumber("SweetBatteryVBUSMicrovolts", vbus.microvolts);
++  putNumber("SweetBatteryVBUSAgeMS", (UInt32)((now - vbus.started_ns) / 1000000ULL));
++ } else {
++  removePowerValue("SweetBatteryVBUSMicrovolts"); removePowerValue("SweetBatteryVBUSAgeMS");
++ }
++ /* Physical voltage is only one dependency. Identity/profile bounds, source
++  * current capability, parallel isolation and watchdog remain unverified.
++  * Do not set inputVerified/verifiedNs or infer maxFcc/maxFv from ADC voltage. */
++}
++#endif
++
+ int
+ SweetBattery::runtimeUpdate(void *context, enum sweet_charger_operation operation, unsigned value, uint64_t deadline, unsigned *out)
+ {
+@@ -1225,6 +1286,13 @@ SweetBattery::startRuntime(OSObject *owner, void *, void *, void *, void *)
+ 	SweetBattery *self = OSDynamicCast(SweetBattery, owner);
+ 	if (!self || !self->fRunning) { return kIOReturnNotReady; }
+ 	self->fRuntimeMode = self->fRuntimeRequested;
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ self->fAdcClient = SweetAdc5Client::withOwner(self->fLoop, adcChanged, self);
++ if (!self->fAdcClient) {
++  SWEET_LOG_ERROR("SWEET BATT ADC: registry consumer allocation failed; runtime unavailable\n");
++  return kIOReturnNoMemory;
++ }
++#endif
+ 	SWEET_LOG_INFO("SWEET BATT RUNTIME: v1 mode=%u; board identity/input/parallel providers missing; control interlocked\n",
+ 	    self->fRuntimeMode);
+ 	SWEET_LOG_INFO("SWEET BATT HARDWARE: v1 semantic charger operations; sampling via PMIC backend\n");
+@@ -1539,6 +1607,9 @@ bool
+ SweetBattery::willTerminate(IOService *provider, IOOptionBits options)
+ {
+ 	removeRuntimeNotifier();
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ if (fAdcClient) { fAdcClient->stop(); }
++#endif
+ 	if (fLoop && fTimerAdded) {
+ 		(void)fLoop->runAction(&SweetBattery::stopPolling, this);
+ 	}
+@@ -1554,6 +1625,9 @@ void
+ SweetBattery::stop(IOService *provider)
+ {
+ 	removeRuntimeNotifier();
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ if (fAdcClient) { fAdcClient->stop(); }
++#endif
+ 	if (fLoop && fTimerAdded) {
+ 		/* Serialize against a running timer callback, including rearming. */
+ 		(void)fLoop->runAction(&SweetBattery::stopPolling, this);
+@@ -1584,6 +1658,9 @@ SweetBattery::stopPolling(OSObject *owner, void *, void *, void *, void *)
+ 		return kIOReturnBadArgument;
+ 	}
+ 	self->stopRuntime();
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ if (self->fAdcClient) { self->fAdcClient->invalidate(); self->publishAdc(); }
++#endif
+ 	self->fRunning = false;
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ 	if (self->fMuxClient) {
+@@ -1607,6 +1684,9 @@ void
+ SweetBattery::free(void)
+ {
+ 	removeRuntimeNotifier();
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ if (fAdcClient) { fAdcClient->stop(); }
++#endif
+ 	/* Defensive unwind also covers a start() failure before stop(). */
+ 	if (fLoop && fTimerAdded) {
+ 		(void)fLoop->runAction(&SweetBattery::stopPolling, this);
+@@ -1628,6 +1708,9 @@ SweetBattery::free(void)
+ 		fMonitorAdded = false;
+ 	}
+ 	OSSafeReleaseNULL(fMonitor);
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ OSSafeReleaseNULL(fAdcClient);
++#endif
+ 	OSSafeReleaseNULL(fLoop);
+ 	if (fControlLock) { IOLockFree(fControlLock);fControlLock = NULL; }
+ 	IOPMPowerSource::free();
+diff --git a/iokit/Kernel/arm/SweetPmicAdc5.cpp b/iokit/Kernel/arm/SweetPmicAdc5.cpp
+index 32fd85c7bfd8c4d743d3e2690a3efbeec4b4073b..23e43783092a9595e7a22b154fbccd8bc2c36f0c 100644
+--- a/iokit/Kernel/arm/SweetPmicAdc5.cpp
++++ b/iokit/Kernel/arm/SweetPmicAdc5.cpp
+@@ -62,14 +62,27 @@ SweetPmicAdc5::subscribeAction(OSObject *owner, void *, void *, void *, void *)
+ }
+ 
+ IOReturn
+-SweetPmicAdc5::requestSample(enum sweet_adc5_channel channel)
++SweetPmicAdc5::status(void)
++{
++ return loop ? loop->runAction(statusAction, this) : kIOReturnNotReady;
++}
++IOReturn
++SweetPmicAdc5::statusAction(OSObject *owner, void *, void *, void *, void *)
++{
++ SweetPmicAdc5 *self = OSDynamicCast(SweetPmicAdc5, owner);
++ if (self->failed) { return kIOReturnIOError; }
++ return !__atomic_load_n(&self->stopping, __ATOMIC_ACQUIRE) && self->ready ? kIOReturnSuccess : kIOReturnNotReady;
++}
++
++IOReturn
++SweetPmicAdc5::requestSample(enum sweet_adc5_channel channel, unsigned *token)
+ {
+  if ((channel != SWEET_ADC5_BAT_ID && channel != SWEET_ADC5_USBIN) || !loop) { return kIOReturnBadArgument; }
+- return loop->runAction(sampleAction, this, &channel);
++ return loop->runAction(sampleAction, this, &channel, token);
+ }
+ 
+ IOReturn
+-SweetPmicAdc5::sampleAction(OSObject *owner, void *argument, void *, void *, void *)
++SweetPmicAdc5::sampleAction(OSObject *owner, void *argument, void *token, void *, void *)
+ {
+  SweetPmicAdc5 *self = OSDynamicCast(SweetPmicAdc5, owner);
+  enum sweet_adc5_channel channel = *(enum sweet_adc5_channel *)argument;
+@@ -83,6 +96,7 @@ SweetPmicAdc5::sampleAction(OSObject *owner, void *argument, void *, void *, voi
+      self->sequence, channel, rc, self->session.phase);
+  if (rc) { self->complete(rc, NULL); return kIOReturnIOError; }
+  self->armDeadline();
++ if (token) { *(unsigned *)token = self->sequence; }
+  return kIOReturnSuccess;
+ }
+ 
+@@ -122,6 +136,8 @@ SweetPmicAdc5::muxEvent(void *context, unsigned events)
+  if (events & SWEET_MUX_READY) {
+   self->ready = true;
+   self->setProperty("SweetADC5IRQHealthy", true);
++  /* A matched client may have arrived before mux READY. Wake it explicitly. */
++  self->messageClients(kIOMessageServicePropertyChange);
+   if (self->diagnostics) {
+    unsigned first = self->diagnostics & 1 ? 1 : 2;
+    self->diagnostics &= ~first;
+@@ -175,7 +191,7 @@ SweetPmicAdc5::complete(int error, const struct sweet_adc5_measurement *result)
+   SWEET_LOG_ERROR("SWEET ADC5 FAILURE: v1 id=%u error=%d restore-error=%d cleanup=%d; provider stopped\n", sequence, error, session.restore_error, cleanup);
+  } else if (result) {
+   unsigned index = result->channel - 1;
+-  samples[index] = *result; valid[index] = true;
++  samples[index] = *result; samples[index].sequence = sequence; valid[index] = true;
+   setProperty(index ? "SweetADC5USBINMicrovolts" : "SweetADC5BATIDMicrovolts", (uint64_t)result->microvolts, 32);
+   setProperty(index ? "SweetADC5USBINValid" : "SweetADC5BATIDValid", true);
+   SWEET_LOG_INFO("SWEET ADC5 SAMPLE: v1 id=%u channel=%u raw=%#x uv=%u eoc=%u valid=1 restored=1\n",
+@@ -203,6 +219,7 @@ SweetPmicAdc5::stopAction(OSObject *owner, void *, void *, void *, void *)
+  self->setProperty("SweetADC5BATIDValid", false); self->setProperty("SweetADC5USBINValid", false);
+  int rc = sweet_spmi_adc5_abort(&self->session);
+  if (rc) { SWEET_LOG_ERROR("SWEET ADC5 STOP: restore error=%d\n", rc); }
++ self->messageClients(kIOMessageServicePropertyChange);
+  return kIOReturnSuccess;
+ }
+ 
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index 697069e3894dce19490e4efdb4e42950d8aca0ad..33a54300fc4554eb94602ff6eb6546fbcb47c5b8 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -25,4 +25,5 @@ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitc
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp
+ 
++iokit/Kernel/arm/SweetAdc5Client.cpp                               optional iokitcpp
+ iokit/Kernel/arm/SweetPmicAdc5.cpp                                optional iokitcpp

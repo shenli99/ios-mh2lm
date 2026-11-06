@@ -1,5 +1,11 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+0156补充（本地实现，待云构建/实机）：SweetBattery 已通过每consumer的
+SweetAdc5Client 订阅 ADC5 IOService，自己的workloop发起请求并验证token、
+source epoch与时效；插拔撤销旧VBUS，保护monitor维护电压测量，退出同步清理。
+没有设置充电授权，身份/输入能力/并联隔离/watchdog仍缺。
+接口、时序和下一轮步骤见[ADC5 consumer](BATTERY-ADC5-CONSUMER.md)。
+
 0120a4补充：0155 ADC5 provider实机已得到BAT_ID 889684uV、USBIN 4831136uV，
 三次EOC及配置恢复成功，无ADC错误；下一步接入测量provider并核对充电证据。
 充电仍互锁，不能把转换成功等同于真实充电。详细数据和回归边界见
@@ -8,7 +14,7 @@
 ## 0155 ADC5 provider（0120a4正常转换已实测）
 
 板级新增专用nub匹配独立 `SweetPmicAdc5` 服务，自己的workloop/timer通过
-registry client接mux group2 EOC；默认空闲，显式诊断参数才启动转换。
+registry client接mux group2 EOC；默认空闲；typed client 或显式诊断参数可启动转换。
 真实ADC转换与恢复在0120a4正常完成，结果尚未接入充电授权。详见
 [ADC5 provider](BATTERY-ADC5-PROVIDER.md)。
 
@@ -22,7 +28,7 @@ IOPMPowerSource自己的workloop，拆出内部PMIC采样组件与语义充电�
 新边界图、API、历史诊断残留和测试状态见
 [BATTERY-HARDWARE-INTERFACES.md](BATTERY-HARDWARE-INTERFACES.md)。
 
-## 当前代码架构：0119基线加0151～0155
+## 当前代码架构：0119基线加0151～0156
 
 2026-11-05核对0119最终源码。当前采用 **IOKit服务匹配/生命周期 + 板级GIC
 分派 + 各设备下半部**，不是完整的通用GIC/总线provider树。0119各测试镜像

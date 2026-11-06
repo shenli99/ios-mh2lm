@@ -1,5 +1,8 @@
 # PM8150B ADC5 转换 provider（0155）
 
+0156已本地实现[SweetBattery测量consumer](BATTERY-ADC5-CONSUMER.md)，待新云构建与实机；
+下方0155的“尚未接入consumer/只启动各一次”等描述为历史阶段。充电仍互锁。
+
 2026-11-06。0120a4已完成云端构建及真实转换/EOC/恢复验证，详细结果见末节。
 0120a3只证明ADC可读、writer/IRQ ownership元数据正常；本轮验证实际写入、
 转换、EOC与恢复。ADC成功也不会自动满足电池身份、输入能力或充电允许条件。

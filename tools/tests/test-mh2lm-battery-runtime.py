@@ -26,7 +26,7 @@ def strip_includes(text):
 def function(name):
     match = re.search(r'\n'+re.escape(name)+r'\([^)]*\)\n\{',source)
     assert match,name
-    start=source.rfind('\n\n',0,match.start())+2
+    start=source.rfind('\n',0,match.start())+1
     end=source.index('{',match.start())+1
     depth=1
     while depth:
@@ -101,6 +101,7 @@ struct OSDictionary {
 #define kIOBatteryCharge 4
 #define kIOReturnSuccess 0
 #define kIOReturnNotReady -1
+#define kIOReturnNoMemory -3
 struct OSObject {virtual ~OSObject()=default;};
 #define OSDynamicCast(type,obj) dynamic_cast<type *>(obj)
 static uint64_t timeNs=1000000000ULL;
@@ -112,6 +113,20 @@ struct IOTimerEventSource {
     void setTimeoutMS(unsigned n){assert(n==1000);armed=true;++arms;}
     void cancelTimeout(){armed=false;}
     void disable(){disabled=true;}
+};
+'''
+adc_header=strip_includes((root/'bsd/dev/sweet_adc5.h').read_text())
+# Actual registry/expiry/concurrency behavior is in test-mh2lm-adc-consumer.py.
+# Here the typed provider boundary lets us test battery publication/withdrawal.
+adc_model=r'''
+class SweetAdc5Client {
+public:
+ bool valid[2]={},present=false;unsigned updates=0,sourceUpdates=0;
+ sweet_adc5_measurement samples[2]={};
+ static SweetAdc5Client *withOwner(void *,void (*)(void *),void *) {static SweetAdc5Client instance;return &instance;}
+ void invalidate(){valid[0]=valid[1]=false;}
+ void update(bool input,bool changed,bool,uint64_t){++updates;if(changed)++sourceUpdates;present=input;if(!input)valid[1]=false;}
+ bool copyFresh(sweet_adc5_channel c,uint64_t now,sweet_adc5_measurement *out){auto &s=samples[c-1];if(!valid[c-1] || now<s.completed_ns || now<s.started_ns || now-s.started_ns>(c==1?60000000000ULL:3000000000ULL))return false;*out=s;return true;}
 };
 '''
 shim=r'''
@@ -147,7 +162,8 @@ public:
  unsigned fRuntimeMode=2,fRuntimeRequested=2,fMonitorSamples=0,fLastPercent=70,fLastMv=4000;
  uint32_t fLastReasons=~0u;
  bool fRunning=true,fPercentValid=true;
- IOTimerEventSource *fMonitor;
+ IOTimerEventSource *fMonitor; void *fLoop=nullptr;
+ SweetAdc5Client *fAdcClient=nullptr;void publishAdc();static void adcChanged(void *);
  IOLock controlLock;IOLock *fControlLock=&controlLock;bool fPowerStopping=false,fControlClaimed=false;
  static IOReturn runtimePowerNotice(void *,void *,UInt32,IOService *,void *,vm_size_t);
  SweetBattSnapshot fSnapshot={};SweetBattLimits fLimits={};SweetBattController fController={};
@@ -280,6 +296,8 @@ int main(){
     assert(b.fSnapshot.tempValid && b.fSnapshot.tempCenti==2500 && b.fSnapshot.currentValid && b.fSnapshot.ma>2300);
     assert(b.fSnapshot.nominalValid && b.fSnapshot.nominalMah==4000 && b.fSnapshot.learnedValid && b.fSnapshot.learnedMah==3900);
     assert(!b.fController.owned && writes.empty() && timer.armed);
+    assert(b.fAdcClient && b.fAdcClient->updates==1 && b.fAdcClient->sourceUpdates==1);
+    assert(!b.registry["SweetBatteryVBUSMeasured"] && !b.registry.count("SweetBatteryVBUSMicrovolts"));
     assert(b.registry["Temperature"]==2500 && b.registry["MaxCapacity"]==3900);
     assert(b.registry["DesignCapacity"]==4000 && b.registry["CurrentCapacity"]==2730);
     assert(!b.registry.count("CycleCount") && !b.registry["SweetBatterySOCEstimated"]);
@@ -289,7 +307,9 @@ int main(){
     SweetBattery::monitorFired(&b,&timer);
     for(auto a:reads)assert(a!=0x1310 && a!=0x1307 && a!=0x1308 && a!=0x1506 && a!=0x1509 && a!=0x150b);
     assert((b.fSnapshot.raw[SB_USB]&16) && b.publishes==2 && b.publishedCurrentValid);
+    assert(b.fAdcClient->sourceUpdates==1);
     b.sampleRuntime(true);assert(!b.fSnapshot.raw[SB_USB]);
+    assert(b.fAdcClient->sourceUpdates==2);
     failures={0x10000};pairFailure=true;reads.clear();
     SweetBattery::monitorFired(&b,&timer);
     assert(!b.fSnapshot.tempValid && !b.fSnapshot.currentValid && !b.publishedCurrentValid);
@@ -331,18 +351,31 @@ int main(){
         std::thread notify([&]{while(!go.load()){}SweetBattery::runtimePowerNotice(&racing,nullptr,kIOMessageSystemWillPowerOff,nullptr,nullptr,0);});
         go=true;submit.join();notify.join();assert(racing.fPowerStopping && changed[0x1042]==0);
     }
+    // Completed ADC values publish as measurements, never charge authority.
+    SweetBattery measured;SweetAdc5Client adc;measured.fAdcClient=&adc;measured.fRuntimeMode=1;
+    measured.fSnapshot=sample();adc.valid[0]=adc.valid[1]=true;
+    adc.samples[0].started_ns=adc.samples[0].completed_ns=timeNs;
+    adc.samples[1].started_ns=adc.samples[1].completed_ns=timeNs;
+    adc.samples[0].microvolts=889684;adc.samples[1].microvolts=4831136;
+    SweetBattery::adcChanged(&measured);
+    assert(measured.registry["SweetBatteryVBUSMeasured"] && measured.registry["SweetBatteryVBUSMicrovolts"]==4831136);
+    assert(!measured.fLimits.batteryVerified && !measured.fLimits.inputVerified && !measured.fLimits.parallelVerified && !measured.fController.owned);
+    timeNs+=3000000001ULL;SweetBattery::adcChanged(&measured);
+    assert(!measured.registry["SweetBatteryVBUSMeasured"] && !measured.registry.count("SweetBatteryVBUSMicrovolts"));
+    measured.fPowerStopping=true;SweetBattery::adcChanged(&measured);
+    assert(!measured.registry["SweetBatteryBATIDMeasured"] && !measured.registry.count("SweetBatteryBATIDMicrovolts"));
     sleepWakeNote note={nullptr,1};
     assert(!SweetBattery::runtimePowerNotice(&shutdown,nullptr,kIOMessageSystemWillSleep,nullptr,&note,sizeof(note)));
     assert(acknowledged==1 && note.returnValue==0);
     puts("PASS: actual runtime sampler, units/validity, IRQ-only input acquisition, monitor publication and stop/no rearm");
 }
 '''
-names=['sweet_batt_now_ns','SweetBattery::sampleRuntime','SweetBattery::runtimeUpdate',
+names=['sweet_batt_now_ns','SweetBattery::adcChanged','SweetBattery::publishAdc','SweetBattery::sampleRuntime','SweetBattery::runtimeUpdate',
        'SweetBattery::runRuntimePolicy','SweetBattery::startRuntime',
        'SweetBattery::monitorFired','SweetBattery::stopRuntime','SweetBattery::publishRuntime','SweetBattery::runtimeClock','SweetBattery::publish','SweetBattery::removePowerValue','SweetBattery::runtimePowerNotice']
 with tempfile.TemporaryDirectory(prefix='mh2lm-runtime-') as directory:
     cpp=Path(directory)/'test.cpp';binary=Path(directory)/'test'
-    cpp.write_text(prelude+charger+strip_includes(header)+spmi+strip_includes(power_header)+shim+strip_includes(backend)+strip_includes(power)+''.join(function(n) for n in names)+checks)
+    cpp.write_text(prelude+charger+strip_includes(header)+spmi+strip_includes(power_header)+adc_header+adc_model+shim+strip_includes(backend)+strip_includes(power)+''.join(function(n) for n in names)+checks)
     subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-O1','-g',
         '-fsanitize=address,undefined',str(cpp),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],env=dict(os.environ,ASAN_OPTIONS='detect_leaks=0',UBSAN_OPTIONS='halt_on_error=1'),check=True,timeout=30)
