@@ -1,5 +1,11 @@
 # 0119之后的电池驱动推进
 
+0120a5后离线核对：实测BAT_ID换算94～95kΩ与Tocad91kΩ匹配，4027mAh容量也
+相符；板级FCC覆盖2800mA。下一实现补固定24字节profile前缀及输入类型/模式/
+epoch日志与证据消费者，不能用旧ICL或USB configured bool直接授权。源码依据、
+范围和最小测试批次见[身份/输入核对](BATTERY-IDENTITY-INPUT-AUDIT.md)。
+本轮无需上机或push，仍缺并联隔离/watchdog，不重复ADC正常路径。
+
 0120a5补充：0156的ADC5测量consumer正常路径已实测通过。约24分半、657次
 转换/1266次EOC；655个结果被接受，2个因插拔/识别改变epoch正确丢弃，无ADC
 超时/ERROR/panic。电池身份、输入能力、并联隔离和watchdog仍缺，充电仍互锁。

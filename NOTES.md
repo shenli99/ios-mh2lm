@@ -2,6 +2,45 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**CURRENT: 0120a5后身份/输入离线核对完成；下一实现范围已落文档，尚无新内核。**
+
+新增 `docs/BATTERY-IDENTITY-INPUT-AUDIT.md` 与离线复算工具
+`tools/audit-mh2lm-battery-evidence.py`。LG源码HEAD仍为d4f335e。
+严格复现extension_get_batt_id：BIAS1825mV，先uV/1000截断再分压，48个accepted
+BAT_ID得到94786..95057Ω（整数94/95kΩ），全部落Tocad91k的78..104区间，
+不落LGC12k的11..13。Tocad416字节profile offset412 nominal4027与实测一致，
+LGC4073不一致。两项支持Tocad候选，未声称完整身份/profile已验证。
+LG supplement将profile3300mA覆盖为2800mA，未来不能漏此板级约束。
+
+FG integrity13在LG白名单，但仍需固定word65/offset0/len24前缀比对。Gen4
+word64..169映射4520+(word-64)*2，前缀SID2 4522..4539；当前FG API只处理>=170，
+不能直接塞65进旧分支。应复用有界FG会话和锁/恢复，只读profile不写学习数据。
+Tocad prefix0900ffe3f10796dab3d50000a1bda38af88784929e942380。
+
+0120a3旧preflight：APSD1/result1=SDP，FCC34=2600mA/FV53=4430mV，ICL1e=1500/
+settled3c=3000mA。TypeC1506=40为accessory路径，150b2a无CC-attached，不能当
+普通Rp；旧启动片段不能充当前0120a5许可。0120a5只打印valid bitmap而没打印
+这些raw，不能反推。APSD解析还须检查status QC bit1/精确result枚举/角色；现
+sb_decide仅排result60，inputVerified一直false所以未放行。snapshot保护tick
+会刷新总时间却缓存输入，未来必须给输入独立时间/epoch，不能偷偷续期。
+
+USB配置描述符bMaxPower250=USB2 500mA，configured仅内部endpoint bool，尚无
+电源许可provider；SET_CONFIGURATION(0)分支未清configured，reset才清。
+先记录未修改USB，不能直接将bool接入授权；需撤销/reset/disconnect/suspend/
+generation语义。备份boot_a/b静态header无lge.battid参数，不排除ABL动态追加。
+
+验证：离线工具按有效SWEETLOG长度复算，结果
+scratch/artifact-0120a5/battery-evidence-audit.json；源码SHA/profile SHA/全部数值
+可复现。具体检查结果与提交号见git提交。未改驱动/CI/boot、未push/设备操作。
+
+NEXT：实现固定profile-prefix typed读取+既有输入配置raw/error/epoch/独立时间
+记录，按需在后端加固定1507/150d；接精确APSD/角色/时效消费者后才形成候选限值。
+与并联隔离/watchdog依赖按六段计划推进，仍不打包启充档。新产物同一观察镜像
+可分电脑USB/已知普通5V充电器采集，持久日志足够；无需重复0120a5 ADC转换。
+本次离线核对无需用户上机/push。用户自己push/fastboot。
+
+### Previous 0120a5 consumer device result
+
 **CURRENT: 0120a5 ADC5 consumer持续转换/插拔正常路径已通过，下一步补身份/输入证据。**
 
 日志logs/sweetlog-0120a5-battery-adc5-consumer.bin，SHA256
