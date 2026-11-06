@@ -2,6 +2,47 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**CURRENT: 0156 ADC5 → SweetBattery 测量接入已实现，等待用户push与新云产物。**
+
+实现提交 `9b6d817`，补丁 `xnu/patches/0156-mh2lm-battery-adc5-consumer.patch`。
+新增每consumer的SweetAdc5Client OSObject，IOKit matched/terminated/general-interest
+发现并retain ADC5 IOService，通知只短锁/排队；所有typed status/request/copy在
+battery自己的workloop上，不直读寄存器、不走全局单例。provider新增READY/stop
+通知、status()、请求token与measurement.sequence；Busy/初始NotReady只等通知。
+
+runtime1..3自动接入。启动BAT_ID，已知输入存在才测USBIN；IRQ/arm-sync/有界确认
+撤销旧USBIN并递增epoch，转换中插拔的旧结果丢弃。现有1s保护monitor维护测量：
+USBIN满2s安排转换、3s过期；BAT_ID满30s刷新、60s过期；使用startedNs保守计龄。
+不定时扫描USB/APSD/Type-C发现插拔，也不轮询ADC status替代缺失EOC。
+终止/失败/READY丢失撤销缓存、连接终结不自动重绑；stop在battery gate外同步
+通知，保留provider到interest remove后再release。失效移除旧测量数值并updateStatus。
+系统真正sleep后的完整ADC suspend/resume尚未实现，不把屏幕息屏当系统睡眠验收。
+
+充电授权字段没有设置，仍互锁；本轮不证明电池身份/输入电流能力/SMB1355隔离/
+watchdog维护，不应出现启充CONTROL。USB/按键/触摸路径未改。CircleCI只增加0156
+source gates；实际build.sh命令和参数未变。用户自己push/fastboot，本轮未push/设备操作。
+
+本地底稿 `scratch/adc-consumer-0120a4/{base,edited,verify}/xnu`；
+`validation-results.json`、`cloud-apply.json`、`*-tests.txt`、`gate-results.json`。
+31基线文件与0120a4云树逐字节匹配，0156严格apply后33文件匹配；四个ARM64 TU
+编译通过（旧CI头+Linux clang兼容参数，非完整native link）。实际ADC client
+17场景+100通知/终止stop竞态，实际mux/provider/keys/battery 57场景+80竞态，
+transport81，runtime（含ADC发布/撤回与不授权）、SPMI、board回归通过。
+源码gate接受0156拒绝0155；packager拒绝0120a4旧kernel。host模型不证明native
+锁序或真实重复转换稳定。接口、锁序和测试步骤见
+[docs/BATTERY-ADC5-CONSUMER.md](docs/BATTERY-ADC5-CONSUMER.md)。
+
+NEXT：用户push main，下载新编号kernel/buildtree；核对0156后运行
+`tools/mk-mh2lm-event-matrix.sh <xnu-kernel-编号.gz> <编号> --battery-adc5-consumer`。
+生成 `out-bs/boot-16k-编号-battery-adc5-consumer.img`，runtime1/IRQ4/ADCconv0，
+保留USB/按键/触摸及USB日志，不混入启动有限诊断。USB插入启动，桌面约30秒，
+拔线15～20秒/插入15～20秒两轮并操作三键/触摸，可含屏幕息屏一轮；取持久日志
+`sweetlog-编号-battery-adc5-consumer.bin`。重点看accepted token/epoch/uv、
+invalidate present0/1、插入时重复EOC/restore，拔线后不继续安排USBIN，无ADC失败/
+共享mux隔离/panic/错误启充。无需补baseline/dry或重复上一轮单次转换。
+
+### Previous 0120a4 real-device conversion result
+
 **LATEST RESULT: 0120a4 实机 ADC5 转换链路通过；下一步接入测量provider与充电证据。**
 
 日志logs/sweetlog-0120a4-battery-adc5-conversion.bin，SHA256
