@@ -1,5 +1,9 @@
 # 0120a5 后的电池身份与输入能力离线核对
 
+2026-11-07后续：下文规划的固定profile读取、输入raw/error/独立时间与拒绝条件
+已实现为0157，尚待云构建/实机。当前接口、检查及单镜像采集见
+[profile/输入证据实现](BATTERY-PROFILE-INPUT-EVIDENCE.md)。下文保留离线核对依据。
+
 2026-11-06。本轮只核对 LG 源码、DTS、现有 XNU 源码和已导出的日志，没有改
 内核、CI 或 boot。结论：**实测 BAT_ID 与 Tocad 91kΩ profile 一致，4027mAh
 容量提供第二项相符证据；当前 FG profile 前缀及输入端电流许可仍待补证。**

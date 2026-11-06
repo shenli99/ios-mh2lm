@@ -35,7 +35,7 @@ def function(name):
 
 for name in ['SweetBattery::sampleRuntime','SweetBattery::runtimeUpdate','SweetBattery::runtimePowerNotice']:
     body=function(name)
-    assert not re.search(r'\bsweet_spmi_(read|charger_read|charger_update|fg_read)\s*\(',body),name
+    assert not re.search(r'\bsweet_spmi_(read|charger_read|charger_update|fg_read(?:_profile)?)\s*\(',body),name
 assert not re.search(r'0x(?:1042|1043|1061|1070|1340|1342|1365|1366|1370)',header)
 assert not re.search(r'ml_io_map|volatile\s+.*\*',backend+power)
 
@@ -44,6 +44,7 @@ prelude=r'''
 #include <cstdint>
 #include <cstdio>
 #include <cstdarg>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <atomic>
@@ -59,8 +60,7 @@ static void recordLog(const char *fmt,...) {
     char buffer[2048];va_list args;va_start(args,fmt);
     int n=vsnprintf(buffer,sizeof(buffer),fmt,args);va_end(args);
     assert(n>=0 && static_cast<size_t>(n)<sizeof(buffer));
-    if(std::string(fmt).find("SWEET BATT SAMPLE:")!=std::string::npos ||
-       std::string(fmt).find(": v3 ")!=std::string::npos){
+    if(std::string(fmt).find("SWEET BATT ")!=std::string::npos){
         // Include actual "[INFO] " prefix and newline in the 255-byte budget.
         assert(n+7<=255 && n>0 && buffer[n-1]=='\n');
     }
@@ -137,7 +137,11 @@ static std::set<unsigned> failures;
 static bool pairFailure=false;
 static unsigned injectedAt=0,updateCount=0,delayAt=0;
 static std::map<unsigned,unsigned> changed;
+static unsigned readAdvanceNs;
+static uint8_t profilePrefix[24]={0x09,0x00,0xff,0xe3,0xf1,0x07,0x96,0xda,
+ 0xb3,0xd5,0x00,0x00,0xa1,0xbd,0xa3,0x8a,0xf8,0x87,0x84,0x92,0x9e,0x94,0x23,0x80};
 extern "C" int sweet_spmi_charger_read(unsigned sid,unsigned addr,uint8_t *out){
+    timeNs+=readAdvanceNs;
     assert(sid==2);reads.push_back(addr);if(failures.count(addr))return -9;
     *out=regs[addr];return 0;
 }
@@ -148,6 +152,13 @@ extern "C" int sweet_spmi_read(unsigned sid,unsigned addr,uint8_t *out){
 extern "C" int sweet_spmi_fg_read(unsigned field,uint16_t *out){
     reads.push_back(0x10000+field);if(failures.count(0x10000+field))return -10;
     *out=fg[field];return 0;
+}
+extern "C" int sweet_spmi_fg_read_profile(sweet_fg_profile *out){
+    reads.push_back(0x10004);
+    if(failures.count(0x10004) || failures.count(0x10001) || failures.count(0x10002))return -10;
+    sweet_fg_profile next={};next.started_ns=timeNs;timeNs+=readAdvanceNs;
+    next.completed_ns=timeNs;next.integrity=fg[2];next.nominal_mah=fg[1];
+    memcpy(next.prefix,profilePrefix,24);*out=next;return 0;
 }
 extern "C" int sweet_spmi_charger_update(unsigned sid,unsigned addr,unsigned mask,unsigned value,uint8_t *out){
     assert(sid==2);writes.push_back(addr);++updateCount;
@@ -215,9 +226,65 @@ static SweetBattSnapshot sample(){
     s.presentValid=s.present=s.socValid=s.profileValid=true;
     s.mv=4000;s.tempCenti=2500;s.percent=70;s.integrity=1;
     s.raw[SB_PATH]=0x95;s.raw[SB_USB]=16;s.raw[SB_APSD]=1;s.raw[SB_STAGE]=7;
+    s.raw[SB_RESULT]=8;s.raw[SB_TYPEC]=8;s.raw[SB_MISC]=0x29;s.raw[SB_ATTACHED]=0x20;
+    s.inputEpoch=1;s.inputStartedNs=s.inputCompletedNs=timeNs;
     return s;
 }
-static SweetBattLimits limits(){return {true,true,true,3300,4430,1500,5000,timeNs};}
+static SweetBattLimits limits(){return {true,true,true,2800,4430,1500,5000,timeNs};}
+static void evidenceTests(){
+    auto s=sample();auto l=limits();SweetBattController c={};
+    assert(sb_source_type(s)==SB_SOURCE_DCP && sb_normal_sink(s) && sb_input_fresh(s,timeNs));
+    const unsigned raw[]={0,1,4,8,2,0x10,0x28,0x48};
+    for(unsigned kind=0;kind<8;++kind){
+        s.raw[SB_RESULT]=raw[kind];assert(sb_source_type(s)==kind);
+        auto decision=sb_decide(c,s,l,timeNs);
+        assert(decision.allow==(kind==SB_SOURCE_CDP || kind==SB_SOURCE_DCP));
+    }
+    // QC status overrides an otherwise ordinary DCP result, as in LG.
+    s=sample();s.raw[SB_APSD]=3;
+    assert(sb_source_type(s)==SB_SOURCE_QC2 && (sb_decide(c,s,l,timeNs).reasons&SB_R_INPUT));
+    s.raw[SB_RESULT]=0x48;assert(sb_source_type(s)==SB_SOURCE_QC3);
+    s=sample();s.raw[SB_APSD]=0;assert(sb_source_type(s)==SB_SOURCE_UNKNOWN);
+    for(unsigned mixed:{0x03u,0x05u,0x0cu,0x18u,0x20u,0x60u,0x7fu}){
+        s=sample();s.raw[SB_RESULT]=mixed;assert(sb_source_type(s)==SB_SOURCE_UNKNOWN);
+        assert(sb_decide(c,s,l,timeNs).reasons&SB_R_INPUT);
+    }
+    s=sample();s.raw[SB_RESULT]=0x88;assert(sb_source_type(s)==SB_SOURCE_DCP); // result mask
+    for(unsigned value:{0u,1u,0x40u,0x20u,0x10u,0x0cu}){
+        s=sample();s.raw[SB_TYPEC]=value;assert(!sb_normal_sink(s));
+        assert(sb_decide(c,s,l,timeNs).reasons&SB_R_INPUT);
+    }
+    for(unsigned flip:{1u,4u,8u,0x10u,0x20u,0x40u,0x80u}){
+        s=sample();s.raw[SB_MISC]^=flip;assert(!sb_normal_sink(s));
+    }
+    for(unsigned field:{SB_DEBUG_ACCESS,SB_LEGACY,SB_ATTACHED}){
+        s=sample();s.raw[field]=field==SB_ATTACHED?0:1;assert(!sb_normal_sink(s));
+        s=sample();s.valid&=~(1ULL<<field);assert(!sb_input_fresh(s,timeNs));
+    }
+    s=sample();s.inputEpoch=0;assert(!sb_input_fresh(s,timeNs));
+    s=sample();s.inputCompletedNs=timeNs-1;assert(!sb_input_fresh(s,timeNs));
+    s=sample();s.inputCompletedNs=timeNs+1;assert(!sb_input_fresh(s,timeNs));
+    // Refreshing telemetry/limits may not silently renew source acquisition.
+    s=sample();auto oldInput=s.inputStartedNs;
+    s.startedNs=s.completedNs=l.verifiedNs=timeNs+3000000001ULL;
+    assert(!sb_input_fresh(s,s.completedNs) && (sb_decide(c,s,l,s.completedNs).reasons&SB_R_INPUT));
+    s=sample();s.inputStartedNs=timeNs-500000000ULL;
+    auto d=sb_decide(c,s,limits(),timeNs);
+    assert(d.allow && d.validUntilNs==timeNs+2500000000ULL);
+    assert(sb_evidence_deadline(UINT64_MAX-1)==UINT64_MAX);
+    (void)oldInput;
+    s=sample();s.profilePrefixValid=s.nominalValid=true;s.integrity=0x13;s.nominalMah=4027;
+    memcpy(s.profilePrefix,profilePrefix,24);assert(sb_profile_match(s)==1);
+    for(unsigned i=0;i<24;++i){s.profilePrefix[i]^=1;assert(!sb_profile_match(s));s.profilePrefix[i]^=1;}
+    s.nominalMah=4073;assert(!sb_profile_match(s));s.nominalMah=4027;
+    s.integrity=1;assert(!sb_profile_match(s)); // load bit alone is not LG's whitelist
+    s.integrity=0x13;s.profilePrefixValid=false;assert(!sb_profile_match(s));
+    static const uint8_t lgc[24]={0x09,0x00,0xdf,0xe3,0x8c,0xdc,0x11,0xe3,
+     0xa8,0xdc,0x00,0x00,0xca,0xbc,0x3e,0x8b,0xf9,0x87,0x84,0x80,0xb5,0x8d,0x1f,0x80};
+    s.profilePrefixValid=true;s.nominalMah=4073;memcpy(s.profilePrefix,lgc,24);assert(sb_profile_match(s)==2);
+    l=limits();l.maxFccMa=3300;s=sample();assert(sb_decide(c,s,l,timeNs).reasons&SB_R_LIMITS);
+    puts("PASS: exact source/QC/role classification, missing/stale input and decision expiry, real profile prefixes/metadata, board FCC bound");
+}
 static void policyTests(){
     auto s=sample();auto l=limits();SweetBattController c={};SweetBattery control;
     auto d=sb_decide(c,s,l,timeNs);assert(d.allow && !d.reasons && d.fccMa==500 && d.iclMa==500 && d.fvMv==4200);
@@ -286,7 +353,7 @@ static void policyTests(){
     puts("PASS: policy missing inputs/staleness/thermal hysteresis, dry-run, ordered control, every write failure and expiry");
 }
 int main(){
-    policyTests();reads.clear();writes.clear();changed.clear();
+    evidenceTests();policyTests();reads.clear();writes.clear();changed.clear();
     regs={{0x41a0,0xff},{0x41a1,0x7f},{0x41a2,0x60},{0x41a3,0xed},
           {0x41a6,0xff},{0x41a7,0x7f},{0x41a8,0x60},{0x41a9,0xed},
           {0x4009,180},{0x400a,180},{0x4010,2},{0x4107,0},{0x1310,16},{0x1006,3},{0x110b,0x95},{0x1307,1}};
@@ -295,6 +362,7 @@ int main(){
     assert(!SweetBattery::startRuntime(&b,nullptr,nullptr,nullptr,nullptr));
     assert(b.fSnapshot.tempValid && b.fSnapshot.tempCenti==2500 && b.fSnapshot.currentValid && b.fSnapshot.ma>2300);
     assert(b.fSnapshot.nominalValid && b.fSnapshot.nominalMah==4000 && b.fSnapshot.learnedValid && b.fSnapshot.learnedMah==3900);
+    assert(b.fSnapshot.profilePrefixValid && b.fSnapshot.inputEpoch==1);
     assert(!b.fController.owned && writes.empty() && timer.armed);
     assert(b.fAdcClient && b.fAdcClient->updates==1 && b.fAdcClient->sourceUpdates==1);
     assert(!b.registry["SweetBatteryVBUSMeasured"] && !b.registry.count("SweetBatteryVBUSMicrovolts"));
@@ -304,12 +372,17 @@ int main(){
     assert(!b.legacy.count("CycleCount"));
     // A telemetry tick must not discover USB/APSD changes: those require IRQ.
     regs[0x1310]=0;reads.clear();++timeNs;
+    auto inputStart=b.fSnapshot.inputStartedNs,inputEnd=b.fSnapshot.inputCompletedNs;
+    auto profileStart=b.fSnapshot.profileStartedNs;
     SweetBattery::monitorFired(&b,&timer);
-    for(auto a:reads)assert(a!=0x1310 && a!=0x1307 && a!=0x1308 && a!=0x1506 && a!=0x1509 && a!=0x150b);
+    for(auto a:reads)assert(a!=0x1310 && a!=0x1307 && a!=0x1308 && a!=0x1506 && a!=0x1509 && a!=0x150b && a!=0x1507 && a!=0x150d && a!=0x10004);
+    assert(b.fSnapshot.inputEpoch==1 && b.fSnapshot.inputStartedNs==inputStart && b.fSnapshot.inputCompletedNs==inputEnd);
+    assert(b.fSnapshot.profileStartedNs==profileStart);
     assert((b.fSnapshot.raw[SB_USB]&16) && b.publishes==2 && b.publishedCurrentValid);
     assert(b.fAdcClient->sourceUpdates==1);
     b.sampleRuntime(true);assert(!b.fSnapshot.raw[SB_USB]);
     assert(b.fAdcClient->sourceUpdates==2);
+    assert(b.fSnapshot.inputEpoch==2);
     failures={0x10000};pairFailure=true;reads.clear();
     SweetBattery::monitorFired(&b,&timer);
     assert(!b.fSnapshot.tempValid && !b.fSnapshot.currentValid && !b.publishedCurrentValid);
@@ -319,6 +392,9 @@ int main(){
     failures={0x10001,0x10002,0x10003};pairFailure=false;logs.clear();b.sampleRuntime(true);b.publishRuntime();
     assert(!b.registry.count("DesignCapacity") && b.registry["MaxCapacity"]==100 && b.registry["SweetBatteryCapacityUsesPercent"]);
     assert(logs.find("n-error=-10")!=std::string::npos && logs.find("l-error=-10")!=std::string::npos && logs.find("p-error=-10")!=std::string::npos);
+    assert(!b.fSnapshot.profilePrefixValid && !sb_profile_match(b.fSnapshot));
+    for(auto byte:b.fSnapshot.profilePrefix)assert(!byte);
+    assert(!b.fSnapshot.profileStartedNs && !b.fSnapshot.profileCompletedNs);
     assert(logs.find("SWEET BATT CONFIG: v3 id=")!=std::string::npos);
     assert(logs.find("SWEET BATT SAMPLE: v2 id=")!=std::string::npos && logs.find("SWEET BATT TIME: v3 id=")!=std::string::npos);
     regs[0x1651]=0xc2;regs[0x1653]=0x87;failures={0x1042};logs.clear();b.sampleRuntime(true);
@@ -328,6 +404,18 @@ int main(){
     failures.clear();pairFailure=false;fg[0]=0x3fc;b.sampleRuntime(false);
     assert(b.fSnapshot.tempValid && b.fSnapshot.tempCenti==-100);
     fg[0]=0xffff;b.sampleRuntime(false);assert(!b.fSnapshot.tempValid);
+    // Input interval ends before the FG tuple/telemetry, not after it.
+    readAdvanceNs=1000;fg[0]=100;fg[1]=4027;fg[2]=0x13;fg[3]=4027;failures.clear();
+    logs.clear();b.sampleRuntime(true);
+    assert(b.fSnapshot.inputCompletedNs<b.fSnapshot.profileStartedNs && b.fSnapshot.profileCompletedNs<=b.fSnapshot.completedNs);
+    assert(sb_profile_match(b.fSnapshot)==1 && logs.find("match=1 integrity=0x13 nominal=4027 prefix=0900ffe3f10796dab3d50000a1bda38af88784929e942380")!=std::string::npos);
+    assert(logs.find("SWEET BATT INPUT: v4")!=std::string::npos && logs.find("SWEET BATT ICL MODE: v1")!=std::string::npos);
+    // A failed newly-read source never retains a prior valid raw value.
+    failures={0x1507};b.fSnapshot.raw[SB_DEBUG_ACCESS]=0x3f;b.sampleRuntime(true);
+    assert(!sb_valid(b.fSnapshot,SB_DEBUG_ACCESS) && !b.fSnapshot.raw[SB_DEBUG_ACCESS] && !sb_input_fresh(b.fSnapshot,timeNs));
+    failures.clear();readAdvanceNs=0;
+    b.fSnapshot.inputEpoch=UINT64_MAX-1;b.sampleRuntime(true);assert(b.fSnapshot.inputEpoch==UINT64_MAX);
+    b.sampleRuntime(true);assert(!sb_input_fresh(b.fSnapshot,timeNs) && !b.fSnapshot.inputStartedNs);
     // Largest sample id and timestamp must retain the complete time record.
     auto savedTime=timeNs;auto savedSamples=b.fMonitorSamples;
     timeNs=UINT64_MAX-1;b.fMonitorSamples=UINT32_MAX-1;logs.clear();b.sampleRuntime(true);

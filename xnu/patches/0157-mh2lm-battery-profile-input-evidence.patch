@@ -1,0 +1,453 @@
+diff --git a/bsd/dev/sweet_battery_runtime.h b/bsd/dev/sweet_battery_runtime.h
+index 164545f9458f48d0856d98554deef892edb3312c..141d97cc6f74d1046d80106a2f6cc07d1716fdeb 100644
+--- a/bsd/dev/sweet_battery_runtime.h
++++ b/bsd/dev/sweet_battery_runtime.h
+@@ -12,7 +12,7 @@ enum SweetBattReg {
+  SB_PATH, SB_SETTLED, SB_APSD, SB_RESULT, SB_USB, SB_SUSPEND, SB_OVERRIDE,
+  SB_LOAD, SB_MODE, SB_ICL, SB_AICL, SB_TYPEC, SB_ATTACHED, SB_MISC,
+  SB_SMB, SB_WDOG, SB_WDOG_TIME, SB_SMB_CFG, SB_JEITA, SB_ITERM_HI,
+- SB_ITERM_LO, SB_RECHARGE, SB_REG_COUNT
++ SB_ITERM_LO, SB_RECHARGE, SB_DEBUG_ACCESS, SB_LEGACY, SB_REG_COUNT
+ };
+ struct SweetBattSnapshot {
+  uint8_t raw[SB_REG_COUNT];
+@@ -24,10 +24,73 @@ struct SweetBattSnapshot {
+  int ma, tempCenti; /* IOPM sign: positive current = charging */
+  uint16_t rawVoltage, rawCurrent, rawTemp, integrity;
+  int tempError, nominalError, learnedError, profileError;
++ /* Input timestamps/epoch change ONLY on event/arm/bounded-confirm reads.
++  * Protection telemetry must not renew a cached source's acquisition time. */
++ uint64_t inputEpoch, inputStartedNs, inputCompletedNs;
++ uint8_t profilePrefix[24];
++ bool profilePrefixValid;
++ int profilePrefixError;
++ uint64_t profileStartedNs, profileCompletedNs;
+ };
+ static inline bool sb_valid(const SweetBattSnapshot &s, unsigned field)
+ { return field < SB_REG_COUNT && (s.valid & (1ULL << field)); }
+ 
++static inline uint64_t sb_input_mask(void)
++{
++ return (1ULL<<SB_USB)|(1ULL<<SB_APSD)|(1ULL<<SB_RESULT)|(1ULL<<SB_TYPEC)|
++  (1ULL<<SB_ATTACHED)|(1ULL<<SB_MISC)|(1ULL<<SB_DEBUG_ACCESS)|(1ULL<<SB_LEGACY);
++}
++static inline bool sb_input_fresh(const SweetBattSnapshot &s, uint64_t now)
++{
++ return (s.valid&sb_input_mask())==sb_input_mask() && s.inputEpoch &&
++  s.inputStartedNs && s.inputCompletedNs>=s.inputStartedNs &&
++  now>=s.inputCompletedNs && now-s.inputStartedNs<=3000000000ULL;
++}
++static inline uint64_t sb_evidence_deadline(uint64_t start)
++{ return start>~0ULL-3000000000ULL?~0ULL:start+3000000000ULL; }
++enum SweetBattSourceType {
++ SB_SOURCE_UNKNOWN, SB_SOURCE_SDP, SB_SOURCE_CDP, SB_SOURCE_DCP,
++ SB_SOURCE_OCP, SB_SOURCE_FLOAT, SB_SOURCE_QC2, SB_SOURCE_QC3
++};
++/* LG smblib_get_apsd_result: exact masked values, status QC override. This
++ * describes detection, never establishes a PD/USB current permission. */
++static inline SweetBattSourceType sb_source_type(const SweetBattSnapshot &s)
++{
++ if (!sb_valid(s,SB_APSD) || !sb_valid(s,SB_RESULT) || !(s.raw[SB_APSD]&1))
++  return SB_SOURCE_UNKNOWN;
++ unsigned result=s.raw[SB_RESULT]&0x7f;
++ if (s.raw[SB_APSD]&2) return result==0x48?SB_SOURCE_QC3:SB_SOURCE_QC2;
++ switch (result) {
++ case 1: return SB_SOURCE_SDP; case 4: return SB_SOURCE_CDP;
++ case 8: return SB_SOURCE_DCP; case 2: return SB_SOURCE_OCP;
++ case 0x10: return SB_SOURCE_FLOAT; case 0x28: return SB_SOURCE_QC2;
++ case 0x48: return SB_SOURCE_QC3; default: return SB_SOURCE_UNKNOWN;
++ }
++}
++static inline bool sb_normal_sink(const SweetBattSnapshot &s)
++{
++ if ((s.valid&sb_input_mask())!=sb_input_mask()) return false;
++ unsigned rp=s.raw[SB_TYPEC]&0x7f;
++ return (rp==8 || rp==4 || rp==2) && (s.raw[SB_MISC]&0xfd)==0x29 &&
++  (s.raw[SB_ATTACHED]&0x20) && !(s.raw[SB_DEBUG_ACCESS]&0x3f) &&
++  !(s.raw[SB_LEGACY]&3);
++}
++/* Diagnostic match only. Both data and metadata came from the same grant;
++ * this is LG's prefix convention, not a full 416-byte profile verification. */
++static inline unsigned sb_profile_match(const SweetBattSnapshot &s)
++{
++ if (!s.profilePrefixValid || !s.profileValid || !s.nominalValid || !(s.integrity&1)) return 0;
++ unsigned flags=s.integrity&~1u;
++ if (flags!=8 && flags!=2 && flags!=6 && flags!=12 && flags!=18 && flags!=22 && flags!=28) return 0;
++ static const uint8_t tocad[24]={0x09,0x00,0xff,0xe3,0xf1,0x07,0x96,0xda,
++  0xb3,0xd5,0x00,0x00,0xa1,0xbd,0xa3,0x8a,0xf8,0x87,0x84,0x92,0x9e,0x94,0x23,0x80};
++ static const uint8_t lgc[24]={0x09,0x00,0xdf,0xe3,0x8c,0xdc,0x11,0xe3,
++  0xa8,0xdc,0x00,0x00,0xca,0xbc,0x3e,0x8b,0xf9,0x87,0x84,0x80,0xb5,0x8d,0x1f,0x80};
++ bool t=s.nominalMah==4027, l=s.nominalMah==4073;
++ for (unsigned i=0;i<24;++i) { t=t && s.profilePrefix[i]==tocad[i];l=l && s.profilePrefix[i]==lgc[i]; }
++ return t?1:l?2:0;
++}
++
+ /* These missing providers intentionally block hardware enable today. Runtime
+  * register values cannot prove battery identity, physical isolation or VBUS.
+  * Synthetic evidence is allowed only in host tests, never by device arguments. */
+@@ -91,7 +154,8 @@ sb_decide(SweetBattController &c, const SweetBattSnapshot &s,
+  if (!limits.inputVerified || now<limits.verifiedNs ||
+      now-limits.verifiedNs>3000000000ULL || limits.vbusMv<4500 ||
+      limits.vbusMv>5500 || !sb_valid(s,SB_APSD) || !(s.raw[SB_APSD]&1) ||
+-     !sb_valid(s,SB_RESULT) || (s.raw[SB_RESULT]&0x60) ||
++     !sb_input_fresh(s,now) || !sb_normal_sink(s) ||
++     (sb_source_type(s)!=SB_SOURCE_DCP && sb_source_type(s)!=SB_SOURCE_CDP) ||
+      (sb_valid(s,SB_USB) && (s.raw[SB_USB]&16) &&
+       (!(s.raw[SB_PATH]&1) || !(s.raw[SB_PATH]&16)))) d.reasons|=SB_R_INPUT;
+  /* First implementation supports only a proven watchdog-off session. Refuse
+@@ -104,14 +168,15 @@ sb_decide(SweetBattController &c, const SweetBattSnapshot &s,
+  d.fccMa=d.fccMa/50*50;d.iclMa=d.iclMa/50*50;
+  d.fvMv=d.fvMv>=3600?3600+(d.fvMv-3600)/10*10:0;
+  if (!d.fccMa || !d.iclMa || !d.fvMv || limits.maxFvMv>4430 ||
+-     limits.maxFccMa>3300) d.reasons|=SB_R_LIMITS;
++     limits.maxFccMa>2800) d.reasons|=SB_R_LIMITS; /* LG board supplement */
+  if (c.enabled && (s.raw[SB_FCC]*50u>d.fccMa ||
+      3600u+s.raw[SB_FV]*10u>d.fvMv || s.raw[SB_ICL]*50u>d.iclMa)) d.reasons|=SB_R_HARDWARE;
+  if (c.owned && now>=c.deadlineNs) d.reasons|=SB_R_EXPIRED;
+  if (c.fault) d.reasons|=c.faultReasons?c.faultReasons:SB_R_TRANSPORT;
+  if (c.stopped) d.reasons|=SB_R_STOPPED;
+- d.validUntilNs=s.startedNs+3000000000ULL;
+- if (limits.verifiedNs+3000000000ULL<d.validUntilNs) d.validUntilNs=limits.verifiedNs+3000000000ULL;
++ d.validUntilNs=sb_evidence_deadline(s.startedNs);
++ if (sb_evidence_deadline(limits.verifiedNs)<d.validUntilNs) d.validUntilNs=sb_evidence_deadline(limits.verifiedNs);
++ if (sb_evidence_deadline(s.inputStartedNs)<d.validUntilNs) d.validUntilNs=sb_evidence_deadline(s.inputStartedNs);
+  d.allow=d.reasons==0;
+  if (d.reasons&(SB_R_TRANSPORT|SB_R_HARDWARE)) d.state=SB_FAULT;
+  else if (d.reasons&(SB_R_STOPPED|SB_R_EXPIRED)) d.state=SB_STOPPED;
+diff --git a/bsd/dev/sweet_pmic_power.h b/bsd/dev/sweet_pmic_power.h
+index 3534c5ac465b70bb730e7821eb3a6503ad7fac8b..aadfd2714aa7cc999c8f245a4463aa01c284cfb2 100644
+--- a/bsd/dev/sweet_pmic_power.h
++++ b/bsd/dev/sweet_pmic_power.h
+@@ -8,7 +8,9 @@
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ /* Refresh input/APSD/Type-C only on initial observation or an actual event.
+  * Capacity may remain cached on protection ticks; every fresh read reports its
+- * own validity/error. Failure is unknown, never synthesized as a valid zero. */
++ * own validity/error. The fixed profile-prefix/metadata tuple shares a grant.
++ * Input acquisition has its own monotonic epoch and start/completion times;
++ * protection ticks preserve them. Failure is unknown, never a valid zero. */
+ void sweet_pmic_power_read_snapshot(SweetBattSnapshot &snapshot,
+     bool refreshInput, bool refreshCapacity, unsigned lastPercent);
+ #endif
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 29be2c7acdb982c30aa5e2693dbb77f815908d6e..b3eb38109a680f8532f1f8767e7f5e304302a049 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -304,7 +304,7 @@ static const struct sp_charger_register sp_charger_registers[] = {
+ 	{0x1340, 0x01}, {0x1342, 0x01}, {0x1365, 0x10},
+ 	{0x1366, 0x07}, {0x1370, 0xff}, {0x1380, 0x9c},
+ 	/* Only these Type-C status bytes; no peripheral-wide permission. */
+-	{0x1506, 0}, {0x1509, 0}, {0x150b, 0},
++	{0x1506, 0}, {0x1507, 0}, {0x1509, 0}, {0x150b, 0}, {0x150d, 0},
+ 	{0x1648, 0}, {0x1651, 0}, {0x1653, 0}, {0x1661, 0}, {0x1690, 0}
+ };
+ 
+@@ -832,9 +832,10 @@ struct sp_fg_session {
+ 	const char *operation;
+ 	int error;
+ };
+-static int sp_fg_last_error[4];
+-static unsigned sp_fg_last_addr[4];
+-static const char *sp_fg_last_operation[4];
++/* Four scalar fields plus the private fixed-profile operation. */
++static int sp_fg_last_error[5];
++static unsigned sp_fg_last_addr[5];
++static const char *sp_fg_last_operation[5];
+ 
+ static int
+ sp_fg_record(struct sp_fg_session *session, unsigned addr,
+@@ -857,7 +858,7 @@ sp_fg_route_diagnostics(void)
+ 	/* Metadata only: no interrupt-bank mapping or foreign RW access. The
+ 	 * observer window belongs to EE0 even if an APID's writer is another EE.
+ 	 * Match Linux v5: first mapping, preferring the last local EE mapping. */
+-	static const unsigned peripherals[] = {0x01, 0x41, 0x43, 0x46, 0x47, 0x48};
++	static const unsigned peripherals[] = {0x01, 0x41, 0x43, 0x45, 0x46, 0x47, 0x48};
+ 	IOLockLock(sp_lock);
+ 	for (unsigned n = 0; n < sizeof(peripherals) / sizeof(peripherals[0]); ++n) {
+ 		unsigned ppid = 0x200u | peripherals[n];
+@@ -1047,10 +1048,18 @@ sp_fg_release(struct sp_fg_session *session)
+ 	return first ? first : second;
+ }
+ 
+-int
+-sweet_spmi_fg_read(unsigned field, uint16_t *out)
++static uint64_t
++sp_fg_now(void)
++{
++	uint64_t ticks, ns;
++	clock_get_uptime(&ticks);
++	absolutetime_to_nanoseconds(ticks, &ns);
++	return ns;
++}
++
++static int
++sp_fg_read_fixed(unsigned field, uint16_t *out, struct sweet_fg_profile *profile)
+ {
+-	if (!out || field > SWEET_FG_LEARNED_CAPACITY) { return SWEET_SPMI_INVALID; }
+ 	if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
+ 	IOLock *lock = __atomic_load_n(&sp_fg_lock, __ATOMIC_ACQUIRE);
+ 	if (!lock) {
+@@ -1061,6 +1070,8 @@ sweet_spmi_fg_read(unsigned field, uint16_t *out)
+ 		else { IOLockFree(candidate); lock = expected; }
+ 	}
+ 	IOLockLock(lock);
++	struct sweet_fg_profile next = {0};
++	if (profile) { next.started_ns = sp_fg_now(); }
+ 	struct sp_fg_session session = {0, "session-disabled", 0};
+ 	sp_fg_route_diagnostics();
+ 	int result = sp_fg_failed ? SWEET_SPMI_POISONED : SWEET_SPMI_OK;
+@@ -1135,15 +1146,29 @@ sweet_spmi_fg_read(unsigned field, uint16_t *out)
+ 		dmaChanged = true;
+ 		result = sp_fg_update(&session, 0x4371, 2, 2);
+ 	}
+-	if (field == SWEET_FG_TEMPERATURE) { word = 328; }
+-	else if (field == SWEET_FG_NOMINAL_CAPACITY) { word = 271; }
+-	else if (field == SWEET_FG_PROFILE_INTEGRITY) { word = 299; }
+-	else { word = revision == 1 ? 285 : 287; }
+-	if (word >= 300) { addr = 0x4820 + (word - 300) * 2; }
+-	else if (word >= 275) { addr = 0x4720 + (word - 275) * 2; }
+-	else { addr = 0x4620 + (word - 170) * 2; }
+-	if (!result) { result = sp_fg_byte(&session, addr, &lo); }
+-	if (!result && field != SWEET_FG_PROFILE_INTEGRITY) { result = sp_fg_byte(&session, addr + 1, &hi); }
++	if (profile) {
++		/* Gen4 battery profile partition starts at word64 / DMA1 0x4520.
++		 * PROFILE_LOAD_WORD65 maps to 0x4522, NOT the >=170 aperture.
++		 * LG compares this fixed 24-byte prefix; also read its integrity and
++		 * nominal capacity before releasing the same grant. */
++		for (unsigned i = 0; !result && i < SWEET_FG_PROFILE_PREFIX_SIZE; ++i) {
++			result = sp_fg_byte(&session, 0x4522 + i, &next.prefix[i]);
++		}
++		if (!result) { result = sp_fg_byte(&session, 0x4750, &next.integrity); }
++		if (!result) { result = sp_fg_byte(&session, 0x46ea, &lo); }
++		if (!result) { result = sp_fg_byte(&session, 0x46eb, &hi); }
++		next.nominal_mah = (uint16_t)(lo | ((unsigned)hi << 8));
++	} else {
++		if (field == SWEET_FG_TEMPERATURE) { word = 328; }
++		else if (field == SWEET_FG_NOMINAL_CAPACITY) { word = 271; }
++		else if (field == SWEET_FG_PROFILE_INTEGRITY) { word = 299; }
++		else { word = revision == 1 ? 285 : 287; }
++		if (word >= 300) { addr = 0x4820 + (word - 300) * 2; }
++		else if (word >= 275) { addr = 0x4720 + (word - 275) * 2; }
++		else { addr = 0x4620 + (word - 170) * 2; }
++		if (!result) { result = sp_fg_byte(&session, addr, &lo); }
++		if (!result && field != SWEET_FG_PROFILE_INTEGRITY) { result = sp_fg_byte(&session, addr + 1, &hi); }
++	}
+ 	if (!result) { result = sp_fg_byte(&session, 0x4370, &dma); }
+ 	if (!result && (dma & 6)) {
+ 		SWEET_LOG_WARN("SWEET FG DMA: v3 phase=post sts=%#x field=%u; no clear or retry\n", dma, field);
+@@ -1162,7 +1187,12 @@ sweet_spmi_fg_read(unsigned field, uint16_t *out)
+ 		int cleanup = sp_fg_update(&session, 0x41ee, 0xff, peek);
+ 		if (cleanup) { sp_fg_failed = true; result = cleanup; }
+ 	}
+-	if (!result) { *out = (uint16_t)(lo | ((unsigned)hi << 8)); }
++	if (!result) {
++		if (profile) {
++			next.completed_ns = sp_fg_now();
++			*profile = next; /* Only publish after every cleanup succeeded. */
++		} else { *out = (uint16_t)(lo | ((unsigned)hi << 8)); }
++	}
+ 	/* Report first failure and transitions only: a persistent fault must not
+ 	 * produce one warning per protection tick. Primary provenance survives
+ 	 * cleanup; final-error also exposes a failed unwind. */
+@@ -1173,6 +1203,9 @@ sweet_spmi_fg_read(unsigned field, uint16_t *out)
+ 			SWEET_LOG_WARN("SWEET FG ACCESS: v2 field=%u op=%s sid=2 addr=%#x ppid=%#x error=%d final-error=%d; value=unknown\n",
+ 			    field, session.operation, session.addr, 0x200u | (session.addr >> 8),
+ 			    session.error ? session.error : result, result);
++		} else if (profile) {
++			SWEET_LOG_INFO("SWEET FG PROFILE: v1 fixed prefix24; same-session integrity=%#x nominal=%u recovered=%u\n",
++			    next.integrity, next.nominal_mah, sp_fg_last_error[field] != 0);
+ 		} else {
+ 			SWEET_LOG_INFO("SWEET FG ACCESS: v2 field=%u rev=%u memtype=%#x raw=%#x recovered=%u\n",
+ 			    field, revision, memtype, *out, sp_fg_last_error[field] != 0);
+@@ -1185,6 +1218,20 @@ sweet_spmi_fg_read(unsigned field, uint16_t *out)
+ 	return result;
+ }
+ 
++int
++sweet_spmi_fg_read(unsigned field, uint16_t *out)
++{
++	if (!out || field > SWEET_FG_LEARNED_CAPACITY) { return SWEET_SPMI_INVALID; }
++	return sp_fg_read_fixed(field, out, NULL);
++}
++
++int
++sweet_spmi_fg_read_profile(struct sweet_fg_profile *out)
++{
++	if (!out) { return SWEET_SPMI_INVALID; }
++	return sp_fg_read_fixed(4, NULL, out);
++}
++
+ #endif /* ARM64_BOARD_CONFIG_MH2LM */
+ 
+ int
+diff --git a/bsd/dev/sweet_spmi.h b/bsd/dev/sweet_spmi.h
+index f592813b3fd5e57c0f32074905dd33010fec39c0..0f7c1b36f296ebb06a46b0f960f9353927ed3327 100644
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -68,7 +68,7 @@ int sweet_spmi_charger_update(unsigned sid, unsigned addr, unsigned mask,
+ 	unsigned value, uint8_t *verified);
+ /* Gen4 read-only SRAM data via bounded DMA request/grant/release. This does
+  * write MEMIF protocol controls, never profile/learned SRAM contents. Fixed
+- * four fields only; serial session lock releases the controller lock at waits.
++ * four scalar fields; serial session lock releases the controller lock at waits.
+  * Observer reads select the v5 PPID route independently of write ownership.
+  * All protocol writers must have a unique EE0 route before any session write;
+  * each actual update rechecks it. No foreign RW channel is accessed.
+@@ -82,6 +82,17 @@ int sweet_spmi_charger_update(unsigned sid, unsigned addr, unsigned mask,
+ #define SWEET_FG_PROFILE_INTEGRITY 2u
+ #define SWEET_FG_LEARNED_CAPACITY  3u
+ int sweet_spmi_fg_read(unsigned field, uint16_t *out);
++/* Fixed Gen4 profile evidence, all read in ONE bounded MEMIF session. No
++ * address/length input and no profile/learning writes. Output unchanged on
++ * any error, including release/restore failure. Call on a consumer workloop. */
++#define SWEET_FG_PROFILE_PREFIX_SIZE 24u
++struct sweet_fg_profile {
++	uint8_t prefix[SWEET_FG_PROFILE_PREFIX_SIZE];
++	uint8_t integrity;
++	uint16_t nominal_mah;
++	uint64_t started_ns, completed_ns;
++};
++int sweet_spmi_fg_read_profile(struct sweet_fg_profile *out);
+ #endif /* ARM64_BOARD_CONFIG_MH2LM */
+ /* Logs PMIC-arb v5 routing state for the PM8150B charger/USB peripherals.
+  * This is a read-only bring-up probe: it never enables, clears, or claims
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index cf1824d79ff2e0ef0d5f2f345746f4b2b03c823c..88e21eb041502b2653eec9c1c711e597a573615d 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -1146,7 +1146,8 @@ SweetBattery::sampleRuntime(bool refreshInput)
+ 	 * telemetry/protection, never substitutes periodic plug discovery. */
+ 	SweetBattSnapshot next = fSnapshot;
+ 	next.startedNs = sweet_batt_now_ns();
+-	sweet_pmic_power_read_snapshot(next, refreshInput, refreshInput || !fMonitorSamples, fLastPercent);
++	bool refreshCapacity = refreshInput || !fMonitorSamples;
++	sweet_pmic_power_read_snapshot(next, refreshInput, refreshCapacity, fLastPercent);
+ 	next.completedNs = sweet_batt_now_ns();
+ 	bool batteryChanged = next.presentValid != fSnapshot.presentValid || next.present != fSnapshot.present;
+  fSnapshot = next;
+@@ -1171,7 +1172,42 @@ SweetBattery::sampleRuntime(bool refreshInput)
+ 	    next.integrity, next.profileValid, next.profileError);
+ 	SWEET_LOG_INFO("SWEET BATT TIME: v3 id=%u started-ns=%llu completed-ns=%llu\n",
+ 	    fMonitorSamples, (unsigned long long)next.startedNs, (unsigned long long)next.completedNs);
++	if (refreshCapacity) {
++		char prefix[49];
++		static const char hex[] = "0123456789abcdef";
++		for (unsigned i = 0; i < 24; ++i) {
++			prefix[2 * i] = hex[next.profilePrefix[i] >> 4];
++			prefix[2 * i + 1] = hex[next.profilePrefix[i] & 15];
++		}
++		prefix[48] = 0;
++		SWEET_LOG_INFO("SWEET BATT PROFILE: v1 id=%u valid=%u error=%d match=%u integrity=%#x nominal=%u prefix=%s; diagnostic-only\n",
++		    fMonitorSamples, next.profilePrefixValid, next.profilePrefixError,
++		    sb_profile_match(next), next.integrity, next.nominalMah, prefix);
++		SWEET_LOG_INFO("SWEET BATT PROFILE TIME: v1 id=%u started-ns=%llu completed-ns=%llu\n",
++		    fMonitorSamples, (unsigned long long)next.profileStartedNs, (unsigned long long)next.profileCompletedNs);
++	}
+ 	if (refreshInput) {
++		SWEET_LOG_INFO("SWEET BATT INPUT: v4 id=%u epoch=%llu type=%u sink-ok=%u fresh=%u apsd=%#x/%d result=%#x/%d usb=%#x/%d\n",
++		    fMonitorSamples, (unsigned long long)next.inputEpoch, sb_source_type(next),
++		    sb_normal_sink(next), sb_input_fresh(next, next.completedNs),
++		    next.raw[SB_APSD], next.errors[SB_APSD], next.raw[SB_RESULT], next.errors[SB_RESULT],
++		    next.raw[SB_USB], next.errors[SB_USB]);
++		SWEET_LOG_INFO("SWEET BATT INPUT TIME: v1 id=%u epoch=%llu started-ns=%llu completed-ns=%llu\n",
++		    fMonitorSamples, (unsigned long long)next.inputEpoch,
++		    (unsigned long long)next.inputStartedNs, (unsigned long long)next.inputCompletedNs);
++		SWEET_LOG_INFO("SWEET BATT TYPEC: v4 id=%u sink=%#x/%d attached=%#x/%d misc=%#x/%d debug=%#x/%d legacy=%#x/%d\n",
++		    fMonitorSamples, next.raw[SB_TYPEC], next.errors[SB_TYPEC],
++		    next.raw[SB_ATTACHED], next.errors[SB_ATTACHED], next.raw[SB_MISC], next.errors[SB_MISC],
++		    next.raw[SB_DEBUG_ACCESS], next.errors[SB_DEBUG_ACCESS], next.raw[SB_LEGACY], next.errors[SB_LEGACY]);
++		SWEET_LOG_INFO("SWEET BATT ICL: v1 id=%u path=%#x/%d suspend=%#x/%d icl=%#x/%d settled=%#x/%d\n",
++		    fMonitorSamples, next.raw[SB_PATH], next.errors[SB_PATH], next.raw[SB_SUSPEND], next.errors[SB_SUSPEND],
++		    next.raw[SB_ICL], next.errors[SB_ICL], next.raw[SB_SETTLED], next.errors[SB_SETTLED]);
++		SWEET_LOG_INFO("SWEET BATT ICL MODE: v1 id=%u override=%#x/%d load=%#x/%d mode=%#x/%d aicl=%#x/%d\n",
++		    fMonitorSamples, next.raw[SB_OVERRIDE], next.errors[SB_OVERRIDE], next.raw[SB_LOAD], next.errors[SB_LOAD],
++		    next.raw[SB_MODE], next.errors[SB_MODE], next.raw[SB_AICL], next.errors[SB_AICL]);
++		SWEET_LOG_INFO("SWEET BATT LIMIT CONFIG: v1 id=%u fcc=%#x/%d fv=%#x/%d cfg2=%#x/%d jeita=%#x/%d\n",
++		    fMonitorSamples, next.raw[SB_FCC], next.errors[SB_FCC], next.raw[SB_FV], next.errors[SB_FV],
++		    next.raw[SB_CFG2], next.errors[SB_CFG2], next.raw[SB_JEITA], next.errors[SB_JEITA]);
+ 		/* Raw configuration is evidence, not a charging permission. Errors
+ 		 * accompany every byte so a retained value cannot masquerade as fresh. */
+ 		SWEET_LOG_INFO("SWEET BATT CONFIG: v3 id=%u valid=%#llx enable=%#x enable-error=%d pause=%#x pause-error=%d wdog=%#x wdog-error=%d wdog-time=%#x wdog-time-error=%d\n",
+diff --git a/iokit/Kernel/arm/SweetPmicPower.cpp b/iokit/Kernel/arm/SweetPmicPower.cpp
+index 333a415679dbbe471aa9c8373a854d8ed2ab8f42..e2858478c7d92551593320b9ae02721901ec2d43 100644
+--- a/iokit/Kernel/arm/SweetPmicPower.cpp
++++ b/iokit/Kernel/arm/SweetPmicPower.cpp
+@@ -5,6 +5,15 @@
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ #include "../../../bsd/dev/sweet_spmi.h"
+ #include "../../../bsd/dev/sweet_pmic_power.h"
++#include <kern/clock.h>
++
++static uint64_t powerNow(void)
++{
++	uint64_t ticks, ns;
++	clock_get_uptime(&ticks);
++	absolutetime_to_nanoseconds(ticks, &ns);
++	return ns;
++}
+ 
+ /* FG exposes an IBATT copy register specifically for a consistent raw sample.
+  * Do not write its hold bits: a matching pair is enough for diagnostics. */
+@@ -73,17 +82,28 @@ sweet_pmic_power_read_snapshot(SweetBattSnapshot &next, bool refreshInput,
+ 		0x1006,0x1007,0x100d,0x1042,0x1043,0x1051,0x1061,0x1070,
+ 		0x110b,0x1108,0x1307,0x1308,0x1310,0x1340,0x1342,0x1365,
+ 		0x1366,0x1370,0x1380,0x1506,0x1509,0x150b,0x1648,0x1651,
+-		0x1653,0x1690,0x1090,0x1067,0x1068,0x107d
++		0x1653,0x1690,0x1090,0x1067,0x1068,0x107d,0x1507,0x150d
+ 	};
++	if (refreshInput) {
++		/* Invalidate before acquiring a replacement. Saturation fails closed;
++		 * no wrap can make an earlier source epoch appear current. */
++		next.valid &= ~sb_input_mask();
++		next.inputStartedNs = next.inputCompletedNs = 0;
++		if (next.inputEpoch != ~0ULL) {
++			++next.inputEpoch;
++			next.inputStartedNs = powerNow();
++		}
++	}
+ 	for (unsigned i = 0; i < SB_REG_COUNT; ++i) {
+-		if (!refreshInput && (i == SB_USB || i == SB_APSD || i == SB_RESULT ||
+-		    i == SB_TYPEC || i == SB_ATTACHED || i == SB_MISC)) { continue; }
++		if (!refreshInput && (sb_input_mask() & (1ULL << i))) { continue; }
+ 		uint8_t value = 0;
+ 		int rc = sweet_spmi_charger_read(2, addresses[i], &value);
+ 		next.errors[i] = rc;
+ 		next.valid &= ~(1ULL << i);
++		next.raw[i] = 0; /* Failure is unknown, not a retained prior raw value. */
+ 		if (!rc) { next.raw[i] = value; next.valid |= 1ULL << i; }
+ 	}
++	if (refreshInput && next.inputStartedNs) { next.inputCompletedNs = powerNow(); }
+ 	uint8_t present = 0;
+ 	next.presentValid = !sweet_spmi_read(2, 0x4107, &present);
+ 	next.present = next.presentValid && !(present & 4);
+@@ -108,17 +128,22 @@ sweet_pmic_power_read_snapshot(SweetBattSnapshot &next, bool refreshInput,
+ 	/* Identity/capacity is sampled at initial observation and each real event,
+ 	 * not on every protection tick. Never write/reload SRAM profile data. */
+ 	if (refreshCapacity) {
+-		uint16_t nominal = 0, learned = 0, integrity = 0;
+-		next.profileError = sweet_spmi_fg_read(SWEET_FG_PROFILE_INTEGRITY, &integrity);
++		struct sweet_fg_profile profile = {};
++		uint16_t learned = 0;
++		next.profilePrefixError = sweet_spmi_fg_read_profile(&profile);
++		next.profilePrefixValid = !next.profilePrefixError;
++		next.profileStartedNs = profile.started_ns;
++		next.profileCompletedNs = profile.completed_ns;
++		for (unsigned i = 0; i < 24; ++i) { next.profilePrefix[i] = profile.prefix[i]; }
++		next.profileError = next.nominalError = next.profilePrefixError;
+ 		next.profileValid = !next.profileError;
+-		next.integrity = integrity;
+-		next.nominalError = sweet_spmi_fg_read(SWEET_FG_NOMINAL_CAPACITY, &nominal);
++		next.integrity = profile.integrity;
+ 		next.learnedError = sweet_spmi_fg_read(SWEET_FG_LEARNED_CAPACITY, &learned);
+-		next.nominalValid = !next.nominalError && next.profileValid && (integrity & 1) &&
+-		    nominal >= 1000 && nominal <= 6000;
++		next.nominalValid = !next.nominalError && next.profileValid && (profile.integrity & 1) &&
++		    profile.nominal_mah >= 1000 && profile.nominal_mah <= 6000;
+ 		next.learnedValid = next.nominalValid && !next.learnedError &&
+-		    learned >= nominal / 2 && learned <= nominal * 12 / 10;
+-		next.nominalMah = nominal;
++		    learned >= profile.nominal_mah / 2 && learned <= profile.nominal_mah * 12 / 10;
++		next.nominalMah = profile.nominal_mah;
+ 		next.learnedMah = learned;
+ 	}
+ }

@@ -1,5 +1,10 @@
 # 0119之后的电池驱动推进
 
+0157已实现固定profile tuple读取与输入快照/时效，待用户push和新云产物。仍不
+启充；下一轮同一镜像采电脑/普通5V电源证据，无需再跑ADC bring-up。接口及步骤见
+[profile/输入证据实现](BATTERY-PROFILE-INPUT-EVIDENCE.md)，之后继续身份/输入许可
+consumer、并联隔离和watchdog依赖。
+
 0120a5后离线核对：实测BAT_ID换算94～95kΩ与Tocad91kΩ匹配，4027mAh容量也
 相符；板级FCC覆盖2800mA。下一实现补固定24字节profile前缀及输入类型/模式/
 epoch日志与证据消费者，不能用旧ICL或USB configured bool直接授权。源码依据、

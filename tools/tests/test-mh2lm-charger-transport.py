@@ -90,6 +90,7 @@ static unsigned ctlReads,stsReads,failCtlReadAt,failStsReadAt,clearDelay,clearPe
 static std::vector<unsigned> rwAddresses;
 static std::vector<unsigned> dmaControlValues;
 static std::vector<unsigned> observerApids;
+static std::vector<unsigned> observerAddresses;
 static unsigned maps,unmaps,commands,writes,readCommands,ioReads,failReadAt;
 static unsigned observerStatus=1,rwStatus=1;
 static uint32_t version=0x50000000;
@@ -131,13 +132,14 @@ static void modelWrite(vm_offset_t b,unsigned o,uint32_t v){
         apid=(b-SWEET_DEV_SPMI_OBS_PA)/0x80;
         observerApids.push_back(apid);
         unsigned address=(((routing[apid]>>8)&0xfff)<<8)|reg;
+        observerAddresses.push_back(address);
         if(address==0x24370){++stsReads;if(clearPending && --clearPending==0)pmic[address]&=~6u;}
         if(address==0x24371)++ctlReads;
         if(address>=0x24400 && address<0x24a00)assert((pmic[0x24340]&1) && (pmic[0x24350]&0xa0)==0x80);
         bool fail=(address==0x24371 && ctlReads==failCtlReadAt) || (address==0x24370 && stsReads==failStsReadAt);
         status[b]=(fail || failReadAt==readCommands || address==failFgAddress)?3:observerStatus;
         data[b]=pmic[(((routing[apid]>>8)&0xfff)<<8)|reg];
-        if(postDmaError && address==0x24859)pmic[0x24370]|=4;
+        if(postDmaError && (address==0x24859 || address==0x246eb))pmic[0x24370]|=4;
     }else{
         assert(b>=SWEET_DEV_SPMI_CHNLS_PA && (v>>27)==0);++writes;
         apid=(b-SWEET_DEV_SPMI_CHNLS_PA)/0x10000;
@@ -193,6 +195,8 @@ int main(int argc,char **argv){
     assert(sweet_spmi_charger_read(2,0x1042,&out)==SWEET_SPMI_NOT_READY && out==0xa5);
     sweet_adc5_preflight notReady;memset(&notReady,0xa5,sizeof(notReady));auto savedNotReady=notReady;
     assert(sweet_spmi_adc5_inspect(&notReady)==SWEET_SPMI_NOT_READY && !memcmp(&notReady,&savedNotReady,sizeof(notReady)));
+    sweet_fg_profile absent;memset(&absent,0xa5,sizeof(absent));auto savedAbsent=absent;
+    assert(sweet_spmi_fg_read_profile(&absent)==SWEET_SPMI_NOT_READY && !memcmp(&absent,&savedAbsent,sizeof(absent)));
     if(!strcmp(mode,"alloc-fail")){
         failAlloc=true;assert(sweet_spmi_init()==-1 && !sp_attempted);failAlloc=false;
     }
@@ -350,6 +354,50 @@ int main(int argc,char **argv){
         pmic[0x24750]=1;
         pmic[0x24734]=0x3c;pmic[0x24735]=0xf;
         pmic[0x24738]=0x72;pmic[0x24739]=0xe;
+        if(!strncmp(mode,"fg-profile-",11)) {
+            own(37,0x45,4); // DMA1 observer is valid even with a foreign writer.
+            pmic[0x20103]=!strcmp(mode,"fg-profile-v1")?1:2;
+            for(unsigned i=0;i<24;++i)pmic[0x24522+i]=0x80+i;
+            pmic[0x24750]=0x13;pmic[0x246ea]=0xbb;pmic[0x246eb]=0x0f;
+            int expected=0;
+            if(!strcmp(mode,"fg-profile-missing")){routing.erase(37);expected=SWEET_SPMI_NO_OWNER;}
+            if(!strcmp(mode,"fg-profile-writer")){ownership[32]=3;expected=SWEET_SPMI_NO_OWNER;}
+            if(!strcmp(mode,"fg-profile-grant")){pmic[0x24310]=0;expected=SWEET_SPMI_TIMEOUT;}
+            if(!strcmp(mode,"fg-profile-cleanup")){failFgRelease=true;expected=SWEET_SPMI_IO;}
+            if(!strcmp(mode,"fg-profile-post-error")){postDmaError=true;expected=SWEET_SPMI_IO;}
+            if(!strcmp(mode,"fg-profile-busy")){pmic[0x24350]=0x80;expected=SWEET_SPMI_BUSY;}
+            if(!strcmp(mode,"fg-profile-type")){pmic[0x24305]=0x0e;expected=SWEET_SPMI_UNSUPPORTED;}
+            if(!strncmp(mode,"fg-profile-byte-",16)){
+                unsigned i=atoi(mode+16);assert(i<24);failFgAddress=0x24522+i;expected=SWEET_SPMI_IO;
+            }
+            if(!strcmp(mode,"fg-profile-integrity")){failFgAddress=0x24750;expected=SWEET_SPMI_IO;}
+            if(!strcmp(mode,"fg-profile-nominal-lo")){failFgAddress=0x246ea;expected=SWEET_SPMI_IO;}
+            if(!strcmp(mode,"fg-profile-nominal-hi")){failFgAddress=0x246eb;expected=SWEET_SPMI_IO;}
+            if(!strcmp(mode,"fg-profile-poison")){sp_fg_failed=true;expected=SWEET_SPMI_POISONED;}
+            sweet_fg_profile profile;memset(&profile,0xa5,sizeof(profile));auto saved=profile;
+            assert(sweet_spmi_fg_read_profile(&profile)==expected);
+            if(expected)assert(!memcmp(&profile,&saved,sizeof(profile)));
+            else {
+                for(unsigned i=0;i<24;++i)assert(profile.prefix[i]==0x80+i);
+                assert(profile.integrity==0x13 && profile.nominal_mah==4027);
+                assert(profile.started_ns==adcTimeNs && profile.completed_ns==adcTimeNs);
+            }
+            for(auto address:observerAddresses)if(address>=0x24400 && address<0x24a00){
+                assert((address>=0x24522 && address<=0x24539) || address==0x24750 || address==0x246ea || address==0x246eb);
+            }
+            for(auto a:rwAddresses)assert(a==0x24340 || a==0x24350 || a==0x24371 || a==0x241ee);
+            if(failFgRelease || postDmaError){
+                assert(sp_fg_failed);auto before=commands;
+                assert(sweet_spmi_fg_read_profile(&profile)==SWEET_SPMI_POISONED && commands==before);
+            }
+            if(expected==SWEET_SPMI_NO_OWNER && !strcmp(mode,"fg-profile-writer"))assert(writes==0);
+            if(writes && !failFgRelease)assert(!(pmic[0x24340]&1) && !(pmic[0x24350]&0xa0) && !(pmic[0x24371]&2));
+            auto before=commands;
+            assert(sweet_spmi_fg_read_profile(nullptr)==SWEET_SPMI_INVALID && commands==before);
+            uint16_t scalar=0xdead;assert(sweet_spmi_fg_read(4,&scalar)==SWEET_SPMI_INVALID && commands==before && scalar==0xdead);
+            balanced();assert(!sessionDepth);IOLockFree(sp_lock);if(sp_fg_lock)IOLockFree(sp_fg_lock);
+            printf("PASS: fixed profile tuple/prefix partition/foreign observer/unwind/output preservation %s\n",mode);return 0;
+        }
         int wanted=0;
         // Real 0120 regression: REVID can be readable through EE0's observer
         // without an EE0 writer. DMA apertures also need reads, never writes.
@@ -496,10 +544,16 @@ int main(int argc,char **argv){
     assert(sweet_spmi_charger_update(2,0x1042,0,0,&out)==SWEET_SPMI_INVALID);
     assert(sweet_spmi_charger_update(2,0x1042,1,2,&out)==SWEET_SPMI_INVALID);
     assert(sweet_spmi_charger_update(2,0x1042,1,1,nullptr)==SWEET_SPMI_INVALID);
-    assert(sweet_spmi_charger_read(2,0x1507,&out)==SWEET_SPMI_INVALID);
+    assert(sweet_spmi_charger_read(2,0x1508,&out)==SWEET_SPMI_INVALID);
     assert(ioReads==before && !commands && out==0xa5);
     // Legacy Type-C policy remains closed; only exact new status table opens.
     assert(sweet_spmi_read(2,0x1506,&out)==-1 && ioReads==before);
+    for(unsigned address:{0x1507u,0x150du}){
+        pmic[0x20000+address]=0x21;
+        assert(!sweet_spmi_charger_read(2,address,&out) && out==0x21);
+        auto count=commands;
+        assert(sweet_spmi_charger_update(2,address,1,0,&out)==SWEET_SPMI_INVALID && commands==count);
+    }
     pmic[0x21506]=0x21;assert(!sweet_spmi_charger_read(2,0x1506,&out) && out==0x21 && !maps);
     pmic[0x21042]=0xa0;
     assert(!sweet_spmi_charger_update(2,0x1042,1,1,&out) && out==0xa1 && pmic[0x21042]==0xa1 && writes==1);
@@ -587,5 +641,10 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-charge-io-') as directory:
                  'fg-clear-no-writer','fg-clear-ambiguous','fg-clear-unknown','fg-clear-busy',
                  'fg-clear-write1','fg-clear-write2','fg-clear-write3','fg-clear-timeout',
                  'fg-clear-denied','fg-clear-dropped','fg-clear-readback','fg-clear-status-read',
-                 'fg-clear-later-error','fg-clear-v2-foreign']:
+                 'fg-clear-later-error','fg-clear-v2-foreign',
+                 'fg-profile-v1','fg-profile-v2','fg-profile-missing','fg-profile-writer',
+                 'fg-profile-grant','fg-profile-cleanup','fg-profile-post-error','fg-profile-busy',
+                 'fg-profile-type','fg-profile-poison','fg-profile-integrity',
+                 'fg-profile-nominal-lo','fg-profile-nominal-hi',
+                 *[f'fg-profile-byte-{i}' for i in range(24)]]:
         subprocess.run([str(binary),mode],env=env,check=True,timeout=20)

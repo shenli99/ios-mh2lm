@@ -76,7 +76,7 @@ jobs:
             fi
             require_marker() {
               if ! grep -Fq "$2" "$1"; then
-                echo "ERROR: required 0139..0156 marker missing from $1: $2" >&2
+                echo "ERROR: required 0139..0157 marker missing from $1: $2" >&2
                 exit 1
               fi
             }
@@ -124,6 +124,14 @@ jobs:
             require_marker xnu/iokit/Kernel/arm/SweetAdc5Client.cpp 'result.sequence == token'
             require_marker xnu/iokit/Kernel/arm/SweetPmicAdc5.cpp 'SweetPmicAdc5::statusAction'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SweetBattery::publishAdc(void)'
+            require_marker xnu/bsd/dev/sweet_spmi.c 'sweet_spmi_fg_read_profile(struct sweet_fg_profile'
+            require_marker xnu/bsd/dev/sweet_spmi.c 'SWEET FG PROFILE: v1 fixed prefix24'
+            require_marker xnu/bsd/dev/sweet_battery_runtime.h 'sb_input_fresh(const SweetBattSnapshot'
+            require_marker xnu/bsd/dev/sweet_battery_runtime.h 'sb_profile_match(const SweetBattSnapshot'
+            require_marker xnu/iokit/Kernel/arm/SweetPmicPower.cpp 'next.inputCompletedNs = powerNow()'
+            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT PROFILE: v1'
+            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT INPUT: v4'
+            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT INPUT TIME: v1'
             require_marker xnu/iokit/conf/files.arm64 'iokit/Kernel/arm/SweetAdc5Client.cpp'
             require_marker xnu/bsd/dev/sweet_spmi.c 'sp_fg_dma_command_locked(unsigned apid'
             require_marker xnu/bsd/dev/sweet_spmi.c 'SWEET FG DMA: v3 phase=recovery'
