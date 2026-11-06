@@ -2,7 +2,33 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
-**LATEST RESULT: 0120a3 ADC预检/采样分层实机正常；下一步实现真实ADC provider。**
+**LATEST RESULT: 0155 ADC5 conversion provider 本地完成，待用户push/云编译/实机。**
+
+实现提交 `db2728f`；0155 patch: `xnu/patches/0155-mh2lm-adc5-conversion-provider.patch`。新增专用
+`SweetPmicAdc5Device` nub 和 `SweetPmicAdc5 : IOService`，默认发布并订阅 mux
+ADC5 group2 EOC、保持转换空闲；自己的 IOWorkLoop/timer 负责 BAT_ID/USBIN 转换，
+没有在 matched 回调做重 SPMI，也没有接入充电放行。专用 consumer 不再匹配全部
+IOResources。`sweet_board_init()` 在 mux 后发布 ADC nub，按键/电池事件路径保持独立。
+
+新增 `sweetbattadcconv=1..3`：1=BAT_ID，2=USBIN（含GND workaround），3=两者顺序。
+每阶段100ms有界、校验EOC/status/channel/raw、恢复配置；错误/恢复失败停止provider，
+不静默切回轮询。默认0只启动服务不发起转换。打包入口：
+`tools/mk-mh2lm-event-matrix.sh <xnu-kernel-编号.gz> <编号> --battery-adc5-conversion`，
+生成 `out-bs/boot-16k-编号-battery-adc5-conversion.img`。
+
+本地证据：`scratch/adc-provider-0120a3/validation-results.json`、
+`arm64-tests.txt`、`transport-tests.txt`、`mux-tests.txt`、`board-tests.txt`。
+严格apply/31文件逐字节比较、6个ARM64单文件编译、transport 81项、mux/provider
+57场景（含13项ADC）及80次竞态、runtime/SPMI/board回归均通过。旧0120a3 kernel被新profile gate拒绝。
+尚无0155云端完整链接或真实ADC EOC/电压恢复日志；充电仍互锁，不能据此称真实充电恢复。
+真实测试步骤见 [`docs/BATTERY-ADC5-PROVIDER.md`](docs/BATTERY-ADC5-PROVIDER.md)。
+
+NEXT：用户push main并下载新编号kernel/buildtree；核对0155后打包上述组合镜像。
+首次保持USB线插入，取得启动早期BAT_ID一次及USBIN两次EOC和恢复日志；
+约60秒内操作三键/触摸并插拔一轮，导出持久日志。ADC只在启动时各采一次，
+插拔用于回归事件，不会自动重采。无需先baseline/dry；本轮无push/设备操作。
+
+**0154实机结果仍为0120a3；0155 ADC provider已在上方完成本地实现，当前等待云构建和实机证据。**
 
 用户导出logs/sweetlog-0120a3-battery-telemetry.bin，SHA256
 f414a6331edb147c6ab48e4203ee9ac6db2f9056b1e7bae03a7e5725f74f60fe。
