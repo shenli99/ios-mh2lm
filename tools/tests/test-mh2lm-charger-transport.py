@@ -76,7 +76,11 @@ static thread_local unsigned depth,sessionDepth;
 static IOLock *controllerLock;
 static bool failAlloc,failMap,failPermanent,dropWrite,failFgRelease;
 static unsigned failFgAddress;
+static bool clearStuck,clearSelfClear,postDmaError;
+static unsigned clearWrites,clearHighs,failClearAt,failClearStatus=3;
+static unsigned ctlReads,stsReads,failCtlReadAt,failStsReadAt,clearDelay,clearPending;
 static std::vector<unsigned> rwAddresses;
+static std::vector<unsigned> dmaControlValues;
 static std::vector<unsigned> observerApids;
 static unsigned maps,unmaps,commands,writes,readCommands,ioReads,failReadAt;
 static unsigned observerStatus=1,rwStatus=1;
@@ -119,18 +123,28 @@ static void modelWrite(vm_offset_t b,unsigned o,uint32_t v){
         apid=(b-SWEET_DEV_SPMI_OBS_PA)/0x80;
         observerApids.push_back(apid);
         unsigned address=(((routing[apid]>>8)&0xfff)<<8)|reg;
+        if(address==0x24370){++stsReads;if(clearPending && --clearPending==0)pmic[address]&=~6u;}
+        if(address==0x24371)++ctlReads;
         if(address>=0x24400 && address<0x24a00)assert((pmic[0x24340]&1) && (pmic[0x24350]&0xa0)==0x80);
-        status[b]=(failReadAt==readCommands || address==failFgAddress)?3:observerStatus;
+        bool fail=(address==0x24371 && ctlReads==failCtlReadAt) || (address==0x24370 && stsReads==failStsReadAt);
+        status[b]=(fail || failReadAt==readCommands || address==failFgAddress)?3:observerStatus;
         data[b]=pmic[(((routing[apid]>>8)&0xfff)<<8)|reg];
+        if(postDmaError && address==0x24859)pmic[0x24370]|=4;
     }else{
         assert(b>=SWEET_DEV_SPMI_CHNLS_PA && (v>>27)==0);++writes;
         apid=(b-SWEET_DEV_SPMI_CHNLS_PA)/0x10000;
         assert(ownership[apid]==0); // foreign writer permission is never borrowed
         unsigned address=(((routing[apid]>>8)&0xfff)<<8)|reg;rwAddresses.push_back(address);
+        if(address==0x24371){++clearWrites;dmaControlValues.push_back(data[b]&255);if(data[b]&1)++clearHighs;}
         if(failFgRelease && address==0x24350 && !(data[b]&0x80)){status[b]=3;return;}
         status[b]=rwStatus;
+        if(address==0x24371 && clearWrites==failClearAt)status[b]=failClearStatus;
         if(!dropWrite && (rwStatus==1 || rwStatus==0))
             pmic[(((routing[apid]>>8)&0xfff)<<8)|reg]=data[b]&255;
+        if(address==0x24371 && (data[b]&1)){
+            if(!clearStuck){if(clearDelay)clearPending=clearDelay;else pmic[0x24370]&=~6u;}
+            if(clearSelfClear)pmic[address]&=~1u;
+        }
     }
 }
 '''
@@ -215,7 +229,32 @@ int main(int argc,char **argv){
         if(!strcmp(mode,"fg-active")){pmic[0x241ef]=8;wanted=SWEET_SPMI_TIMEOUT;}
         if(!strcmp(mode,"fg-read-fail")){failFgAddress=0x24859;wanted=SWEET_SPMI_IO;}
         if(!strcmp(mode,"fg-cleanup-fail")){failFgRelease=true;wanted=SWEET_SPMI_IO;}
-        if(!strcmp(mode,"fg-dma-error")){pmic[0x24370]=4;wanted=SWEET_SPMI_IO;}
+        if(!strcmp(mode,"fg-dma-error")){pmic[0x24370]=4;clearStuck=true;wanted=SWEET_SPMI_IO;}
+        if(!strncmp(mode,"fg-clear-",9)){
+            pmic[0x24370]=4;pmic[0x24371]=0xa2; // unrelated bits + partition already set
+            if(!strcmp(mode,"fg-clear-write-error"))pmic[0x24370]=2;
+            if(!strcmp(mode,"fg-clear-both-errors"))pmic[0x24370]=6;
+            if(!strcmp(mode,"fg-clear-self"))clearSelfClear=true;
+            if(!strcmp(mode,"fg-clear-delayed"))clearDelay=3;
+            if(!strcmp(mode,"fg-clear-initial-high")){pmic[0x24370]=0;pmic[0x24371]=0xa3;}
+            if(!strcmp(mode,"fg-clear-stuck")){clearStuck=true;wanted=SWEET_SPMI_IO;}
+            if(!strcmp(mode,"fg-clear-map-fail")){failMap=true;wanted=SWEET_SPMI_MAP_FAILED;}
+            if(!strcmp(mode,"fg-clear-no-writer")){ownership[32]=4;wanted=SWEET_SPMI_NO_OWNER;}
+            if(!strcmp(mode,"fg-clear-ambiguous")){own(70,0x43);wanted=SWEET_SPMI_AMBIGUOUS;}
+            if(!strcmp(mode,"fg-clear-unknown")){pmic[0x20103]=3;wanted=SWEET_SPMI_UNSUPPORTED;}
+            if(!strcmp(mode,"fg-clear-busy")){pmic[0x24350]=0x80;wanted=SWEET_SPMI_BUSY;}
+            if(!strcmp(mode,"fg-clear-write1")){failClearAt=1;wanted=SWEET_SPMI_IO;}
+            if(!strcmp(mode,"fg-clear-write2")){failClearAt=2;wanted=SWEET_SPMI_IO;}
+            if(!strcmp(mode,"fg-clear-write3")){failClearAt=3;wanted=SWEET_SPMI_IO;}
+            if(!strcmp(mode,"fg-clear-timeout")){failClearAt=2;failClearStatus=0;wanted=SWEET_SPMI_TIMEOUT;}
+            if(!strcmp(mode,"fg-clear-denied")){failClearAt=2;failClearStatus=5;wanted=SWEET_SPMI_DENIED;}
+            if(!strcmp(mode,"fg-clear-dropped")){failClearAt=2;failClearStatus=9;wanted=SWEET_SPMI_DROPPED;}
+            if(!strcmp(mode,"fg-clear-readback")){failCtlReadAt=3;wanted=SWEET_SPMI_IO;}
+            if(!strcmp(mode,"fg-clear-status-read")){failStsReadAt=2;wanted=SWEET_SPMI_IO;}
+            if(!strcmp(mode,"fg-clear-v2-foreign")){pmic[0x20103]=2;ownership[30]=4;}
+        }
+        if(!strcmp(mode,"fg-post-error")){postDmaError=true;wanted=SWEET_SPMI_IO;}
+        unsigned initialCtl=pmic[0x24371];
         uint16_t raw=0xdead;assert(sweet_spmi_fg_read(SWEET_FG_TEMPERATURE,&raw)==wanted);
         if(wanted)assert(raw==0xdead);else assert(raw==100);
         if(wanted)assert(logs.find("SWEET FG ACCESS: v2 field=0 op=")!=std::string::npos);
@@ -237,17 +276,43 @@ int main(int argc,char **argv){
             auto prior=commands;observerStatus=1;
             assert(sweet_spmi_fg_read(SWEET_FG_TEMPERATURE,&raw)==SWEET_SPMI_POISONED && commands==prior);
         }
-        if(wanted==SWEET_SPMI_BUSY || wanted==SWEET_SPMI_UNSUPPORTED || !strcmp(mode,"fg-dma-error"))assert(writes==0);
-        if(writes) {
-            assert(pmic[0x241ee]==0x31 && (pmic[0x24371]&2)==0);
+        if(wanted==SWEET_SPMI_BUSY || wanted==SWEET_SPMI_UNSUPPORTED)assert(writes==0);
+        if(writes && !failClearAt && !failCtlReadAt) {
+            assert(pmic[0x241ee]==0x31 && (pmic[0x24371]&2)==(initialCtl&2));
             assert(!(pmic[0x24340]&1));
             if(!failFgRelease)assert((pmic[0x24350]&0xa0)==0);
+        }
+        if(!strncmp(mode,"fg-clear-",9)){
+            if(wanted==SWEET_SPMI_NO_OWNER || wanted==SWEET_SPMI_AMBIGUOUS ||
+               wanted==SWEET_SPMI_BUSY || wanted==SWEET_SPMI_UNSUPPORTED || failMap)assert(clearWrites==0);
+            if(!wanted){
+                assert(clearHighs==1 && clearWrites==3 && pmic[0x24371]==0xa2 && !(pmic[0x24370]&6));
+                assert((dmaControlValues==std::vector<unsigned>{0xa2,0xa3,0xa2}));
+                assert(logs.find("phase=recovery")!=std::string::npos && logs.find("low-confirmed=1 error=0")!=std::string::npos);
+            }
+            if(!strcmp(mode,"fg-clear-stuck"))assert(stsReads==6 && clearHighs==1 && sp_fg_failed);
+            if(!strcmp(mode,"fg-clear-timeout"))assert(clearWrites==2 && sp_rw_poisoned[32] && logs.find("RW lane poisoned, no further writes")!=std::string::npos);
+            if(failClearAt || failCtlReadAt || failStsReadAt || failMap || clearStuck){
+                assert(sp_fg_failed);auto prior=commands;
+                failMap=false;failClearAt=0;failCtlReadAt=failStsReadAt=0;
+                assert(sweet_spmi_fg_read(SWEET_FG_TEMPERATURE,&raw)==SWEET_SPMI_POISONED && prior==commands);
+            }
+        }
+        if(!strcmp(mode,"fg-post-error")){
+            assert(sp_fg_failed && clearHighs==0 && logs.find("op=dma-post-status")!=std::string::npos);
+            unsigned prior=commands;pmic[0x24370]=0;
+            assert(sweet_spmi_fg_read(SWEET_FG_TEMPERATURE,&raw)==SWEET_SPMI_POISONED && commands==prior);
+        }
+        if(!strcmp(mode,"fg-later-error") || !strcmp(mode,"fg-clear-later-error")){
+            auto highs=clearHighs;pmic[0x24370]=4;
+            assert(sweet_spmi_fg_read(SWEET_FG_TEMPERATURE,&raw)==SWEET_SPMI_IO && clearHighs==highs && sp_fg_failed);
+            assert(logs.find("op=dma-pre-status")!=std::string::npos);
         }
         if(!strcmp(mode,"fg-recovery")){
             failFgAddress=0;assert(!sweet_spmi_fg_read(SWEET_FG_TEMPERATURE,&raw) && raw==100);
             assert(logs.find("recovered=1")!=std::string::npos);
         }
-        if(!wanted){
+        if(!wanted && !sp_fg_failed){
             assert(!sweet_spmi_fg_read(SWEET_FG_NOMINAL_CAPACITY,&raw) && raw==4000);
             assert(!sweet_spmi_fg_read(SWEET_FG_PROFILE_INTEGRITY,&raw) && raw==1);
             assert(!sweet_spmi_fg_read(SWEET_FG_LEARNED_CAPACITY,&raw) && raw==(pmic[0x20103]==1?3900:3698));
@@ -366,5 +431,11 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-charge-io-') as directory:
                  'fg-foreign-identity','fg-readonly-pages','fg-local-preferred','fg-first-foreign',
                  'fg-no-memif-writer','fg-no-peek-writer','fg-ambiguous-writer','fg-poisoned-writer',
                  'fg-missing-identity','fg-missing-data','fg-observer-denied','fg-observer-timeout',
-                 'fg-v2-foreign-battinfo','fg-recovery']:
+                 'fg-v2-foreign-battinfo','fg-recovery','fg-post-error','fg-later-error',
+                 'fg-clear-read-error','fg-clear-write-error','fg-clear-both-errors','fg-clear-self',
+                 'fg-clear-delayed','fg-clear-initial-high','fg-clear-stuck','fg-clear-map-fail',
+                 'fg-clear-no-writer','fg-clear-ambiguous','fg-clear-unknown','fg-clear-busy',
+                 'fg-clear-write1','fg-clear-write2','fg-clear-write3','fg-clear-timeout',
+                 'fg-clear-denied','fg-clear-dropped','fg-clear-readback','fg-clear-status-read',
+                 'fg-clear-later-error','fg-clear-v2-foreign']:
         subprocess.run([str(binary),mode],env=env,check=True,timeout=20)

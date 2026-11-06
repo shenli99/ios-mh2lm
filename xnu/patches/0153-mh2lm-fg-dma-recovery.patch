@@ -1,0 +1,222 @@
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -509,6 +509,8 @@
+  * Unknown silicon/layout and an already claimed MEMIF fail closed. */
+ static IOLock *sp_fg_lock;
+ static bool sp_fg_failed;
++static bool sp_fg_dma_prepared;
++static bool sp_fg_dma_recovery_used;
+ 
+ /* Session-local failure provenance survives cleanup. Only diagnostic dedup
+  * state has boot lifetime, protected by sp_fg_lock along with the session. */
+@@ -598,6 +600,124 @@
+ 	}
+ 	IOLockUnlock(sp_lock);
+ 	return sp_fg_record(session, addr, "writer-preflight", result);
++}
++
++/* Fixed command, not a stable-configuration RMW: CLEAR_LOG can self-clear.
++ * Caller holds both session and controller locks, checked idle/identity and
++ * a unique EE0 writer. Do not export this as an arbitrary register writer. */
++static int
++sp_fg_dma_command_locked(unsigned apid, vm_offset_t channel, uint8_t value)
++{
++	if (sweet_spmi_rw_poisoned_locked(apid)) { return SWEET_SPMI_POISONED; }
++	sp_wr(channel, 0x10u, value);
++	sp_wr(channel, 0, 0x71u << 4);
++	int result = sp_charger_wait(channel);
++	if (result == SWEET_SPMI_TIMEOUT) { sweet_spmi_rw_poison_locked(apid); }
++	return result;
++}
++
++static int
++sp_fg_prepare_dma(struct sp_fg_session *session)
++{
++	struct sweet_spmi_charger_route route;
++	uint8_t arb = 0, cfg = 0, before = 0, after = 0, ctl = 0, actual = 0;
++	bool afterValid = false, actualValid = false;
++	vm_offset_t channel = 0;
++	IOLockLock(sp_lock);
++	int result = sp_charger_route(2, 0x4371, &route);
++	if (!result && sweet_spmi_rw_poisoned_locked(route.apid)) { result = SWEET_SPMI_POISONED; }
++	sp_fg_record(session, 0x4371, "dma-writer", result);
++	/* Recheck idle atomically with the clear command against local users.
++	 * This does not claim to serialize external execution environments. */
++	if (!result) { result = sp_fg_record(session, 0x4340, "dma-pre-read",
++	    sp_charger_read_locked(route.apid, 0x4340, &arb)); }
++	if (!result) { result = sp_fg_record(session, 0x4350, "dma-pre-read",
++	    sp_charger_read_locked(route.apid, 0x4350, &cfg)); }
++	if (!result && ((arb & 1) || (cfg & 0xa0))) {
++		result = sp_fg_record(session, (arb & 1) ? 0x4340 : 0x4350,
++		    "dma-pre-busy", SWEET_SPMI_BUSY);
++	}
++	if (!result) { result = sp_fg_record(session, 0x4370, "dma-pre-read",
++	    sp_charger_read_locked(route.apid, 0x4370, &before)); }
++	if (!result) { result = sp_fg_record(session, 0x4371, "dma-pre-read",
++	    sp_charger_read_locked(route.apid, 0x4371, &ctl)); }
++	if (!result && (!sp_fg_dma_prepared || (before & 6) || (ctl & 1))) {
++		SWEET_LOG_INFO("SWEET FG DMA: v3 phase=pre sts=%#x ctl=%#x arb=%#x cfg=%#x initialized=%u recovery-used=%u\n",
++		    before, ctl, arb, cfg, sp_fg_dma_prepared, sp_fg_dma_recovery_used);
++	}
++	if (!result && sp_fg_dma_prepared && ((before & 6) || (ctl & 1))) {
++		/* New errors after initialization are evidence, not a reason to clear
++		 * and silently retry a failed sample on the next timer tick. */
++		sp_fg_failed = true;
++		result = sp_fg_record(session, 0x4370, "dma-pre-status", SWEET_SPMI_IO);
++	}
++	if (!result && !sp_fg_dma_prepared && ((before & 6) || (ctl & 1))) {
++		if (sp_fg_dma_recovery_used) {
++			result = sp_fg_record(session, 0x4370, "dma-recovery-used", SWEET_SPMI_IO);
++		} else {
++			sp_fg_dma_recovery_used = true; /* one bounded attempt this boot */
++			channel = ml_io_map_unmappable(
++			    SP_CHNLS_PA + SP_CHNLS_APID_STRIDE * route.apid, 0x1000, VM_WIMG_IO);
++			if (!channel) { result = sp_fg_record(session, 0x4371,
++			    "dma-clear-map", SWEET_SPMI_MAP_FAILED); }
++			uint8_t base = ctl & ~1u;
++			bool highAttempted = false, lowConfirmed = false;
++			/* Linux sets CLEAR_LOG for errors and clears it on the next check.
++			 * Explicit low/high/low also handles an inherited asserted bit.
++			 * Preserve ADDR_KIND and every unrelated control bit throughout. */
++			for (unsigned step = 0; !result && step < 3; ++step) {
++				uint8_t value = base | (step == 1 ? 1 : 0);
++				actualValid = false;
++				if (step == 1) { highAttempted = true; }
++				result = sp_fg_record(session, 0x4371, "dma-clear-command",
++				    sp_fg_dma_command_locked(route.apid, channel, value));
++				if (!result) { result = sp_fg_record(session, 0x4371, "dma-clear-readback",
++				    sp_charger_read_locked(route.apid, 0x4371, &actual)); }
++				actualValid = !result;
++				/* The asserted bit may self-clear. Never demand a high readback. */
++				if (!result && ((actual & ~1u) != base || (step != 1 && (actual & 1)))) {
++					result = sp_fg_record(session, 0x4371, "dma-clear-verify", SWEET_SPMI_VERIFY);
++				}
++				if (!result && step == 2) { lowConfirmed = true; }
++			}
++			if (highAttempted && !lowConfirmed && !sweet_spmi_rw_poisoned_locked(route.apid)) {
++				/* An error may follow an effective write: try deassert once, but
++				 * never reuse a timed-out RW channel or erase the primary error. */
++				int cleanup = sp_fg_dma_command_locked(route.apid, channel, base);
++				if (!cleanup) { cleanup = sp_charger_read_locked(route.apid, 0x4371, &actual); }
++				actualValid = !cleanup;
++				lowConfirmed = !cleanup && actual == base;
++				if (!lowConfirmed) {
++					SWEET_LOG_ERROR("SWEET FG DMA: v3 clear deassert unconfirmed error=%d ctl=%#x; session disabled\n",
++					    cleanup, actual);
++				}
++			}
++			if (highAttempted && !lowConfirmed && sweet_spmi_rw_poisoned_locked(route.apid)) {
++				SWEET_LOG_ERROR("SWEET FG DMA: v3 clear deassert unconfirmed; RW lane poisoned, no further writes\n");
++			}
++			if (channel) {
++				ml_io_unmap(trunc_page(channel), round_page(0x1000 + (channel & PAGE_MASK)));
++			}
++			/* Status may settle after the command. Poll only five times, with
++			 * no additional clear commands and at most 40us explicit delay. */
++			for (unsigned n = 0; !result && n < 5; ++n) {
++				result = sp_fg_record(session, 0x4370, "dma-clear-status-read",
++				    sp_charger_read_locked(route.apid, 0x4370, &after));
++				afterValid = !result;
++				if (result || !(after & 6)) { break; }
++				if (n != 4) { delay(10); }
++			}
++			if (!result && (after & 6)) { result = sp_fg_record(session, 0x4370,
++			    "dma-clear-status", SWEET_SPMI_IO); }
++			if (result) { sp_fg_failed = true; }
++			SWEET_LOG_INFO("SWEET FG DMA: v3 phase=recovery before=%#x after=%#x after-ok=%u ctl=%#x ctl-ok=%u low-confirmed=%u error=%d\n",
++			    before, after, afterValid, actual, actualValid, lowConfirmed, result);
++			if (result) { SWEET_LOG_ERROR("SWEET FG DMA: v3 startup recovery failed error=%d; session disabled until reboot\n", result); }
++		}
++	}
++	if (!result) { sp_fg_dma_prepared = true; }
++	IOLockUnlock(sp_lock);
++	return result;
+ }
+ 
+ static int
+@@ -649,16 +769,13 @@
+ 		result = sp_fg_record(&session, (arb & 1) ? 0x4340 : 0x4350,
+ 		    "session-busy", SWEET_SPMI_BUSY);
+ 	}
+-	if (!result) { result = sp_fg_byte(&session, 0x4370, &dma); }
+-	if (!result && (dma & 6)) {
+-		result = sp_fg_record(&session, 0x4370, "dma-status", SWEET_SPMI_IO);
+-	}
+ 	/* Validate all protocol writers before changing any session state. This
+ 	 * never grants a foreign writer permission; every update checks again. */
+ 	if (!result) { result = sp_fg_require_writer(&session, 0x4340); }
+ 	if (!result) { result = sp_fg_require_writer(&session, 0x4350); }
+ 	if (!result) { result = sp_fg_require_writer(&session, 0x4371); }
+ 	if (!result && revision == 1) { result = sp_fg_require_writer(&session, 0x41ee); }
++	if (!result) { result = sp_fg_prepare_dma(&session); }
+ 	/* v1: select ALG_ACTIVE peek, wait for it to go low before requesting DMA.
+ 	 * Restore our mux selection even on failure; never change FG algorithms. */
+ 	if (!result && revision == 1) {
+@@ -716,7 +833,9 @@
+ 	if (!result && field != SWEET_FG_PROFILE_INTEGRITY) { result = sp_fg_byte(&session, addr + 1, &hi); }
+ 	if (!result) { result = sp_fg_byte(&session, 0x4370, &dma); }
+ 	if (!result && (dma & 6)) {
+-		result = sp_fg_record(&session, 0x4370, "dma-status", SWEET_SPMI_IO);
++		SWEET_LOG_WARN("SWEET FG DMA: v3 phase=post sts=%#x field=%u; no clear or retry\n", dma, field);
++		sp_fg_failed = true;
++		result = sp_fg_record(&session, 0x4370, "dma-post-status", SWEET_SPMI_IO);
+ 	}
+ 	if (dmaChanged) {
+ 		int cleanup = sp_fg_update(&session, 0x4371, 2, dmaCfg & 2);
+diff --git a/bsd/dev/sweet_spmi.h b/bsd/dev/sweet_spmi.h
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -72,6 +72,10 @@
+  * Observer reads select the v5 PPID route independently of write ownership.
+  * All protocol writers must have a unique EE0 route before any session write;
+  * each actual update rechecks it. No foreign RW channel is accessed.
++ * Once per boot, the first idle/identified DMA preflight may clear inherited
++ * error logs via fixed CLEAR_LOG low/high/low commands and verify the result.
++ * This is not a sampling retry: new pre/post DMA status faults disable SRAM
++ * sessions until reboot. No FG reset, SRAM content or charging-policy writes.
+  * Preserve output on any failure, including cleanup failure. */
+ #define SWEET_FG_TEMPERATURE       0u
+ #define SWEET_FG_NOMINAL_CAPACITY  1u
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -1187,21 +1187,28 @@
+ 	next.completedNs = sweet_batt_now_ns();
+ 	fSnapshot = next;
+ 	++fMonitorSamples;
+-	SWEET_LOG_INFO("SWEET BATT SAMPLE: v1 source=%s valid=%#llx mv=%u v-ok=%u ma=%d i-ok=%u temp-centi=%d temp-ok=%u temp-error=%d temp-raw=%#x nominal=%u n-ok=%u n-error=%d learned=%u l-ok=%u l-error=%d profile=%#x p-ok=%u p-error=%d started-ns=%llu completed-ns=%llu\n",
+-	    refreshInput ? "irq" : "protection-timer", (unsigned long long)next.valid, next.mv, next.voltageValid,
+-	    next.ma, next.currentValid, next.tempCenti, next.tempValid, next.tempError,
+-	    next.rawTemp, next.nominalMah, next.nominalValid, next.nominalError,
++	/* Keep each console record below 255 bytes, including severity/newline.
++	 * A shared sample id joins the independently complete records. */
++	SWEET_LOG_INFO("SWEET BATT SAMPLE: v2 id=%u source=%s valid=%#llx mv=%u v-ok=%u ma=%d i-ok=%u\n",
++	    fMonitorSamples, refreshInput ? "irq" : "protection-timer",
++	    (unsigned long long)next.valid, next.mv, next.voltageValid, next.ma, next.currentValid);
++	SWEET_LOG_INFO("SWEET BATT FG: v3 id=%u temp-centi=%d temp-ok=%u temp-error=%d temp-raw=%#x\n",
++	    fMonitorSamples, next.tempCenti, next.tempValid, next.tempError, next.rawTemp);
++	SWEET_LOG_INFO("SWEET BATT CAP: v3 id=%u nominal=%u n-ok=%u n-error=%d learned=%u l-ok=%u l-error=%d profile=%#x p-ok=%u p-error=%d\n",
++	    fMonitorSamples, next.nominalMah, next.nominalValid, next.nominalError,
+ 	    next.learnedMah, next.learnedValid, next.learnedError,
+-	    next.integrity, next.profileValid, next.profileError, (unsigned long long)next.startedNs,
+-	    (unsigned long long)next.completedNs);
++	    next.integrity, next.profileValid, next.profileError);
++	SWEET_LOG_INFO("SWEET BATT TIME: v3 id=%u started-ns=%llu completed-ns=%llu\n",
++	    fMonitorSamples, (unsigned long long)next.startedNs, (unsigned long long)next.completedNs);
+ 	if (refreshInput) {
+ 		/* Raw configuration is evidence, not a charging permission. Errors
+ 		 * accompany every byte so a retained value cannot masquerade as fresh. */
+-		SWEET_LOG_INFO("SWEET BATT CONFIG: v2 valid=%#llx enable=%#x enable-error=%d pause=%#x pause-error=%d wdog=%#x wdog-error=%d wdog-time=%#x wdog-time-error=%d smb=%#x smb-error=%d smb-cfg=%#x smb-cfg-error=%d\n",
+-		    (unsigned long long)next.valid,
++		SWEET_LOG_INFO("SWEET BATT CONFIG: v3 id=%u valid=%#llx enable=%#x enable-error=%d pause=%#x pause-error=%d wdog=%#x wdog-error=%d wdog-time=%#x wdog-time-error=%d\n",
++		    fMonitorSamples, (unsigned long long)next.valid,
+ 		    next.raw[SB_ENABLE], next.errors[SB_ENABLE], next.raw[SB_PAUSE], next.errors[SB_PAUSE],
+-		    next.raw[SB_WDOG], next.errors[SB_WDOG], next.raw[SB_WDOG_TIME], next.errors[SB_WDOG_TIME],
+-		    next.raw[SB_SMB], next.errors[SB_SMB], next.raw[SB_SMB_CFG], next.errors[SB_SMB_CFG]);
++		    next.raw[SB_WDOG], next.errors[SB_WDOG], next.raw[SB_WDOG_TIME], next.errors[SB_WDOG_TIME]);
++		SWEET_LOG_INFO("SWEET BATT PARALLEL: v3 id=%u smb=%#x smb-error=%d smb-cfg=%#x smb-cfg-error=%d\n",
++		    fMonitorSamples, next.raw[SB_SMB], next.errors[SB_SMB], next.raw[SB_SMB_CFG], next.errors[SB_SMB_CFG]);
+ 	}
+ #endif
+ }

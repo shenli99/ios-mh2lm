@@ -47,6 +47,11 @@ static void recordLog(const char *fmt,...) {
     char buffer[2048];va_list args;va_start(args,fmt);
     int n=vsnprintf(buffer,sizeof(buffer),fmt,args);va_end(args);
     assert(n>=0 && static_cast<size_t>(n)<sizeof(buffer));
+    if(std::string(fmt).find("SWEET BATT SAMPLE:")!=std::string::npos ||
+       std::string(fmt).find(": v3 ")!=std::string::npos){
+        // Include actual "[INFO] " prefix and newline in the 255-byte budget.
+        assert(n+7<=255 && n>0 && buffer[n-1]=='\n');
+    }
     std::lock_guard<std::mutex> guard(logMutex);logs+=buffer;
 }
 #define SWEET_LOG_INFO(...) recordLog(__VA_ARGS__)
@@ -270,7 +275,8 @@ int main(){
     failures={0x10001,0x10002,0x10003};pairFailure=false;logs.clear();b.sampleRuntime(true);b.publishRuntime();
     assert(!b.registry.count("DesignCapacity") && b.registry["MaxCapacity"]==100 && b.registry["SweetBatteryCapacityUsesPercent"]);
     assert(logs.find("n-error=-10")!=std::string::npos && logs.find("l-error=-10")!=std::string::npos && logs.find("p-error=-10")!=std::string::npos);
-    assert(logs.find("SWEET BATT CONFIG: v2 valid=")!=std::string::npos);
+    assert(logs.find("SWEET BATT CONFIG: v3 id=")!=std::string::npos);
+    assert(logs.find("SWEET BATT SAMPLE: v2 id=")!=std::string::npos && logs.find("SWEET BATT TIME: v3 id=")!=std::string::npos);
     regs[0x1651]=0xc2;regs[0x1653]=0x87;failures={0x1042};logs.clear();b.sampleRuntime(true);
     assert(logs.find("enable-error=-9")!=std::string::npos && logs.find("wdog=0xc2 wdog-error=0 wdog-time=0x87 wdog-time-error=0")!=std::string::npos);
     // A protection tick does not reprint the event-only config diagnostic.
@@ -278,6 +284,11 @@ int main(){
     failures.clear();pairFailure=false;fg[0]=0x3fc;b.sampleRuntime(false);
     assert(b.fSnapshot.tempValid && b.fSnapshot.tempCenti==-100);
     fg[0]=0xffff;b.sampleRuntime(false);assert(!b.fSnapshot.tempValid);
+    // Largest sample id and timestamp must retain the complete time record.
+    auto savedTime=timeNs;auto savedSamples=b.fMonitorSamples;
+    timeNs=UINT64_MAX-1;b.fMonitorSamples=UINT32_MAX-1;logs.clear();b.sampleRuntime(true);
+    assert(logs.find("SWEET BATT TIME: v3 id=4294967295 started-ns=18446744073709551614 completed-ns=18446744073709551614\n")!=std::string::npos);
+    timeNs=savedTime;b.fMonitorSamples=savedSamples;
     // Stop cancels the actual monitor and leaves it unable to rearm/submit IO.
     b.fController.owned=b.fController.enabled=true;b.fController.deadlineNs=timeNs+1000000;
     b.stopRuntime();assert(timer.disabled && !timer.armed && !b.fController.enabled);
