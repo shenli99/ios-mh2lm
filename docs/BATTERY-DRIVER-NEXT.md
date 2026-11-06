@@ -1,5 +1,11 @@
 # 0119之后的电池驱动推进
 
+0154已本地完成硬件接口收敛和ADC5只读预检，待用户push/云编译。
+策略不再提交地址/掩码，新runtime采样移入内部PMIC组件；实际ADC转换、
+三类证据provider与watchdog/pet仍未完成。本轮下一步先用新telemetry取得
+ADC5配置及observer/writer/IRQ独立归属，不启充。详见
+[BATTERY-HARDWARE-INTERFACES.md](BATTERY-HARDWARE-INTERFACES.md)。
+
 **2026-11-06当前执行计划：** 用户要求把电池驱动实现分段，已编写
 [`BATTERY-IMPLEMENTATION-PLAN.md`](BATTERY-IMPLEMENTATION-PLAN.md)：
 共享访问与控制接口 → 真实测量/配置 → 策略与保护 → 首次受控充电 → 运行期

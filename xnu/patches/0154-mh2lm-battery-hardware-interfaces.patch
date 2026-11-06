@@ -1,0 +1,648 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -115,6 +115,7 @@
+ bsd/dev/sweet_display_probe.c		standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
++bsd/dev/sweet_charger.c			standard
+ bsd/dev/sweet_usb.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+diff --git a/bsd/dev/sweet_adc5.h b/bsd/dev/sweet_adc5.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_adc5.h
+@@ -0,0 +1,37 @@
++/* ADC5 preflight contract, not a measurement or control provider.
++ * Consumer requests a fixed snapshot, never a SID/register address. */
++#ifndef SWEET_ADC5_H
++#define SWEET_ADC5_H
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++enum sweet_adc5_field {
++ SWEET_ADC5_TYPE, SWEET_ADC5_SUBTYPE, SWEET_ADC5_STATUS, SWEET_ADC5_SEQUENCE,
++ SWEET_ADC5_DIGITAL, SWEET_ADC5_AVERAGE, SWEET_ADC5_CHANNEL, SWEET_ADC5_SETTLE,
++ SWEET_ADC5_ENABLE, SWEET_ADC5_REQUEST, SWEET_ADC5_DATA_LO, SWEET_ADC5_DATA_HI,
++ SWEET_ADC5_CAL_DELAY, SWEET_ADC5_FIELD_COUNT
++};
++struct sweet_adc5_route {
++ uint16_t observer_apid, writer_apid, irq_apid;
++ int irq_error; /* unique EE0 APID with IRQ-owner bit, still not armed */
++ int writer_error; /* uniqueness/EE0/poison only, not proof a write is accepted */
++ uint8_t writer_ee, irq_owner;
++};
++struct sweet_adc5_preflight {
++ uint8_t raw[SWEET_ADC5_FIELD_COUNT];
++ int errors[SWEET_ADC5_FIELD_COUNT];
++ uint32_t valid;
++ struct sweet_adc5_route user, calibration;
++};
++/* Fixed SID2 user31/cal37, PMIC-arb v5. Read-only, no IRQ/MMIO mapping or
++ * new request. Data bytes may be stale or for another channel: NEVER convert
++ * them into VBUS/battery ID. No permission is added to the general read API.
++ * Returns 0 when the fixed inspection ran; field errors/valid and writer_error
++ * must still be inspected individually. On invalid/not-ready/unsupported the
++ * output is unchanged. Caller timestamps outside the controller lock. */
++int sweet_spmi_adc5_inspect(struct sweet_adc5_preflight *out);
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/bsd/dev/sweet_battery_runtime.h b/bsd/dev/sweet_battery_runtime.h
+--- a/bsd/dev/sweet_battery_runtime.h
++++ b/bsd/dev/sweet_battery_runtime.h
+@@ -5,6 +5,7 @@
+ #define SWEET_BATTERY_RUNTIME_H
+ #include <stdint.h>
+ #include <stdbool.h>
++#include "sweet_charger.h"
+ 
+ enum SweetBattReg {
+  SB_STAGE, SB_ERROR, SB_THERMAL, SB_ENABLE, SB_PAUSE, SB_CFG2, SB_FCC, SB_FV,
+@@ -123,15 +124,15 @@
+ }
+ 
+ typedef uint64_t (*SweetBattClock)(void *);
+-typedef int (*SweetBattUpdate)(void *,unsigned,unsigned,unsigned,uint8_t *);
++typedef int (*SweetBattUpdate)(void *,enum sweet_charger_operation,unsigned,uint64_t,unsigned *);
+ static inline bool sb_stop(SweetBattController &c, SweetBattUpdate update, void *ctx)
+ {
+  if (!c.owned) { return true; }
+  c.stopConfirmed=false;
+- uint8_t actual=0;
+- int rc=update(ctx,0x1042,1,0,&actual);
+- if (rc || (actual&1) || !c.fault) c.lastError=rc?rc:((actual&1)?-12:0);
+- if (rc || (actual&1)) { c.fault=true;c.state=SB_FAULT;return false; }
++ unsigned actual=0;
++ int rc=update(ctx,SWEET_CHARGER_ENABLE,0,0,&actual);
++ if (rc || (actual!=0) || !c.fault) c.lastError=rc?rc:((actual!=0)?-12:0);
++ if (rc || (actual!=0)) { c.fault=true;c.state=SB_FAULT;return false; }
+  c.enabled=false;c.stopConfirmed=true;
+  return true;
+ }
+@@ -159,17 +160,23 @@
+   * Disable inherited charging first, then configure; enable is always last. */
+  if (!c.owned) { c.owned=true;c.deadlineNs=now+60000000000ULL; }
+  if (!sb_stop(c,update,ctx)) return false;
+- const unsigned addr[]={0x1340,0x1370,0x1366,0x1342,0x1365,0x1061,0x1070,0x1043,0x1340,0x1042};
+- const unsigned mask[]={1,255,7,1,16,255,255,1,1,1};
+- const unsigned value[]={1,d.iclMa/50,1,0,16,d.fccMa/50,(d.fvMv-3600)/10,0,0,1};
+- for (unsigned i=0;i<sizeof(addr)/sizeof(addr[0]);++i) {
++ const enum sweet_charger_operation operations[]={SWEET_CHARGER_INPUT_SUSPEND,
++  SWEET_CHARGER_INPUT_LIMIT_MA,SWEET_CHARGER_SOFTWARE_INPUT_LIMIT,
++  SWEET_CHARGER_FAST_CURRENT_MA,SWEET_CHARGER_FLOAT_VOLTAGE_MV,
++  SWEET_CHARGER_PAUSE,SWEET_CHARGER_INPUT_SUSPEND,SWEET_CHARGER_ENABLE};
++ const unsigned value[]={1,d.iclMa,1,d.fccMa,d.fvMv,0,0,1};
++ for (unsigned i=0;i<sizeof(operations)/sizeof(operations[0]);++i) {
+   uint64_t current=clock(ctx);
+   if (current>=c.deadlineNs || current>=d.validUntilNs || current<now) {
+    c.stopped=true;(void)sb_stop(c,update,ctx);c.state=SB_STOPPED;return false;
+   }
+-  if (addr[i]==0x1042 && value[i]) c.stopConfirmed=false;
+-  uint8_t actual=0;int rc=update(ctx,addr[i],mask[i],value[i],&actual);
+-  if (rc || ((actual^value[i])&mask[i])) {
++  if (operations[i]==SWEET_CHARGER_ENABLE && value[i]) c.stopConfirmed=false;
++  uint64_t deadline=c.deadlineNs<d.validUntilNs?c.deadlineNs:d.validUntilNs;
++  unsigned actual=0;int rc=update(ctx,operations[i],value[i],deadline,&actual);
++  if (rc==SWEET_CHARGER_EXPIRED) {
++   c.stopped=true;(void)sb_stop(c,update,ctx);c.state=c.fault?SB_FAULT:SB_STOPPED;return false;
++  }
++  if (rc || actual!=value[i]) {
+    c.fault=true;c.lastError=rc?rc:-12;
+    (void)sb_stop(c,update,ctx);c.state=SB_FAULT;return false;
+   }
+diff --git a/bsd/dev/sweet_charger.c b/bsd/dev/sweet_charger.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_charger.c
+@@ -0,0 +1,66 @@
++/* PM8150B charger backend. Keep protocol encoding below battery policy.
++ * No MMIO here: all transactions use the existing restricted controller API. */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include "sweet_spmi.h"
++#include "sweet_charger.h"
++#include <kern/clock.h>
++
++static int
++sc_update(unsigned addr, unsigned mask, unsigned value, uint64_t deadline,
++    uint8_t *actual)
++{
++ if (!(addr == 0x1042 && mask == 1 && value == 0)) {
++  uint64_t now, ns;
++  clock_get_uptime(&now); absolutetime_to_nanoseconds(now, &ns);
++  if (!deadline || ns >= deadline) { return SWEET_CHARGER_EXPIRED; }
++ }
++ return sweet_spmi_charger_update(2, addr, mask, value, actual);
++}
++
++int
++sweet_charger_execute(enum sweet_charger_operation operation,
++    unsigned value, uint64_t deadline_ns, unsigned *verified)
++{
++ unsigned addr, mask, code, scale = 1, offset = 0;
++ if (!verified) { return SWEET_SPMI_INVALID; }
++ switch (operation) {
++ case SWEET_CHARGER_ENABLE:
++ case SWEET_CHARGER_PAUSE:
++ case SWEET_CHARGER_INPUT_SUSPEND:
++  if (value > 1) { return SWEET_SPMI_INVALID; }
++  addr = operation == SWEET_CHARGER_ENABLE ? 0x1042 :
++      operation == SWEET_CHARGER_PAUSE ? 0x1043 : 0x1340;
++  mask = 1; code = value; break;
++ case SWEET_CHARGER_INPUT_LIMIT_MA:
++ case SWEET_CHARGER_FAST_CURRENT_MA:
++  if (!value || value > 500 || value % 50) { return SWEET_SPMI_INVALID; }
++  addr = operation == SWEET_CHARGER_INPUT_LIMIT_MA ? 0x1370 : 0x1061;
++  mask = 255; scale = 50; code = value / scale; break;
++ case SWEET_CHARGER_FLOAT_VOLTAGE_MV:
++  if (value < 3600 || value > 4200 || value % 10) { return SWEET_SPMI_INVALID; }
++  addr = 0x1070; mask = 255; scale = 10; offset = 3600;
++  code = (value - offset) / scale; break;
++ case SWEET_CHARGER_SOFTWARE_INPUT_LIMIT: {
++  if (value != 1) { return SWEET_SPMI_INVALID; }
++  /* LG smb5-lib.c: ICL override mode, then override-after-APSD. Keep this
++   * fixed sequence inside the hardware backend, with per-write verification. */
++  const unsigned registers[] = {0x1366, 0x1342, 0x1365};
++  const unsigned masks[] = {7, 1, 16}, codes[] = {1, 0, 16};
++  for (unsigned i = 0; i < 3; ++i) {
++   uint8_t actual;
++   int rc = sc_update(registers[i], masks[i], codes[i], deadline_ns, &actual);
++   if (rc) { return rc; }
++   if ((actual & masks[i]) != codes[i]) { return SWEET_SPMI_VERIFY; }
++  }
++  *verified = 1; return SWEET_SPMI_OK;
++ }
++ default: return SWEET_SPMI_INVALID;
++ }
++ uint8_t actual;
++ int rc = sc_update(addr, mask, code, deadline_ns, &actual);
++ if (rc) { return rc; }
++ if ((actual & mask) != code) { return SWEET_SPMI_VERIFY; }
++ *verified = (actual & mask) * scale + offset;
++ return SWEET_SPMI_OK;
++}
++#endif /* ARM64_BOARD_CONFIG_MH2LM */
+diff --git a/bsd/dev/sweet_charger.h b/bsd/dev/sweet_charger.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_charger.h
+@@ -0,0 +1,29 @@
++/* Semantic charger operations. Values and verified outputs are mA, mV or
++ * boolean, never register addresses/masks/codes. Thread context only.
++ * The battery workloop owns policy/control lifetime; this backend owns encoding.
++ * No operation grants a charging lease or supplies missing board evidence. */
++#ifndef SWEET_CHARGER_H
++#define SWEET_CHARGER_H
++#include <stdint.h>
++#define SWEET_CHARGER_EXPIRED (-100)
++#ifdef __cplusplus
++extern "C" {
++#endif
++enum sweet_charger_operation {
++ SWEET_CHARGER_ENABLE, SWEET_CHARGER_PAUSE, SWEET_CHARGER_INPUT_SUSPEND,
++ SWEET_CHARGER_INPUT_LIMIT_MA, SWEET_CHARGER_SOFTWARE_INPUT_LIMIT,
++ SWEET_CHARGER_FAST_CURRENT_MA, SWEET_CHARGER_FLOAT_VOLTAGE_MV
++};
++/* Fixed PM8150B backend; uses the restricted shared SPMI transport. Exact
++ * quantization required, no rounding up. First-stage caps: 500mA / 4200mV.
++ * SOFTWARE_INPUT_LIMIT accepts only 1 and configures its three verified modes.
++ * Failure may have changed hardware; caller must stop/fault, not restore an
++ * inherited enable. *verified is unchanged on any failure. No hidden retries.
++ * deadline_ns uses XNU uptime in ns and is checked before EVERY physical update.
++ * ENABLE=0 alone is always allowed without a deadline, including power stop. */
++int sweet_charger_execute(enum sweet_charger_operation operation,
++ unsigned value, uint64_t deadline_ns, unsigned *verified);
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/bsd/dev/sweet_pmic_power.h b/bsd/dev/sweet_pmic_power.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_pmic_power.h
+@@ -0,0 +1,15 @@
++/* Internal hardware sampling interface used by SweetBattery on its workloop.
++ * No address/mask parameter is exposed. This component neither owns a workloop
++ * nor grants charging permission; future ADC/I2C providers supply separate
++ * typed evidence. The caller sets started/completed time around this call. */
++#ifndef SWEET_PMIC_POWER_H
++#define SWEET_PMIC_POWER_H
++#include "sweet_battery_runtime.h"
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++/* Refresh input/APSD/Type-C only on initial observation or an actual event.
++ * Capacity may remain cached on protection ticks; every fresh read reports its
++ * own validity/error. Failure is unknown, never synthesized as a valid zero. */
++void sweet_pmic_power_read_snapshot(SweetBattSnapshot &snapshot,
++    bool refreshInput, bool refreshCapacity, unsigned lastPercent);
++#endif
++#endif
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -16,6 +16,7 @@
+ #include <vm/memory_types.h>
+ #include <pexpert/arm64/sweet_dev.h>
+ #include "sweet_spmi.h"
++#include "sweet_adc5.h"
+ #include "sweet_log_level.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+@@ -432,6 +433,63 @@
+ 	}
+ 	IOLockUnlock(sp_lock);
+ 	return result;
++}
++
++/* Read-only ADC5 capability preflight. No converter ownership is claimed.
++ * Observer selection is independent of the writer; never touch foreign RW. */
++static void
++sp_adc5_route(unsigned peripheral, struct sweet_adc5_route *out)
++{
++ out->observer_apid = sp_find_apid(0x200u | peripheral);
++ out->writer_apid = out->irq_apid = SP_NO_APID;
++ out->irq_error = SWEET_SPMI_NO_OWNER;
++ for (unsigned apid = 0; apid < sp_count; ++apid) {
++  uint32_t map = sp_rd(sp_core, SP_APID_MAP_OFF + 4u * apid);
++  if (!map || ((map >> 8) & 0xfffu) != (0x200u | peripheral) ||
++      !(map & SP_IRQ_OWNER_BIT) ||
++      (sp_rd(sp_cfg, SP_OWNERSHIP_OFF + 4u * apid) & 7u) != 0) { continue; }
++  if (out->irq_apid != SP_NO_APID) {
++   out->irq_error = SWEET_SPMI_AMBIGUOUS; break;
++  }
++  out->irq_apid = (uint16_t)apid; out->irq_error = SWEET_SPMI_OK;
++ }
++ struct sweet_spmi_charger_route route;
++ out->writer_error = sp_charger_route(2, peripheral << 8, &route);
++ if (!out->writer_error) {
++  out->writer_apid = route.apid;
++  out->writer_ee = route.write_ee;
++  out->irq_owner = route.irq_owner;
++  if (sweet_spmi_rw_poisoned_locked(route.apid)) { out->writer_error = SWEET_SPMI_POISONED; }
++ }
++}
++
++int
++sweet_spmi_adc5_inspect(struct sweet_adc5_preflight *out)
++{
++ if (!out) { return SWEET_SPMI_INVALID; }
++ if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
++ IOLockLock(sp_lock);
++ uint32_t version = sp_rd(sp_core, 0);
++ if (version < 0x50000000u || version >= 0x60000000u) {
++  IOLockUnlock(sp_lock); return SWEET_SPMI_UNSUPPORTED;
++ }
++ struct sweet_adc5_preflight next = {0};
++ sp_adc5_route(0x31, &next.user);
++ sp_adc5_route(0x37, &next.calibration);
++ static const unsigned addresses[SWEET_ADC5_FIELD_COUNT] = {
++  0x3104, 0x3105, 0x3108, 0x3109, 0x3142, 0x3143, 0x3144,
++  0x3145, 0x3146, 0x3147, 0x3150, 0x3151, 0x3744
++ };
++ for (unsigned i = 0; i < SWEET_ADC5_FIELD_COUNT; ++i) {
++  unsigned apid = i == SWEET_ADC5_CAL_DELAY ? next.calibration.observer_apid : next.user.observer_apid;
++  int rc = apid == SP_NO_APID ? SWEET_SPMI_NO_OWNER :
++      sp_charger_read_locked(apid, addresses[i], &next.raw[i]);
++  next.errors[i] = rc;
++  if (!rc) { next.valid |= 1u << i; }
++ }
++ *out = next;
++ IOLockUnlock(sp_lock);
++ return SWEET_SPMI_OK;
+ }
+ 
+ /* Internal primitive for a separately validated protocol register. */
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -28,7 +28,9 @@
+ #include <IOKit/IOInterruptEventSource.h>
+ #include <kern/clock.h>
+ #include "../../../bsd/dev/sweet_spmi.h"
++#include "../../../bsd/dev/sweet_adc5.h"
+ #include "../../../bsd/dev/sweet_battery_runtime.h"
++#include "../../../bsd/dev/sweet_pmic_power.h"
+ #include "../../../bsd/dev/sweet_spmi_mux.h"
+ #include "../../../bsd/dev/sweet_spmi_mux_client.h"
+ class SweetSpmiMuxClient;
+@@ -109,6 +111,7 @@
+ 	void removeRuntimeNotifier(void);
+ 	static IOReturn runtimePowerNotice(void *, void *, UInt32, IOService *, void *, vm_size_t);
+ 	bool fMonitorAdded;
++	bool fAdcPreflightRequested;
+ 	SweetBattSnapshot fSnapshot;
+ 	SweetBattLimits fLimits;
+ 	SweetBattController fController;
+@@ -120,7 +123,7 @@
+ 	static uint64_t runtimeClock(void *);
+ 	static void monitorFired(OSObject *, IOTimerEventSource *);
+ 	static IOReturn startRuntime(OSObject *, void *, void *, void *, void *);
+-	static int runtimeUpdate(void *, unsigned, unsigned, unsigned, uint8_t *);
++	static int runtimeUpdate(void *, enum sweet_charger_operation, unsigned, uint64_t, unsigned *);
+ 	void stopRuntime(void);
+ 	void removePowerValue(const char *);
+ 	IOWorkLoop *fLoop;
+@@ -1132,58 +1135,7 @@
+ 	 * telemetry/protection, never substitutes periodic plug discovery. */
+ 	SweetBattSnapshot next = fSnapshot;
+ 	next.startedNs = sweet_batt_now_ns();
+-	static const unsigned addresses[SB_REG_COUNT] = {
+-		0x1006,0x1007,0x100d,0x1042,0x1043,0x1051,0x1061,0x1070,
+-		0x110b,0x1108,0x1307,0x1308,0x1310,0x1340,0x1342,0x1365,
+-		0x1366,0x1370,0x1380,0x1506,0x1509,0x150b,0x1648,0x1651,
+-		0x1653,0x1690,0x1090,0x1067,0x1068,0x107d
+-	};
+-	for (unsigned i = 0; i < SB_REG_COUNT; ++i) {
+-		if (!refreshInput && (i == SB_USB || i == SB_APSD || i == SB_RESULT ||
+-		    i == SB_TYPEC || i == SB_ATTACHED || i == SB_MISC)) { continue; }
+-		uint8_t value = 0;
+-		int rc = sweet_spmi_charger_read(2, addresses[i], &value);
+-		next.errors[i] = rc;
+-		next.valid &= ~(1ULL << i);
+-		if (!rc) { next.raw[i] = value; next.valid |= 1ULL << i; }
+-	}
+-	uint8_t present = 0;
+-	next.presentValid = !sweet_spmi_read(2, 0x4107, &present);
+-	next.present = next.presentValid && !(present & 4);
+-	/* Gen4 has a defined voltage scale. Do not guess a different generation
+-	 * merely because a voltage falls outside the plausibility bounds. */
+-	next.voltageValid = readWordPair(2, 0x41a0, 0x41a6, &next.rawVoltage);
+-	next.mv = (unsigned)(((uint64_t)next.rawVoltage * 122070u) / 1000000u);
+-	next.voltageValid = next.voltageValid && next.mv >= 2800 && next.mv <= 4600;
+-	next.currentValid = readWordPair(2, 0x41a2, 0x41a8, &next.rawCurrent);
+-	int signedRaw = (next.rawCurrent & 0x8000) ? (int)next.rawCurrent - 65536 : next.rawCurrent;
+-	next.ma = (int)(-((int64_t)signedRaw * 488281) / 1000000);
+-	next.currentValid = next.currentValid && next.ma >= -8000 && next.ma <= 8000;
+-	uint8_t soc = 0, ready = 0;
+-	next.socValid = !sweet_spmi_read(2, 0x4010, &ready) && (ready & 2) &&
+-	    readBytePair(2, 0x4009, 0x400a, &soc);
+-	next.percent = next.socValid ? scaleMsoc(soc) : fLastPercent;
+-	next.tempError = sweet_spmi_fg_read(SWEET_FG_TEMPERATURE, &next.rawTemp);
+-	int rawTemp = next.rawTemp & 0x3ff;
+-	if (rawTemp & 0x200) { rawTemp -= 0x400; }
+-	next.tempCenti = rawTemp * 25;
+-	next.tempValid = !next.tempError && next.rawTemp != 0xffffu && next.tempCenti >= -4000 && next.tempCenti <= 8000;
+-	/* Identity/capacity is sampled at initial observation and each real event,
+-	 * not on every protection tick. Never write/reload SRAM profile data. */
+-	if (refreshInput || !fMonitorSamples) {
+-		uint16_t nominal = 0, learned = 0, integrity = 0;
+-		next.profileError = sweet_spmi_fg_read(SWEET_FG_PROFILE_INTEGRITY, &integrity);
+-		next.profileValid = !next.profileError;
+-		next.integrity = integrity;
+-		next.nominalError = sweet_spmi_fg_read(SWEET_FG_NOMINAL_CAPACITY, &nominal);
+-		next.learnedError = sweet_spmi_fg_read(SWEET_FG_LEARNED_CAPACITY, &learned);
+-		next.nominalValid = !next.nominalError && next.profileValid && (integrity & 1) &&
+-		    nominal >= 1000 && nominal <= 6000;
+-		next.learnedValid = next.nominalValid && !next.learnedError &&
+-		    learned >= nominal / 2 && learned <= nominal * 12 / 10;
+-		next.nominalMah = nominal;
+-		next.learnedMah = learned;
+-	}
++	sweet_pmic_power_read_snapshot(next, refreshInput, refreshInput || !fMonitorSamples, fLastPercent);
+ 	next.completedNs = sweet_batt_now_ns();
+ 	fSnapshot = next;
+ 	++fMonitorSamples;
+@@ -1214,7 +1166,7 @@
+ }
+ 
+ int
+-SweetBattery::runtimeUpdate(void *context, unsigned addr, unsigned mask, unsigned value, uint8_t *out)
++SweetBattery::runtimeUpdate(void *context, enum sweet_charger_operation operation, unsigned value, uint64_t deadline, unsigned *out)
+ {
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ 	SweetBattery *self = (SweetBattery *)context;
+@@ -1222,17 +1174,17 @@
+ 	/* Serialize the stop notification with command submission. A flag check
+ 	 * outside this lock would race a final enable after a shutdown disable. */
+ 	IOLockLock(self->fControlLock);
+-	bool disable = addr == 0x1042 && mask == 1 && value == 0;
++	bool disable = operation == SWEET_CHARGER_ENABLE && value == 0;
+ 	int rc;
+ 	if (self->fPowerStopping && !disable) { rc = SWEET_SPMI_NOT_READY; }
+ 	else {
+ 		self->fControlClaimed = true;
+-		rc = sweet_spmi_charger_update(2, addr, mask, value, out);
++		rc = sweet_charger_execute(operation, value, deadline, out);
+ 	}
+ 	IOLockUnlock(self->fControlLock);
+ 	if (!rc) {
+-		SWEET_LOG_INFO("SWEET BATT CONTROL: addr=%#x mask=%#x requested=%#x verified=%#x\n",
+-		    addr, mask, value, *out);
++		SWEET_LOG_INFO("SWEET BATT CONTROL: operation=%u requested=%u verified=%u\n",
++		    operation, value, *out);
+ 	}
+ 	return rc;
+ #else
+@@ -1275,6 +1227,7 @@
+ 	self->fRuntimeMode = self->fRuntimeRequested;
+ 	SWEET_LOG_INFO("SWEET BATT RUNTIME: v1 mode=%u; board identity/input/parallel providers missing; control interlocked\n",
+ 	    self->fRuntimeMode);
++	SWEET_LOG_INFO("SWEET BATT HARDWARE: v1 semantic charger operations; sampling via PMIC backend\n");
+ 	self->sampleRuntime(true);
+ 	self->runRuntimePolicy();
+ 	self->publishRuntime();
+@@ -1344,9 +1297,9 @@
+ 	self->fPowerStopping = true;
+ 	if (self->fControlClaimed) {
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+-		uint8_t verified = 0;
+-		int rc = sweet_spmi_charger_update(2, 0x1042, 1, 0, &verified);
+-		if (rc || (verified & 1)) {
++		unsigned verified = 0;
++		int rc = sweet_charger_execute(SWEET_CHARGER_ENABLE, 0, 0, &verified);
++		if (rc || verified != 0) {
+ 			SWEET_LOG_ERROR("SWEET BATT CONTROL: power transition=%#x disable unconfirmed error=%d\n", message, rc);
+ 		}
+ #endif
+@@ -1421,6 +1374,29 @@
+ 			    addr, route.apid, result, (unsigned long long)ns);
+ 		}
+ 	}
++	/* Preflight only. Keep ADC addresses/protocol inside the controller backend;
++	 * this service neither starts conversions nor treats cached data as limits. */
++	struct sweet_adc5_preflight adc = {};
++	int adcError = sweet_spmi_adc5_inspect(&adc);
++	uint64_t adcTime, adcNs;
++	clock_get_uptime(&adcTime); absolutetime_to_nanoseconds(adcTime, &adcNs);
++	SWEET_LOG_INFO("SWEET ADC5 PREFLIGHT: v1 error=%d valid=%#x at-ns=%llu measurement-valid=0; no conversion requested\n",
++	    adcError, adc.valid, (unsigned long long)adcNs);
++	if (adcError || adc.valid != ((1u << SWEET_ADC5_FIELD_COUNT) - 1u)) {
++		SWEET_LOG_WARN("SWEET ADC5 PREFLIGHT: incomplete error=%d valid=%#x; no measurement or control permission\n", adcError, adc.valid);
++	}
++	if (!adcError) {
++		const struct sweet_adc5_route *routes[] = {&adc.user, &adc.calibration};
++		for (unsigned i = 0; i < 2; ++i) {
++			SWEET_LOG_INFO("SWEET ADC5 ROUTE: v1 block=%s observer=%u writer=%u writer-error=%d write-ee=%u irq-apid=%u irq-error=%d\n",
++			    i ? "calibration" : "user", routes[i]->observer_apid, routes[i]->writer_apid,
++			    routes[i]->writer_error, routes[i]->writer_ee, routes[i]->irq_apid, routes[i]->irq_error);
++		}
++		for (unsigned i = 0; i < SWEET_ADC5_FIELD_COUNT; ++i) {
++			SWEET_LOG_INFO("SWEET ADC5 FIELD: v1 field=%u raw=%#x valid=%u error=%d; diagnostic-only\n",
++			    i, adc.raw[i], (adc.valid >> i) & 1u, adc.errors[i]);
++		}
++	}
+ 	SWEET_LOG_INFO("SWEET CHARGER PREFLIGHT: complete; write permission not exercised, charging policy absent\n");
+ 	return kIOReturnSuccess;
+ }
+@@ -1455,6 +1431,9 @@
+ 		return false;
+ 	}
+ 	fRuntimeRequested = (unsigned)runtime;
++	int adcPreflight = 0;
++	(void)PE_parse_boot_argn("sweetbattadcdiag", &adcPreflight, sizeof(adcPreflight));
++	fAdcPreflightRequested = adcPreflight == 1;
+ #endif
+ 	int diag = 0;
+ 	(void)PE_parse_boot_argn("sweetbattdiag", &diag, sizeof(diag));
+@@ -1523,7 +1502,7 @@
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ 			int transport = 0;
+ 			(void)PE_parse_boot_argn("sweetbatttransport", &transport, sizeof(transport));
+-			if (fSid2 && transport == 1) {
++			if (fSid2 && (transport == 1 || fAdcPreflightRequested)) {
+ 				(void)fLoop->runAction(&SweetBattery::transportPreflightAction, this);
+ 			}
+ #endif
+diff --git a/iokit/Kernel/arm/SweetPmicPower.cpp b/iokit/Kernel/arm/SweetPmicPower.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetPmicPower.cpp
+@@ -0,0 +1,125 @@
++/* PM8150B measurement backend. The IOPMPowerSource service owns scheduling,
++ * snapshots and publication; all register/protocol detail stays in this layer.
++ * This is an internal stateless component, not a second competing power source.
++ * No direct MMIO: use existing controller/FG APIs and their shared locks. */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include "../../../bsd/dev/sweet_spmi.h"
++#include "../../../bsd/dev/sweet_pmic_power.h"
++
++/* FG exposes an IBATT copy register specifically for a consistent raw sample.
++ * Do not write its hold bits: a matching pair is enough for diagnostics. */
++static bool
++powerReadWordPair(unsigned sid, unsigned address, unsigned copyAddress,
++    uint16_t *value)
++{
++	for (unsigned attempt = 0; attempt < 4; ++attempt) {
++		uint8_t lo, hi, copyLo, copyHi;
++		if (sweet_spmi_read(sid, address, &lo) ||
++		    sweet_spmi_read(sid, address + 1, &hi) ||
++		    sweet_spmi_read(sid, copyAddress, &copyLo) ||
++		    sweet_spmi_read(sid, copyAddress + 1, &copyHi)) {
++			return false;
++		}
++		uint16_t sample = (uint16_t)((unsigned)lo | ((unsigned)hi << 8));
++		uint16_t copy = (uint16_t)((unsigned)copyLo | ((unsigned)copyHi << 8));
++		if (sample == copy) {
++			*value = sample;
++			return true;
++		}
++	}
++	return false;
++}
++
++/* PM8150B's MONOTONIC_SOC is a byte with an adjacent shadow copy, not a
++ * literal percentage. Match the Linux FG driver's bounded consistency check
++ * before scaling it. A failed pair is unknown, never 0%. */
++static bool
++powerReadBytePair(unsigned sid, unsigned address, unsigned copyAddress,
++    uint8_t *value)
++{
++	for (unsigned attempt = 0; attempt < 4; ++attempt) {
++		uint8_t sample, copy;
++		if (sweet_spmi_read(sid, address, &sample) ||
++		    sweet_spmi_read(sid, copyAddress, &copy)) {
++			return false;
++		}
++		if (sample == copy) {
++			*value = sample;
++			return true;
++		}
++	}
++	return false;
++}
++
++static unsigned
++powerScaleMsoc(uint8_t raw)
++{
++	/* Linux fg_get_msoc(): endpoints stay 0/100; raw 1..254 maps to 1..99
++	 * with nearest-integer rounding. In particular 0xa8 is 66%, not invalid. */
++	if (raw == 0xffu) {
++		return 100u;
++	}
++	if (raw == 0u) {
++		return 0u;
++	}
++	return (((unsigned)(raw - 1u) * 98u + 126u) / 253u) + 1u;
++}
++
++void
++sweet_pmic_power_read_snapshot(SweetBattSnapshot &next, bool refreshInput,
++    bool refreshCapacity, unsigned lastPercent)
++{
++	static const unsigned addresses[SB_REG_COUNT] = {
++		0x1006,0x1007,0x100d,0x1042,0x1043,0x1051,0x1061,0x1070,
++		0x110b,0x1108,0x1307,0x1308,0x1310,0x1340,0x1342,0x1365,
++		0x1366,0x1370,0x1380,0x1506,0x1509,0x150b,0x1648,0x1651,
++		0x1653,0x1690,0x1090,0x1067,0x1068,0x107d
++	};
++	for (unsigned i = 0; i < SB_REG_COUNT; ++i) {
++		if (!refreshInput && (i == SB_USB || i == SB_APSD || i == SB_RESULT ||
++		    i == SB_TYPEC || i == SB_ATTACHED || i == SB_MISC)) { continue; }
++		uint8_t value = 0;
++		int rc = sweet_spmi_charger_read(2, addresses[i], &value);
++		next.errors[i] = rc;
++		next.valid &= ~(1ULL << i);
++		if (!rc) { next.raw[i] = value; next.valid |= 1ULL << i; }
++	}
++	uint8_t present = 0;
++	next.presentValid = !sweet_spmi_read(2, 0x4107, &present);
++	next.present = next.presentValid && !(present & 4);
++	/* Gen4 has a defined voltage scale. Do not guess a different generation
++	 * merely because a voltage falls outside the plausibility bounds. */
++	next.voltageValid = powerReadWordPair(2, 0x41a0, 0x41a6, &next.rawVoltage);
++	next.mv = (unsigned)(((uint64_t)next.rawVoltage * 122070u) / 1000000u);
++	next.voltageValid = next.voltageValid && next.mv >= 2800 && next.mv <= 4600;
++	next.currentValid = powerReadWordPair(2, 0x41a2, 0x41a8, &next.rawCurrent);
++	int signedRaw = (next.rawCurrent & 0x8000) ? (int)next.rawCurrent - 65536 : next.rawCurrent;
++	next.ma = (int)(-((int64_t)signedRaw * 488281) / 1000000);
++	next.currentValid = next.currentValid && next.ma >= -8000 && next.ma <= 8000;
++	uint8_t soc = 0, ready = 0;
++	next.socValid = !sweet_spmi_read(2, 0x4010, &ready) && (ready & 2) &&
++	    powerReadBytePair(2, 0x4009, 0x400a, &soc);
++	next.percent = next.socValid ? powerScaleMsoc(soc) : lastPercent;
++	next.tempError = sweet_spmi_fg_read(SWEET_FG_TEMPERATURE, &next.rawTemp);
++	int rawTemp = next.rawTemp & 0x3ff;
++	if (rawTemp & 0x200) { rawTemp -= 0x400; }
++	next.tempCenti = rawTemp * 25;
++	next.tempValid = !next.tempError && next.rawTemp != 0xffffu && next.tempCenti >= -4000 && next.tempCenti <= 8000;
++	/* Identity/capacity is sampled at initial observation and each real event,
++	 * not on every protection tick. Never write/reload SRAM profile data. */
++	if (refreshCapacity) {
++		uint16_t nominal = 0, learned = 0, integrity = 0;
++		next.profileError = sweet_spmi_fg_read(SWEET_FG_PROFILE_INTEGRITY, &integrity);
++		next.profileValid = !next.profileError;
++		next.integrity = integrity;
++		next.nominalError = sweet_spmi_fg_read(SWEET_FG_NOMINAL_CAPACITY, &nominal);
++		next.learnedError = sweet_spmi_fg_read(SWEET_FG_LEARNED_CAPACITY, &learned);
++		next.nominalValid = !next.nominalError && next.profileValid && (integrity & 1) &&
++		    nominal >= 1000 && nominal <= 6000;
++		next.learnedValid = next.nominalValid && !next.learnedError &&
++		    learned >= nominal / 2 && learned <= nominal * 12 / 10;
++		next.nominalMah = nominal;
++		next.learnedMah = learned;
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_MH2LM */
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -18,6 +18,7 @@
+ iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitcpp
+ iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
++iokit/Kernel/arm/SweetPmicPower.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp

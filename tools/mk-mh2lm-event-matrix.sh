@@ -150,7 +150,8 @@ if [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ]; then
 	for marker in 'SWEET BATT RUNTIME: v1 mode=' 'SWEET BATT SAMPLE: v2 id=' \
 	    'SWEET BATT POLICY: v1 mode=' 'battery-source' 'battery-fault' \
 	    'SWEET FG ACCESS: v2 field=' 'SWEET BATT CONFIG: v3 id=' \
-	    'SWEET FG DMA: v3 phase=recovery' 'SWEET BATT TIME: v3 id='; do
+	    'SWEET FG DMA: v3 phase=recovery' 'SWEET BATT TIME: v3 id=' \
+	    'SWEET BATT HARDWARE: v1 semantic charger operations' 'SWEET ADC5 PREFLIGHT: v1'; do
 		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
 			printf 'kernel lacks battery runtime marker: %s\n' "$marker" >&2
 			exit 1
@@ -222,7 +223,7 @@ if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-ir
 			"$IRQ_ARGS sweetbattirq=4 sweetbattuidiag=1 sweetbattdiag=1"
 		make_profile battery-telemetry \
 			"LG G8X - XNU real battery telemetry (${LABEL})" \
-			"$IRQ_ARGS sweetbattirq=4 sweetbattuidiag=1 sweetbattruntime=1"
+			"$IRQ_ARGS sweetbattirq=4 sweetbattuidiag=1 sweetbattruntime=1 sweetbattadcdiag=1"
 		make_profile battery-policy-dry \
 			"LG G8X - XNU battery policy dry run (${LABEL})" \
 			"$IRQ_ARGS sweetbattirq=4 sweetbattuidiag=1 sweetbattruntime=2"

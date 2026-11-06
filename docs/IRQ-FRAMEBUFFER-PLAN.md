@@ -1,5 +1,10 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
+0154进度：硬件接口收敛与ADC5只读预检已本地完成，待云构建/实机。
+0120a2遥测实机通过；实际ADC转换/输入能力/电池身份/并联及watchdog依赖
+仍未闭环，不能进入首次受控充电或宣布电池IRQ阶段结束。详见
+[硬件接口与下一轮](BATTERY-HARDWARE-INTERFACES.md)，后续大目标顺序不变。
+
 **2026-11-06计划更新：** 已确认当前缺少主动充电控制，旧成功来自首次采样前
 已经允许充电的状态，具体启动writer未定。按用户要求将电池实现划为六段，
 详见 [`BATTERY-IMPLEMENTATION-PLAN.md`](BATTERY-IMPLEMENTATION-PLAN.md)。

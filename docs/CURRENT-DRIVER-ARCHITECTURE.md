@@ -1,5 +1,15 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+## 0154电池接口更新（本地完成，尚待云构建/实机）
+
+0120a2已验证FG初次DMA恢复及温度/容量遥测；0154进一步保持现有电池
+IOPMPowerSource自己的workloop，拆出内部PMIC采样组件与语义充电后端。
+策略提交mA/mV等操作，后端复用共享SPMI/FG接口；没有另造单例或把普通
+内部组件伪装成已经完成的IOService provider。新增ADC5只读预检，实际
+ADC转换、SMB1355总线provider及watchdog维护仍缺。USB/按键/触摸路径未改。
+新边界图、API、历史诊断残留和测试状态见
+[BATTERY-HARDWARE-INTERFACES.md](BATTERY-HARDWARE-INTERFACES.md)。
+
 ## 当前架构：0119 / 0146～0148
 
 2026-11-05核对0119最终源码。当前采用 **IOKit服务匹配/生命周期 + 板级GIC

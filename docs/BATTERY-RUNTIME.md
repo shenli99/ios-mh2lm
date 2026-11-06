@@ -1,5 +1,10 @@
 # 电池遥测、策略与运行期实现（0151）
 
+0154本地更新：runtime控制回调改为固定操作+物理单位+期限；寄存器编码和
+每次物理更新前的期限检查在充电后端，新采样经内部PMIC组件。保留现有
+IOPMPowerSource/workloop/mux生命周期。telemetry新增ADC5只读预检，尚无
+ADC转换/provider或本轮实机结果，见[硬件接口](BATTERY-HARDWARE-INTERFACES.md)。
+
 2026-11-06，承接0150。按用户要求补第4～6段的可独立实现代码，同时补上
 第2～3段的采样/策略前置。本地实现与测试完成；0120原生云产物已核对、
 三档boot已打包并初步实测，**六段尚未验收**，见[BATTERY-RUNTIME-0120-TESTING.md](BATTERY-RUNTIME-0120-TESTING.md)。

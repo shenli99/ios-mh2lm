@@ -76,7 +76,7 @@ jobs:
             fi
             require_marker() {
               if ! grep -Fq "$2" "$1"; then
-                echo "ERROR: required 0139..0153 marker missing from $1: $2" >&2
+                echo "ERROR: required 0139..0154 marker missing from $1: $2" >&2
                 exit 1
               fi
             }
@@ -100,6 +100,15 @@ jobs:
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET CHARGER PREFLIGHT: restricted transport v1'
             require_marker xnu/bsd/dev/sweet_spmi.c 'sweet_spmi_fg_read(unsigned field'
             require_marker xnu/bsd/dev/sweet_spmi.c 'SWEET FG ACCESS: v2 field='
+            require_marker xnu/bsd/dev/sweet_charger.c 'sweet_charger_execute(enum sweet_charger_operation'
+            require_marker xnu/bsd/dev/sweet_charger.c 'ns >= deadline'
+            require_marker xnu/bsd/dev/sweet_battery_runtime.h 'SWEET_CHARGER_INPUT_LIMIT_MA'
+            require_marker xnu/bsd/conf/files 'bsd/dev/sweet_charger.c'
+            require_marker xnu/iokit/conf/files.arm64 'iokit/Kernel/arm/SweetPmicPower.cpp'
+            require_marker xnu/iokit/Kernel/arm/SweetPmicPower.cpp 'sweet_pmic_power_read_snapshot(SweetBattSnapshot'
+            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT HARDWARE: v1 semantic charger operations'
+            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET ADC5 PREFLIGHT: v1'
+            require_marker xnu/bsd/dev/sweet_spmi.c 'sweet_spmi_adc5_inspect(struct sweet_adc5_preflight'
             require_marker xnu/bsd/dev/sweet_spmi.c 'sp_fg_dma_command_locked(unsigned apid'
             require_marker xnu/bsd/dev/sweet_spmi.c 'SWEET FG DMA: v3 phase=recovery'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT SAMPLE: v2 id='
@@ -137,6 +146,10 @@ jobs:
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'nub->registerService(kIOServiceSynchronous)'
             require_marker xnu/iokit/KernelConfigTables.cpp "'IOProviderClass' = SweetSpmiMuxDevice;"
             require_marker xnu/iokit/KernelConfigTables.cpp "'IOProviderClass' = SweetPmicKeysDevice;"
+            if grep -Eq '0x(1042|1043|1061|1070|1340|1342|1365|1366|1370)' xnu/bsd/dev/sweet_battery_runtime.h; then
+              echo 'ERROR: register-address control survived semantic charger interface' >&2
+              exit 1
+            fi
             # An applied board wrapper is insufficient if the old edges survived.
             if grep -Eq 'sweet_(keys_init|touch_init|usb_probe|sample_start|display_probe_init|gpu_init|board_init|spmi_mux_start)' xnu/bsd/dev/sweet_ufs.c ||
                grep -Fq 'sweet_spmi_mux_start' xnu/bsd/dev/sweet_keys.c ||

@@ -16,6 +16,9 @@ if len(sys.argv) != 2:
 root = Path(sys.argv[1])
 source = (root/'bsd/dev/sweet_spmi.c').read_text()
 header = (root/'bsd/dev/sweet_spmi.h').read_text()
+adc_header = (root/'bsd/dev/sweet_adc5.h').read_text()
+charger_header = (root/'bsd/dev/sweet_charger.h').read_text()
+charger_backend = re.sub(r'^#include[^\n]*\n', '', (root/'bsd/dev/sweet_charger.c').read_text(), flags=re.M)
 mux = (root/'iokit/Kernel/arm/SweetSpmiInterruptMux.cpp').read_text()
 battery = (root/'iokit/Kernel/arm/SweetBattery.cpp').read_text()
 
@@ -180,6 +183,8 @@ static void balanced(){assert(depth==0 && maps==unmaps);}
 int main(int argc,char **argv){
     assert(argc==2);const char *mode=argv[1];uint8_t out=0xa5;
     assert(sweet_spmi_charger_read(2,0x1042,&out)==SWEET_SPMI_NOT_READY && out==0xa5);
+    sweet_adc5_preflight notReady;memset(&notReady,0xa5,sizeof(notReady));auto savedNotReady=notReady;
+    assert(sweet_spmi_adc5_inspect(&notReady)==SWEET_SPMI_NOT_READY && !memcmp(&notReady,&savedNotReady,sizeof(notReady)));
     if(!strcmp(mode,"alloc-fail")){
         failAlloc=true;assert(sweet_spmi_init()==-1 && !sp_attempted);failAlloc=false;
     }
@@ -191,6 +196,63 @@ int main(int argc,char **argv){
     }
     assert(sweet_spmi_init()==0);
     own(10,0x10);own(11,0x13);own(12,0x15);own(13,0x16);
+    if(!strncmp(mode,"adc-",4)) {
+        own(20,0x31,0,true);own(21,0x37,0,true);
+        pmic[0x23104]=8;pmic[0x23105]=0x0d;pmic[0x23108]=1;
+        pmic[0x23144]=0x4b;pmic[0x23150]=0xaa;pmic[0x23151]=0x55;pmic[0x23744]=3;
+        if(!strcmp(mode,"adc-foreign")){ownership[20]=3;ownership[21]=4;}
+        if(!strcmp(mode,"adc-ambiguous"))own(22,0x31,0,true);
+        if(!strcmp(mode,"adc-missing"))routing.erase(20);
+        if(!strcmp(mode,"adc-timeout"))observerStatus=0;
+        if(!strcmp(mode,"adc-poison"))sp_rw_poisoned[20]=true;
+        if(!strcmp(mode,"adc-denied"))observerStatus=5;
+        sweet_adc5_preflight adc{};assert(!sweet_spmi_adc5_inspect(&adc));
+        assert(!writes && !maps && !unmaps);
+        if(!strcmp(mode,"adc-timeout")){
+            assert(!adc.valid && adc.errors[0]==SWEET_SPMI_TIMEOUT && adc.errors[1]==SWEET_SPMI_POISONED);
+            auto before=commands;assert(!sweet_spmi_adc5_inspect(&adc) && commands==before);
+        }else if(!strcmp(mode,"adc-denied")){
+            assert(!adc.valid);for(int rc:adc.errors)assert(rc==SWEET_SPMI_DENIED);
+        }else if(!strcmp(mode,"adc-missing")){
+            assert(adc.valid==(1u<<SWEET_ADC5_CAL_DELAY));
+            assert(adc.user.observer_apid==SP_NO_APID && adc.user.writer_error==SWEET_SPMI_NO_OWNER);
+        }else{
+            assert(adc.valid==((1u<<SWEET_ADC5_FIELD_COUNT)-1));
+            assert(adc.raw[SWEET_ADC5_CHANNEL]==0x4b && adc.raw[SWEET_ADC5_DATA_LO]==0xaa && adc.raw[SWEET_ADC5_CAL_DELAY]==3);
+            int want=!strcmp(mode,"adc-foreign")?SWEET_SPMI_NO_OWNER:!strcmp(mode,"adc-ambiguous")?SWEET_SPMI_AMBIGUOUS:!strcmp(mode,"adc-poison")?SWEET_SPMI_POISONED:0;
+            assert(adc.user.writer_error==want);
+            assert(adc.user.irq_error==(!strcmp(mode,"adc-foreign")?SWEET_SPMI_NO_OWNER:!strcmp(mode,"adc-ambiguous")?SWEET_SPMI_AMBIGUOUS:0));
+        }
+        sweet_adc5_preflight saved=adc;auto before=commands;
+        version=0x60000000;assert(sweet_spmi_adc5_inspect(&adc)==SWEET_SPMI_UNSUPPORTED && !memcmp(&saved,&adc,sizeof(adc)));
+        assert(commands==before && sweet_spmi_adc5_inspect(nullptr)==SWEET_SPMI_INVALID);
+        balanced();IOLockFree(sp_lock);printf("PASS: fixed read-only ADC5 inspection %s\n",mode);return 0;
+    }
+    if(!strcmp(mode,"charger-semantic")){
+        unsigned value=0xa5;auto before=commands;
+        for(unsigned ma:{0u,1u,49u,51u,501u,1000u}){
+            assert(sweet_charger_execute(SWEET_CHARGER_FAST_CURRENT_MA,ma,1000000000,&value)==SWEET_SPMI_INVALID);
+            assert(sweet_charger_execute(SWEET_CHARGER_INPUT_LIMIT_MA,ma,1000000000,&value)==SWEET_SPMI_INVALID);
+        }
+        for(unsigned mv:{0u,3590u,3601u,4201u,4430u})assert(sweet_charger_execute(SWEET_CHARGER_FLOAT_VOLTAGE_MV,mv,1000000000,&value)==SWEET_SPMI_INVALID);
+        assert(sweet_charger_execute(SWEET_CHARGER_ENABLE,2,1000000000,&value)==SWEET_SPMI_INVALID);
+        assert(sweet_charger_execute(SWEET_CHARGER_SOFTWARE_INPUT_LIMIT,0,1000000000,&value)==SWEET_SPMI_INVALID);
+        assert(sweet_charger_execute(static_cast<sweet_charger_operation>(7),1,1000000000,&value)==SWEET_SPMI_INVALID);
+        assert(commands==before && value==0xa5);
+        assert(sweet_charger_execute(SWEET_CHARGER_ENABLE,1,0,&value)==SWEET_CHARGER_EXPIRED && commands==before && value==0xa5);
+        assert(sweet_charger_execute(SWEET_CHARGER_ENABLE,1,123456,&value)==SWEET_CHARGER_EXPIRED && commands==before);
+        assert(sweet_charger_execute(SWEET_CHARGER_ENABLE,0,0,nullptr)==SWEET_SPMI_INVALID && commands==before);
+        own(14,0x10);routing.erase(14); // normal unique writer for charger page
+        pmic[0x21042]=0xa0;pmic[0x21061]=0;pmic[0x21070]=0;pmic[0x21370]=0;
+        assert(!sweet_charger_execute(SWEET_CHARGER_ENABLE,1,1000000000,&value) && value==1 && pmic[0x21042]==0xa1);
+        assert(!sweet_charger_execute(SWEET_CHARGER_FAST_CURRENT_MA,500,1000000000,&value) && value==500 && pmic[0x21061]==10);
+        assert(!sweet_charger_execute(SWEET_CHARGER_INPUT_LIMIT_MA,450,1000000000,&value) && value==450 && pmic[0x21370]==9);
+        assert(!sweet_charger_execute(SWEET_CHARGER_FLOAT_VOLTAGE_MV,4200,1000000000,&value) && value==4200 && pmic[0x21070]==60);
+        assert(!sweet_charger_execute(SWEET_CHARGER_SOFTWARE_INPUT_LIMIT,1,1000000000,&value) && value==1);
+        value=0xa5;rwStatus=3;
+        assert(sweet_charger_execute(SWEET_CHARGER_ENABLE,0,1000000000,&value)==SWEET_SPMI_IO && value==0xa5);
+        balanced();IOLockFree(sp_lock);puts("PASS: semantic operations, unit bounds, physical readback and failure preservation");return 0;
+    }
     if(!strncmp(mode,"fg-",3)) {
         for(unsigned n=0;n<7;++n)own(30+n,n==0?1:n==1?0x41:n==2?0x43:0x46+n-3);
         pmic[0x20105]=0x20;pmic[0x20103]=strncmp(mode,"fg-v2",5)?1:2;
@@ -423,11 +485,11 @@ int main(int argc,char **argv){
 with tempfile.TemporaryDirectory(prefix='mh2lm-charge-io-') as directory:
     cpp = Path(directory)/'test.cpp'
     binary = Path(directory)/'test'
-    cpp.write_text(prelude+header+source+mux_prelude+function(mux,'SweetSpmiInterruptMux::writePeripheral')+preflight_prelude+re.sub(r'^#if[^\n]*\n', '', function(battery,'SweetBattery::transportPreflightAction'), flags=re.M)+checks)
+    cpp.write_text(prelude+header+adc_header+charger_header+source+mux_prelude+function(mux,'SweetSpmiInterruptMux::writePeripheral')+preflight_prelude+charger_backend+re.sub(r'^#if[^\n]*\n', '', function(battery,'SweetBattery::transportPreflightAction'), flags=re.M)+checks)
     subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-O1','-g','-pthread',
         '-fsanitize=address,undefined',str(cpp),'-o',str(binary)],check=True)
-    env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0')
-    for mode in ['normal','alloc-fail','map-fail','fg-v1','fg-v2','fg-busy','fg-unknown','fg-grant','fg-active','fg-read-fail','fg-cleanup-fail','fg-dma-error',
+    env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', UBSAN_OPTIONS='halt_on_error=1')
+    for mode in ['charger-semantic','adc-normal','adc-foreign','adc-ambiguous','adc-missing','adc-timeout','adc-denied','adc-poison','normal','alloc-fail','map-fail','fg-v1','fg-v2','fg-busy','fg-unknown','fg-grant','fg-active','fg-read-fail','fg-cleanup-fail','fg-dma-error',
                  'fg-foreign-identity','fg-readonly-pages','fg-local-preferred','fg-first-foreign',
                  'fg-no-memif-writer','fg-no-peek-writer','fg-ambiguous-writer','fg-poisoned-writer',
                  'fg-missing-identity','fg-missing-data','fg-observer-denied','fg-observer-timeout',

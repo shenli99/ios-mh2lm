@@ -184,7 +184,7 @@ startup_adapter=startup_adapter.replace('fMuxWatching=false','fTimerAdded=true')
 # runtime/controller suite separately exercises actual monitor and stop methods.
 if 'SweetBattery::stopRuntime' in battery:
     startup_adapter=startup_adapter.replace('public:', 'public: void stopRuntime() {} unsigned fRuntimeMode=0, fRuntimeRequested=0; SweetBattController fController={};\n', 1)
-    startup_adapter=read('bsd/dev/sweet_battery_runtime.h')+'\n'+startup_adapter
+    startup_adapter=read('bsd/dev/sweet_charger.h')+'\n'+strip(read('bsd/dev/sweet_battery_runtime.h'))+'\n'+startup_adapter
     startup_adapter=startup_adapter.replace('IOInterruptEventSource *fIrqEvent;',
         'IOInterruptEventSource *fIrqEvent; IOTimerEventSource *fMonitor=nullptr;')
 

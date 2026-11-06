@@ -16,6 +16,12 @@ root = Path(sys.argv[1])
 source = (root/'iokit/Kernel/arm/SweetBattery.cpp').read_text()
 header = (root/'bsd/dev/sweet_battery_runtime.h').read_text()
 spmi = (root/'bsd/dev/sweet_spmi.h').read_text()
+charger = (root/'bsd/dev/sweet_charger.h').read_text()
+backend = (root/'bsd/dev/sweet_charger.c').read_text()
+power = (root/'iokit/Kernel/arm/SweetPmicPower.cpp').read_text()
+power_header = (root/'bsd/dev/sweet_pmic_power.h').read_text()
+def strip_includes(text):
+    return re.sub(r'^#include[^\n]*\n', '', text, flags=re.M)
 
 def function(name):
     match = re.search(r'\n'+re.escape(name)+r'\([^)]*\)\n\{',source)
@@ -26,6 +32,12 @@ def function(name):
     while depth:
         depth+=(source[end]=='{')-(source[end]=='}');end+=1
     return source[start:end]+'\n'
+
+for name in ['SweetBattery::sampleRuntime','SweetBattery::runtimeUpdate','SweetBattery::runtimePowerNotice']:
+    body=function(name)
+    assert not re.search(r'\bsweet_spmi_(read|charger_read|charger_update|fg_read)\s*\(',body),name
+assert not re.search(r'0x(?:1042|1043|1061|1070|1340|1342|1365|1366|1370)',header)
+assert not re.search(r'ml_io_map|volatile\s+.*\*',backend+power)
 
 prelude=r'''
 #include <cassert>
@@ -115,6 +127,7 @@ extern "C" int sweet_spmi_charger_read(unsigned sid,unsigned addr,uint8_t *out){
     *out=regs[addr];return 0;
 }
 extern "C" int sweet_spmi_read(unsigned sid,unsigned addr,uint8_t *out){
+    if(pairFailure && ((addr>=0x41a0 && addr<=0x41ab) || addr==0x4009 || addr==0x400a))return -9;
     return sweet_spmi_charger_read(sid,addr,out);
 }
 extern "C" int sweet_spmi_fg_read(unsigned field,uint16_t *out){
@@ -165,7 +178,7 @@ public:
   publishedMa=registry.count("Amperage")?(int32_t)registry["Amperage"]:0;
   publishedCurrentValid=registry["SweetBatteryCurrentValid"];
  }
- static int runtimeUpdate(void *,unsigned,unsigned,unsigned,uint8_t *);
+ static int runtimeUpdate(void *,enum sweet_charger_operation,unsigned,uint64_t,unsigned *);
  static IOReturn startRuntime(OSObject *,void *,void *,void *,void *);
  static void monitorFired(OSObject *,IOTimerEventSource *);
  static bool readWordPair(unsigned,unsigned addr,unsigned cp,uint16_t *out){
@@ -238,6 +251,16 @@ static void policyTests(){
     assert(!sb_apply(c,d,timeNs,false,SweetBattery::runtimeUpdate,&control,testClock));
     assert(c.stopped && !c.enabled && changed[0x1042]==0);
     assert(writes.size()==6);delayAt=0;
+    // Deadline is checked below the typed API before EACH physical write,
+    // including all three writes of the software input mode operation.
+    for(unsigned expiredAt=1;expiredAt<=11;++expiredAt){
+        c={};s=sample();l=limits();d=sb_decide(c,s,l,timeNs);
+        updateCount=0;delayAt=expiredAt;writes.clear();
+        assert(!sb_apply(c,d,timeNs,false,SweetBattery::runtimeUpdate,&control,testClock));
+        assert(c.stopped && !c.enabled && changed[0x1042]==0);
+        assert(writes.size()==expiredAt+1);delayAt=0;
+    }
+
     c={};s=sample();l=limits();d=sb_decide(c,s,l,timeNs);
     assert(sb_apply(c,d,timeNs,false,SweetBattery::runtimeUpdate,&control,testClock));
     // Hardware unexpectedly clears enable: disable/confirm and latch a fault.
@@ -249,7 +272,8 @@ static void policyTests(){
 int main(){
     policyTests();reads.clear();writes.clear();changed.clear();
     regs={{0x41a0,0xff},{0x41a1,0x7f},{0x41a2,0x60},{0x41a3,0xed},
-          {0x4010,2},{0x4107,0},{0x1310,16},{0x1006,3},{0x110b,0x95},{0x1307,1}};
+          {0x41a6,0xff},{0x41a7,0x7f},{0x41a8,0x60},{0x41a9,0xed},
+          {0x4009,180},{0x400a,180},{0x4010,2},{0x4107,0},{0x1310,16},{0x1006,3},{0x110b,0x95},{0x1307,1}};
     fg={{0,100},{1,4000},{2,1},{3,3900}};
     IOTimerEventSource timer;SweetBattery b;b.fMonitor=&timer;
     assert(!SweetBattery::startRuntime(&b,nullptr,nullptr,nullptr,nullptr));
@@ -294,16 +318,16 @@ int main(){
     b.stopRuntime();assert(timer.disabled && !timer.armed && !b.fController.enabled);
     auto arms=timer.arms;auto samples=b.fMonitorSamples;SweetBattery::monitorFired(&b,&timer);
     assert(timer.arms==arms && b.fMonitorSamples==samples);
-    SweetBattery shutdown;uint8_t verified=0;
-    assert(!SweetBattery::runtimeUpdate(&shutdown,0x1042,1,1,&verified));
+    SweetBattery shutdown;unsigned verified=0;
+    assert(!SweetBattery::runtimeUpdate(&shutdown,SWEET_CHARGER_ENABLE,1,timeNs+1000000000,&verified));
     std::thread power([&]{assert(!SweetBattery::runtimePowerNotice(&shutdown,nullptr,kIOMessageSystemWillRestart,nullptr,nullptr,0));});
     power.join();assert(shutdown.fPowerStopping && changed[0x1042]==0);
-    auto prior=writes.size();assert(SweetBattery::runtimeUpdate(&shutdown,0x1042,1,1,&verified)==SWEET_SPMI_NOT_READY);
+    auto prior=writes.size();assert(SweetBattery::runtimeUpdate(&shutdown,SWEET_CHARGER_ENABLE,1,timeNs+1000000000,&verified)==SWEET_SPMI_NOT_READY);
     assert(writes.size()==prior);
     for(unsigned round=0;round<100;++round){
         SweetBattery racing;racing.fControlClaimed=true;std::atomic<bool> go{false};
-        std::thread submit([&]{while(!go.load()){}for(unsigned i=0;i<20;++i){uint8_t v;
-            int rc=SweetBattery::runtimeUpdate(&racing,0x1042,1,1,&v);assert(rc==0 || rc==SWEET_SPMI_NOT_READY);}});
+        std::thread submit([&]{while(!go.load()){}for(unsigned i=0;i<20;++i){unsigned v;
+            int rc=SweetBattery::runtimeUpdate(&racing,SWEET_CHARGER_ENABLE,1,timeNs+1000000000,&v);assert(rc==0 || rc==SWEET_SPMI_NOT_READY);}});
         std::thread notify([&]{while(!go.load()){}SweetBattery::runtimePowerNotice(&racing,nullptr,kIOMessageSystemWillPowerOff,nullptr,nullptr,0);});
         go=true;submit.join();notify.join();assert(racing.fPowerStopping && changed[0x1042]==0);
     }
@@ -318,7 +342,7 @@ names=['sweet_batt_now_ns','SweetBattery::sampleRuntime','SweetBattery::runtimeU
        'SweetBattery::monitorFired','SweetBattery::stopRuntime','SweetBattery::publishRuntime','SweetBattery::runtimeClock','SweetBattery::publish','SweetBattery::removePowerValue','SweetBattery::runtimePowerNotice']
 with tempfile.TemporaryDirectory(prefix='mh2lm-runtime-') as directory:
     cpp=Path(directory)/'test.cpp';binary=Path(directory)/'test'
-    cpp.write_text(prelude+header+spmi+shim+''.join(function(n) for n in names)+checks)
+    cpp.write_text(prelude+charger+strip_includes(header)+spmi+strip_includes(power_header)+shim+strip_includes(backend)+strip_includes(power)+''.join(function(n) for n in names)+checks)
     subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-O1','-g',
         '-fsanitize=address,undefined',str(cpp),'-o',str(binary)],check=True)
-    subprocess.run([str(binary)],env=dict(os.environ,ASAN_OPTIONS='detect_leaks=0'),check=True,timeout=30)
+    subprocess.run([str(binary)],env=dict(os.environ,ASAN_OPTIONS='detect_leaks=0',UBSAN_OPTIONS='halt_on_error=1'),check=True,timeout=30)
