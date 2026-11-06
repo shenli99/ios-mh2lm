@@ -8,10 +8,9 @@
 进入XNU时已enable1，具体启动writer未知。
 历史依据见 [`BATTERY-CHARGING-HISTORY.md`](BATTERY-CHARGING-HISTORY.md)。
 
-当前 0120a1 已通过 observer 修正，但 FG 温度/容量在 DMA 错误位检查失败。
-0153 的首次空闲 DMA 清错/原始诊断/短日志已本地完成，待构建和实机，见
-[FG DMA 恢复](BATTERY-FG-DMA-RECOVERY.md)。仍处于第2段测量闭环，不跳过
-身份、输入能力、并联隔离和 watchdog 依赖去启充。
+0120a2 已实测通过0153初始DMA清错，温度/容量/profile读取及短日志正常。
+证据见 [FG DMA 恢复](BATTERY-FG-DMA-RECOVERY.md)。仍处于第2～3段依赖闭环，
+后续补实际电池身份/限值、输入能力、并联隔离和watchdog；尚未主动启充。
 
 ## 目标、架构与范围
 

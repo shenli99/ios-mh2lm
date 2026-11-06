@@ -5,11 +5,12 @@
 共享访问与控制接口 → 真实测量/配置 → 策略与保护 → 首次受控充电 → 运行期
 事件管理 → 完整上报与回归。下面保留此前诊断过程，不再把“等待SMB_CFG”
 当作全部推进计划；0149可随第一批实现合并编译，无须单独消耗一轮。
-0150/0151 已随 0120 实测；0152 的 observer 分层修正在 0120a1 生效。
-当前四个 FG 字段停在 `0x4370` DMA 错误位检查；0153 已本地补首次会话的
-有界清错、原始 pre/recovery/post 诊断与短日志，待用户 push/下一次云构建。
-详见 [BATTERY-FG-DMA-RECOVERY.md](BATTERY-FG-DMA-RECOVERY.md)。下一产物先测
-telemetry 持久日志，无需先跑 dry 或重复 no-USB。
+0150/0151 已随 0120 实测；0152 observer 修正在 0120a1 生效。
+0120a2 已验证 0153：首次 DMA WRITE_ERROR 从0x2清到0，温度28.75～30.5°C、
+FG nominal/learned4027mAh与profile0x13有效，短日志完整。详见
+[BATTERY-FG-DMA-RECOVERY.md](BATTERY-FG-DMA-RECOVERY.md)。无需补live或先测dry。
+下一步转向第2～3段剩余的实际电池身份/限值、VBUS/输入能力、并联隔离provider
+与watchdog/pet，不继续把FG错误当作当前阻塞。
 
 第4～6段已有可独立实现的控制/事件/上报代码，电池身份/上限、VBUS实测及
 并联隔离 provider 尚缺，真实充电未验收、不打包控制档。0120a1 已取得

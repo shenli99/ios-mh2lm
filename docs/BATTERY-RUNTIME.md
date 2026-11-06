@@ -5,9 +5,10 @@
 三档boot已打包并初步实测，**六段尚未验收**，见[BATTERY-RUNTIME-0120-TESTING.md](BATTERY-RUNTIME-0120-TESTING.md)。
 第4段的“真实充电→受控停止”没有发生，不能宣称整份六段计划已经完成。
 
-0120a1 实测已通过 0152 observer 修正；四个 FG 字段仍因 DMA_STS 错误无效。
-0153 已本地补首次空闲会话的有界 DMA 清错和分段短日志，待 push/构建/实机，
-见 [FG DMA 恢复](BATTERY-FG-DMA-RECOVERY.md)。本轮不开放充电控制。
+0120a2 已实测通过 0153 初始 DMA 清错：WRITE_ERROR 0x2→0，779次温度采样有效，
+nominal/learned4027mAh、profile0x13均读出，短日志与完整耗时正常。
+见 [FG DMA 恢复与实机结果](BATTERY-FG-DMA-RECOVERY.md)。原始温度未做LG补偿，
+电池身份/限值、实际VBUS/输入能力、并联隔离与watchdog/pet仍待补，不开放充电。
 
 ## 当前完成度与仍缺的依赖
 

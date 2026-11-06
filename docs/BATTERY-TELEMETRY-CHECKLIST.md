@@ -5,6 +5,13 @@
 [BATTERY-RUNTIME.md](BATTERY-RUNTIME.md)。下面保留实现前的核对清单。与[实现计划](BATTERY-IMPLEMENTATION-PLAN.md)配套。
 0150只提供底层受限接口和一次只读预检，不会批准充电。
 
+0120a2进展：0153已实测清除初始DMA WRITE_ERROR，Gen4 rev2温度及容量/profile
+读出；779次V/I/原始温度有效，29次初始/事件取得nominal/learned4027mAh和
+integrity0x13，保护timer其余采样沿用容量。新runtime已接入标准电流/温度发布，
+不再是下表历史阶段的“尚未实现”；LG补偿和系统属性独立核对仍待完成。
+目前未闭合的是物理电池ID/允许限值、实际VBUS/输入能力、并联隔离和watchdog。
+完整证据见[FG DMA恢复实机结果](BATTERY-FG-DMA-RECOVERY.md)。
+
 每项后续应携带原始值、来源/版本、单位、完成时刻、返回码、有效性；时效由
 保护采样预算定义，不用“上次成功”永远有效。配置码与实际测量分开。
 

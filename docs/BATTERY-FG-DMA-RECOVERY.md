@@ -1,7 +1,8 @@
 # FG 初始 DMA 错误恢复与短记录日志（0153）
 
 2026-11-06，实现提交 `47fa07e`，承接原生 0120a1 / 0152。代码和本地验证
-完成，待用户 push、CircleCI 构建及实机验证；没有新 boot，也未操作设备。
+完成；0120a2 云产物及实机已验证本次初始清错、温度/容量读取和短日志，
+详见末节。未主动开启充电，也未由 agent 操作设备。
 0120a1 证据见 [FG observer 与路由记录](BATTERY-FG-OBSERVER-ROUTES.md)。
 
 ## 本轮解决什么
@@ -141,3 +142,58 @@ ADT、TOML、无重复参数；boot 内固件与既有 `kernel-32m.blob` 相同�
 核对脚本、原生选定源码、三档 TOML 和结果在
 `/home/shenli/work1/scratch/artifact-0120a2/`，见 `verification.json`、
 `verify-artifact.py`、`verify-images.py`、`packaging.txt`。
+
+## 0120a2 实机：DMA 清错及遥测通过（2026-11-06）
+
+日志 `logs/sweetlog-0120a2-battery-telemetry.bin` SHA256：
+`fedff4bec0d304aee5c720ff15fbc45fb04778781f5752eeb8bc1fa7d9458bc6`。
+header v1/ring4,194,304/total655,416/flush75，未回卷，解码无 NUL；实参
+`sweetbattruntime=1 sweetbattirq=4`。以下行号指底稿解码文本。
+
+首次原始状态与清错结果（125～130行）：
+
+```text
+phase=pre sts=0x2 ctl=0 arb=0x6 cfg=0 initialized=0 recovery-used=0
+phase=recovery before=0x2 after=0 after-ok=1 ctl=0 ctl-ok=1 low-confirmed=1 error=0
+field=0 rev=2 memtype=0xd raw=0x78
+field=2 rev=2 memtype=0xd raw=0x13
+field=1 rev=2 memtype=0xd raw=0xfbb
+field=3 rev=2 memtype=0xd raw=0xfbb
+```
+
+本次确认启动首次准备时 WRITE_ERROR bit1 已高，READ_ERROR bit2 未高；
+MEMIF 空闲，清错回读成功，然后四字段访问成功。不能倒推上一轮 0120a1
+具体哪一位，也不能确定该写错误由固件、此前系统还是其他 EE 造成。
+ACCESS 的 `recovered=0` 表示该字段此前尚未报告失败，不表示 DMA 清错失败。
+
+| 项目 | 本轮结果与边界 |
+| --- | --- |
+| 快照 | 779 次，29 次初始/事件、750 次保护 timer；started 时间跨度 779.694 秒 |
+| 温度 | 779/779 有效、error0；raw0x73～0x7a，对应28.75～30.5°C；仍未做LG补偿/独立温度计校准 |
+| 容量/profile | nominal4027mAh、learned4027mAh、integrity0x13，所有错误0/有效1；29次初始/事件重新读取，其余750次沿用，并非779次独立容量测量 |
+| 物理身份 | integrity bit0满足当前检查，容量是FG读数；尚未证明所装电池型号/允许FCC/FV，不把它当作电池身份provider |
+| 电压/电流 | 779/779有效；3875～3987mV、IOPM符号-647～+40mA；没有持续真实充电证据 |
+| 快照耗时 | min37.060ms / median37.640ms / max92.749ms（首次）；未出现旧截断导致的时间缺失 |
+| 短日志 | SAMPLE/FG/CAP/TIME各779条且id1～779完整对应；含INFO和换行最长分别107/85/123/86字节，CONFIG155、PARALLEL84字节 |
+| DMA稳定性 | 仅首次一组pre/recovery；无后续pre/post错误、ACCESS失败、ERROR或会话poison证据；故障清理路径仍仅本地注入验证 |
+| 电池中断 | USBIN20 + source-change7，对应27次refresh，notifications/samples连续1～27，全部healthy1；route-to-publish约88.776～90.595ms |
+| 其他IRQ | 按键三路attach；本次power/volume-down各2条命中，volume-up无操作证据；触摸计数到80、USB计数到128。不能据此称本次测全三键 |
+
+29 次配置均有效：enable0、pause0、WDOG0x62/time0x8c、SMB0/CFG0x2，
+与上一轮一致；SMB0仍不能证明并联隔离。29次原发布均charging0/CHGR0x47；
+21次策略转换均allow0/owned0，原因0x7c0（11次）或0x7c8（10次，多NO_INPUT）。
+原来的TELEMETRY/TEMPERATURE阻止位已消失，剩余电池身份、并联、输入能力、
+watchdog与限值仍未闭合。没有CONTROL提交，mode1本身不启充。
+
+无panic/mux隔离，8条既有USB ep0/ep5命令WARN另记；powerd selector4仍
+unsupported，是已知Apple user-client兼容缺口，本轮未修复或据此判定FG失败。
+有电量67→66%的原始发布记录；屏幕实际显示和完整IORegistry值未独立抓取。
+
+结论：0153的本次正常恢复路径和短日志实机通过，不需要补live或重跑
+observe/dry来证明这两点。接下来推进第2～3段剩余依赖：实际电池身份/限值与
+VBUS/输入能力provider、并联状态/隔离，以及watchdog/pet责任。完成前不开放
+控制镜像；这次遥测成功不等于完整电池驱动或真实充电已经验收。
+
+解码、逐条证据与机器统计见 `scratch/artifact-0120a2/` 中
+`battery-telemetry-persistent.txt`、`battery-telemetry-analysis.json` 和
+`analyze-telemetry.py`。本轮仅分析/记录，没有驱动修改、新CI/boot、push或设备操作。

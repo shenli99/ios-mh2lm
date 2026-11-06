@@ -2,6 +2,43 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**LATEST RESULT: 0120a2初始DMA清错/温度容量/短日志实机通过；转向provider和watchdog缺口。**
+
+用户已导出logs/sweetlog-0120a2-battery-telemetry.bin，SHA256
+fedff4bec0d304aee5c720ff15fbc45fb04778781f5752eeb8bc1fa7d9458bc6。
+header v1/ring4194304/total655416/flush75，未回卷/无NUL，实参runtime1/IRQ4。
+承接实现47fa07e、打包记录e3235ea。首次DMA pre sts2/ctl0/arb6/cfg0，说明本次
+WRITE_ERRORbit1高（不是READ_ERROR）；恢复after0/after-ok1/ctl0/ctl-ok1/
+low-confirmed1/error0，后续四字段成功rev2/memtype0d。不能倒推0120a1具体bit，
+也不能证明初态错误来源。ACCESS recovered0只是字段此前无失败报告，不是清错失败。
+
+779快照=29初始/事件+750protectiontimer，started跨度779.694秒；V/I全部有效，
+3875..3987mV、IOPM -647..+40mA。779温度全部有效/error0/raw73..7a/28.75..30.5C，
+仍未LG补偿/独立校准。nominal/learned4027mAh/profile13，29次初始/事件真实重读
+全部成功，余750缓存；不能称779次独立容量读取，不能据容量/profile证明电池身份。
+四类短记录各779、id1..779匹配，INFO+newline最长SAMPLE107/FG85/CAP123/TIME86，
+CONFIG155/PARALLEL84，完整TIME耗时min37.060/median37.640/max92.749ms(首次)。
+只有首次DMApre/recovery，无后续FGwarn/error；本次正常路径通过，故障路径仍host。
+
+29CONFIG均valid、en0/pause0/WD62/time8c/SMB0/CFG2。21policy allow0/owned0，
+reason7c0(11)/7c8(10，多NO_INPUT)，原TELEMETRY/TEMP阻止位消失；电池ID/限值、
+并联/输入能力、watchdog仍缺。29原发布charging0/CHGR47、SOC67->66；无CONTROL，
+不能声称真实充电。USBIN20/source7对应27refresh，counter1..27连续healthy1、
+routepublish88.776..90.595ms；keys power/down各2hit、up无本次操作证据，touch到80、
+USB到128。无ERROR/panic/mux隔离；8既有USBcmdWARN另记。powerdsel4unsupported
+仍为既有ABI缺口，不据此否定FG。UI/完整IORegistry未另抓。
+
+NEXT无需补live/重复本镜像或先dry；进入第2～3段剩余证据provider：实际电池
+身份/上限、实测VBUS/输入能力、并联状态/隔离，以及WDpet责任/保护。不要再把
+DMA错误列为当前阻塞，不用bootarg伪造证据，不自动关WD绕过保护。第4～6段/
+CHGR真实充电转换和framebuffer顺序未变。详细结果已写入
+ docs/BATTERY-FG-DMA-RECOVERY.md末节，runtime/NEXT/计划/路线图/测量清单同步。
+底稿scratch/artifact-0120a2/{battery-telemetry-persistent.txt,
+battery-telemetry-analysis.json,analyze-telemetry.py}。本轮仅分析/文档，无驱动
+修改/新CI/新boot/push/设备操作。
+
+### Previous 0120a2 packaging handoff
+
 **CURRENT: 0120a2云产物已核对，0153三档boot已生成，待用户先测telemetry持久日志。**
 
 本轮只核对/打包/记录，不改驱动或CI、未push/设备操作。logs两份0120a2归档
