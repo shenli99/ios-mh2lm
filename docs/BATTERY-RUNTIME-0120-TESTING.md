@@ -1,7 +1,7 @@
 # 0120 电池遥测与模拟策略测试
 
 2026-11-06，承接实现提交bde5519。用户下载产物，本轮仅核对和打包，
-没有改驱动/CI、push或操作设备。实机结果待补。
+没有改驱动/CI、push或操作设备。telemetry持久日志结果已补于文末。
 
 ## 产物核对
 
@@ -60,3 +60,43 @@ SRAM内容；三个真实证据provider仍缺，不能声称此次能主动开�
 温度是未经LG补偿的原始值；容量是FG字段，不能独自证明实际电池身份。
 UI显示充电与策略允许、物理电流证据分开分析。本轮不验收真实充电恢复，
 也不宣告六段计划第4～6段或电池IRQ整体完成。
+
+## 首次遥测实机结果
+
+用户仅导出`logs/sweetlog-0120-battery-telemetry.bin`，无需为了分析再补live。
+SHA256 `7e06beb2344ddef2262d37dfcfe4742888e636392f410a0eb32203a1fe58fc86`。
+v1、ring4194304、total472585、flush58，未回卷，解码5379行、无NUL。
+解码和逐项分析保存在工作区`scratch/artifact-0120/`下
+`battery-telemetry-persistent.txt`及`battery-telemetry-analysis.json`。
+
+实际bootargs和RUNTIME均为mode1。617快照跨度609.888秒，其中23次初始/事件
+路径、594次保护timer；30配置字段valid始终0x3fffffff，V/I均有效，
+3873..3987mV，IOPM方向电流-684..+16mA。没有持续充电方向电流证据。
+23次原电池发布均charging0、CHGR0x47/state7，SOC65/66%，不能以1%的变化
+证明真实充电。15次策略记录均owned0/allow0，无CONTROL日志；这与mode1
+不提交充电控制的设计一致。此次日志没有直接打印充电enable的raw值，不能
+据历史日志代填当前0x1042。
+
+**新的未通过项是FG遥测：温度617次均temp-error=-4、temp-ok=0，nominal/
+learned/profile也始终无效。** -4在原生头文件中是SWEET_SPMI_NO_OWNER，
+由sp_charger_route找不到目标PPID的EE0 owner返回，不是DMA超时，也不是
+电池测出了0°C。FG路径先读0x0105/0103/4305，再进入MEMIF/DMA；由于失败
+日志未含地址，尚不能区分身份读取阶段与MEMIF阶段，也不能断言硬件禁止
+访问。容量/profile独立error未输出，不能把温度-4直接当作它们的错误码。
+身份observer读取是否不必要地要求write owner，是下一步应核实的实现问题；
+MEMIF实际控制写仍必须核对owner，不应直接放宽写权限。
+
+策略原因0x7d1（8次）包含TELEMETRY/TEMPERATURE/BATTERY_ID/PARALLEL/INPUT/
+WATCHDOG/LIMITS；0x7d9（7次）再含NO_INPUT。state4是缺温度后软件进入hold，
+不证明实际过热；WATCHDOG位表示不满足当前“确认off”的策略，全部配置字段
+有效时可确定0x1651的相应mask非零，但本日志没有raw字节，尚未建立pet机制。
+因此即使修复温度读取，也不能宣称所有启充条件已经齐全。
+
+21次IRQ刷新均healthy1，notifications/samples连续1..21；14次USBIN、7次
+新增source-change，插拔通知工作正常。本次未自然观测到CHGR/MSOC/READY
+hit；不撤销既有MSOC实机验证。未见驱动ERROR、panic或mux隔离；有4条既有
+USB ep0/ep5 cmd0x6 status1警告，不能据此认定充电失败由USB造成。
+
+**下一步先处理FG路由/读写权限分层及失败地址诊断，同时落实watchdog和三个
+证据provider；暂不要求用户重启去测policy-dry或observe。** 不充电在本档
+属预期边界，但不能把本次遥测当作验收通过。本轮没有修改驱动或CI。

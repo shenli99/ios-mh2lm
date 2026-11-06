@@ -2,6 +2,36 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**LATEST RESULT: 0120 telemetry持久日志已分析；不充电符合mode1边界，但FG遥测失败，先不测dry。**
+
+用户仅提供logs/sweetlog-0120-battery-telemetry.bin，足够完成本轮分析，无需补
+live。SHA7e06beb2344ddef2262d37dfcfe4742888e636392f410a0eb32203a1fe58fc86，
+v1/ring4MiB/total472585/flush58，未回卷、解码无NUL。scratch/artifact-0120/
+battery-telemetry-persistent.txt及battery-telemetry-analysis.json保存逐行证据。
+实际args/runtime=1，617快照（23irq/594protectiontimer），跨度609.888s；
+全部V/I valid，3873..3987mV、IOPM -684..+16mA，没有持续正充电电流证据。
+23原电池发布charging0、CHGR47/state7；65/66%不能独自证明充电。
+15policy均owned0/allow0，无CONTROL提交；mode1本来就不写充电策略。
+
+新发现：617/617 temp-error=-4即SWEET_SPMI_NO_OWNER（sp_charger_route未找到
+目标PPID的EE0owner），不是温度0C或总线timeout。temp/nominal/learned/profile
+valid均0，30配置寄存器valid=0x3fffffff。SRAM读先经0105/0103/4305和MEMIF/
+DMA各地址，日志没打印失败地址，不能断言必然在MEMIF或硬件权限不支持。
+capacity/profile独立error未打印，不能硬说它们也都是-4。应查身份只读步骤
+不必要依赖writeowner的问题、实际PPID/APID/ownership，再判断会话写权限。
+不要去掉MEMIF控制写owner校验或强行启充。
+policy0x7d1（8次）/0x7d9（7次，多NO_INPUT）明确包含telemetry/temp/identity/
+parallel/input/watchdog/limits；state4是缺温度触发的软件hold，不证明过热。
+全部配置valid且有WATCHDOG位，说明1651不满足当前off条件，尚无raw字节和pet。
+
+IRQ21次刷新均healthy1、notifications/samples1..21；14USBIN+7source，未见
+CHGR/MSOC/READY自然hit，不能因缺hit撤销历史MSOC验证。无驱动ERROR/panic/
+mux隔离；4USB ep0/ep5命令WARN仍在，不凭此归因充电。NEXT先补FG路由诊断/
+正确划分observer读取和owned协议写、解析watchdog及三个证据provider；暂缓
+policy-dry/observe额外启动，本轮未修改驱动/CI、未push/设备操作。
+
+### Previous packaging handoff
+
 **CURRENT USER TASK: 0120云产物已核对、三档boot已打包，待用户先测telemetry。**
 
 承接bde5519；本轮只核对/打包/记录，没有改驱动、CI、push或操作设备。
