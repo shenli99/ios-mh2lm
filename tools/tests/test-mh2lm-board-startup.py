@@ -27,7 +27,7 @@ assert bsd.index('bsd_autoconf();') < bsd.index('inittodr(0);') < bsd.index('swe
 assert 'bsd/dev/sweet_board.c' in files
 for name in ['sweet_keys_init', 'sweet_touch_init', 'sweet_usb_probe',
              'sweet_sample_start', 'sweet_display_probe_init', 'sweet_gpu_init',
-             'sweet_spmi_mux_start', 'sweet_board_init']:
+             'sweet_spmi_mux_start', 'sweet_adc5_init', 'sweet_board_init']:
     assert name not in ufs, 'UFS owns unrelated startup: ' + name
 assert 'sweet_log_start();' in ufs
 assert ufs.index('su.ready = true;') < ufs.index('sweet_log_start();')
@@ -66,8 +66,9 @@ prelude = r'''
 #define SWEET_LOG_INFO(...) ((void)0)
 #define SWEET_LOG_ERROR(...) ((void)0)
 static std::vector<int> calls;
-static bool muxFail, keysDisabled, keyFail;
+static bool muxFail, keysDisabled, keyFail, adcFail;
 int sweet_spmi_mux_start() { calls.push_back(1); return muxFail ? -1 : 0; }
+int sweet_adc5_init() { calls.push_back(7); return adcFail ? -1 : 0; }
 void sweet_keys_init() {
     calls.push_back(2);
     if (keysDisabled || keyFail) return;
@@ -81,13 +82,14 @@ checks = r'''
 int main(int argc, char **argv) {
     if (argc>1) {
         muxFail=!std::strcmp(argv[1],"mux-fail");
+        adcFail=!std::strcmp(argv[1],"adc-fail");
         keysDisabled=!std::strcmp(argv[1],"keys-disabled");
         keyFail=!std::strcmp(argv[1],"keys-fail");
     }
     sweet_board_init();
-    assert((calls==std::vector<int>{1,2,3,4,5,6}));
+    assert((calls==std::vector<int>{1,7,2,3,4,5,6}));
     sweet_board_init(); // root mount retries must not duplicate drivers
-    assert(calls.size()==6);
+    assert(calls.size()==7);
     std::printf("PASS: board startup %s; independent fan-out, one-shot\n",argc>1?argv[1]:"normal");
 }
 '''
@@ -97,7 +99,7 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-board-start-') as d:
     src.write_text(prelude+body+checks)
     subprocess.run([os.environ.get('CXX','c++'), '-std=c++17', '-O1', '-g',
                     '-fsanitize=address,undefined', str(src), '-o', str(binary)], check=True)
-    for scenario in ['normal','keys-disabled','keys-fail','mux-fail']:
+    for scenario in ['normal','keys-disabled','keys-fail','mux-fail','adc-fail']:
         subprocess.run([str(binary),scenario],
                        env=dict(os.environ, ASAN_OPTIONS='detect_leaks=0'), check=True)
 print('PASS: BSD phase, UFS storage-only startup, key consumer ownership')

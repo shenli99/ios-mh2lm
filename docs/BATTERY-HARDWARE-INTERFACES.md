@@ -4,6 +4,9 @@
 产物已核对并打包，实机预检和采样回归结果见末节。本轮先固定接口边界并取得ADC5访问依据；未完成ADC测量、
 电池身份验证、并联控制或watchdog维护，仍不开放受控充电。
 
+0155新增ADC5转换服务的当前架构、寄存器契约和测试步骤见
+[ADC5 provider](BATTERY-ADC5-PROVIDER.md)。下方0154边界和实机数据按历史保留。
+
 ## 服务、策略与硬件边界
 
 ```mermaid
@@ -59,6 +62,28 @@ FV使用mV，暂限3600～4200mV且10mV步进；software-input-limit只接受1�
 
 API仍复用`sweet_spmi_charger_update()`，没有扩大白名单或写权限。watchdog
 pet尚未实现，未来应是独立的触发命令接口，不能塞入稳定配置RMW/回读协议。
+
+## ADC5 provider 实际转换（0155，待实机验证）
+
+0155在预检之上加入独立 `SweetPmicAdc5 : IOService`，由板级
+`SweetPmicAdc5Device` nub 匹配。provider 自己拥有 IOWorkLoop 和 timer，通过
+`SweetSpmiMuxClient` 订阅 SID2/0x31 的 EOC 路由。matched只retain/记录并排队；
+provider workloop完成attach/READY，再进行ADC配置、转换和恢复。默认订阅EOC，
+保持转换空闲，
+只有 `sweetbattadcconv=1..3` 显式请求 BAT_ID、USBIN 或两者顺序转换。
+
+转换协议严格固定：先检查 PMIC subtype/revision、user/cal writer 唯一性、
+请求/enable/status 空闲；BAT_ID 使用 `0x4b`，USBIN 使用 `0x08` 和 1/16
+prescale。USBIN 先把 `0x3744` 设为 `0x73`，等待20 ms并做 REF_GND EOC，
+随后发起 USBIN EOC。完成后检查 EOC、status、channel、`0x3150/51` 的
+`0x8000` 无效码，按 PM8150B `0x70e4`/1875 mV 换算，再恢复所有保存配置。
+每个阶段上限100 ms；EOC丢失、错误结果或恢复失败会终止本次 session，恢复失败
+使 provider 本次启动失效，绝不切换到轮询或给充电策略放行。
+
+当前 provider 结果只发布原始 measurement 属性和 valid 标志，不接入
+`SweetBattLimits`、VBUS证据或充电 enable。实机验收需看到
+BAT_ID一次及USBIN两次EOC、raw/微伏、restored=1、IRQ healthy，以及按键/电池事件无丢失；
+这轮日志仍不能证明真实充电。
 
 ## ADC5 只读预检
 

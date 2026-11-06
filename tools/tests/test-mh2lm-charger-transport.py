@@ -76,6 +76,11 @@ static void recordLog(const char *format,...) {
 #define SWEET_LOG_INFO(...) recordLog(__VA_ARGS__)
 using vm_offset_t=uintptr_t; using vm_size_t=size_t; using IOLock=std::mutex;
 static thread_local unsigned depth,sessionDepth;
+static uint64_t adcTimeNs=123456;
+static bool adcAbortStuck;
+static unsigned adcRequests, failAdcWriteAt;
+static void clock_get_uptime(uint64_t *t){*t=adcTimeNs;}
+static void absolutetime_to_nanoseconds(uint64_t t,uint64_t *n){*n=t;}
 static IOLock *controllerLock;
 static bool failAlloc,failMap,failPermanent,dropWrite,failFgRelease;
 static unsigned failFgAddress;
@@ -138,12 +143,16 @@ static void modelWrite(vm_offset_t b,unsigned o,uint32_t v){
         apid=(b-SWEET_DEV_SPMI_CHNLS_PA)/0x10000;
         assert(ownership[apid]==0); // foreign writer permission is never borrowed
         unsigned address=(((routing[apid]>>8)&0xfff)<<8)|reg;rwAddresses.push_back(address);
+        if(address==0x23147)++adcRequests;
         if(address==0x24371){++clearWrites;dmaControlValues.push_back(data[b]&255);if(data[b]&1)++clearHighs;}
         if(failFgRelease && address==0x24350 && !(data[b]&0x80)){status[b]=3;return;}
         status[b]=rwStatus;
         if(address==0x24371 && clearWrites==failClearAt)status[b]=failClearStatus;
-        if(!dropWrite && (rwStatus==1 || rwStatus==0))
+        if(failAdcWriteAt==writes)status[b]=3;
+        if(!dropWrite && (status[b]==1 || status[b]==0))
             pmic[(((routing[apid]>>8)&0xfff)<<8)|reg]=data[b]&255;
+        if(address==0x23147 && status[b]==1 && !dropWrite) { pmic[address]=0;pmic[0x23108]=2; }
+        if(address==0x23146 && !(data[b]&0x80) && status[b]==1 && !adcAbortStuck)pmic[0x23108]&=~2u;
         if(address==0x24371 && (data[b]&1)){
             if(!clearStuck){if(clearDelay)clearPending=clearDelay;else pmic[0x24370]&=~6u;}
             if(clearSelfClear)pmic[address]&=~1u;
@@ -172,8 +181,7 @@ struct SweetBattery : OSObject {
     bool fRunning=false,fSid2=false;
     static IOReturn transportPreflightAction(OSObject *,void *,void *,void *,void *);
 };
-static void clock_get_uptime(uint64_t *t){assert(depth==0);*t=123456;}
-static void absolutetime_to_nanoseconds(uint64_t t,uint64_t *n){*n=t;}
+
 '''
 checks = r'''
 static void own(unsigned apid,unsigned per,unsigned ee=0,bool irq=false){
@@ -196,10 +204,90 @@ int main(int argc,char **argv){
     }
     assert(sweet_spmi_init()==0);
     own(10,0x10);own(11,0x13);own(12,0x15);own(13,0x16);
+    if(!strncmp(mode,"conversion-",11)) {
+        own(20,0x31,0,true);own(21,0x37,0,false);own(30,1,4,true);
+        pmic[0x23104]=8;pmic[0x23105]=0x28;pmic[0x20105]=0x20;pmic[0x20103]=2;
+        pmic[0x23142]=0x98;pmic[0x23143]=0x85;pmic[0x23144]=0x4b;pmic[0x23145]=0xa1;
+        pmic[0x23146]=1;pmic[0x23744]=3;
+        auto saved=pmic;
+        sweet_adc5_session session{},other{};sweet_adc5_measurement value;memset(&value,0xa5,sizeof(value));auto untouched=value;
+        bool usb=std::strstr(mode,"usb")!=nullptr;
+        auto channel=usb?SWEET_ADC5_USBIN:SWEET_ADC5_BAT_ID;
+        int expected=0;
+        if(!strcmp(mode,"conversion-busy")){pmic[0x23108]=2;expected=SWEET_SPMI_BUSY;}
+        if(!strcmp(mode,"conversion-enabled")){pmic[0x23146]|=0x80;expected=SWEET_SPMI_BUSY;}
+        if(!strcmp(mode,"conversion-requested")){pmic[0x23147]=0x80;expected=SWEET_SPMI_BUSY;}
+        if(!strcmp(mode,"conversion-type")){pmic[0x23105]=0x29;expected=SWEET_SPMI_UNSUPPORTED;}
+        if(!strcmp(mode,"conversion-foreign")){ownership[20]=3;expected=SWEET_SPMI_NO_OWNER;}
+        if(!strcmp(mode,"conversion-ambiguous")){own(22,0x31);expected=SWEET_SPMI_AMBIGUOUS;}
+        if(!strcmp(mode,"conversion-cal-foreign")){ownership[21]=3;expected=SWEET_SPMI_NO_OWNER;}
+        if(!strcmp(mode,"conversion-poison")){sp_rw_poisoned[20]=true;expected=SWEET_SPMI_POISONED;}
+        if(!strcmp(mode,"conversion-read-fail")){failReadAt=readCommands+3;expected=SWEET_SPMI_IO;}
+        auto before=writes;
+        int rc=sweet_spmi_adc5_begin(&session,channel);
+        if(expected){assert(rc==expected && !writes && !session.active);balanced();IOLockFree(sp_lock);printf("PASS: ADC conversion preflight %s\n",mode);return 0;}
+        assert(!rc && session.active && !session.restore_error && sp_adc5_owner==&session);
+        auto count=commands;assert(sweet_spmi_adc5_begin(&other,channel)==SWEET_SPMI_BUSY && commands==count);
+        if(!strcmp(mode,"conversion-abort") || !strcmp(mode,"conversion-usb-abort")){
+            assert(!sweet_spmi_adc5_abort(&session));assert(!session.active && !sp_adc5_owner);
+        } else if(!strcmp(mode,"conversion-timeout") || !strcmp(mode,"conversion-usb-timeout")){
+            adcTimeNs=session.deadline_ns;assert(sweet_spmi_adc5_advance(&session,SWEET_ADC5_EOC,&value)==SWEET_ADC5_EXPIRED);
+            assert(!session.active && !memcmp(&value,&untouched,sizeof(value)));
+        } else {
+            if(usb){
+                assert(session.phase==SWEET_ADC5_WAIT_SETTLE && pmic[0x23744]==0x73 && !adcRequests);
+                assert(sweet_spmi_adc5_advance(&session,SWEET_ADC5_SETTLED,&value)==SWEET_SPMI_BUSY && !adcRequests);
+                adcTimeNs=session.settle_until_ns;
+                assert(sweet_spmi_adc5_advance(&session,SWEET_ADC5_SETTLED,&value)==SWEET_ADC5_MORE);
+                assert(session.phase==SWEET_ADC5_GROUND && pmic[0x23144]==8 && adcRequests==1);
+                pmic[0x23108]=1;
+                assert(sweet_spmi_adc5_advance(&session,SWEET_ADC5_EOC,&value)==SWEET_ADC5_MORE);
+                assert(session.phase==SWEET_ADC5_RESULT && adcRequests==2);
+            }
+            pmic[0x23108]=1;pmic[0x23150]=0xe4;pmic[0x23151]=0x30;
+            if(!strcmp(mode,"conversion-invalid-data")){pmic[0x23150]=0;pmic[0x23151]=0x80;}
+            if(!strcmp(mode,"conversion-wrong-channel"))pmic[0x23144]=9;
+            if(!strcmp(mode,"conversion-false-eoc"))pmic[0x23108]=2;
+            if(!strcmp(mode,"conversion-result-read-fail"))failReadAt=readCommands+3;
+            if(!strcmp(mode,"conversion-usb-cal-restore-fail"))ownership[21]=3;
+            if(!strcmp(mode,"conversion-restore-fail")){rwStatus=3;}
+            if(!strcmp(mode,"conversion-usb-poison-result")){sp_rw_poisoned[20]=true;}
+            if(!strcmp(mode,"conversion-stuck-abort")){adcAbortStuck=true;pmic[0x23108]=2;}
+            rc=sweet_spmi_adc5_advance(&session,SWEET_ADC5_EOC,&value);
+            if(strcmp(mode,"conversion-normal") && strcmp(mode,"conversion-usb-normal")){
+                assert(rc && !memcmp(&value,&untouched,sizeof(value)) && !session.active);
+            }else{
+                assert(!rc && !session.active && value.raw==0x30e4 && value.eoc_count==(usb?2u:1u));
+                unsigned uv=uint64_t(0x30e4)*1875000/0x70e4;
+                assert(value.microvolts==uv*(usb?16:1) && value.completed_ns>=value.started_ns);
+            }
+        }
+        if(!session.restore_error){
+            for(unsigned addr:{0x23142u,0x23143u,0x23144u,0x23145u,0x23146u,0x23744u})assert(pmic[addr]==saved[addr]);
+        }else{
+            assert(sp_adc5_failed);
+            auto before=commands;assert(sweet_spmi_adc5_begin(&other,channel)==SWEET_SPMI_POISONED && commands==before);
+        }
+        assert(!sp_adc5_owner);
+        for(unsigned address:rwAddresses)assert((address>=0x23142 && address<=0x23147) || address==0x23744);
+        if(!strcmp(mode,"conversion-usb-poison-result"))assert(pmic[0x23744]==3);
+        balanced();IOLockFree(sp_lock);printf("PASS: actual ADC phase/restore/output semantics %s\n",mode);return 0;
+    }
     if(!strncmp(mode,"adc-",4)) {
         own(20,0x31,0,true);own(21,0x37,0,true);
         pmic[0x23104]=8;pmic[0x23105]=0x0d;pmic[0x23108]=1;
         pmic[0x23144]=0x4b;pmic[0x23150]=0xaa;pmic[0x23151]=0x55;pmic[0x23744]=3;
+        if(!strcmp(mode,"adc-normal")) {
+            auto before=commands;uint8_t byte=0xa5;
+            for(unsigned reg:{0x10u,0x14u,0x16u,0x42u,0x111u})
+                assert(sweet_spmi_adc5_irq_read(reg,&byte)==SWEET_SPMI_INVALID && byte==0xa5);
+            assert(sweet_spmi_read(2,0x3104,&byte)!=0 && sweet_spmi_charger_read(2,0x3142,&byte)==SWEET_SPMI_INVALID);
+            assert(commands==before);
+            for(unsigned reg:{0x11u,0x12u,0x13u,0x15u}) {
+                pmic[0x23100|reg]=0x5a;
+                assert(!sweet_spmi_adc5_irq_read(reg,&byte) && byte==0x5a);
+            }
+        }
         if(!strcmp(mode,"adc-foreign")){ownership[20]=3;ownership[21]=4;}
         if(!strcmp(mode,"adc-ambiguous"))own(22,0x31,0,true);
         if(!strcmp(mode,"adc-missing"))routing.erase(20);
@@ -489,7 +577,7 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-charge-io-') as directory:
     subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-O1','-g','-pthread',
         '-fsanitize=address,undefined',str(cpp),'-o',str(binary)],check=True)
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', UBSAN_OPTIONS='halt_on_error=1')
-    for mode in ['charger-semantic','adc-normal','adc-foreign','adc-ambiguous','adc-missing','adc-timeout','adc-denied','adc-poison','normal','alloc-fail','map-fail','fg-v1','fg-v2','fg-busy','fg-unknown','fg-grant','fg-active','fg-read-fail','fg-cleanup-fail','fg-dma-error',
+    for mode in ['conversion-normal','conversion-usb-normal','conversion-busy','conversion-enabled','conversion-requested','conversion-type','conversion-foreign','conversion-ambiguous','conversion-cal-foreign','conversion-poison','conversion-read-fail','conversion-abort','conversion-usb-abort','conversion-timeout','conversion-usb-timeout','conversion-invalid-data','conversion-wrong-channel','conversion-false-eoc','conversion-result-read-fail','conversion-restore-fail','conversion-usb-cal-restore-fail','conversion-usb-poison-result','conversion-stuck-abort','charger-semantic','adc-normal','adc-foreign','adc-ambiguous','adc-missing','adc-timeout','adc-denied','adc-poison','normal','alloc-fail','map-fail','fg-v1','fg-v2','fg-busy','fg-unknown','fg-grant','fg-active','fg-read-fail','fg-cleanup-fail','fg-dma-error',
                  'fg-foreign-identity','fg-readonly-pages','fg-local-preferred','fg-first-foreign',
                  'fg-no-memif-writer','fg-no-peek-writer','fg-ambiguous-writer','fg-poisoned-writer',
                  'fg-missing-identity','fg-missing-data','fg-observer-denied','fg-observer-timeout',

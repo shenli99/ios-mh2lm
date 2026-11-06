@@ -35,6 +35,9 @@ header=read('bsd/dev/sweet_spmi_mux.h')
 client=read('iokit/Kernel/arm/SweetSpmiMuxClient.cpp')
 client_header=read('bsd/dev/sweet_spmi_mux_client.h')
 keys=read('iokit/Kernel/arm/SweetPmicKeys.cpp')
+adc=read('iokit/Kernel/arm/SweetPmicAdc5.cpp')
+adc_header=read('bsd/dev/sweet_adc5.h')
+adc_service_header=read('bsd/dev/sweet_adc5_service.h')
 battery=read('iokit/Kernel/arm/SweetBattery.cpp')
 for removed in ['sweet_spmi_mux_attach','sweet_spmi_mux_detach','sweet_spmi_mux_watch_ready',
                 'sweet_spmi_mux_unwatch_ready','muxService','readyLock','publishReadiness']:
@@ -53,7 +56,7 @@ for name,body in {'read32':'return hwRead(base, off);',
 
 # Add registry capabilities to the shared historical hardware fixture.
 prelude=prelude.replace('using IOReturn = int;', 'using IOReturn = int; using IOOptionBits = unsigned;')
-prelude=prelude.replace('kIOReturnNotPermitted=2,','kIOReturnNoMemory=5, kIOReturnNotPermitted=2,')
+prelude=prelude.replace('kIOReturnNotPermitted=2,','kIOReturnBusy=6, kIOReturnNoMemory=5, kIOReturnNotPermitted=2,')
 prelude=prelude.replace('virtual void free() {}','virtual bool init() { return true; }\n    virtual void free() {}')
 prelude=prelude.replace('struct OSDictionary {};','struct OSDictionary : OSObject {};')
 prelude=prelude.replace('struct OSObject {', 'static std::atomic<int> liveObjects{0};\nstruct OSObject {\n    OSObject() { ++liveObjects; }')
@@ -86,6 +89,8 @@ struct IOService : OSObject {
     static IOPlatformExpert *getPlatform();
     static OSDictionary *serviceMatching(const char *) { return new OSDictionary; }
     static IONotifier *addMatchingNotification(const char *,OSDictionary *,MatchHandler,void *);
+    unsigned messages=0;
+    void messageClients(unsigned) { ++messages; }
     void setName(const char *) {}
     OSObject *getProperty(const char *k) { return properties[k]=="true"?kOSBooleanTrue:nullptr; }
     bool setProperty(const char *k,const char *v) { properties[k]=v; return true; }
@@ -190,6 +195,19 @@ if 'SweetBattery::stopRuntime' in battery:
 
 startup_adapter=startup_adapter.replace('IOInterruptEventSource *fIrqEvent;', 'IOInterruptEventSource *fIrqEvent;\n    SweetSpmiMuxClient *fMuxClient=nullptr;')
 startup_adapter=startup_adapter.replace('fIrqEvent=IOInterruptEventSource::interruptEventSource(this, irqAction, nullptr, 0);','fIrqEvent=IOInterruptEventSource::interruptEventSource(this, irqAction, nullptr, 0);\n        assert(fLoop->addEventSource(fIrqEvent)==0);')
+startup_adapter=re.sub(r'struct IOTimerEventSource \{.*?\n\};', r"""
+struct IOTimerEventSource : IOInterruptEventSource {
+    unsigned requests=0, delayMS=0; bool armed=false;
+    using TimerAction=void (*)(OSObject *,IOTimerEventSource *);
+    TimerAction timerAction=nullptr;
+    IOTimerEventSource() : IOInterruptEventSource(nullptr,nullptr) {}
+    static IOTimerEventSource *timerEventSource(OSObject *o,TimerAction a) {
+        auto *t=new IOTimerEventSource;t->owner=o;t->timerAction=a;return t;
+    }
+    void setTimeoutMS(unsigned ms) { ++requests;delayMS=ms;armed=true; }
+    void cancelTimeout() { armed=false; }
+};
+""",startup_adapter,flags=re.S)
 startup_adapter='using IOPMPowerSource=IOService;\n'+re.search(r'^#define SWEET_BATT_POLL_MS\b.*$',battery,re.M)[0]+'\n'+startup_adapter
 for name in ['failIrq','irqNotify','irqAction','tryAttachIrq','startIrqAction','timerFired','stopPolling']:
     startup_adapter+=function(battery,'SweetBattery::'+name)
@@ -202,7 +220,11 @@ static unsigned backendPrepares,backendStarts,backendStops,backendEvents;
 static bool holdPrepare;
 static std::atomic<bool> prepareEntered{false},prepareProceed{false};
 static bool backendPrepare=true,backendStart=true,backendRunning=false;
-static bool PE_parse_boot_argn(const char *,void *,size_t) { return false; }
+static unsigned adcMode;
+static bool PE_parse_boot_argn(const char *key,void *value,size_t size) {
+    if (!std::strcmp(key,"sweetbattadcconv")) { assert(size==sizeof(adcMode)); std::memcpy(value,&adcMode,size); return true; }
+    return false;
+}
 extern "C" bool sweet_keys_prepare() {
     ++backendPrepares;
     assert(!testInstance->bindings[0].notify && !backendStarts);
@@ -216,8 +238,46 @@ extern "C" bool sweet_keys_start() { assert(backendPrepares==1 && testInstance->
 extern "C" void sweet_keys_stop() { ++backendStops;backendRunning=false; }
 extern "C" void sweet_keys_event(unsigned) { assert(backendRunning); ++backendEvents; }
 '''
+
+adc_adapter=r'''
+static constexpr unsigned kIOMessageServicePropertyChange=1;
+static unsigned adcBegins,adcAborts,adcAdvances;
+static bool adcBeginFail,adcResultFail,adcAbortFail;
+int sweet_spmi_adc5_begin(sweet_adc5_session *s,sweet_adc5_channel c) {
+    ++adcBegins;if(adcBeginFail)return -1;
+    assert(!s->active);s->active=1;s->channel=c;s->eoc_count=0;s->started_ns=fakeNs;
+    s->deadline_ns=fakeNs+100000000ULL;s->settle_until_ns=fakeNs+20000000ULL;
+    s->phase=c==SWEET_ADC5_USBIN?SWEET_ADC5_WAIT_SETTLE:SWEET_ADC5_RESULT;return 0;
+}
+int sweet_spmi_adc5_abort(sweet_adc5_session *s) {
+    if(s->active)++adcAborts;s->active=0;s->phase=SWEET_ADC5_FAILED;
+    s->restore_error=adcAbortFail?-9:0;return s->restore_error;
+}
+int sweet_spmi_adc5_advance(sweet_adc5_session *s,sweet_adc5_cause cause,sweet_adc5_measurement *out) {
+    assert(s->active);++adcAdvances;
+    if(adcResultFail) { s->active=0;return -8; }
+    if(cause==SWEET_ADC5_SETTLED) {
+        assert(s->phase==SWEET_ADC5_WAIT_SETTLE && fakeNs>=s->settle_until_ns);
+        s->phase=SWEET_ADC5_GROUND;s->deadline_ns=fakeNs+100000000ULL;return SWEET_ADC5_MORE;
+    }
+    assert(cause==SWEET_ADC5_EOC);++s->eoc_count;
+    if(s->phase==SWEET_ADC5_GROUND) { s->phase=SWEET_ADC5_RESULT;s->deadline_ns=fakeNs+100000000ULL;return SWEET_ADC5_MORE; }
+    assert(s->phase==SWEET_ADC5_RESULT);
+    *out={};out->channel=s->channel;out->microvolts=s->channel==SWEET_ADC5_USBIN?5000000:800000;
+    out->raw=1234;out->eoc_count=s->eoc_count;out->started_ns=s->started_ns;out->completed_ns=fakeNs;
+    s->active=0;s->phase=SWEET_ADC5_DONE;return 0;
+}
+static SweetPmicAdc5 *adcInstance;
+'''
 registry_impl=r'''
 void IOService::registerService(unsigned) {
+    if (dynamic_cast<SweetPmicAdc5Device *>(this)) {
+        auto *service=new SweetPmicAdc5;assert(service->init());assert(service->attach(this));
+        adcInstance=service;
+        if(service->start(this))service->mockStarted=true;
+        else {adcInstance=nullptr;service->terminate(2);}
+        service->release();return;
+    }
     if (dynamic_cast<SweetSpmiMuxDevice *>(this)) {
         if (!testMatchDriver) return;
         auto *service=new SweetSpmiInterruptMux;
@@ -301,9 +361,91 @@ static void ownerCleanup(const char *mode) {
     assert(!(hwRead(0x17a00000,0x100+4*(513/32))&(1u<<(513%32))));
     endProvider();assertNoLeaks();
 }
+static IOReturn fireAdcTimer(OSObject *owner,void *,void *,void *,void *) {
+    auto *a=static_cast<SweetPmicAdc5 *>(owner);assert(a->timer->armed);
+    fakeNs+=uint64_t(a->timer->delayMS)*1000000ULL;a->timer->armed=false;
+    a->timer->timerAction(a,a->timer);return 0;
+}
+static void adcCheck(const char *mode) {
+    // Register a new owned EOC lane without disturbing the established key/battery lanes.
+    ppids[280]=0x231;mmio[SWEET_DEV_SPMI_CORE_PA+0x900+4*280]=0x01000000|(0x231<<8);
+    assert(startMux()==0);SweetBattery b;startBattery(b);sweet_keys_init();pump();
+    assert(b.fIrqAttached && backendRunning);
+    adcMode=!std::strcmp(mode,"adc-idle")?0:!std::strcmp(mode,"adc-usb")?2:!std::strcmp(mode,"adc-sequence")?3:1;
+    bool sequence=adcMode==3;
+    adcBeginFail=!std::strcmp(mode,"adc-begin-fail");
+    bool setupFail=!std::strcmp(mode,"adc-loop-fail") || !std::strcmp(mode,"adc-timer-add-fail") || !std::strcmp(mode,"adc-notifier-fail");
+    if(!std::strcmp(mode,"adc-loop-fail"))testLoopFail=1;
+    if(!std::strcmp(mode,"adc-timer-add-fail"))testAddFail=1;
+    if(!std::strcmp(mode,"adc-notifier-fail"))failNotifierAt=2;
+    if(setupFail) {
+        assert(sweet_adc5_init()==-1 && !adcInstance);pump();
+        assert(!adcBegins && !testInstance->bindings[2].notify && b.fIrqAttached && backendRunning);
+        cleanupBattery(b);while(!platform.children.empty())platform.children.back()->terminate(2);
+        pump();assertNoLeaks();return;
+    }
+    assert(!sweet_adc5_init());auto *a=adcInstance;assert(a);a->retain();
+    // Subscribe is gated, so immediate registry replay cannot call into an unassigned connection.
+    assert(a->connection);pump();
+    if(adcBeginFail) {
+        assert(a->failed && !a->session.active && adcBegins==1 && !testInstance->bindings[2].notify);
+    } else if (!std::strcmp(mode,"adc-idle")) {
+        assert(a->ready && !a->session.active && !adcBegins);
+        assert(!a->requestSample(SWEET_ADC5_BAT_ID));assert(adcBegins==1);
+    } else assert(a->ready && a->session.active && adcBegins==1);
+    if(!adcBeginFail) {
+        assert(a->requestSample(SWEET_ADC5_BAT_ID)==kIOReturnBusy);
+        assert(adcBegins==1);
+        sweet_adc5_measurement sample{};sample.raw=0xcafe;
+        assert(a->copySample(SWEET_ADC5_BAT_ID,&sample)==kIOReturnNotReady && sample.raw==0xcafe);
+        if(!std::strcmp(mode,"adc-timeout") || !std::strcmp(mode,"adc-restore-fail")) {
+            adcAbortFail=!std::strcmp(mode,"adc-restore-fail");
+            a->loop->runAction(fireAdcTimer,a);
+            assert(a->failed && adcAborts==1 && !testInstance->bindings[2].notify);
+            assert(!a->valid[0] && !a->valid[1] && !a->timer->armed);
+        } else if(!std::strcmp(mode,"adc-stop-active")) {
+            inject(280,1); // queued EOC is cancelled/synchronized before owner release
+            platform.children.back()->terminate(2);pump();
+            assert(adcAborts==1 && !a->session.active && !testInstance->bindings[2].notify);
+        } else if(!std::strcmp(mode,"adc-provider-term")) {
+            testInstance->inactive=true;registryTerminated(testInstance);
+            assert(a->session.active);pump();
+            assert(a->failed && adcAborts==1 && !a->session.active && !testInstance->bindings[2].notify);
+        } else {
+            if(adcMode==2) {a->loop->runAction(fireAdcTimer,a);inject(280,1);pump();assert(a->session.active && !a->valid[1]);}
+            adcResultFail=!std::strcmp(mode,"adc-result-fail");
+            inject(280,1);pump();
+            if(adcResultFail) assert(a->failed && !testInstance->bindings[2].notify);
+            else {
+                unsigned channel=adcMode==2?2:1;
+                assert(!a->copySample(static_cast<sweet_adc5_channel>(channel),&sample));
+                assert(sample.microvolts==(channel==2?5000000u:800000u) && (sequence || (!a->session.active && !a->timer->armed)));
+                assert(a->messages==1);
+                assert(a->properties[adcMode==2?"SweetADC5USBINValid":"SweetADC5BATIDValid"]=="true");
+                if(sequence) {
+                    assert(a->session.active && a->session.channel==SWEET_ADC5_USBIN && adcBegins==2);
+                    a->loop->runAction(fireAdcTimer,a);inject(280,1);pump();inject(280,1);pump();
+                    assert(a->valid[0] && a->valid[1] && !a->session.active && a->messages==2);
+                }
+                // Unsolicited EOC cannot overwrite the cached sample or start another request.
+                inject(280,1);pump();assert(a->strayEoc==1 && adcBegins==(sequence?2u:1u) && a->messages==(sequence?2u:1u));
+            }
+        }
+    }
+    if(std::strcmp(mode,"adc-provider-term")) {
+        inject(269,0x10);inject(248,1);pump();
+        assert(!b.fIrqFailed && b.fIrqNotifications==1 && backendEvents==1 && backendRunning);
+    }
+    if(!a->isInactive())platform.children.back()->terminate(2);
+    assert(a->properties["SweetADC5IRQHealthy"]=="false" && a->properties["SweetADC5BATIDValid"]=="false" && a->properties["SweetADC5USBINValid"]=="false");
+    a->release();cleanupBattery(b);
+    while(!platform.children.empty())platform.children.back()->terminate(2);
+    pump();assertNoLeaks();
+}
 int main(int argc,char **argv) {
     assert(argc>1);const char *mode=argv[1];initialize();
-    if (!std::strcmp(mode,"early") || !std::strcmp(mode,"late")) ownerCleanup(mode);
+    if (!std::strncmp(mode,"adc-",4)) adcCheck(mode);
+    else if (!std::strcmp(mode,"early") || !std::strcmp(mode,"late")) ownerCleanup(mode);
     else if (!std::strcmp(mode,"term-before-provider-stop")) {
         SweetBattery b;startBattery(b);assert(startMux()==0);sweet_keys_init();pump();
         auto *mux=testInstance;mux->retain();
@@ -558,8 +700,10 @@ int main(int argc,char **argv) {
 }
 '''
 # Private layout is exposed only for host assertions; actual sources stay private.
-units=strip(header).replace('private:','public:')+strip(mux)+strip(client_header).replace('private:','public:')+strip(client)
-units+=adapters+strip(keys).replace('private:','public:')+startup_adapter+registry_impl
+prelude+='\nextern \"C\" int sweet_spmi_adc5_irq_read(unsigned reg,uint8_t *out) { return sweet_spmi_read(2,0x3100|reg,out); }\n'
+units=strip(read('bsd/dev/sweet_spmi.h'))+strip(header).replace('private:','public:')+strip(mux)+strip(client_header).replace('private:','public:')+strip(client)
+units+=adapters+strip(keys).replace('private:','public:')+startup_adapter
+units+=strip(adc_header)+strip(adc_service_header).replace('private:','public:')+adc_adapter+strip(adc)+registry_impl
 units+='\n#define state (testInstance->state)\n#define routes (testInstance->routes)\n#define bindings (testInstance->bindings)\n#define ackRoute(r) testInstance->ackRoute(r)\n'
 # Field aliases are only for unchanged legacy scenarios, never new lifecycle code.
 units+=legacy_board+legacy_checks+'\n#undef state\n#undef routes\n#undef bindings\n#undef ackRoute\n'+checks
@@ -568,7 +712,7 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-mux-consumers-') as d:
     src.write_text('#define SWEET_MUX_SERVICE_TEST 1\n#define ARM64_BOARD_CONFIG_SWEET 1\n'+prelude+units)
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-O1','-g','-pthread',
                     '-fsanitize=address,undefined',str(src),'-o',str(binary)],check=True)
-    scenarios=['early','late','cancel-before-match','term-before-attach','term-after-attach',
+    scenarios=['adc-idle','adc-bat-id','adc-usb','adc-sequence','adc-loop-fail','adc-timer-add-fail','adc-notifier-fail','adc-begin-fail','adc-timeout','adc-result-fail','adc-restore-fail','adc-stop-active','adc-provider-term','early','late','cancel-before-match','term-before-attach','term-after-attach',
                'rollback-isolate-keys','detach-isolate-ok','detach-isolate-timeout','detach-isolate-gate-fail',
                'detach-isolate-pending-fail','isolate-shared-apid','isolated-apid-rebind',
                'key-type-mismatch','keys-prepare-fail','keys-late-match','keys-cancel-before-match',

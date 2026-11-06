@@ -2,8 +2,8 @@
 
 0154本地更新：runtime控制回调改为固定操作+物理单位+期限；寄存器编码和
 每次物理更新前的期限检查在充电后端，新采样经内部PMIC组件。保留现有
-IOPMPowerSource/workloop/mux生命周期。0120a3实机通过新增ADC5只读预检及
-采样回归，但实际ADC转换/provider尚缺，见[硬件接口](BATTERY-HARDWARE-INTERFACES.md)。
+IOPMPowerSource/workloop/mux生命周期。0120a3实机通过新增ADC5只读预检及采样回归；0155加入默认空闲的 ADC5 转换 provider，
+尚未有实机 EOC/恢复证据，见[硬件接口](BATTERY-HARDWARE-INTERFACES.md)。
 
 2026-11-06，承接0150。按用户要求补第4～6段的可独立实现代码，同时补上
 第2～3段的采样/策略前置。本地实现与测试完成；0120原生云产物已核对、
@@ -14,6 +14,19 @@ IOPMPowerSource/workloop/mux生命周期。0120a3实机通过新增ADC5只读预
 nominal/learned4027mAh、profile0x13均读出，短日志与完整耗时正常。
 见 [FG DMA 恢复与实机结果](BATTERY-FG-DMA-RECOVERY.md)。原始温度未做LG补偿，
 电池身份/限值、实际VBUS/输入能力、并联隔离与watchdog/pet仍待补，不开放充电。
+
+## ADC5 provider 模式（0155）
+
+| 参数 | 行为 |
+| --- | --- |
+| `sweetbattadcconv` 省略或0 | 发布 `SweetPmicAdc5` 服务但不发起转换 |
+| `sweetbattadcconv=1` | 仅 BAT_ID (`0x4b`) 一次转换 |
+| `sweetbattadcconv=2` | 仅 USBIN (`0x08`) 一次转换，含 GND workaround |
+| `sweetbattadcconv=3` | BAT_ID 后 USBIN，各一次；仅诊断，不改变充电放行 |
+
+provider 的 EOC 走 mux group2 和自己的 workloop；matched仅retain/排队，不做SPMI；attach和转换在consumer workloop。
+转换超时、错误结果、owner/route异常或恢复失败都会停止 provider，本启动不回退
+轮询。当前打包入口为 `tools/mk-mh2lm-event-matrix.sh ... --battery-adc5-conversion`。
 
 ## 当前完成度与仍缺的依赖
 

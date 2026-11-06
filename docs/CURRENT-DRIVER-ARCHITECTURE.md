@@ -1,16 +1,23 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+## 0155 ADC5 provider（本地验证通过，待云构建/实机）
+
+板级新增专用nub匹配独立 `SweetPmicAdc5` 服务，自己的workloop/timer通过
+registry client接mux group2 EOC；默认空闲，显式诊断参数才启动转换。
+真实ADC转换与恢复尚待实机，结果不接入充电授权。详见
+[ADC5 provider](BATTERY-ADC5-PROVIDER.md)。
+
 ## 0154电池接口更新（0120a3实机预检及采样回归通过）
 
 0120a2已验证FG初次DMA恢复及温度/容量遥测；0154进一步保持现有电池
 IOPMPowerSource自己的workloop，拆出内部PMIC采样组件与语义充电后端。
 策略提交mA/mV等操作，后端复用共享SPMI/FG接口；没有另造单例或把普通
-内部组件伪装成已经完成的IOService provider。新增ADC5只读预检，实际
-ADC转换、SMB1355总线provider及watchdog维护仍缺。USB/按键/触摸路径未改。
+内部组件伪装成已经完成的IOService provider。新增 ADC5 只读预检及默认空闲的 ADC5 转换 provider；SMB1355 总线 provider、
+真实电池身份/输入能力与 watchdog 维护仍缺。USB/按键/触摸路径未改。
 新边界图、API、历史诊断残留和测试状态见
 [BATTERY-HARDWARE-INTERFACES.md](BATTERY-HARDWARE-INTERFACES.md)。
 
-## 当前架构：0119 / 0146～0148
+## 当前代码架构：0119基线加0151～0155（0155待实机）
 
 2026-11-05核对0119最终源码。当前采用 **IOKit服务匹配/生命周期 + 板级GIC
 分派 + 各设备下半部**，不是完整的通用GIC/总线provider树。0119各测试镜像
@@ -30,6 +37,9 @@ flowchart TD
   PE --> KN
   KN --> K[IOKit匹配 SweetPmicKeys : IOService]
   R[IOResources / 早期匹配] --> B[SweetBattery : IOPMPowerSource]
+  BOARD --> AN[SweetPmicAdc5Device nub]
+  AN --> A5[SweetPmicAdc5 : IOService / own IOWorkLoop]
+  A5 -. SweetSpmiMuxClient group2 / EOC .-> M
   K -. 独立 SweetSpmiMuxClient / registry通知 .-> M
   B -. 独立 SweetSpmiMuxClient / registry通知 .-> M
   BOARD --> UT[触摸 / USB / 诊断项的板级入口]
@@ -38,11 +48,11 @@ flowchart TD
 ```
 
 图中实线表示启动/发布关系，虚线表示服务发现，不表示consumer挂在mux下成为
-子设备。mux和按键各自有nub及匹配服务；电池仍由IOResources匹配。
+子设备。mux、按键和 ADC5 各自有专用 nub 及匹配服务；电池仍由IOResources匹配。
 UFS只保留存储及依赖分区的持久日志，不能再把mux或兄弟外设的初始化放回UFS。
 关闭按键不会阻止mux/电池启动。USB ACM使用内存console ring，不等待持久线程。
 
-每个按键/电池consumer持有自己的 `SweetSpmiMuxClient`。matched通知只retain、
+每个按键/电池/ADC5 consumer持有自己的 `SweetSpmiMuxClient`。matched通知只retain、
 记录和排队；自己的workloop再prepare（按键）及调用mux公开C++
 `attachConsumer()`。mux在自己的gate串行配置路由，成功后consumer才进入READY。
 没有全局C单例查询桥接，也没有 `waitForService()` 或定时重试发现服务。
@@ -56,6 +66,7 @@ stop/free先停止事件并同步回调，再释放线程/MMIO。真实手机终
 | 共享PMIC中断 | PMIC-arb/PDC → GIC INTID513 → 短callback屏蔽SPI并排队 → mux软件IOInterruptEventSource/IOWorkLoop扫描路由、确认/清除中断 → 通知consumer自己的loop。mux实例拥有路由状态、绑定、MMIO和workloop。 |
 | 按键 | mux group0 → 按键consumer loop → 唤醒原C后端worker读取真实键电平 → SweetHIDButtons → backboardd。SweetPmicKeys拥有连接、workloop和后端退出流程。 |
 | 电池 | mux group1 → 电池consumer loop/软件IES → 真实gauge/USB/CHGR采样 → IOPMPowerSource属性与updateStatus → powerd及iOS电源UI。驱动不直接调用SpringBoard画图标。 |
+| ADC5 | 专用 `SweetPmicAdc5Device` → `SweetPmicAdc5` 自有 workloop/timer → mux group2 EOC → 固定 BAT_ID/USBIN 转换与恢复。默认空闲，结果不授权充电。 |
 | USB | GIC INTID165 → 短callback → BSD事件worker处理DWC3 event buffer、EP0及CDC-ACM，确认后重开IRQ；独立日志发送线程由日志/配置/TX完成事件唤醒。仍是板级gadget，没有通用IOKit USB provider栈。 |
 | 触摸 | TLMM GPIO122 / INTID240 → 短callback → BSD触摸worker → GPIO模拟I²C读取TouchComm → SweetHIDTouch → backboardd。仍无独立通用I²C/GPIO provider。 |
 | 显示 | CoreAnimation软件渲染 → 本项目IOSurface/IOMobileFramebuffer兼容接口 → AppleCLCD定时模拟vsync与CPU图层复制 → ABL已配置的framebuffer/面板扫描。0119参数sweetfb_hz30；未接管完整MDSS/GPU呈现。 |
@@ -77,8 +88,8 @@ configured/dtr/tx_busy或停止控制器；reset分支才清这些状态。该�
 IOFilterInterruptEventSource**。其保留的受锁GIC服务槽仅用于物理投递，不用于
 consumer发现。IOService身份并不自动赋予通用中断控制器能力。
 
-路由仍是 **七项固定硬件描述、两个consumer group**：三键及USBIN/CHGR/
-MSOC_DELTA/SOC_READY；不是硬编码功能switch。attach/detach注册的是消费者身份、
+路由现在是 **十项固定硬件描述、三个consumer group**：三键、电池的
+USBIN/CHGR/MSOC_DELTA/SOC_READY/FAULT，以及 ADC5 EOC；不是硬编码功能switch。attach/detach注册的是消费者身份、
 事件mask和回调，尚不接受任意新外设的动态路由描述。未来扩展provider时应保留
 consumer接口，另行抽出硬件描述和上游中断注册。
 

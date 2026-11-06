@@ -2,7 +2,7 @@
 
 0154完成第1段接口收敛及第2段ADC5只读预检，并在0120a3实机正常运行：
 策略调用语义充电操作，新runtime通过内部PMIC组件采样，不穿透现有SPMI/FG接口。
-预检不产生有效VBUS/电池ID，也不满足充电前置；下一步为实际ADC转换及EOC。实现边界与下一轮见
+预检不产生有效VBUS/电池ID，也不满足充电前置；0155已实现实际ADC转换及EOC provider，但尚待实机验证。实现边界与下一轮见
 [硬件接口](BATTERY-HARDWARE-INTERFACES.md)，六段验收状态不变。
 
 2026-11-06，六段计划已经进入实现。0150共享transport、0151遥测/策略/运行层
@@ -16,6 +16,17 @@
 0120a2 已实测通过0153初始DMA清错，温度/容量/profile读取及短日志正常。
 证据见 [FG DMA 恢复](BATTERY-FG-DMA-RECOVERY.md)。仍处于第2～3段依赖闭环，
 后续补实际电池身份/限值、输入能力、并联隔离和watchdog；尚未主动启充。
+
+## 0155 当前子计划：ADC5 转换 provider
+
+已完成本地实现：独立 `SweetPmicAdc5` IOService、专用 nub、自己的 IOWorkLoop/timer、
+SPMI/mux 固定接口、BAT_ID/USBIN 两阶段转换、EOC/超时/恢复失败闭环。默认空闲，
+`--battery-adc5-conversion` 打包档才用 `sweetbattadcconv=3` 发起一次 BAT_ID→USBIN
+序列。provider 只产生可审计的测量属性，不给充电策略授权。
+
+结束条件：ARM64编译、transport/mux/生命周期测试通过；实机日志显示两路 EOC、
+有效 raw/微伏、配置恢复和 IRQ healthy，且按键/电池事件无错误。任何失败都保持
+充电互锁，下一步再处理电池身份、输入能力和并联隔离 provider。
 
 ## 目标、架构与范围
 
@@ -179,8 +190,8 @@ CHGR中断独立投递得到验证，三键/触摸/ACM仍工作。失败保留�
 - 每批先完成适当的本地编译/故障测试和patch应用校验，再由用户push；下载
   后核对实际源码/内核标记并制作boot。fastboot与设备操作继续由用户执行。
 
-**当前进度：0150/0151本地实现与验证完成，准备一次合并云编译。**
-新增三档为观察、真实遥测、模拟策略，保留全事件/USB日志。第4段执行器已有
+**当前进度：0120a3已验证0154预检；0155 ADC转换provider本地验证完成，待云编译/实机。**
+新增ADC5转换诊断档，保留全事件/USB日志；后续仍可复用已有遥测/模拟档。第4段执行器已有
 本地错误注入验证，但缺少真实证据provider，设备不会使能；第5～6段仍需
 硬件/完整IOPM回归。完整状态、参数与残余缺口见
 [BATTERY-RUNTIME.md](BATTERY-RUNTIME.md)，不将未完成项伪装成已验收。

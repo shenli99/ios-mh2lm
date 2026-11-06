@@ -1,0 +1,818 @@
+diff --git a/bsd/dev/sweet_adc5.h b/bsd/dev/sweet_adc5.h
+index 9fbef99e08f4276b7eaf8332f06499b4e16a31b1..685cacf9420a8859970cff70652194b8a6b0ab51 100644
+--- a/bsd/dev/sweet_adc5.h
++++ b/bsd/dev/sweet_adc5.h
+@@ -1,5 +1,5 @@
+-/* ADC5 preflight contract, not a measurement or control provider.
+- * Consumer requests a fixed snapshot, never a SID/register address. */
++/* ADC5 fixed preflight/conversion protocol. Consumer requests a typed
++ * operation, never a SID/register address. No charging control permission. */
+ #ifndef SWEET_ADC5_H
+ #define SWEET_ADC5_H
+ #include <stdint.h>
+@@ -31,6 +31,40 @@ struct sweet_adc5_preflight {
+  * must still be inspected individually. On invalid/not-ready/unsupported the
+  * output is unchanged. Caller timestamps outside the controller lock. */
+ int sweet_spmi_adc5_inspect(struct sweet_adc5_preflight *out);
++
++/* Mux-only fixed SID2/0x31 IRQ observer offsets 11/12/13/15. */
++int sweet_spmi_adc5_irq_read(unsigned offset, uint8_t *out);
++
++/* Conversion protocol: fixed channels, caller-owned session and output units.
++ * All calls are thread-context. begin/advance/abort serialize on the shared
++ * controller lock; no waits held across EOC. Session memory lives until abort.
++ * Errors preserve measurement output; begin may touch session on a HW failure
++ * to report restore_error, but always cleans/releases its lease before return.
++ * A BUSY/invalid/unready rejection leaves the session unchanged.
++ * Successful begin is followed by SETTLED (USB only), EOC(s), or abort.
++ * MORE means another EOC is required; only rc=0 from advance returns a sample.
++ * Caller must use its own workloop, never concurrently mutate the session. */
++#define SWEET_ADC5_MORE 1
++#define SWEET_ADC5_EXPIRED (-101)
++enum sweet_adc5_channel { SWEET_ADC5_BAT_ID = 1, SWEET_ADC5_USBIN = 2 };
++enum sweet_adc5_phase { SWEET_ADC5_IDLE, SWEET_ADC5_WAIT_SETTLE, SWEET_ADC5_GROUND,
++ SWEET_ADC5_RESULT, SWEET_ADC5_DONE, SWEET_ADC5_FAILED };
++enum sweet_adc5_cause { SWEET_ADC5_SETTLED = 1, SWEET_ADC5_EOC = 2 };
++struct sweet_adc5_session {
++ uint8_t saved[6];
++ unsigned channel, phase, touched, active, eoc_count;
++ int restore_error;
++ uint64_t started_ns, deadline_ns, settle_until_ns;
++};
++struct sweet_adc5_measurement {
++ unsigned channel, microvolts, eoc_count;
++ uint16_t raw;
++ uint64_t started_ns, completed_ns;
++};
++int sweet_spmi_adc5_begin(struct sweet_adc5_session *, enum sweet_adc5_channel);
++int sweet_spmi_adc5_advance(struct sweet_adc5_session *, enum sweet_adc5_cause,
++ struct sweet_adc5_measurement *);
++int sweet_spmi_adc5_abort(struct sweet_adc5_session *);
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/bsd/dev/sweet_adc5_service.h b/bsd/dev/sweet_adc5_service.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d46faf0e7d7e63a5823a3e0ee35ba0b8d19da6a5
+--- /dev/null
++++ b/bsd/dev/sweet_adc5_service.h
+@@ -0,0 +1,44 @@
++/* Typed ADC provider interface. Discover/retain SweetPmicAdc5 through IOKit.
++ * requestSample is asynchronous; copySample returns only a completed restored
++ * measurement. Clients can register general interest for property-change
++ * messages, then queue their own workloop and call copySample. No callbacks
++ * enter a client gate from this provider's gate. Caller owns its service retain.
++ * No charging limits/identity are implied by a voltage measurement. */
++#ifndef SWEET_ADC5_SERVICE_H
++#define SWEET_ADC5_SERVICE_H
++#if defined(__cplusplus) && defined(ARM64_BOARD_CONFIG_MH2LM)
++#include "sweet_adc5.h"
++#include "sweet_spmi_mux_client.h"
++#include <IOKit/IOTimerEventSource.h>
++class SweetPmicAdc5 : public IOService {
++ OSDeclareDefaultStructors(SweetPmicAdc5);
++public:
++ bool start(IOService *) APPLE_KEXT_OVERRIDE;
++ bool willTerminate(IOService *, IOOptionBits) APPLE_KEXT_OVERRIDE;
++ void stop(IOService *) APPLE_KEXT_OVERRIDE;
++ void free(void) APPLE_KEXT_OVERRIDE;
++ IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE { return loop; }
++ virtual IOReturn requestSample(enum sweet_adc5_channel channel);
++ virtual IOReturn copySample(enum sweet_adc5_channel channel,
++     struct sweet_adc5_measurement *out);
++private:
++ IOWorkLoop *loop = NULL;
++ IOTimerEventSource *timer = NULL;
++ SweetSpmiMuxClient *connection = NULL;
++ struct sweet_adc5_session session = {};
++ struct sweet_adc5_measurement samples[2] = {};
++ bool valid[2] = {}, timerAdded = false, ready = false, failed = false;
++ volatile unsigned stopping = 0;
++ unsigned diagnostics = 0, sequence = 0, strayEoc = 0;
++ static IOReturn subscribeAction(OSObject *, void *, void *, void *, void *);
++ static IOReturn sampleAction(OSObject *, void *, void *, void *, void *);
++ static IOReturn copyAction(OSObject *, void *, void *, void *, void *);
++ static IOReturn stopAction(OSObject *, void *, void *, void *, void *);
++ static void muxEvent(void *, unsigned);
++ static void timerFired(OSObject *, IOTimerEventSource *);
++ void armDeadline(void);
++ void complete(int, const struct sweet_adc5_measurement *);
++ void shutdown(void);
++};
++#endif
++#endif
+diff --git a/bsd/dev/sweet_board.c b/bsd/dev/sweet_board.c
+index 6f19f80feb716c0dc2f76b91ec2e434d63ab4bf4..d6746751c5866072fdfc9ad42a1adc85cd608641 100644
+--- a/bsd/dev/sweet_board.c
++++ b/bsd/dev/sweet_board.c
+@@ -14,6 +14,7 @@ extern void sweet_usb_probe(void);
+ extern void sweet_sample_start(void);
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ extern void sweet_display_probe_init(void);
++extern int sweet_adc5_init(void);
+ #endif
+ #if defined(ARM64_BOARD_CONFIG_GUACAMOLE)
+ extern void sweet_gpu_init(void);
+@@ -35,6 +36,9 @@ sweet_board_init(void)
+ 	if (sweet_spmi_mux_start() != 0) {
+ 		SWEET_LOG_ERROR("SWEET BOARD: shared PMIC mux unavailable; continuing independent devices\n");
+ 	}
++	if (sweet_adc5_init() != 0) {
++		SWEET_LOG_ERROR("SWEET BOARD: ADC5 provider unavailable; continuing independent devices\n");
++	}
+ #endif
+ 	sweet_keys_init();
+ 	sweet_touch_init();
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index e093e169f57422725973a776dbdcd25c7ccdc85e..29be2c7acdb982c30aa5e2693dbb77f815908d6e 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -17,6 +17,7 @@
+ #include <pexpert/arm64/sweet_dev.h>
+ #include "sweet_spmi.h"
+ #include "sweet_adc5.h"
++#include <kern/clock.h>
+ #include "sweet_log_level.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+@@ -379,7 +380,8 @@ sp_charger_wait(vm_offset_t lane)
+ 	return SWEET_SPMI_TIMEOUT;
+ }
+ 
+-/* Owned observer read; caller holds sp_lock, validated table and route. */
++/* Internal observer primitive; caller holds sp_lock and validates its fixed
++ * protocol/table address and observer APID. Does not impose a public whitelist. */
+ static int
+ sp_charger_read_locked(unsigned apid, unsigned addr, uint8_t *out)
+ {
+@@ -494,16 +496,12 @@ sweet_spmi_adc5_inspect(struct sweet_adc5_preflight *out)
+ 
+ /* Internal primitive for a separately validated protocol register. */
+ static int
+-sp_update_owned(unsigned sid, unsigned addr, unsigned mask,
++sp_update_owned_locked(unsigned sid, unsigned addr, unsigned mask,
+     unsigned value, uint8_t *verified)
+ {
+-	if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) {
+-		return SWEET_SPMI_NOT_READY;
+-	}
+ 	struct sweet_spmi_charger_route route;
+ 	uint8_t old = 0, actual = 0;
+ 	vm_offset_t channel = 0;
+-	IOLockLock(sp_lock);
+ 	int result = sp_charger_route(sid, addr, &route);
+ 	if (result == SWEET_SPMI_OK && sweet_spmi_rw_poisoned_locked(route.apid)) {
+ 		result = SWEET_SPMI_POISONED;
+@@ -541,13 +539,23 @@ sp_update_owned(unsigned sid, unsigned addr, unsigned mask,
+ 	if (result == SWEET_SPMI_OK) {
+ 		*verified = actual;
+ 	}
+-	IOLockUnlock(sp_lock);
+ 	if (result != SWEET_SPMI_OK) {
+ 		SWEET_LOG_ERROR("SWEET CHARGER IO: update addr=%#x mask=%#x value=%#x error=%d; hardware state unconfirmed\n",
+ 		    addr, mask, value, result);
+ 	}
+ 	return result;
+ }
++static int
++sp_update_owned(unsigned sid, unsigned addr, unsigned mask,
++    unsigned value, uint8_t *verified)
++{
++ if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
++ IOLockLock(sp_lock);
++ int rc = sp_update_owned_locked(sid, addr, mask, value, verified);
++ IOLockUnlock(sp_lock);
++ return rc;
++}
++
+ int
+ sweet_spmi_charger_update(unsigned sid, unsigned addr, unsigned mask,
+     unsigned value, uint8_t *verified)
+@@ -560,6 +568,253 @@ sweet_spmi_charger_update(unsigned sid, unsigned addr, unsigned mask,
+ 	return sp_update_owned(sid, addr, mask, value, verified);
+ }
+ 
++
++/* ADC5 fixed protocol. The lease belongs to the controller, not a discoverable
++ * service singleton. No arbitrary register API or conversion-time sleeps.
++ * Every phase and cleanup is under sp_lock; EOC/settle waits release it. */
++static struct sweet_adc5_session *sp_adc5_owner;
++static bool sp_adc5_failed;
++static const unsigned sp_adc5_saved_addr[] = {0x3142,0x3143,0x3144,0x3145,0x3146,0x3744};
++static const unsigned sp_adc5_saved_mask[] = {0x7c,0x07,0xff,0x0f,0x80,0xff};
++
++static uint64_t
++sp_adc5_now(void)
++{
++ uint64_t absolute, ns;
++ clock_get_uptime(&absolute); absolutetime_to_nanoseconds(absolute, &ns);
++ return ns;
++}
++
++/* Internal observer transaction for the fixed ADC5 protocol and PMIC
++ * identity tuple. This is deliberately not exported as an arbitrary raw
++ * register API and never reuses the charger write whitelist. */
++static int
++sp_observer_read_locked(unsigned sid, unsigned addr, uint8_t *out)
++{
++ if (!out || sid > 15u || addr > 0xffffu) { return SWEET_SPMI_INVALID; }
++ unsigned apid = sp_find_apid((sid << 8) | (addr >> 8));
++ return apid == SP_NO_APID ? SWEET_SPMI_NO_OWNER : sp_charger_read_locked(apid, addr, out);
++}
++
++static int
++sp_adc5_read_locked(unsigned addr, uint8_t *out)
++{
++ return sp_observer_read_locked(2, addr, out);
++}
++int
++sweet_spmi_adc5_irq_read(unsigned offset, uint8_t *out)
++{
++ if (!out || (offset != 0x11 && offset != 0x12 && offset != 0x13 && offset != 0x15)) { return SWEET_SPMI_INVALID; }
++ if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
++ IOLockLock(sp_lock);
++ int rc = sp_adc5_read_locked(0x3100 | offset, out);
++ IOLockUnlock(sp_lock);
++ return rc;
++}
++
++static int
++sp_adc5_set_locked(struct sweet_adc5_session *session, unsigned index, unsigned value)
++{
++ if (sp_adc5_now() >= session->deadline_ns) { return SWEET_ADC5_EXPIRED; }
++ uint8_t actual;
++ session->touched |= 1u << index; /* a failed command may still have changed HW */
++ return sp_update_owned_locked(2, sp_adc5_saved_addr[index],
++     sp_adc5_saved_mask[index], value, &actual);
++}
++
++/* CONV_REQ is a trigger, never a stable masked update or retry/readback.
++ * Revalidate the unique EE0 writer and the shared RW poison for each request. */
++static int
++sp_adc5_trigger_locked(struct sweet_adc5_session *session)
++{
++ if (sp_adc5_now() >= session->deadline_ns) { return SWEET_ADC5_EXPIRED; }
++ struct sweet_spmi_charger_route route;
++ int rc = sp_charger_route(2, 0x3147, &route);
++ if (!rc && sweet_spmi_rw_poisoned_locked(route.apid)) { rc = SWEET_SPMI_POISONED; }
++ if (rc) { return rc; }
++ vm_offset_t channel = ml_io_map_unmappable(
++     SP_CHNLS_PA + SP_CHNLS_APID_STRIDE * route.apid, 0x1000, VM_WIMG_IO);
++ if (!channel) { return SWEET_SPMI_MAP_FAILED; }
++ sp_wr(channel, 0x10u, 0x80);
++ sp_wr(channel, 0, 0x47u << 4);
++ rc = sp_charger_wait(channel);
++ if (rc == SWEET_SPMI_TIMEOUT) { sweet_spmi_rw_poison_locked(route.apid); }
++ ml_io_unmap(trunc_page(channel), round_page(0x1000 + (channel & PAGE_MASK)));
++ return rc;
++}
++
++/* Best effort, bounded restoration. Cal is on another APID and must still be
++ * restored if the user lane was poisoned. Never restart a saved conversion.
++ * Entry requires idle/disabled, so saved ADC enable is always zero. */
++static int
++sp_adc5_restore_locked(struct sweet_adc5_session *session)
++{
++ int error = 0, rc;
++ uint8_t actual = 0, status = 0;
++ if (session->touched) {
++  rc = sp_update_owned_locked(2, 0x3146, 0x80, 0, &actual);
++  if (rc) { error = rc; }
++  rc = sp_adc5_read_locked(0x3108, &status);
++  if (!rc && (status & 2)) { rc = SWEET_SPMI_BUSY; }
++  if (rc && !error) { error = rc; }
++  /* Do not change channel/configuration of a still-running converter. */
++  if (!rc) {
++   for (unsigned i = 0; i < 4; ++i) {
++    if (!(session->touched & (1u << i))) { continue; }
++    rc = sp_update_owned_locked(2, sp_adc5_saved_addr[i], sp_adc5_saved_mask[i],
++        session->saved[i] & sp_adc5_saved_mask[i], &actual);
++    if (rc && !error) { error = rc; }
++   }
++  }
++  if (session->touched & (1u << 5)) {
++   rc = sp_update_owned_locked(2, 0x3744, 0xff, session->saved[5], &actual);
++   if (rc && !error) { error = rc; }
++  }
++ }
++ session->restore_error = error;
++ session->active = 0;
++ sp_adc5_owner = NULL;
++ if (error) {
++  sp_adc5_failed = true;
++  SWEET_LOG_ERROR("SWEET ADC5 IO: restore error=%d status=%#x; ADC unavailable until reboot\n", error, status);
++ }
++ return error;
++}
++
++static int
++sp_adc5_launch_locked(struct sweet_adc5_session *session, bool ground)
++{
++ int rc;
++ session->deadline_ns = sp_adc5_now() + 100000000ULL;
++ if (ground) {
++  rc = sp_adc5_set_locked(session, 2, 0); /* REF_GND */
++  if (!rc) { rc = sp_adc5_set_locked(session, 4, 0x80); }
++  if (!rc) { rc = sp_adc5_trigger_locked(session); }
++  /* LG USBIN workaround: select ABS_CAL and USBIN before ground EOC. */
++  if (!rc) { rc = sp_adc5_set_locked(session, 0, 0x28); }
++  if (!rc) { rc = sp_adc5_set_locked(session, 2, 0x08); }
++  session->phase = SWEET_ADC5_GROUND;
++ } else {
++  rc = sp_adc5_set_locked(session, 0, 0x28); /* absolute/timer, decimation 840 */
++  if (!rc) { rc = sp_adc5_set_locked(session, 1, 0); } /* one averaged sample */
++  if (!rc) { rc = sp_adc5_set_locked(session, 2, 0x4b); }
++  if (!rc) { rc = sp_adc5_set_locked(session, 3, 0); } /* DT settle index 0 */
++  if (!rc) { rc = sp_adc5_set_locked(session, 4, 0x80); }
++  if (!rc) { rc = sp_adc5_trigger_locked(session); }
++  session->phase = SWEET_ADC5_RESULT;
++ }
++ return rc;
++}
++
++int
++sweet_spmi_adc5_begin(struct sweet_adc5_session *session, enum sweet_adc5_channel channel)
++{
++ if (!session || (channel != SWEET_ADC5_BAT_ID && channel != SWEET_ADC5_USBIN)) { return SWEET_SPMI_INVALID; }
++ if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
++ IOLockLock(sp_lock);
++ int rc = SWEET_SPMI_OK;
++ if (sp_adc5_failed) { rc = SWEET_SPMI_POISONED; }
++ else if (sp_adc5_owner) { rc = SWEET_SPMI_BUSY; }
++ struct sweet_adc5_session next = {0};
++ uint8_t type = 0, subtype = 0, pmic = 0, revision = 0, request = 0, status = 0;
++ struct sweet_spmi_charger_route route;
++ if (!rc) { rc = sp_charger_route(2, 0x3142, &route); }
++ if (!rc && sweet_spmi_rw_poisoned_locked(route.apid)) { rc = SWEET_SPMI_POISONED; }
++ if (!rc) { rc = sp_charger_route(2, 0x3744, &route); }
++ if (!rc && sweet_spmi_rw_poisoned_locked(route.apid)) { rc = SWEET_SPMI_POISONED; }
++ if (!rc) { rc = sp_adc5_read_locked(0x3104, &type); }
++ if (!rc) { rc = sp_adc5_read_locked(0x3105, &subtype); }
++ if (!rc) { rc = sp_adc5_read_locked(0x0105, &pmic); }
++ if (!rc) { rc = sp_adc5_read_locked(0x0103, &revision); }
++ /* Only the target tuple verified in 0120a3; no guessed layout fallback. */
++ if (!rc && (type != 8 || subtype != 0x28 || pmic != 0x20 || revision != 2)) { rc = SWEET_SPMI_UNSUPPORTED; }
++ if (!rc) { rc = sp_adc5_read_locked(0x3108, &status); }
++ if (!rc) { rc = sp_adc5_read_locked(0x3147, &request); }
++ for (unsigned i = 0; !rc && i < 6; ++i) { rc = sp_adc5_read_locked(sp_adc5_saved_addr[i], &next.saved[i]); }
++ if (!rc && ((status & 2) || (request & 0x80) || (next.saved[4] & 0x80))) { rc = SWEET_SPMI_BUSY; }
++ if (!rc) {
++  next.channel = channel; next.active = 1; next.started_ns = sp_adc5_now();
++  next.deadline_ns = next.started_ns + 100000000ULL;
++  *session = next; sp_adc5_owner = session;
++  if (channel == SWEET_ADC5_USBIN) {
++   rc = sp_adc5_set_locked(session, 5, 0x73);
++   session->settle_until_ns = sp_adc5_now() + 20000000ULL;
++   session->phase = SWEET_ADC5_WAIT_SETTLE;
++  } else { rc = sp_adc5_launch_locked(session, false); }
++  if (rc) { (void)sp_adc5_restore_locked(session); }
++ }
++ IOLockUnlock(sp_lock);
++ return rc;
++}
++
++int
++sweet_spmi_adc5_advance(struct sweet_adc5_session *session, enum sweet_adc5_cause cause,
++    struct sweet_adc5_measurement *out)
++{
++ if (!session || !out) { return SWEET_SPMI_INVALID; }
++ if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
++ IOLockLock(sp_lock);
++ int rc = SWEET_SPMI_OK;
++ if (sp_adc5_owner != session || !session->active) { IOLockUnlock(sp_lock); return SWEET_SPMI_INVALID; }
++ uint64_t now = sp_adc5_now();
++ if (now >= session->deadline_ns) { rc = SWEET_ADC5_EXPIRED; }
++ if (!rc && session->phase == SWEET_ADC5_WAIT_SETTLE) {
++  if (cause != SWEET_ADC5_SETTLED || now < session->settle_until_ns) { IOLockUnlock(sp_lock); return SWEET_SPMI_BUSY; }
++  rc = sp_adc5_launch_locked(session, true);
++  if (!rc) { IOLockUnlock(sp_lock); return SWEET_ADC5_MORE; }
++ } else if (!rc) {
++  if (cause != SWEET_ADC5_EOC) { IOLockUnlock(sp_lock); return SWEET_SPMI_INVALID; }
++  uint8_t status = 0, channel = 0;
++  rc = sp_adc5_read_locked(0x3108, &status);
++  if (!rc && (status & 3) != 1) { rc = SWEET_SPMI_VERIFY; }
++  if (!rc) { rc = sp_adc5_read_locked(0x3144, &channel); }
++  if (!rc && channel != (session->channel == SWEET_ADC5_BAT_ID ? 0x4b : 0x08)) { rc = SWEET_SPMI_VERIFY; }
++  if (!rc && session->phase == SWEET_ADC5_GROUND) {
++   ++session->eoc_count;
++   session->deadline_ns = sp_adc5_now() + 100000000ULL;
++   rc = sp_adc5_trigger_locked(session);
++   session->phase = SWEET_ADC5_RESULT;
++   if (!rc) { IOLockUnlock(sp_lock); return SWEET_ADC5_MORE; }
++  } else if (!rc && session->phase == SWEET_ADC5_RESULT) {
++   uint8_t lo = 0, hi = 0;
++   rc = sp_adc5_read_locked(0x3150, &lo);
++   if (!rc) { rc = sp_adc5_read_locked(0x3151, &hi); }
++   unsigned raw = lo | ((unsigned)hi << 8);
++   if (!rc && raw >= 0x8000) { rc = SWEET_SPMI_VERIFY; }
++   struct sweet_adc5_measurement result = {0};
++   if (!rc) {
++    ++session->eoc_count;
++    result.raw = (uint16_t)raw; result.channel = session->channel;
++    result.microvolts = (unsigned)(((uint64_t)raw * 1875000u) / 0x70e4u);
++    if (session->channel == SWEET_ADC5_USBIN) { result.microvolts *= 16u; }
++    result.started_ns = session->started_ns; result.completed_ns = sp_adc5_now();
++    result.eoc_count = session->eoc_count;
++   }
++   int restore = sp_adc5_restore_locked(session);
++   if (!rc) { rc = restore; }
++   if (!rc) { session->phase = SWEET_ADC5_DONE; *out = result; }
++   else { session->phase = SWEET_ADC5_FAILED; }
++   IOLockUnlock(sp_lock); return rc;
++  } else if (!rc) { rc = SWEET_SPMI_INVALID; }
++ }
++ if (rc) { (void)sp_adc5_restore_locked(session); session->phase = SWEET_ADC5_FAILED; }
++ IOLockUnlock(sp_lock);
++ return rc;
++}
++
++int
++sweet_spmi_adc5_abort(struct sweet_adc5_session *session)
++{
++ if (!session || !__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_INVALID; }
++ IOLockLock(sp_lock);
++ int rc = SWEET_SPMI_OK;
++ if (sp_adc5_owner == session && session->active) {
++  rc = sp_adc5_restore_locked(session); session->phase = SWEET_ADC5_FAILED;
++ }
++ IOLockUnlock(sp_lock);
++ return rc;
++}
++
+ /* A separate protocol session, not part of the charger configuration table.
+  * There are no public raw MEMIF writes or arbitrary SRAM word accesses.
+  * The session lock never nests inside sp_lock; grant/ALG waits drop sp_lock.
+diff --git a/bsd/dev/sweet_spmi_mux.h b/bsd/dev/sweet_spmi_mux.h
+index 285062daf62dd79745d33fa3f1912a689a31ea1b..7b1bf94752ff734f6b1d4eb3f927335519666ee3 100644
+--- a/bsd/dev/sweet_spmi_mux.h
++++ b/bsd/dev/sweet_spmi_mux.h
+@@ -20,6 +20,8 @@ int sweet_spmi_mux_start(void);
+ #define SWEET_BATT_IRQ_SOURCE 0x10u
+ #define SWEET_BATT_IRQ_FAULT  0x20u
+ #define SWEET_BATT_IRQ_ALL    0x3fu
++#define SWEET_MUX_ADC5 2u
++#define SWEET_ADC5_IRQ_EOC 0x100u
+ #define SWEET_MUX_READY     0x40000000u
+ #define SWEET_MUX_FAILED    0x80000000u
+ typedef void (*SweetMuxNotify)(void *context, unsigned events);
+@@ -31,8 +33,8 @@ typedef void (*SweetMuxNotify)(void *context, unsigned events);
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOInterruptEventSource.h>
+ #include <IOKit/IOWorkLoop.h>
+-#define SWEET_MUX_ROUTE_COUNT 9u
+-enum { MUX_KEYS = SWEET_MUX_KEYS, MUX_BATTERY = SWEET_MUX_BATTERY, MUX_GROUPS = 2 };
++#define SWEET_MUX_ROUTE_COUNT 10u
++enum { MUX_KEYS = SWEET_MUX_KEYS, MUX_BATTERY = SWEET_MUX_BATTERY, MUX_ADC5 = SWEET_MUX_ADC5, MUX_GROUPS = 3 };
+ struct MuxRoute {
+ 	unsigned sid, per, bit, token, group;
+ 	/* Bit0 rising, bit1 falling. Configuration is route data, not a switch. */
+diff --git a/iokit/Kernel/arm/SweetPmicAdc5.cpp b/iokit/Kernel/arm/SweetPmicAdc5.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..32fd85c7bfd8c4d743d3e2690a3efbeec4b4073b
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetPmicAdc5.cpp
+@@ -0,0 +1,259 @@
++/* ADC5 IOService: own gate/timer/lifecycle, registry mux consumer, IRQ-only
++ * conversion completion. Hardware protocol stays behind sweet_adc5.h. */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include <IOKit/IOLib.h>
++#include <IOKit/IOMessage.h>
++#include <IOKit/IOPlatformExpert.h>
++#include <pexpert/pexpert.h>
++#include <kern/clock.h>
++#include "../../../bsd/dev/sweet_adc5_service.h"
++#include "../../../bsd/dev/sweet_spmi.h"
++#define SWEET_LOG_SINK IOLog
++#include "../../../bsd/dev/sweet_log_level.h"
++class SweetPmicAdc5Device : public IOService {
++ OSDeclareDefaultStructors(SweetPmicAdc5Device);
++};
++OSDefineMetaClassAndStructors(SweetPmicAdc5Device, IOService);
++OSDefineMetaClassAndStructors(SweetPmicAdc5, IOService);
++
++static uint64_t
++adcNow(void)
++{
++ uint64_t absolute, ns;
++ clock_get_uptime(&absolute); absolutetime_to_nanoseconds(absolute, &ns);
++ return ns;
++}
++
++bool
++SweetPmicAdc5::start(IOService *provider)
++{
++ unsigned mode = 0;
++ PE_parse_boot_argn("sweetbattadcconv", &mode, sizeof(mode));
++ /* Always publish the typed provider. Existing preflight remains read-only;
++  * only explicit conversion diagnostics or a typed client can start work. */
++ if (mode > 3 || !IOService::start(provider)) { return false; }
++ diagnostics = mode; /* bit0 BAT_ID, bit1 USBIN, finite initial sequence */
++ /* Set initial properties before registry replay can queue READY/failure. */
++ setProperty("SweetADC5MeasurementProvider", true);
++ setProperty("SweetADC5ChargingPermission", false);
++ setProperty("SweetADC5IRQHealthy", false);
++ loop = IOWorkLoop::workLoop();
++ timer = IOTimerEventSource::timerEventSource(this, timerFired);
++ if (loop && timer && loop->addEventSource(timer) == kIOReturnSuccess) {
++  timerAdded = true;
++  (void)loop->runAction(subscribeAction, this);
++ }
++ if (!connection) {
++  shutdown(); IOService::stop(provider); return false;
++ }
++ provider->setProperty("SweetADC5ServiceStarted", true);
++ registerService();
++ SWEET_LOG_INFO("SWEET ADC5 SERVICE: v1 mode=%u registry consumer; IRQ-only completion, no charging permission\n", mode);
++ return true;
++}
++
++IOReturn
++SweetPmicAdc5::subscribeAction(OSObject *owner, void *, void *, void *, void *)
++{
++ SweetPmicAdc5 *self = OSDynamicCast(SweetPmicAdc5, owner);
++ self->connection = SweetSpmiMuxClient::withOwner(self, self->loop,
++     SWEET_MUX_ADC5, SWEET_ADC5_IRQ_EOC, muxEvent, self);
++ return self->connection ? kIOReturnSuccess : kIOReturnNoMemory;
++}
++
++IOReturn
++SweetPmicAdc5::requestSample(enum sweet_adc5_channel channel)
++{
++ if ((channel != SWEET_ADC5_BAT_ID && channel != SWEET_ADC5_USBIN) || !loop) { return kIOReturnBadArgument; }
++ return loop->runAction(sampleAction, this, &channel);
++}
++
++IOReturn
++SweetPmicAdc5::sampleAction(OSObject *owner, void *argument, void *, void *, void *)
++{
++ SweetPmicAdc5 *self = OSDynamicCast(SweetPmicAdc5, owner);
++ enum sweet_adc5_channel channel = *(enum sweet_adc5_channel *)argument;
++ if (__atomic_load_n(&self->stopping, __ATOMIC_ACQUIRE) || !self->ready || self->failed) { return kIOReturnNotReady; }
++ if (self->session.active) { return kIOReturnBusy; }
++ self->valid[channel - 1] = false;
++ self->setProperty(channel == SWEET_ADC5_BAT_ID ? "SweetADC5BATIDValid" : "SweetADC5USBINValid", false);
++ ++self->sequence;
++ int rc = sweet_spmi_adc5_begin(&self->session, channel);
++ SWEET_LOG_INFO("SWEET ADC5 REQUEST: v1 id=%u channel=%u error=%d phase=%u\n",
++     self->sequence, channel, rc, self->session.phase);
++ if (rc) { self->complete(rc, NULL); return kIOReturnIOError; }
++ self->armDeadline();
++ return kIOReturnSuccess;
++}
++
++IOReturn
++SweetPmicAdc5::copySample(enum sweet_adc5_channel channel, struct sweet_adc5_measurement *out)
++{
++ if (!out || !loop || (channel != SWEET_ADC5_BAT_ID && channel != SWEET_ADC5_USBIN)) { return kIOReturnBadArgument; }
++ return loop->runAction(copyAction, this, &channel, out);
++}
++
++IOReturn
++SweetPmicAdc5::copyAction(OSObject *owner, void *argument, void *output, void *, void *)
++{
++ SweetPmicAdc5 *self = OSDynamicCast(SweetPmicAdc5, owner);
++ unsigned index = *(enum sweet_adc5_channel *)argument - 1;
++ if (__atomic_load_n(&self->stopping, __ATOMIC_ACQUIRE) || !self->ready || self->failed || !self->valid[index]) { return kIOReturnNotReady; }
++ *(struct sweet_adc5_measurement *)output = self->samples[index];
++ return kIOReturnSuccess;
++}
++
++void
++SweetPmicAdc5::armDeadline(void)
++{
++ uint64_t now = adcNow();
++ uint64_t deadline = session.phase == SWEET_ADC5_WAIT_SETTLE ? session.settle_until_ns : session.deadline_ns;
++ unsigned ms = deadline > now ? (unsigned)((deadline - now + 999999ULL) / 1000000ULL) : 0;
++ timer->setTimeoutMS(ms);
++}
++
++void
++SweetPmicAdc5::muxEvent(void *context, unsigned events)
++{
++ SweetPmicAdc5 *self = (SweetPmicAdc5 *)context;
++ /* SweetSpmiMuxClient has already crossed onto this consumer's own loop. */
++ if (__atomic_load_n(&self->stopping, __ATOMIC_ACQUIRE)) { return; }
++ if (events & SWEET_MUX_FAILED) { self->complete(SWEET_SPMI_NOT_READY, NULL); return; }
++ if (events & SWEET_MUX_READY) {
++  self->ready = true;
++  self->setProperty("SweetADC5IRQHealthy", true);
++  if (self->diagnostics) {
++   unsigned first = self->diagnostics & 1 ? 1 : 2;
++   self->diagnostics &= ~first;
++   (void)self->requestSample((enum sweet_adc5_channel)first);
++  }
++ }
++ if (events & SWEET_ADC5_IRQ_EOC) {
++  if (!self->session.active || self->session.phase == SWEET_ADC5_WAIT_SETTLE) {
++   ++self->strayEoc;
++   SWEET_LOG_WARN("SWEET ADC5 EOC: stale/unsolicited phase=%u count=%u; no sample accepted\n", self->session.phase, self->strayEoc);
++   return;
++  }
++  self->timer->cancelTimeout();
++  struct sweet_adc5_measurement result = {};
++  int rc = sweet_spmi_adc5_advance(&self->session, SWEET_ADC5_EOC, &result);
++  SWEET_LOG_INFO("SWEET ADC5 EOC: v1 id=%u error=%d phase=%u count=%u\n",
++      self->sequence, rc, self->session.phase, self->session.eoc_count);
++  if (rc == SWEET_ADC5_MORE) { self->armDeadline(); }
++  else { self->complete(rc, rc ? NULL : &result); }
++ }
++}
++
++void
++SweetPmicAdc5::timerFired(OSObject *owner, IOTimerEventSource *)
++{
++ SweetPmicAdc5 *self = OSDynamicCast(SweetPmicAdc5, owner);
++ if (__atomic_load_n(&self->stopping, __ATOMIC_ACQUIRE) || !self->session.active) { return; }
++ if (self->session.phase == SWEET_ADC5_WAIT_SETTLE) {
++  struct sweet_adc5_measurement unused = {};
++  int rc = sweet_spmi_adc5_advance(&self->session, SWEET_ADC5_SETTLED, &unused);
++  if (rc == SWEET_ADC5_MORE || rc == SWEET_SPMI_BUSY) { self->armDeadline(); }
++  else { self->complete(rc, NULL); }
++ } else {
++  /* A deadline diagnoses failure, never substitutes a status-poll sample. */
++  SWEET_LOG_ERROR("SWEET ADC5 TIMEOUT: id=%u phase=%u; EOC missing, no polling fallback\n", self->sequence, self->session.phase);
++  self->complete(SWEET_ADC5_EXPIRED, NULL);
++ }
++}
++
++void
++SweetPmicAdc5::complete(int error, const struct sweet_adc5_measurement *result)
++{
++ timer->cancelTimeout();
++ if (error) {
++  int cleanup = sweet_spmi_adc5_abort(&session);
++  failed = true; ready = false; valid[0] = valid[1] = false;
++  diagnostics = 0;
++  setProperty("SweetADC5IRQHealthy", false);
++  setProperty("SweetADC5BATIDValid", false); setProperty("SweetADC5USBINValid", false);
++  if (connection) { connection->detach(); }
++  SWEET_LOG_ERROR("SWEET ADC5 FAILURE: v1 id=%u error=%d restore-error=%d cleanup=%d; provider stopped\n", sequence, error, session.restore_error, cleanup);
++ } else if (result) {
++  unsigned index = result->channel - 1;
++  samples[index] = *result; valid[index] = true;
++  setProperty(index ? "SweetADC5USBINMicrovolts" : "SweetADC5BATIDMicrovolts", (uint64_t)result->microvolts, 32);
++  setProperty(index ? "SweetADC5USBINValid" : "SweetADC5BATIDValid", true);
++  SWEET_LOG_INFO("SWEET ADC5 SAMPLE: v1 id=%u channel=%u raw=%#x uv=%u eoc=%u valid=1 restored=1\n",
++      sequence, result->channel, result->raw, result->microvolts, result->eoc_count);
++  SWEET_LOG_INFO("SWEET ADC5 TIME: v1 id=%u started-ns=%llu completed-ns=%llu\n",
++      sequence, (unsigned long long)result->started_ns, (unsigned long long)result->completed_ns);
++ }
++ /* General-interest clients must only queue their own work; never call back
++  * synchronously into this provider from the notification. */
++ messageClients(kIOMessageServicePropertyChange);
++ if (!error && diagnostics) {
++  unsigned next = diagnostics & 1 ? 1 : 2;
++  diagnostics &= ~next;
++  (void)requestSample((enum sweet_adc5_channel)next);
++ }
++}
++
++IOReturn
++SweetPmicAdc5::stopAction(OSObject *owner, void *, void *, void *, void *)
++{
++ SweetPmicAdc5 *self = OSDynamicCast(SweetPmicAdc5, owner);
++ if (self->timer) { self->timer->cancelTimeout(); self->timer->disable(); }
++ self->ready = false; self->valid[0] = self->valid[1] = false;
++ self->setProperty("SweetADC5IRQHealthy", false);
++ self->setProperty("SweetADC5BATIDValid", false); self->setProperty("SweetADC5USBINValid", false);
++ int rc = sweet_spmi_adc5_abort(&self->session);
++ if (rc) { SWEET_LOG_ERROR("SWEET ADC5 STOP: restore error=%d\n", rc); }
++ return kIOReturnSuccess;
++}
++
++void
++SweetPmicAdc5::shutdown(void)
++{
++ __atomic_store_n(&stopping, 1u, __ATOMIC_RELEASE);
++ /* Outside the gate: remove/synchronize notifiers and mux callbacks first. */
++ if (connection) { connection->stop(); }
++ if (loop) { (void)loop->runAction(stopAction, this); }
++}
++
++bool
++SweetPmicAdc5::willTerminate(IOService *provider, IOOptionBits options)
++{
++ shutdown(); return IOService::willTerminate(provider, options);
++}
++void
++SweetPmicAdc5::stop(IOService *provider)
++{
++ shutdown(); IOService::stop(provider);
++}
++void
++SweetPmicAdc5::free(void)
++{
++ shutdown();
++ if (timer && loop && timerAdded) { loop->removeEventSource(timer); timerAdded = false; }
++ OSSafeReleaseNULL(connection); OSSafeReleaseNULL(timer); OSSafeReleaseNULL(loop);
++ IOService::free();
++}
++/* Late board publication, never a global service discovery bridge. */
++extern "C" int sweet_adc5_init(void);
++extern "C" int
++sweet_adc5_init(void)
++{
++ static bool requested;
++ if (requested) { return 0; }
++ requested = true;
++ IOPlatformExpert *platform = IOService::getPlatform();
++ if (!platform) { return -1; }
++ SweetPmicAdc5Device *nub = new SweetPmicAdc5Device;
++ if (!nub) { return -1; }
++ if (!nub->init() || !nub->attach(platform)) { nub->release(); return -1; }
++ nub->setName("mh2lm-pmic-adc5");
++ nub->registerService(kIOServiceSynchronous);
++ bool started = nub->getProperty("SweetADC5ServiceStarted") == kOSBooleanTrue;
++ if (!started) {
++  SWEET_LOG_ERROR("SWEET ADC5 SERVICE: matching/start failed; provider unavailable\n");
++  (void)nub->terminate(kIOServiceSynchronous);
++ }
++ nub->release();
++ return started ? 0 : -1;
++}
++#endif
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+index 353a8e002c5f8c19131831bed2d6f15b9cf97a6a..806888d2dcfbdeaf59dc256c7aca672292fa80e8 100644
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -23,6 +23,7 @@
+ #include <vm/memory_types.h>
+ #include <kern/clock.h>
+ #include "../../../bsd/dev/sweet_spmi.h"
++#include "../../../bsd/dev/sweet_adc5.h"
+ #include "../../../bsd/dev/sweet_spmi_mux.h"
+ #define SWEET_LOG_SINK IOLog
+ #include "../../../bsd/dev/sweet_log_level.h"
+@@ -50,6 +51,7 @@ static const MuxRoute routeTemplates[] = {
+ 	/* PM8150B DTS: source-change USBIN bit6 and CHGR error bit0 rising. */
+ 	{2, 0x13, 6, SWEET_BATT_IRQ_SOURCE, MUX_BATTERY, 1, "battery-source"},
+ 	{2, 0x10, 0, SWEET_BATT_IRQ_FAULT, MUX_BATTERY, 1, "battery-fault"},
++	{2, 0x31, 0, SWEET_ADC5_IRQ_EOC, MUX_ADC5, 1, "adc5-eoc"},
+ };
+ static_assert(sizeof(routeTemplates) / sizeof(routeTemplates[0]) == SWEET_MUX_ROUTE_COUNT,
+     "route layout must match the instance storage");
+@@ -159,7 +161,10 @@ SweetSpmiInterruptMux::readPeripheral(const MuxRoute &route, unsigned reg, uint8
+ 	if (!obs || !out || route.apid == MUX_NO_APID) {
+ 		return false;
+ 	}
+-	if (route.group != MUX_KEYS) {
++	if (route.group == MUX_ADC5) {
++		return sweet_spmi_adc5_irq_read(reg, out) == 0;
++	}
++	if (route.group == MUX_BATTERY) {
+ 		return sweet_spmi_read(route.sid, (route.per << 8) | reg, out) == 0;
+ 	}
+ 	sweet_spmi_irq_lock();
+@@ -867,8 +872,10 @@ IOReturn
+ SweetSpmiInterruptMux::attachConsumer(IOService *consumer, unsigned group, unsigned events, SweetMuxNotify notify,
+     void *context)
+ {
++	static const unsigned groupMasks[] = {SWEET_KEYS_IRQ_ALL, SWEET_BATT_IRQ_ALL, SWEET_ADC5_IRQ_EOC};
++	static_assert(sizeof(groupMasks) / sizeof(groupMasks[0]) == MUX_GROUPS, "group masks");
+ 	if (!consumer || group >= MUX_GROUPS || !events || !notify || !context ||
+-	    (group == MUX_KEYS ? events != SWEET_KEYS_IRQ_ALL : (events & ~SWEET_BATT_IRQ_ALL) != 0)) {
++	    (events & ~groupMasks[group]) || (group == MUX_KEYS && events != SWEET_KEYS_IRQ_ALL)) {
+ 		return kIOReturnBadArgument;
+ 	}
+ 	if (!workLoop) {
+diff --git a/iokit/Kernel/arm/SweetSpmiMuxClient.cpp b/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
+index 700c2f10c3d7f037e3bb9052a8f3d53001d3ec44..07f77fe8c6e08dfda21a62b40daca121477e4fba 100644
+--- a/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
++++ b/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
+@@ -174,8 +174,8 @@ SweetSpmiMuxClient::process(void)
+ 		SWEET_LOG_INFO("SWEET MUX CLIENT: matched and attached group=%u\n", group);
+ 		notify(context, SWEET_MUX_READY);
+ 	}
+-	if (pending & SWEET_BATT_IRQ_ALL) {
+-		notify(context, pending & SWEET_BATT_IRQ_ALL);
++	if (pending & events) {
++		notify(context, pending & events);
+ 	}
+ }
+ 
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index ed05c032fd781187592e1b41e96b255027f97828..1bbbc306f6fef727a06a1fe2e4868e13b8235cd7 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -42,6 +42,11 @@ const char * gIOKernelConfigTables =
+     "     'IOMatchCategory' = SweetSpmiInterruptMux;"
+     "   },"
+     "   {"
++    "     'IOClass'         = SweetPmicAdc5;"
++    "     'IOProviderClass' = SweetPmicAdc5Device;"
++    "     'IOMatchCategory' = SweetPmicAdc5;"
++    "   },"
++    "   {"
+     "     'IOClass'         = SweetPmicKeys;"
+     "     'IOProviderClass' = SweetPmicKeysDevice;"
+     "     'IOMatchCategory' = SweetPmicKeys;"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index b1ebd0ff7c1a29e34d42dfd4930f777dfba6483d..697069e3894dce19490e4efdb4e42950d8aca0ad 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -24,3 +24,5 @@ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitc
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp
++
++iokit/Kernel/arm/SweetPmicAdc5.cpp                                optional iokitcpp

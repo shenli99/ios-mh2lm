@@ -2,9 +2,10 @@
 
 0154硬件接口与ADC5只读预检已在0120a3实机正常运行，13字段全部可读，
 user observer/writer/IRQ元数据为APID280；calibration未发现本地IRQ owner符合DTS。
-策略不再提交地址/掩码，新runtime采样移入内部PMIC组件；实际ADC转换、
-三类证据provider与watchdog/pet仍未完成。下一步直接实现实际ADC转换及EOC，
-无需重复预检或先跑dry，仍不启充。详见
+策略不再提交地址/掩码，新runtime采样移入内部PMIC组件；0155已实现独立ADC5
+IOService/转换/EOC/恢复，本地验证通过，下一步云构建与实机转换验收。
+三类充电证据provider接入与watchdog/pet仍未完成，无需重复预检或先跑dry，
+仍不启充。实机步骤见[ADC5 provider](BATTERY-ADC5-PROVIDER.md)，接口见
 [BATTERY-HARDWARE-INTERFACES.md](BATTERY-HARDWARE-INTERFACES.md)。
 
 **2026-11-06当前执行计划：** 用户要求把电池驱动实现分段，已编写

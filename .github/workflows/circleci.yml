@@ -76,7 +76,7 @@ jobs:
             fi
             require_marker() {
               if ! grep -Fq "$2" "$1"; then
-                echo "ERROR: required 0139..0154 marker missing from $1: $2" >&2
+                echo "ERROR: required 0139..0155 marker missing from $1: $2" >&2
                 exit 1
               fi
             }
@@ -109,6 +109,16 @@ jobs:
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT HARDWARE: v1 semantic charger operations'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET ADC5 PREFLIGHT: v1'
             require_marker xnu/bsd/dev/sweet_spmi.c 'sweet_spmi_adc5_inspect(struct sweet_adc5_preflight'
+            require_marker xnu/bsd/dev/sweet_spmi.c 'sweet_spmi_adc5_begin(struct sweet_adc5_session'
+            require_marker xnu/bsd/dev/sweet_spmi.c 'sp_adc5_restore_locked(struct sweet_adc5_session'
+            require_marker xnu/bsd/dev/sweet_adc5_service.h 'class SweetPmicAdc5 : public IOService'
+            require_marker xnu/iokit/Kernel/arm/SweetPmicAdc5.cpp 'SWEET ADC5 SERVICE: v1 mode='
+            require_marker xnu/iokit/Kernel/arm/SweetPmicAdc5.cpp 'sweetbattadcconv'
+            require_marker xnu/iokit/Kernel/arm/SweetPmicAdc5.cpp 'SWEET_ADC5_EXPIRED'
+            require_marker xnu/iokit/conf/files.arm64 'iokit/Kernel/arm/SweetPmicAdc5.cpp'
+            require_marker xnu/bsd/dev/sweet_board.c 'sweet_adc5_init()'
+            require_marker xnu/iokit/KernelConfigTables.cpp "'IOProviderClass' = SweetPmicAdc5Device;"
+            require_marker xnu/bsd/dev/sweet_spmi_mux.h 'SWEET_MUX_ADC5'
             require_marker xnu/bsd/dev/sweet_spmi.c 'sp_fg_dma_command_locked(unsigned apid'
             require_marker xnu/bsd/dev/sweet_spmi.c 'SWEET FG DMA: v3 phase=recovery'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT SAMPLE: v2 id='
@@ -119,7 +129,7 @@ jobs:
             require_marker xnu/bsd/dev/sweet_battery_runtime.h 'sb_decide(SweetBattController'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT RUNTIME: v1 mode='
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'registerPrioritySleepWakeInterest(runtimePowerNotice, this)'
-            require_marker xnu/iokit/Kernel/arm/SweetSpmiMuxClient.cpp 'pending & SWEET_BATT_IRQ_ALL'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiMuxClient.cpp 'pending & events'
             require_marker xnu/bsd/dev/sweet_spmi_mux.h 'SWEET_BATT_IRQ_SOURCE'
             require_marker xnu/bsd/dev/sweet_keys.c 'sweet_spmi_irq_lock();'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET MUX: controller transactions serialized across keys and battery'
