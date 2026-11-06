@@ -2,6 +2,29 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**CURRENT USER TASK: 0120云产物已核对、三档boot已打包，待用户先测telemetry。**
+
+承接bde5519；本轮只核对/打包/记录，没有改驱动、CI、push或操作设备。
+logs/xnu-kernel-0120.gz和xnu-buildtree-0120.gz可正常解包；没有0120构建日志。
+原生源码24/24与scratch/battery-runtime-0119/verify/xnu逐字节相同，包含
+0149～0151；kernel manifest通过、plain arm64、segment 16K对齐，新增runtime/
+sample/policy/source/fault/preflight字符串及SRAM/transport/PM通知符号均存在。
+kernel SHA256 628c3d8e2fe0baa8ba47a1ccd2cd792d2870cefbcb2a814fca8e2fa0c62801ac。
+已运行tools/mk-mh2lm-event-matrix.sh logs/xnu-kernel-0120.gz 0120 --battery-runtime
+（实际传绝对artifact路径），out-bs生成boot-16k-0120-battery-telemetry.img、
+boot-16k-0120-battery-policy-dry.img、boot-16k-0120-battery-runtime-observe.img。
+再次从最终Android boot镜像提取FAT校验kernel/ADT/TOML、无重复参数、firmware
+不变；每档35667968字节。详细hash/步骤见docs/BATTERY-RUNTIME-0120-TESTING.md，
+机器核对结果和选定源码在scratch/artifact-0120/verification.json及xnu/。
+
+NEXT：用户先boot telemetry，USB live日志+持久日志（保留启动早期SRAM错误），
+稳定约60秒，插拔两轮，每状态15～30秒，记录UI和异常；不必先boot observe。
+先分析真实温度/容量/MEMIF、事件路由/共享SPMI健康；之后再测policy-dry。
+控制档未生成，三个board provider仍缺、fLimits空，不能启充；1/2档有MEMIF
+协议写但不写充电策略/FG内容。不得称真实充电恢复或第4～6段已实机验收。
+
+### Previous implementation handoff (0120 packaging supersedes its artifact status)
+
 **CURRENT USER TASK: 补后三段；0151已补可独立实现代码，待一次云编译/实机。**
 
 本轮承接本地13c443f(0150)。按六段计划第4～6段理解，同时补第2～3段前置；
