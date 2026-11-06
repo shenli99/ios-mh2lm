@@ -1,6 +1,6 @@
 # SweetBattery 的 ADC5 测量接入（0156）
 
-2026-11-06。本地实现和验证完成，待新云构建与实机日志。0120a4 已证明
+2026-11-06。0120a5已完成云构建和持续测量/插拔正常路径实测，详细结果见末节。0120a4 已证明
 BAT_ID/USBIN 转换及 EOC/恢复正常；本轮把真实测量接入电池服务的生命周期。
 充电仍互锁，电池身份、输入承诺电流、SMB1355 隔离与 watchdog 维护尚未完成。
 
@@ -90,9 +90,9 @@ consumer 不擅自 abort 可能仍服务其他客户端的硬件会话。
 - CircleCI增加0156源码gate，构建命令/参数不变；gate接受0156、拒绝0155。
   新打包档拒绝0120a4旧kernel，避免仅改参数冒充新驱动。
 
-host模型不证明原生IOKit锁序或真实硬件重复转换/插拔稳定，需下一轮实机日志。
+host模型不证明原生IOKit锁序；0120a5已补持续转换/插拔正常路径证据，真实故障/服务终止仍待设备验证。
 
-## 下一轮一次镜像测试
+## 可复用的单镜像测试步骤（0120a5已执行）
 
 用户push并下载新编号 kernel/buildtree 后，核对0156并打包：
 
@@ -116,7 +116,7 @@ USBIN EOC/恢复。拔线后不继续安排USBIN；重新插入后新epoch结果
 
 已核对云构建：33个选定源码文件与0156本地verify逐字节一致，源码gate通过；
 plain arm64/subtype0、16K segment、manifest及client/provider新增方法定义符号通过。
-这证明本轮代码已进入产物，持续转换/插拔行为仍待实机验证。
+这证明本轮代码已进入产物；持续转换/插拔的0120a5实机结果见下节。
 
 | 文件 | SHA256 |
 | --- | --- |
@@ -130,3 +130,61 @@ plain arm64/subtype0、16K segment、manifest及client/provider新增方法定�
 runtime1/IRQ4/ADCconv0，无旧adcdiag参数，保留USB/按键/触摸路径。
 底稿 `scratch/artifact-0120a5/{verify-artifact.py,verify-images.py,verification.json}`。
 本轮未改驱动/CI、未push或操作设备；下一步按上节单镜像步骤导出持久日志。
+
+
+## 0120a5 实机结果：持续测量与插拔正常路径通过
+
+日志 `logs/sweetlog-0120a5-battery-adc5-consumer.bin`，SHA256
+`f009090b73162c63ecb16122789013d4ab08b90e0b4bfb1dda12ca242c431ddb`。
+SWEETLOG v1，ring4194304、total1511002、flush144，未回卷、有效正文无NUL；
+按header有效长度解码，不计ring尾部残留。实参runtime1/IRQ4/ADCconv0，与测试镜像一致。
+遥测跨度1470.037秒（约24分半），不是只验证启动时各采一次。
+
+| 项目 | 实测 |
+| --- | --- |
+| ADC请求/完成 | id1..657连续，657次请求error0，657个结果均valid1/restored1 |
+| BAT_ID | 48次完成且均被consumer接受，888581～889814uV，中位889489uV |
+| USBIN | 609次完成，607次接受，2次因source epoch改变丢弃 |
+| 被接受的USBIN电压 | 4610032～4994112uV，中位4813488uV |
+| ADC真实EOC | 1266次mux hit，与48×1＋609×2一致；USBIN中间error1仍是MORE |
+| BAT_ID转换间隔 | 30.141～30.346秒，中位30.143秒 |
+| 同epoch接受USBIN的启动间隔 | 596对，2.054～2.861秒，中位2.079秒 |
+| 转换测量区间 | BAT_ID 7.444～14.399ms；USBIN29.857～92.015ms；不含最终恢复耗时 |
+
+请求id、结果id、consumer token/通道/uV逐笔对齐。657个结果恰好对应655个
+consumer接受与2个丢弃，没有未结请求/丢失结果。日志顺序重放确认，接受的USBIN
+都属于当时最新epoch且present1；present0撤销之后、下一次present1之前没有新的
+USBIN请求。稳定epoch内测量间隔与设计一致，不把拔线期间115秒长间隔当超时。
+
+19次epoch失效记录（含启动/arm-sync），其中present0共6条；它们来自输入/识别/
+MSOC刷新，不可把每个epoch都当成一次物理插拔。17次实际电池IRQ刷新：USBIN10、
+source6、MSOC1，notification/sample1..17连续、healthy1；route-to-publish
+89.319～111.930ms。较短时间内也有present反复变化，日志不足以区分操作节奏与
+物理接触抖动；未出现错误采用旧epoch的结果。
+
+两次竞争都实际验证了保护：
+
+- token496：USBIN转换中拔线，provider完成raw0x4b/77840uV，恢复成功；
+  consumer已从epoch12切到13/present0，因此输出discarded，未采用这笔低电压。
+- token498：仍插线但识别事件将epoch15推进到16，provider结果4981648uV；
+  consumer丢弃旧epoch结果，随后token499在epoch16重新转换并接受。
+
+这两条discarded WARN表示上下文校验生效，不是ADC转换失败，也没有退回轮询。
+没有ADC FAILURE/TIMEOUT、ERROR、panic或mux故障/隔离。
+
+1433组完整SAMPLE/FG/CAP/TIME、id1..1433匹配：19次IRQ/arm采样、1414次保护
+monitor；V/I有效1433组，3854～3953mV、IOPM -736～+40mA；温度29.25～31.50°C
+全部有效，仍未LG温度补偿。nominal/learned均4027mAh、profile0x13，SOC64→63%。
+19份CONFIG均enable0/pause0、watchdog0x62/time0x8c；policy11条均allow0，
+reasons0x7c0（6）/0x7c8（5），没有CONTROL。仍未恢复真实充电，符合本轮互锁。
+
+三个按键都有完整HID down/up，触摸记录到hits140/empty0，USB计数记录hits128/
+err0；既有USB endpoint cmd6/status1 WARN仍有10条，不将此称为USB全部问题已解决。
+有SpringBoard发起shutdown的文字，但无完整的ADC服务终止/硬件停止证据，不能
+据此验收系统PM或真实故障恢复。没有额外IORegistry dump，不宣称逐时刻属性过期
+边界已被外部直接观察。ADC接入的正常转换/插拔路径已可继续推进后续依赖。
+
+底稿 `scratch/artifact-0120a5/{battery-adc5-consumer-persistent.txt,analyze-consumer.py,
+consumer-analysis.json,analysis-summary.txt}`。本轮仅分析/记录，无新驱动/CI修改、
+不需要重新编译或重复baseline/本轮测量测试。下一步核对实际电池身份/额定限值与
+输入承诺能力，接入相应证据，再补SMB1355隔离和watchdog维护；充电仍互锁。

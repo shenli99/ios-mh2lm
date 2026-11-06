@@ -2,6 +2,47 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**CURRENT: 0120a5 ADC5 consumer持续转换/插拔正常路径已通过，下一步补身份/输入证据。**
+
+日志logs/sweetlog-0120a5-battery-adc5-consumer.bin，SHA256
+`f009090b73162c63ecb16122789013d4ab08b90e0b4bfb1dda12ca242c431ddb`。
+v1/ring4194304/total1511002/flush144、未回卷/有效正文无NUL，按header有效长度
+解码。实参runtime1/IRQ4/ADCconv0，遥测跨度1470.037s，约24分半。
+
+657请求/完成连续id1..657、全error0/valid1/restored1；BAT_ID48次全接受，
+888581..889814uV，中位889489；USBIN609次完成/607接受/2丢弃，接受范围
+4610032..4994112uV。1266真实ADC EOC=48+609*2。BAT_ID间隔30.141..30.346s；
+同epoch接受USBIN596对启动间隔2.054..2.861s、中位2.079。BAT_ID测量区间
+7.444..14.399ms，USBIN29.857..92.015ms，不含最后恢复耗时。
+
+两个真实竞争：token496拔线时raw4b/77840uV完成，但epoch12→13/present0，
+consumer正确丢弃；token498识别事件epoch15→16，4981648uV旧结果同样丢弃，
+之后token499新epoch接受。655接受+2丢弃恰好覆盖657结果；日志顺序重放确认
+present0撤销后无新USBIN请求、没有错误epoch接受。这两WARN是预期保护，无ADC
+FAILURE/TIMEOUT、ERROR、panic、mux故障/隔离。source epoch共19（含startup/arm），
+present0六条，不能将每条epoch算一次物理插拔；短暂presence反复的物理原因未证明。
+
+1433组SAMPLE/FG/CAP/TIME完整；19 IRQ/arm+1414保护tick，V/I均有效，
+3854..3953mV、IOPM -736..+40mA；temp29.25..31.50C（未LG补偿），容量4027/
+profile13，SOC64→63%。19CONFIG全enable0/pause0/WD62/time8c；11policy全allow0，
+reasons7c0(6)/7c8(5)，无CONTROL，未恢复真实充电。17真实电池IRQ刷新USBIN10/
+source6/MSOC1，notification/sample连续且healthy1，发布延迟89.319..111.930ms。
+三键完整down/up、touch记录140/empty0、USB128/err0；既有endpoint WARN10条。
+有SpringBoard shutdown请求，无完整ADC stop/系统PM/故障恢复实机证据；未取独立
+IORegistry dump，不宣称所有时效/生命周期边界已外部验证或USB问题全修。
+
+底稿scratch/artifact-0120a5/{analyze-consumer.py,consumer-analysis.json,
+analysis-summary.txt,battery-adc5-consumer-persistent.txt}，完整结果见
+[docs/BATTERY-ADC5-CONSUMER.md](docs/BATTERY-ADC5-CONSUMER.md)。本轮仅分析记录，
+未改驱动/CI、无新boot/push/设备操作；无需补live/baseline或重复本轮测试。
+
+NEXT：按六段计划继续实际电池身份/额定限值与输入能力证据，再补SMB1355隔离
+和watchdog维护。通过IOKit/typed接口接入，不从889mV直接宣称电池型号，也不把
+4.8V当电流承诺；缺项保持充电互锁。0156正常路径已通过，不再把接ADC consumer
+列为下一轮任务。用户自己push/fastboot。
+
+### Previous 0120a5 artifact packaging handoff
+
 **CURRENT: 0120a5云产物已核对并打包，等待实机ADC5 consumer日志。**
 
 kernel gzip SHA256 `f4d0709e6100cd5fb0e84b89b53e419f16142887c758e698bc1af35ed5a7f89e`；

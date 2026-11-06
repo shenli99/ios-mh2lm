@@ -1,6 +1,11 @@
 # 0119之后的电池驱动推进
 
-0156补充（本地实现，待云构建/实机）：SweetBattery 已通过每consumer的
+0120a5补充：0156的ADC5测量consumer正常路径已实测通过。约24分半、657次
+转换/1266次EOC；655个结果被接受，2个因插拔/识别改变epoch正确丢弃，无ADC
+超时/ERROR/panic。电池身份、输入能力、并联隔离和watchdog仍缺，充电仍互锁。
+详细计数、范围与验收边界见[ADC5 consumer实机结果](BATTERY-ADC5-CONSUMER.md#0120a5-实机结果持续测量与插拔正常路径通过)。
+
+0156实现（现已由0120a5验证正常路径）：SweetBattery 已通过每consumer的
 SweetAdc5Client 订阅 ADC5 IOService，自己的workloop发起请求并验证token、
 source epoch与时效；插拔撤销旧VBUS，保护monitor维护电压测量，退出同步清理。
 没有设置充电授权，身份/输入能力/并联隔离/watchdog仍缺。
