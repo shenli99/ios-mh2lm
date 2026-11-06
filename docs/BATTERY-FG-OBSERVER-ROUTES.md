@@ -1,6 +1,7 @@
 # 0120 FG 读取失败与 0152 路由修正
 
-2026-11-06。0120实机遥测失败，0152完成本地修正及验证，待用户push/云编译。
+2026-11-06。0120实机遥测失败，0152完成本地修正及验证；0120a1原生云产物
+已核对并打包，待实机验证，路径与校验见文末。
 本轮不开放主动充电。原始结果见
 [0120测试记录](BATTERY-RUNTIME-0120-TESTING.md)。
 
@@ -85,8 +86,43 @@ CircleCI仅增加0152源码标记门禁，真实build.sh命令不变；YAML和�
 防止旧内核冒充新修正；已有0120镜像保留。底稿及完整测试结果在工作区
 `scratch/fg-observer-0120/`（validation-results.json、verify/xnu、compile.py）。
 
-下一轮用户push/编译后，本地核对新产物再以同一`--battery-runtime`生成三档。
+0120a1已核对，并以同一`--battery-runtime`生成三档。
 优先测telemetry，启动约一分钟、插拔两轮并导出持久日志即可；先检查四字段
 及FG路由/失败地址，再看watchdog/enable/并联配置，不重复0120或no-USB测试。
 若仍停在writer-preflight，可明确标记该协议写所需权限未满足，不能直接取消
 写权校验。手机温度/容量尚未验证，不能宣称本轮恢复物理充电或结束IRQ阶段。
+
+## 0120a1产物与可用镜像
+
+用户输入编号“01120a1”，本地实际文件为0120a1，以下均沿用实际编号。
+实现提交99189b1；本次只核对/打包/记录，无驱动或CI修改、push、设备操作。
+
+| 产物 | SHA256 |
+| --- | --- |
+| logs/xnu-kernel-0120a1.gz | 10bb1374c6294ba31e314dfdc5d25d271c86003468c556f22cf26f82aa52ae62 |
+| logs/xnu-buildtree-0120a1.gz | e86a392b692c36f017e687b0a8200b0b4ea643d8be4dba517934847ff0a2934d |
+| kernel.development.mh2lm | 08d44a9394b0921d555aa00534b68a81ff55037b9f6b1916c84adb3c107dee10 |
+
+原生24个选定源码文件与本地0152严格应用/编译输入逐字节相同；kernel manifest、
+plain arm64、segment16K对齐、FG ROUTE/ACCESS v2、CONFIG v2及容量独立错误
+字符串、FG/charger/PM通知定义符号通过。没有该轮build日志，不推断CI运行ID。
+原生源码/机器记录/实际启动TOML在工作区`scratch/artifact-0120a1/`，详情
+`verification.json`与`required-symbols.txt`。
+
+镜像均在`/home/shenli/work1/out-bs/`，每档35667968字节：
+
+| 文件名 | SHA256 |
+| --- | --- |
+| boot-16k-0120a1-battery-telemetry.img | 59ffcf2d4f35b9a49e7a769931540ee6f2349bd75a690092d221168a15828e78 |
+| boot-16k-0120a1-battery-policy-dry.img | e219c7e76f8022b488d0d0c0774c1078dd914c41998114e12b92c17a9f2aaf5a |
+| boot-16k-0120a1-battery-runtime-observe.img | 1df8a8e47b49d65b03b5ff05c2c4151a3ba2c07f34e6a9098d18e2d49cfd7cb2 |
+
+脚本生成后独立从最终Android boot解出ramdisk，回读FAT内kernel/ADT/TOML，
+确认firmware/kernel/ADT相同、参数无重复。三档保留realSID2、sweetbattirq4、
+三键/USB/触摸IRQ及ACM；telemetry为runtime1，dry为2，observe无runtime。
+未打包控制档，三项board证据provider仍缺，不能主动启充。
+
+先测telemetry即可：用户fastboot boot后等待约一分钟，插拔两轮，每个状态
+停留15～30秒，导出`sweetlog-0120a1-battery-telemetry.bin`；持久日志足够，
+不额外要求live，不先测observe/dry。先看四字段有效性与FG失败位置，再看
+enable/watchdog/SMB原始配置；实机结果待用户日志。

@@ -2,6 +2,29 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**CURRENT: 0120a1云产物已核对，0152三档boot已生成，待用户测telemetry持久日志。**
+
+用户报“01120a1”，实际文件logs/xnu-{kernel,buildtree}-0120a1.gz，统一按0120a1
+打包，未另造01120a1编号。原生选定24文件与scratch/fg-observer-0120/verify/xnu
+逐字节相同，包含0152；manifest、plainarm64、16Ksegment、FGROUTE/ACCESSv2、
+CONFIGv2与独立容量error等字符串、FG/charger/PM通知定义符号均通过。
+kernelSHA08d44a9394b0921d555aa00534b68a81ff55037b9f6b1916c84adb3c107dee10。
+没有本轮构建日志，不编造CI运行ID。无驱动/CI修改、push或设备操作。
+已用--battery-runtime生成out-bs/boot-16k-0120a1-battery-telemetry.img、
+boot-16k-0120a1-battery-policy-dry.img、boot-16k-0120a1-battery-runtime-observe.img。
+每档35667968字节；再次从最终boot解出FAT校验kernel/ADT/TOML/firmware，参数
+无重复，realSID2/mode4/keys/USBACM保留；新telemetryruntime1、dry2、observe无runtime。
+完整hash与说明见docs/BATTERY-FG-OBSERVER-ROUTES.md的0120a1节；原生源码、
+TOML、verification.json与required-symbols.txt在scratch/artifact-0120a1/。
+
+NEXT用户优先telemetry，启动约1分钟、插拔2轮每状态15～30秒，导出
+sweetlog-0120a1-battery-telemetry.bin即可，无需先observe/dry或补USB日志。
+先分析FG温度/容量/四fielderror、ACCESS失败地址/阶段和ROUTEowner，再核对
+CONFIGwatchdog/enable/SMB。该镜像仍不提交充电策略，三个provider缺口未消失，
+不以“插线仍不充”直接判本轮遥测修正失败，不声称已恢复充电。
+
+### Previous implementation handoff
+
 **CURRENT: 0152 FG observer路由分层修正已本地完成，待用户push/云编译；不启充。**
 
 用户“那继续吧”后对照LG spmi-pmic-arb.c的read_apid_map_v5/offset_v5：observer
