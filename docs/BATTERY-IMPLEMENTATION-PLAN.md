@@ -1,12 +1,17 @@
 # MH2LM 电池驱动实现计划
 
 2026-11-06，六段计划已经进入实现。0150共享transport、0151遥测/策略/运行层
-完成本地验证，尚未云编译或实机验收。用户要求补后三段，其可独立实现部分与
+已随0120云构建并进行初步遥测实测，六段尚未验收。用户要求补后三段，其可独立实现部分与
 第2～3段前置已合批，详见[BATTERY-RUNTIME.md](BATTERY-RUNTIME.md)。
 物理电池身份、实测VBUS和并联隔离provider仍缺，受控充电未开放，不能把代码
 完成称为六段验收完成。当前XNU仍不能保证从禁充初态进入真实充电；旧m19在
 进入XNU时已enable1，具体启动writer未知。
 历史依据见 [`BATTERY-CHARGING-HISTORY.md`](BATTERY-CHARGING-HISTORY.md)。
+
+当前 0120a1 已通过 observer 修正，但 FG 温度/容量在 DMA 错误位检查失败。
+0153 的首次空闲 DMA 清错/原始诊断/短日志已本地完成，待构建和实机，见
+[FG DMA 恢复](BATTERY-FG-DMA-RECOVERY.md)。仍处于第2段测量闭环，不跳过
+身份、输入能力、并联隔离和 watchdog 依赖去启充。
 
 ## 目标、架构与范围
 

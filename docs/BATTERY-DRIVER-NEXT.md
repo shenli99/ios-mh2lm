@@ -5,17 +5,16 @@
 共享访问与控制接口 → 真实测量/配置 → 策略与保护 → 首次受控充电 → 运行期
 事件管理 → 完整上报与回归。下面保留此前诊断过程，不再把“等待SMB_CFG”
 当作全部推进计划；0149可随第一批实现合并编译，无须单独消耗一轮。
-0150/0151已随0120云构建核对并首次实测；FG温度/容量无效，0152修正observer
-读取不应要求writer的分层问题，补失败地址和独立错误/配置日志，已本地通过、
-待用户push/下一轮构建。见[BATTERY-FG-OBSERVER-ROUTES.md](BATTERY-FG-OBSERVER-ROUTES.md)。新档为观察、
-真实遥测、模拟策略；当前不打包受控充电。第4～6段已补可独立实现的控制/
-事件/上报代码，电池身份、VBUS实测及并联隔离provider尚缺，真实充电未验收。
-当前状态和下一步见[BATTERY-RUNTIME.md](BATTERY-RUNTIME.md)。
+0150/0151 已随 0120 实测；0152 的 observer 分层修正在 0120a1 生效。
+当前四个 FG 字段停在 `0x4370` DMA 错误位检查；0153 已本地补首次会话的
+有界清错、原始 pre/recovery/post 诊断与短日志，待用户 push/下一次云构建。
+详见 [BATTERY-FG-DMA-RECOVERY.md](BATTERY-FG-DMA-RECOVERY.md)。下一产物先测
+telemetry 持久日志，无需先跑 dry 或重复 no-USB。
 
-0120a1已实测：REVID write-ee4，observer修正有效；四FG字段现停在0x4370
-DMA错误位检查，尚缺LG初始化中的有界清错/恢复。watchdog配置0x62/0x8c、
-enable0已取得，pet尚缺；SAMPLE超长截断也需修正。完整结果与边界见上述
-FG文档末节；暂不要求重复实机或运行dry档。
+第4～6段已有可独立实现的控制/事件/上报代码，电池身份/上限、VBUS实测及
+并联隔离 provider 尚缺，真实充电未验收、不打包控制档。0120a1 已取得
+watchdog `0x62/0x8c` 与 enable0，pet 尚缺；不通过关 watchdog 绕过保护。
+当前状态见 [BATTERY-RUNTIME.md](BATTERY-RUNTIME.md)。
 
 ## 历史诊断与计划依据
 

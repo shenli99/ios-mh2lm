@@ -2,12 +2,12 @@
 
 2026-11-06，承接0150。按用户要求补第4～6段的可独立实现代码，同时补上
 第2～3段的采样/策略前置。本地实现与测试完成；0120原生云产物已核对、
-三档boot已打包，**尚未实机验收**，见[BATTERY-RUNTIME-0120-TESTING.md](BATTERY-RUNTIME-0120-TESTING.md)。
+三档boot已打包并初步实测，**六段尚未验收**，见[BATTERY-RUNTIME-0120-TESTING.md](BATTERY-RUNTIME-0120-TESTING.md)。
 第4段的“真实充电→受控停止”没有发生，不能宣称整份六段计划已经完成。
 
-0120实机发现FG温度/容量无效；0152已完成observer与协议写权限分层修正及
-失败地址/配置日志，本地验证通过；0120a1云产物已核对并打包，待实机。见
-[BATTERY-FG-OBSERVER-ROUTES.md](BATTERY-FG-OBSERVER-ROUTES.md)。这不开放充电控制。
+0120a1 实测已通过 0152 observer 修正；四个 FG 字段仍因 DMA_STS 错误无效。
+0153 已本地补首次空闲会话的有界 DMA 清错和分段短日志，待 push/构建/实机，
+见 [FG DMA 恢复](BATTERY-FG-DMA-RECOVERY.md)。本轮不开放充电控制。
 
 ## 当前完成度与仍缺的依赖
 
@@ -47,11 +47,13 @@ SweetBattery在自己的IOWorkLoop上拥有snapshot/controller/monitor；mux保�
 只公开四个字段：温度word328、nominal容量word271、profile integrity word299、
 learned容量word285(v1)/287(v2)，不开放任意SRAM字地址。
 
-过程：独立会话锁 → 检查MEMIF未被claim及无DMA错误 → v1临时选择ALG_ACTIVE
+过程：独立会话锁 → 身份/空闲及写权限预检 → 0153初次DMA状态检查/有界清错
+→ v1临时选择ALG_ACTIVE
 peek并有界等待 → request/grant → 分区寻址读取 → DMA错误检查 → 恢复地址模式、
 释放两个request位、恢复peek。release的两步都会尝试，清理失败禁用本启动后续
 会话且不返回数据。已有claim返回BUSY，不替其他owner强行释放。未知revision
-拒绝；不复位FG、不清学习数据，也不自动执行全量Linux FG初始化。
+拒绝；不复位FG、不清学习数据，也不自动执行全量Linux FG初始化。0153只在
+首次准备时允许一次清错；准备完成后的新pre/post错误禁用SRAM直到重启。
 
 ALG等待最多35×10ms，grant最多50×10ms，v1另有必要1ms等待。等待用IOSleep，
 **不持共享SPMI事务锁**；会话锁只串行本接口。单笔总线事务仍按0150有界，所有

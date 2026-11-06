@@ -2,6 +2,42 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**CURRENT: 0153已本地完成，待用户push/云编译；先验证FG遥测，不启充。**
+
+用户“那继续吧”后完成首次FG DMA清错与短日志，实现提交47fa07e。
+新增xnu/patches/0153-mh2lm-fg-dma-recovery.patch，3源文件：身份/revision、
+MEMIFidle和全部writer预检后，在共享SPMI锁内重查idle/唯一EE0writer/poison，
+读4370/4371。首次发现mask6错误或clearbit高才尝试一次固定4371low/high/low，
+保留其他bit，high允许自清，每步回读；状态最多5读/显式delay总40us。不是
+完整LinuxFGinit，实机clear时序/错误来源未确认，不声称一定是固件遗留。
+清错失败锁存FGfailed；high后只在RW未poison时额外一次deassert清理，超时
+共享poison后绝不复用。准备完成后的新pre/post错禁用本启动SRAM，不重清重试。
+新DMA v3记录pre/recovery/post原值与有效性；ACCESS v2新增阶段操作名保留。
+
+SAMPLE v2/FG,CAP,TIME v3以相同sampleid拆短记录，CONFIG v3和PARALLEL v3仅
+初始/事件打印，独立错误与完整时间保留，不改全局console或timer采样范围。
+按键/USB/触摸IRQ-only、registryconsumer、共享锁/timeoutpoison均保留。
+CI仅新增/更新sourcegate（接受0153拒绝0152），actual build.sh前缀byteequal；
+packager --battery-runtime marker同步更新/bash-n通过，无新参数或控制boot档。
+
+本地50个transport/FG真实函数ASAN/UBSAN场景通过，含三命令失败、自清/延迟/
+状态不清、map/readback/status失败、超时poison/不复用、权限/忙/未知拒绝、
+后续/post不重清；runtime策略/发布/stop和100PMrace通过，日志含INFO/newline
+的255byte检查与最大id/64bit时间通过；mux套件+80race、旧SPMI+10race通过。
+原生0120a1上严格apply/24选定文件bytecompare通过，2ARM64单文件编译通过
+（已有CIheaders/Linuxclang兼容，不是完整nativebuild）。底稿
+scratch/fg-dma-0120a1/{base,edited,verify,*tests.txt,validation-results.json}。
+
+文档docs/BATTERY-FG-DMA-RECOVERY.md记录语义/边界/下一轮，runtime/计划/NEXT/
+IRQ路线图/observer互链已更新。无push/新CI/新boot/设备操作。用户push后下载
+新产物，再核对并用--battery-runtime打包；先telemetry约60秒+插拔两轮、
+各状态15～30秒，导出持久日志保留早期DMA。无需先跑observe/dry或旧noUSB。
+检查清错前后raw/有效性、四字段和完整TIME，再检查共享IRQ健康。
+控制仍缺实际电池身份/限值、VBUS/输入能力和并联隔离provider，fLimits空；
+watchdog/pet仍缺，不自动关WDOG。测量恢复≠充电已恢复。
+
+### Previous 0120a1 analysis handoff
+
 **LATEST RESULT: 0120a1证实observer修正，当前FG阻塞为4370 DMA错误位；尚未补恢复。**
 
 用户已提供logs/sweetlog-0120a1-battery-telemetry.bin，SHA256

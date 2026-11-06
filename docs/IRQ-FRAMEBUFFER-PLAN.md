@@ -13,9 +13,10 @@
 缺少电池/VBUS/并联证据provider，设备仍受互锁；状态与同核三档见
 [BATTERY-RUNTIME.md](BATTERY-RUNTIME.md)，第4～6段实机验收尚未完成。
 
-0120补充：USBIN/source-change均正常，FG温度/容量遥测失败，充电控制未开放。
-0152已本地修正FG observer和写权限的分层，增加失败地址与配置证据日志，
-待用户push/云编译；先验遥测，见[BATTERY-FG-OBSERVER-ROUTES.md](BATTERY-FG-OBSERVER-ROUTES.md)。
+0120/0120a1 补充：USBIN/source-change 正常，0152 observer 修正已实测生效；
+FG 温度/容量仍在 DMA_STS 错误检查失败。0153 已本地补有界初始清错与短日志，
+待 push/云构建；先验遥测，见 [FG DMA 恢复](BATTERY-FG-DMA-RECOVERY.md)。
+充电控制保持受限，电池目标与第4～6段实机验收未完成，framebuffer顺序不变。
 
 **当前进度：** 0119 mode4已实测三次独立MSOC中断，拔线期间电量由74%下降至
 73/72/71%，与四次USBIN刷新区分，三键/触摸继续工作；之前mode3息屏插拔唤屏
