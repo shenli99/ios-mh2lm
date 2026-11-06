@@ -1,6 +1,55 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-11-06, latest)
+## Agent handoff / active work (2026-11-07, latest)
+
+**CURRENT: 0157 profile/输入证据实现已完成，等待用户push与新云产物。**
+
+实现提交 `39f9cc7`，补丁 `xnu/patches/0157-mh2lm-battery-profile-input-evidence.patch`。
+新增 `sweet_spmi_fg_read_profile(sweet_fg_profile *)`：固定24字节前缀4522..4539、
+integrity4750、nominal46ea/b，同MEMIF grant，开始时间在FG锁内、完成时间在所有
+清理之后。复用原有界会话/版本/writer/初始DMA恢复/poison，四字段scalar签名及
+范围不变。部分读取或清理失败保持调用者输出；后端撤销本次tuple，不用旧前缀。
+事件采样用tuple代替两次独立integrity/nominal会话，learned仍单读。前缀失败
+也使本次nominal/profile未知，现有IOPM按百分比语义发布，不静默退旧元数据。
+
+输入snapshot新增独立inputEpoch/start/end，初始/IRQ/既有有界确认才更新；保护
+tick保留APSD/TypeC/plugin/debug/legacy的原获取时间和序号，不扫描续期。仅新增
+1507/150d两项固定只读白名单，禁止写；失败清本次raw/valid。实时保护配置仍读。
+epoch饱和时间清零，避免回卷。该epoch和ADC client epoch是独立获取序号，不能
+只因数字相等就当共享token。未来输入consumer需明确关联VBUS来源撤销与时效。
+
+新增PROFILE/PROFILE TIME、INPUT v4/INPUT TIME、TYPEC v4、ICL/ICL MODE/LIMIT
+CONFIG短行，raw/error/id/时间可拼接，INFO分级；底层WARN/ERROR沿用。profile
+match=1 Tocad/2 LGC/0未知，校验24字节/白名单/nominal，仅诊断，不是完整416字节
+或物理BATID验证。输入精确APSD/QC分类+普通sink拒绝条件，初始策略只接受DCP/CDP、
+拒绝legacy/debug/SDP/QC等；3秒独立快照期限并入决策期限，饱和加法防溢出。
+板级FCC校验2800，首次受控执行器仍500mA/4200mV。所有limits授权仍false，未启充。
+长期稳定插线时缓存输入不再新鲜，不通过保护timer扫描续期；事件许可provider
+尚未完成，不能声称可持续充电。并联隔离、watchdog维护与身份授权仍缺。
+
+本地底稿 `scratch/battery-evidence-0120a5/`，含base/edited/verify、cloud-apply.json、
+validation-results.json、implementation-summary.json、各suite日志和编译结果。
+0120a5实际33文件基线逐字节一致、0157严格apply后与verify相同。3个ARM64 TU
+SweetBattery/SweetPmicPower/sweet_spmi编译通过（旧CI头/Linux clang兼容参数，非
+完整native link）。transport ASAN/UBSAN118场景含37个固定profile场景，runtime
+策略/实际采样/日志长度/时效/退出、mux及80竞态、ADC client17+100竞态、SPMI与
+board回归通过。源码gate接受0157拒绝0156，打包档拒绝真实0120a5旧kernel。
+CircleCI只新增源码gate，实际build命令/参数不变。无新云build ID、boot或设备
+结果，本轮未push/fastboot。详见 `docs/BATTERY-PROFILE-INPUT-EVIDENCE.md`。
+
+NEXT：用户push main并下载新编号kernel/buildtree；核对0157的6个变动文件/33基线
+及 `_sweet_spmi_fg_read_profile` 符号，再运行
+`tools/mk-mh2lm-event-matrix.sh <xnu-kernel-编号.gz> <编号> --battery-evidence`。
+输出 `out-bs/boot-16k-编号-battery-evidence.img`（runtime1/IRQ4/ADCconv0），保留
+三键/触摸/USB IRQ与USB日志。无需baseline/dry或重新测ADC bring-up。
+同次boot：电脑USB桌面30s→拔10s→普通已知5V充电器20～30s→拔10s→电脑10s，
+导出 `sweetlog-编号-battery-evidence.bin` 并注明电源。无live也可仅持久日志。
+重点tuple完整、预期Tocad match1/4027/13及prefix，与BATID结合解释；输入各阶段
+raw/error/type/sink/epoch可解释，无清理失败/隔离/错误CONTROL。sink-ok=0不必然
+是驱动读错，可能legacy/accessory等尚不支持路径；保留原始状态，不伪造许可。
+本批仍不充电符合范围。之后接身份/输入证据消费者、并联隔离与watchdog。
+
+### Previous 0120a5 offline identity/input audit
 
 **CURRENT: 0120a5后身份/输入离线核对完成；下一实现范围已落文档，尚无新内核。**
 
