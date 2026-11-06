@@ -101,3 +101,11 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 应见group2成功attach、BAT_ID一次EOC、USBIN两次EOC、两个SAMPLE的valid=1/restored=1、
 raw/uv与TIME，且无TIMEOUT/FAILURE及mux隔离。取得这些证据后再接实际身份/输入provider；
 本轮仍不执行CONTROL/enable，不据UI充电图标判定真实充电恢复。
+
+## 0120a4 产物核对
+
+0155 云构建已通过源码 marker、31 个选定文件逐字节比较、plain arm64/subtype0、
+16K segment 及 ADC5 符号检查。测试镜像为
+`out-bs/boot-16k-0120a4-battery-adc5-conversion.img`，SHA256
+`bce9b70785a24f48352335960f4833e30e1764604bbdcd5781deae5a03f971a5`。
+

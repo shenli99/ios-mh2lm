@@ -23,6 +23,10 @@ IOResources。`sweet_board_init()` 在 mux 后发布 ADC nub，按键/电池事�
 尚无0155云端完整链接或真实ADC EOC/电压恢复日志；充电仍互锁，不能据此称真实充电恢复。
 真实测试步骤见 [`docs/BATTERY-ADC5-PROVIDER.md`](docs/BATTERY-ADC5-PROVIDER.md)。
 
+0120a4 已下载并核对：kernel gzip SHA256 `1ae1aa5e6749d0ac609ab3dac515238f4cae5f85030ae8442e50070143301a06`，buildtree gzip SHA256 `ffc54f6cbb916395cc2f9f2f5a31499470a48153e2726cf1c6dce2734e9998b4`；内核 SHA256 `f53f989649556aeb125912d802156cc307e7f8b93c0518f1536b0a3f8c4118d2`。31个0155源码逐字节一致，plain arm64/subtype0、16K segment、ADC5符号/marker通过。
+
+已生成并回读镜像：`out-bs/boot-16k-0120a4-battery-adc5-conversion.img`，SHA256 `bce9b70785a24f48352335960f4833e30e1764604bbdcd5781deae5a03f971a5`。参数包含 `sweetbattirq=4 sweetbattadcdiag=1 sweetbattadcconv=3 sweetbattruntime=1`，保持 USB/按键/触摸 IRQ，充电仍互锁。验证脚本见 `scratch/artifact-0120a4/verification.json`。
+
 NEXT：用户push main并下载新编号kernel/buildtree；核对0155后打包上述组合镜像。
 首次保持USB线插入，取得启动早期BAT_ID一次及USBIN两次EOC和恢复日志；
 约60秒内操作三键/触摸并插拔一轮，导出持久日志。ADC只在启动时各采一次，
