@@ -2,6 +2,30 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**CURRENT: 0120a5云产物已核对并打包，等待实机ADC5 consumer日志。**
+
+kernel gzip SHA256 `f4d0709e6100cd5fb0e84b89b53e419f16142887c758e698bc1af35ed5a7f89e`；
+buildtree gzip `90e421b00c5409c54bd9a7db10ae7a8755ae2b768cb9c00051c8f78609477bbc`。
+33个0156源码逐字节匹配本地verify，source gates、plain arm64/subtype0、16K segment、
+manifest及新ADC consumer/provider方法符号通过。内核SHA256
+`8f21f6d1b0cb653c440de3318a85fce9b91dfd9edb620e9c4d6ebd18d797ef92`。
+
+镜像 `out-bs/boot-16k-0120a5-battery-adc5-consumer.img`，35,667,968字节，SHA256
+`ff0f5284331f402d091f003b2cb4fb8276f48dc161db17e62665a974b59ad4a3`。
+最终boot回读：header/原firmware、FAT kernel/ADT/TOML一致，无重复args；
+runtime1/IRQ4/ADCconv0，无adcdiag，保留USB/按键/触摸IRQ及USB日志。充电仍互锁。
+底稿 `scratch/artifact-0120a5/{verify-artifact.py,verify-images.py,verification.json}`。
+本轮仅核对/打包/记录，未改驱动或CI，未push/操作设备。
+
+NEXT：用户fastboot boot上述镜像，USB插入启动、桌面等30秒，拔线15～20秒/
+插入15～20秒两轮，操作三键/触摸，可含屏幕息屏一轮；导出
+`sweetlog-0120a5-battery-adc5-consumer.bin`。重点确认client接收BAT_ID/USBIN、
+插入时持续EOC与恢复、拔线撤销旧值/停止安排USBIN、重插新epoch有效，且无ADC
+失败/共享mux隔离/错误启充。不必先baseline/dry或重跑启动有限转换档。
+日志按header total解码，避免旧ring尾部混入。完成后再核对身份/输入能力等依赖。
+
+### Previous 0156 implementation handoff
+
 **CURRENT: 0156 ADC5 → SweetBattery 测量接入已实现，等待用户push与新云产物。**
 
 实现提交 `9b6d817`，补丁 `xnu/patches/0156-mh2lm-battery-adc5-consumer.patch`。

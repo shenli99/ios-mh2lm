@@ -110,3 +110,23 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 USBIN EOC/恢复。拔线后不继续安排USBIN；重新插入后新epoch结果有效。
 转换恰好跨插拔时出现一次 discarded WARN 是预期保护，不要求刻意追求该竞争。
 不应有 ADC FAILURE/TIMEOUT、共享mux隔离、panic或错误启充。充电未恢复符合本轮范围。
+
+
+## 0120a5 云产物与镜像核对
+
+已核对云构建：33个选定源码文件与0156本地verify逐字节一致，源码gate通过；
+plain arm64/subtype0、16K segment、manifest及client/provider新增方法定义符号通过。
+这证明本轮代码已进入产物，持续转换/插拔行为仍待实机验证。
+
+| 文件 | SHA256 |
+| --- | --- |
+| xnu-kernel-0120a5.gz | `f4d0709e6100cd5fb0e84b89b53e419f16142887c758e698bc1af35ed5a7f89e` |
+| xnu-buildtree-0120a5.gz | `90e421b00c5409c54bd9a7db10ae7a8755ae2b768cb9c00051c8f78609477bbc` |
+| kernel.development.mh2lm | `8f21f6d1b0cb653c440de3318a85fce9b91dfd9edb620e9c4d6ebd18d797ef92` |
+| boot-16k-0120a5-battery-adc5-consumer.img | `ff0f5284331f402d091f003b2cb4fb8276f48dc161db17e62665a974b59ad4a3` |
+
+镜像位于工作区 `out-bs/boot-16k-0120a5-battery-adc5-consumer.img`，35,667,968字节。
+最终boot回读验证header/原firmware、FAT内kernel/ADT/TOML一致、参数无重复，
+runtime1/IRQ4/ADCconv0，无旧adcdiag参数，保留USB/按键/触摸路径。
+底稿 `scratch/artifact-0120a5/{verify-artifact.py,verify-images.py,verification.json}`。
+本轮未改驱动/CI、未push或操作设备；下一步按上节单镜像步骤导出持久日志。
