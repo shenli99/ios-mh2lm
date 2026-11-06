@@ -2,6 +2,37 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**CURRENT: 0152 FG observer路由分层修正已本地完成，待用户push/云编译；不启充。**
+
+用户“那继续吧”后对照LG spmi-pmic-arb.c的read_apid_map_v5/offset_v5：observer
+不要求APIDwrite-ee==本地，RW才要求。0151sp_fg_byte误把所有固定读都经唯一
+EE0writer查找；0152改用现有sp_find_apid选observer（first/localpreferred），
+原EE0observer窗口/共享锁/timeoutpoison保留。不改旧read白名单或chargerAPI。
+会话写之前预检4340/4350/4371唯一EE0writer，v1加41ee；写仍逐笔重新校验。
+没有外部RW操作、SRAM内容写、充电策略写或bootarg放行，IRQ/consumer不改。
+新FG ROUTE v2首次core/cfg元数据（不映射intr）；ACCESS v2带首个失败字段/
+操作/地址/PPID、primary/final错误，WARN按状态变化，清理ERROR仍无条件。
+SAMPLE加tempraw/nerr/lerr/perr；CONFIG v2初始/事件打印enable/pause/watchdog/
+time/SMB/SMB_CFG原字节+独立error，不额外轮询USB。旧0120缺失败地址，不能
+断言硬件确切失败在REVID/MEMIF/DMA哪一步；修正明确代码问题，待现场定位。
+
+新增xnu/patches/0152-mh2lm-fg-observer-routes.patch，3文件；实际完整transport/
+FG26场景ASAN/UBSAN通过（foreignREAD/localpreferred/noMEMIFwriter/ambiguous/
+poison/denied/timeout/noextraWARN/recovery，及原有grant/ALG/cleanup），实际
+batteryruntime采样/发布/保护策略+100PMrace通过；mux/consumer全套+80race、
+旧SPMI+10race通过。原生0120上严格apply/24文件bytecompare通过，2ARM64
+编译单元通过（已有CIheaders/Linuxclang兼容，不是nativefullbuild）。完整结果
+scratch/fg-observer-0120/validation-results.json、verify/xnu、compile.py。
+CI仅4个新增sourcegate+版本提示，实际build.sh前缀byteequal；YAML/gate接受
+0152拒绝0120。打包脚本runtime加新marker，bash-n通过。无新boot/实机/push。
+
+文档docs/BATTERY-FG-OBSERVER-ROUTES.md记录语义/证据/边界/下一轮。NEXT让用户
+push后等新产物，核对并用--battery-runtime打包；先telemetry持久日志即可，
+同时取得真实FG结果和watchdog/enable/SMB原值，再决定dry与providers实现。
+勿重复旧0120/0119noUSB，不去掉MEMIF写权限检查；控制三provider仍缺未启充。
+
+### Previous 0120 result
+
 **LATEST RESULT: 0120 telemetry持久日志已分析；不充电符合mode1边界，但FG遥测失败，先不测dry。**
 
 用户仅提供logs/sweetlog-0120-battery-telemetry.bin，足够完成本轮分析，无需补

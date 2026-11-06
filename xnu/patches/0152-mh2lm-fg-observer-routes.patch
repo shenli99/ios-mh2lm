@@ -1,0 +1,329 @@
+From: ios-mh2lm
+Subject: mh2lm: separate FG observer routes from protocol write ownership
+
+Use the v5 observer mapping policy for fixed FG reads. Preflight every
+protocol writer before session mutations and retain per-update ownership
+checks. Report first failure address/operation and independently valid
+capacity/watchdog/configuration evidence without enabling charge control.
+
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -510,30 +510,102 @@
+ static IOLock *sp_fg_lock;
+ static bool sp_fg_failed;
+ 
+-static int
+-sp_fg_byte(unsigned addr, uint8_t *out)
++/* Session-local failure provenance survives cleanup. Only diagnostic dedup
++ * state has boot lifetime, protected by sp_fg_lock along with the session. */
++struct sp_fg_session {
++	unsigned addr;
++	const char *operation;
++	int error;
++};
++static int sp_fg_last_error[4];
++static unsigned sp_fg_last_addr[4];
++static const char *sp_fg_last_operation[4];
++
++static int
++sp_fg_record(struct sp_fg_session *session, unsigned addr,
++    const char *operation, int result)
++{
++	if (result && !session->error) {
++		session->addr = addr;
++		session->operation = operation;
++		session->error = result;
++	}
++	return result;
++}
++
++static void
++sp_fg_route_diagnostics(void)
++{
++	static bool reported;
++	if (reported) { return; }
++	reported = true;
++	/* Metadata only: no interrupt-bank mapping or foreign RW access. The
++	 * observer window belongs to EE0 even if an APID's writer is another EE.
++	 * Match Linux v5: first mapping, preferring the last local EE mapping. */
++	static const unsigned peripherals[] = {0x01, 0x41, 0x43, 0x46, 0x47, 0x48};
++	IOLockLock(sp_lock);
++	for (unsigned n = 0; n < sizeof(peripherals) / sizeof(peripherals[0]); ++n) {
++		unsigned ppid = 0x200u | peripherals[n];
++		unsigned matches = 0;
++		uint16_t selected = sp_find_apid(ppid);
++		for (unsigned apid = 0; apid < sp_count; ++apid) {
++			uint32_t map = sp_rd(sp_core, SP_APID_MAP_OFF + 4u * apid);
++			if (!map || ((map >> 8) & 0xfffu) != ppid) { continue; }
++			++matches;
++			unsigned owner = sp_rd(sp_cfg, SP_OWNERSHIP_OFF + 4u * apid) & 7u;
++			SWEET_LOG_INFO("SWEET FG ROUTE: v2 ppid=%#x apid=%u write-ee=%u irq-owner=%u observer-selected=%u\n",
++			    ppid, apid, owner, (map & SP_IRQ_OWNER_BIT) != 0, apid == selected);
++		}
++		if (!matches) {
++			SWEET_LOG_WARN("SWEET FG ROUTE: v2 ppid=%#x has no mapping\n", ppid);
++		}
++	}
++	IOLockUnlock(sp_lock);
++}
++
++static int
++sp_fg_byte(struct sp_fg_session *session, unsigned addr, uint8_t *out)
++{
++	IOLockLock(sp_lock);
++	uint32_t version = sp_rd(sp_core, 0);
++	int result = SWEET_SPMI_UNSUPPORTED;
++	if (version >= 0x50000000u && version < 0x60000000u) {
++		uint16_t apid = sp_find_apid(0x200u | (addr >> 8));
++		result = apid == SP_NO_APID ? SWEET_SPMI_NO_OWNER :
++		    sp_charger_read_locked(apid, addr, out);
++	}
++	IOLockUnlock(sp_lock);
++	return sp_fg_record(session, addr, "observer-read", result);
++}
++
++static int
++sp_fg_update(struct sp_fg_session *session, unsigned addr,
++    unsigned mask, unsigned value)
++{
++	uint8_t verified;
++	return sp_fg_record(session, addr, "protocol-update",
++	    sp_update_owned(2, addr, mask, value, &verified));
++}
++
++static int
++sp_fg_require_writer(struct sp_fg_session *session, unsigned addr)
+ {
+ 	struct sweet_spmi_charger_route route;
+ 	IOLockLock(sp_lock);
+ 	int result = sp_charger_route(2, addr, &route);
+-	if (!result) { result = sp_charger_read_locked(route.apid, addr, out); }
+-	IOLockUnlock(sp_lock);
+-	return result;
+-}
+-
+-static int
+-sp_fg_update(unsigned addr, unsigned mask, unsigned value)
+-{
+-	uint8_t verified;
+-	return sp_update_owned(2, addr, mask, value, &verified);
+-}
+-
+-static int
+-sp_fg_release(void)
++	if (!result && sweet_spmi_rw_poisoned_locked(route.apid)) {
++		result = SWEET_SPMI_POISONED;
++	}
++	IOLockUnlock(sp_lock);
++	return sp_fg_record(session, addr, "writer-preflight", result);
++}
++
++static int
++sp_fg_release(struct sp_fg_session *session)
+ {
+ 	/* Always attempt both, even when the first command fails. */
+-	int first = sp_fg_update(0x4350, 0xa0, 0);
+-	int second = sp_fg_update(0x4340, 0x01, 0);
++	int first = sp_fg_update(session, 0x4350, 0xa0, 0);
++	int second = sp_fg_update(session, 0x4340, 0x01, 0);
+ 	if (first || second) {
+ 		sp_fg_failed = true;
+ 		SWEET_LOG_ERROR("SWEET FG SRAM: release failed intf=%d arb=%d; session disabled until reboot\n",
+@@ -556,63 +628,82 @@
+ 		else { IOLockFree(candidate); lock = expected; }
+ 	}
+ 	IOLockLock(lock);
++	struct sp_fg_session session = {0, "session-disabled", 0};
++	sp_fg_route_diagnostics();
+ 	int result = sp_fg_failed ? SWEET_SPMI_POISONED : SWEET_SPMI_OK;
+ 	uint8_t revision = 0, subtype = 0, memtype = 0, cfg = 0, arb = 0, dma = 0;
+ 	uint8_t lo = 0, hi = 0, peek = 0, active = 0;
+ 	bool requested = false, peekChanged = false;
+ 	unsigned word = 0, addr = 0;
+-	if (!result) { result = sp_fg_byte(0x0105, &subtype); }
+-	if (!result) { result = sp_fg_byte(0x0103, &revision); }
+-	if (!result) { result = sp_fg_byte(0x4305, &memtype); }
++	if (!result) { result = sp_fg_byte(&session, 0x0105, &subtype); }
++	if (!result) { result = sp_fg_byte(&session, 0x0103, &revision); }
++	if (!result) { result = sp_fg_byte(&session, 0x4305, &memtype); }
+ 	if (!result && (subtype != 0x20 || (revision != 1 && revision != 2) || memtype != 0x0d)) {
+-		result = SWEET_SPMI_UNSUPPORTED;
+-	}
+-	if (!result) { result = sp_fg_byte(0x4340, &arb); }
+-	if (!result) { result = sp_fg_byte(0x4350, &cfg); }
+-	if (!result && ((arb & 1) || (cfg & 0xa0))) { result = SWEET_SPMI_BUSY; }
+-	if (!result) { result = sp_fg_byte(0x4370, &dma); }
+-	if (!result && (dma & 6)) { result = SWEET_SPMI_IO; }
++		result = sp_fg_record(&session, subtype != 0x20 ? 0x0105 :
++		    (revision != 1 && revision != 2) ? 0x0103 : 0x4305,
++		    "identity-layout", SWEET_SPMI_UNSUPPORTED);
++	}
++	if (!result) { result = sp_fg_byte(&session, 0x4340, &arb); }
++	if (!result) { result = sp_fg_byte(&session, 0x4350, &cfg); }
++	if (!result && ((arb & 1) || (cfg & 0xa0))) {
++		result = sp_fg_record(&session, (arb & 1) ? 0x4340 : 0x4350,
++		    "session-busy", SWEET_SPMI_BUSY);
++	}
++	if (!result) { result = sp_fg_byte(&session, 0x4370, &dma); }
++	if (!result && (dma & 6)) {
++		result = sp_fg_record(&session, 0x4370, "dma-status", SWEET_SPMI_IO);
++	}
++	/* Validate all protocol writers before changing any session state. This
++	 * never grants a foreign writer permission; every update checks again. */
++	if (!result) { result = sp_fg_require_writer(&session, 0x4340); }
++	if (!result) { result = sp_fg_require_writer(&session, 0x4350); }
++	if (!result) { result = sp_fg_require_writer(&session, 0x4371); }
++	if (!result && revision == 1) { result = sp_fg_require_writer(&session, 0x41ee); }
+ 	/* v1: select ALG_ACTIVE peek, wait for it to go low before requesting DMA.
+ 	 * Restore our mux selection even on failure; never change FG algorithms. */
+ 	if (!result && revision == 1) {
+-		result = sp_fg_byte(0x41ee, &peek);
++		result = sp_fg_byte(&session, 0x41ee, &peek);
+ 		if (!result) {
+ 			peekChanged = true;
+-			result = sp_fg_update(0x41ee, 0xff, 0xac);
++			result = sp_fg_update(&session, 0x41ee, 0xff, 0xac);
+ 		}
+ 		for (unsigned n = 0; !result && n < 35; ++n) {
+-			result = sp_fg_byte(0x41ef, &active);
++			result = sp_fg_byte(&session, 0x41ef, &active);
+ 			if (result || !(active & 8)) { break; }
+ 			IOSleep(10);
+ 		}
+-		if (!result && (active & 8)) { result = SWEET_SPMI_TIMEOUT; }
++		if (!result && (active & 8)) {
++			result = sp_fg_record(&session, 0x41ef, "alg-wait", SWEET_SPMI_TIMEOUT);
++		}
+ 		if (!result) { IOSleep(1); }
+ 	}
+ 	if (!result) {
+ 		/* We checked that no prior session owns MEMIF. From the first request
+ 		 * attempt onward unwind both request bits, even after a failed write. */
+ 		requested = true;
+-		result = sp_fg_update(0x4340, 0x01, 0x01);
+-	}
+-	if (!result) { result = sp_fg_update(0x4350, 0xa0, 0x80); }
++		result = sp_fg_update(&session, 0x4340, 0x01, 0x01);
++	}
++	if (!result) { result = sp_fg_update(&session, 0x4350, 0xa0, 0x80); }
+ 	if (!result) { delay(40); }
+ 	bool granted = false;
+ 	for (unsigned n = 0; !result && n < 50; ++n) {
+-		result = sp_fg_byte(0x4310, &active);
++		result = sp_fg_byte(&session, 0x4310, &active);
+ 		if (result) { break; }
+ 		if (active & 8) { granted = true; break; }
+ 		IOSleep(10);
+ 	}
+-	if (!result && !granted) { result = SWEET_SPMI_TIMEOUT; }
++	if (!result && !granted) {
++		result = sp_fg_record(&session, 0x4310, "grant-wait", SWEET_SPMI_TIMEOUT);
++	}
+ 	if (!result && revision == 1) { IOSleep(1); }
+ 	/* Partition addressing bit must be set; it does not change SRAM contents.
+ 	 * Preserve and restore the addressing mode around this session. */
+ 	uint8_t dmaCfg = 0;
+ 	bool dmaChanged = false;
+-	if (!result) { result = sp_fg_byte(0x4371, &dmaCfg); }
++	if (!result) { result = sp_fg_byte(&session, 0x4371, &dmaCfg); }
+ 	if (!result && !(dmaCfg & 2)) {
+ 		dmaChanged = true;
+-		result = sp_fg_update(0x4371, 2, 2);
++		result = sp_fg_update(&session, 0x4371, 2, 2);
+ 	}
+ 	if (field == SWEET_FG_TEMPERATURE) { word = 328; }
+ 	else if (field == SWEET_FG_NOMINAL_CAPACITY) { word = 271; }
+@@ -621,23 +712,43 @@
+ 	if (word >= 300) { addr = 0x4820 + (word - 300) * 2; }
+ 	else if (word >= 275) { addr = 0x4720 + (word - 275) * 2; }
+ 	else { addr = 0x4620 + (word - 170) * 2; }
+-	if (!result) { result = sp_fg_byte(addr, &lo); }
+-	if (!result && field != SWEET_FG_PROFILE_INTEGRITY) { result = sp_fg_byte(addr + 1, &hi); }
+-	if (!result) { result = sp_fg_byte(0x4370, &dma); }
+-	if (!result && (dma & 6)) { result = SWEET_SPMI_IO; }
++	if (!result) { result = sp_fg_byte(&session, addr, &lo); }
++	if (!result && field != SWEET_FG_PROFILE_INTEGRITY) { result = sp_fg_byte(&session, addr + 1, &hi); }
++	if (!result) { result = sp_fg_byte(&session, 0x4370, &dma); }
++	if (!result && (dma & 6)) {
++		result = sp_fg_record(&session, 0x4370, "dma-status", SWEET_SPMI_IO);
++	}
+ 	if (dmaChanged) {
+-		int cleanup = sp_fg_update(0x4371, 2, dmaCfg & 2);
++		int cleanup = sp_fg_update(&session, 0x4371, 2, dmaCfg & 2);
+ 		if (cleanup) { sp_fg_failed = true; result = cleanup; }
+ 	}
+ 	if (requested) {
+-		int cleanup = sp_fg_release();
++		int cleanup = sp_fg_release(&session);
+ 		if (cleanup) { result = cleanup; }
+ 	}
+ 	if (peekChanged) {
+-		int cleanup = sp_fg_update(0x41ee, 0xff, peek);
++		int cleanup = sp_fg_update(&session, 0x41ee, 0xff, peek);
+ 		if (cleanup) { sp_fg_failed = true; result = cleanup; }
+ 	}
+ 	if (!result) { *out = (uint16_t)(lo | ((unsigned)hi << 8)); }
++	/* Report first failure and transitions only: a persistent fault must not
++	 * produce one warning per protection tick. Primary provenance survives
++	 * cleanup; final-error also exposes a failed unwind. */
++	if (!sp_fg_last_operation[field] || sp_fg_last_error[field] != result ||
++	    (result && (sp_fg_last_addr[field] != session.addr ||
++	    strcmp(sp_fg_last_operation[field], session.operation) != 0))) {
++		if (result) {
++			SWEET_LOG_WARN("SWEET FG ACCESS: v2 field=%u op=%s sid=2 addr=%#x ppid=%#x error=%d final-error=%d; value=unknown\n",
++			    field, session.operation, session.addr, 0x200u | (session.addr >> 8),
++			    session.error ? session.error : result, result);
++		} else {
++			SWEET_LOG_INFO("SWEET FG ACCESS: v2 field=%u rev=%u memtype=%#x raw=%#x recovered=%u\n",
++			    field, revision, memtype, *out, sp_fg_last_error[field] != 0);
++		}
++	}
++	sp_fg_last_error[field] = result;
++	sp_fg_last_addr[field] = session.addr;
++	sp_fg_last_operation[field] = session.operation;
+ 	IOLockUnlock(lock);
+ 	return result;
+ }
+diff --git a/bsd/dev/sweet_spmi.h b/bsd/dev/sweet_spmi.h
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -69,6 +69,9 @@
+ /* Gen4 read-only SRAM data via bounded DMA request/grant/release. This does
+  * write MEMIF protocol controls, never profile/learned SRAM contents. Fixed
+  * four fields only; serial session lock releases the controller lock at waits.
++ * Observer reads select the v5 PPID route independently of write ownership.
++ * All protocol writers must have a unique EE0 route before any session write;
++ * each actual update rechecks it. No foreign RW channel is accessed.
+  * Preserve output on any failure, including cleanup failure. */
+ #define SWEET_FG_TEMPERATURE       0u
+ #define SWEET_FG_NOMINAL_CAPACITY  1u
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -1187,12 +1187,22 @@
+ 	next.completedNs = sweet_batt_now_ns();
+ 	fSnapshot = next;
+ 	++fMonitorSamples;
+-	SWEET_LOG_INFO("SWEET BATT SAMPLE: v1 source=%s valid=%#llx mv=%u v-ok=%u ma=%d i-ok=%u temp-centi=%d temp-ok=%u temp-error=%d nominal=%u n-ok=%u learned=%u l-ok=%u profile=%#x p-ok=%u started-ns=%llu completed-ns=%llu\n",
++	SWEET_LOG_INFO("SWEET BATT SAMPLE: v1 source=%s valid=%#llx mv=%u v-ok=%u ma=%d i-ok=%u temp-centi=%d temp-ok=%u temp-error=%d temp-raw=%#x nominal=%u n-ok=%u n-error=%d learned=%u l-ok=%u l-error=%d profile=%#x p-ok=%u p-error=%d started-ns=%llu completed-ns=%llu\n",
+ 	    refreshInput ? "irq" : "protection-timer", (unsigned long long)next.valid, next.mv, next.voltageValid,
+ 	    next.ma, next.currentValid, next.tempCenti, next.tempValid, next.tempError,
+-	    next.nominalMah, next.nominalValid, next.learnedMah, next.learnedValid,
+-	    next.integrity, next.profileValid, (unsigned long long)next.startedNs,
++	    next.rawTemp, next.nominalMah, next.nominalValid, next.nominalError,
++	    next.learnedMah, next.learnedValid, next.learnedError,
++	    next.integrity, next.profileValid, next.profileError, (unsigned long long)next.startedNs,
+ 	    (unsigned long long)next.completedNs);
++	if (refreshInput) {
++		/* Raw configuration is evidence, not a charging permission. Errors
++		 * accompany every byte so a retained value cannot masquerade as fresh. */
++		SWEET_LOG_INFO("SWEET BATT CONFIG: v2 valid=%#llx enable=%#x enable-error=%d pause=%#x pause-error=%d wdog=%#x wdog-error=%d wdog-time=%#x wdog-time-error=%d smb=%#x smb-error=%d smb-cfg=%#x smb-cfg-error=%d\n",
++		    (unsigned long long)next.valid,
++		    next.raw[SB_ENABLE], next.errors[SB_ENABLE], next.raw[SB_PAUSE], next.errors[SB_PAUSE],
++		    next.raw[SB_WDOG], next.errors[SB_WDOG], next.raw[SB_WDOG_TIME], next.errors[SB_WDOG_TIME],
++		    next.raw[SB_SMB], next.errors[SB_SMB], next.raw[SB_SMB_CFG], next.errors[SB_SMB_CFG]);
++	}
+ #endif
+ }
+ 

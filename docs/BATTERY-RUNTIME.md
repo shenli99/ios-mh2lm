@@ -5,6 +5,10 @@
 三档boot已打包，**尚未实机验收**，见[BATTERY-RUNTIME-0120-TESTING.md](BATTERY-RUNTIME-0120-TESTING.md)。
 第4段的“真实充电→受控停止”没有发生，不能宣称整份六段计划已经完成。
 
+0120实机发现FG温度/容量无效；0152已完成observer与协议写权限分层修正及
+失败地址/配置日志，本地验证通过、待下一次云编译与实机。见
+[BATTERY-FG-OBSERVER-ROUTES.md](BATTERY-FG-OBSERVER-ROUTES.md)。这不开放充电控制。
+
 ## 当前完成度与仍缺的依赖
 
 | 段 | 已实现 | 尚未完成 |

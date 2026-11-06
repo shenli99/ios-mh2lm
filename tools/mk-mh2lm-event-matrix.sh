@@ -148,7 +148,8 @@ fi
 
 if [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ]; then
 	for marker in 'SWEET BATT RUNTIME: v1 mode=' 'SWEET BATT SAMPLE: v1 source=' \
-	    'SWEET BATT POLICY: v1 mode=' 'battery-source' 'battery-fault'; do
+	    'SWEET BATT POLICY: v1 mode=' 'battery-source' 'battery-fault' \
+	    'SWEET FG ACCESS: v2 field=' 'SWEET BATT CONFIG: v2 valid='; do
 		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
 			printf 'kernel lacks battery runtime marker: %s\n' "$marker" >&2
 			exit 1

@@ -62,6 +62,7 @@ prelude = r'''
 #define trunc_page(a) ((a)&~PAGE_MASK)
 #define round_page(a) (((a)+PAGE_MASK)&~PAGE_MASK)
 static std::string logs;
+static void recordLog(const char *format,...) __attribute__((format(printf,1,2)));
 static void recordLog(const char *format,...) {
     char buf[1024];va_list args;va_start(args,format);
     int n=vsnprintf(buf,sizeof(buf),format,args);va_end(args);
@@ -76,6 +77,7 @@ static IOLock *controllerLock;
 static bool failAlloc,failMap,failPermanent,dropWrite,failFgRelease;
 static unsigned failFgAddress;
 static std::vector<unsigned> rwAddresses;
+static std::vector<unsigned> observerApids;
 static unsigned maps,unmaps,commands,writes,readCommands,ioReads,failReadAt;
 static unsigned observerStatus=1,rwStatus=1;
 static uint32_t version=0x50000000;
@@ -115,6 +117,7 @@ static void modelWrite(vm_offset_t b,unsigned o,uint32_t v){
     if(b>=SWEET_DEV_SPMI_OBS_PA){
         assert((v>>27)==1 && !(v&15));++readCommands;
         apid=(b-SWEET_DEV_SPMI_OBS_PA)/0x80;
+        observerApids.push_back(apid);
         unsigned address=(((routing[apid]>>8)&0xfff)<<8)|reg;
         if(address>=0x24400 && address<0x24a00)assert((pmic[0x24340]&1) && (pmic[0x24350]&0xa0)==0x80);
         status[b]=(failReadAt==readCommands || address==failFgAddress)?3:observerStatus;
@@ -122,6 +125,7 @@ static void modelWrite(vm_offset_t b,unsigned o,uint32_t v){
     }else{
         assert(b>=SWEET_DEV_SPMI_CHNLS_PA && (v>>27)==0);++writes;
         apid=(b-SWEET_DEV_SPMI_CHNLS_PA)/0x10000;
+        assert(ownership[apid]==0); // foreign writer permission is never borrowed
         unsigned address=(((routing[apid]>>8)&0xfff)<<8)|reg;rwAddresses.push_back(address);
         if(failFgRelease && address==0x24350 && !(data[b]&0x80)){status[b]=3;return;}
         status[b]=rwStatus;
@@ -175,7 +179,7 @@ int main(int argc,char **argv){
     own(10,0x10);own(11,0x13);own(12,0x15);own(13,0x16);
     if(!strncmp(mode,"fg-",3)) {
         for(unsigned n=0;n<7;++n)own(30+n,n==0?1:n==1?0x41:n==2?0x43:0x46+n-3);
-        pmic[0x20105]=0x20;pmic[0x20103]=strcmp(mode,"fg-v2")?1:2;
+        pmic[0x20105]=0x20;pmic[0x20103]=strncmp(mode,"fg-v2",5)?1:2;
         pmic[0x24305]=0x0d;pmic[0x24310]=8;pmic[0x241ee]=0x31;
         pmic[0x24858]=100;pmic[0x24859]=0;
         pmic[0x246ea]=0xa0;pmic[0x246eb]=0xf;
@@ -183,6 +187,28 @@ int main(int argc,char **argv){
         pmic[0x24734]=0x3c;pmic[0x24735]=0xf;
         pmic[0x24738]=0x72;pmic[0x24739]=0xe;
         int wanted=0;
+        // Real 0120 regression: REVID can be readable through EE0's observer
+        // without an EE0 writer. DMA apertures also need reads, never writes.
+        if(!strcmp(mode,"fg-foreign-identity")){ownership[30]=3;}
+        if(!strcmp(mode,"fg-readonly-pages")){
+            for(unsigned apid=33;apid<=36;++apid)ownership[apid]=3;
+        }
+        if(!strcmp(mode,"fg-v2-foreign-battinfo")){ownership[31]=3;}
+        if(!strcmp(mode,"fg-local-preferred")){
+            own(29,1,5);own(70,1,3);
+        }
+        if(!strcmp(mode,"fg-first-foreign")){
+            ownership[30]=3;own(29,1,5);own(70,1,3);
+        }
+        if(!strcmp(mode,"fg-no-memif-writer")){ownership[32]=3;wanted=SWEET_SPMI_NO_OWNER;}
+        if(!strcmp(mode,"fg-no-peek-writer")){ownership[31]=3;wanted=SWEET_SPMI_NO_OWNER;}
+        if(!strcmp(mode,"fg-ambiguous-writer")){own(70,0x43);wanted=SWEET_SPMI_AMBIGUOUS;}
+        if(!strcmp(mode,"fg-poisoned-writer")){sp_rw_poisoned[32]=true;wanted=SWEET_SPMI_POISONED;}
+        if(!strcmp(mode,"fg-missing-identity")){routing.erase(30);wanted=SWEET_SPMI_NO_OWNER;}
+        if(!strcmp(mode,"fg-missing-data")){routing.erase(35);wanted=SWEET_SPMI_NO_OWNER;}
+        if(!strcmp(mode,"fg-observer-denied")){observerStatus=5;wanted=SWEET_SPMI_DENIED;}
+        if(!strcmp(mode,"fg-observer-timeout")){observerStatus=0;wanted=SWEET_SPMI_TIMEOUT;}
+        if(!strcmp(mode,"fg-recovery")){failFgAddress=0x24859;wanted=SWEET_SPMI_IO;}
         if(!strcmp(mode,"fg-busy")){pmic[0x24350]=0x80;wanted=SWEET_SPMI_BUSY;}
         if(!strcmp(mode,"fg-unknown")){pmic[0x20103]=3;wanted=SWEET_SPMI_UNSUPPORTED;}
         if(!strcmp(mode,"fg-grant")){pmic[0x24310]=0;wanted=SWEET_SPMI_TIMEOUT;}
@@ -192,11 +218,34 @@ int main(int argc,char **argv){
         if(!strcmp(mode,"fg-dma-error")){pmic[0x24370]=4;wanted=SWEET_SPMI_IO;}
         uint16_t raw=0xdead;assert(sweet_spmi_fg_read(SWEET_FG_TEMPERATURE,&raw)==wanted);
         if(wanted)assert(raw==0xdead);else assert(raw==100);
+        if(wanted)assert(logs.find("SWEET FG ACCESS: v2 field=0 op=")!=std::string::npos);
+        if(!strcmp(mode,"fg-no-memif-writer")){
+            assert(writes==0 && logs.find("op=writer-preflight sid=2 addr=0x4340 ppid=0x243 error=-4")!=std::string::npos);
+            auto old=logs;assert(sweet_spmi_fg_read(SWEET_FG_TEMPERATURE,&raw)==wanted && logs==old && writes==0);
+        }
+        if(!strcmp(mode,"fg-no-peek-writer"))assert(writes==0 && logs.find("op=writer-preflight sid=2 addr=0x41ee")!=std::string::npos);
+        if(!strcmp(mode,"fg-poisoned-writer") || !strcmp(mode,"fg-ambiguous-writer") ||
+           !strcmp(mode,"fg-missing-identity") || !strcmp(mode,"fg-observer-denied") ||
+           !strcmp(mode,"fg-observer-timeout"))assert(writes==0);
+        if(!strcmp(mode,"fg-missing-identity"))assert(logs.find("op=observer-read sid=2 addr=0x105")!=std::string::npos);
+        if(!strcmp(mode,"fg-missing-data"))assert(logs.find("op=observer-read sid=2 addr=0x4858")!=std::string::npos);
+        if(!strcmp(mode,"fg-read-fail") || !strcmp(mode,"fg-recovery"))assert(logs.find("op=observer-read sid=2 addr=0x4859")!=std::string::npos);
+        if(!strcmp(mode,"fg-local-preferred"))assert(observerApids.front()==30);
+        if(!strcmp(mode,"fg-first-foreign"))assert(observerApids.front()==29);
+        if(!strcmp(mode,"fg-foreign-identity"))assert(observerApids.front()==30);
+        if(!strcmp(mode,"fg-observer-timeout")){
+            auto prior=commands;observerStatus=1;
+            assert(sweet_spmi_fg_read(SWEET_FG_TEMPERATURE,&raw)==SWEET_SPMI_POISONED && commands==prior);
+        }
         if(wanted==SWEET_SPMI_BUSY || wanted==SWEET_SPMI_UNSUPPORTED || !strcmp(mode,"fg-dma-error"))assert(writes==0);
-        else {
+        if(writes) {
             assert(pmic[0x241ee]==0x31 && (pmic[0x24371]&2)==0);
             assert(!(pmic[0x24340]&1));
             if(!failFgRelease)assert((pmic[0x24350]&0xa0)==0);
+        }
+        if(!strcmp(mode,"fg-recovery")){
+            failFgAddress=0;assert(!sweet_spmi_fg_read(SWEET_FG_TEMPERATURE,&raw) && raw==100);
+            assert(logs.find("recovered=1")!=std::string::npos);
         }
         if(!wanted){
             assert(!sweet_spmi_fg_read(SWEET_FG_NOMINAL_CAPACITY,&raw) && raw==4000);
@@ -313,5 +362,9 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-charge-io-') as directory:
     subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-O1','-g','-pthread',
         '-fsanitize=address,undefined',str(cpp),'-o',str(binary)],check=True)
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0')
-    for mode in ['normal','alloc-fail','map-fail','fg-v1','fg-v2','fg-busy','fg-unknown','fg-grant','fg-active','fg-read-fail','fg-cleanup-fail','fg-dma-error']:
+    for mode in ['normal','alloc-fail','map-fail','fg-v1','fg-v2','fg-busy','fg-unknown','fg-grant','fg-active','fg-read-fail','fg-cleanup-fail','fg-dma-error',
+                 'fg-foreign-identity','fg-readonly-pages','fg-local-preferred','fg-first-foreign',
+                 'fg-no-memif-writer','fg-no-peek-writer','fg-ambiguous-writer','fg-poisoned-writer',
+                 'fg-missing-identity','fg-missing-data','fg-observer-denied','fg-observer-timeout',
+                 'fg-v2-foreign-battinfo','fg-recovery']:
         subprocess.run([str(binary),mode],env=env,check=True,timeout=20)

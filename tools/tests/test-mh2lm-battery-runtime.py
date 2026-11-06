@@ -31,6 +31,7 @@ prelude=r'''
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstdarg>
 #include <map>
 #include <mutex>
 #include <atomic>
@@ -39,7 +40,16 @@ prelude=r'''
 #include <string>
 #include <vector>
 #define ARM64_BOARD_CONFIG_MH2LM 1
-#define SWEET_LOG_INFO(...) ((void)0)
+static std::mutex logMutex;
+static std::string logs;
+static void recordLog(const char *fmt,...) __attribute__((format(printf,1,2)));
+static void recordLog(const char *fmt,...) {
+    char buffer[2048];va_list args;va_start(args,fmt);
+    int n=vsnprintf(buffer,sizeof(buffer),fmt,args);va_end(args);
+    assert(n>=0 && static_cast<size_t>(n)<sizeof(buffer));
+    std::lock_guard<std::mutex> guard(logMutex);logs+=buffer;
+}
+#define SWEET_LOG_INFO(...) recordLog(__VA_ARGS__)
 #define SWEET_LOG_ERROR(...) ((void)0)
 using UInt32=uint32_t;
 using IOReturn=int;using vm_size_t=size_t;
@@ -257,8 +267,14 @@ int main(){
     assert(b.fLastReasons&SB_R_TELEMETRY);
     assert(!b.registry.count("Temperature") && !b.registry.count("Amperage") && !b.registry.count("InstantAmperage"));
     assert(!b.legacy.count("Amperage"));
-    failures={0x10001,0x10002,0x10003};pairFailure=false;b.sampleRuntime(true);b.publishRuntime();
+    failures={0x10001,0x10002,0x10003};pairFailure=false;logs.clear();b.sampleRuntime(true);b.publishRuntime();
     assert(!b.registry.count("DesignCapacity") && b.registry["MaxCapacity"]==100 && b.registry["SweetBatteryCapacityUsesPercent"]);
+    assert(logs.find("n-error=-10")!=std::string::npos && logs.find("l-error=-10")!=std::string::npos && logs.find("p-error=-10")!=std::string::npos);
+    assert(logs.find("SWEET BATT CONFIG: v2 valid=")!=std::string::npos);
+    regs[0x1651]=0xc2;regs[0x1653]=0x87;failures={0x1042};logs.clear();b.sampleRuntime(true);
+    assert(logs.find("enable-error=-9")!=std::string::npos && logs.find("wdog=0xc2 wdog-error=0 wdog-time=0x87 wdog-time-error=0")!=std::string::npos);
+    // A protection tick does not reprint the event-only config diagnostic.
+    logs.clear();b.sampleRuntime(false);assert(logs.find("SWEET BATT CONFIG:")==std::string::npos);
     failures.clear();pairFailure=false;fg[0]=0x3fc;b.sampleRuntime(false);
     assert(b.fSnapshot.tempValid && b.fSnapshot.tempCenti==-100);
     fg[0]=0xffff;b.sampleRuntime(false);assert(!b.fSnapshot.tempValid);
