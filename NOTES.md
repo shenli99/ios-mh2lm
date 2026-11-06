@@ -2,6 +2,44 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**LATEST RESULT: 0120a1证实observer修正，当前FG阻塞为4370 DMA错误位；尚未补恢复。**
+
+用户已提供logs/sweetlog-0120a1-battery-telemetry.bin，SHA256
+182dee0a02438f85393c06468538c09c1714c3750e363f15d3288e5a588a4862。
+v1/ring4194304/total515723/flush77，未回卷/无解码NUL。bootargsruntime1。
+793快照（16irq/777protectiontimer），startedNs跨度799.873s，V/I均有效：
+3895..3997mV、IOPM -588..+15mA。温度和n/l/p三个error全部-9，均无效。
+ROUTEv2证实REVIDppid201/APID103/write-ee4，旧要求EE0writer确实会在身份
+读取前失败；现已通过identity/REVID，进入4370的DMA状态位检查。
+其余映射241->284/243->286/246->289/247->290/248->291，write-ee0。
+ACCESS四字段均op=dma-status/addr4370/error-9。由代码能确定DMA_STS mask6
+非零（READ_ERROR bit2或WRITE_ERROR bit1），不是SPMI命令超时/NO_OWNER。
+旧日志没打印raw且pre/post检查同op，不能断言具体哪bit或首笔pre/post阶段，
+也不能证明错误由本轮写入、历史启动残留或外部EE造成。
+
+16次CONFIG全部有效且enable0/pause0/WD1651=62/time1653=8c/SMB1648=0/
+SMBCFG1690=2；pluginWD启用、BARK IRQ使能、BITE配置会禁充，不能直接声称
+已发生bark/bite或enable0由其造成。此状态与现策略要求WDoff不符，pet尚缺。
+11policy均allow0/owned0，无CONTROL；16原发布charging0/CHGR47，仍未启充。
+14次IRQ（USBIN10/source4）notification/sample1..14、healthy1；无ERROR/
+panic/mux隔离，6USB命令WARN另记。不能把配置SMB0当作并联隔离证据。
+
+本轮发现0152SAMPLE太长：每条自身输出约255字节时截断，丢newline/结束时间，
+后继文本粘连。计数按severity标记拆记录，不能用物理行数数样本；开始时间和
+错误字段仍可取，completedNs/延迟无法还原。不要称persistent ring损坏/回卷。
+实际IOLib_IOLogv无显式256buffer，尚未定位底层截断点，不乱改全局console。
+LG fg-memif.c:fg_dma_init调用fg_clear_dma_errors_if_any，以4371bit0处理DMA
+错误日志，再设置partition并release；现接口遇错误直接拒绝，缺对应恢复。
+NEXT设计有界DMAerror清理：先记录原始4370/4371及pre/post，确认idle/身份/
+独立writer、不清理本轮事务失败以静默重试、不把trigger塞稳定RMW；清理后
+验证状态、保留partition/其他bit、失败退出。与拆短SAMPLE日志一起实施再编译；
+另落实watchdog/pet及三provider，不能为了启充关WD/放宽权限。本轮仅分析/记录，
+无新内核补丁/CI/boot/push/设备操作，无需补live或重复0120a1/跑dry。
+原解码/JSON/native参考底稿scratch/artifact-0120a1/；完整结果见
+docs/BATTERY-FG-OBSERVER-ROUTES.md的0120a1实机结果。
+
+### Previous packaging handoff
+
 **CURRENT: 0120a1云产物已核对，0152三档boot已生成，待用户测telemetry持久日志。**
 
 用户报“01120a1”，实际文件logs/xnu-{kernel,buildtree}-0120a1.gz，统一按0120a1

@@ -12,6 +12,11 @@
 事件/上报代码，电池身份、VBUS实测及并联隔离provider尚缺，真实充电未验收。
 当前状态和下一步见[BATTERY-RUNTIME.md](BATTERY-RUNTIME.md)。
 
+0120a1已实测：REVID write-ee4，observer修正有效；四FG字段现停在0x4370
+DMA错误位检查，尚缺LG初始化中的有界清错/恢复。watchdog配置0x62/0x8c、
+enable0已取得，pet尚缺；SAMPLE超长截断也需修正。完整结果与边界见上述
+FG文档末节；暂不要求重复实机或运行dry档。
+
 ## 历史诊断与计划依据
 
 2026-11-05，用户希望全事件日志确认后继续电池驱动。当前USBIN与MSOC的真实

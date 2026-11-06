@@ -1,7 +1,7 @@
 # 0120 FG 读取失败与 0152 路由修正
 
 2026-11-06。0120实机遥测失败，0152完成本地修正及验证；0120a1原生云产物
-已核对并打包，待实机验证，路径与校验见文末。
+已核对并打包，首次实机日志已分析，结果与下一步见文末。
 本轮不开放主动充电。原始结果见
 [0120测试记录](BATTERY-RUNTIME-0120-TESTING.md)。
 
@@ -126,3 +126,60 @@ plain arm64、segment16K对齐、FG ROUTE/ACCESS v2、CONFIG v2及容量独立�
 停留15～30秒，导出`sweetlog-0120a1-battery-telemetry.bin`；持久日志足够，
 不额外要求live，不先测observe/dry。先看四字段有效性与FG失败位置，再看
 enable/watchdog/SMB原始配置；实机结果待用户日志。
+
+## 0120a1首次实机结果
+
+日志`logs/sweetlog-0120a1-battery-telemetry.bin`，SHA256
+`182dee0a02438f85393c06468538c09c1714c3750e363f15d3288e5a588a4862`。
+v1/ring4194304/total515723/flush77，未回卷、无解码NUL；runtime1。
+工作区`scratch/artifact-0120a1/battery-telemetry-persistent.txt`与
+`battery-telemetry-analysis.json`保存原解码与按记录分析。
+
+**0152权限分层修正已获得实机支持：** REVID实际映射PPID0x201、APID103，
+write-ee=4，旧版要求唯一EE0 writer确实会在0x0105之前拒绝。新observer
+已通过身份/revision读取，当前四字段一致停在`dma-status addr=0x4370`，
+返回-9。另有下列实际路由，均write-ee=0：
+
+| PPID | APID | 功能 |
+| --- | --- | --- |
+| 0x241 | 284 | FG BATT_INFO |
+| 0x243 | 286 | FG MEMIF |
+| 0x246 | 289 | DMA容量窗口 |
+| 0x247 | 290 | DMA学习/profile窗口 |
+| 0x248 | 291 | DMA温度窗口 |
+
+793个快照（16初始/事件、777保护timer），开始时间跨度799.873秒；全部30配置
+位有效，V/I有效，3895..3997mV、IOPM方向-588..+15mA。温度与nominal/learned/
+profile错误码均-9，值无效。此-9由DMA_STS mask0x6非零返回，指DMA read/write
+错误位，不是SPMI DENIED/超时，也不是新的owner不足。
+本日志未打印DMA_STS raw，且两处pre/post检查同用dma-status，不能判定具体
+哪个错误位、第一笔发生在哪一阶段，或断言错误来自旧启动/当前代码/外部EE。
+
+16次CONFIG均独立读取成功，值一致：
+
+| 寄存器 | 值 | 当前可下的结论 |
+| --- | --- | --- |
+| 0x1042/1043 | 0/0 | charging enable关闭，pause未置位 |
+| 0x1651 | 0x62 | plugin timer bit1和BARK IRQ bit6启用；不满足当前确认watchdog-off策略 |
+| 0x1653 | 0x8c | BITE配置为禁充；不能据配置证明已经发生超时 |
+| 0x1648/1690 | 0/0x2 | 是实际配置，仍不能代替外部SMB1355隔离证据 |
+
+watchdog依据LG smb5-reg.h与qpnp-smb5.c。未取得bark/bite IRQ或pet证据，
+不能把enable0唯一归因于watchdog。11条policy均allow0/owned0，无CONTROL
+提交，16条原发布均charging0、CHGR0x47。仍没有持续正充电电流证据。
+14次IRQ刷新（10USBIN/4source-change）计数连续且healthy1，无驱动ERROR、
+panic或mux隔离；有6条既有USB ep0/ep5命令WARN，不能拿它们解释FG错误。
+
+另发现本轮新增SAMPLE过长：输出在约255字节处截断，结束时间与换行缺失，
+与后继文本粘连。计数按记录标记而非物理行，开始时间/错误字段可用，结束
+时间不可恢复。不是ring回卷证据；底层截断位置尚未定位，先缩短驱动日志，
+无需为此修改全局console。上一轮host测试用2048字节接收未覆盖此边界，需要
+补短记录长度检查。
+
+下一步应一起补齐DMA状态raw及pre/post定位、受条件约束的DMA错误恢复，并
+拆短采样日志。LG `fg-memif.c:fg_dma_init`会先调用
+`fg_clear_dma_errors_if_any`，通过0x4371 bit0处理DMA错误日志；当前实现只有
+遇错拒绝，尚无该恢复过程。实现须确认身份/idle/写路由、保留其他控制位、
+验证错误已清除且有界，不把command放入稳定配置RMW，不在每次读失败后静默
+清错重试，也不能重置FG/profile。仍需watchdog/pet及三个证据provider。
+本轮只分析和记录，尚未新增恢复补丁；无需补live或重复当前镜像/dry测试。
