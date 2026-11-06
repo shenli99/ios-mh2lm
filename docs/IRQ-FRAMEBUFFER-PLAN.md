@@ -5,7 +5,11 @@
 详见 [`BATTERY-IMPLEMENTATION-PLAN.md`](BATTERY-IMPLEMENTATION-PLAN.md)。
 先完成共享访问、真实测量与保护策略，再验证受控充电/CHGR事件及运行期恢复。
 容量学习、profile重载、快充/无线等后续扩展不作为本轮IRQ验收前置。framebuffer
-继续按原顺序在IRQ基本验收后推进；本轮仅写计划。
+继续按原顺序在IRQ基本验收后推进。当前已开始第1段：0150受限SPMI接口、
+与mux共享RW超时状态和可选只读预检已完成本地验证，尚待合批构建/实机。
+接口边界见[BATTERY-SPMI-TRANSPORT.md](BATTERY-SPMI-TRANSPORT.md)，后续按
+[BATTERY-TELEMETRY-CHECKLIST.md](BATTERY-TELEMETRY-CHECKLIST.md)补第2段；
+当前没有运行期充电策略写入。
 
 **当前进度：** 0119 mode4已实测三次独立MSOC中断，拔线期间电量由74%下降至
 73/72/71%，与四次USBIN刷新区分，三键/触摸继续工作；之前mode3息屏插拔唤屏

@@ -1,0 +1,447 @@
+From: ios-mh2lm
+Subject: mh2lm: add restricted charger transport and shared RW timeout state
+
+Keep the legacy observer policy unchanged. Add fixed-USID2 byte reads and
+atomic masked configuration updates with unique EE0 ownership, bounded v5
+transactions and readback. Share poisoned RW lanes with the IRQ mux. No
+charging-policy write caller is added. Optional sweetbatttransport=1 runs
+one read-only preflight on the battery workloop; protections/control follow.
+
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -1,7 +1,8 @@
+ /*
+  * Battery observer EXT_READL and shared PMIC-arb transaction serialization.
+  * Observer API remains read only. Keys and mux IRQ writes share its lock.
+- * No charger configuration or PMIC write API is provided here.
++ * A separate MH2LM charger table permits bounded, verified configuration RMW.
++ * No charging policy invokes these writes until its protections are ready.
+  * Initialization is serialized across battery and late board services.
+  * Disjoint APIDs do not exempt commands from controller serialization.
+  */
+@@ -10,11 +11,15 @@
+ #include <sys/systm.h>
+ #include <machine/machine_routines.h>
+ #include <IOKit/IOLocks.h>
++#include <mach/vm_param.h>
++#include <vm/memory_types.h>
+ #include <pexpert/arm64/sweet_dev.h>
+ #include "sweet_spmi.h"
+ #include "sweet_log_level.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned int);
++extern void ml_io_unmap(vm_offset_t, vm_size_t);
+ 
+ #define SP_CORE_PA SWEET_DEV_SPMI_CORE_PA
+ #define SP_CHNLS_PA SWEET_DEV_SPMI_CHNLS_PA
+@@ -35,6 +40,9 @@
+ static bool sp_attempted, sp_ready;
+ /* A timed-out command may complete late: never reuse that lane this boot. */
+ static bool sp_poisoned[512];
++/* RW and observer are distinct lanes. All RW users (including mux) share this
++ * state under sp_lock so a late command cannot corrupt another component. */
++static bool sp_rw_poisoned[512];
+ 
+ static uint32_t
+ sp_rd(vm_offset_t base, unsigned off)
+@@ -258,6 +266,234 @@
+ {
+ 	IOLockUnlock(sp_lock);
+ }
++
++int
++sweet_spmi_rw_poisoned_locked(unsigned apid)
++{
++	return apid >= sp_count || apid >= 512 || sp_rw_poisoned[apid];
++}
++
++void
++sweet_spmi_rw_poison_locked(unsigned apid)
++{
++	if (apid < sp_count && apid < 512) {
++		sp_rw_poisoned[apid] = true;
++	}
++}
++
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++/* LG smb5-reg.h / smb5-lib.c. These CMD bits are persistent controls (Linux
++ * uses masked writes); pulse/W1C commands intentionally have no writer here.
++ * Security unlock, SRAM, parallel charger override and IRQ offsets are absent.
++ * This table describes access semantics, not approval to enable charging. */
++struct sp_charger_register {
++	uint16_t addr;
++	uint8_t write_mask;
++};
++static const struct sp_charger_register sp_charger_registers[] = {
++	{0x1006, 0}, {0x1007, 0}, {0x100b, 0}, {0x100d, 0},
++	{0x1042, 0x01}, {0x1043, 0x01}, {0x1051, 0},
++	{0x1061, 0xff}, {0x1067, 0}, {0x1068, 0}, {0x1069, 0}, {0x106a, 0},
++	{0x106b, 0}, {0x106c, 0}, {0x1070, 0xff}, {0x1072, 0},
++	{0x107d, 0}, {0x107e, 0}, {0x107f, 0}, {0x1090, 0},
++	{0x1107, 0}, {0x1108, 0}, {0x110b, 0},
++	{0x1307, 0}, {0x1308, 0}, {0x1310, 0},
++	{0x1340, 0x01}, {0x1342, 0x01}, {0x1365, 0x10},
++	{0x1366, 0x07}, {0x1370, 0xff}, {0x1380, 0x9c},
++	/* Only these Type-C status bytes; no peripheral-wide permission. */
++	{0x1506, 0}, {0x1509, 0}, {0x150b, 0},
++	{0x1648, 0}, {0x1651, 0}, {0x1653, 0}, {0x1661, 0}, {0x1690, 0}
++};
++
++static const struct sp_charger_register *
++sp_charger_register(unsigned sid, unsigned addr)
++{
++	if (sid != 2u || addr > 0xffffu) {
++		return NULL;
++	}
++	for (unsigned i = 0; i < sizeof(sp_charger_registers) /
++	    sizeof(sp_charger_registers[0]); ++i) {
++		if (sp_charger_registers[i].addr == addr) {
++			return &sp_charger_registers[i];
++		}
++	}
++	return NULL;
++}
++
++/* Called with sp_lock held. The IRQ-owner bit is intentionally independent:
++ * v5 may map IRQ and write ownership to different APIDs for one peripheral. */
++static int
++sp_charger_route(unsigned sid, unsigned addr, struct sweet_spmi_charger_route *out)
++{
++	uint32_t version = sp_rd(sp_core, 0);
++	if (version < 0x50000000u || version >= 0x60000000u) {
++		return SWEET_SPMI_UNSUPPORTED;
++	}
++	uint16_t found = SP_NO_APID;
++	uint8_t irq_owner = 0;
++	unsigned ppid = (sid << 8) | (addr >> 8);
++	for (unsigned apid = 0; apid < sp_count; ++apid) {
++		uint32_t map = sp_rd(sp_core, SP_APID_MAP_OFF + 4u * apid);
++		if (!map || ((map >> 8) & 0xfffu) != ppid ||
++		    (sp_rd(sp_cfg, SP_OWNERSHIP_OFF + 4u * apid) & 7u) != 0) {
++			continue;
++		}
++		if (found != SP_NO_APID) {
++			return SWEET_SPMI_AMBIGUOUS;
++		}
++		found = (uint16_t)apid;
++		irq_owner = (map & SP_IRQ_OWNER_BIT) != 0;
++	}
++	if (found == SP_NO_APID) {
++		return SWEET_SPMI_NO_OWNER;
++	}
++	*out = (struct sweet_spmi_charger_route){found, 0, irq_owner};
++	return SWEET_SPMI_OK;
++}
++
++static void
++sp_wr(vm_offset_t base, unsigned off, uint32_t value)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = value;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++/* A DONE error has completed and can be reported without retry. A timeout is
++ * different: the lane must be poisoned before releasing the controller lock. */
++static int
++sp_charger_wait(vm_offset_t lane)
++{
++	for (unsigned i = 0; i < 1000; ++i) {
++		uint32_t status = sp_rd(lane, 0x08u);
++		if (status & 1u) {
++			if (status & 4u) { return SWEET_SPMI_DENIED; }
++			if (status & 8u) { return SWEET_SPMI_DROPPED; }
++			if (status & 2u) { return SWEET_SPMI_IO; }
++			return SWEET_SPMI_OK;
++		}
++		delay(1);
++	}
++	return SWEET_SPMI_TIMEOUT;
++}
++
++/* Owned observer read; caller holds sp_lock, validated table and route. */
++static int
++sp_charger_read_locked(unsigned apid, unsigned addr, uint8_t *out)
++{
++	if (sp_poisoned[apid]) {
++		return SWEET_SPMI_POISONED;
++	}
++	vm_offset_t lane = sp_obs + 0x80u * apid;
++	sp_wr(lane, 0, (1u << 27) | ((addr & 0xffu) << 4));
++	int result = sp_charger_wait(lane);
++	if (result == SWEET_SPMI_TIMEOUT) {
++		sp_poisoned[apid] = true;
++		SWEET_LOG_ERROR("SWEET CHARGER IO: observer timeout addr=%#x apid=%u; lane poisoned\n",
++		    addr, apid);
++	}
++	if (result == SWEET_SPMI_OK) {
++		*out = (uint8_t)sp_rd(lane, 0x18u);
++	}
++	return result;
++}
++
++int
++sweet_spmi_charger_get_route(unsigned sid, unsigned addr,
++    struct sweet_spmi_charger_route *out)
++{
++	if (!out || !sp_charger_register(sid, addr)) {
++		return SWEET_SPMI_INVALID;
++	}
++	if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) {
++		return SWEET_SPMI_NOT_READY;
++	}
++	IOLockLock(sp_lock);
++	int result = sp_charger_route(sid, addr, out);
++	IOLockUnlock(sp_lock);
++	return result;
++}
++
++int
++sweet_spmi_charger_read(unsigned sid, unsigned addr, uint8_t *out)
++{
++	if (!out || !sp_charger_register(sid, addr)) {
++		return SWEET_SPMI_INVALID;
++	}
++	if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) {
++		return SWEET_SPMI_NOT_READY;
++	}
++	struct sweet_spmi_charger_route route;
++	IOLockLock(sp_lock);
++	int result = sp_charger_route(sid, addr, &route);
++	if (result == SWEET_SPMI_OK) {
++		result = sp_charger_read_locked(route.apid, addr, out);
++	}
++	IOLockUnlock(sp_lock);
++	return result;
++}
++
++int
++sweet_spmi_charger_update(unsigned sid, unsigned addr, unsigned mask,
++    unsigned value, uint8_t *verified)
++{
++	const struct sp_charger_register *reg = sp_charger_register(sid, addr);
++	if (!verified || !reg || !mask || (mask & ~reg->write_mask) ||
++	    (value & ~mask)) {
++		return SWEET_SPMI_INVALID;
++	}
++	if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) {
++		return SWEET_SPMI_NOT_READY;
++	}
++	struct sweet_spmi_charger_route route;
++	uint8_t old = 0, actual = 0;
++	vm_offset_t channel = 0;
++	IOLockLock(sp_lock);
++	int result = sp_charger_route(sid, addr, &route);
++	if (result == SWEET_SPMI_OK && sweet_spmi_rw_poisoned_locked(route.apid)) {
++		result = SWEET_SPMI_POISONED;
++	}
++	if (result == SWEET_SPMI_OK) {
++		result = sp_charger_read_locked(route.apid, addr, &old);
++	}
++	uint8_t next = (old & ~mask) | value;
++	if (result == SWEET_SPMI_OK && old != next) {
++		/* Temporary kernel_map allocation; never unmap permanent ml_io_map. */
++		channel = ml_io_map_unmappable(
++		    SP_CHNLS_PA + SP_CHNLS_APID_STRIDE * route.apid, 0x1000, VM_WIMG_IO);
++		if (!channel) {
++			result = SWEET_SPMI_MAP_FAILED;
++		} else {
++			sp_wr(channel, 0x10u, next);
++			sp_wr(channel, 0, (addr & 0xffu) << 4); /* EXT_WRITEL, BC=0 */
++			result = sp_charger_wait(channel);
++			if (result == SWEET_SPMI_TIMEOUT) {
++				sweet_spmi_rw_poison_locked(route.apid);
++			}
++		}
++		if (result == SWEET_SPMI_OK) {
++			result = sp_charger_read_locked(route.apid, addr, &actual);
++			if (result == SWEET_SPMI_OK && ((actual ^ next) & mask)) {
++				result = SWEET_SPMI_VERIFY;
++			}
++		}
++	} else {
++		actual = old; /* no-change success needs no RW mapping or command */
++	}
++	if (channel) {
++		ml_io_unmap(trunc_page(channel), round_page(0x1000 + (channel & PAGE_MASK)));
++	}
++	if (result == SWEET_SPMI_OK) {
++		*verified = actual;
++	}
++	IOLockUnlock(sp_lock);
++	if (result != SWEET_SPMI_OK) {
++		SWEET_LOG_ERROR("SWEET CHARGER IO: update addr=%#x mask=%#x value=%#x error=%d; hardware state unconfirmed\n",
++		    addr, mask, value, result);
++	}
++	return result;
++}
++#endif /* ARM64_BOARD_CONFIG_MH2LM */
+ 
+ int
+ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+diff --git a/bsd/dev/sweet_spmi.h b/bsd/dev/sweet_spmi.h
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -18,6 +18,54 @@
+  * This does not authorize arbitrary PMIC writes. */
+ void sweet_spmi_irq_lock(void);
+ void sweet_spmi_irq_unlock(void);
++/* RW timeout state is shared with the IRQ mux. Caller MUST hold the above
++ * lock. Invalid APIDs fail closed. There is no reset/retry during this boot. */
++int sweet_spmi_rw_poisoned_locked(unsigned apid);
++void sweet_spmi_rw_poison_locked(unsigned apid);
++
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++/* Restricted charger transport, NOT a charging policy or a control lease.
++ * Thread context only, after init; functions acquire the shared lock internally.
++ * Fixed USID2/register table, single-byte accesses, unique EE0 write owner and
++ * v5 required. IRQ ownership is separate and is NOT required for these APIs.
++ * All outputs are unchanged on failure. No automatic retry or rollback.
++ * A failed update may already have changed hardware; caller must enter its
++ * control fault path, never infer that the old value has been restored.
++ * Do not call from mux callbacks while its gate/transport lock is held. */
++enum sweet_spmi_result {
++	SWEET_SPMI_OK = 0,
++	SWEET_SPMI_INVALID = -1,
++	SWEET_SPMI_NOT_READY = -2,
++	SWEET_SPMI_UNSUPPORTED = -3,
++	SWEET_SPMI_NO_OWNER = -4,
++	SWEET_SPMI_AMBIGUOUS = -5,
++	SWEET_SPMI_MAP_FAILED = -6,
++	SWEET_SPMI_DENIED = -7,
++	SWEET_SPMI_DROPPED = -8,
++	SWEET_SPMI_IO = -9,
++	SWEET_SPMI_TIMEOUT = -10,
++	SWEET_SPMI_POISONED = -11,
++	SWEET_SPMI_VERIFY = -12
++};
++struct sweet_spmi_charger_route {
++	uint16_t apid;
++	uint8_t write_ee;
++	uint8_t irq_owner;
++};
++/* Metadata only; no PMIC command or RW channel mapping. */
++int sweet_spmi_charger_get_route(unsigned sid, unsigned addr,
++	struct sweet_spmi_charger_route *out);
++/* Exact readable-register table. Does not widen sweet_spmi_read's whitelist. */
++int sweet_spmi_charger_read(unsigned sid, unsigned addr, uint8_t *out);
++/* Stable configuration only. mask must be nonzero and a subset of the table;
++ * value must contain no bits outside mask. Read/modify/write/readback is atomic
++ * against all local controller users. W1C/trigger, IRQ, SRAM and secure writes
++ * are rejected. Verified output is the actual byte, including preserved bits.
++ * Unchanged values submit no write. This API performs no physical-unit limits;
++ * the future battery controller must validate limits/protection before calling. */
++int sweet_spmi_charger_update(unsigned sid, unsigned addr, unsigned mask,
++	unsigned value, uint8_t *verified);
++#endif /* ARM64_BOARD_CONFIG_MH2LM */
+ /* Logs PMIC-arb v5 routing state for the PM8150B charger/USB peripherals.
+  * This is a read-only bring-up probe: it never enables, clears, or claims
+  * an interrupt. Call only after sweet_spmi_init() outside primary IRQ context. */
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -122,6 +122,9 @@
+ 	static void irqNotify(void *context, unsigned events);
+ 	static void irqAction(OSObject *owner, IOInterruptEventSource *, int count);
+ 	static IOReturn startIrqAction(OSObject *owner, void *, void *, void *, void *);
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	static IOReturn transportPreflightAction(OSObject *owner, void *, void *, void *, void *);
++#endif
+ 	void tryAttachIrq(void);
+ 	void failIrq(const char *reason);
+ 	bool preflightIrq(void);
+@@ -1023,6 +1026,53 @@
+ 	sender->setTimeoutMS(SWEET_BATT_POLL_MS);
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++/* One-shot, explicit read-only access preflight on the consumer's own loop.
++ * Never call this from registry matching or interpret it as control approval.
++ * Missing/invalid values retain their errors rather than becoming zero. */
++IOReturn
++SweetBattery::transportPreflightAction(OSObject *owner, void *, void *, void *, void *)
++{
++	SweetBattery *self = OSDynamicCast(SweetBattery, owner);
++	if (!self || !self->fRunning || !self->fSid2) {
++		return kIOReturnNotReady;
++	}
++	SWEET_LOG_INFO("SWEET CHARGER PREFLIGHT: restricted transport v1; read-only, no control acquired\n");
++	const unsigned registers[] = {
++		0x1042, 0x1043, 0x1061, 0x1070,
++		0x1107, 0x1108, 0x110b,
++		0x1307, 0x1308, 0x1340, 0x1342, 0x1365, 0x1366, 0x1370, 0x1380,
++		0x1506, 0x1509, 0x150b,
++		0x1648, 0x1651, 0x1653, 0x1690
++	};
++	for (unsigned i = 0; i < sizeof(registers) / sizeof(registers[0]); ++i) {
++		unsigned addr = registers[i];
++		struct sweet_spmi_charger_route route;
++		int result = sweet_spmi_charger_get_route(SWEET_BATT_SID, addr, &route);
++		if (result != SWEET_SPMI_OK) {
++			SWEET_LOG_WARN("SWEET CHARGER PREFLIGHT: addr=%#x route-error=%d value=unknown\n",
++			    addr, result);
++			continue;
++		}
++		uint8_t value = 0;
++		uint64_t sampled, ns;
++		result = sweet_spmi_charger_read(SWEET_BATT_SID, addr, &value);
++		clock_get_uptime(&sampled);
++		absolutetime_to_nanoseconds(sampled, &ns);
++		if (result == SWEET_SPMI_OK) {
++			SWEET_LOG_INFO("SWEET CHARGER PREFLIGHT: sid=2 addr=%#x apid=%u write-ee=%u irq-owner=%u raw=%#x at-ns=%llu\n",
++			    addr, route.apid, route.write_ee, route.irq_owner, value,
++			    (unsigned long long)ns);
++		} else {
++			SWEET_LOG_WARN("SWEET CHARGER PREFLIGHT: sid=2 addr=%#x apid=%u read-error=%d value=unknown at-ns=%llu\n",
++			    addr, route.apid, result, (unsigned long long)ns);
++		}
++	}
++	SWEET_LOG_INFO("SWEET CHARGER PREFLIGHT: complete; write permission not exercised, charging policy absent\n");
++	return kIOReturnSuccess;
++}
++#endif /* ARM64_BOARD_CONFIG_MH2LM */
++
+ bool
+ SweetBattery::start(IOService *provider)
+ {
+@@ -1090,6 +1140,13 @@
+ 		if (fLoop && fTimer && fLoop->addEventSource(fTimer) == kIOReturnSuccess) {
+ 			fTimerAdded = true;
+ 			fRunning = true;
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++			int transport = 0;
++			(void)PE_parse_boot_argn("sweetbatttransport", &transport, sizeof(transport));
++			if (fSid2 && transport == 1) {
++				(void)fLoop->runAction(&SweetBattery::transportPreflightAction, this);
++			}
++#endif
+ 			if (fIrqMode >= 2) {
+ 				fIrqEvent = IOInterruptEventSource::interruptEventSource(this, &SweetBattery::irqAction, NULL, 0);
+ 				if (fIrqEvent && fLoop->addEventSource(fIrqEvent) == kIOReturnSuccess) {
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -197,6 +197,13 @@
+ 		return false;
+ 	}
+ 	sweet_spmi_irq_lock();
++	if (sweet_spmi_rw_poisoned_locked(route.apid)) {
++		route.writePoisoned = true;
++		sweet_spmi_irq_unlock();
++		SWEET_LOG_ERROR("SWEET MUX: RW lane poisoned route=%s apid=%u; write refused\n",
++		    route.name, route.apid);
++		return false;
++	}
+ 	write32(route.channel, 0x10u, data);
+ 	write32(route.channel, 0x00u, ((reg & 0xffu) << 4) | (bytes - 1u));
+ 	for (unsigned i = 0; i < 1000; ++i) {
+@@ -213,6 +220,7 @@
+ 	}
+ 	/* A timed-out RW command can complete late. Never reuse that APID,
+ 	 * including the power/volume-down pair which shares a key lane. */
++	sweet_spmi_rw_poison_locked(route.apid);
+ 	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+ 		if (routes[i].apid == route.apid) {
+ 			routes[i].writePoisoned = true;

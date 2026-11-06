@@ -2,27 +2,39 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
-**CURRENT USER TASK: battery implementation PLANNING ONLY, six segments documented.**
-User requests task breakdown after historical explanation. New active plan
-docs/BATTERY-IMPLEMENTATION-PLAN.md:1sharedtransport/controlinterfaces,
-2realtelemetry/config/topology,3policy/protectiondryrun,4firstcontrolledcharge,
-5runtimeevents/thermal/recovery,6IOPM/capacitycleanup/regression. Each has
-deliverables/exitcriteria. NEXTimplementationstage1+stage2evidencelist, not
-anothernoUSBtest. This turn changes ONLYdocs; no implementation/boot/control.
-0149diagnostics canjoinfirstbatch, don'tinsistonstandalonecloudbuild.
-PreserveIOResourcesbattery/registrymuxclient/sharedtransportlock/ownworkloop/
-IOPMPowerSource; no newglobals. Chargingwriter belongs transport,notmuxIRQAPI.
-Telemetryrequiresrealtemp(validatedSRAMsessionorprovenRRADC),IBATTpair,
-ICLmode/settled,FCC/FV/ITERM/recharge/protection/watchdog,physicalbatterybounds
-andparallelpath. Unknownsblockcontrol;controlrequiresallguardsBEFOREenable.
-NoassumptionunmanagedSMB1355inactiveorVBUS5VjustbecauseXNUdidn'tnegotiate.
-Stage4limitedsessionwithactivethermal/expiry/faultstop alreadyimplemented;
-notenablefirstandaddprotectionlater. Stage5timersforthermals/telemetry/WDOG
-allowed&explicit,NOT2spollfallback. Failurecan'tguaranteeIObusdisable;logfault.
-Batch1aimstages1..3withmultipleprofiles;controlprofiledefaultoffandmustpass
-preconditions. No fixedCIroundpromise. Advancedlearning/profilewrites/fast/
-wireless aren'tIRQclosureblockers. UpdatesNEXT/IRQroadmap,preserveframebuffer
-afterbasicIRQacceptance. Userpush/fastboot;doNOTstartdriverworkthisplanningturn.
+**CURRENT USER TASK: 开始实现电池驱动，已落地第1段 transport，下一步第2段。**
+
+用户已授权实施，不再是planning-only。父提交67b8d5c为六段计划。
+本轮0150 `xnu/patches/0150-mh2lm-charger-transport.patch`：
+- 新MH2LM/USID2/v5精确表接口get_route/read/update，唯一EE0 writer，IRQ-owner
+  独立；旧observer白名单/采样保持。原子RMW、请求mask回读、详细错误、不重试。
+- RW timeout poison放共享transport，mux写前同锁检查，timeout同锁发布，
+  两边禁止复用lane；mux写权限未扩大。
+- RW使用临时unmappable映射并正确16K解除，未引入新服务/consumer全局桥接。
+- sweetbatttransport=1默认关闭，电池own workloop一次只读路由/配置预检，
+  不在matched回调做访问，无新timer/策略写调用者；无充电控制权接管。
+- tools/mk-mh2lm-event-matrix.sh --battery-transport可在未来新产物生成
+  battery-observe和battery-transport，同核保留mode4/keys/ACM/touch。尚无新boot。
+- CircleCI实际bash build.sh未改，仅补0150 source markers；YAML/source gate
+  接受0150/拒绝0149通过。不要把此变更归因成CI编译命令调整。
+
+本地验证：实际transport+实际mux写+实际电池预检host ASAN/UBSAN测试通过，
+含owner/范围/掩码/版本拒绝、初始化/映射失败、并发RMW与mux写、status error、
+回读失败/不符、双向timeoutpoison、逐项unknown、无预检策略写和资源平衡。
+旧SPMI套件+10次并发、mux/consumer套件+80次竞争、0149诊断回归均通过。
+严格apply后23个选定文件byte equal；sweet_spmi.c/mux.cpp/battery.cpp ARM64
+单文件编译通过（Linux clang19+既有CI headers及builtin兼容定义，不是完整链接）。
+工作底稿scratch/charge-transport-0119/{base,edited,verify,compile.py,*.compile.txt}。
+接口/锁顺序/错误/限制：docs/BATTERY-SPMI-TRANSPORT.md。
+
+下一步按docs/BATTERY-TELEMETRY-CHECKLIST.md落实第2段，补真实snapshot和
+Gen4 SRAM有界request/grant/read/release温度/身份接口；v1 DMA workaround按
+REVID，grant等待不能占共享锁。当前充电RMW明确拒绝SRAM/脉冲/IRQ/parallel写。
+温度25°C、容量5020仍占位；电流已有diag未完整IOPM发布。并联SMB1355隔离、
+电池上限、输入/高压/watchdog/退出保护未闭合，不得开启1042。
+第1段本地实现不是实机验收，route metadata不能证明实际写被硬件允许。
+尽量将0149/0150与第2～3段合并一次云编译，不需要用户现在单独push或测旧
+noUSB档。没有push/fastboot/设备操作；继续由用户执行。
 
 **LATEST historical charging audit: inherited-enabled hypothesis supported, NO new boot/build needed.**
 User corrected framing: XNU never enablescharging, so en0 persistence is expected,

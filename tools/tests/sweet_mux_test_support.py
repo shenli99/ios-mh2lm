@@ -186,6 +186,13 @@ extern "C" void ml_io_unmap(vm_offset_t a, vm_size_t n) {
 }
 extern "C" void sweet_spmi_irq_lock() { assert(lockDepth++ == 0); }
 extern "C" void sweet_spmi_irq_unlock() { assert(--lockDepth == 0); }
+static bool rwLanePoison[512];
+extern "C" int sweet_spmi_rw_poisoned_locked(unsigned apid) {
+    assert(lockDepth==1);return apid>=512 || rwLanePoison[apid];
+}
+extern "C" void sweet_spmi_rw_poison_locked(unsigned apid) {
+    assert(lockDepth==1 && apid<512);rwLanePoison[apid]=true;
+}
 extern "C" int sweet_spmi_read(unsigned sid, unsigned a, uint8_t *v) {
     if ((a >> 8) == failReadPer) return -1;
     assert(lockDepth == 0); // the API itself acquires the observer lock
