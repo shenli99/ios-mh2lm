@@ -109,3 +109,35 @@ USBIN/source、按键/触摸/ACM 是否继续正常。若出现 post 错误或�
 本轮不开放主动充电。实际电池身份/上限、实测 VBUS/输入能力、已证明的并联
 隔离 provider 仍缺，`fLimits` 仍为空；watchdog/pet 未实现，不自动关 watchdog
 绕过保护。先恢复测量，再补这些依赖和实际充电验收。
+
+## 0120a2 云产物与最终 boot（2026-11-06）
+
+用户已下载 kernel/buildtree 两份归档；无对应构建日志/CI run ID，不推测运行号。
+原生 buildtree 24 个选定文件与 `scratch/fg-dma-0120a1/verify/xnu` 逐字节一致，
+包含 0153；完整 source gate 通过。kernel manifest、plain arm64/subtype0、
+16K segment 对齐、16 个新旧诊断 marker、6 个 FG/charger/PM 定义符号均通过。
+
+- `xnu-kernel-0120a2.gz` SHA256：`83c4cba78e1cb8f0970cb9d79acb8e11cdbb4a1a268345b788ef854519767c00`。
+- `xnu-buildtree-0120a2.gz` SHA256：`b48d243cf5791bbbf35839a076c9cbf3ff06c3d4999783774f11ce08c354fad3`。
+- `kernel_sha256` SHA256：`191c424d1683ca4d3137ee72589377f86ad66c8f5abb35c0bbf713ed4b4daf56`。
+
+使用本仓库 `tools/mk-mh2lm-event-matrix.sh` 的 `--battery-runtime` 生成三档，
+每档 35,667,968 字节。再次从最终 Android boot 镜像读回 FAT，核对 kernel、
+ADT、TOML、无重复参数；boot 内固件与既有 `kernel-32m.blob` 相同。
+保留 cpus8、真实 SID2 电池、mode4、按键和 USB ACM 参数；runtime 分别为
+省略/1/2，无控制档。
+
+| 文件（位于 `/home/shenli/work1/out-bs/`） | SHA256 |
+| --- | --- |
+| `boot-16k-0120a2-battery-runtime-observe.img` | `e4532142e7412673b0681242a46cd08acc32fd465699029009a2850086fb4568` |
+| `boot-16k-0120a2-battery-telemetry.img` | `b141c3d93a15e00bc9e536871efd94d9c06cd44a5fa76933b90bf74f1eb0dd2f` |
+| `boot-16k-0120a2-battery-policy-dry.img` | `32af6f6745107c2f50e1392bf576af01bc4c3fa0fc7d9a42d33b2a1ec2020336` |
+
+先测试 `boot-16k-0120a2-battery-telemetry.img`。启动后停留约一分钟，USB 插拔
+两轮，每种状态等待 15～30 秒，导出 `sweetlog-0120a2-battery-telemetry.bin`。
+持久日志足以保留首次 DMA pre/recovery；暂不要求先跑 observe/dry 或补 live。
+本轮只核对与打包，未 push、未操作设备，尚无 0120a2 实机结论。
+
+核对脚本、原生选定源码、三档 TOML 和结果在
+`/home/shenli/work1/scratch/artifact-0120a2/`，见 `verification.json`、
+`verify-artifact.py`、`verify-images.py`、`packaging.txt`。

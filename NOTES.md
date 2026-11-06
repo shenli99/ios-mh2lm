@@ -2,6 +2,30 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**CURRENT: 0120a2云产物已核对，0153三档boot已生成，待用户先测telemetry持久日志。**
+
+本轮只核对/打包/记录，不改驱动或CI、未push/设备操作。logs两份0120a2归档
+原生24选定文件与scratch/fg-dma-0120a1/verify/xnu逐字节相同，0153生效；完整
+sourcegate、manifest、plainarm64/subtype0/16Ksegment、16marker/6定义符号通过。
+kernelSHA191c424d1683ca4d3137ee72589377f86ad66c8f5abb35c0bbf713ed4b4daf56。
+无对应buildlog/CIrunID，不编造。归档SHA和三bootSHA详见
+ docs/BATTERY-FG-DMA-RECOVERY.md 的0120a2节。
+
+使用--battery-runtime生成out-bs/boot-16k-0120a2-battery-telemetry.img、
+boot-16k-0120a2-battery-policy-dry.img、boot-16k-0120a2-battery-runtime-observe.img，
+均35667968字节。从最终boot再次读回FAT核对kernel/ADT/TOML，参数无重复、
+realSID2/mode4/keys/ACM保留、runtime分别1/2/省略；固件blob未变。
+原生源码、脚本、TOML、verification.json在scratch/artifact-0120a2/。
+
+NEXT用户先telemetry，约60秒+插拔两轮/每状态15～30秒，导出
+sweetlog-0120a2-battery-telemetry.bin即可，无需先observe/dry或补live/旧noUSB。
+分析首次DMApre/recovery原值/有效性、清错结果、四FG字段error、完整TIME，
+再核对共享IRQ健康。没有0120a2实机证据；不能提前称DMA/温度/容量恢复。
+本轮仍不启充，电池身份/限值、实际VBUS/输入能力/并联隔离provider和WDpet缺口
+未消失。正常显示或外接电源不等于本驱动已恢复真实充电。
+
+### Previous 0153 implementation handoff
+
 **CURRENT: 0153已本地完成，待用户push/云编译；先验证FG遥测，不启充。**
 
 用户“那继续吧”后完成首次FG DMA清错与短日志，实现提交47fa07e。
