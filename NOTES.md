@@ -2,6 +2,47 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
+**CURRENT: 0154硬件接口收敛/ADC5只读预检已本地完成，提交ca6927f；待用户push/云构建。**
+
+用户要求按XNU常见模式、复用接口，避免上层穿透读写寄存器。新增0154，
+10个内核文件：runtime回调改为sweet_charger_execute固定操作/物理mA,mV/
+verified/uptime期限；地址编码在内部后端，每次物理更新检查deadline（含
+softwareICL模式内部三次），仅ENABLE0禁充免期限。复用现有受限SPMI原子
+更新/回读，无新写权限；原PM停止互锁保留。新runtime采样迁至内部
+SweetPmicPower组件，仍调用原SPMI/FG API，采样/事件/缓存语义保留。
+这些是现有服务内部无状态组件，不是新IOService/provider或单例桥接。
+SweetBattery仍拥有IOPMPowerSource/workloop/发布/生命周期；旧baseline/
+IRQ采样/历史诊断仍保留transport调用，不宣称整个服务已无寄存器知识。
+
+新增sweet_spmi_adc5_inspect固定SID2/user31/cal37，只读13字段；返回raw/
+逐字段error/valid以及独立observer、唯一EE0writer、唯一EE0IRQowner归属。
+可读≠可写≠可接IRQ；无转换/ADC写/IRQarming/新MMIO映射/白名单扩大。
+旧ADC数据明确measurement-valid0，不用于VBUS/电池ID/限制放行。
+--battery-runtime的telemetry新增sweetbattadcdiag1，在自己loop一次预检、
+早于consumer注册；同时沿用charger只读preflight。dry/observe参数不变。
+匹配/IRQ上半部无重SPMI。按键/USB/触摸IRQ-only和muxconsumer未改。
+
+本地严格apply及29文件byteequal；58transport/FG/语义/ADC ASAN+UBSAN场景，
+runtime策略/真实采样/发布/stop、11次物理写各步failure/expiry及100PMrace，
+mux全套+80race、SPMI+10并发均通过、无sanitizer诊断。四ARM64单文件编译
+通过（旧CIheaders/LinuxClang兼容，含头文件/严格诊断警告，非native全构建）。
+完整CIgate接受0154拒绝0153，actual build.sh前缀byteequal；YAML/bash-n/
+telemetry唯一ADC参数/ADC记录255byte预算通过，打包器拒绝旧0120a2内核。
+底稿scratch/battery-interfaces-0120a2/{base,edited,verify,strict-apply,
+*tests.txt,validation-results.json}。详细文档docs/BATTERY-HARDWARE-INTERFACES.md，
+runtime/NEXT/计划/当前架构/路线图同步。无push/新云构建/新boot/设备操作。
+
+NEXT用户push后下载下一编号产物，先核对0154源/符号/marker再用
+--battery-runtime打包。先telemetry约60秒+插拔两轮/每状态15～30秒，导出
+持久日志，查HARDWAREv1与ADC5PREFLIGHT/ROUTE/FIELD、原FG/共享IRQ健康；
+无需先dry或重复旧USB实验。没有0154实机证据。下一步实际ADC provider
+应有IOService/自己的loop并经现mux接EOC，初始化不在matched。SMB1355
+SE4I2C0c仍缺provider，watchdog触发pet未实现。电池身份/限值、实测VBUS/
+输入能力/并联隔离与WD保护未闭环，fLimits仍unknown、不开放充电或控制档。
+0120a2遥测通过≠0154通过≠真实充电恢复。下方保留0120a2确切实机证据。
+
+### Previous 0120a2 telemetry result
+
 **LATEST RESULT: 0120a2初始DMA清错/温度容量/短日志实机通过；转向provider和watchdog缺口。**
 
 用户已导出logs/sweetlog-0120a2-battery-telemetry.bin，SHA256
