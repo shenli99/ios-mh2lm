@@ -1,7 +1,7 @@
 # 电池硬件接口与 ADC5 预检（0154）
 
-2026-11-06，承接0120a2已验证的FG遥测。0154完成本地实现/测试，尚无本轮
-云构建或实机结果。本轮先固定接口边界并取得ADC5访问依据；未完成ADC测量、
+2026-11-06，承接0120a2已验证的FG遥测。0154完成本地实现/测试，0120a3云
+产物已核对并打包，尚无本轮实机结果。本轮先固定接口边界并取得ADC5访问依据；未完成ADC测量、
 电池身份验证、并联控制或watchdog维护，仍不开放受控充电。
 
 ## 服务、策略与硬件边界
@@ -105,8 +105,8 @@ CircleCI只增加源码门禁：完整门禁接受0154、拒绝0153，实际buil
 逐字节未变；YAML、打包脚本语法、telemetry参数和ADC日志255字节预算检查通过。
 本地底稿：`/home/shenli/work1/scratch/battery-interfaces-0120a2/validation-results.json`。
 
-用户push并下载下一编号产物后，核对新源码/符号和marker，再用
-`--battery-runtime`生成同核三档。先测telemetry：稳定约60秒，插拔两轮、
+0120a3产物已核对新源码/符号和marker，并用`--battery-runtime`生成同核三档。
+镜像与SHA见[BATTERY-RUNTIME-0120-TESTING.md](BATTERY-RUNTIME-0120-TESTING.md)。先测telemetry：稳定约60秒，插拔两轮、
 每状态15～30秒，导出持久日志即可；无需先dry或重复旧USB日志实验。
 检查HARDWARE v1、ADC5 PREFLIGHT/ROUTE/FIELD、原FG遥测和共享IRQ健康。
 若预检失败，按独立observer/writer/IRQ与字段error定位，不试写验证权限。

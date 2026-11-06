@@ -1,5 +1,22 @@
 # 0120 电池遥测与模拟策略测试
 
+## 0120a3 / 0154 硬件接口与 ADC5 预检测试档
+
+0120a3 已核对为0154构建，29个选定源码文件与本地verify逐字节一致，
+内核SHA256为`22460d3e4056179e3ace39fc367c25c438dd9829a53327cf93a5a57a7afe91d3`。
+已生成三个同核档，telemetry镜像为
+`/home/shenli/work1/out-bs/boot-16k-0120a3-battery-telemetry.img`，SHA256
+`de0e8c5474c323df44abaaa2ad1fa260d1c31190f40a7012250169dab672ec78`；observe
+为`259dc12f3ea402f9ba731d3941635ce5207c4c2f994aef446c0b2fdf9d0bb09b`，dry
+为`cb91931bdeb4946c66ed08afcec4093d7f2b5712990a7d1ef0001e6dae82c088`。
+三档均回读kernel/ADT/TOML/firmware和无重复参数；只有telemetry启用
+`sweetbattadcdiag=1`。这只是构建/打包通过，尚无0120a3实机证据。
+
+本轮只测试telemetry：稳定约60秒、插拔两轮、每状态15～30秒，导出持久日志。
+须保留启动早期内容，核对HARDWARE、ADC5 PREFLIGHT/ROUTE/FIELD以及原FG
+遥测和共享IRQ。ADC5字段是只读诊断，不能据此判断实际VBUS/电池ID或真实充电；
+没有控制档，也不要用dry档替代本测试。
+
 2026-11-06，承接实现提交bde5519。用户下载产物，本轮仅核对和打包，
 没有改驱动/CI、push或操作设备。telemetry持久日志结果已补于文末。
 

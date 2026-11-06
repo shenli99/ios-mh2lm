@@ -2,7 +2,37 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
-**CURRENT: 0154硬件接口收敛/ADC5只读预检已本地完成，提交ca6927f；待用户push/云构建。**
+**CURRENT: 0120a3已核对为0154并打包，待用户测试telemetry。**
+
+用户提供logs/xnu-kernel-0120a3.gz与xnu-buildtree-0120a3.gz。两者SHA256分别为
+`6e80b1e7fddefdd4d763d4cb60b5dde8484a8a26154abf490e9da8d775d3b9c9`、
+`a1dec3ad24c00fe39ba39e6d50a44dd1bdbdcca71c1c4039546540d6af806d76`。
+buildtree解出29个选定文件，逐字节匹配0154 verify；内核manifest、plain
+arm64/subtype0、16K segment和新增hardware/ADC5 marker、semantic charger/
+ADC inspect symbols通过。内核SHA256 `22460d3e4056179e3ace39fc367c25c438dd9829a53327cf93a5a57a7afe91d3`。
+
+已用`tools/mk-mh2lm-event-matrix.sh ... 0120a3 --battery-runtime`生成并回读
+三个同核镜像：
+`out-bs/boot-16k-0120a3-battery-runtime-observe.img` SHA256
+`259dc12f3ea402f9ba731d3941635ce5207c4c2f994aef446c0b2fdf9d0bb09b`；
+`out-bs/boot-16k-0120a3-battery-telemetry.img` SHA256
+`de0e8c5474c323df44abaaa2ad1fa260d1c31190f40a7012250169dab672ec78`；
+`out-bs/boot-16k-0120a3-battery-policy-dry.img` SHA256
+`cb91931bdeb4946c66ed08afcec4093d7f2b5712990a7d1ef0001e6dae82c088`。
+回读确认kernel/ADT/TOML/firmware一致、参数无重复，telemetry唯一带
+`sweetbattadcdiag=1`；控制仍有互锁。未执行设备操作。
+
+NEXT用户先fastboot boot telemetry镜像，启动稳定约60秒，插拔两轮且每状态
+15～30秒，导出` sweetlog-0120a3-battery-telemetry.bin`。重点查
+`SWEET BATT HARDWARE: v1`、`SWEET ADC5 PREFLIGHT/ROUTE/FIELD`，分别核对
+observer/writer/IRQ owner与字段valid/error；同时检查原FG温度/容量/V/I、
+共享IRQ和是否有panic/error。ADC日志明确diagnostic-only，不把data字节当
+VBUS或电池ID，也不要先跑dry/重复USB实验。控制档未生成。
+
+0154源码与本地测试记录仍见提交ca6927f、文档提交6cb79e2和
+scratch/battery-interfaces-0120a2/validation-results.json。
+
+### Previous 0154 implementation handoff
 
 用户要求按XNU常见模式、复用接口，避免上层穿透读写寄存器。新增0154，
 10个内核文件：runtime回调改为sweet_charger_execute固定操作/物理mA,mV/
