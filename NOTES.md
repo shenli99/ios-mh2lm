@@ -2,39 +2,52 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
-**CURRENT USER TASK: 开始实现电池驱动，已落地第1段 transport，下一步第2段。**
+**CURRENT USER TASK: 补后三段；0151已补可独立实现代码，待一次云编译/实机。**
 
-用户已授权实施，不再是planning-only。父提交67b8d5c为六段计划。
-本轮0150 `xnu/patches/0150-mh2lm-charger-transport.patch`：
-- 新MH2LM/USID2/v5精确表接口get_route/read/update，唯一EE0 writer，IRQ-owner
-  独立；旧observer白名单/采样保持。原子RMW、请求mask回读、详细错误、不重试。
-- RW timeout poison放共享transport，mux写前同锁检查，timeout同锁发布，
-  两边禁止复用lane；mux写权限未扩大。
-- RW使用临时unmappable映射并正确16K解除，未引入新服务/consumer全局桥接。
-- sweetbatttransport=1默认关闭，电池own workloop一次只读路由/配置预检，
-  不在matched回调做访问，无新timer/策略写调用者；无充电控制权接管。
-- tools/mk-mh2lm-event-matrix.sh --battery-transport可在未来新产物生成
-  battery-observe和battery-transport，同核保留mode4/keys/ACM/touch。尚无新boot。
-- CircleCI实际bash build.sh未改，仅补0150 source markers；YAML/source gate
-  接受0150/拒绝0149通过。不要把此变更归因成CI编译命令调整。
+本轮承接本地13c443f(0150)。按六段计划第4～6段理解，同时补第2～3段前置；
+已向用户发异步范围核对，无答复，按该范围实施。没有push/设备操作。
+新增 xnu/patches/0151-mh2lm-battery-runtime.patch（基于0150，7文件）：
+- bsd/dev/sweet_battery_runtime.h：实际snapshot/limits/controller与纯策略，
+  reason位、3s时效、10..40C限制/12..38C恢复、FCC/ICL<=500mA FV<=4.2V，
+  单会话60s，动作先disable/配置回读/最后enable，编程中超时也禁用，故障锁存。
+- C transport新增sweet_spmi_fg_read固定4字段，Gen4 DMA request/grant/release，
+  v1 peek/ALG等待，v2布局，busy/未知rev拒绝，cleanup失败boot sessionpoison。
+  SRAM数据只读，MEMIF/peek协议控制确实有写；没有profile写或任意SRAM访问。
+- SweetBattery可选sweetbattruntime=1真实遥测/2模拟/3受互锁的控制入口，0默认旧行为。
+  新模式要求realSID2+IRQ4，ownworkloop+独立1smonitor；timer不读USB/APSD/TypeC
+  状态，不回退插拔轮询。标准IOPM发布实测I/温度、FG容量和有效性；失效移除旧
+  温度/电流，容量未知用100比例单位并标记，未知cycle不伪造0；LG温度补偿未实现。
+- mux表新增USBIN bit6 source-change、CHGR bit0 error（已有两个APID、rising），
+  event0x10/0x20，ALL0x3f；client转发mask同步扩展，mode0原事件订阅不变。
+- 新power notifier在ownloop外remove并同步回调；控制提交独立IOLock将shutdown/
+  sleep禁充与迟到enable互斥。通知不等batteryloop、不改loop-ownedcontroller，
+  bootPMroot缺失拒绝新模式；service停止/IRQfail取消timer禁充，失败显式未确认。
 
-本地验证：实际transport+实际mux写+实际电池预检host ASAN/UBSAN测试通过，
-含owner/范围/掩码/版本拒绝、初始化/映射失败、并发RMW与mux写、status error、
-回读失败/不符、双向timeoutpoison、逐项unknown、无预检策略写和资源平衡。
-旧SPMI套件+10次并发、mux/consumer套件+80次竞争、0149诊断回归均通过。
-严格apply后23个选定文件byte equal；sweet_spmi.c/mux.cpp/battery.cpp ARM64
-单文件编译通过（Linux clang19+既有CI headers及builtin兼容定义，不是完整链接）。
-工作底稿scratch/charge-transport-0119/{base,edited,verify,compile.py,*.compile.txt}。
-接口/锁顺序/错误/限制：docs/BATTERY-SPMI-TRANSPORT.md。
+重要限制：fLimits目前初始化为空，没有实际电池ID/上限、实测VBUS/输入能力、
+并联隔离证据provider，设备SB_R_BATTERY_ID/PARALLEL/INPUT/LIMITS必然禁止enable。
+不能把合成host证据搬到bootarg。控制执行器有代码≠手机已恢复充电。
+watchdog目前只接受确认off的条件，不实现pet、不自动关WDOG以跳过保护。
+SRAM温度原始未LG补偿、nominal/learned属FG数据不证明实际电池身份。
+真正睡眠不自动恢复控制，普通displayoff仍保护监测；完整sleep/PM时序待实机。
+第4～6段尚未验收、CHGR正常充电转换未证明；不得声称电池/IRQ整体结案。
 
-下一步按docs/BATTERY-TELEMETRY-CHECKLIST.md落实第2段，补真实snapshot和
-Gen4 SRAM有界request/grant/read/release温度/身份接口；v1 DMA workaround按
-REVID，grant等待不能占共享锁。当前充电RMW明确拒绝SRAM/脉冲/IRQ/parallel写。
-温度25°C、容量5020仍占位；电流已有diag未完整IOPM发布。并联SMB1355隔离、
-电池上限、输入/高压/watchdog/退出保护未闭合，不得开启1042。
-第1段本地实现不是实机验收，route metadata不能证明实际写被硬件允许。
-尽量将0149/0150与第2～3段合并一次云编译，不需要用户现在单独push或测旧
-noUSB档。没有push/fastboot/设备操作；继续由用户执行。
+本地实际函数ASAN/UBSAN PASS：SRAMv1/v2/busy/unknown/grant/ALG/读/清理失败，
+无SRAM内容写、等待释放共享锁；策略所有关键字段失效、迟滞、所有11写步骤
+失败、编程中到期、service stop和PM禁充锁；额外100次power通知/enable竞争通过；实际sample/publish移除失效值/
+容量比率/monitor no-rearm；新mux source/fault投递与detach；旧mux套件+80race、
+旧SPMI+10race、0149diag和loglevel通过。4编译单元ARM64单文件通过，Linux
+clang19+既有CI headers/builtin兼容，并非完整原生build/link。24选定源文件
+严格apply/bytecompare，YAML/sourcegate接受0151拒绝0150、build.sh命令未变。
+底稿 scratch/battery-runtime-0119/{base,edited,verify,compile.py,*tests.txt}。
+新调用IOSleep/PMnotifier/ack符号已核对原生0119存在。
+
+文档docs/BATTERY-RUNTIME.md给精确能力/参数/缺口；计划/NEXT/IRQ路线图已更新。
+NEXT：可让用户push一次合并0149～0151；新产物下载后验源码/标记并用
+ tools/mk-mh2lm-event-matrix.sh ARTIFACT LABEL --battery-runtime
+生成同核battery-runtime-observe / battery-telemetry / battery-policy-dry，保留
+keys/touch/ACM/mode4。没有受控镜像，尚无新boot路径；不重复0119 noUSB测试。
+先取得温度/容量/MEMIF现场数据，再落实ADC5身份+VBUS和并联隔离provider，
+之后才开放控制档做实际充电与第4～6段验收。user push/fastboot，不由agent代做。
 
 **LATEST historical charging audit: inherited-enabled hypothesis supported, NO new boot/build needed.**
 User corrected framing: XNU never enablescharging, so en0 persistence is expected,

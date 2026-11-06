@@ -76,7 +76,7 @@ jobs:
             fi
             require_marker() {
               if ! grep -Fq "$2" "$1"; then
-                echo "ERROR: required 0139..0150 marker missing from $1: $2" >&2
+                echo "ERROR: required 0139..0151 marker missing from $1: $2" >&2
                 exit 1
               fi
             }
@@ -98,6 +98,12 @@ jobs:
             require_marker xnu/bsd/dev/sweet_spmi.c 'sweet_spmi_rw_poison_locked(route.apid);'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'sweet_spmi_rw_poisoned_locked(route.apid)'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET CHARGER PREFLIGHT: restricted transport v1'
+            require_marker xnu/bsd/dev/sweet_spmi.c 'sweet_spmi_fg_read(unsigned field'
+            require_marker xnu/bsd/dev/sweet_battery_runtime.h 'sb_decide(SweetBattController'
+            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT RUNTIME: v1 mode='
+            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'registerPrioritySleepWakeInterest(runtimePowerNotice, this)'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiMuxClient.cpp 'pending & SWEET_BATT_IRQ_ALL'
+            require_marker xnu/bsd/dev/sweet_spmi_mux.h 'SWEET_BATT_IRQ_SOURCE'
             require_marker xnu/bsd/dev/sweet_keys.c 'sweet_spmi_irq_lock();'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET MUX: controller transactions serialized across keys and battery'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET MUX: isolated group=%u; other groups remain available'

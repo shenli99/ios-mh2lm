@@ -1,5 +1,8 @@
 # 电池共享 SPMI 访问接口（0150）
 
+后续0151的SRAM/运行层实现及当前缺口见
+[BATTERY-RUNTIME.md](BATTERY-RUNTIME.md)。本文记录0150交付边界。
+
 2026-11-06：第1段的 transport 实现与只读预检已完成本地验证，尚未云编译或
 实机验收。没有调用充电配置写接口，没有取得充电控制权，也没有修复物理充电。
 第2段数据清单见 [BATTERY-TELEMETRY-CHECKLIST.md](BATTERY-TELEMETRY-CHECKLIST.md)。

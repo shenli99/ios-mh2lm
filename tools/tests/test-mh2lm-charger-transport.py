@@ -71,17 +71,26 @@ static void recordLog(const char *format,...) {
 #define SWEET_LOG_WARN(...) recordLog(__VA_ARGS__)
 #define SWEET_LOG_INFO(...) recordLog(__VA_ARGS__)
 using vm_offset_t=uintptr_t; using vm_size_t=size_t; using IOLock=std::mutex;
-static thread_local unsigned depth;
-static bool failAlloc,failMap,failPermanent,dropWrite;
+static thread_local unsigned depth,sessionDepth;
+static IOLock *controllerLock;
+static bool failAlloc,failMap,failPermanent,dropWrite,failFgRelease;
+static unsigned failFgAddress;
+static std::vector<unsigned> rwAddresses;
 static unsigned maps,unmaps,commands,writes,readCommands,ioReads,failReadAt;
 static unsigned observerStatus=1,rwStatus=1;
 static uint32_t version=0x50000000;
 static std::map<unsigned,unsigned> routing,ownership,pmic,status,data;
-static IOLock *IOLockAlloc(){return failAlloc?nullptr:new IOLock;}
+static IOLock *IOLockAlloc(){if(failAlloc)return nullptr;auto *p=new IOLock;
+    if(!controllerLock)controllerLock=p;return p;}
 static void IOLockFree(IOLock *l){delete l;}
-static void IOLockLock(IOLock *l){l->lock();assert(depth++==0);}
-static void IOLockUnlock(IOLock *l){assert(--depth==0);l->unlock();}
-static void delay(unsigned) {assert(depth==1);}
+static void IOLockLock(IOLock *l){l->lock();if(l==controllerLock)assert(depth++==0);else assert(sessionDepth++==0);}
+static void IOLockUnlock(IOLock *l){if(l==controllerLock)assert(--depth==0);else assert(--sessionDepth==0);l->unlock();}
+static void delay(unsigned n) {assert(depth==1 || (sessionDepth==1 && n==40));}
+static void IOSleep(unsigned) {
+    assert(depth==0 && sessionDepth==1);
+    // A different controller user must remain runnable while grant/ALG waits.
+    std::thread worker([]{IOLockLock(controllerLock);IOLockUnlock(controllerLock);});worker.join();
+}
 extern "C" vm_offset_t ml_io_map(vm_offset_t a,vm_size_t){assert(depth==1);return failPermanent?0:a;}
 extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t a,vm_size_t n,unsigned){
     assert(depth==1 && n==0x1000 && a>=SWEET_DEV_SPMI_CHNLS_PA);
@@ -106,11 +115,15 @@ static void modelWrite(vm_offset_t b,unsigned o,uint32_t v){
     if(b>=SWEET_DEV_SPMI_OBS_PA){
         assert((v>>27)==1 && !(v&15));++readCommands;
         apid=(b-SWEET_DEV_SPMI_OBS_PA)/0x80;
-        status[b]=(failReadAt==readCommands)?3:observerStatus;
+        unsigned address=(((routing[apid]>>8)&0xfff)<<8)|reg;
+        if(address>=0x24400 && address<0x24a00)assert((pmic[0x24340]&1) && (pmic[0x24350]&0xa0)==0x80);
+        status[b]=(failReadAt==readCommands || address==failFgAddress)?3:observerStatus;
         data[b]=pmic[(((routing[apid]>>8)&0xfff)<<8)|reg];
     }else{
         assert(b>=SWEET_DEV_SPMI_CHNLS_PA && (v>>27)==0);++writes;
         apid=(b-SWEET_DEV_SPMI_CHNLS_PA)/0x10000;
+        unsigned address=(((routing[apid]>>8)&0xfff)<<8)|reg;rwAddresses.push_back(address);
+        if(failFgRelease && address==0x24350 && !(data[b]&0x80)){status[b]=3;return;}
         status[b]=rwStatus;
         if(!dropWrite && (rwStatus==1 || rwStatus==0))
             pmic[(((routing[apid]>>8)&0xfff)<<8)|reg]=data[b]&255;
@@ -160,6 +173,45 @@ int main(int argc,char **argv){
     }
     assert(sweet_spmi_init()==0);
     own(10,0x10);own(11,0x13);own(12,0x15);own(13,0x16);
+    if(!strncmp(mode,"fg-",3)) {
+        for(unsigned n=0;n<7;++n)own(30+n,n==0?1:n==1?0x41:n==2?0x43:0x46+n-3);
+        pmic[0x20105]=0x20;pmic[0x20103]=strcmp(mode,"fg-v2")?1:2;
+        pmic[0x24305]=0x0d;pmic[0x24310]=8;pmic[0x241ee]=0x31;
+        pmic[0x24858]=100;pmic[0x24859]=0;
+        pmic[0x246ea]=0xa0;pmic[0x246eb]=0xf;
+        pmic[0x24750]=1;
+        pmic[0x24734]=0x3c;pmic[0x24735]=0xf;
+        pmic[0x24738]=0x72;pmic[0x24739]=0xe;
+        int wanted=0;
+        if(!strcmp(mode,"fg-busy")){pmic[0x24350]=0x80;wanted=SWEET_SPMI_BUSY;}
+        if(!strcmp(mode,"fg-unknown")){pmic[0x20103]=3;wanted=SWEET_SPMI_UNSUPPORTED;}
+        if(!strcmp(mode,"fg-grant")){pmic[0x24310]=0;wanted=SWEET_SPMI_TIMEOUT;}
+        if(!strcmp(mode,"fg-active")){pmic[0x241ef]=8;wanted=SWEET_SPMI_TIMEOUT;}
+        if(!strcmp(mode,"fg-read-fail")){failFgAddress=0x24859;wanted=SWEET_SPMI_IO;}
+        if(!strcmp(mode,"fg-cleanup-fail")){failFgRelease=true;wanted=SWEET_SPMI_IO;}
+        if(!strcmp(mode,"fg-dma-error")){pmic[0x24370]=4;wanted=SWEET_SPMI_IO;}
+        uint16_t raw=0xdead;assert(sweet_spmi_fg_read(SWEET_FG_TEMPERATURE,&raw)==wanted);
+        if(wanted)assert(raw==0xdead);else assert(raw==100);
+        if(wanted==SWEET_SPMI_BUSY || wanted==SWEET_SPMI_UNSUPPORTED || !strcmp(mode,"fg-dma-error"))assert(writes==0);
+        else {
+            assert(pmic[0x241ee]==0x31 && (pmic[0x24371]&2)==0);
+            assert(!(pmic[0x24340]&1));
+            if(!failFgRelease)assert((pmic[0x24350]&0xa0)==0);
+        }
+        if(!wanted){
+            assert(!sweet_spmi_fg_read(SWEET_FG_NOMINAL_CAPACITY,&raw) && raw==4000);
+            assert(!sweet_spmi_fg_read(SWEET_FG_PROFILE_INTEGRITY,&raw) && raw==1);
+            assert(!sweet_spmi_fg_read(SWEET_FG_LEARNED_CAPACITY,&raw) && raw==(pmic[0x20103]==1?3900:3698));
+        }
+        if(failFgRelease){
+            unsigned prior=commands;assert(sp_fg_failed);
+            assert(sweet_spmi_fg_read(SWEET_FG_TEMPERATURE,&raw)==SWEET_SPMI_POISONED && commands==prior);
+        }
+        for(auto a:rwAddresses)assert(a==0x24340 || a==0x24350 || a==0x24371 || a==0x241ee);
+        auto count=commands;assert(sweet_spmi_fg_read(4,&raw)==SWEET_SPMI_INVALID && commands==count);
+        balanced();assert(!sessionDepth);IOLockFree(sp_lock);if(sp_fg_lock)IOLockFree(sp_fg_lock);
+        printf("PASS: actual SRAM protocol, bounds/unwind/no SRAM writes %s\n",mode);return 0;
+    }
     struct sweet_spmi_charger_route route={0xaaaa,5,5};
     // A unique EE0 writer is usable without the IRQ-owner bit. Foreign duplicates
     // do not grant write access; a second EE0 writer is ambiguous even with IRQ.
@@ -261,5 +313,5 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-charge-io-') as directory:
     subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-O1','-g','-pthread',
         '-fsanitize=address,undefined',str(cpp),'-o',str(binary)],check=True)
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0')
-    for mode in ['normal','alloc-fail','map-fail']:
+    for mode in ['normal','alloc-fail','map-fail','fg-v1','fg-v2','fg-busy','fg-unknown','fg-grant','fg-active','fg-read-fail','fg-cleanup-fail','fg-dma-error']:
         subprocess.run([str(binary),mode],env=env,check=True,timeout=20)

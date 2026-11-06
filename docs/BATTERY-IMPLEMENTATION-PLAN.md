@@ -1,8 +1,11 @@
 # MH2LM 电池驱动实现计划
 
-2026-11-06，按用户要求制定任务分段，现已开始第1段。0150受限transport与
-只读预检完成本地验证，待后续合并构建/实机；尚未开启充电控制。当前缺口已明确：XNU没有主动充电控制，无法保证从禁充初态恢复；旧
-m19进入XNU时已经enable1。具体启动writer仍未知，不阻塞下面的实现设计。
+2026-11-06，六段计划已经进入实现。0150共享transport、0151遥测/策略/运行层
+完成本地验证，尚未云编译或实机验收。用户要求补后三段，其可独立实现部分与
+第2～3段前置已合批，详见[BATTERY-RUNTIME.md](BATTERY-RUNTIME.md)。
+物理电池身份、实测VBUS和并联隔离provider仍缺，受控充电未开放，不能把代码
+完成称为六段验收完成。当前XNU仍不能保证从禁充初态进入真实充电；旧m19在
+进入XNU时已enable1，具体启动writer未知。
 历史依据见 [`BATTERY-CHARGING-HISTORY.md`](BATTERY-CHARGING-HISTORY.md)。
 
 ## 目标、架构与范围
@@ -167,8 +170,8 @@ CHGR中断独立投递得到验证，三键/触摸/ACM仍工作。失败保留�
 - 每批先完成适当的本地编译/故障测试和patch应用校验，再由用户push；下载
   后核对实际源码/内核标记并制作boot。fastboot与设备操作继续由用户执行。
 
-**当前进度：第1段接口代码和本地验证已落地，实机验收待后续合并构建。**
-见[BATTERY-SPMI-TRANSPORT.md](BATTERY-SPMI-TRANSPORT.md)。下一步按
-[BATTERY-TELEMETRY-CHECKLIST.md](BATTERY-TELEMETRY-CHECKLIST.md)补第2段。
-现有写接口没有运行期调用者；真实温度/策略/保护timer/受控档仍未实现，
-不能把计划行为当成已有功能，也不能将路由元数据预检成功当成写权限实测。
+**当前进度：0150/0151本地实现与验证完成，准备一次合并云编译。**
+新增三档为观察、真实遥测、模拟策略，保留全事件/USB日志。第4段执行器已有
+本地错误注入验证，但缺少真实证据provider，设备不会使能；第5～6段仍需
+硬件/完整IOPM回归。完整状态、参数与残余缺口见
+[BATTERY-RUNTIME.md](BATTERY-RUNTIME.md)，不将未完成项伪装成已验收。

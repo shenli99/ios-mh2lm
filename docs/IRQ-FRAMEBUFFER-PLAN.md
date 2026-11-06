@@ -9,7 +9,9 @@
 与mux共享RW超时状态和可选只读预检已完成本地验证，尚待合批构建/实机。
 接口边界见[BATTERY-SPMI-TRANSPORT.md](BATTERY-SPMI-TRANSPORT.md)，后续按
 [BATTERY-TELEMETRY-CHECKLIST.md](BATTERY-TELEMETRY-CHECKLIST.md)补第2段；
-当前没有运行期充电策略写入。
+当前没有实际充电使能。0151补了遥测、策略、控制执行器与运行层，
+缺少电池/VBUS/并联证据provider，设备仍受互锁；状态与同核三档见
+[BATTERY-RUNTIME.md](BATTERY-RUNTIME.md)，第4～6段实机验收尚未完成。
 
 **当前进度：** 0119 mode4已实测三次独立MSOC中断，拔线期间电量由74%下降至
 73/72/71%，与四次USBIN刷新区分，三键/触摸继续工作；之前mode3息屏插拔唤屏

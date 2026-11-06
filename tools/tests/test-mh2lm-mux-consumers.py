@@ -180,6 +180,14 @@ template<typename... Args> static void testWarn(const char *format, Args...) {
 
 startup_adapter=startup_adapter.replace('class SweetBattery : public OSObject','class SweetBattery : public IOService')
 startup_adapter=startup_adapter.replace('fMuxWatching=false','fTimerAdded=true')
+# This suite substitutes sampling, not the new runtime's protection timer. The
+# runtime/controller suite separately exercises actual monitor and stop methods.
+if 'SweetBattery::stopRuntime' in battery:
+    startup_adapter=startup_adapter.replace('public:', 'public: void stopRuntime() {} unsigned fRuntimeMode=0, fRuntimeRequested=0; SweetBattController fController={};\n', 1)
+    startup_adapter=read('bsd/dev/sweet_battery_runtime.h')+'\n'+startup_adapter
+    startup_adapter=startup_adapter.replace('IOInterruptEventSource *fIrqEvent;',
+        'IOInterruptEventSource *fIrqEvent; IOTimerEventSource *fMonitor=nullptr;')
+
 startup_adapter=startup_adapter.replace('IOInterruptEventSource *fIrqEvent;', 'IOInterruptEventSource *fIrqEvent;\n    SweetSpmiMuxClient *fMuxClient=nullptr;')
 startup_adapter=startup_adapter.replace('fIrqEvent=IOInterruptEventSource::interruptEventSource(this, irqAction, nullptr, 0);','fIrqEvent=IOInterruptEventSource::interruptEventSource(this, irqAction, nullptr, 0);\n        assert(fLoop->addEventSource(fIrqEvent)==0);')
 startup_adapter='using IOPMPowerSource=IOService;\n'+re.search(r'^#define SWEET_BATT_POLL_MS\b.*$',battery,re.M)[0]+'\n'+startup_adapter
@@ -526,6 +534,21 @@ int main(int argc,char **argv) {
         testInstance->detachConsumer(&keyOwner,1,&context);assert(testInstance->bindings[1].notify);
         testDetach(1,&context);assert(!testInstance->bindings[1].consumer);
         endProvider();assertNoLeaks();
+    } else if (!std::strcmp(mode,"battery-runtime-events")) {
+        assert(startMux()==0);sweet_keys_init();pump();
+        SweetBattery b;b.fIrqMode=4;b.fRuntimeRequested=b.fRuntimeMode=2;startBattery(b);pump();
+        assert(b.fIrqAttached && backendRunning);
+        assert(testInstance->bindings[1].events==SWEET_BATT_IRQ_ALL);
+        assert(testInstance->routes[7].active && testInstance->routes[8].active);
+        auto samples=b.fIrqSamples;inject(269,0x40);pump();
+        assert(b.fIrqSamples==samples+1 && !b.fController.fault && backendRunning);
+        inject(266,1);pump();
+        assert(b.fController.fault && b.fController.faultReasons==SB_R_HARDWARE);
+        assert(b.fIrqSamples==samples+2 && backendRunning && !b.fIrqFailed);
+        cleanupBattery(b);
+        assert(!testInstance->routes[7].active && !testInstance->routes[8].active);
+        endProvider();while(!platform.children.empty())platform.children.back()->terminate(2);
+        assertNoLeaks();
     } else if (!std::strcmp(mode,"hardware") || !std::strcmp(mode,"timeout") || !std::strncmp(mode,"board-",6)) {
         char name[]="mux-test";char *args[]={name,const_cast<char *>(mode)};
         hardwareCheck(2,args);endProvider();assertNoLeaks();
@@ -554,7 +577,7 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-mux-consumers-') as d:
                'notifier-fail-first','notifier-fail-second','attach-fail','keys','keys-worker-fail',
                'parallel','identity','notifier-stop-race','provider-stop-race','client-event-fail',
                'mux-fail-missing','mux-fail-init','mux-fail-loop','mux-fail-event','mux-fail-map',
-               'hardware','timeout','board-no-keys','board-key-fail','board-key-rollback',
+               'battery-runtime-events','hardware','timeout','board-no-keys','board-key-fail','board-key-rollback',
                'board-key-detach','board-arm-fail']
     # LSan cannot operate in this sandbox's ptrace environment. Explicit
     # object/registry/notifier/MMIO accounting accompanies ASAN/UBSAN instead.

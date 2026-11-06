@@ -1,0 +1,1082 @@
+From: ios-mh2lm
+Subject: mh2lm: add battery telemetry, guarded policy and runtime lifecycle
+
+Read fixed Gen4 SRAM fields with bounded request/grant/release, publish real
+current/temperature/capacity validity, and add an opt-in protected workloop
+monitor. Extend battery source/fault IRQ forwarding without polling input.
+Add a dry-run policy and finite verified control sequencer, but keep hardware
+enable interlocked: battery identity, measured VBUS and parallel isolation
+providers are still missing. No controlled-charge image is packaged.
+
+diff --git a/bsd/dev/sweet_battery_runtime.h b/bsd/dev/sweet_battery_runtime.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_battery_runtime.h
+@@ -0,0 +1,183 @@
++/* Battery policy/controller: no IOKit, MMIO, timer or global service state.
++ * The battery's workloop owns all instances. Units: mV, mA, centidegrees C, ns.
++ * Board evidence comes from real providers; no boot-arg can assert validity. */
++#ifndef SWEET_BATTERY_RUNTIME_H
++#define SWEET_BATTERY_RUNTIME_H
++#include <stdint.h>
++#include <stdbool.h>
++
++enum SweetBattReg {
++ SB_STAGE, SB_ERROR, SB_THERMAL, SB_ENABLE, SB_PAUSE, SB_CFG2, SB_FCC, SB_FV,
++ SB_PATH, SB_SETTLED, SB_APSD, SB_RESULT, SB_USB, SB_SUSPEND, SB_OVERRIDE,
++ SB_LOAD, SB_MODE, SB_ICL, SB_AICL, SB_TYPEC, SB_ATTACHED, SB_MISC,
++ SB_SMB, SB_WDOG, SB_WDOG_TIME, SB_SMB_CFG, SB_JEITA, SB_ITERM_HI,
++ SB_ITERM_LO, SB_RECHARGE, SB_REG_COUNT
++};
++struct SweetBattSnapshot {
++ uint8_t raw[SB_REG_COUNT];
++ int errors[SB_REG_COUNT];
++ uint64_t valid, startedNs, completedNs;
++ bool voltageValid, currentValid, tempValid, presentValid, present;
++ bool socValid, nominalValid, learnedValid, profileValid;
++ unsigned mv, percent, nominalMah, learnedMah;
++ int ma, tempCenti; /* IOPM sign: positive current = charging */
++ uint16_t rawVoltage, rawCurrent, rawTemp, integrity;
++ int tempError, nominalError, learnedError, profileError;
++};
++static inline bool sb_valid(const SweetBattSnapshot &s, unsigned field)
++{ return field < SB_REG_COUNT && (s.valid & (1ULL << field)); }
++
++/* These missing providers intentionally block hardware enable today. Runtime
++ * register values cannot prove battery identity, physical isolation or VBUS.
++ * Synthetic evidence is allowed only in host tests, never by device arguments. */
++struct SweetBattLimits {
++ bool batteryVerified, parallelVerified, inputVerified;
++ unsigned maxFccMa, maxFvMv, inputMa, vbusMv;
++ uint64_t verifiedNs;
++};
++enum SweetBattReason : uint32_t {
++ SB_R_TELEMETRY=1u<<0, SB_R_STALE=1u<<1, SB_R_NO_BATTERY=1u<<2,
++ SB_R_NO_INPUT=1u<<3, SB_R_TEMPERATURE=1u<<4, SB_R_HARDWARE=1u<<5,
++ SB_R_BATTERY_ID=1u<<6, SB_R_PARALLEL=1u<<7, SB_R_INPUT=1u<<8,
++ SB_R_WATCHDOG=1u<<9, SB_R_LIMITS=1u<<10, SB_R_EXPIRED=1u<<11,
++ SB_R_TRANSPORT=1u<<12, SB_R_STOPPED=1u<<13
++};
++enum SweetBattState { SB_WAITING, SB_NO_INPUT, SB_PREPARE, SB_CHARGING,
++ SB_THERMAL_HOLD, SB_FULL, SB_FAULT, SB_STOPPED };
++struct SweetBattDecision {
++ uint32_t reasons;
++ unsigned fccMa, fvMv, iclMa;
++ bool allow;
++ SweetBattState state;
++ uint64_t validUntilNs;
++};
++struct SweetBattController {
++ bool owned, enabled, fault, stopped, thermalHold, stopConfirmed;
++ uint64_t deadlineNs;
++ int lastError;
++ uint32_t faultReasons;
++ SweetBattState state;
++};
++static inline SweetBattDecision
++sb_decide(SweetBattController &c, const SweetBattSnapshot &s,
++ const SweetBattLimits &limits, uint64_t now)
++{
++ SweetBattDecision d = {};
++ d.state=SB_WAITING;
++ const uint64_t needed=(1ULL<<SB_STAGE)|(1ULL<<SB_ERROR)|(1ULL<<SB_THERMAL)|
++  (1ULL<<SB_PATH)|(1ULL<<SB_USB)|(1ULL<<SB_ENABLE)|(1ULL<<SB_PAUSE)|
++  (1ULL<<SB_WDOG)|(1ULL<<SB_WDOG_TIME)|(1ULL<<SB_APSD)|(1ULL<<SB_RESULT)|
++  (1ULL<<SB_ICL)|(1ULL<<SB_FCC)|(1ULL<<SB_FV)|(1ULL<<SB_SUSPEND)|
++  (1ULL<<SB_MODE)|(1ULL<<SB_LOAD)|(1ULL<<SB_OVERRIDE);
++ if ((s.valid&needed)!=needed || !s.voltageValid || !s.currentValid ||
++     !s.tempValid || !s.presentValid || !s.socValid) d.reasons|=SB_R_TELEMETRY;
++ /* Validate start-to-now, not just time since the final register. */
++ if (!s.completedNs || now<s.startedNs || now<s.completedNs ||
++     now-s.startedNs>3000000000ULL) d.reasons|=SB_R_STALE;
++ if (!s.presentValid || !s.present) d.reasons|=SB_R_NO_BATTERY;
++ if (!sb_valid(s,SB_USB) || !(s.raw[SB_USB]&16)) d.reasons|=SB_R_NO_INPUT;
++ /* Initial narrow 10..40 C band, resume only within 12..38 C. Missing temp
++  * never clears a hold. This is a conservative policy, not LG tempcomp. */
++ if (!s.tempValid || s.tempCenti<1000 || s.tempCenti>4000) c.thermalHold=true;
++ else if (s.tempCenti>=1200 && s.tempCenti<=3800) c.thermalHold=false;
++ if (c.thermalHold) d.reasons|=SB_R_TEMPERATURE;
++ if ((sb_valid(s,SB_ERROR) && (s.raw[SB_ERROR]&2)) ||
++     (sb_valid(s,SB_THERMAL) && (s.raw[SB_THERMAL]&15)) ||
++     (c.enabled && (!(s.raw[SB_ENABLE]&1) || (s.raw[SB_PAUSE]&1))) ||
++     s.mv>4450 || (s.currentValid && s.ma>600)) d.reasons|=SB_R_HARDWARE;
++ if (!limits.batteryVerified || !s.profileValid || !(s.integrity&1)) d.reasons|=SB_R_BATTERY_ID;
++ if (!limits.parallelVerified) d.reasons|=SB_R_PARALLEL;
++ if (!limits.inputVerified || now<limits.verifiedNs ||
++     now-limits.verifiedNs>3000000000ULL || limits.vbusMv<4500 ||
++     limits.vbusMv>5500 || !sb_valid(s,SB_APSD) || !(s.raw[SB_APSD]&1) ||
++     !sb_valid(s,SB_RESULT) || (s.raw[SB_RESULT]&0x60) ||
++     (sb_valid(s,SB_USB) && (s.raw[SB_USB]&16) &&
++      (!(s.raw[SB_PATH]&1) || !(s.raw[SB_PATH]&16)))) d.reasons|=SB_R_INPUT;
++ /* First implementation supports only a proven watchdog-off session. Refuse
++  * enabled/plugin watchdog rather than pet an unverified timing contract. */
++ if (!sb_valid(s,SB_WDOG) || (s.raw[SB_WDOG]&0xc2)) d.reasons|=SB_R_WATCHDOG;
++ d.fccMa=limits.maxFccMa<500?limits.maxFccMa:500;
++ d.iclMa=limits.inputMa<500?limits.inputMa:500;
++ d.fvMv=limits.maxFvMv<4200?limits.maxFvMv:4200;
++ /* Quantize downward, never silently round above the approved bound. */
++ d.fccMa=d.fccMa/50*50;d.iclMa=d.iclMa/50*50;
++ d.fvMv=d.fvMv>=3600?3600+(d.fvMv-3600)/10*10:0;
++ if (!d.fccMa || !d.iclMa || !d.fvMv || limits.maxFvMv>4430 ||
++     limits.maxFccMa>3300) d.reasons|=SB_R_LIMITS;
++ if (c.enabled && (s.raw[SB_FCC]*50u>d.fccMa ||
++     3600u+s.raw[SB_FV]*10u>d.fvMv || s.raw[SB_ICL]*50u>d.iclMa)) d.reasons|=SB_R_HARDWARE;
++ if (c.owned && now>=c.deadlineNs) d.reasons|=SB_R_EXPIRED;
++ if (c.fault) d.reasons|=c.faultReasons?c.faultReasons:SB_R_TRANSPORT;
++ if (c.stopped) d.reasons|=SB_R_STOPPED;
++ d.validUntilNs=s.startedNs+3000000000ULL;
++ if (limits.verifiedNs+3000000000ULL<d.validUntilNs) d.validUntilNs=limits.verifiedNs+3000000000ULL;
++ d.allow=d.reasons==0;
++ if (d.reasons&(SB_R_TRANSPORT|SB_R_HARDWARE)) d.state=SB_FAULT;
++ else if (d.reasons&(SB_R_STOPPED|SB_R_EXPIRED)) d.state=SB_STOPPED;
++ else if (d.reasons&SB_R_TEMPERATURE) d.state=SB_THERMAL_HOLD;
++ else if (d.reasons&SB_R_NO_INPUT) d.state=SB_NO_INPUT;
++ else if (d.allow && s.percent>=99 && (s.raw[SB_STAGE]&7)==5) {
++  d.allow=false;d.state=SB_FULL;
++ } else if (d.allow) d.state=c.enabled?SB_CHARGING:SB_PREPARE;
++ return d;
++}
++
++typedef uint64_t (*SweetBattClock)(void *);
++typedef int (*SweetBattUpdate)(void *,unsigned,unsigned,unsigned,uint8_t *);
++static inline bool sb_stop(SweetBattController &c, SweetBattUpdate update, void *ctx)
++{
++ if (!c.owned) { return true; }
++ c.stopConfirmed=false;
++ uint8_t actual=0;
++ int rc=update(ctx,0x1042,1,0,&actual);
++ if (rc || (actual&1) || !c.fault) c.lastError=rc?rc:((actual&1)?-12:0);
++ if (rc || (actual&1)) { c.fault=true;c.state=SB_FAULT;return false; }
++ c.enabled=false;c.stopConfirmed=true;
++ return true;
++}
++
++/* Called only on the battery loop. dry-run never acquires control or writes.
++ * No automatic restart after a fault, expiration or explicit service stop.
++ * A transient thermal/input hold may resume after a newly valid decision. */
++static inline bool sb_apply(SweetBattController &c, const SweetBattDecision &d,
++ uint64_t now, bool dryRun, SweetBattUpdate update, void *ctx, SweetBattClock clock)
++{
++ if (dryRun) { return true; }
++ if (!d.allow) {
++  if (d.reasons&SB_R_HARDWARE) { c.fault=true;c.faultReasons|=SB_R_HARDWARE; }
++  if (d.reasons&SB_R_EXPIRED) c.stopped=true;
++  bool ok=sb_stop(c,update,ctx);c.state=ok?d.state:SB_FAULT;return ok;
++ }
++ /* Defense in depth against callers passing a stale/contradictory decision. */
++ if (!clock || !d.validUntilNs || now>=d.validUntilNs || d.reasons || c.stopped || c.fault ||
++     (c.owned && now>=c.deadlineNs) || !d.fccMa || d.fccMa>500 ||
++     !d.iclMa || d.iclMa>500 || d.fvMv<3600 || d.fvMv>4200) {
++  c.stopped=true;(void)sb_stop(c,update,ctx);return false;
++ }
++ if (c.enabled) { c.state=SB_CHARGING;return true; }
++ /* Ownership starts at the first attempted disable, including ambiguous error.
++  * Disable inherited charging first, then configure; enable is always last. */
++ if (!c.owned) { c.owned=true;c.deadlineNs=now+60000000000ULL; }
++ if (!sb_stop(c,update,ctx)) return false;
++ const unsigned addr[]={0x1340,0x1370,0x1366,0x1342,0x1365,0x1061,0x1070,0x1043,0x1340,0x1042};
++ const unsigned mask[]={1,255,7,1,16,255,255,1,1,1};
++ const unsigned value[]={1,d.iclMa/50,1,0,16,d.fccMa/50,(d.fvMv-3600)/10,0,0,1};
++ for (unsigned i=0;i<sizeof(addr)/sizeof(addr[0]);++i) {
++  uint64_t current=clock(ctx);
++  if (current>=c.deadlineNs || current>=d.validUntilNs || current<now) {
++   c.stopped=true;(void)sb_stop(c,update,ctx);c.state=SB_STOPPED;return false;
++  }
++  if (addr[i]==0x1042 && value[i]) c.stopConfirmed=false;
++  uint8_t actual=0;int rc=update(ctx,addr[i],mask[i],value[i],&actual);
++  if (rc || ((actual^value[i])&mask[i])) {
++   c.fault=true;c.lastError=rc?rc:-12;
++   (void)sb_stop(c,update,ctx);c.state=SB_FAULT;return false;
++  }
++ }
++ c.enabled=true;
++ if (clock(ctx)>=c.deadlineNs || clock(ctx)>=d.validUntilNs) {
++  c.stopped=true;(void)sb_stop(c,update,ctx);c.state=c.fault?SB_FAULT:SB_STOPPED;return false;
++ }
++ c.state=SB_CHARGING;return true;
++}
++#endif
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -11,6 +11,7 @@
+ #include <sys/systm.h>
+ #include <machine/machine_routines.h>
+ #include <IOKit/IOLocks.h>
++#include <IOKit/IOLib.h>
+ #include <mach/vm_param.h>
+ #include <vm/memory_types.h>
+ #include <pexpert/arm64/sweet_dev.h>
+@@ -433,15 +434,11 @@
+ 	return result;
+ }
+ 
+-int
+-sweet_spmi_charger_update(unsigned sid, unsigned addr, unsigned mask,
++/* Internal primitive for a separately validated protocol register. */
++static int
++sp_update_owned(unsigned sid, unsigned addr, unsigned mask,
+     unsigned value, uint8_t *verified)
+ {
+-	const struct sp_charger_register *reg = sp_charger_register(sid, addr);
+-	if (!verified || !reg || !mask || (mask & ~reg->write_mask) ||
+-	    (value & ~mask)) {
+-		return SWEET_SPMI_INVALID;
+-	}
+ 	if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) {
+ 		return SWEET_SPMI_NOT_READY;
+ 	}
+@@ -493,6 +490,158 @@
+ 	}
+ 	return result;
+ }
++int
++sweet_spmi_charger_update(unsigned sid, unsigned addr, unsigned mask,
++    unsigned value, uint8_t *verified)
++{
++	const struct sp_charger_register *reg = sp_charger_register(sid, addr);
++	if (!verified || !reg || !mask || (mask & ~reg->write_mask) ||
++	    (value & ~mask)) {
++		return SWEET_SPMI_INVALID;
++	}
++	return sp_update_owned(sid, addr, mask, value, verified);
++}
++
++/* A separate protocol session, not part of the charger configuration table.
++ * There are no public raw MEMIF writes or arbitrary SRAM word accesses.
++ * The session lock never nests inside sp_lock; grant/ALG waits drop sp_lock.
++ * One session may take up to ~0.9s. Call only from a consumer workloop/thread.
++ * Unknown silicon/layout and an already claimed MEMIF fail closed. */
++static IOLock *sp_fg_lock;
++static bool sp_fg_failed;
++
++static int
++sp_fg_byte(unsigned addr, uint8_t *out)
++{
++	struct sweet_spmi_charger_route route;
++	IOLockLock(sp_lock);
++	int result = sp_charger_route(2, addr, &route);
++	if (!result) { result = sp_charger_read_locked(route.apid, addr, out); }
++	IOLockUnlock(sp_lock);
++	return result;
++}
++
++static int
++sp_fg_update(unsigned addr, unsigned mask, unsigned value)
++{
++	uint8_t verified;
++	return sp_update_owned(2, addr, mask, value, &verified);
++}
++
++static int
++sp_fg_release(void)
++{
++	/* Always attempt both, even when the first command fails. */
++	int first = sp_fg_update(0x4350, 0xa0, 0);
++	int second = sp_fg_update(0x4340, 0x01, 0);
++	if (first || second) {
++		sp_fg_failed = true;
++		SWEET_LOG_ERROR("SWEET FG SRAM: release failed intf=%d arb=%d; session disabled until reboot\n",
++		    first, second);
++	}
++	return first ? first : second;
++}
++
++int
++sweet_spmi_fg_read(unsigned field, uint16_t *out)
++{
++	if (!out || field > SWEET_FG_LEARNED_CAPACITY) { return SWEET_SPMI_INVALID; }
++	if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
++	IOLock *lock = __atomic_load_n(&sp_fg_lock, __ATOMIC_ACQUIRE);
++	if (!lock) {
++		IOLock *candidate = IOLockAlloc(), *expected = NULL;
++		if (!candidate) { return SWEET_SPMI_NOT_READY; }
++		if (__atomic_compare_exchange_n(&sp_fg_lock, &expected, candidate, false,
++		    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) { lock = candidate; }
++		else { IOLockFree(candidate); lock = expected; }
++	}
++	IOLockLock(lock);
++	int result = sp_fg_failed ? SWEET_SPMI_POISONED : SWEET_SPMI_OK;
++	uint8_t revision = 0, subtype = 0, memtype = 0, cfg = 0, arb = 0, dma = 0;
++	uint8_t lo = 0, hi = 0, peek = 0, active = 0;
++	bool requested = false, peekChanged = false;
++	unsigned word = 0, addr = 0;
++	if (!result) { result = sp_fg_byte(0x0105, &subtype); }
++	if (!result) { result = sp_fg_byte(0x0103, &revision); }
++	if (!result) { result = sp_fg_byte(0x4305, &memtype); }
++	if (!result && (subtype != 0x20 || (revision != 1 && revision != 2) || memtype != 0x0d)) {
++		result = SWEET_SPMI_UNSUPPORTED;
++	}
++	if (!result) { result = sp_fg_byte(0x4340, &arb); }
++	if (!result) { result = sp_fg_byte(0x4350, &cfg); }
++	if (!result && ((arb & 1) || (cfg & 0xa0))) { result = SWEET_SPMI_BUSY; }
++	if (!result) { result = sp_fg_byte(0x4370, &dma); }
++	if (!result && (dma & 6)) { result = SWEET_SPMI_IO; }
++	/* v1: select ALG_ACTIVE peek, wait for it to go low before requesting DMA.
++	 * Restore our mux selection even on failure; never change FG algorithms. */
++	if (!result && revision == 1) {
++		result = sp_fg_byte(0x41ee, &peek);
++		if (!result) {
++			peekChanged = true;
++			result = sp_fg_update(0x41ee, 0xff, 0xac);
++		}
++		for (unsigned n = 0; !result && n < 35; ++n) {
++			result = sp_fg_byte(0x41ef, &active);
++			if (result || !(active & 8)) { break; }
++			IOSleep(10);
++		}
++		if (!result && (active & 8)) { result = SWEET_SPMI_TIMEOUT; }
++		if (!result) { IOSleep(1); }
++	}
++	if (!result) {
++		/* We checked that no prior session owns MEMIF. From the first request
++		 * attempt onward unwind both request bits, even after a failed write. */
++		requested = true;
++		result = sp_fg_update(0x4340, 0x01, 0x01);
++	}
++	if (!result) { result = sp_fg_update(0x4350, 0xa0, 0x80); }
++	if (!result) { delay(40); }
++	bool granted = false;
++	for (unsigned n = 0; !result && n < 50; ++n) {
++		result = sp_fg_byte(0x4310, &active);
++		if (result) { break; }
++		if (active & 8) { granted = true; break; }
++		IOSleep(10);
++	}
++	if (!result && !granted) { result = SWEET_SPMI_TIMEOUT; }
++	if (!result && revision == 1) { IOSleep(1); }
++	/* Partition addressing bit must be set; it does not change SRAM contents.
++	 * Preserve and restore the addressing mode around this session. */
++	uint8_t dmaCfg = 0;
++	bool dmaChanged = false;
++	if (!result) { result = sp_fg_byte(0x4371, &dmaCfg); }
++	if (!result && !(dmaCfg & 2)) {
++		dmaChanged = true;
++		result = sp_fg_update(0x4371, 2, 2);
++	}
++	if (field == SWEET_FG_TEMPERATURE) { word = 328; }
++	else if (field == SWEET_FG_NOMINAL_CAPACITY) { word = 271; }
++	else if (field == SWEET_FG_PROFILE_INTEGRITY) { word = 299; }
++	else { word = revision == 1 ? 285 : 287; }
++	if (word >= 300) { addr = 0x4820 + (word - 300) * 2; }
++	else if (word >= 275) { addr = 0x4720 + (word - 275) * 2; }
++	else { addr = 0x4620 + (word - 170) * 2; }
++	if (!result) { result = sp_fg_byte(addr, &lo); }
++	if (!result && field != SWEET_FG_PROFILE_INTEGRITY) { result = sp_fg_byte(addr + 1, &hi); }
++	if (!result) { result = sp_fg_byte(0x4370, &dma); }
++	if (!result && (dma & 6)) { result = SWEET_SPMI_IO; }
++	if (dmaChanged) {
++		int cleanup = sp_fg_update(0x4371, 2, dmaCfg & 2);
++		if (cleanup) { sp_fg_failed = true; result = cleanup; }
++	}
++	if (requested) {
++		int cleanup = sp_fg_release();
++		if (cleanup) { result = cleanup; }
++	}
++	if (peekChanged) {
++		int cleanup = sp_fg_update(0x41ee, 0xff, peek);
++		if (cleanup) { sp_fg_failed = true; result = cleanup; }
++	}
++	if (!result) { *out = (uint16_t)(lo | ((unsigned)hi << 8)); }
++	IOLockUnlock(lock);
++	return result;
++}
++
+ #endif /* ARM64_BOARD_CONFIG_MH2LM */
+ 
+ int
+diff --git a/bsd/dev/sweet_spmi.h b/bsd/dev/sweet_spmi.h
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -45,7 +45,8 @@
+ 	SWEET_SPMI_IO = -9,
+ 	SWEET_SPMI_TIMEOUT = -10,
+ 	SWEET_SPMI_POISONED = -11,
+-	SWEET_SPMI_VERIFY = -12
++	SWEET_SPMI_VERIFY = -12,
++	SWEET_SPMI_BUSY = -13
+ };
+ struct sweet_spmi_charger_route {
+ 	uint16_t apid;
+@@ -65,6 +66,15 @@
+  * the future battery controller must validate limits/protection before calling. */
+ int sweet_spmi_charger_update(unsigned sid, unsigned addr, unsigned mask,
+ 	unsigned value, uint8_t *verified);
++/* Gen4 read-only SRAM data via bounded DMA request/grant/release. This does
++ * write MEMIF protocol controls, never profile/learned SRAM contents. Fixed
++ * four fields only; serial session lock releases the controller lock at waits.
++ * Preserve output on any failure, including cleanup failure. */
++#define SWEET_FG_TEMPERATURE       0u
++#define SWEET_FG_NOMINAL_CAPACITY  1u
++#define SWEET_FG_PROFILE_INTEGRITY 2u
++#define SWEET_FG_LEARNED_CAPACITY  3u
++int sweet_spmi_fg_read(unsigned field, uint16_t *out);
+ #endif /* ARM64_BOARD_CONFIG_MH2LM */
+ /* Logs PMIC-arb v5 routing state for the PM8150B charger/USB peripherals.
+  * This is a read-only bring-up probe: it never enables, clears, or claims
+diff --git a/bsd/dev/sweet_spmi_mux.h b/bsd/dev/sweet_spmi_mux.h
+--- a/bsd/dev/sweet_spmi_mux.h
++++ b/bsd/dev/sweet_spmi_mux.h
+@@ -17,6 +17,9 @@
+ #define SWEET_BATT_IRQ_CHG   0x02u
+ #define SWEET_BATT_IRQ_MSOC  0x04u
+ #define SWEET_BATT_IRQ_READY 0x08u
++#define SWEET_BATT_IRQ_SOURCE 0x10u
++#define SWEET_BATT_IRQ_FAULT  0x20u
++#define SWEET_BATT_IRQ_ALL    0x3fu
+ #define SWEET_MUX_READY     0x40000000u
+ #define SWEET_MUX_FAILED    0x80000000u
+ typedef void (*SweetMuxNotify)(void *context, unsigned events);
+@@ -28,7 +31,7 @@
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOInterruptEventSource.h>
+ #include <IOKit/IOWorkLoop.h>
+-#define SWEET_MUX_ROUTE_COUNT 7u
++#define SWEET_MUX_ROUTE_COUNT 9u
+ enum { MUX_KEYS = SWEET_MUX_KEYS, MUX_BATTERY = SWEET_MUX_BATTERY, MUX_GROUPS = 2 };
+ struct MuxRoute {
+ 	unsigned sid, per, bit, token, group;
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -18,6 +18,9 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <device/device_types.h> /* io_buf_ptr_t for private OSKext headers */
+ #include <IOKit/IOLib.h>
++#include <IOKit/IOLocks.h>
++#include <IOKit/IOMessage.h>
++#include <IOKit/pwr_mgt/RootDomain.h>
+ #include <IOKit/IOKitKeys.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOWorkLoop.h>
+@@ -25,6 +28,7 @@
+ #include <IOKit/IOInterruptEventSource.h>
+ #include <kern/clock.h>
+ #include "../../../bsd/dev/sweet_spmi.h"
++#include "../../../bsd/dev/sweet_battery_runtime.h"
+ #include "../../../bsd/dev/sweet_spmi_mux.h"
+ #include "../../../bsd/dev/sweet_spmi_mux_client.h"
+ class SweetSpmiMuxClient;
+@@ -97,6 +101,28 @@
+ 	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void free(void) APPLE_KEXT_OVERRIDE;
+ private:
++	unsigned fRuntimeMode, fRuntimeRequested;
++	IOTimerEventSource *fMonitor;
++	IOLock *fControlLock;
++	IONotifier *fPowerNotice;
++	bool fPowerStopping, fControlClaimed;
++	void removeRuntimeNotifier(void);
++	static IOReturn runtimePowerNotice(void *, void *, UInt32, IOService *, void *, vm_size_t);
++	bool fMonitorAdded;
++	SweetBattSnapshot fSnapshot;
++	SweetBattLimits fLimits;
++	SweetBattController fController;
++	unsigned fMonitorSamples;
++	uint32_t fLastReasons;
++	void sampleRuntime(bool refreshInput);
++	void runRuntimePolicy(void);
++	void publishRuntime(void);
++	static uint64_t runtimeClock(void *);
++	static void monitorFired(OSObject *, IOTimerEventSource *);
++	static IOReturn startRuntime(OSObject *, void *, void *, void *, void *);
++	static int runtimeUpdate(void *, unsigned, unsigned, unsigned, uint8_t *);
++	void stopRuntime(void);
++	void removePowerValue(const char *);
+ 	IOWorkLoop *fLoop;
+ 	IOTimerEventSource *fTimer;
+ 	IOInterruptEventSource *fIrqEvent;
+@@ -241,6 +267,16 @@
+ 	if (!IOPMPowerSource::init()) {
+ 		return false;
+ 	}
++	fRuntimeMode = fRuntimeRequested = fMonitorSamples = 0;
++	fLastReasons = ~0u;
++	fMonitor = NULL;
++	fControlLock = NULL;
++	fPowerNotice = NULL;
++	fPowerStopping = fControlClaimed = false;
++	fMonitorAdded = false;
++	fSnapshot = {};
++	fLimits = {};
++	fController = {};
+ 	fLoop = NULL;
+ 	fTimer = NULL;
+ 	fTimerAdded = fRunning = fReal = false;
+@@ -309,10 +345,17 @@
+     bool capable, bool charging, bool full, bool measured, bool currentValid)
+ {
+ 	/* Use consistent mAh units (DT nominal=5020). powerd computes C*100/M. */
+-	const unsigned capacity = (5020u * percent + 50u) / 100u;
++	unsigned maximum = 5020;
++	if (fRuntimeMode) {
++		maximum = fSnapshot.learnedValid ? fSnapshot.learnedMah :
++		    (fSnapshot.nominalValid ? fSnapshot.nominalMah : 100u);
++		ma = fSnapshot.currentValid ? fSnapshot.ma : 0;
++		currentValid = fSnapshot.currentValid;
++	}
++	const unsigned capacity = (maximum * percent + 50u) / 100u;
+ 	setBatteryInstalled(true);
+ 	setCurrentCapacity(capacity);
+-	setMaxCapacity(5020);
++	setMaxCapacity(maximum);
+ 	setExternalConnected(external);
+ 	setExternalChargeCapable(capable);
+ 	setIsCharging(charging);
+@@ -320,21 +363,41 @@
+ 	/* An uncalibrated voltage curve must not assert a critical shutdown. */
+ 	setAtCriticalLevel(false);
+ 	setVoltage(mv);
+-	setAmperage(ma);
++	if (!fRuntimeMode || currentValid) { setAmperage(ma); }
++	else { removePowerValue("Amperage"); }
+ 	setTimeRemaining(-1); /* Unknown; never publish zero minutes on error. */
+-	setCycleCount(0);     /* Placeholder: cycle learning is not implemented. */
++	if (!fRuntimeMode) { setCycleCount(0); }
++	else { removePowerValue("CycleCount"); }
+ 	putBool("FullyCharged", full);
+ 	putBool("AppleRawExternalConnected", external);
+ 	putNumber("AppleRawCurrentCapacity", capacity);
+-	putNumber("AppleRawMaxCapacity", 5020);
+-	putNumber("DesignCapacity", 5020);
+-	putNumber("InstantAmperage", (UInt32)ma);
++	putNumber("AppleRawMaxCapacity", maximum);
++	if (!fRuntimeMode) { putNumber("DesignCapacity", 5020); }
++	else if (fSnapshot.nominalValid) { putNumber("DesignCapacity", fSnapshot.nominalMah); }
++	else { removePowerValue("DesignCapacity"); }
++	if (!fRuntimeMode || currentValid) { putNumber("InstantAmperage", (UInt32)ma); }
++	else { removePowerValue("InstantAmperage"); }
+ 	/* iOS battery convention: centidegrees C; fixed 25 C, NOT measured. */
+-	putNumber("Temperature", 2500);
++	if (!fRuntimeMode) { putNumber("Temperature", 2500); }
++	else if (fSnapshot.tempValid) { putNumber("Temperature", (UInt32)fSnapshot.tempCenti); }
++	else { removePowerValue("Temperature"); }
++	if (fRuntimeMode) {
++		putBool("SweetBatteryTemperatureValid", fSnapshot.tempValid);
++		putBool("SweetBatteryCapacityValid", fSnapshot.nominalValid);
++		putBool("SweetBatteryCapacityUsesPercent", !fSnapshot.nominalValid && !fSnapshot.learnedValid);
++		putBool("SweetBatteryCycleCountValid", false);
++		putBool("SweetBatteryVoltageValid", fSnapshot.voltageValid);
++		putBool("SweetBatteryInstalledValid", fSnapshot.presentValid);
++		if (fSnapshot.presentValid) { setBatteryInstalled(fSnapshot.present); }
++		putNumber("SweetBatteryPolicyReasons", fLastReasons);
++		putNumber("SweetBatteryControlState", (unsigned)fController.state);
++		putBool("SweetBatteryControlOwned", fController.owned);
++		putBool("SweetBatteryStopConfirmed", fController.owned && fController.stopConfirmed);
++	}
+ 	putBool("SweetBatteryHardwareSampleValid", measured);
+ 	putBool("SweetBatteryCurrentValid", currentValid);
+-	putBool("SweetBatterySOCEstimated", measured);
+-	putBool("SweetBatteryTemperatureEstimated", true);
++	putBool("SweetBatterySOCEstimated", fRuntimeMode ? !fSnapshot.socValid : measured);
++	putBool("SweetBatteryTemperatureEstimated", !fRuntimeMode || !fSnapshot.tempValid);
+ 	putBool("SweetBatteryFallback", !measured);
+ 	putNumber("SweetBatteryPercent", percent);
+ 
+@@ -344,10 +407,11 @@
+ 		const char *keys[] = {kIOBatteryCurrentChargeKey, kIOBatteryCapacityKey,
+ 		    kIOBatteryVoltageKey, kIOBatteryAmperageKey, kIOBatteryCycleCountKey,
+ 		    kIOBatteryFlagsKey};
+-		UInt32 values[] = {capacity, 5020, mv, (UInt32)ma, 0,
++		UInt32 values[] = {capacity, maximum, mv, (UInt32)ma, 0,
+ 		    (UInt32)(kIOBatteryInstalled | (external ? kIOBatteryChargerConnect : 0) |
+ 		    (charging ? kIOBatteryCharge : 0))};
+ 		for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
++			if (fRuntimeMode && (i == 4 || (i == 3 && !currentValid))) { continue; }
+ 			OSNumber *number = OSNumber::withNumber(values[i], 32);
+ 			if (number) {
+ 				legacy->setObject(keys[i], number);
+@@ -840,6 +904,12 @@
+ 		logChargeDiagnostics(state);
+ 	}
+ 
++	if (fRuntimeMode) {
++		sampleRuntime(true);
++		runRuntimePolicy();
++		publishRuntime();
++		return;
++	}
+ 	publish(published, fLastMv, 0, external, external, charging, full,
+ 	    measured, false);
+ }
+@@ -884,6 +954,7 @@
+ 		return;
+ 	}
+ 	fIrqFailed = true;
++	stopRuntime();
+ 	fRunning = false;
+ 	if (fTimer) {
+ 		fTimer->cancelTimeout();
+@@ -906,7 +977,7 @@
+ SweetBattery::irqNotify(void *context, unsigned events)
+ {
+ 	SweetBattery *self = (SweetBattery *)context;
+-	if (events & 0x0fu) {
++	if (events & SWEET_BATT_IRQ_ALL) {
+ 		uint64_t now;
+ 		clock_get_uptime(&now);
+ 		__atomic_store_n(&self->fIrqNotifyTime, now, __ATOMIC_RELEASE);
+@@ -933,11 +1004,16 @@
+ 		SWEET_LOG_INFO("SWEET BATT IRQ: registry provider matched; routes already attached\n");
+ 		self->tryAttachIrq();
+ 	}
+-	pending &= 0x0fu;
++	pending &= SWEET_BATT_IRQ_ALL;
+ 	if (!pending || !self->fRunning || !self->fIrqAttached) {
+ 		return;
+ 	}
+ 	uint64_t notified = __atomic_load_n(&self->fIrqNotifyTime, __ATOMIC_ACQUIRE);
++	if ((pending & SWEET_BATT_IRQ_FAULT) && self->fRuntimeMode) {
++		self->fController.fault = true;
++		self->fController.faultReasons = SB_R_HARDWARE;
++		SWEET_LOG_ERROR("SWEET BATT CONTROL: CHGR fault IRQ latched; recovery requires explicit restart\n");
++	}
+ 	self->fSettleBudget = 1;
+ 	self->poll();
+ 	++self->fIrqSamples;
+@@ -963,6 +1039,7 @@
+ 	if (fIrqMode >= 4) {
+ 		events |= SWEET_BATT_IRQ_MSOC | SWEET_BATT_IRQ_READY;
+ 	}
++	if (fRuntimeRequested) { events |= SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_FAULT; }
+ 	fIrqAttached = true;
+ 	putBool("SweetBatteryIRQWaitingForMux", false);
+ 	putBool("SweetBatteryIRQHealthy", true);
+@@ -995,6 +1072,7 @@
+ 	if (self->fIrqMode >= 4) {
+ 		events |= SWEET_BATT_IRQ_MSOC | SWEET_BATT_IRQ_READY;
+ 	}
++	if (self->fRuntimeRequested) { events |= SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_FAULT; }
+ 	SWEET_LOG_INFO("SWEET BATT IRQ: waiting for mux registry match; no timer/status polling\n");
+ 	self->fMuxClient = SweetSpmiMuxClient::withOwner(self, self->fLoop,
+ 	    SWEET_MUX_BATTERY, events, irqNotify, self);
+@@ -1024,6 +1102,264 @@
+ 	}
+ 	self->poll();
+ 	sender->setTimeoutMS(SWEET_BATT_POLL_MS);
++}
++
++
++void
++SweetBattery::removePowerValue(const char *key)
++{
++	if (properties && properties->getObject(key)) {
++		properties->removeObject(key);
++		removeProperty(key);
++		settingsChangedSinceUpdate = true;
++	}
++}
++
++static uint64_t
++sweet_batt_now_ns(void)
++{
++	uint64_t ticks, ns;
++	clock_get_uptime(&ticks);
++	absolutetime_to_nanoseconds(ticks, &ns);
++	return ns;
++}
++
++void
++SweetBattery::sampleRuntime(bool refreshInput)
++{
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	/* Only IRQ/arm-sync refreshes plug/APSD/type-C/ICL. The monitor updates
++	 * telemetry/protection, never substitutes periodic plug discovery. */
++	SweetBattSnapshot next = fSnapshot;
++	next.startedNs = sweet_batt_now_ns();
++	static const unsigned addresses[SB_REG_COUNT] = {
++		0x1006,0x1007,0x100d,0x1042,0x1043,0x1051,0x1061,0x1070,
++		0x110b,0x1108,0x1307,0x1308,0x1310,0x1340,0x1342,0x1365,
++		0x1366,0x1370,0x1380,0x1506,0x1509,0x150b,0x1648,0x1651,
++		0x1653,0x1690,0x1090,0x1067,0x1068,0x107d
++	};
++	for (unsigned i = 0; i < SB_REG_COUNT; ++i) {
++		if (!refreshInput && (i == SB_USB || i == SB_APSD || i == SB_RESULT ||
++		    i == SB_TYPEC || i == SB_ATTACHED || i == SB_MISC)) { continue; }
++		uint8_t value = 0;
++		int rc = sweet_spmi_charger_read(2, addresses[i], &value);
++		next.errors[i] = rc;
++		next.valid &= ~(1ULL << i);
++		if (!rc) { next.raw[i] = value; next.valid |= 1ULL << i; }
++	}
++	uint8_t present = 0;
++	next.presentValid = !sweet_spmi_read(2, 0x4107, &present);
++	next.present = next.presentValid && !(present & 4);
++	/* Gen4 has a defined voltage scale. Do not guess a different generation
++	 * merely because a voltage falls outside the plausibility bounds. */
++	next.voltageValid = readWordPair(2, 0x41a0, 0x41a6, &next.rawVoltage);
++	next.mv = (unsigned)(((uint64_t)next.rawVoltage * 122070u) / 1000000u);
++	next.voltageValid = next.voltageValid && next.mv >= 2800 && next.mv <= 4600;
++	next.currentValid = readWordPair(2, 0x41a2, 0x41a8, &next.rawCurrent);
++	int signedRaw = (next.rawCurrent & 0x8000) ? (int)next.rawCurrent - 65536 : next.rawCurrent;
++	next.ma = (int)(-((int64_t)signedRaw * 488281) / 1000000);
++	next.currentValid = next.currentValid && next.ma >= -8000 && next.ma <= 8000;
++	uint8_t soc = 0, ready = 0;
++	next.socValid = !sweet_spmi_read(2, 0x4010, &ready) && (ready & 2) &&
++	    readBytePair(2, 0x4009, 0x400a, &soc);
++	next.percent = next.socValid ? scaleMsoc(soc) : fLastPercent;
++	next.tempError = sweet_spmi_fg_read(SWEET_FG_TEMPERATURE, &next.rawTemp);
++	int rawTemp = next.rawTemp & 0x3ff;
++	if (rawTemp & 0x200) { rawTemp -= 0x400; }
++	next.tempCenti = rawTemp * 25;
++	next.tempValid = !next.tempError && next.rawTemp != 0xffffu && next.tempCenti >= -4000 && next.tempCenti <= 8000;
++	/* Identity/capacity is sampled at initial observation and each real event,
++	 * not on every protection tick. Never write/reload SRAM profile data. */
++	if (refreshInput || !fMonitorSamples) {
++		uint16_t nominal = 0, learned = 0, integrity = 0;
++		next.profileError = sweet_spmi_fg_read(SWEET_FG_PROFILE_INTEGRITY, &integrity);
++		next.profileValid = !next.profileError;
++		next.integrity = integrity;
++		next.nominalError = sweet_spmi_fg_read(SWEET_FG_NOMINAL_CAPACITY, &nominal);
++		next.learnedError = sweet_spmi_fg_read(SWEET_FG_LEARNED_CAPACITY, &learned);
++		next.nominalValid = !next.nominalError && next.profileValid && (integrity & 1) &&
++		    nominal >= 1000 && nominal <= 6000;
++		next.learnedValid = next.nominalValid && !next.learnedError &&
++		    learned >= nominal / 2 && learned <= nominal * 12 / 10;
++		next.nominalMah = nominal;
++		next.learnedMah = learned;
++	}
++	next.completedNs = sweet_batt_now_ns();
++	fSnapshot = next;
++	++fMonitorSamples;
++	SWEET_LOG_INFO("SWEET BATT SAMPLE: v1 source=%s valid=%#llx mv=%u v-ok=%u ma=%d i-ok=%u temp-centi=%d temp-ok=%u temp-error=%d nominal=%u n-ok=%u learned=%u l-ok=%u profile=%#x p-ok=%u started-ns=%llu completed-ns=%llu\n",
++	    refreshInput ? "irq" : "protection-timer", (unsigned long long)next.valid, next.mv, next.voltageValid,
++	    next.ma, next.currentValid, next.tempCenti, next.tempValid, next.tempError,
++	    next.nominalMah, next.nominalValid, next.learnedMah, next.learnedValid,
++	    next.integrity, next.profileValid, (unsigned long long)next.startedNs,
++	    (unsigned long long)next.completedNs);
++#endif
++}
++
++int
++SweetBattery::runtimeUpdate(void *context, unsigned addr, unsigned mask, unsigned value, uint8_t *out)
++{
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	SweetBattery *self = (SweetBattery *)context;
++	if (!self || !self->fControlLock) { return SWEET_SPMI_NOT_READY; }
++	/* Serialize the stop notification with command submission. A flag check
++	 * outside this lock would race a final enable after a shutdown disable. */
++	IOLockLock(self->fControlLock);
++	bool disable = addr == 0x1042 && mask == 1 && value == 0;
++	int rc;
++	if (self->fPowerStopping && !disable) { rc = SWEET_SPMI_NOT_READY; }
++	else {
++		self->fControlClaimed = true;
++		rc = sweet_spmi_charger_update(2, addr, mask, value, out);
++	}
++	IOLockUnlock(self->fControlLock);
++	if (!rc) {
++		SWEET_LOG_INFO("SWEET BATT CONTROL: addr=%#x mask=%#x requested=%#x verified=%#x\n",
++		    addr, mask, value, *out);
++	}
++	return rc;
++#else
++	return -1;
++#endif
++}
++
++void
++SweetBattery::runRuntimePolicy(void)
++{
++	if (fControlLock) {
++		IOLockLock(fControlLock);
++		if (fPowerStopping) { fController.stopped = true; }
++		IOLockUnlock(fControlLock);
++	}
++	uint64_t now = sweet_batt_now_ns();
++	SweetBattDecision decision = sb_decide(fController, fSnapshot, fLimits, now);
++	if (fLastReasons != decision.reasons || fController.state != decision.state) {
++		SWEET_LOG_INFO("SWEET BATT POLICY: v1 mode=%u state=%u reasons=%#x allow=%u fcc=%u fv=%u icl=%u owned=%u\n",
++		    fRuntimeMode, decision.state, decision.reasons, decision.allow,
++		    decision.fccMa, decision.fvMv, decision.iclMa, fController.owned);
++	}
++	fLastReasons = decision.reasons;
++	if (fRuntimeMode >= 2) {
++		if (!sb_apply(fController, decision, now, fRuntimeMode != 3, runtimeUpdate, this, runtimeClock)) {
++			SWEET_LOG_ERROR("SWEET BATT CONTROL: failure error=%d; stop state unconfirmed=%u\n",
++			    fController.lastError, !fController.stopConfirmed);
++		}
++	}
++	if (fController.fault) { fController.state = SB_FAULT; }
++	else if (fController.stopped) { fController.state = SB_STOPPED; }
++	else { fController.state = decision.state; }
++}
++
++IOReturn
++SweetBattery::startRuntime(OSObject *owner, void *, void *, void *, void *)
++{
++	SweetBattery *self = OSDynamicCast(SweetBattery, owner);
++	if (!self || !self->fRunning) { return kIOReturnNotReady; }
++	self->fRuntimeMode = self->fRuntimeRequested;
++	SWEET_LOG_INFO("SWEET BATT RUNTIME: v1 mode=%u; board identity/input/parallel providers missing; control interlocked\n",
++	    self->fRuntimeMode);
++	self->sampleRuntime(true);
++	self->runRuntimePolicy();
++	self->publishRuntime();
++	self->fMonitor->setTimeoutMS(1000);
++	return kIOReturnSuccess;
++}
++
++void
++SweetBattery::monitorFired(OSObject *owner, IOTimerEventSource *)
++{
++	SweetBattery *self = OSDynamicCast(SweetBattery, owner);
++	if (!self || !self->fRunning || !self->fRuntimeMode || self->fController.stopped) { return; }
++	self->sampleRuntime(false);
++	self->runRuntimePolicy();
++	self->publishRuntime();
++	if (self->fRunning && !self->fController.stopped) { self->fMonitor->setTimeoutMS(1000); }
++}
++
++uint64_t
++SweetBattery::runtimeClock(void *)
++{
++	return sweet_batt_now_ns();
++}
++
++void
++SweetBattery::publishRuntime(void)
++{
++	uint64_t now = sweet_batt_now_ns();
++	bool fresh = !fController.stopped && fSnapshot.completedNs && now >= fSnapshot.startedNs &&
++	    now >= fSnapshot.completedNs && now - fSnapshot.startedNs <= 3000000000ULL;
++	putBool("SweetBatteryTelemetryFresh", fresh);
++	if (!fresh) {
++		fSnapshot.tempValid = fSnapshot.currentValid = fSnapshot.voltageValid = false;
++	}
++	putNumber("SweetBatterySampleAgeMS", now >= fSnapshot.startedNs ?
++	    (UInt32)((now - fSnapshot.startedNs) / 1000000ULL) : 0xffffffffu);
++	unsigned percent = fPercentValid ? fLastPercent : fSnapshot.percent;
++	bool external = sb_valid(fSnapshot, SB_USB) && (fSnapshot.raw[SB_USB] & 16);
++	bool capable = external && sb_valid(fSnapshot, SB_PATH) && (fSnapshot.raw[SB_PATH] & 1) &&
++	    (fSnapshot.raw[SB_PATH] & 16) && !(fSnapshot.raw[SB_PATH] & 64);
++	bool statusValid = sb_valid(fSnapshot, SB_STAGE) && sb_valid(fSnapshot, SB_ERROR) &&
++	    sb_valid(fSnapshot, SB_THERMAL) && sb_valid(fSnapshot, SB_ENABLE) && sb_valid(fSnapshot, SB_PAUSE);
++	unsigned state = fSnapshot.raw[SB_STAGE] & 7;
++	bool charging = capable && statusValid && (fSnapshot.raw[SB_ENABLE] & 1) &&
++	    !(fSnapshot.raw[SB_PAUSE] & 1) && !(fSnapshot.raw[SB_ERROR] & 2) &&
++	    !(fSnapshot.raw[SB_THERMAL] & 15) && state >= 1 && state <= 4;
++	putBool("SweetBatteryExternalValid", sb_valid(fSnapshot, SB_USB));
++	putBool("SweetBatteryChargeStateValid", statusValid);
++	putBool("SweetBatteryTemperatureCompensated", false);
++	publish(percent, fSnapshot.voltageValid ? fSnapshot.mv : fLastMv,
++	    fSnapshot.ma, external, capable, charging,
++	    external && fSnapshot.socValid && fSnapshot.percent >= 99 && statusValid && state == 5,
++	    fSnapshot.socValid, fSnapshot.currentValid);
++}
++
++IOReturn
++SweetBattery::runtimePowerNotice(void *target, void *, UInt32 message,
++    IOService *, void *argument, vm_size_t)
++{
++	SweetBattery *self = (SweetBattery *)target;
++	if (message != kIOMessageSystemWillSleep && message != kIOMessageSystemWillRestart &&
++	    message != kIOMessageSystemWillPowerOff) { return kIOReturnUnsupported; }
++	/* No wait for the consumer loop: it can be publishing to power clients.
++	 * Only a bounded disable command is allowed here, serialized with submit.
++	 * All controller state remains owned by the consumer loop. */
++	IOLockLock(self->fControlLock);
++	self->fPowerStopping = true;
++	if (self->fControlClaimed) {
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++		uint8_t verified = 0;
++		int rc = sweet_spmi_charger_update(2, 0x1042, 1, 0, &verified);
++		if (rc || (verified & 1)) {
++			SWEET_LOG_ERROR("SWEET BATT CONTROL: power transition=%#x disable unconfirmed error=%d\n", message, rc);
++		}
++#endif
++	}
++	IOLockUnlock(self->fControlLock);
++	if (message == kIOMessageSystemWillSleep && argument) {
++		sleepWakeNote *note = (sleepWakeNote *)argument;
++		note->returnValue = 0;
++		acknowledgeSleepWakeNotification(note->powerRef);
++	}
++	return kIOReturnSuccess;
++}
++
++void
++SweetBattery::removeRuntimeNotifier(void)
++{
++	/* Outside our workloop gate; remove synchronizes an in-flight callback. */
++	if (fPowerNotice) { fPowerNotice->remove();fPowerNotice = NULL; }
++}
++
++void
++SweetBattery::stopRuntime(void)
++{
++	if (fMonitor) { fMonitor->cancelTimeout();fMonitor->disable(); }
++	if (!fRuntimeMode) { return; }
++	fController.stopped = true;
++	if (!sb_stop(fController, runtimeUpdate, this)) {
++		SWEET_LOG_ERROR("SWEET BATT CONTROL: service stopping; hardware disable unconfirmed error=%d\n",
++		    fController.lastError);
++	}
+ }
+ 
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+@@ -1095,6 +1431,13 @@
+ 		return false;
+ 	}
+ 	fIrqMode = (unsigned)irqMode;
++	int runtime = 0;
++	(void)PE_parse_boot_argn("sweetbattruntime", &runtime, sizeof(runtime));
++	if (runtime < 0 || runtime > 3 || (runtime && (!fSid2 || fIrqMode < 4))) {
++		SWEET_LOG_ERROR("SWEET BATT RUNTIME: invalid mode=%d; real SID2 and IRQ mode4 required\n", runtime);
++		return false;
++	}
++	fRuntimeRequested = (unsigned)runtime;
+ #endif
+ 	int diag = 0;
+ 	(void)PE_parse_boot_argn("sweetbattdiag", &diag, sizeof(diag));
+@@ -1139,6 +1482,26 @@
+ 		fTimer = IOTimerEventSource::timerEventSource(this, &SweetBattery::timerFired);
+ 		if (fLoop && fTimer && fLoop->addEventSource(fTimer) == kIOReturnSuccess) {
+ 			fTimerAdded = true;
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++			if (fRuntimeRequested) {
++				fMonitor = IOTimerEventSource::timerEventSource(this, &SweetBattery::monitorFired);
++				if (!fMonitor || fLoop->addEventSource(fMonitor) != kIOReturnSuccess) {
++					failIrq("protection monitor unavailable");
++					return false;
++				}
++				fMonitorAdded = true;
++				fControlLock = IOLockAlloc();
++				if (!fControlLock || !IOService::getPMRootDomain()) {
++					SWEET_LOG_ERROR("SWEET BATT RUNTIME: control lock or PM root domain unavailable\n");
++					return false;
++				}
++				fPowerNotice = registerPrioritySleepWakeInterest(runtimePowerNotice, this);
++				if (!fPowerNotice) {
++					SWEET_LOG_ERROR("SWEET BATT RUNTIME: power transition notifier unavailable\n");
++					return false;
++				}
++			}
++#endif
+ 			fRunning = true;
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ 			int transport = 0;
+@@ -1158,6 +1521,11 @@
+ 			} else {
+ 				fTimer->setTimeoutMS(SWEET_BATT_POLL_MS);
+ 			}
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++			if (fRuntimeRequested && fLoop->runAction(&SweetBattery::startRuntime, this) != kIOReturnSuccess) {
++				return false;
++			}
++#endif
+ 		} else if (fIrqMode >= 2) {
+ 			failIrq("battery workloop/timer unavailable");
+ 		} else {
+@@ -1166,6 +1534,7 @@
+ 			SWEET_LOG_ERROR("SWEET BATTERY: timer unavailable; static fallback\n");
+ 		}
+ 	}
++
+ 	registerService();
+ 	return true;
+ }
+@@ -1173,6 +1542,7 @@
+ bool
+ SweetBattery::willTerminate(IOService *provider, IOOptionBits options)
+ {
++	removeRuntimeNotifier();
+ 	if (fLoop && fTimerAdded) {
+ 		(void)fLoop->runAction(&SweetBattery::stopPolling, this);
+ 	}
+@@ -1187,6 +1557,7 @@
+ void
+ SweetBattery::stop(IOService *provider)
+ {
++	removeRuntimeNotifier();
+ 	if (fLoop && fTimerAdded) {
+ 		/* Serialize against a running timer callback, including rearming. */
+ 		(void)fLoop->runAction(&SweetBattery::stopPolling, this);
+@@ -1202,6 +1573,10 @@
+ 		fLoop->removeEventSource(fIrqEvent);
+ 		fIrqEventAdded = false;
+ 	}
++	if (fLoop && fMonitorAdded) {
++		fLoop->removeEventSource(fMonitor);
++		fMonitorAdded = false;
++	}
+ 	IOPMPowerSource::stop(provider);
+ }
+ 
+@@ -1212,6 +1587,7 @@
+ 	if (!self) {
+ 		return kIOReturnBadArgument;
+ 	}
++	self->stopRuntime();
+ 	self->fRunning = false;
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ 	if (self->fMuxClient) {
+@@ -1219,6 +1595,10 @@
+ 	}
+ 	self->fIrqAttached = false;
+ #endif
++	if (self->fMonitor) {
++		self->fMonitor->cancelTimeout();
++		self->fMonitor->disable();
++	}
+ 	if (self->fIrqEvent) {
+ 		self->fIrqEvent->disable();
+ 	}
+@@ -1230,6 +1610,7 @@
+ void
+ SweetBattery::free(void)
+ {
++	removeRuntimeNotifier();
+ 	/* Defensive unwind also covers a start() failure before stop(). */
+ 	if (fLoop && fTimerAdded) {
+ 		(void)fLoop->runAction(&SweetBattery::stopPolling, this);
+@@ -1246,7 +1627,13 @@
+ 	}
+ 	OSSafeReleaseNULL(fIrqEvent);
+ 	OSSafeReleaseNULL(fTimer);
++	if (fLoop && fMonitorAdded) {
++		fLoop->removeEventSource(fMonitor);
++		fMonitorAdded = false;
++	}
++	OSSafeReleaseNULL(fMonitor);
+ 	OSSafeReleaseNULL(fLoop);
++	if (fControlLock) { IOLockFree(fControlLock);fControlLock = NULL; }
+ 	IOPMPowerSource::free();
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -47,6 +47,9 @@
+ 	{2, 0x10, 1, SWEET_BATT_IRQ_CHG, MUX_BATTERY, 1, "battery-chgr"},
+ 	{2, 0x40, 3, SWEET_BATT_IRQ_MSOC, MUX_BATTERY, 1, "battery-msoc"},
+ 	{2, 0x40, 1, SWEET_BATT_IRQ_READY, MUX_BATTERY, 3, "battery-ready"},
++	/* PM8150B DTS: source-change USBIN bit6 and CHGR error bit0 rising. */
++	{2, 0x13, 6, SWEET_BATT_IRQ_SOURCE, MUX_BATTERY, 1, "battery-source"},
++	{2, 0x10, 0, SWEET_BATT_IRQ_FAULT, MUX_BATTERY, 1, "battery-fault"},
+ };
+ static_assert(sizeof(routeTemplates) / sizeof(routeTemplates[0]) == SWEET_MUX_ROUTE_COUNT,
+     "route layout must match the instance storage");
+@@ -865,7 +868,7 @@
+     void *context)
+ {
+ 	if (!consumer || group >= MUX_GROUPS || !events || !notify || !context ||
+-	    (group == MUX_KEYS ? events != SWEET_KEYS_IRQ_ALL : (events & ~0x0fu) != 0)) {
++	    (group == MUX_KEYS ? events != SWEET_KEYS_IRQ_ALL : (events & ~SWEET_BATT_IRQ_ALL) != 0)) {
+ 		return kIOReturnBadArgument;
+ 	}
+ 	if (!workLoop) {
+diff --git a/iokit/Kernel/arm/SweetSpmiMuxClient.cpp b/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
+--- a/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
++++ b/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
+@@ -174,8 +174,8 @@
+ 		SWEET_LOG_INFO("SWEET MUX CLIENT: matched and attached group=%u\n", group);
+ 		notify(context, SWEET_MUX_READY);
+ 	}
+-	if (pending & 0x0fu) {
+-		notify(context, pending & 0x0fu);
++	if (pending & SWEET_BATT_IRQ_ALL) {
++		notify(context, pending & SWEET_BATT_IRQ_ALL);
+ 	}
+ }
+ 
