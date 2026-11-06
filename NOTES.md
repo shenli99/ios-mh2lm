@@ -2,7 +2,48 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
-**CURRENT: 0120a3已核对为0154并打包，待用户测试telemetry。**
+**LATEST RESULT: 0120a3 ADC预检/采样分层实机正常；下一步实现真实ADC provider。**
+
+用户导出logs/sweetlog-0120a3-battery-telemetry.bin，SHA256
+f414a6331edb147c6ab48e4203ee9ac6db2f9056b1e7bae03a7e5725f74f60fe。
+v1/ring4194304/total886017/flush125，未回卷/无NUL；实参runtime1/IRQ4/adcdiag1，
+HARDWAREv1出现。ADC检查1次/error0/valid1fff，13字段全valid/error0。
+user observer=writer=irqAPID280/writeEE0；cal observer=writer282/writeEE0，
+irqAPID65535/noEE0owner(-4)。DTS只声明user0x31bit0rising EOC，不要求独立cal
+IRQ，该项不构成阻塞。元数据不证明真实写权或EOC投递，尚未发起转换。
+
+字段顺序0..12的raw：08,28,00,00,18,80,4b,01,00,00,00,80,03，对应
+3104/3105/3108/3109/3142/3143/3144/3145/3146/3147/3150/3151/3744。
+channel4b对应BAT_ID_PU2只是继承配置；data8000也是LG ADC_USR_DATA_CHECK
+无效值。不能将可读valid1或配置当成有效ID/VBUS/电池身份。
+
+1252完整SAMPLE/FG/CAP/TIME，id1..1252匹配，跨度1279.409s；21初始/事件
+真实容量重读，其余1231缓存。V/I全有效3859..3970mV、IOPM -737..+15mA；
+温度全有效28.50..30.50C（raw72..7a，仍未LG补偿），capacity4027/profile13。
+TIME min37.046/median37.596/max92.607ms。首次DMA WRITE_ERROR2清到0成功，
+无后续FG WARN/ERROR。ADC记录最长INFO+newline116/124/79bytes。
+
+19mux电池刷新USBIN12/source5/MSOC2，notification/sample1..19连续healthy1，
+routepublish88.953..90.822ms。power/down各2hit且完整HID down/up，up无本次
+操作证据；touch计数229、USB128，无ERROR/panic/mux隔离。10USB endpoint
+cmd6/status1 WARN属既有问题，powerdsel4unsupported也仍在。不能称所有驱动
+无bug/全部生命周期已验收。充电21CONFIG均en0/pause0/WD62/time8c/SMB0/CFG2，
+policy13条allow0/owned0 reasons7c0(7)/7c8(6)，无CONTROL，CHGR47，不能称真充电。
+
+底稿scratch/artifact-0120a3/{battery-telemetry-persistent.txt,
+analyze-telemetry.py,battery-telemetry-analysis.json,analysis-summary.txt}，详细
+结果见docs/BATTERY-HARDWARE-INTERFACES.md及runtime测试文档。本轮只分析/
+文档，未改驱动/CI、无新boot/push/设备操作，无需补live/先dry/重复本轮。
+NEXT实现实际ADC provider：保留IOService/自己的workloop，经现有共享SPMI
+受限协议和mux注册EOC；准备、IRQ完成、有界超时、错误恢复/退出都在明确
+生命周期内，不在matched做重活，不静默切换轮询。验证实际写/转换/EOC和
+BAT_ID_PU2、USB_IN_V_16校准/单位、USBIN workaround，再接有效证据接口。
+本次owner可读通过不等于ADC转换成功或已具备安全limits；SMB1355 provider、
+实际电池身份/额定限制、输入能力和WD pet仍缺。保持充电互锁，勿关WD绕过。
+
+### Previous 0120a3 packaging handoff
+
+**CURRENT AT PACKAGING: 0120a3已核对为0154并打包。**
 
 用户提供logs/xnu-kernel-0120a3.gz与xnu-buildtree-0120a3.gz。两者SHA256分别为
 `6e80b1e7fddefdd4d763d4cb60b5dde8484a8a26154abf490e9da8d775d3b9c9`、

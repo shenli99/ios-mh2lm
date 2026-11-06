@@ -10,12 +10,25 @@
 为`259dc12f3ea402f9ba731d3941635ce5207c4c2f994aef446c0b2fdf9d0bb09b`，dry
 为`cb91931bdeb4946c66ed08afcec4093d7f2b5712990a7d1ef0001e6dae82c088`。
 三档均回读kernel/ADT/TOML/firmware和无重复参数；只有telemetry启用
-`sweetbattadcdiag=1`。这只是构建/打包通过，尚无0120a3实机证据。
+`sweetbattadcdiag=1`。实机结果见下节；以下保留打包与测试说明。
 
 本轮只测试telemetry：稳定约60秒、插拔两轮、每状态15～30秒，导出持久日志。
 须保留启动早期内容，核对HARDWARE、ADC5 PREFLIGHT/ROUTE/FIELD以及原FG
 遥测和共享IRQ。ADC5字段是只读诊断，不能据此判断实际VBUS/电池ID或真实充电；
 没有控制档，也不要用dry档替代本测试。
+
+### 0120a3 实机结论
+
+持久日志SHA256为`f414a6331edb147c6ab48e4203ee9ac6db2f9056b1e7bae03a7e5725f74f60fe`，
+未回卷，1252次快照覆盖约1279秒。ADC5 13/13字段有效，user observer/writer/
+IRQ均为APID280；calibration observer/writer为APID282且无独立IRQ owner，符合
+DTS仅给user `0x31` EOC中断的描述。该轮未发起转换，data仍是diagnostic-only。
+
+1252次V/I、温度及容量状态均有效；容量实际重读21次，余1231次为缓存。
+19次电池mux刷新全部healthy；总快照由21次初始/事件与1231次保护timer构成。
+power/volume-down各有完整按键边沿，
+USB/触摸IRQ未见错误；10条既有USB endpoint WARN仍需单独处理。充电状态仍
+为enable=0、CHGR=0x47、无控制记录，不能视为已充电。
 
 2026-11-06，承接实现提交bde5519。用户下载产物，本轮仅核对和打包，
 没有改驱动/CI、push或操作设备。telemetry持久日志结果已补于文末。

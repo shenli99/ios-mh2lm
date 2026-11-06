@@ -1,7 +1,7 @@
 # 电池硬件接口与 ADC5 预检（0154）
 
 2026-11-06，承接0120a2已验证的FG遥测。0154完成本地实现/测试，0120a3云
-产物已核对并打包，尚无本轮实机结果。本轮先固定接口边界并取得ADC5访问依据；未完成ADC测量、
+产物已核对并打包，实机预检和采样回归结果见末节。本轮先固定接口边界并取得ADC5访问依据；未完成ADC测量、
 电池身份验证、并联控制或watchdog维护，仍不开放受控充电。
 
 ## 服务、策略与硬件边界
@@ -115,3 +115,51 @@ CircleCI只增加源码门禁：完整门禁接受0154、拒绝0153，实际buil
 consumer接口接入EOC，初始化在自己的loop，退出同步撤回回调。补齐实际
 电池身份/限值、VBUS/输入能力、并联隔离和watchdog保护之后，才进入首次
 受控充电及CHGR状态转换验收。0120a2的遥测实机成功不构成0154实机通过。
+
+## 0120a3 实机结果
+
+`sweetlog-0120a3-battery-telemetry.bin` SHA256 为
+`f414a6331edb147c6ab48e4203ee9ac6db2f9056b1e7bae03a7e5725f74f60fe`。日志未
+回卷，总计886017字节，1252次快照，持续约1279秒。ADC5整体
+`error=0/valid=0x1fff`，13个字段全部`valid=1/error=0`。user block 的
+observer、writer、IRQ owner 都是APID280；calibration block的observer/writer
+是APID282，没有独立IRQ owner。DTS只声明SID2/0x31的EOC rising IRQ，因此
+calibration的`irq-error=-4`符合当前硬件描述，不是本轮故障。
+
+| 字段/地址 | 本次raw |
+| --- | --- |
+| type/subtype：3104/3105 | 08/28 |
+| status/sequence：3108/3109 | 00/00 |
+| digital/average：3142/3143 | 18/80 |
+| channel/settle：3144/3145 | 4b/01 |
+| enable/request：3146/3147 | 00/00 |
+| data lo/hi：3150/3151 | 00/80 |
+| cal-delay：3744 | 03 |
+
+channel4b对应LG头文件的BAT_ID_PU2，但仅是继承的通道配置；合并data8000
+等于LG `qcom-vadc-common.h:ADC_USR_DATA_CHECK`无效码，更不能算实测电池ID。
+本次writer-error0只确认EE0归属/唯一性和未poison，不证明真实写入被接受；
+irq-error0只确认元数据，不证明EOC已经投递。cal的-4特指未发现本地EE0
+IRQ owner，不是读取字段失败。后续EOC通过user APID280接入。
+
+本轮没有发起ADC转换；enable/request为0，data仍是诊断原始字节，不能据此
+换算VBUS或电池ID。FG与运行层没有错误：1252次V/I均有效（3859～3970mV、
+-737～+15mA），温度均有效（28.50～30.50°C），容量/profile均为
+4027mAh/0x13。共21次IRQ来源快照，其中19次是mux电池刷新（USBIN12、
+source5、MSOC2），每次`healthy=1`；另有1231次保护timer缓存采样。按键
+power和volume-down都有完整down/up，USB/触摸IRQ无错误，未见panic、SPMI
+ERROR或mux isolation。10条既有USB endpoint WARN另行记录。
+
+充电仍未恢复：配置均为`enable=0`，`CHGR=0x47`，没有CONTROL记录，策略
+`allow=0`（原因0x7c0/0x7c8）。这轮证明接口、owner区分和事件链正常，
+不构成真实充电验收。
+
+21次初始/事件快照实际重读容量，余1231次保留缓存；不能把CAP记录1252条
+写成1252次独立容量读取。快照耗时中位37.596ms，最大92.607ms；首次DMA
+WRITE_ERROR0x2成功清到0。未出现新的FG错误、共享SPMI失败或mux隔离。
+
+下一步不重复本镜像或先跑dry，直接设计实际ADC provider及有限协议：
+自己的IOService/workloop，经现有共享SPMI接口配置转换，通过mux注册user
+EOC、以有界timer处理超时失败并清理，不引入静默轮询回退；还需验证真实
+写权、转换结果、校准、单位与退出恢复。之后接battery/input证据，再补
+SMB1355、watchdog和实际限值；不能仅凭本次预检开放充电。
