@@ -2,7 +2,35 @@
 
 ## Agent handoff / active work (2026-11-06, latest)
 
-**LATEST RESULT: 0155 ADC5 conversion provider 本地完成，待用户push/云编译/实机。**
+**LATEST RESULT: 0120a4 实机 ADC5 转换链路通过；下一步接入测量provider与充电证据。**
+
+日志logs/sweetlog-0120a4-battery-adc5-conversion.bin，SHA256
+61b405c6b10b1f66b341abc0687f57b065850060874627c88afc35091b637814。
+v1/ring4194304/total357043/flush26、未回卷/有效正文无NUL。ring尾部残留旧轮
+日志，必须按header total解码，不能统计整个bin的strings。参数conv3/runtime1/IRQ4。
+
+服务/group2 attach成功，三次真实ADC EOC：BAT_ID raw3591/889684uV/eoc1，
+USBIN raw122e/4831136uV/eoc2，均valid1/restored1。USBIN中间error1是MORE正返回，
+并非失败。TIME区间70.336459/32.360156ms，含等待/调度、不含最终恢复；无ADC
+FAILURE/TIMEOUT、ERROR、panic、mux隔离。真实转换与受限恢复正常，真实故障/
+服务终止路径尚未设备验证。
+
+280完整快照/id1..280，跨度289.003s；2次真实容量读取+278缓存。V/I有效3951..3952mV、
+IOPM -132..0mA；temp30.25..30.75C、capacity4027/profile13。CONFIG两次en0，
+WD62/time8c，policy allow0/reasons7c0，无CONTROL。当前转换结果未接入limits，
+不能称已恢复充电。power/up完整down/up，down仅down；触摸44/USB128err0，
+3条既有endpoint WARN。本轮没有USBIN插拔事件，勿计入旧轮19次刷新。
+
+NEXT无需补ADC/baseline/dry；实现SweetBattery通过IOKit发现/retain/终止清理接入
+ADC5测量provider，核对实际电池ID/限值、VBUS/输入能力、SMB1355隔离和watchdog pet，
+保持充电互锁。底稿scratch/artifact-0120a4/{adc5-analysis.json,analysis-summary.txt,
+battery-adc5-conversion-persistent.txt,analyze-adc5.py}。详细结果见
+[docs/BATTERY-ADC5-PROVIDER.md](docs/BATTERY-ADC5-PROVIDER.md)。本轮仅分析/记录，
+未改驱动/CI/生成新boot/push/操作设备。
+
+### Previous 0155 implementation and packaging
+
+**0155实现提交db2728f，0120a4已云构建并完成上述实机转换；下方保留实现/打包过程。**
 
 实现提交 `db2728f`；0155 patch: `xnu/patches/0155-mh2lm-adc5-conversion-provider.patch`。新增专用
 `SweetPmicAdc5Device` nub 和 `SweetPmicAdc5 : IOService`，默认发布并订阅 mux

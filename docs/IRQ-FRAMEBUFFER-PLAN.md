@@ -1,7 +1,12 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
+0120a4补充：0155 ADC5 provider实机已得到BAT_ID 889684uV、USBIN 4831136uV，
+三次EOC及配置恢复成功，无ADC错误；下一步接入测量provider并核对充电证据。
+充电仍互锁，不能把转换成功等同于真实充电。详细数据和回归边界见
+[ADC5实机结果](BATTERY-ADC5-PROVIDER.md#0120a4-实机结果转换链路通过)。
+
 0155进度：ADC5独立IOService/专用nub/固定转换/EOC/有界恢复已通过本地验证，
-下一步云构建及实机转换；0154只读预检已在0120a3正常运行。
+0120a4正常转换已通过，下一步接入测量与充电证据；0154预检在0120a3通过。
 测试步骤见[ADC5 provider](BATTERY-ADC5-PROVIDER.md)。
 0120a2遥测实机通过；实际ADC转换/输入能力/电池身份/并联及watchdog依赖
 仍未闭环，不能进入首次受控充电或宣布电池IRQ阶段结束。详见

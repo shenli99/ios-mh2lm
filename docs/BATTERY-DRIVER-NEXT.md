@@ -1,9 +1,14 @@
 # 0119之后的电池驱动推进
 
+0120a4补充：0155 ADC5 provider实机已得到BAT_ID 889684uV、USBIN 4831136uV，
+三次EOC及配置恢复成功，无ADC错误；下一步接入测量provider并核对充电证据。
+充电仍互锁，不能把转换成功等同于真实充电。详细数据和回归边界见
+[ADC5实机结果](BATTERY-ADC5-PROVIDER.md#0120a4-实机结果转换链路通过)。
+
 0154硬件接口与ADC5只读预检已在0120a3实机正常运行，13字段全部可读，
 user observer/writer/IRQ元数据为APID280；calibration未发现本地IRQ owner符合DTS。
 策略不再提交地址/掩码，新runtime采样移入内部PMIC组件；0155已实现独立ADC5
-IOService/转换/EOC/恢复，本地验证通过，下一步云构建与实机转换验收。
+IOService/转换/EOC/恢复，0120a4正常转换已通过，下一步接入测量与充电证据。
 三类充电证据provider接入与watchdog/pet仍未完成，无需重复预检或先跑dry，
 仍不启充。实机步骤见[ADC5 provider](BATTERY-ADC5-PROVIDER.md)，接口见
 [BATTERY-HARDWARE-INTERFACES.md](BATTERY-HARDWARE-INTERFACES.md)。

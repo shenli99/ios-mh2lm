@@ -1,6 +1,6 @@
 # PM8150B ADC5 转换 provider（0155）
 
-2026-11-06。本地实现和验证完成，尚无云端全量构建/实机转换证据。
+2026-11-06。0120a4已完成云端构建及真实转换/EOC/恢复验证，详细结果见末节。
 0120a3只证明ADC可读、writer/IRQ ownership元数据正常；本轮验证实际写入、
 转换、EOC与恢复。ADC成功也不会自动满足电池身份、输入能力或充电允许条件。
 
@@ -109,3 +109,41 @@ raw/uv与TIME，且无TIMEOUT/FAILURE及mux隔离。取得这些证据后再接�
 `out-bs/boot-16k-0120a4-battery-adc5-conversion.img`，SHA256
 `bce9b70785a24f48352335960f4833e30e1764604bbdcd5781deae5a03f971a5`。
 
+## 0120a4 实机结果：转换链路通过
+
+日志 `logs/sweetlog-0120a4-battery-adc5-conversion.bin`，SHA256
+`61b405c6b10b1f66b341abc0687f57b065850060874627c88afc35091b637814`。
+SWEETLOG v1、4MiB ring、total357043、flush26，未回卷，有效正文无NUL。
+**只解析header的total字节；ring尾部仍有上轮文字，不能用整个bin的strings统计。**
+
+参数为ADCconv3/runtime1/batteryIRQ4。user/cal预检13字段有效，user observer/
+writer/IRQ均APID280，cal observer/writer282且无独立IRQ owner，符合DTS。
+专用服务启动、mux group2 attach成功，随后真实转换结果为：
+
+| 测量 | raw | 微伏 | EOC次数 | 有效/恢复 |
+| --- | --- | --- | --- | --- |
+| BAT_ID_PU2 | 0x3591 | 889684（889.684mV） | 1 | valid1/restored1 |
+| USB_IN_V_16 | 0x122e | 4831136（4.831136V） | 2（GND+USBIN） | valid1/restored1 |
+
+mux实际记录三次adc5-eoc命中。USBIN第一个EOC的`error=1 phase=3 count=1`为
+`SWEET_ADC5_MORE`正返回值，表示继续第二阶段，并非错误；第二次error0/phase4。
+TIME测量区间分别70.336459ms、32.360156ms，含排队/等待，不等同纯硬件转换耗时；
+completed时间在最终配置恢复之前取得，不能当成含清理的端到端时长。
+没有ADC TIMEOUT/FAILURE、ERROR、panic或mux隔离，证明本次真实转换/投递/
+受限配置恢复正常。仅此一次启动，故障恢复和真实服务终止仍只有本地注入测试。
+
+本轮280组完整SAMPLE/FG/CAP/TIME，id连续，跨度289.003秒；2次初始/arm-sync
+真实容量读取，278组沿用缓存。V/I全有效：3951～3952mV、IOPM电流-132～0mA；
+温度30.25～30.75°C，仍未经LG补偿；nominal/learned4027mAh、profile13。
+两个CONFIG均enable0、pause0、WD62/time8c；policy allow0/reasons7c0，无CONTROL。
+ADC测量尚未接入limits/provider证据，因此本轮没有恢复真实充电。
+
+power和volume-up各有down/up；volume-down仅记录down，不能据此判定完整三键
+回归通过或存在卡键。触摸计数44、USB IRQ计数128/err0。无新的USBIN插拔刷新，
+不能把ring尾部旧轮的19次刷新计入本次。保留三条既有USB端点cmd6/status1 WARN，
+不据此归因ADC。无需重跑ADC/baseline/dry；下一步将测量provider按IOKit发现/
+生命周期接入battery，并核对物理电池ID/上限、输入能力、SMB1355并联隔离及WD pet。
+单次BAT_ID电压不证明电池型号/限值，单次4.831V不证明输入承诺电流或持续有效。
+
+底稿：`scratch/artifact-0120a4/{battery-adc5-conversion-persistent.txt,
+analyze-adc5.py,adc5-analysis.json,analysis-summary.txt}`。
