@@ -2,6 +2,11 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+用户要求将GitHub Actions的XNU构建改为手动：已删除`.github/workflows/xnu.yml`
+的push触发，仅保留workflow_dispatch及原有手动参数；构建job和CircleCI配置
+未改。YAML解析与结构比较通过。修改尚未push，推送后生效；未在线禁用整个
+workflow、触发构建或取消既有运行。当前电池工作与下一步见下方交接。
+
 **CURRENT: 0162驱动修复保留；撤回40e2e91新增CI检查，恢复原CircleCI配置。**
 
 用户反馈CircleCI配置损坏。40e2e91只改了circleci.yml两条require_marker，
