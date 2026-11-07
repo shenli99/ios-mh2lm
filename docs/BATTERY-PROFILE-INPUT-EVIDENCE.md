@@ -161,3 +161,10 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 epoch与时序明确，且没有FG清理失败、mux隔离或错误启充CONTROL。无需刻意重复
 数百次ADC转换。本批不充电符合范围，真实充电仍须后续身份/输入许可消费者、
 SMB1355隔离与watchdog维护闭合后验收。
+
+### 0159：APSD事件与时序修正
+
+原“所有IRQ/有限确认更新输入epoch”的实现已由0159收窄为初始/plugin/source。
+source bit6早在0151已接入；新增事件来源、观测会话、完成采集期限、一致性及
+实际BC1.2 enable观察。旧0157数据和测试结果保留为历史。下一镜像仍用原档，
+新增0159 kernel门禁；见[APSD事件修复](BATTERY-APSD-EVENTS.md)。

@@ -2,6 +2,37 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0159 APSD事件来源/时效修复本地完成；用户不单独push0158，一起提交。**
+
+更正前次对话：0151已实现battery-source（SID2/PID13/bit6）、SOURCE事件位及
+runtime订阅，0155保留，0120a5已有6次source命中。“当前没有source路由”的
+判断误看了0141早期版本。本轮不重复注册route，也不能从“XNU未写enable”
+推断硬件使能关闭；原先1362 bit3没有读过。
+
+补丁0159接0158：irqAction传递plugin/source原因，初始采一次；CHGR/MSOC/READY/
+有限SOC确认/保护monitor不读取或续期APSD。新增精确只读1362/BC1P2 bit3，
+USBIN→APSD_STATUS→RESULT→STATUS→USBIN一致性检查，失败/变化拒绝。观测会话、
+source来源及独立时间拒绝启动残留DONE，处理两种事件先后但不续期；已观测
+拔插/读错/新输入IRQ排队撤销。策略与执行deadline增加source期限。缺少真实
+input/identity/parallel/watchdog授权仍不启充，未主动enable/rerun APSD。
+后续需DPDM PHY/角色/PD状态provider及typed enable/trigger生命周期，不能把
+事件证据当已证实的电流合同或假定捕获了每次物理插拔。
+
+本地：0158+0159严格apply到实际0120a6云源码并与verify逐文件一致；新源码gate
+检查0159 marker，旧0120a6被拒绝。ARM64三个TU交叉编译、runtime/IRQ/mux/ADC
+consumer/transport/SPMI/日志/board回归通过，含来源先后、读取竞态、过期与撤销。
+CI只追加源码gate，编译命令不变；packager原battery-evidence新增0159 markers。
+文档docs/BATTERY-APSD-EVENTS.md；底稿工作区scratch/battery-apsd-events。
+没有push/新云run/boot/设备结果。用户自己push。
+
+NEXT：用户一次push含0158和0159的当前main；下载新编号kernel/buildtree后核对
+patch与markers，再用原 --battery-evidence 打包（runtime1/IRQ4/ADCconv0），
+保留三键/触摸/USB IRQ及USB日志。一次boot采电脑/普通已知5V电源的插拔持久日志，
+看events0/1/10/11、enabled/coherent/source/qualified和source时间，再看0158
+pending route。仍非真实充电验收，不重测baseline或ADC bring-up。
+
+### Previous 0120a6 packaging handoff (superseded)
+
 **CURRENT: 0120a6 云产物已核对并打包，等待实机 profile/input evidence 日志。**
 
 0120a6 SHA256：`xnu-kernel-0120a6.gz` `c11a13767ac100fbc3cb345cec4fd0e4092085e6bc384af633ae9080fdd4d4f8`；

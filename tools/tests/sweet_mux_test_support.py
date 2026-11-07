@@ -287,6 +287,7 @@ public:
     bool fRunning=true, fIrqAttached=false, fIrqFailed=false, fMuxWatching=false;
     bool fSettlePending=false, healthy=false, waiting=false, valid=true;
     unsigned fIrqMode=2, fIrqSamples=0, fSettleBudget=0, reads=0, publications=0;
+    unsigned fRuntimeInputEvents=0;
     volatile unsigned fIrqPending=0, fIrqNotifications=0;
     volatile uint64_t fIrqNotifyTime=0;
     SweetBattery() {

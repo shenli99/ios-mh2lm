@@ -690,9 +690,15 @@ int main(int argc,char **argv) {
         assert(testInstance->routes[7].active && testInstance->routes[8].active);
         auto samples=b.fIrqSamples;inject(269,0x40);pump();
         assert(b.fIrqSamples==samples+1 && !b.fController.fault && backendRunning);
+        assert(b.fRuntimeInputEvents==SWEET_BATT_IRQ_SOURCE);
         inject(266,1);pump();
         assert(b.fController.fault && b.fController.faultReasons==SB_R_HARDWARE);
         assert(b.fIrqSamples==samples+2 && backendRunning && !b.fIrqFailed);
+        assert(b.fRuntimeInputEvents==0); // CHGR must not masquerade as input IRQ
+        inject(269,0x10);pump();
+        assert(b.fRuntimeInputEvents==SWEET_BATT_IRQ_USB);
+        inject(269,0x50);pump();
+        assert(b.fRuntimeInputEvents==(SWEET_BATT_IRQ_USB|SWEET_BATT_IRQ_SOURCE));
         cleanupBattery(b);
         assert(!testInstance->routes[7].active && !testInstance->routes[8].active);
         endProvider();while(!platform.children.empty())platform.children.back()->terminate(2);

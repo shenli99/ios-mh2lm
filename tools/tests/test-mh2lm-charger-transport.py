@@ -548,12 +548,14 @@ int main(int argc,char **argv){
     assert(ioReads==before && !commands && out==0xa5);
     // Legacy Type-C policy remains closed; only exact new status table opens.
     assert(sweet_spmi_read(2,0x1506,&out)==-1 && ioReads==before);
-    for(unsigned address:{0x1507u,0x150du}){
+    for(unsigned address:{0x1507u,0x150du,0x1362u}){
         pmic[0x20000+address]=0x21;
         assert(!sweet_spmi_charger_read(2,address,&out) && out==0x21);
         auto count=commands;
         assert(sweet_spmi_charger_update(2,address,1,0,&out)==SWEET_SPMI_INVALID && commands==count);
     }
+    assert(sweet_spmi_charger_update(2,0x1362,8,8,&out)==SWEET_SPMI_INVALID);
+    assert(sweet_spmi_charger_update(2,0x1341,1,1,&out)==SWEET_SPMI_INVALID);
     pmic[0x21506]=0x21;assert(!sweet_spmi_charger_read(2,0x1506,&out) && out==0x21 && !maps);
     pmic[0x21042]=0xa0;
     assert(!sweet_spmi_charger_update(2,0x1042,1,1,&out) && out==0xa1 && pmic[0x21042]==0xa1 && writes==1);

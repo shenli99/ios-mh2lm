@@ -1,0 +1,292 @@
+diff --git a/bsd/dev/sweet_battery_runtime.h b/bsd/dev/sweet_battery_runtime.h
+index 141d97cc6f74d1046d80106a2f6cc07d1716fdeb..45643008e9f945d48de4cbc3d400814b0c76cbba 100644
+--- a/bsd/dev/sweet_battery_runtime.h
++++ b/bsd/dev/sweet_battery_runtime.h
+@@ -12,7 +12,7 @@ enum SweetBattReg {
+  SB_PATH, SB_SETTLED, SB_APSD, SB_RESULT, SB_USB, SB_SUSPEND, SB_OVERRIDE,
+  SB_LOAD, SB_MODE, SB_ICL, SB_AICL, SB_TYPEC, SB_ATTACHED, SB_MISC,
+  SB_SMB, SB_WDOG, SB_WDOG_TIME, SB_SMB_CFG, SB_JEITA, SB_ITERM_HI,
+- SB_ITERM_LO, SB_RECHARGE, SB_DEBUG_ACCESS, SB_LEGACY, SB_REG_COUNT
++ SB_ITERM_LO, SB_RECHARGE, SB_DEBUG_ACCESS, SB_LEGACY, SB_APSD_OPTIONS, SB_REG_COUNT
+ };
+ struct SweetBattSnapshot {
+  uint8_t raw[SB_REG_COUNT];
+@@ -24,9 +24,15 @@ struct SweetBattSnapshot {
+  int ma, tempCenti; /* IOPM sign: positive current = charging */
+  uint16_t rawVoltage, rawCurrent, rawTemp, integrity;
+  int tempError, nominalError, learnedError, profileError;
+- /* Input timestamps/epoch change ONLY on event/arm/bounded-confirm reads.
++ /* Input timestamps/epoch change ONLY on initial/plugin/source reads.
+   * Protection telemetry must not renew a cached source's acquisition time. */
+  uint64_t inputEpoch, inputStartedNs, inputCompletedNs;
++ /* Observed USB session, separate from snapshot acquisition epoch. Source IRQ
++  * qualifies a completion; a fresh register read alone never does. Missed or
++  * coalesced physical detach/attach cannot be ruled out by this evidence. */
++ uint64_t usbSession, apsdSession, apsdStartedNs, apsdCompletedNs;
++ unsigned inputEvents;
++ bool apsdCoherent, apsdFromSource;
+  uint8_t profilePrefix[24];
+  bool profilePrefixValid;
+  int profilePrefixError;
+@@ -38,7 +44,8 @@ static inline bool sb_valid(const SweetBattSnapshot &s, unsigned field)
+ static inline uint64_t sb_input_mask(void)
+ {
+  return (1ULL<<SB_USB)|(1ULL<<SB_APSD)|(1ULL<<SB_RESULT)|(1ULL<<SB_TYPEC)|
+-  (1ULL<<SB_ATTACHED)|(1ULL<<SB_MISC)|(1ULL<<SB_DEBUG_ACCESS)|(1ULL<<SB_LEGACY);
++  (1ULL<<SB_ATTACHED)|(1ULL<<SB_MISC)|(1ULL<<SB_DEBUG_ACCESS)|(1ULL<<SB_LEGACY)|
++  (1ULL<<SB_APSD_OPTIONS);
+ }
+ static inline bool sb_input_fresh(const SweetBattSnapshot &s, uint64_t now)
+ {
+@@ -67,6 +74,53 @@ static inline SweetBattSourceType sb_source_type(const SweetBattSnapshot &s)
+  case 0x48: return SB_SOURCE_QC3; default: return SB_SOURCE_UNKNOWN;
+  }
+ }
++/* These values mirror the mux consumer events; compile-time checked by the
++ * IOKit adapter. No dependency on mux/service internals in policy code. */
++enum { SB_INPUT_PLUGIN = 0x01u, SB_INPUT_SOURCE = 0x10u };
++static inline void sb_note_input(SweetBattSnapshot &s,
++ const SweetBattSnapshot &previous, unsigned events)
++{
++ s.inputEvents=events;
++ s.apsdFromSource=false;
++ s.apsdSession=s.apsdStartedNs=s.apsdCompletedNs=0;
++ bool known=sb_valid(s,SB_USB), oldKnown=sb_valid(previous,SB_USB);
++ bool present=known && (s.raw[SB_USB]&16);
++ bool oldPresent=oldKnown && (previous.raw[SB_USB]&16);
++ if (!known || !oldKnown || present!=oldPresent) {
++  /* Saturation is terminal, never wrap to reuse an old session. */
++  if (s.usbSession!=~0ULL) ++s.usbSession;
++ }
++ if (!known || !present || !s.usbSession || s.usbSession==~0ULL ||
++     !s.apsdCoherent || !sb_valid(s,SB_APSD_OPTIONS) ||
++     !(s.raw[SB_APSD_OPTIONS]&8) || sb_source_type(s)==SB_SOURCE_UNKNOWN) return;
++ if (events&SB_INPUT_SOURCE) {
++  s.apsdFromSource=true;s.apsdSession=s.usbSession;
++  s.apsdStartedNs=s.inputStartedNs;s.apsdCompletedNs=s.inputCompletedNs;
++ } else if (oldKnown && oldPresent && previous.apsdFromSource &&
++     previous.apsdSession==s.usbSession &&
++     previous.raw[SB_APSD]==s.raw[SB_APSD] &&
++     previous.raw[SB_RESULT]==s.raw[SB_RESULT] &&
++     previous.raw[SB_TYPEC]==s.raw[SB_TYPEC] &&
++     previous.raw[SB_ATTACHED]==s.raw[SB_ATTACHED] &&
++     previous.raw[SB_MISC]==s.raw[SB_MISC] &&
++     previous.raw[SB_DEBUG_ACCESS]==s.raw[SB_DEBUG_ACCESS] &&
++     previous.raw[SB_LEGACY]==s.raw[SB_LEGACY]) {
++  /* A plugin notification can follow source-change. Preserve compatible
++   * evidence, but NEVER renew its source-event acquisition time. */
++  s.apsdFromSource=true;s.apsdSession=previous.apsdSession;
++  s.apsdStartedNs=previous.apsdStartedNs;s.apsdCompletedNs=previous.apsdCompletedNs;
++ }
++}
++static inline bool sb_apsd_event_fresh(const SweetBattSnapshot &s,uint64_t now)
++{
++ return s.apsdFromSource && s.apsdCoherent && s.usbSession &&
++  s.usbSession!=~0ULL && s.apsdSession==s.usbSession &&
++  sb_input_fresh(s,now) && sb_valid(s,SB_APSD_OPTIONS) &&
++  (s.raw[SB_APSD_OPTIONS]&8) && (s.raw[SB_USB]&16) &&
++  s.apsdStartedNs && s.apsdCompletedNs>=s.apsdStartedNs &&
++  now>=s.apsdCompletedNs && now-s.apsdStartedNs<=3000000000ULL &&
++  sb_source_type(s)!=SB_SOURCE_UNKNOWN;
++}
+ static inline bool sb_normal_sink(const SweetBattSnapshot &s)
+ {
+  if ((s.valid&sb_input_mask())!=sb_input_mask()) return false;
+@@ -154,7 +208,7 @@ sb_decide(SweetBattController &c, const SweetBattSnapshot &s,
+  if (!limits.inputVerified || now<limits.verifiedNs ||
+      now-limits.verifiedNs>3000000000ULL || limits.vbusMv<4500 ||
+      limits.vbusMv>5500 || !sb_valid(s,SB_APSD) || !(s.raw[SB_APSD]&1) ||
+-     !sb_input_fresh(s,now) || !sb_normal_sink(s) ||
++     !sb_input_fresh(s,now) || !sb_apsd_event_fresh(s,now) || !sb_normal_sink(s) ||
+      (sb_source_type(s)!=SB_SOURCE_DCP && sb_source_type(s)!=SB_SOURCE_CDP) ||
+      (sb_valid(s,SB_USB) && (s.raw[SB_USB]&16) &&
+       (!(s.raw[SB_PATH]&1) || !(s.raw[SB_PATH]&16)))) d.reasons|=SB_R_INPUT;
+@@ -177,6 +231,7 @@ sb_decide(SweetBattController &c, const SweetBattSnapshot &s,
+  d.validUntilNs=sb_evidence_deadline(s.startedNs);
+  if (sb_evidence_deadline(limits.verifiedNs)<d.validUntilNs) d.validUntilNs=sb_evidence_deadline(limits.verifiedNs);
+  if (sb_evidence_deadline(s.inputStartedNs)<d.validUntilNs) d.validUntilNs=sb_evidence_deadline(s.inputStartedNs);
++ if (sb_evidence_deadline(s.apsdStartedNs)<d.validUntilNs) d.validUntilNs=sb_evidence_deadline(s.apsdStartedNs);
+  d.allow=d.reasons==0;
+  if (d.reasons&(SB_R_TRANSPORT|SB_R_HARDWARE)) d.state=SB_FAULT;
+  else if (d.reasons&(SB_R_STOPPED|SB_R_EXPIRED)) d.state=SB_STOPPED;
+diff --git a/bsd/dev/sweet_pmic_power.h b/bsd/dev/sweet_pmic_power.h
+index aadfd2714aa7cc999c8f245a4463aa01c284cfb2..0773de58c1300f60c56dc3ef6e29c3a4740bebd4 100644
+--- a/bsd/dev/sweet_pmic_power.h
++++ b/bsd/dev/sweet_pmic_power.h
+@@ -6,7 +6,7 @@
+ #define SWEET_PMIC_POWER_H
+ #include "sweet_battery_runtime.h"
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+-/* Refresh input/APSD/Type-C only on initial observation or an actual event.
++/* Refresh input/APSD/Type-C only on initial observation or plugin/source IRQ.
+  * Capacity may remain cached on protection ticks; every fresh read reports its
+  * own validity/error. The fixed profile-prefix/metadata tuple shares a grant.
+  * Input acquisition has its own monotonic epoch and start/completion times;
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index b3eb38109a680f8532f1f8767e7f5e304302a049..2fb0583cd99bf58220fe96736990b07d1e2918fe 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -301,7 +301,7 @@ static const struct sp_charger_register sp_charger_registers[] = {
+ 	{0x107d, 0}, {0x107e, 0}, {0x107f, 0}, {0x1090, 0},
+ 	{0x1107, 0}, {0x1108, 0}, {0x110b, 0},
+ 	{0x1307, 0}, {0x1308, 0}, {0x1310, 0},
+-	{0x1340, 0x01}, {0x1342, 0x01}, {0x1365, 0x10},
++	{0x1340, 0x01}, {0x1342, 0x01}, {0x1362, 0}, {0x1365, 0x10},
+ 	{0x1366, 0x07}, {0x1370, 0xff}, {0x1380, 0x9c},
+ 	/* Only these Type-C status bytes; no peripheral-wide permission. */
+ 	{0x1506, 0}, {0x1507, 0}, {0x1509, 0}, {0x150b, 0}, {0x150d, 0},
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 88e21eb041502b2653eec9c1c711e597a573615d..f14b3f0d416ccbfa85e121bf020f99463987db21 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -124,6 +124,7 @@ private:
+ 	SweetBattLimits fLimits;
+ 	SweetBattController fController;
+ 	unsigned fMonitorSamples;
++	unsigned fRuntimeInputEvents; /* owned by the battery workloop */
+ 	uint32_t fLastReasons;
+ 	void sampleRuntime(bool refreshInput);
+ 	void runRuntimePolicy(void);
+@@ -278,7 +279,7 @@ SweetBattery::init(OSDictionary *dictionary)
+ 	if (!IOPMPowerSource::init()) {
+ 		return false;
+ 	}
+-	fRuntimeMode = fRuntimeRequested = fMonitorSamples = 0;
++	fRuntimeMode = fRuntimeRequested = fMonitorSamples = fRuntimeInputEvents = 0;
+ 	fLastReasons = ~0u;
+ 	fMonitor = NULL;
+ 	fControlLock = NULL;
+@@ -1028,6 +1029,7 @@ SweetBattery::irqAction(OSObject *owner, IOInterruptEventSource *, int count)
+ 		self->fController.faultReasons = SB_R_HARDWARE;
+ 		SWEET_LOG_ERROR("SWEET BATT CONTROL: CHGR fault IRQ latched; recovery requires explicit restart\n");
+ 	}
++	self->fRuntimeInputEvents = pending & (SWEET_BATT_IRQ_USB | SWEET_BATT_IRQ_SOURCE);
+ 	self->fSettleBudget = 1;
+ 	self->poll();
+ 	++self->fIrqSamples;
+@@ -1142,13 +1144,26 @@ void
+ SweetBattery::sampleRuntime(bool refreshInput)
+ {
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+-	/* Only IRQ/arm-sync refreshes plug/APSD/type-C/ICL. The monitor updates
+-	 * telemetry/protection, never substitutes periodic plug discovery. */
++	static_assert(SB_INPUT_PLUGIN == SWEET_BATT_IRQ_USB && SB_INPUT_SOURCE == SWEET_BATT_IRQ_SOURCE,
++	    "input causes must match mux events");
++	/* CHGR/MSOC/READY and bounded SOC confirmation must not renew APSD.
++	 * All state and PMIC reads remain on this consumer's workloop. */
++	const char *sampleSource = refreshInput ? "irq" : "protection-timer";
++	unsigned inputEvents = fRuntimeInputEvents;
++	fRuntimeInputEvents = 0;
++	bool refreshCapacity = refreshInput || !fMonitorSamples;
++	refreshInput = refreshInput && (!fMonitorSamples || inputEvents);
+ 	SweetBattSnapshot next = fSnapshot;
+ 	next.startedNs = sweet_batt_now_ns();
+-	bool refreshCapacity = refreshInput || !fMonitorSamples;
+ 	sweet_pmic_power_read_snapshot(next, refreshInput, refreshCapacity, fLastPercent);
+ 	next.completedNs = sweet_batt_now_ns();
++	if (refreshInput) { sb_note_input(next, fSnapshot, inputEvents); }
++	/* A newer source/plugin notification arriving during SPMI sampling must
++	 * be handled by its queued action before any input evidence is used. */
++	if (__atomic_load_n(&fIrqPending, __ATOMIC_ACQUIRE) &
++	    (SWEET_BATT_IRQ_USB | SWEET_BATT_IRQ_SOURCE)) {
++		next.apsdFromSource = false;
++	}
+ 	bool batteryChanged = next.presentValid != fSnapshot.presentValid || next.present != fSnapshot.present;
+  fSnapshot = next;
+  if (fAdcClient) {
+@@ -1162,7 +1177,7 @@ SweetBattery::sampleRuntime(bool refreshInput)
+ 	/* Keep each console record below 255 bytes, including severity/newline.
+ 	 * A shared sample id joins the independently complete records. */
+ 	SWEET_LOG_INFO("SWEET BATT SAMPLE: v2 id=%u source=%s valid=%#llx mv=%u v-ok=%u ma=%d i-ok=%u\n",
+-	    fMonitorSamples, refreshInput ? "irq" : "protection-timer",
++	    fMonitorSamples, sampleSource,
+ 	    (unsigned long long)next.valid, next.mv, next.voltageValid, next.ma, next.currentValid);
+ 	SWEET_LOG_INFO("SWEET BATT FG: v3 id=%u temp-centi=%d temp-ok=%u temp-error=%d temp-raw=%#x\n",
+ 	    fMonitorSamples, next.tempCenti, next.tempValid, next.tempError, next.rawTemp);
+@@ -1187,6 +1202,14 @@ SweetBattery::sampleRuntime(bool refreshInput)
+ 		    fMonitorSamples, (unsigned long long)next.profileStartedNs, (unsigned long long)next.profileCompletedNs);
+ 	}
+ 	if (refreshInput) {
++		SWEET_LOG_INFO("SWEET BATT APSD EVENT: v1 id=%u events=%#x session=%llu source=%u coherent=%u qualified=%u options=%#x/%d enabled=%u\n",
++		    fMonitorSamples, next.inputEvents, (unsigned long long)next.usbSession,
++		    next.apsdFromSource, next.apsdCoherent, sb_apsd_event_fresh(next, next.completedNs),
++		    next.raw[SB_APSD_OPTIONS], next.errors[SB_APSD_OPTIONS],
++		    sb_valid(next, SB_APSD_OPTIONS) && (next.raw[SB_APSD_OPTIONS] & 8) ? 1u : 0u);
++		SWEET_LOG_INFO("SWEET BATT APSD TIME: v1 id=%u session=%llu started-ns=%llu completed-ns=%llu\n",
++		    fMonitorSamples, (unsigned long long)next.apsdSession,
++		    (unsigned long long)next.apsdStartedNs, (unsigned long long)next.apsdCompletedNs);
+ 		SWEET_LOG_INFO("SWEET BATT INPUT: v4 id=%u epoch=%llu type=%u sink-ok=%u fresh=%u apsd=%#x/%d result=%#x/%d usb=%#x/%d\n",
+ 		    fMonitorSamples, (unsigned long long)next.inputEpoch, sb_source_type(next),
+ 		    sb_normal_sink(next), sb_input_fresh(next, next.completedNs),
+@@ -1321,6 +1344,7 @@ SweetBattery::startRuntime(OSObject *owner, void *, void *, void *, void *)
+ {
+ 	SweetBattery *self = OSDynamicCast(SweetBattery, owner);
+ 	if (!self || !self->fRunning) { return kIOReturnNotReady; }
++	self->fRuntimeInputEvents = 0; /* initial snapshot is not an APSD completion IRQ */
+ 	self->fRuntimeMode = self->fRuntimeRequested;
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+  self->fAdcClient = SweetAdc5Client::withOwner(self->fLoop, adcChanged, self);
+diff --git a/iokit/Kernel/arm/SweetPmicPower.cpp b/iokit/Kernel/arm/SweetPmicPower.cpp
+index e2858478c7d92551593320b9ae02721901ec2d43..5e9dd61165df05c11ea5ae03c3411eefedaa4592 100644
+--- a/iokit/Kernel/arm/SweetPmicPower.cpp
++++ b/iokit/Kernel/arm/SweetPmicPower.cpp
+@@ -82,12 +82,13 @@ sweet_pmic_power_read_snapshot(SweetBattSnapshot &next, bool refreshInput,
+ 		0x1006,0x1007,0x100d,0x1042,0x1043,0x1051,0x1061,0x1070,
+ 		0x110b,0x1108,0x1307,0x1308,0x1310,0x1340,0x1342,0x1365,
+ 		0x1366,0x1370,0x1380,0x1506,0x1509,0x150b,0x1648,0x1651,
+-		0x1653,0x1690,0x1090,0x1067,0x1068,0x107d,0x1507,0x150d
++		0x1653,0x1690,0x1090,0x1067,0x1068,0x107d,0x1507,0x150d,0x1362
+ 	};
+ 	if (refreshInput) {
+ 		/* Invalidate before acquiring a replacement. Saturation fails closed;
+ 		 * no wrap can make an earlier source epoch appear current. */
+ 		next.valid &= ~sb_input_mask();
++		next.apsdCoherent = false;
+ 		next.inputStartedNs = next.inputCompletedNs = 0;
+ 		if (next.inputEpoch != ~0ULL) {
+ 			++next.inputEpoch;
+@@ -96,6 +97,8 @@ sweet_pmic_power_read_snapshot(SweetBattSnapshot &next, bool refreshInput,
+ 	}
+ 	for (unsigned i = 0; i < SB_REG_COUNT; ++i) {
+ 		if (!refreshInput && (sb_input_mask() & (1ULL << i))) { continue; }
++		/* Source result is acquired below, bracketed by status/VBUS reads. */
++		if (i == SB_APSD || i == SB_RESULT || i == SB_USB) { continue; }
+ 		uint8_t value = 0;
+ 		int rc = sweet_spmi_charger_read(2, addresses[i], &value);
+ 		next.errors[i] = rc;
+@@ -103,7 +106,34 @@ sweet_pmic_power_read_snapshot(SweetBattSnapshot &next, bool refreshInput,
+ 		next.raw[i] = 0; /* Failure is unknown, not a retained prior raw value. */
+ 		if (!rc) { next.raw[i] = value; next.valid |= 1ULL << i; }
+ 	}
+-	if (refreshInput && next.inputStartedNs) { next.inputCompletedNs = powerNow(); }
++	if (refreshInput) {
++		/* No sleeping, rerun, or retry. Reject a result changing during reads.
++		 * Matching bytes are a bounded consistency check, not a PMIC snapshot
++		 * or proof of a new BC1.2 session. Source-event provenance is separate. */
++		const unsigned fields[] = {SB_USB, SB_APSD, SB_RESULT};
++		const unsigned regs[] = {0x1310, 0x1307, 0x1308};
++		for (unsigned i = 0; i < 3; ++i) {
++			unsigned field = fields[i];
++			uint8_t value = 0;
++			int rc = sweet_spmi_charger_read(2, regs[i], &value);
++			next.errors[field] = rc;
++			next.raw[field] = rc ? 0 : value;
++			if (!rc) { next.valid |= 1ULL << field; }
++		}
++		const unsigned afterFields[] = {SB_APSD, SB_USB};
++		const unsigned afterRegs[] = {0x1307, 0x1310};
++		for (unsigned i = 0; i < 2; ++i) {
++			unsigned field = afterFields[i];
++			uint8_t after = 0;
++			int rc = sweet_spmi_charger_read(2, afterRegs[i], &after);
++			if (rc || !sb_valid(next, field) || after != next.raw[field]) {
++				next.valid &= ~(1ULL << field);
++				if (!next.errors[field]) { next.errors[field] = rc ? rc : SWEET_SPMI_VERIFY; }
++			}
++		}
++		next.apsdCoherent = sb_valid(next, SB_USB) && sb_valid(next, SB_APSD) && sb_valid(next, SB_RESULT);
++		if (next.inputStartedNs) { next.inputCompletedNs = powerNow(); }
++	}
+ 	uint8_t present = 0;
+ 	next.presentValid = !sweet_spmi_read(2, 0x4107, &present);
+ 	next.present = next.presentValid && !(present & 4);

@@ -1,5 +1,11 @@
 # 0119之后的电池驱动推进
 
+0159已修正APSD事件来源与时效：0151早已接入source-change bit6，本轮保留路由，
+仅初始/plugin/source采输入，防止CHGR/SOC续期；新增只读1362 bit3实际使能观察，
+结果前后状态一致性检查及source会话期限。0158+0159一起待push/云编译，继续
+原battery-evidence单镜像。详见[APSD事件修复](BATTERY-APSD-EVENTS.md)。尚未
+主动enable/rerun APSD，DPDM/Type-C输入provider和真实启充仍需后续实现。
+
 0157已实现固定profile tuple读取与输入快照/时效；0158增加共享mux pending route
 取证与按组隔离，待用户push和新云产物。仍不
 启充；下一轮同一镜像采电脑/普通5V电源证据，无需再跑ADC bring-up。接口及步骤见

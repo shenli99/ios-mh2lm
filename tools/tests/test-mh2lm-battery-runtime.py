@@ -19,6 +19,8 @@ spmi = (root/'bsd/dev/sweet_spmi.h').read_text()
 charger = (root/'bsd/dev/sweet_charger.h').read_text()
 backend = (root/'bsd/dev/sweet_charger.c').read_text()
 power = (root/'iokit/Kernel/arm/SweetPmicPower.cpp').read_text()
+mux_header = (root/'bsd/dev/sweet_spmi_mux.h').read_text()
+event_defines = "\n".join(re.findall(r'^#define SWEET_BATT_IRQ_.*$', mux_header, re.M))+"\n"
 power_header = (root/'bsd/dev/sweet_pmic_power.h').read_text()
 def strip_includes(text):
     return re.sub(r'^#include[^\n]*\n', '', text, flags=re.M)
@@ -138,11 +140,14 @@ static bool pairFailure=false;
 static unsigned injectedAt=0,updateCount=0,delayAt=0;
 static std::map<unsigned,unsigned> changed;
 static unsigned readAdvanceNs;
+static unsigned mutateAtAddr,mutateNth,mutateCount,mutateValue;
+
 static uint8_t profilePrefix[24]={0x09,0x00,0xff,0xe3,0xf1,0x07,0x96,0xda,
  0xb3,0xd5,0x00,0x00,0xa1,0xbd,0xa3,0x8a,0xf8,0x87,0x84,0x92,0x9e,0x94,0x23,0x80};
 extern "C" int sweet_spmi_charger_read(unsigned sid,unsigned addr,uint8_t *out){
     timeNs+=readAdvanceNs;
     assert(sid==2);reads.push_back(addr);if(failures.count(addr))return -9;
+    if(addr==mutateAtAddr && ++mutateCount==mutateNth)regs[addr]=mutateValue;
     *out=regs[addr];return 0;
 }
 extern "C" int sweet_spmi_read(unsigned sid,unsigned addr,uint8_t *out){
@@ -172,6 +177,7 @@ class SweetBattery : public OSObject {
 public:
  unsigned fRuntimeMode=2,fRuntimeRequested=2,fMonitorSamples=0,fLastPercent=70,fLastMv=4000;
  uint32_t fLastReasons=~0u;
+ unsigned fRuntimeInputEvents=0;volatile unsigned fIrqPending=0;
  bool fRunning=true,fPercentValid=true;
  IOTimerEventSource *fMonitor; void *fLoop=nullptr;
  SweetAdc5Client *fAdcClient=nullptr;void publishAdc();static void adcChanged(void *);
@@ -220,6 +226,10 @@ public:
 };
 '''
 checks=r'''
+static void inputSample(SweetBattery &b,unsigned events=SWEET_BATT_IRQ_USB){
+    b.fRuntimeInputEvents=events;b.sampleRuntime(true);
+}
+
 static SweetBattSnapshot sample(){
     SweetBattSnapshot s={};s.valid=(1ULL<<SB_REG_COUNT)-1;
     s.startedNs=s.completedNs=timeNs;s.voltageValid=s.currentValid=s.tempValid=true;
@@ -228,7 +238,55 @@ static SweetBattSnapshot sample(){
     s.raw[SB_PATH]=0x95;s.raw[SB_USB]=16;s.raw[SB_APSD]=1;s.raw[SB_STAGE]=7;
     s.raw[SB_RESULT]=8;s.raw[SB_TYPEC]=8;s.raw[SB_MISC]=0x29;s.raw[SB_ATTACHED]=0x20;
     s.inputEpoch=1;s.inputStartedNs=s.inputCompletedNs=timeNs;
+    s.raw[SB_APSD_OPTIONS]=8;s.usbSession=s.apsdSession=1;
+    s.apsdStartedNs=s.apsdCompletedNs=timeNs;s.apsdCoherent=s.apsdFromSource=true;
     return s;
+}
+static void apsdEventTests(){
+    auto s=sample();SweetBattSnapshot empty={};
+    sb_note_input(s,empty,0);assert(!s.apsdFromSource && !sb_apsd_event_fresh(s,timeNs));
+    // Startup DONE is diagnostic only. Plugin without completion remains waiting.
+    auto previous=s;sb_note_input(s,previous,SWEET_BATT_IRQ_USB);
+    assert(!s.apsdFromSource);
+    previous=s;sb_note_input(s,previous,SWEET_BATT_IRQ_SOURCE);
+    assert(sb_apsd_event_fresh(s,timeNs));
+    // A same-level plugin delivered after source must not force event ordering
+    // or renew the older completion timestamp.
+    previous=s;s.inputStartedNs=s.inputCompletedNs=timeNs+1000000000ULL;
+    sb_note_input(s,previous,SWEET_BATT_IRQ_USB);
+    assert(s.apsdFromSource && s.apsdStartedNs==timeNs);
+    assert(!sb_apsd_event_fresh(s,timeNs+3000000001ULL));
+    // Source can also be the first indication of insertion, before plugin.
+    auto early=sample();SweetBattSnapshot unplugged={};
+    unplugged.valid=1ULL<<SB_USB;unplugged.usbSession=7;
+    early.usbSession=7;sb_note_input(early,unplugged,SWEET_BATT_IRQ_SOURCE);
+    assert(early.usbSession==8 && sb_apsd_event_fresh(early,timeNs));
+    auto completed=early;sb_note_input(early,completed,SWEET_BATT_IRQ_USB);
+    assert(early.usbSession==8 && early.apsdStartedNs==completed.apsdStartedNs);
+    // Physical unplug/replug revokes the observed session, even with DONE held.
+    previous=s;s.raw[SB_USB]=0;sb_note_input(s,previous,SWEET_BATT_IRQ_USB);
+    assert(!s.apsdFromSource && s.usbSession==previous.usbSession+1);
+    previous=s;s.raw[SB_USB]=16;sb_note_input(s,previous,SWEET_BATT_IRQ_USB);
+    assert(!s.apsdFromSource && s.usbSession==previous.usbSession+1);
+    previous=s;sb_note_input(s,previous,SWEET_BATT_IRQ_USB|SWEET_BATT_IRQ_SOURCE);
+    assert(s.apsdFromSource);
+    for(unsigned field:{SB_APSD,SB_APSD_OPTIONS,SB_RESULT,SB_USB}){
+        s=sample();previous=s;s.valid&=~(1ULL<<field);
+        sb_note_input(s,previous,SWEET_BATT_IRQ_SOURCE);assert(!s.apsdFromSource);
+    }
+    s=sample();previous=s;s.raw[SB_APSD]=0;
+    sb_note_input(s,previous,SWEET_BATT_IRQ_SOURCE);assert(!s.apsdFromSource);
+    s=sample();previous=s;s.raw[SB_APSD_OPTIONS]=0;
+    sb_note_input(s,previous,SWEET_BATT_IRQ_SOURCE);assert(!s.apsdFromSource);
+    s=sample();previous=s;s.raw[SB_RESULT]=4;
+    sb_note_input(s,previous,SWEET_BATT_IRQ_USB);assert(!s.apsdFromSource);
+    s=sample();previous=s;s.apsdCoherent=false;
+    sb_note_input(s,previous,SWEET_BATT_IRQ_SOURCE);assert(!s.apsdFromSource);
+    s=sample();previous=s;s.usbSession=UINT64_MAX-1;s.raw[SB_USB]=0;
+    sb_note_input(s,previous,SWEET_BATT_IRQ_USB);assert(s.usbSession==UINT64_MAX);
+    previous=s;s.raw[SB_USB]=16;
+    sb_note_input(s,previous,SWEET_BATT_IRQ_SOURCE);assert(!s.apsdFromSource);
+    puts("PASS: APSD source/plugin both orders, startup residue, observed detach/replug, coalesced causes, stale/disabled/incoherent/error rejection");
 }
 static SweetBattLimits limits(){return {true,true,true,2800,4430,1500,5000,timeNs};}
 static void evidenceTests(){
@@ -271,6 +329,9 @@ static void evidenceTests(){
     s=sample();s.inputStartedNs=timeNs-500000000ULL;
     auto d=sb_decide(c,s,limits(),timeNs);
     assert(d.allow && d.validUntilNs==timeNs+2500000000ULL);
+    s=sample();s.apsdStartedNs=timeNs-750000000ULL;
+    d=sb_decide(c,s,limits(),timeNs);
+    assert(d.allow && d.validUntilNs==timeNs+2250000000ULL);
     assert(sb_evidence_deadline(UINT64_MAX-1)==UINT64_MAX);
     (void)oldInput;
     s=sample();s.profilePrefixValid=s.nominalValid=true;s.integrity=0x13;s.nominalMah=4027;
@@ -353,7 +414,7 @@ static void policyTests(){
     puts("PASS: policy missing inputs/staleness/thermal hysteresis, dry-run, ordered control, every write failure and expiry");
 }
 int main(){
-    evidenceTests();policyTests();reads.clear();writes.clear();changed.clear();
+    evidenceTests();apsdEventTests();policyTests();reads.clear();writes.clear();changed.clear();
     regs={{0x41a0,0xff},{0x41a1,0x7f},{0x41a2,0x60},{0x41a3,0xed},
           {0x41a6,0xff},{0x41a7,0x7f},{0x41a8,0x60},{0x41a9,0xed},
           {0x4009,180},{0x400a,180},{0x4010,2},{0x4107,0},{0x1310,16},{0x1006,3},{0x110b,0x95},{0x1307,1}};
@@ -375,12 +436,12 @@ int main(){
     auto inputStart=b.fSnapshot.inputStartedNs,inputEnd=b.fSnapshot.inputCompletedNs;
     auto profileStart=b.fSnapshot.profileStartedNs;
     SweetBattery::monitorFired(&b,&timer);
-    for(auto a:reads)assert(a!=0x1310 && a!=0x1307 && a!=0x1308 && a!=0x1506 && a!=0x1509 && a!=0x150b && a!=0x1507 && a!=0x150d && a!=0x10004);
+    for(auto a:reads)assert(a!=0x1310 && a!=0x1307 && a!=0x1308 && a!=0x1506 && a!=0x1509 && a!=0x150b && a!=0x1507 && a!=0x150d && a!=0x1362 && a!=0x10004);
     assert(b.fSnapshot.inputEpoch==1 && b.fSnapshot.inputStartedNs==inputStart && b.fSnapshot.inputCompletedNs==inputEnd);
     assert(b.fSnapshot.profileStartedNs==profileStart);
     assert((b.fSnapshot.raw[SB_USB]&16) && b.publishes==2 && b.publishedCurrentValid);
     assert(b.fAdcClient->sourceUpdates==1);
-    b.sampleRuntime(true);assert(!b.fSnapshot.raw[SB_USB]);
+    inputSample(b);assert(!b.fSnapshot.raw[SB_USB]);
     assert(b.fAdcClient->sourceUpdates==2);
     assert(b.fSnapshot.inputEpoch==2);
     failures={0x10000};pairFailure=true;reads.clear();
@@ -389,7 +450,7 @@ int main(){
     assert(b.fLastReasons&SB_R_TELEMETRY);
     assert(!b.registry.count("Temperature") && !b.registry.count("Amperage") && !b.registry.count("InstantAmperage"));
     assert(!b.legacy.count("Amperage"));
-    failures={0x10001,0x10002,0x10003};pairFailure=false;logs.clear();b.sampleRuntime(true);b.publishRuntime();
+    failures={0x10001,0x10002,0x10003};pairFailure=false;logs.clear();inputSample(b);b.publishRuntime();
     assert(!b.registry.count("DesignCapacity") && b.registry["MaxCapacity"]==100 && b.registry["SweetBatteryCapacityUsesPercent"]);
     assert(logs.find("n-error=-10")!=std::string::npos && logs.find("l-error=-10")!=std::string::npos && logs.find("p-error=-10")!=std::string::npos);
     assert(!b.fSnapshot.profilePrefixValid && !sb_profile_match(b.fSnapshot));
@@ -397,7 +458,7 @@ int main(){
     assert(!b.fSnapshot.profileStartedNs && !b.fSnapshot.profileCompletedNs);
     assert(logs.find("SWEET BATT CONFIG: v3 id=")!=std::string::npos);
     assert(logs.find("SWEET BATT SAMPLE: v2 id=")!=std::string::npos && logs.find("SWEET BATT TIME: v3 id=")!=std::string::npos);
-    regs[0x1651]=0xc2;regs[0x1653]=0x87;failures={0x1042};logs.clear();b.sampleRuntime(true);
+    regs[0x1651]=0xc2;regs[0x1653]=0x87;failures={0x1042};logs.clear();inputSample(b);
     assert(logs.find("enable-error=-9")!=std::string::npos && logs.find("wdog=0xc2 wdog-error=0 wdog-time=0x87 wdog-time-error=0")!=std::string::npos);
     // A protection tick does not reprint the event-only config diagnostic.
     logs.clear();b.sampleRuntime(false);assert(logs.find("SWEET BATT CONFIG:")==std::string::npos);
@@ -406,19 +467,45 @@ int main(){
     fg[0]=0xffff;b.sampleRuntime(false);assert(!b.fSnapshot.tempValid);
     // Input interval ends before the FG tuple/telemetry, not after it.
     readAdvanceNs=1000;fg[0]=100;fg[1]=4027;fg[2]=0x13;fg[3]=4027;failures.clear();
-    logs.clear();b.sampleRuntime(true);
+    logs.clear();inputSample(b);
     assert(b.fSnapshot.inputCompletedNs<b.fSnapshot.profileStartedNs && b.fSnapshot.profileCompletedNs<=b.fSnapshot.completedNs);
     assert(sb_profile_match(b.fSnapshot)==1 && logs.find("match=1 integrity=0x13 nominal=4027 prefix=0900ffe3f10796dab3d50000a1bda38af88784929e942380")!=std::string::npos);
     assert(logs.find("SWEET BATT INPUT: v4")!=std::string::npos && logs.find("SWEET BATT ICL MODE: v1")!=std::string::npos);
     // A failed newly-read source never retains a prior valid raw value.
-    failures={0x1507};b.fSnapshot.raw[SB_DEBUG_ACCESS]=0x3f;b.sampleRuntime(true);
+    failures={0x1507};b.fSnapshot.raw[SB_DEBUG_ACCESS]=0x3f;inputSample(b);
     assert(!sb_valid(b.fSnapshot,SB_DEBUG_ACCESS) && !b.fSnapshot.raw[SB_DEBUG_ACCESS] && !sb_input_fresh(b.fSnapshot,timeNs));
     failures.clear();readAdvanceNs=0;
-    b.fSnapshot.inputEpoch=UINT64_MAX-1;b.sampleRuntime(true);assert(b.fSnapshot.inputEpoch==UINT64_MAX);
-    b.sampleRuntime(true);assert(!sb_input_fresh(b.fSnapshot,timeNs) && !b.fSnapshot.inputStartedNs);
+    // Real sampler integration: source IRQ completion, same-level plugin,
+    // unrelated battery refresh, and status/VBUS changes during acquisition.
+    regs[0x1310]=16;regs[0x1307]=1;regs[0x1308]=8;regs[0x1362]=8;
+    inputSample(b,SWEET_BATT_IRQ_SOURCE);
+    assert(b.fSnapshot.apsdFromSource && b.fSnapshot.apsdCoherent);
+    auto sourceStart=b.fSnapshot.apsdStartedNs;
+    auto sourceEpoch=b.fSnapshot.inputEpoch;
+    reads.clear();b.sampleRuntime(true); // CHGR/MSOC/bounded confirm, no input cause
+    for(auto a:reads)assert(a!=0x1307 && a!=0x1308 && a!=0x1310 && a!=0x1362);
+    assert(b.fSnapshot.inputEpoch==sourceEpoch && b.fSnapshot.apsdStartedNs==sourceStart);
+    inputSample(b);assert(b.fSnapshot.apsdStartedNs==sourceStart);
+    for(unsigned addr:{0x1307u,0x1310u}){
+        regs[0x1307]=1;regs[0x1310]=16;
+        mutateAtAddr=addr;mutateNth=2;mutateCount=0;mutateValue=0;
+        inputSample(b,SWEET_BATT_IRQ_SOURCE);
+        assert(!b.fSnapshot.apsdCoherent && !b.fSnapshot.apsdFromSource);
+        assert(b.fSnapshot.errors[addr==0x1307?SB_APSD:SB_USB]==SWEET_SPMI_VERIFY);
+    }
+    mutateAtAddr=0;regs[0x1310]=16;regs[0x1307]=1;
+    failures={0x1362};inputSample(b,SWEET_BATT_IRQ_SOURCE);
+    assert(!b.fSnapshot.apsdFromSource && !sb_valid(b.fSnapshot,SB_APSD_OPTIONS));
+    failures.clear();b.fIrqPending=SWEET_BATT_IRQ_USB;
+    inputSample(b,SWEET_BATT_IRQ_SOURCE);assert(!b.fSnapshot.apsdFromSource);
+    b.fIrqPending=0;inputSample(b,SWEET_BATT_IRQ_SOURCE);
+    assert(sb_apsd_event_fresh(b.fSnapshot,timeNs));
+    assert(logs.find("SWEET BATT APSD EVENT: v1")!=std::string::npos);
+    b.fSnapshot.inputEpoch=UINT64_MAX-1;inputSample(b);assert(b.fSnapshot.inputEpoch==UINT64_MAX);
+    inputSample(b);assert(!sb_input_fresh(b.fSnapshot,timeNs) && !b.fSnapshot.inputStartedNs);
     // Largest sample id and timestamp must retain the complete time record.
     auto savedTime=timeNs;auto savedSamples=b.fMonitorSamples;
-    timeNs=UINT64_MAX-1;b.fMonitorSamples=UINT32_MAX-1;logs.clear();b.sampleRuntime(true);
+    timeNs=UINT64_MAX-1;b.fMonitorSamples=UINT32_MAX-1;logs.clear();inputSample(b);
     assert(logs.find("SWEET BATT TIME: v3 id=4294967295 started-ns=18446744073709551614 completed-ns=18446744073709551614\n")!=std::string::npos);
     timeNs=savedTime;b.fMonitorSamples=savedSamples;
     // Stop cancels the actual monitor and leaves it unable to rearm/submit IO.
@@ -463,7 +550,7 @@ names=['sweet_batt_now_ns','SweetBattery::adcChanged','SweetBattery::publishAdc'
        'SweetBattery::monitorFired','SweetBattery::stopRuntime','SweetBattery::publishRuntime','SweetBattery::runtimeClock','SweetBattery::publish','SweetBattery::removePowerValue','SweetBattery::runtimePowerNotice']
 with tempfile.TemporaryDirectory(prefix='mh2lm-runtime-') as directory:
     cpp=Path(directory)/'test.cpp';binary=Path(directory)/'test'
-    cpp.write_text(prelude+charger+strip_includes(header)+spmi+strip_includes(power_header)+adc_header+adc_model+shim+strip_includes(backend)+strip_includes(power)+''.join(function(n) for n in names)+checks)
+    cpp.write_text(prelude+charger+strip_includes(header)+spmi+strip_includes(power_header)+adc_header+event_defines+adc_model+shim+strip_includes(backend)+strip_includes(power)+''.join(function(n) for n in names)+checks)
     subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-O1','-g',
         '-fsanitize=address,undefined',str(cpp),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],env=dict(os.environ,ASAN_OPTIONS='detect_leaks=0',UBSAN_OPTIONS='halt_on_error=1'),check=True,timeout=30)
