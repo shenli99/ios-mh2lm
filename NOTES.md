@@ -2,6 +2,50 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a13 inhibit2主PMIC输出禁止通过；ADC68收到EOC但处理过期，根因仍待定位。下一项独立watchdog4。**
+
+上一文档3f08ae2，实现8d6435b，打包ba5143e。本轮只读日志/实际云源码和更新
+文档，未改驱动/CI、未push/操作设备/重打包。日志
+logs/sweetlog-0120a13-battery-inhibit.bin，SHA256
+07f0c0a427ae5f038a640c493183de3b97b1d222a3f17e544cfc77ef25c2f60e。
+SWEETLOG v1/4MiB/有效476631/flush25/6154行，无回卷/NUL；291连续采样、
+279.991秒（22irq含初始化/arm-sync、269保护）。完整证据在
+ docs/BATTERY-DEPENDENCY-TESTS.md末节；NEXT/实施计划/ADC5-CONSUMER/INPUT-SESSION同步。
+
+deps2/runtime1，初始SMB0→INHIBIT命令接受→新遥测id31 main-enable0/smb08/
+select02。20笔后续PARALLEL均08/02/error0，覆盖插拔/ADC故障/180秒窗口结束，
+最后id285 uptime297.923秒仍保持。21笔CONFIG均enable0，无CONTROL。
+180秒窗口正常结束pets0/disable-error0，无DEPENDENCIES FAILED或禁止位丢失。
+仅主PMIC输出禁止通过，外部SMB1355 I²C状态仍缺，parallelVerified仍false。
+
+ADC68请求、67成功（3BATID/64USBIN）、132EOC；67全部valid/restored/接受，
+无epoch丢弃，成功总耗时7.486～51.881ms。68/USBIN从WAIT_SETTLE开始，
+mux irq137明确投递adc5-eoc route-hits132，随后consumer EOC68返回-101/
+phase5/count0，restore-error0/cleanup0，provider停机/测量撤销。
+没有timer TIMEOUT行。源码advance先获取共享SPMI锁再查deadline，count0说明
+首EOC尚未接受已过期；附近电池id121采样99.935ms。调度/锁等待是调查方向，
+没有各层时间戳，不能认定根因；不能声称这次没有硬件EOC，也不能倒推身份档同因。
+后续补typed ADC及mux边界故障快照/trigger→IRQ→queue→callback→lock时序，
+保留IRQ-only、失败撤销，不用轮询/重试/单纯延长截止掩盖。
+
+CC id127/128/130/131在重复source后保留原时间戳，但在ADC故障后，无新VBUS/
+正permit，长期许可与有效许可内撤销仍未验收。20 IRQ refresh均healthy，
+99.871～108.922ms；三键配对down/up、touch83/empty0、ACM configured2，
+无panic或mux失败/隔离；UV6/OV未命中，5条USB EP0/EP5 warning保留旧枚举问题。
+底稿scratch/artifact-0120a13：battery-inhibit-persistent.txt、analyze-inhibit.py、
+inhibit-log-analysis.json、audit-inhibit.py、inhibit-verification.json。
+
+NEXT：用户fastboot boot
+/home/shenli/work1/out-bs/boot-16k-0120a13-battery-watchdog.img。
+桌面后尽快拔线5秒→接同一稳定电源至少60秒→拔线5秒；确认三键/触摸，导出
+sweetlog-0120a13-battery-watchdog.bin（持久日志即可）。诊断从驱动准备起180秒，
+不要在桌面先等几分钟。查bark路由attach/healthy、f3与maskc2=42新遥测、至少
+两次自然bark+pet；初次pet/窗口结束不能算维护通过。无需push/编译/baseline，
+仍不启充。组合7、ADC可靠性/长期许可、外部SMB1355 I²C隔离、正式managed-
+watchdog授权/保护验收仍待完成。
+
+### Previous 0120a13 identity log handoff (superseded next action)
+
 **CURRENT: 0120a13身份档日志已分析。身份建立/刷新与失败撤销通过；ADC238缺首个EOC，长期输入许可未覆盖。下一项独立inhibit2。**
 
 上一打包/文档提交ba5143e，实现8d6435b；本轮只读日志/实际云源码及更新文档，

@@ -1,5 +1,12 @@
 # SweetBattery 的 ADC5 测量接入（0156）
 
+**0120a13副路禁止档新增故障证据：** ADC68的EOC已被mux投递并进入consumer，
+advance返回-101/phase5/count0，restore/cleanup均0；没有timer TIMEOUT记录。
+因此已有“收到EOC但处理过期”的案例，不能一概按未发硬件中断处理。附近电池
+采样99.935ms仅提示并发，缺各阶段/锁时间戳，仍不能确定根因，也不能倒推身份档
+一定同因。长期输入许可仍未覆盖；下一独立测试是watchdog4。
+[完整证据](BATTERY-DEPENDENCY-TESTS.md#0120a13副路禁止档实测主pmic禁止通过adc收到eoc仍过期)。
+
 **0120a13故障更新：** 237次转换成功后，token238 USBIN在GROUND/phase2缺首个
 EOC，error-101；恢复/cleanup均0，provider停机、客户端测量和身份/限值撤销正确。
 发生在首次拔线前，无正输入许可，长期许可未覆盖。此次不是已记录的第二阶段

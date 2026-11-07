@@ -1,8 +1,9 @@
 # 电池身份、并联禁止与 watchdog 分步测试（0165）
 
 2026-11-07。用户要求在0164来源保留修复的同一次云编译中推进后三项依赖，
-用参数分开或组合测试。0120a13身份档已实测：身份建立/刷新及ADC故障后撤销通过，
-ADC第238次请求缺首个EOC，长期输入许可未覆盖；副路/watchdog/组合待实机。
+用参数分开或组合测试。0120a13身份建立/刷新及ADC故障后撤销、主PMIC副路输出
+禁止均已有实测；ADC分别在身份档238与禁止档68故障，长期输入许可未覆盖。
+下一项独立watchdog4；外部隔离与组合验收仍待完成。
 **全部档位只允许runtime1；没有主动启充。** 身份可建立板级限值，主PMIC副路
 禁止与watchdog的配置/IRQ链可独立取证；外部SMB1355隔离和managed-watchdog
 最终授权仍未成立。不能将“已有实现”写成“三项实机验收完成”。
@@ -246,3 +247,50 @@ SWEETLOG v1，4MiB环、有效901517字节、flush67、11510行，无回卷/NUL�
 log-analysis.json、audit-identity.py、identity-verification.json。分析器显式将238归入
 失败请求，不把“无结果”当日志截断，也不使用0120a12固定3个正permit的旧断言。
 本轮只读日志/源码并更新文档，未改驱动/CI、未push/操作设备或重新打包镜像。
+
+## 0120a13副路禁止档实测：主PMIC禁止通过，ADC收到EOC仍过期
+
+日志 `logs/sweetlog-0120a13-battery-inhibit.bin`，SHA256
+`07f0c0a427ae5f038a640c493183de3b97b1d222a3f17e544cfc77ef25c2f60e`。
+SWEETLOG v1/4MiB/有效476631字节/flush25/6154行，无回卷/NUL。
+291笔连续采样、约279.991秒；22笔IRQ含初始化/arm-sync，269笔保护timer。
+
+**本档目标通过：主PMIC的SMB_EN副路输出禁止。** deps2/runtime1正确，初始SMB0；
+INHIBIT命令被接受，下一笔独立遥测id31确认main-enable0/SMB08/select02。
+后续20笔PARALLEL原始记录均SMB08/select02且读取error0，覆盖插拔、ADC故障和
+有限窗口结束之后，最后id285/uptime297.923秒仍保持。21笔CONFIG均enable0，
+无CONTROL/主动启充。180秒诊断到期正常终止，pets0/disable-error0；本档没有
+watchdog维护任务，pets0是预期。没有DEPENDENCIES FAILED或禁止位丢失。
+外部SMB1355仍无I²C实际状态证据，parallelVerified保持false，不能称外部隔离通过。
+
+ADC68请求中67次成功（3 BAT_ID/64 USBIN），全部valid1/restored1并接受，无epoch
+丢弃；USBIN4573696～5082352µV，成功总耗时7.486～51.881ms。第68次USBIN故障：
+
+1. REQUEST68从WAIT_SETTLE开始；同一轮mux irq137明确hit adc5-eoc（route-hits132）。
+2. consumer确实执行EOC68，返回error-101/phase5/count0；随后restore-error0/cleanup0，
+   provider停机，客户端测量撤销。没有timer `SWEET ADC5 TIMEOUT`记录。
+3. 源码在 `sweet_spmi_adc5_advance()`取得共享SPMI锁后先检查deadline；该返回值与
+   count0说明第一次EOC尚未接受即已过期。附近电池id121采样耗时99.935ms、涉及
+   变化中的Type-C状态；仅是并发线索，不能由相邻日志顺序推出精确锁等待时间。
+
+与身份档“未看到EOC到达”不同，本档已有mux投递及consumer回调证据，不能一概
+称硬件没有发中断。仍缺trigger/IRQ/排队/回调入口/锁获取的时间戳及故障现场快照，
+不能认定硬件完成晚、workloop调度晚、共享锁等待或二者组合中的哪一种是根因，
+也不能倒推身份档一定同因。后续ADC修复优先补各层有界取证，不以轮询、自动重试
+或单纯放宽100ms截止掩盖。长期输入许可仍未覆盖：Rp3A分类id127/128/130/131
+在ADC故障后，虽重复source保留CC原时间戳，已无新VBUS可生成permit。
+
+20次IRQ refresh全healthy，route→publish99.871～108.922ms；三键down/up配对、
+触摸hits83/empty0、ACM configured2，无panic/共享mux失败或隔离。UV6、OV未
+自然命中，不能冒充完整保护验收；5条USB EP0/EP5 warning保留旧枚举问题。
+
+NEXT：用现成 `boot-16k-0120a13-battery-watchdog.img`，进入桌面后尽快拔线5秒，
+接同一稳定电源至少60秒，再拔线5秒并导出
+`sweetlog-0120a13-battery-watchdog.bin`；确认三键/触摸。诊断从驱动准备起只有
+180秒，开始操作前不要在桌面等待几分钟。目标是路由attach/healthy、配置f3及
+maskc2=42的新遥测、至少两次自然bark与pet；初次pet/窗口结束不能独立算通过。
+仍不启充，无需新编译或baseline。组合7/ADC可靠性和长期许可验收仍待后续。
+
+底稿 `scratch/artifact-0120a13/`：battery-inhibit-persistent.txt、analyze-inhibit.py、
+inhibit-log-analysis.json、audit-inhibit.py、inhibit-verification.json。本轮只读分析和
+文档更新，未改驱动/CI、未push/操作设备或重新打包。

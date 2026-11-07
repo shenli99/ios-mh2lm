@@ -1,5 +1,11 @@
 # 输入会话与 VBUS 许可（0163～0164）
 
+**0120a13副路禁止档补充：** id127/128/130/131的CC来源在重复source后保持，
+但ADC68已先故障，仍无新VBUS/正permit，长期许可与有效许可内撤销尚未验收。
+这次EOC确实由mux投递，consumer以deadline过期拒绝，根因待阶段/锁时间戳取证。
+副路输出禁止已通过，下一独立测试watchdog4，详见
+[最新实测](BATTERY-DEPENDENCY-TESTS.md#0120a13副路禁止档实测主pmic禁止通过adc收到eoc仍过期)。
+
 **0120a13身份档实测更新：** 身份8次建立/刷新均为profile1、95057Ω、板级
 2800mA/4430mV，ADC故障后身份/限值正确撤销。第238次USBIN请求在GROUND
 phase2缺首个EOC，provider停止；首次拔线及全部Rp3A分类在故障后，长期输入
