@@ -2,6 +2,45 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a15 watchdog4维护/有限停止通过；ADC59确认deadline前pending、ACK/notify晚。下一实现修关键分发/重遥测竞争，不追加硬件测试。**
+
+实现9f49c1d/0166，上轮文档470a376。本轮只读日志/源码和写文档，未改驱动/CI、
+未push/操作设备/重打包，无新修复实现。日志sweetlog-0120a15-battery-watchdog.bin，
+SHA256 b330efaca945025918974eed1fad5dc9eeb948edea4cc7bfe2907e6f37fbd31b。
+v1/4MiB/有效592827/flush44/7341行，无回卷/NUL；497采样、469.531秒。
+
+WD prepare55.957199427秒、初始pet55.958830833秒，error0/actual1；新遥测62/f3、
+16CONFIG均enable0。29自然bark，前9各pet2..10，加初始化10pet；GIC→notify
+85.885～122.448µs，notify→pet完成90.332～93.156ms（完整电池采样开销）。首
+GIC71.856766406，比初始pet15.897936秒；稳定间隔16.378～16.381秒，跨拔插
+33.415秒。软件START epoch5/121.236512、epoch12/122.246604，pets4；后者至
+138.029354首后续bark15.782751秒，但已有3次自然维护，不能算0120a13无首bark
+新plugin失败的同条件通过。236.168015秒样本后正常window complete/pets10/
+disable0，后20bark不再pet。无WD FAILED/故障快照，不验收带电bite/深睡/最终授权。
+
+ADC59请求/58成功（3ID/55USB），114consumer EOC/115mux hit，无丢弃。
+59首EOC MORE后RESULT-101。关键：第二scan121.333559739早于deadline
+121.337562291约4.003ms，channel status1已pending；ACK121.346589479、
+notify121.346589843晚9.028ms。scan→ACK13.030ms；timer121.339324010真到期。
+首notify→callback22.187µs、advance锁等待0.312µs。snapshot区间121.339799322～
+121.346517083、十字段error0/01 00 08 80 00 00 01 01 01 73，锁等待0.340ms/
+读6.718ms。两次hit同irq121/work121。已证实硬件事件deadline前可见却未及时
+ACK/notify；精确ACK锁等待/抢占/总线分量无证据，诊断读也参与竞争，不能全归锁。
+restore/cleanup0，provider撤销，无结果重试/有效许可。ADC失败后WD仍维护。
+44IRQ healthy89.537～116.566ms；power/down各4对，上键无本档记录；touch124/
+empty0，ACM2，3条EP warning、无panic/mux整体失败。无CONTROL/正permit/启充。
+
+完整文档BATTERY-DEPENDENCY-TESTS末节；NEXT/实施计划/ADC/IRQ/TIMING已同步。
+底稿scratch/artifact-0120a15：battery-watchdog-persistent.txt、analyze-watchdog.py/
+watchdog-log-analysis.json、audit-watchdog.py/watchdog-verification.json，不入git。
+NEXT：不再要求identity/watchdog/baseline/inhibit/组合7；下一实现用本次预截止
+pending/晚ACK案例做可复现回归，修关键ACK/事件分发和重遥测SPMI仲裁/调度，
+考虑诊断读对紧急路径的影响。保留原owner/ACK/按键公平/group隔离/清理及deadline，
+不盲目只换表顺序、不去锁穿透/轮询/重试/扩大期限。修复完整验证后再通知push。
+首bark初始起算、长期有效输入许可、外部SMB1355 I²C隔离/最终授权仍未关闭。
+
+### Previous 0120a15 identity handoff (superseded next action)
+
 **CURRENT: 0120a15 identity1已分析：首笔USBIN RESULT超时，抓到EOC锁存后的分发延迟；下一项同核watchdog4。**
 
 实现9f49c1d/0166，上一产物文档f97811f。本轮只读日志/真实云源码、更新文档，

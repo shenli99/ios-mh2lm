@@ -1,5 +1,13 @@
 # ADC5 与 watchdog 时序取证（0166）
 
+**0120a15-watchdog已分析：** 独立看门狗配置/9次自然bark维护/180秒有限停止通过
+（含初始化10pet，结束后20bark不再pet），仍未主动启充。ADC59又RESULT超时，
+这次mux在deadline前4.003ms已读到EOC pending，却到deadline后9.028ms才notify，
+确认存在预截止事件交付过晚；ACK锁等待/抢占/总线耗时仍待拆分。下一实现处理
+关键ACK/分发与重遥测竞争，当前不追加组合7或重复测试，无新驱动需push。
+[完整实测与验收边界](BATTERY-DEPENDENCY-TESTS.md#0120a15看门狗档实测正常维护通过adc确认deadline前已有eoc)。
+下方待watchdog等步骤按历史保留，以本段为当前动作。
+
 **0120a15身份档已分析：** 5次身份转换正常；第6请求（首笔USBIN）RESULT超时。
 恢复前读到转换完成/EOC锁存，第二mux scan晚于deadline78.134ms、notify晚109.106ms；
 首EOC回调仅23.178µs、advance锁等待0.312µs，timer是真到期。已定位到存在分发

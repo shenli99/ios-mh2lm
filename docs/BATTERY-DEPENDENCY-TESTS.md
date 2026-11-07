@@ -1,5 +1,13 @@
 # 电池身份、并联禁止与 watchdog 分步测试（0165）
 
+**0120a15-watchdog已分析：** 独立看门狗配置/9次自然bark维护/180秒有限停止通过
+（含初始化10pet，结束后20bark不再pet），仍未主动启充。ADC59又RESULT超时，
+这次mux在deadline前4.003ms已读到EOC pending，却到deadline后9.028ms才notify，
+确认存在预截止事件交付过晚；ACK锁等待/抢占/总线耗时仍待拆分。下一实现处理
+关键ACK/分发与重遥测竞争，当前不追加组合7或重复测试，无新驱动需push。
+[完整实测与验收边界](BATTERY-DEPENDENCY-TESTS.md#0120a15看门狗档实测正常维护通过adc确认deadline前已有eoc)。
+下方待watchdog等步骤按历史保留，以本段为当前动作。
+
 **0120a15身份档已分析：** 5次身份转换正常；第6请求（首笔USBIN）RESULT超时。
 恢复前读到转换完成/EOC锁存，第二mux scan晚于deadline78.134ms、notify晚109.106ms；
 首EOC回调仅23.178µs、advance锁等待0.312µs，timer是真到期。已定位到存在分发
@@ -547,3 +555,93 @@ pet及终止快照；ADC失败仍保留分析。当前不重测identity/baseline
 底稿`scratch/artifact-0120a15/`：battery-identity-persistent.txt、analyze-log.py、
 log-analysis.json、audit-identity.py、identity-verification.json；断言覆盖逐字段/
 请求结果/期限/晚到hit/身份撤销/无正许可与无启充，底稿和原日志不入git。
+
+
+## 0120a15看门狗档实测：正常维护通过，ADC确认deadline前已有EOC
+
+日志`logs/sweetlog-0120a15-battery-watchdog.bin`，SHA256
+`b330efaca945025918974eed1fad5dc9eeb948edea4cc7bfe2907e6f37fbd31b`。
+SWEETLOG v1/4MiB/有效592827/flush44/7341行，无回卷/NUL；497连续采样跨469.531秒
+（46irq含初始化/451保护）。deps4/runtime1，实际0166诊断标记存在。本轮只读
+日志/源码并写文档，未改驱动/CI、未push/操作设备/重新打包。
+
+### 这个镜像测什么
+
+PMIC watchdog用于监督驱动能否持续处理充电保护事件；bark是提前告警中断，
+驱动收到后写一次专用pet命令重置计时。后续bite可承担硬件禁充保护，不能只靠
+软件声称自己正常。该档先禁止主充电输出，再配置bark16s/bite8s/snarl8s/
+bite-disable1及IRQ，只在初始化和真实bark后pet；诊断180秒结束或故障后不再pet。
+这里测的是配置/IRQ/维护/停止及其时序，**没有主动开启充电，也没有验证带电
+bite禁充、深睡恢复或正式managed授权**。watchdog的硬件事件在诊断结束后仍可
+继续到达；“停止维护”指不再pet，并不表示硬件被关闭。
+
+### watchdog结果
+
+准备op8在55.957199427秒完成，初始pet/op9在55.958830833秒完成，两次命令
+error0/actual1。实际新遥测`main-enable0/WD62(maskc2=42)/timef3`，后续保持；
+16笔CONFIG全部enable0，无CONTROL/正permit，parallel外部隔离和身份许可仍未授予。
+
+29次自然bark均通过路由，窗口内前9次对应pet2..10，加初始化共10pet；每次命令
+error0/actual1。首bark GIC在71.856766406秒，距初始pet完成15.897936秒。
+窗口内GIC→notify85.885～122.448µs；notify→pet命令完成90.332～93.156ms，
+表明mux快速交付之后电池完整采样仍有约90ms开销，不等于硬件响应需要90ms。
+稳定bark间隔16.378～16.381秒，中间跨插拔33.415秒，不能把所有段都算16秒。
+
+软件plugin START两笔：epoch5/observed121.236511614秒、epoch12/observed
+122.246603645秒，均pets4；后者到下一bark GIC138.029354166秒为15.782751秒。
+**这时已维护过3次自然bark，不能当作0120a13组合档“尚未收到自然bark时，首次
+新plugin后27.853秒才到”的同条件复测。** 软件plugin仍不是已证实硬件零点；
+本档未触发缺bark/配置失败，WD FAULT未执行，故障快照路径本档无实机覆盖。
+
+样本226完成236.168014687秒之后window complete/pets10/disable-error0。
+其后20次bark（首个236.313901666秒）仍通过IRQ采样，但无第11pet/重启；后续
+8.19/16.05秒交替只能记为停止维护后的硬件事件，非正常喂狗或带电bite验证。
+watchdog独立诊断维护/有限停止通过，不能推广为组合/正式充电保护全部验收。
+
+### ADC新增决定性证据
+
+59请求/58成功：3BAT_ID、55USBIN，全部valid/restored/consumer接受，无epoch
+丢弃；成功耗时7.499～48.425ms。第59USBIN首EOC MORE/phase3/count1，随后
+RESULT超时-101；restore/cleanup0、provider停止并撤销测量，无失败后结果或重试。
+
+| 阶段 | uptime秒 |
+| --- | --- |
+| 首EOC notify / consumer回调 | 121.236163906 / 121.236186093 |
+| RESULT trigger总线完成 | 121.238245520 |
+| 第二EOC channel pending被mux读到 | 121.333559739 |
+| 原RESULT deadline | 121.337562291 |
+| timer实际执行 | 121.339324010 |
+| 恢复前固定现场读取区间 | 121.339799322～121.346517083 |
+| 第二EOC ACK完成 / notify前 | 121.346589479 / 121.346589843 |
+
+首notify→callback22.187µs，advance锁等待0.312µs。第二scan的`status1`证明该
+通道EOC已pending，发生在deadline**之前4.003ms**；scan→ACK13.030ms，notify
+晚于deadline9.028ms；timer晚1.762ms是真到期。两次hit仍为irq121/work121。
+这次可以排除“硬件尚无第二EOC，只有正常超时”的解释：事件已在期限前可见，
+却未及时ACK/通知。比identity档仅能在超时后快照证明锁存的证据更强。
+
+十字段error0，值仍为`01/00/08/80/00/00/01/01/01/73`；快照锁等待0.340ms、
+读取6.718ms，位于scan→ACK之间且与电池样本101采集重叠。因无ACK获取SPMI锁
+前后时间，不能把13.030ms全部判为锁等待；其中还可能有被抢占/总线完成等待，
+现场读取也会参与共享锁竞争。新实现要缩短关键ACK/通知路径和重遥测之间的
+竞争，并避免诊断本身延长关键事件处理；不能只凭换表顺序承诺根治。
+
+ADC错误之后自然watchdog仍正常维护，说明不同consumer可独立失败，未发生
+共享mux整体关闭。44IRQ refresh全healthy（89.537～116.566ms），power/volume-down
+各4次down/up配对，volume-up本档没有HID验证记录；touch124/empty0、ACM配置2次，
+无panic/mux失败。EP0两条、EP5一条warning保留既有USB枚举问题。
+
+### 下一步
+
+0120a15身份和watchdog两档已有足够ADC分发证据。当前无需重复它们、baseline/
+独立inhibit，暂不追加组合7；下一实现围绕mux ACK/分发公平性与电池重遥测的
+SPMI仲裁/调度做可复现回归，再一次云编译合并修复。先保存实际预截止pending/
+晚通知的失败案例；保留GIC→IOService/client→consumer loop、owner校验、按键
+公平性、ACK/失败隔离/清理和原100ms/23秒期限。不要轮询后备、隐式重试、无锁
+寄存器访问或单纯延长期限。硬件首bark初始起算问题保留，不由本档静默销账。
+本轮是诊断/文档提交，无新驱动提交需要push。仍无主动启充/长期许可/外部SMB1355
+隔离/最终授权结果，修复实现完成后再通知用户push。
+
+底稿`scratch/artifact-0120a15/`：battery-watchdog-persistent.txt、analyze-watchdog.py、
+watchdog-log-analysis.json、audit-watchdog.py、watchdog-verification.json。脚本断言
+逐笔命令/自然bark/维护停止、预截止pending与晚ACK/notify及ADC错误恢复；不入git。
