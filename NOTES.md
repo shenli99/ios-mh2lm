@@ -2,6 +2,53 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a13 deps-all7未通过：ADC19第二阶段超时；首bark晚于23秒期待。四档日志分析已完成，本批不再重刷，下一步定位两项时序。**
+
+上一文档c194b5c，实现8d6435b、打包ba5143e。本轮只读日志/云源码与更新文档，
+未改驱动/CI、未push/操作设备/重打包，无新驱动提交需要云编译。日志
+logs/sweetlog-0120a13-battery-deps-all.bin，SHA256
+68213bfedc94ac51b53e8c83a825c54bb79bbda0361d6f4d9e4009c78ff77c95。
+SWEETLOG v1/4MiB/有效460149/flush26/5879行，无回卷/NUL；308连续采样、289.737秒
+（30irq含初始化/arm-sync、278保护）。详细证据/边界在
+ docs/BATTERY-DEPENDENCY-TESTS.md末节；NEXT/实施计划/ADC5-CONSUMER/INPUT-SESSION同步。
+
+deps7/runtime1，battery1ff，新遥测main-enable0/SMB08/select02/WD62(maskc2=42)/
+timef3。身份token1/17/18 valid1/profile1，95057/94786/94786Ω、限值2800/4430；
+31FG tuple均match1/13/4027。16后续PARALLEL均08/02/error0，17CONFIG均enable0、
+写后62/f3保持，无CONTROL。只证明启动配置相容和主PMIC输出禁止，不代表外部隔离。
+
+ADC19请求/18成功（3BATID/15USBIN），34consumer EOC/35mux hit，18全部valid/
+restored/接受、无epoch丢弃，总耗时7.549～48.252ms。19首EOC MORE/phase3/count1后
+RESULT timer超时，稍后mux记录第二hit（两次irq/work39）；restore/cleanup0，
+provider停机，身份/token/限值归零。与watchdog4的ADC51时序一致，仍无精确
+trigger/GIC/mux scan+notify/consumer/锁前后时间戳，不能据行序认定锁或硬件根因。
+
+watchdog只有初始化pet，**没有自然bark pet**。稳定plugin id106完成124.219秒，
+23秒等待到id131/147.490秒失败终止，error-100 watchdog bark missing/late。
+首bark id136完成152.072秒（比plugin27.853秒、比失败4.582秒）。后续12bark全
+healthy交付、不再pet/无隐式重启，主路保持enable0；没有window-complete。
+故障后间隔约8.19/16.05交替，不能算健康维护或bite保护验收。第一bark晚到已
+证实，原因未定：软件plugin epoch不等于已验证的PMIC计时启动点；不能认定
+三项mux冲突，不能直接放宽23秒。单独watchdog4正常维护/有限停止通过仍有效，
+但不得推广成组合或正式managed授权通过。
+
+CC id106/108/109保留原来源，但ADC已失效，无新VBUS/正permit，长期许可/有效
+许可内撤销未验收。28 IRQ refresh全healthy，89.560～117.417ms；三键配对、
+touch151/empty0，无panic或mux失败/隔离。UV5/OV未命中；ACM configured0、无USB
+warning，USB枚举本档无验证证据，不据此判正常或失效。底稿scratch/artifact-0120a13：
+battery-deps-all-persistent.txt、analyze-deps-all.py、deps-all-log-analysis.json、
+audit-deps-all.py、deps-all-verification.json。
+
+NEXT：不再让用户重刷本批四档或追加baseline/evidence0。下一实现先定位ADC各
+阶段/事件投递/锁等待并补有界时间/故障快照；并核对LG/PMIC watchdog的配置、pet、
+首次真实plugin/掉线抖动与首bark起算关系。取证在typed ADC/PMIC后端及mux各自
+边界，保持GIC→mux IOService→registry client→consumer workloop，不让高层穿透
+读寄存器，不用轮询/自动重试/单纯延长deadline掩盖。新版本具体实现/验证完成
+再通知用户push；本轮无需新编译。后续仍需ADC可靠性与长期许可、外部SMB1355
+I²C隔离、最终managed-watchdog/保护验收。所有0120a13档均未主动启充。
+
+### Previous 0120a13 watchdog log handoff (superseded next action)
+
 **CURRENT: 0120a13 watchdog4自然bark维护/新配置/有限停止通过；ADC51第二阶段超时。下一项deps-all7仅测并存/撤销，之后优先修ADC时序。**
 
 上一文档727c15d，实现8d6435b，打包ba5143e；本轮只读日志/实际云源码与更新

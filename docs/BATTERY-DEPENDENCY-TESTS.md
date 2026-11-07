@@ -1,9 +1,10 @@
 # 电池身份、并联禁止与 watchdog 分步测试（0165）
 
 2026-11-07。用户要求在0164来源保留修复的同一次云编译中推进后三项依赖，
-用参数分开或组合测试。0120a13身份建立/刷新及ADC故障后撤销、主PMIC副路输出
-禁止、watchdog自然bark维护与有限停止已有分档实测。三档均遇ADC故障，长期
-输入许可未覆盖。下一项组合7仅检查并存/故障撤销；外部隔离/最终授权仍未成立。
+用参数分开或组合测试。0120a13四个目标档已完成日志分析：身份及故障撤销、
+主PMIC输出禁止、单独watchdog正常维护/有限停止有实测；组合7未通过，出现
+ADC第二阶段超时及首bark晚于23秒期待。长期输入许可未覆盖，外部隔离/最终
+授权仍未成立。本批不再重刷，下一步定位ADC时序和watchdog首bark启动语义。
 **全部档位只允许runtime1；没有主动启充。** 身份可建立板级限值，主PMIC副路
 禁止与watchdog的配置/IRQ链可独立取证；外部SMB1355隔离和managed-watchdog
 最终授权仍未成立。不能将“已有实现”写成“三项实机验收完成”。
@@ -356,3 +357,51 @@ I²C隔离、最终managed-watchdog授权与故障保护。全部不启充，无
 watchdog-log-analysis.json、audit-watchdog.py、watchdog-verification.json；逐笔连接
 route hit→pet→healthy refresh，确认窗口后的bark没有pet。只读分析/文档更新，
 未改驱动/CI、未push/操作设备或重新打包。
+
+## 0120a13组合档实测：启动配置并存，运行验收未通过
+
+日志 `logs/sweetlog-0120a13-battery-deps-all.bin`，SHA256
+`68213bfedc94ac51b53e8c83a825c54bb79bbda0361d6f4d9e4009c78ff77c95`。
+SWEETLOG v1/4MiB/有效460149字节/flush26/5879行，无回卷/NUL；308笔连续电池
+采样、约289.737秒（30 IRQ含初始化/arm-sync，278保护timer）。四个目标档至此
+已有结果，evidence0无需追加；上方“下一项组合”等指令为当时状态。
+
+**组合7没有通过。** 启动准备相容不等于三项运行并存验收成功：
+
+| 项目 | 实测结论 |
+| --- | --- |
+| 初始配置 | deps7/runtime1、battery mask1ff；新遥测main-enable0/SMB08/select02/WD62(maskc2=42)/timef3，准备阶段无冲突 |
+| 身份 | token1/17/18三次valid1/profile1，95057/94786/94786Ω，板级2800mA/4430mV；31次FG tuple均match1/13/4027。ADC停机后身份、token、限值正确归零 |
+| 主PMIC输出禁止 | 16笔后续PARALLEL均08/02且error0；17笔CONFIG始终enable0，写后WD62/f3保持。无CONTROL/主动启充，外部SMB1355实际隔离仍无证据 |
+| ADC | 19请求中18成功（3 BAT_ID/15 USBIN），全部valid/restored/接受，无epoch丢弃；34条consumer EOC/35个mux hit。第19次首EOC MORE/phase3/count1后，RESULT阶段timer超时，随后mux才打印第二hit（两次irq/work39），restore/cleanup0，provider停机并撤销测量 |
+| Watchdog | 只有初始化pet，没有自然bark pet。稳定plugin id106采样完成124.219秒；23秒期待在id131/147.490秒终止诊断。首bark到id136/152.072秒才完成采样，比plugin约晚27.853秒，晚于终止约4.582秒 |
+| 终止后 | 后续12次bark路由均healthy交付，但无pet/隐式重启，主路继续enable0。没有正常window-complete，此档终止原因是bark missing/late，不能套用单独watchdog档的正常结束结论 |
+
+ADC成功总耗时7.549～48.252ms，BAT_ID888321～889684µV，USBIN4579920～4829056µV。
+第二阶段超时/随后hit与watchdog4的ADC51现象一致，但仍缺精确trigger/GIC/mux
+scan+notify/consumer入口/锁获取时间戳；文本行序不能证明硬件发出时间或锁等待
+时长。ADC失败后CC id106/108/109仍保留同一原来源时间，但已无新VBUS/正permit，
+长期许可与有效许可内拔线撤销未验收。
+
+本档第一bark晚于预期已有日志证据，**不能直接认定是mux冲突或把23秒简单放宽**。
+首次plugin起算依赖软件观察的输入epoch，不等于已证实PMIC内部启动/重启时刻。
+需要按LG实现及PMIC定义核对配置、pet、真实plugin/掉线抖动和首bark的关系，并
+用MISC IRQ/状态及各层时间取证。故障后的采样完成间隔交替约8.19/16.05秒，
+那时软件已停止pet，不能当作健康16秒维护或完整bite保护验收。单独watchdog4
+有自然bark维护/有限停止证据，该结论仍有效，但不能推广成组合7或正式授权通过。
+
+28次IRQ refresh全healthy，route→publish89.560～117.417ms；三键有配对down/up，
+触摸hits151/empty0，无panic/共享mux失败或隔离。UV5、OV无自然命中；本档无ACM
+configured记录，也无USB warning，不据此宣称USB枚举回归通过或功能失效。
+
+NEXT：本批上机测试收束，不再重刷identity/inhibit/watchdog/all或追加baseline。
+下一实现围绕两项缺口：ADC各阶段/事件投递/锁等待的有界诊断和修复；watchdog
+首plugin启动/首bark期限的语义核对及取证。补证必须经typed ADC/PMIC后端和mux
+各自接口，保持现有IOService/registry client/consumer workloop；不在高层穿透读
+寄存器，不添加轮询/自动重试，不靠延长deadline冒充修复。新版本准备完成后再
+通知用户push/编译，本轮没有新的驱动提交需要云编译。后续仍需长期输入许可、
+外部SMB1355 I²C隔离、最终managed-watchdog授权及保护验收，全部尚未主动启充。
+
+底稿 `scratch/artifact-0120a13/`：battery-deps-all-persistent.txt、analyze-deps-all.py、
+deps-all-log-analysis.json、audit-deps-all.py、deps-all-verification.json。只读分析与
+文档更新，未改驱动/CI、未push/操作设备或重新打包。

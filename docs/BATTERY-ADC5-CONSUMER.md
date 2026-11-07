@@ -1,5 +1,11 @@
 # SweetBattery 的 ADC5 测量接入（0156）
 
+**0120a13组合档更新：** ADC19在首EOC已接受后等待RESULT超时，随后mux打印
+第二hit（同属irq/work39），与watchdog4的ADC51现象一致；restore/cleanup0，
+身份/测量/限值正确撤销。组合同时暴露首bark晚于23秒期待，未通过运行验收。
+四档日志取证已收束，不再重刷；下一实现定位ADC阶段/投递/锁时序并核对首bark
+启动语义，保持typed后端/IRQ-only/失败撤销。详见[组合档实测](BATTERY-DEPENDENCY-TESTS.md#0120a13组合档实测启动配置并存运行验收未通过)。
+
 **0120a13-watchdog档补充：** ADC51首EOC已接受（MORE/phase3/count1），随后
 RESULT第二阶段timer超时，mux稍后记录第二个adc5-eoc hit（两次同属irq/work104）。
 无第二次成功EOC回调，restore/cleanup0、provider停止/测量撤销正确。文本hit
