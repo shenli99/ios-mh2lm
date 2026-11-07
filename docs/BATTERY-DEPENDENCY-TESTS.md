@@ -1,5 +1,17 @@
 # 电池身份、并联禁止与 watchdog 分步测试（0165）
 
+**当前0120a16：真实云源码/内核核对通过，同核五档boot已打包并回读，待测identity1。**
+实现357b26f/0167，相关33源码与本地验证树逐字节一致，原106源码gate、新仲裁/
+ACK计时及snapshot v2标记通过；五档均runtime1、不主动启充，三键/USB/触摸IRQ
+及USB日志保留。先用`out-bs/boot-16k-0120a16-battery-identity.img`：桌面后尽快
+拔5秒→同一稳定电源5～10分钟→拔5秒，简测三键/触摸，导出
+`sweetlog-0120a16-battery-identity.bin`，持久日志即可。目标核对持续USBIN转换与
+ACK等锁/持锁/通知时序，是否消除旧超时尚待实机；之后按结果决定同核watchdog4/
+组合7。无需新push/编译，不重测旧0120a15或baseline。
+[镜像归档与验证边界](BATTERY-DEPENDENCY-TESTS.md#0120a16云产物与同内核测试镜像)。
+以下旧待push/待编译/待测动作为历史记录，以本段为准。
+
+
 **当前0167：ACK/遥测竞争修复已完成本地验证，待用户push/新云内核实测。**
 等待中的mux IRQ写/ACK优先于下一笔普通SPMI事务；每遍先ACK、再合并通知，全部
 有限遍次结束后输出日志；独立故障快照逐字段让锁，协议错误的恢复前快照仍保留
@@ -654,3 +666,58 @@ SPMI仲裁/调度做可复现回归，再一次云编译合并修复。先保存
 底稿`scratch/artifact-0120a15/`：battery-watchdog-persistent.txt、analyze-watchdog.py、
 watchdog-log-analysis.json、audit-watchdog.py、watchdog-verification.json。脚本断言
 逐笔命令/自然bark/维护停止、预截止pending与晚ACK/notify及ADC错误恢复；不入git。
+
+## 0120a16云产物与同内核测试镜像
+
+2026-11-07，实现`357b26f`/0167（ACK入场优先、有限通知合批、独立诊断逐字段
+让锁、ACK wait/hold计时）。用户提供`xnu-buildtree-0120a16.gz`及
+`xnu-kernel-0120a16.gz`；未提供构建日志或CI run ID，不声称检查了完整构建警告。
+
+真实buildtree相关33文件与`scratch/spmi-ack-arbitration/verify/`逐字节一致；
+原106源码gate通过。内核SHA256SUMS及新`SWEET MUX ARBITRATION: v1`、
+`SWEET MUX ACK: v1`、ADC/WD snapshot v2和既有IRQ/输入/ACM标记通过。
+本轮不改驱动/CI，不push或操作设备；以下是产物/打包验证，不代表实机修复通过。
+
+实际内核SHA256：`b2a1affab8549e97ff702320b4e314407e89e27e72fc11c61eb5e049bf19d368`。
+
+| 下载归档 | SHA256 |
+| --- | --- |
+| `xnu-buildtree-0120a16.gz` | `99b4c6f3d676341d8fe51dfac45eacf2d526e71e3218c46ec7de649393c19bd2` |
+| `xnu-kernel-0120a16.gz` | `8a63ce6db96157013d404403ec16eb79e0572e2c58896c4b9ca561c5717ac83c` |
+
+打包命令（已执行）：
+
+```sh
+bash tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-0120a16.gz 0120a16 --battery-dependencies
+```
+
+五档输出位于`/home/shenli/work1/out-bs/`：
+
+| 镜像 | deps | 字节 | SHA256 |
+| --- | --- | --- | --- |
+| `boot-16k-0120a16-battery-evidence.img` | 0 | 35667968 | `db7421fe9b43821053d3cd8d2382a94a226e8c188573a91366eb0d7105b131e5` |
+| `boot-16k-0120a16-battery-identity.img` | 1 | 35667968 | `093f27d68959bc4d8135c1855f132a1be4e9b394a819b9519d9e3098e2c96061` |
+| `boot-16k-0120a16-battery-inhibit.img` | 2 | 35667968 | `9be8e763e069af6eb10d038fbd68842a2a748c819b81c44b45da546d067ede27` |
+| `boot-16k-0120a16-battery-watchdog.img` | 4 | 35667968 | `138d91d21a3a0fe2f15c37c7567db61e87f9fa87959a7e26151d4126f99c1f52` |
+| `boot-16k-0120a16-battery-deps-all.img` | 7 | 35667968 | `cb4632dee52a307a920553311099e7b7486076d05f6282b1947c8ba0bd3f8e0c` |
+
+均为Android boot header v1/2048页；从最终boot回读外层kernel blob/ramdisk，
+以及内层FAT中的kernel/16K ADT/UniXNU TOML，与已验证输入逐字节一致。五档
+共用同一真实新内核及ADT，参数唯一且除deps之外一致，runtime1/IRQ4/ADCconv0，
+三键、USB、触摸IRQ和ACM日志保留。副路/WD档仍是有限诊断，不主动启充。
+
+**先测identity1。** 启动路径：
+`/home/shenli/work1/out-bs/boot-16k-0120a16-battery-identity.img`。
+进入桌面后尽快拔5秒→同一稳定电源5～10分钟→拔5秒，简单确认三键和触摸，
+导出`sweetlog-0120a16-battery-identity.bin`。持久日志即可；出现明显故障可提前
+导出。关注连续USBIN测量至少覆盖旧59请求故障附近、原100ms阶段deadline、
+MUX ACK wait/hold及scan/ack/notify；不把hold当作纯硬件耗时，不把v2快照的
+`done-first-lock`当作连续持锁时间。
+
+看过日志后再安排现成watchdog4/组合7；不重刷旧0120a15或baseline/evidence0，
+也不为取旧日志追加云编译。新镜像仍未主动启充；首bark起算、长期输入许可、
+外部SMB1355 I²C隔离及最终managed-watchdog授权仍待完成。
+
+本地底稿`scratch/artifact-0120a16/`：verify-artifacts.py/source-compare.json/
+verification.json、packaging.txt、verify-boots.py/boot-verification.json及最终TOML，
+均不入git。下载归档、实际源码和boot产物不入git。

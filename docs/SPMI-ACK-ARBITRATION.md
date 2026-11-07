@@ -1,5 +1,17 @@
 # SPMI ACK 与遥测竞争修复（0167）
 
+**当前0120a16：真实云源码/内核核对通过，同核五档boot已打包并回读，待测identity1。**
+实现357b26f/0167，相关33源码与本地验证树逐字节一致，原106源码gate、新仲裁/
+ACK计时及snapshot v2标记通过；五档均runtime1、不主动启充，三键/USB/触摸IRQ
+及USB日志保留。先用`out-bs/boot-16k-0120a16-battery-identity.img`：桌面后尽快
+拔5秒→同一稳定电源5～10分钟→拔5秒，简测三键/触摸，导出
+`sweetlog-0120a16-battery-identity.bin`，持久日志即可。目标核对持续USBIN转换与
+ACK等锁/持锁/通知时序，是否消除旧超时尚待实机；之后按结果决定同核watchdog4/
+组合7。无需新push/编译，不重测旧0120a15或baseline。
+[镜像归档与验证边界](BATTERY-DEPENDENCY-TESTS.md#0120a16云产物与同内核测试镜像)。
+以下旧待push/待编译/待测动作为历史记录，以本段为准。
+
+
 2026-11-07，基于真实0120a15云源码及0166。实现补丁
 `xnu/patches/0167-mh2lm-spmi-ack-arbitration.patch`，本地验证通过，待用户push、
 云编译和新内核实测。本轮没有修改CI，没有push、操作设备或生成新boot。

@@ -2,6 +2,33 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a16云产物核对通过，同核五档boot已打包回读，待用户测identity1。**
+
+实现357b26f/0167。真实buildtree的33个相关源码文件与scratch/spmi-ack-arbitration/
+verify逐字节一致，原106源码gate通过；kernel manifest及ARBITRATION v1/ACK v1、
+ADC/WD snapshot v2和既有输入/IRQ/ACM marker通过。用户仅提供buildtree/kernel，
+没有构建日志/CI run ID，不宣称全量警告已查。无0120a16实机结果，不能宣布超时修好。
+
+本轮未改驱动/CI、未push/操作设备。已生成out-bs下五份
+boot-16k-0120a16-battery-{evidence,identity,inhibit,watchdog,deps-all}.img，均
+35,667,968字节、boot header v1；最终boot回读外层blob/ramdisk与内层FAT
+kernel/ADT/TOML逐字节一致。同一新内核、16K ADT，参数唯一，共同runtime1/IRQ4/
+ADCconv0，deps0/1/2/4/7；三键/USB/触摸IRQ及USB日志保留，全部不主动启充。
+实际kernel SHA256：b2a1affab8549e97ff702320b4e314407e89e27e72fc11c61eb5e049bf19d368。
+完整归档/boot SHA与验证边界在docs/BATTERY-DEPENDENCY-TESTS末节，其余路线入口
+已同步。底稿scratch/artifact-0120a16，下载/源码/产物/验证底稿不入git。
+
+NEXT：用户fastboot boot
+/home/shenli/work1/out-bs/boot-16k-0120a16-battery-identity.img。
+桌面后尽快拔5秒→同一稳定电源保持5～10分钟→拔5秒，简测三键/触摸，导出
+sweetlog-0120a16-battery-identity.bin，持久日志即可。关注持续USBIN至少覆盖旧59
+请求、100ms deadline及MUX ACK wait/hold/scan/notify；hold含调度，v2独立snapshot
+耗时不等于连续占锁。出现异常可提前导出，之后按新日志决定watchdog4/组合7。
+无需新push/编译，不重刷旧0120a15/baseline/evidence0/inhibit。全部runtime1不主动
+启充；首bark起算、长期许可/外部SMB1355隔离/最终授权仍未关闭。
+
+### Previous 0167 implementation handoff (superseded next action)
+
 **CURRENT: 0167 ACK/遥测竞争修复本地完成，待用户push/新云产物；未宣称实机修好。**
 
 用户在ACK/并发阻塞审计后授权实现。基于真实0120a15的0166源码，新增
