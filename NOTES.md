@@ -2,6 +2,32 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a9云产物已核对，0160 CC镜像已打包，待实机日志。**
+
+实现提交0b1cf56。0120a9 buildtree的33文件与battery-cc/verify逐字节一致，
+102个源码gate通过；实际kernel manifest有效，含CC/CC TIME/INPUT CAP与
+battery-typec-cc/attach及既有三键/触摸/USB IRQ/ACM/APSD标记。
+产物SHA256：buildtree gz 68edbf3a493e4abf801c1107bca9835f42cbaaf15949bf469aad564b0eff11fd；
+kernel gz 5e4ea03e937c9de70321219c67faa175d5f41af5c8935ced10df56af68b7a24e。
+实际kernel SHA256 7d99770458eab7dfb03a4441078eb5efd6d510f479642e756f3e384799ef5f01。
+
+已生成工作区out-bs/boot-16k-0120a9-battery-evidence.img，35,667,968字节，
+SHA256 8dc5f64f39de24683732b67451265cfaf70787e64048254837832d17447e9c72。
+使用原--battery-evidence：runtime1/IRQ4/ADCconv0，保留按键/触摸/USB IRQ及
+USB日志，仍未启充或实现PD。最终boot header v1载荷与输入firmware/ramdisk
+逐字节一致；从boot内FAT回读kernel/ADT/TOML匹配，参数没有重复。
+底稿scratch/artifact-0120a9，含源码/manifest/marker校验与boot回读报告。
+本轮未改驱动/CI，未push或操作设备；没有新实机结果，未提供本轮CI run ID/日志。
+
+NEXT：用户fastboot boot上述镜像。电脑USB启动桌面约30秒→拔10秒→当前充电器
+约30秒→拔10秒→电脑约10秒；期间确认三键/触摸，注明A-to-C/C-to-C及电源型号/
+输出标识，导出sweetlog-0120a9-battery-evidence.bin（持久日志即可）。关注SID2/
+PID15路由attach/hit、CC reasons/Rp/qualified及独立APSD来源。若启动/路由失败
+保留持久日志分析，不要求先重测baseline。已知电脑重复枚举bug不要反复重插到
+成功。ADC第二EOC超时仍未修改，观察镜像不能作为真实充电验收。
+
+### Previous 0160 implementation handoff (superseded)
+
 **CURRENT: 0160 CC/Rp输入判断已本地完成，待用户push及新云产物。**
 
 用户要求“把cc判断也加进来”。新增补丁0160接0159：typed纯策略解码Rp default/

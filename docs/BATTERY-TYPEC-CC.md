@@ -161,3 +161,22 @@ runtime1镜像做电脑→拔线→当前充电器→拔线→电脑即可，记
 
 底稿工作区`scratch/battery-cc/`：base/edited/verify、cloud-apply、严格应用/源码
 gate报告、测试记录及交叉编译输出。原始设备日志不入git。
+
+## 0120a9云产物与测试镜像
+
+实现提交`0b1cf56`。0120a9实际buildtree中33文件与本地verify逐字节一致，
+102个源码gate通过，kernel manifest与新CC/Type-C路由标记核对通过。
+kernel SHA256：`7d99770458eab7dfb03a4441078eb5efd6d510f479642e756f3e384799ef5f01`。
+
+镜像：`/home/shenli/work1/out-bs/boot-16k-0120a9-battery-evidence.img`。
+大小35,667,968字节；SHA256：
+`8dc5f64f39de24683732b67451265cfaf70787e64048254837832d17447e9c72`。
+runtime1/IRQ4/ADCconv0，保留三键/触摸/USB IRQ和USB日志。boot header v1、
+firmware及ramdisk实际载荷一致，从最终boot内FAT回读kernel/ADT/TOML均匹配，
+没有重复参数。底稿`scratch/artifact-0120a9/`。
+
+设备验证：电脑启动桌面约30秒→拔10秒→当前充电器约30秒→拔10秒→电脑约10秒，
+确认三键/触摸并记录线材A-to-C/C-to-C、电源型号/输出标识；持久日志命名
+`sweetlog-0120a9-battery-evidence.bin`即可。仍是输入判断观察，不能当作真实
+启充或PD验收；ADC超时未修复。本轮只核对、打包及记文档，未push/操作设备，
+尚无本轮设备结果或用户提供的CI run ID/构建日志。
