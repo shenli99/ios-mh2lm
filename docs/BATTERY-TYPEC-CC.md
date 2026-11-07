@@ -1,7 +1,8 @@
 # Type-C CC/Rp 输入判断（0160～0162）
 
-**当前：0120a11云源码已确认包含0162修复，测试boot已打包，待实机日志。**
-保留三种IRQ驱动及USB日志，仍为runtime1输入观测，不启充。
+**当前：0120a11已实机验证0162的sink Rp分类修复和拔线撤销。** 稳定输入读到
+Rp3A，CC reasons0/qualified1/kind2，APSD可同时为FLOAT。仍为runtime1观测，
+没有真实启充或完整input provider，详见文末实测结果。
 40e2e91新增的CI marker检查因未转义`<<`破坏CircleCI模板解析，已在后续修正中
 撤回；CI文件恢复为其父提交原样，驱动修复及本地/打包器校验保留，详见文末。
 先按角色解释Rp，misc bit4保留为诊断观测；USBIN OV/UV独立拒绝。0120a10的7笔
@@ -488,3 +489,85 @@ sink CC分类、短期能力依据及拔线撤销。若沿用电源仍报Rp3A/mi
 有效期内role1/observed1/reasons0/qualified1，kind2/max3000；如果misc bit4
 清除，observed0同样正常，不要求它必须保持错误观测。APSD可FLOAT，3秒观测
 到期与真实charging0仍为现有设计边界，不重复baseline或旧镜像。
+
+## 0120a11实测：CC分类修复通过，拔线撤销正常
+
+日志为工作区`logs/sweetlog-0120a11-battery-evidence.bin`，SHA256：
+`4ec5fbc4c666bbe8fb5cb179e1e0ef7b4fde04c58c97b6d6fb7f00351d2db231`。
+SWEETLOG v1，4MiB ring，有效779516字节、flush58、10086行，未回卷、正文无NUL。
+底稿`scratch/artifact-0120a11/`的`analyze-log.py`、`log-analysis.json`、
+`cc-verification.json`及解码文本；原始设备日志不入git。
+
+### 本轮验证的主要结论
+
+19笔输入记录（初始1、运行期18），19笔APSD options18/enabled1。稳定电源
+接入后，id359先由plugin+Type-C事件取得CC依据；其后id361/362的source事件
+得到FLOAT，继续采用原CC依据，**不再因misc bit4把普通sink Rp3A误拒绝**：
+
+```text
+id359: events=0x41 coherent=1 reasons=0 rp=3 advertised-ma=3000 orientation=2 qualified=1
+       role=1 observed=0x1; INPUT CAP kind=2 max-ma=3000
+       usb=0x10 sink=0x02 attached=0x23 misc=0x3b debug=0 legacy=0x04
+       APSD=0/result=0，尚未完成
+id361/362: events=0x10，APSD=0x21/result=0x10 (FLOAT)，CC仍qualified1/kind2
+```
+
+本轮misc3b与此前misc39只差方向bit1，orientation从1变2，亦说明方向位没有
+误作拒绝条件；不据此猜测用户实际翻转插头的动作。observed1保留了misc bit4
+诊断，既没有清位也没有把它隐藏。USBIN10没有OV/UV位。
+
+三笔CC的session7、started-ns652523091875、completed-ns652550295000完全一致，
+source事件没有刷新CC原始时间。首次FLOAT在同会话plugin后1.259秒，第二次
+在1.371秒后。CC早于APSD完成即成立，满足独立来源设计；没有依赖伪造DCP。
+初始化及电脑段仍拒绝普通sink许可，未把USB枚举成功当作电流授权。
+
+以首次遥测开始为零点，关键采样窗口如下；它们不是物理插拔的精确时间：
+
+| id | 相对秒 | 内核观测 |
+| --- | --- | --- |
+| 240/241 | 247.261/247.363 | 拔线，CC依据清零，external0 |
+| 351～358 | 360.781～361.796 | 接入切换，VBUS/附着先后变化，有两次一致性拒绝 |
+| 359 | 361.898 | 一致sink Rp3A，CC依据成立，external1 |
+| 361/362 | 363.157/363.268 | source完成为FLOAT，CC依据保持原始时间 |
+| 535/536 | 541.882/541.986 | 拔线，CC session/time清零、qualified0/kind0、external/capable0 |
+| 584～587 | 590.197～590.973 | 重接电脑，external恢复；后续source返回SDP，普通CC许可仍拒绝 |
+
+8次UI源状态发布均有updateStatus完成，包含完整撤销/恢复。该证据证明内核
+发布链工作，用户没有另述屏幕现象，不能替代视觉验收。拔线晚于3秒观测期限，
+本轮证明状态撤销和会话清理，不扩张为“在有效期内突发拔线竞态已实机覆盖”。
+CC依据仍仅3秒有效，长期持续input provider尚缺；本日志没有独立过期日志，
+不能将source保留时间验证直接说成已覆盖所有期限边界。
+
+id351/358的USB字节前后变化报VERIFY/-12，撤销fresh/CC，后续IRQ取得一致
+结果，没有timeout/总线损坏证据。拔线USB26含UV bit2，因此新的0x281c或
+0x280c含欠压拒绝是断线状态的诊断组合，不是接电后新发生的稳定欠压故障。
+本轮未覆盖VBUS仍存在时的OV/UV保护，也未新增独立OV/UV IRQ或验证source角色。
+
+### 运行与回归
+
+- 约609.832秒，606笔连续遥测（初始/arm-sync/事件共20 irq，保护586），全部
+  电压/电流有效，3831～3923mV、IOPM符号电流-686～+5mA。20次profile全
+  match1/integrity13/nominal4027mAh。保护monitor不是输入状态轮询fallback。
+- 电池group1/events7f成功attach，mode4 armed；18次运行期刷新healthy1，
+  路由至发布100.654～117.577ms，不是屏幕端到端延迟。mux命中rid11/cc8/
+  vbus6/attach5/legacy3/usbin6/source3。VCONN/MSOC/CHGR自然事件未覆盖；
+  没有据此认定这些路径失败，也不宣称本轮完成全部电池IRQ验收。
+- ADC226请求/226有效且restored结果/432EOC，BATID20、USBIN206；223结果
+  接受，3次USBIN因源epoch变化丢弃(error0)。有效BATID888646～889684uV，
+  USBIN4490656～5104144uV；不能把插拔附近的低值当作稳定电源电压。无ADC
+  超时，旧第二EOC问题未复现，尚未修复。总请求耗时7.463～160.536ms，不足以
+  单独判断分阶段deadline或恢复耗时，仍需原计划的错误快照取证。
+- 无`[ERROR]`、kernel panic或mux隔离。三键均有down/up（volume-down1组、
+  volume-up2组、power3组），触摸计数至少192。USB两次ACM configured，
+  后段重接电脑reset/ep0 warning后无新configured，仍保留已知gadget枚举问题。
+
+19次充电配置全enable0，无CONTROL，UI charging0；稳定输入时策略allow0/
+owned0、reasons7c0（identity/parallel/input/watchdog/limits等依赖未闭合）。
+CC观测成功没有设置inputVerified，3A广播不是实际吸收电流或PD合同，亦不等于
+可以启充。本轮达到的是**sink CC分类、来源保持和正常拔线撤销**的目标。
+
+下一步进入正式输入能力管理：将已验证的CC/APSD与同会话有效ADC电压结合，
+设计长期会话、变化/失效撤销、保护事件及typed接口；不靠轮询读取续短期依据，
+不把CC kind2直接变成启充开关。继续补身份授权、并联隔离和watchdog依赖，
+ADC故障取证仍为独立待办。无需重复本轮/baseline。本次只分析/更新文档，
+未改驱动/CI、未push或操作设备，无新boot或CI run ID。

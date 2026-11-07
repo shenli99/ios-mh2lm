@@ -1,5 +1,19 @@
 # 0119之后的电池驱动推进
 
+**最新实机：0120a11通过0162 sink CC分类及正常拔线撤销。** id359先取得独立
+Rp3A依据，id361/362 APSD为FLOAT时仍qualified1/kind2，三个记录保持同一CC
+时间；id535/536拔线清除session/时间/能力和外接标志。226次ADC全部成功，
+18次运行期电池IRQ健康，三键/触摸有记录。19次配置enable0、无CONTROL，
+真实启充和完整电池IRQ验收仍未完成。详见
+[0120a11实测](BATTERY-TYPEC-CC.md#0120a11实测cc分类修复通过拔线撤销正常)。
+
+下一步推进正式输入能力管理，将CC/APSD、同会话有效VBUS测量和typed授权接口
+结合，明确长期会话/失效撤销及保护事件；现有3秒观测不能靠轮询续期，也不能
+直接作为inputVerified。电池身份授权、parallel隔离、watchdog及ADC错误快照
+取证仍需闭合。无需重跑当前镜像/baseline，CI配置保持原样。
+
+### 0120a11产物及实现记录（历史）
+
 **最新：0120a11已包含0162修复，测试boot已打包，待实机日志。** 33个云源码文件
 与本地验证版一致，kernel marker与manifest通过；镜像为工作区
 `out-bs/boot-16k-0120a11-battery-evidence.img`。仍用原runtime1观察插拔/CC分类，

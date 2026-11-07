@@ -2,6 +2,48 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a11日志分析完成；0162 sink CC分类与正常拔线撤销已实机通过。**
+
+日志sweetlog-0120a11-battery-evidence.bin，SHA256
+4ec5fbc4c666bbe8fb5cb179e1e0ef7b4fde04c58c97b6d6fb7f00351d2db231；SWEETLOG
+v1/4MiB/有效779516/flush58/10086行，无回卷或NUL。分析底稿scratch/artifact-0120a11/
+analyze-log.py、log-analysis.json、cc-verification.json及解码文本，原始日志不入git。
+
+关键成功证据：id359 events41先取得Rp3A，sink02/attached23/misc3b/debug0/
+legacy4/USB10，CC role1/observed1/reasons0/qualified1，INPUT CAP kind2/max3000；
+APSD当时未完成。id361/362 source事件在plugin后1.259/1.371秒返回FLOAT，
+CC仍有效。3笔CC session7/start652523091875/end652550295000完全相同，source
+没有续CC时间。相比0120a10方向位改变到orientation2，bit4不再否决普通sink。
+id535/536拔线USB26，CC session/time全0、qualified0/kind0，UI external/capable0；
+回电脑source得到SDP，普通sink许可仍拒绝。8次UI发布均updateStatus完成，
+仅内核证据，无用户屏幕描述。拔线晚于3秒观测期，不宣称有效期内拔线竞态已测。
+
+约609.832秒，606连续遥测（20irq含初始/arm-sync、586保护），20profile全
+match1/integrity13/4027mAh。19输入全APSD options18/enabled1，3次source完成
+为2FLOAT/1SDP；18次运行期IRQ刷新healthy1，rid11/cc8/vbus6/attach5/legacy3/
+usbin6/source3自然命中。无VCONN/MSOC/CHGR自然覆盖，不将缺命中当失败。
+id351/358 USB字节切换VERIFY/-12后续事件恢复；拔线reasons281c/280c含USBIN
+UV是USB26的断线组合，不是已证明稳定输入欠压，VBUS存在时OV/UV保护未覆盖。
+
+ADC226请求/226有效且restored结果/432EOC，20 BATID/206 USBIN，223接受/3因
+epoch变化丢弃(error0)。BATID888646..889684uV，USBIN4490656..5104144uV；
+请求总耗时7.463..160.536ms，不能单凭总时长判断每阶段deadline。旧第二EOC
+超时未复现但未修，仍需故障快照。无[ERROR]/panic/mux隔离；三键都有down/up，
+touch至少192。两次ACM configured，后段电脑重连reset无新configured，保留
+已知gadget枚举bug。19配置enable0、无CONTROL，charging0，策略allow0/owned0/
+reasons7c0，真实充电依赖仍未闭合，CC广播不是PD合同/实际取电电流。
+
+本轮只分析和更新文档，无驱动/CI修改、新boot、push或设备操作，未提供新CI
+run ID。BATTERY-TYPEC-CC、BATTERY-DRIVER-NEXT、BATTERY-IMPLEMENTATION-PLAN
+已更新；本轮目标完成，无需重跑baseline/当前镜像。
+
+NEXT：正式输入能力管理：组合已验证CC/APSD和同会话有效ADC VBUS，设计typed
+授权接口、长期会话、变化/失效撤销和保护事件；不靠定时读续3秒观测、不直接
+把kind2转为inputVerified或enable。身份授权/parallel隔离/watchdog仍要补齐，
+ADC错误快照取证独立推进。后续保留XNU服务/workloop边界及既有CI不动。
+
+### Previous 0120a11 packaging handoff (superseded)
+
 **CURRENT: 0120a11云产物已核对，0162输入分类测试boot已打包，待实机日志。**
 
 驱动实现40e2e91，CI配置修复2ecfcef，GitHub XNU手动触发c239241。
