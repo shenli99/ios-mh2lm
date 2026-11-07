@@ -1,0 +1,446 @@
+diff --git a/bsd/dev/sweet_charge_basic.h b/bsd/dev/sweet_charge_basic.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..0edbab4bd0f356d44364d9f8dcc12991da0eb478
+--- /dev/null
++++ b/bsd/dev/sweet_charge_basic.h
+@@ -0,0 +1,206 @@
++/* Runtime3 charge controller, modeled on LG SMB5 init_hw + CHG_DISABLE vote.
++ * The PMIC owns APSD/AICL/ICL, CC/CV, termination, recharge and its hard
++ * temperature/BAT_OV limits. Software, as on LG, bounds FCC/FV, keeps the
++ * secondary charger's SMB_EN low, configures the charger watchdog (bite stops
++ * charging), pets it only from the bark IRQ, applies the LG protection-battemp
++ * table and votes disable on any local fault. Decisions run on charger/input
++ * IRQs and on LG's temperature cadence; no ADC, identity or permit gates.
++ * No register addresses here; see sweet_charger.c.
++ * Battery workloop only. Units: mV, mA, centidegrees C, ns. */
++#ifndef SWEET_CHARGE_BASIC_H
++#define SWEET_CHARGE_BASIC_H
++#include "sweet_battery_runtime.h"
++#include "sweet_spmi.h"
++
++enum SweetChargeBasicReason : uint32_t {
++ SCB_R_TELEMETRY=1u<<0, SCB_R_NO_INPUT=1u<<1, SCB_R_NO_BATTERY=1u<<2,
++ SCB_R_TEMPERATURE=1u<<3, SCB_R_VOLTAGE=1u<<4, SCB_R_CHARGER=1u<<5,
++ SCB_R_INPUT_OV=1u<<6, SCB_R_STOPPING=1u<<7, SCB_R_BACKOFF=1u<<8,
++ SCB_R_FAILED=1u<<9
++};
++/* BLT42 profile FV is 4430mV and LG board FCC 2800mA; stay below both. */
++#define SCB_FCC_MA 2000u
++#define SCB_FV_MV 4400u
++#define SCB_VBAT_MAX_MV 4450u
++/* LG sm8150_common-pm.dtsi protection-battemp, capacity-mah-min 3880,
++ * percentages rounded down to 50mA as in battemp_create_parsedt. */
++#define SCB_ALERT_MV 4000
++#define SCB_COOL_ALERT_MA 500u
++#define SCB_COOL_MA 1150u
++#define SCB_WARM_MA 1900u
++#define SCB_WARM_FV_MV 4000u
++#define SCB_CHILLY_ALERT_MA 1000u
++#define SCB_CHILLY_MA 1900u
++/* LG period-ms-normal/warning/emergency; unknown waits for the next event. */
++#define SCB_PERIOD_GOOD_MS 60000u
++#define SCB_PERIOD_WARNING_MS 30000u
++#define SCB_PERIOD_EMERGENCY_MS 10000u
++#define SCB_BACKOFF_NS 5000000000ULL
++#define SCB_STABLE_NS 60000000000ULL
++#define SCB_MAX_FAILURES 5u
++
++enum SweetChargeHealth { SCB_H_UNKNOWN, SCB_H_COLD, SCB_H_COOL, SCB_H_GOOD, SCB_H_WARM, SCB_H_HOT };
++struct SweetChargeBasic {
++ bool enabled, failed, chilly;
++ enum SweetChargeHealth health;
++ unsigned failures, enables, pets, petErrors, fccMa, fvMv;
++ uint64_t enabledNs, programmedNs, retryNs;
++ uint32_t reasons;
++ int lastError;
++};
++enum SweetChargeBasicStep { SCB_IDLE, SCB_ENABLED, SCB_DISABLED, SCB_ERROR, SCB_LIMITS };
++typedef int (*SweetChargeCommand)(void *, enum sweet_charger_operation, unsigned, unsigned *);
++/* LG protection-battemp.c:polling_status_jeita, thresholds in 0.1 C:
++ * upto cool30/good120/warm450/hot550, downto warm520/good430/cool100/cold0. */
++static inline enum SweetChargeHealth
++scb_health(enum SweetChargeHealth now, int deci)
++{
++ int cold=now==SCB_H_COLD?30:0, cool=now==SCB_H_COOL?120:100;
++ int good=now==SCB_H_WARM?430:450, warm=now==SCB_H_HOT?520:550;
++ if (deci<cold) return SCB_H_COLD;
++ if (deci<cool) return SCB_H_COOL;
++ if (deci<good) return SCB_H_GOOD;
++ if (deci<warm) return SCB_H_WARM;
++ return SCB_H_HOT;
++}
++
++/* LG reschedules by health; telemetry loss re-checks at emergency cadence. */
++static inline unsigned
++scb_period_ms(const SweetChargeBasic &c)
++{
++ if (c.reasons&SCB_R_TELEMETRY) return SCB_PERIOD_EMERGENCY_MS;
++ if (c.retryNs && !c.failed) return SCB_PERIOD_EMERGENCY_MS;
++ switch (c.health) {
++ case SCB_H_GOOD: return c.chilly?SCB_PERIOD_WARNING_MS:SCB_PERIOD_GOOD_MS;
++ case SCB_H_COOL: case SCB_H_WARM: return SCB_PERIOD_WARNING_MS;
++ default: return SCB_PERIOD_EMERGENCY_MS;
++ }
++}
++
++static inline uint32_t
++scb_decide(SweetChargeBasic &c, const SweetBattSnapshot &s, uint64_t now, bool stopping,
++ unsigned *fccMa, unsigned *fvMv)
++{
++ uint32_t r=0;
++ const uint64_t needed=(1ULL<<SB_ERROR)|(1ULL<<SB_THERMAL)|(1ULL<<SB_ENABLE)|
++  (1ULL<<SB_USB)|(1ULL<<SB_FCC)|(1ULL<<SB_FV);
++ if ((s.valid&needed)!=needed || !s.voltageValid || !s.tempValid || !s.presentValid)
++  r|=SCB_R_TELEMETRY;
++ if (sb_valid(s,SB_USB) && !(s.raw[SB_USB]&16)) r|=SCB_R_NO_INPUT;
++ if (sb_valid(s,SB_USB) && (s.raw[SB_USB]&8)) r|=SCB_R_INPUT_OV;
++ if (s.presentValid && !s.present) r|=SCB_R_NO_BATTERY;
++ if (s.tempValid) {
++  int deci=s.tempCenti/10;
++  c.health=scb_health(c.health,deci);
++  c.chilly=deci>=0 && deci<=150;
++ }
++ unsigned fcc=SCB_FCC_MA, fv=SCB_FV_MV;
++ bool alert=s.voltageValid && (int)s.mv>=SCB_ALERT_MV;
++ switch (c.health) {
++ case SCB_H_COOL: fcc=alert?SCB_COOL_ALERT_MA:SCB_COOL_MA; break;
++ case SCB_H_WARM: fcc=SCB_WARM_MA; fv=SCB_WARM_FV_MV; break;
++ case SCB_H_GOOD: break;
++ default: r|=SCB_R_TEMPERATURE; break;
++ }
++ if (c.chilly) {
++  unsigned limit=alert?SCB_CHILLY_ALERT_MA:SCB_CHILLY_MA;
++  if (limit<fcc) fcc=limit;
++ }
++ if (s.voltageValid && s.mv>SCB_VBAT_MAX_MV) r|=SCB_R_VOLTAGE;
++ /* PMIC BAT_OV, or its hard/AFP battery temperature limits. */
++ if ((sb_valid(s,SB_ERROR) && (s.raw[SB_ERROR]&2)) ||
++     (sb_valid(s,SB_THERMAL) && (s.raw[SB_THERMAL]&15))) r|=SCB_R_CHARGER;
++ if (stopping) r|=SCB_R_STOPPING;
++ if (c.failed) r|=SCB_R_FAILED;
++ else if (c.retryNs && now<c.retryNs) r|=SCB_R_BACKOFF;
++ c.reasons=r;*fccMa=fcc;*fvMv=fv;
++ return r;
++}
++/* Any command error: best-effort disable, then back off. Repeated failures
++ * (including another writer clearing enable) stop until the next boot. */
++static inline SweetChargeBasicStep
++scb_fail(SweetChargeBasic &c, int rc, uint64_t now, SweetChargeCommand cmd, void *ctx)
++{
++ unsigned actual=0;
++ (void)cmd(ctx,SWEET_CHARGER_ENABLE,0,&actual);
++ c.enabled=false;c.lastError=rc;
++ if (++c.failures>=SCB_MAX_FAILURES) c.failed=true;
++ c.retryNs=now+SCB_BACKOFF_NS;
++ return SCB_ERROR;
++}
++
++static inline bool
++scb_limits_match(const SweetChargeBasic &c, const SweetBattSnapshot &s)
++{
++ return s.raw[SB_FCC]*50u==c.fccMa && 3600u+s.raw[SB_FV]*10u==c.fvMv;
++}
++
++/* bark: the charger watchdog bark IRQ was delivered since the last step.
++ * LG wdog_bark_irq_handler pets unconditionally; a missed pet lets the
++ * hardware bite stop charging, so a pet error while enabled is a fault. */
++static inline SweetChargeBasicStep
++scb_step(SweetChargeBasic &c, const SweetBattSnapshot &s, uint64_t now, bool stopping,
++ bool bark, SweetChargeCommand cmd, void *ctx)
++{
++ unsigned fcc=0, fv=0;
++ uint32_t r=scb_decide(c,s,now,stopping,&fcc,&fv);
++ if (bark) {
++  unsigned actual=0;
++  int rc=cmd(ctx,SWEET_CHARGER_CHARGING_PET,1,&actual);
++  if (!rc && actual==1) ++c.pets;
++  else {
++   ++c.petErrors;
++   if (c.enabled) return scb_fail(c,rc?rc:SWEET_SPMI_VERIFY,now,cmd,ctx);
++  }
++ }
++ bool hwEnabled=sb_valid(s,SB_ENABLE) && (s.raw[SB_ENABLE]&1);
++ if (r) {
++  /* Also clears an enable inherited from boot firmware. */
++  if (!c.enabled && !hwEnabled) return SCB_IDLE;
++  unsigned actual=1;
++  int rc=cmd(ctx,SWEET_CHARGER_ENABLE,0,&actual);
++  c.enabled=false;
++  if (rc || actual) return scb_fail(c,rc?rc:SWEET_SPMI_VERIFY,now,cmd,ctx);
++  return SCB_DISABLED;
++ }
++ if (c.enabled) {
++  /* Only a snapshot started after our last write can show external changes. */
++  bool observed=s.startedNs>c.programmedNs;
++  if (!observed || (hwEnabled && scb_limits_match(c,s))) {
++   if (c.failures && now-c.enabledNs>=SCB_STABLE_NS) c.failures=0;
++   if (fcc==c.fccMa && fv==c.fvMv) return SCB_IDLE;
++   /* Temperature band changed: LG re-votes FCC/FV while charging. */
++   const enum sweet_charger_operation op[]={SWEET_CHARGER_BOARD_FAST_CURRENT_MA,
++    SWEET_CHARGER_BOARD_FLOAT_VOLTAGE_MV};
++   const unsigned value[]={fcc,fv};
++   for (unsigned i=0;i<2;++i) {
++    unsigned actual=~0u;
++    int rc=cmd(ctx,op[i],value[i],&actual);
++    if (rc || actual!=value[i]) return scb_fail(c,rc?rc:SWEET_SPMI_VERIFY,now,cmd,ctx);
++   }
++   c.fccMa=fcc;c.fvMv=fv;c.programmedNs=now;
++   return SCB_LIMITS;
++  }
++  /* Enable or limits changed under us: count it, then reprogram. */
++  c.enabled=false;
++  if (c.failures+1>=SCB_MAX_FAILURES) return scb_fail(c,SWEET_SPMI_VERIFY,now,cmd,ctx);
++  ++c.failures;
++ }
++ /* LG order: disable, isolate secondary, watchdog config + pet, limits,
++  * unpause/resume input, enable last. Every write is read back. */
++ const enum sweet_charger_operation op[]={SWEET_CHARGER_ENABLE,
++  SWEET_CHARGER_PARALLEL_INHIBIT,SWEET_CHARGER_WATCHDOG_PREPARE,
++  SWEET_CHARGER_WATCHDOG_PET,SWEET_CHARGER_BOARD_FAST_CURRENT_MA,
++  SWEET_CHARGER_BOARD_FLOAT_VOLTAGE_MV,SWEET_CHARGER_PAUSE,
++  SWEET_CHARGER_INPUT_SUSPEND,SWEET_CHARGER_ENABLE};
++ const unsigned value[]={0,1,1,1,fcc,fv,0,0,1};
++ for (unsigned i=0;i<sizeof(op)/sizeof(op[0]);++i) {
++  unsigned actual=~0u;
++  int rc=cmd(ctx,op[i],value[i],&actual);
++  if (rc || actual!=value[i]) return scb_fail(c,rc?rc:SWEET_SPMI_VERIFY,now,cmd,ctx);
++ }
++ c.enabled=true;c.fccMa=fcc;c.fvMv=fv;c.enabledNs=c.programmedNs=now;
++ c.retryNs=0;++c.enables;
++ return SCB_ENABLED;
++}
++#endif
+diff --git a/bsd/dev/sweet_charger.c b/bsd/dev/sweet_charger.c
+index 41531b08ecdd787791d13805ee8a3e720892678e..364da2ee413003561b637670f24b221ee7a80518 100644
+--- a/bsd/dev/sweet_charger.c
++++ b/bsd/dev/sweet_charger.c
+@@ -47,6 +47,21 @@ sweet_charger_execute(enum sweet_charger_operation operation,
+   if (value < 3600 || value > 4200 || value % 10) { return SWEET_SPMI_INVALID; }
+   addr = 0x1070; mask = 255; scale = 10; offset = 3600;
+   code = (value - offset) / scale; break;
++ case SWEET_CHARGER_BOARD_FAST_CURRENT_MA:
++  if (!value || value > 2800 || value % 50) { return SWEET_SPMI_INVALID; }
++  addr = 0x1061; mask = 255; scale = 50; code = value / scale; break;
++ case SWEET_CHARGER_BOARD_FLOAT_VOLTAGE_MV:
++  if (value < 3600 || value > 4430 || value % 10) { return SWEET_SPMI_INVALID; }
++  addr = 0x1070; mask = 255; scale = 10; offset = 3600;
++  code = (value - offset) / scale; break;
++ case SWEET_CHARGER_CHARGING_PET: {
++  if (value!=1) return SWEET_SPMI_INVALID;
++  uint64_t ticks,ns;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);
++  if (!deadline_ns || ns>=deadline_ns) return SWEET_CHARGER_EXPIRED;
++  int rc=sweet_spmi_charger_pet_watchdog();
++  if (!rc) *verified=1; /* Bus completion only, never a timer readback. */
++  return rc;
++ }
+ 
+  case SWEET_CHARGER_PARALLEL_INHIBIT:
+   if (value!=1) return SWEET_SPMI_INVALID;
+diff --git a/bsd/dev/sweet_charger.h b/bsd/dev/sweet_charger.h
+index 919193f4064cf7bcbb0100c516b40e3a04378da3..bc128fbfef3119c97cfe168a3b34c6f97d0af763 100644
+--- a/bsd/dev/sweet_charger.h
++++ b/bsd/dev/sweet_charger.h
+@@ -15,7 +15,11 @@ enum sweet_charger_operation {
+  SWEET_CHARGER_FAST_CURRENT_MA, SWEET_CHARGER_FLOAT_VOLTAGE_MV,
+  /* Diagnostic preparation only: require charge disabled, never authorize
+   * external isolation or managed-watchdog policy from a command result. */
+- SWEET_CHARGER_PARALLEL_INHIBIT, SWEET_CHARGER_WATCHDOG_PREPARE, SWEET_CHARGER_WATCHDOG_PET
++ SWEET_CHARGER_PARALLEL_INHIBIT, SWEET_CHARGER_WATCHDOG_PREPARE, SWEET_CHARGER_WATCHDOG_PET,
++ /* Runtime3 board-bounded controller (sweet_charge_basic.h): FCC <=2800mA,
++  * FV <=4430mV (LG supplement/BLT42 profile); pet allowed while charging. */
++ SWEET_CHARGER_BOARD_FAST_CURRENT_MA, SWEET_CHARGER_BOARD_FLOAT_VOLTAGE_MV,
++ SWEET_CHARGER_CHARGING_PET
+ };
+ /* Fixed MISC watchdog fault observation, no caller-supplied register address.
+  * The transport owns the layout; field errors must be inspected individually. */
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 8e501ea93ee1905565eb6ffa2afc6c68ba9acad0..99b2d2383b1274eedfe9bbe832d122be048406e5 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -33,6 +33,7 @@
+ #include "../../../bsd/dev/sweet_adc5_client.h"
+ #endif
+ #include "../../../bsd/dev/sweet_battery_runtime.h"
++#include "../../../bsd/dev/sweet_charge_basic.h"
+ #include "../../../bsd/dev/sweet_pmic_power.h"
+ #include "../../../bsd/dev/sweet_spmi_mux.h"
+ #include "../../../bsd/dev/sweet_spmi_mux_client.h"
+@@ -121,6 +122,9 @@ private:
+ 	IOLock *fControlLock;
+ 	IONotifier *fPowerNotice;
+ 	bool fPowerStopping, fControlClaimed;
++	SweetChargeBasic fBasic;
++	static int basicCommand(void *, enum sweet_charger_operation, unsigned, unsigned *);
++	void runBasicCharge(uint64_t now);
+ 	void removeRuntimeNotifier(void);
+ 	static IOReturn runtimePowerNotice(void *, void *, UInt32, IOService *, void *, vm_size_t);
+ 	bool fMonitorAdded;
+@@ -301,6 +305,7 @@ SweetBattery::init(OSDictionary *dictionary)
+ 	fControlLock = NULL;
+ 	fPowerNotice = NULL;
+ 	fPowerStopping = fControlClaimed = false;
++	fBasic = {};
+ 	fMonitorAdded = false;
+ 	fSnapshot = {};
+ 	fLimits = {};
+@@ -1095,7 +1100,7 @@ SweetBattery::tryAttachIrq(void)
+ 		events |= SWEET_BATT_IRQ_MSOC | SWEET_BATT_IRQ_READY;
+ 	}
+ 	if (fRuntimeRequested) { events |= SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_FAULT | SWEET_BATT_IRQ_TYPEC | SWEET_BATT_IRQ_INPUT_FAULT; }
+-	if (fDependencyMode & 4) { events |= SWEET_BATT_IRQ_WDOG; }
++	if ((fDependencyMode & 4) || fRuntimeRequested == 3) { events |= SWEET_BATT_IRQ_WDOG; }
+ 	fIrqAttached = true;
+ 	putBool("SweetBatteryIRQWaitingForMux", false);
+ 	putBool("SweetBatteryIRQHealthy", true);
+@@ -1129,7 +1134,7 @@ SweetBattery::startIrqAction(OSObject *owner, void *, void *, void *, void *)
+ 		events |= SWEET_BATT_IRQ_MSOC | SWEET_BATT_IRQ_READY;
+ 	}
+ 	if (self->fRuntimeRequested) { events |= SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_FAULT | SWEET_BATT_IRQ_TYPEC | SWEET_BATT_IRQ_INPUT_FAULT; }
+-	if (self->fDependencyMode & 4) { events |= SWEET_BATT_IRQ_WDOG; }
++	if ((self->fDependencyMode & 4) || self->fRuntimeRequested == 3) { events |= SWEET_BATT_IRQ_WDOG; }
+ 	SWEET_LOG_INFO("SWEET BATT IRQ: waiting for mux registry match; no timer/status polling\n");
+ 	self->fMuxClient = SweetSpmiMuxClient::withOwner(self, self->fLoop,
+ 	    SWEET_MUX_BATTERY, events, irqNotify, self);
+@@ -1637,6 +1642,7 @@ SweetBattery::runRuntimePolicy(void)
+ 		IOLockUnlock(fControlLock);
+ 	}
+ 	uint64_t now = sweet_batt_now_ns();
++	if (fRuntimeMode == 3) { runBasicCharge(now); return; }
+ 	refreshDependencies(now);
+ 	refreshInputPermit(now);
+ 	SweetBattDecision decision = sb_decide(fController, fSnapshot, fLimits, now);
+@@ -1657,6 +1663,66 @@ SweetBattery::runRuntimePolicy(void)
+ 	else { fController.state = decision.state; }
+ }
+ 
++int
++SweetBattery::basicCommand(void *context, enum sweet_charger_operation operation, unsigned value, unsigned *out)
++{
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	SweetBattery *self = (SweetBattery *)context;
++	bool disable = operation == SWEET_CHARGER_ENABLE && value == 0;
++	int rc;
++	/* Serialized with the power notifier: nothing but disable after restart/off. */
++	IOLockLock(self->fControlLock);
++	if (!disable && self->fPowerStopping) { rc = SWEET_SPMI_NOT_READY; }
++	else {
++		self->fControlClaimed = true;
++		rc = sweet_charger_execute(operation, value, sweet_batt_now_ns() + 1000000000ULL, out);
++	}
++	IOLockUnlock(self->fControlLock);
++	if (rc || operation != SWEET_CHARGER_CHARGING_PET) {
++		SWEET_LOG_INFO("SWEET BATT BASIC CMD: v2 op=%u value=%u error=%d actual=%u\n",
++		    operation, value, rc, rc ? 0 : *out);
++	}
++	return rc;
++#else
++	return -1;
++#endif
++}
++
++/* Runs only from charger/input/watchdog IRQ refreshes and the LG battemp
++ * cadence timer, always after a fresh snapshot on this workloop. */
++void
++SweetBattery::runBasicCharge(uint64_t now)
++{
++	bool stopping = true;
++	if (fControlLock) {
++		IOLockLock(fControlLock); stopping = fPowerStopping; IOLockUnlock(fControlLock);
++	}
++	bool bark = fWatchdogPending;
++	fWatchdogPending = false;
++	uint32_t before = fBasic.reasons;
++	bool wasEnabled = fBasic.enabled;
++	SweetChargeHealth health = fBasic.health;
++	SweetChargeBasicStep step = scb_step(fBasic, fSnapshot, now, stopping || fController.stopped,
++	    bark, basicCommand, this);
++	if (step != SCB_IDLE || before != fBasic.reasons || wasEnabled != fBasic.enabled ||
++	    health != fBasic.health || fLastReasons == ~0u) {
++		SWEET_LOG_INFO("SWEET BATT BASIC: v2 step=%u reasons=%#x enabled=%u health=%u chilly=%u fcc=%u fv=%u failures=%u failed=%u enables=%u error=%d\n",
++		    step, fBasic.reasons, fBasic.enabled, fBasic.health, fBasic.chilly, fBasic.fccMa,
++		    fBasic.fvMv, fBasic.failures, fBasic.failed, fBasic.enables, fBasic.lastError);
++		SWEET_LOG_INFO("SWEET BATT BASIC STATE: v2 temp-centi=%d mv=%u ma=%d usb=%#x stage=%u pets=%u pet-errors=%u next-ms=%u\n",
++		    fSnapshot.tempCenti, fSnapshot.mv, fSnapshot.ma, fSnapshot.raw[SB_USB],
++		    fSnapshot.raw[SB_STAGE] & 7u, fBasic.pets, fBasic.petErrors, scb_period_ms(fBasic));
++	}
++	fLastReasons = fBasic.reasons;
++	putBool("SweetBatteryBasicChargeEnabled", fBasic.enabled);
++	putNumber("SweetBatteryBasicChargeReasons", fBasic.reasons);
++	putNumber("SweetBatteryBasicChargeHealth", fBasic.health);
++	putNumber("SweetBatteryBasicChargeFailures", fBasic.failures);
++	putNumber("SweetBatteryBasicChargeWatchdogPets", fBasic.pets);
++	/* LG polling_status_work cadence; each IRQ evaluation restarts it. */
++	if (fMonitor && fRunning && !fController.stopped) { fMonitor->setTimeoutMS(scb_period_ms(fBasic)); }
++}
++
+ IOReturn
+ SweetBattery::startRuntime(OSObject *owner, void *, void *, void *, void *)
+ {
+@@ -1665,6 +1731,15 @@ SweetBattery::startRuntime(OSObject *owner, void *, void *, void *, void *)
+ 	self->fRuntimeInputEvents = 0; /* initial snapshot is not an APSD completion IRQ */
+ 	self->fRuntimeMode = self->fRuntimeRequested;
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
++ if (self->fRuntimeMode == 3) {
++  /* No ADC5 consumer: charging must not depend on shared-mux conversions. */
++  SWEET_LOG_INFO("SWEET BATT BASIC: v2 runtime3 IRQ control fcc=%u fv=%u; LG battemp cadence %u/%u/%ums, bark-IRQ pet; no ADC/identity/permit gates\n",
++      SCB_FCC_MA, SCB_FV_MV, SCB_PERIOD_GOOD_MS, SCB_PERIOD_WARNING_MS, SCB_PERIOD_EMERGENCY_MS);
++  self->sampleRuntime(true);
++  self->runRuntimePolicy();
++  self->publishRuntime();
++  return kIOReturnSuccess;
++ }
+  self->fAdcClient = SweetAdc5Client::withOwner(self->fLoop, adcChanged, self);
+  if (!self->fAdcClient) {
+   SWEET_LOG_ERROR("SWEET BATT ADC: registry consumer allocation failed; runtime unavailable\n");
+@@ -1691,7 +1766,8 @@ SweetBattery::monitorFired(OSObject *owner, IOTimerEventSource *)
+ 	self->sampleRuntime(false);
+ 	self->runRuntimePolicy();
+ 	self->publishRuntime();
+-	if (self->fRunning && !self->fController.stopped) { self->fMonitor->setTimeoutMS(1000); }
++	/* Runtime3 re-arms from runBasicCharge at the LG battemp cadence. */
++	if (self->fRuntimeMode != 3 && self->fRunning && !self->fController.stopped) { self->fMonitor->setTimeoutMS(1000); }
+ }
+ 
+ uint64_t
+@@ -1704,8 +1780,9 @@ void
+ SweetBattery::publishRuntime(void)
+ {
+ 	uint64_t now = sweet_batt_now_ns();
++	uint64_t freshNs = fRuntimeMode == 3 ? (SCB_PERIOD_GOOD_MS + 10000ULL) * 1000000ULL : 3000000000ULL;
+ 	bool fresh = !fController.stopped && fSnapshot.completedNs && now >= fSnapshot.startedNs &&
+-	    now >= fSnapshot.completedNs && now - fSnapshot.startedNs <= 3000000000ULL;
++	    now >= fSnapshot.completedNs && now - fSnapshot.startedNs <= freshNs;
+ 	putBool("SweetBatteryTelemetryFresh", fresh);
+ 	SweetBattCc cc = sb_cc_status(fSnapshot);
+ 	SweetBattInputCapability input = sb_input_capability(fSnapshot, now);
+@@ -1749,6 +1826,16 @@ SweetBattery::runtimePowerNotice(void *target, void *, UInt32 message,
+ 	SweetBattery *self = (SweetBattery *)target;
+ 	if (message != kIOMessageSystemWillSleep && message != kIOMessageSystemWillRestart &&
+ 	    message != kIOMessageSystemWillPowerOff) { return kIOReturnUnsupported; }
++	if (message == kIOMessageSystemWillSleep && self->fRuntimeMode == 3) {
++		/* LG keeps charging in suspend: PMIC limits stay active, and if the
++		 * bark IRQ is not serviced the watchdog bite stops charging. */
++		if (argument) {
++			sleepWakeNote *note = (sleepWakeNote *)argument;
++			note->returnValue = 0;
++			acknowledgeSleepWakeNotification(note->powerRef);
++		}
++		return kIOReturnSuccess;
++	}
+ 	/* No wait for the consumer loop: it can be publishing to power clients.
+ 	 * Only a bounded disable command is allowed here, serialized with submit.
+ 	 * All controller state remains owned by the consumer loop. */
+@@ -1789,6 +1876,13 @@ SweetBattery::stopRuntime(void)
+ 	fLimits.batteryVerified = false; fWatchdogArmed = false; fWatchdogPending = false;
+  putBool("SweetBatteryIdentityVerified",false);
+  putBool("SweetBatteryWatchdogDiagnosticActive",false);
++	if (fRuntimeMode == 3) {
++		unsigned disabled = 1;
++		int rc = basicCommand(this, SWEET_CHARGER_ENABLE, 0, &disabled);
++		fBasic.enabled = false;
++		if (rc || disabled) SWEET_LOG_ERROR("SWEET BATT BASIC: stop disable unconfirmed error=%d\n", rc);
++		return;
++	}
+ 	if (fDependencyStarted) {
+ 		unsigned disabled = 0; int rc = dependencyCommand(SWEET_CHARGER_ENABLE, 0, &disabled);
+ 		if (rc) SWEET_LOG_ERROR("SWEET BATT DEPENDENCIES: stop disable unconfirmed error=%d\n", rc);

@@ -2,6 +2,23 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0168 runtime3基础充电已实现并本地验证，未push/未云编译/未上机。用户push后CircleCI出内核，再打包fastboot boot测试。**
+
+改动（ios-mh2lm提交见git log）：xnu/patches/0168-mh2lm-basic-charge-control.patch
+（新sweet_charge_basic.h；sweet_charger.c/h新增BOARD_FAST_CURRENT_MA≤2800、
+BOARD_FLOAT_VOLTAGE_MV≤4430、CHARGING_PET；SweetBattery.cpp runtime3分支）、
+CI 4个require_marker、打包脚本--battery-basic-charge、两个host测试。
+根因：旧放行门实机永远不满足（详见docs/BATTERY-BASIC-CHARGE.md）。
+观察（本地）：12个host测试全过；7文件CI buildtree交叉编译rc0；0168对0167结果树
+strict apply与patch -p1 dry-run通过、逐字节一致（scratch/battery-basic-charge/
+validation-results.json）。未验证：实机是否真充电、SMB1355是否听SMB_EN、bite恢复、
+WillSleep时机——都标【待核实】。
+NEXT：用户push → CircleCI → 下载kernel → `tools/mk-mh2lm-event-matrix.sh <kernel> 0120a17
+--battery-basic-charge` → fastboot boot → 接充电器10分钟以上 → 导出sweetlog。
+期望：`SWEET BATT BASIC: v2 step=1 ... enabled=1`、pets递增、FG电流为负、stage1～3。
+
+### Previous 0120a16 identity handoff (superseded)
+
 **CURRENT: 0120a16身份档未通过：第三请求USBIN RESULT VERIFY-12；ACK及时，无本档超时。下一实现先细分校验原因/核对LG数据语义，不追加本批硬件测试。**
 
 实现357b26f/0167，上一打包文档8ea64b0。本轮只读日志/源码/参考及写文档，未改驱动/

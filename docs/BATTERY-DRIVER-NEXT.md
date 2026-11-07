@@ -1,5 +1,14 @@
 # 0119之后的电池驱动推进
 
+**当前0168：runtime3基础充电（IRQ驱动，按LG SMB5分工），本地验证通过，待用户push/CircleCI/实机。**
+旧放行链（parallelVerified恒false、WD门与实测0x62/0x8c不符、ADC同epoch、租约）
+永远走不通，0120a16全部CONFIG enable0。0168不再加门：PMIC做APSD/AICL/ICL、CC/CV、
+截止和硬保护，软件只设FCC2000/FV4400、拉低SMB_EN、配WD（bite停充）并只在bark IRQ
+喂狗、套LG protection-battemp温度表，任一故障投票停充。boot参数`sweetbattruntime=3`，
+打包`tools/mk-mh2lm-event-matrix.sh KERNEL LABEL --battery-basic-charge`。
+[设计、证据、验证和待核实项](BATTERY-BASIC-CHARGE.md)。以下为历史记录。
+
+
 **0120a16身份档实测：未通过，阻塞点为USBIN RESULT校验失败-12。**
 只有3请求/2成功/5EOC，约53.744秒终止；失败这次GIC→notify61.979µs，ACK等锁
 0.312µs/持锁12.188µs，callback距deadline仍98.522ms，属于及时交付后的校验错误。

@@ -17,6 +17,7 @@ source = (root/'iokit/Kernel/arm/SweetBattery.cpp').read_text()
 header = (root/'bsd/dev/sweet_battery_runtime.h').read_text()
 spmi = (root/'bsd/dev/sweet_spmi.h').read_text()
 charger = (root/'bsd/dev/sweet_charger.h').read_text()
+basic = (root/'bsd/dev/sweet_charge_basic.h').read_text()
 backend = (root/'bsd/dev/sweet_charger.c').read_text()
 power = (root/'iokit/Kernel/arm/SweetPmicPower.cpp').read_text()
 mux_header = (root/'bsd/dev/sweet_spmi_mux.h').read_text()
@@ -115,7 +116,8 @@ static uint64_t testClock(void *){return timeNs;}
 static void absolutetime_to_nanoseconds(uint64_t v,uint64_t *n){*n=v;}
 struct IOTimerEventSource {
     bool armed=false,disabled=false;unsigned arms=0;
-    void setTimeoutMS(unsigned n){assert(n==1000);armed=true;++arms;}
+    unsigned expectMs=1000,lastMs=0;
+    void setTimeoutMS(unsigned n){assert(n==expectMs);lastMs=n;armed=true;++arms;}
     void cancelTimeout(){armed=false;}
     void disable(){disabled=true;}
 };
@@ -210,6 +212,7 @@ public:
  IOTimerEventSource *fMonitor; void *fLoop=nullptr;
  SweetAdc5Client *fAdcClient=nullptr;void publishAdc();static void adcChanged(void *);
  IOLock controlLock;IOLock *fControlLock=&controlLock;bool fPowerStopping=false,fControlClaimed=false;
+ SweetChargeBasic fBasic={};static int basicCommand(void *,enum sweet_charger_operation,unsigned,unsigned *);void runBasicCharge(uint64_t);
  static IOReturn runtimePowerNotice(void *,void *,UInt32,IOService *,void *,vm_size_t);
  SweetBattSnapshot fSnapshot={};SweetBattLimits fLimits={};SweetBattController fController={};
  SweetBattInputSession fInputSession={};bool inputChangePending();void refreshInputPermit(uint64_t);
@@ -855,6 +858,53 @@ static void queuedSourceTests(){
  timeNs=savedTime;regs=savedRegs;fg=savedFg;
  puts("PASS: source IRQ queued during actual sampler/protection tick preserves validated history, both queues and new ADC epoch fence use, long-session recovery, real faults still revoke");
 }
+// Runtime3: real sampler + backend + controller, IRQ-driven, no ADC client.
+static void mode3Tests(){
+ auto savedRegs=regs;auto savedFg=fg;auto savedTime=timeNs;bool savedReflect=reflectWrites;
+ reflectWrites=true;injectedAt=0;failures.clear();writes.clear();changed.clear();updateCount=0;
+ regs[0x1042]=0;regs[0x1310]=16;regs[0x1007]=0;regs[0x100d]=0;regs[0x1061]=0x34;regs[0x1070]=0x53;
+ IOTimerEventSource timer;timer.expectMs=SCB_PERIOD_GOOD_MS;
+ SweetBattery b;b.fMonitor=&timer;b.fRuntimeMode=b.fRuntimeRequested=3;
+ assert(!SweetBattery::startRuntime(&b,nullptr,nullptr,nullptr,nullptr));
+ assert(b.fBasic.enabled && (regs[0x1042]&1) && !b.fAdcClient && timer.armed && timer.lastMs==SCB_PERIOD_GOOD_MS);
+ const std::vector<unsigned> order={0x1042,0x1648,0x1653,0x1651,0x1643,0x1061,0x1070,0x1043,0x1340,0x1042};
+ assert(writes==order && regs[0x1061]==SCB_FCC_MA/50 && regs[0x1070]==(SCB_FV_MV-3600)/10);
+ assert((regs[0x1648]&0x18)==8 && regs[0x1653]==0xf3 && (regs[0x1651]&0xc2)==0x42);
+ assert(b.registry["SweetBatteryBasicChargeEnabled"] && b.registry["SweetBatteryTelemetryFresh"]);
+ // LG cadence tick: fresh sample, no writes, re-armed at 60s.
+ writes.clear();timer.armed=false;timeNs+=60000000000ULL;SweetBattery::monitorFired(&b,&timer);
+ assert(writes.empty() && timer.armed && b.registry["SweetBatteryTelemetryFresh"]);
+ // Bark IRQ: exactly one pet, nothing else.
+ b.fWatchdogPending=true;timeNs+=1000;b.fRuntimeInputEvents=SWEET_BATT_IRQ_WDOG;b.sampleRuntime(true);b.runRuntimePolicy();
+ assert(writes==std::vector<unsigned>{0x1643} && b.fBasic.pets==1 && !b.fWatchdogPending);
+ // Sleep keeps charging in runtime3; the notification is still acknowledged.
+ sleepWakeNote note={nullptr,1};unsigned acks=acknowledged;
+ assert(!SweetBattery::runtimePowerNotice(&b,nullptr,kIOMessageSystemWillSleep,nullptr,&note,sizeof(note)));
+ assert(acknowledged==acks+1 && note.returnValue==0 && !b.fPowerStopping && (regs[0x1042]&1));
+ // Unplug IRQ disables; replug IRQ re-runs the full sequence.
+ writes.clear();regs[0x1310]=0;timeNs+=1000;b.fRuntimeInputEvents=SWEET_BATT_IRQ_USB;b.sampleRuntime(true);b.runRuntimePolicy();
+ assert(writes==std::vector<unsigned>{0x1042} && !(regs[0x1042]&1) && !b.fBasic.enabled);
+ assert(b.fBasic.reasons==SCB_R_NO_INPUT && !b.properties->values["SweetBatteryBasicChargeEnabled"]);
+ writes.clear();regs[0x1310]=16;timeNs+=1000;b.fRuntimeInputEvents=SWEET_BATT_IRQ_USB;b.sampleRuntime(true);b.runRuntimePolicy();
+ assert(writes==order && b.fBasic.enabled && b.fBasic.enables==2);
+ // Hot battery limit from the PMIC (hard temp status) disables.
+ writes.clear();regs[0x100d]=8;timeNs+=1000;b.fRuntimeInputEvents=SWEET_BATT_IRQ_FAULT;b.sampleRuntime(true);b.runRuntimePolicy();
+ assert(!(regs[0x1042]&1) && (b.fBasic.reasons&SCB_R_CHARGER));
+ regs[0x100d]=0;timeNs+=1000;b.fRuntimeInputEvents=SWEET_BATT_IRQ_FAULT;b.sampleRuntime(true);b.runRuntimePolicy();
+ assert(b.fBasic.enabled && (regs[0x1042]&1));
+ // Restart: notifier disables synchronously and nothing but disable follows.
+ assert(!SweetBattery::runtimePowerNotice(&b,nullptr,kIOMessageSystemWillRestart,nullptr,nullptr,0));
+ assert(b.fPowerStopping && !(regs[0x1042]&1));
+ writes.clear();b.fWatchdogPending=true;timeNs+=1000;b.sampleRuntime(false);b.runRuntimePolicy();
+ for(unsigned w:writes)assert(w==0x1042);
+ assert(!b.fBasic.enabled && (b.fBasic.reasons&SCB_R_STOPPING) && b.fBasic.petErrors==1);
+ // Service stop disables and does not re-arm.
+ SweetBattery s;IOTimerEventSource t2;t2.expectMs=SCB_PERIOD_GOOD_MS;s.fMonitor=&t2;s.fRuntimeMode=s.fRuntimeRequested=3;
+ assert(!SweetBattery::startRuntime(&s,nullptr,nullptr,nullptr,nullptr) && (regs[0x1042]&1));
+ s.stopRuntime();assert(!(regs[0x1042]&1) && !s.fBasic.enabled && t2.disabled && !t2.armed);
+ regs=savedRegs;fg=savedFg;timeNs=savedTime;reflectWrites=savedReflect;writes.clear();changed.clear();updateCount=0;
+ puts("PASS: runtime3 actual sampler/backend: LG write order, no ADC client, 60s cadence, bark-only pet, sleep keeps charging, unplug/replug/hard-temp IRQs, restart/stop disable");
+}
 int main(){
     dependencyTests();queuedSourceTests();evidenceTests();apsdEventTests();ccTests();inputSessionTests();policyTests();reads.clear();writes.clear();changed.clear();
     regs={{0x41a0,0xff},{0x41a1,0x7f},{0x41a2,0x60},{0x41a3,0xed},
@@ -1083,16 +1133,17 @@ int main(){
     sleepWakeNote note={nullptr,1};
     assert(!SweetBattery::runtimePowerNotice(&shutdown,nullptr,kIOMessageSystemWillSleep,nullptr,&note,sizeof(note)));
     assert(acknowledged==1 && note.returnValue==0);
+    mode3Tests();
     puts("PASS: actual input permission joins source + exact-epoch VBUS, both IRQ queues suspend/revalidate, voltage expiry/loss revokes, missing dependencies never write");
     puts("PASS: actual runtime sampler, units/validity, IRQ-only input acquisition, monitor publication and stop/no rearm");
 }
 '''
 names=['sweet_batt_now_ns','SweetBattery::captureWatchdogFailure','SweetBattery::dependencyCommand','SweetBattery::dependencyFailure','SweetBattery::refreshDependencies','SweetBattery::inputChangePending','SweetBattery::refreshInputPermit','SweetBattery::adcChanged','SweetBattery::publishAdc','SweetBattery::sampleRuntime','SweetBattery::runtimeUpdate',
        'SweetBattery::runRuntimePolicy','SweetBattery::startRuntime',
-       'SweetBattery::monitorFired','SweetBattery::stopRuntime','SweetBattery::failIrq','SweetBattery::publishRuntime','SweetBattery::runtimeClock','SweetBattery::publish','SweetBattery::removePowerValue','SweetBattery::runtimePowerNotice']
+       'SweetBattery::monitorFired','SweetBattery::stopRuntime','SweetBattery::failIrq','SweetBattery::publishRuntime','SweetBattery::runtimeClock','SweetBattery::publish','SweetBattery::removePowerValue','SweetBattery::runtimePowerNotice','SweetBattery::basicCommand','SweetBattery::runBasicCharge']
 with tempfile.TemporaryDirectory(prefix='mh2lm-runtime-') as directory:
     cpp=Path(directory)/'test.cpp';binary=Path(directory)/'test'
-    cpp.write_text(prelude+charger+strip_includes(header)+spmi+strip_includes(power_header)+adc_header+event_defines+trace_header+adc_model+shim+strip_includes(backend)+strip_includes(power)+''.join(function(n) for n in names)+checks)
+    cpp.write_text(prelude+charger+strip_includes(header)+spmi+strip_includes(basic)+strip_includes(power_header)+adc_header+event_defines+trace_header+adc_model+shim+strip_includes(backend)+strip_includes(power)+''.join(function(n) for n in names)+checks)
     subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-O1','-g',
         '-fsanitize=address,undefined',str(cpp),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],env=dict(os.environ,ASAN_OPTIONS='detect_leaks=0',UBSAN_OPTIONS='halt_on_error=1'),check=True,timeout=30)
