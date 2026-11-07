@@ -1,5 +1,12 @@
 # SweetBattery 的 ADC5 测量接入（0156）
 
+**0163接口更新（待云编译/实机）：** update第二参数从inputChanged bool改为电池
+输入采集的uint64_t inputEpoch；新增copyFreshInput(expectedEpoch,now,out)，精确
+绑定请求/结果与当前输入批次。USBIN提前到采样开始满1秒安排新转换，给3秒许可
+留余量，非输入发现轮询。ADC值经会话管理器与CC/APSD一起形成typed输入许可，
+仍不单独授权电池身份/充电使能。新契约和测试见[输入会话](BATTERY-INPUT-SESSION.md)；
+以下保留0156实现和既有实机基线，旧“所有授权恒false/2秒刷新”不代表0163。
+
 0120a5后的[身份/输入离线核对](BATTERY-IDENTITY-INPUT-AUDIT.md)已完成：BAT_ID与
 nominal共同支持Tocad候选，但尚未读取profile前缀或建立输入电流许可。后续补证
 不需要重复本页已经通过的持续转换/插拔测试。

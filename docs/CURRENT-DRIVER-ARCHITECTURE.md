@@ -1,5 +1,15 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0163当前增量（本地验证完成，待云编译/实机）：** SweetBattery内部新增输入
+session/permit值类型，按输入IRQ更新CC/APSD来源，经已有SweetAdc5Client取得
+精确inputEpoch的VBUS，形成3秒短许可并交给纯策略；不是另一个IOService或全局
+桥接。mux表目前18路/3组，新增USBIN UV/OV双边沿；client可检查尚未送到电池
+回调的pending。按键、DWC3/触摸和显示路径保持。身份限值、并联隔离与watchdog
+仍未闭合，不启充。当前输入架构/边界见[输入会话](BATTERY-INPUT-SESSION.md)。
+
+下文0154～0156/0119段落按当时基线保留，旧“10项/结果不授权任何输入”应以
+上方0163增量和NOTES最新交接为准。
+
 0120a5补充：0156的ADC5测量consumer正常路径已实测通过。约24分半、657次
 转换/1266次EOC；655个结果被接受，2个因插拔/识别改变epoch正确丢弃，无ADC
 超时/ERROR/panic。电池身份、输入能力、并联隔离和watchdog仍缺，充电仍互锁。

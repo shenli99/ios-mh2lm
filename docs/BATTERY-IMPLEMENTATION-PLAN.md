@@ -1,11 +1,12 @@
 # MH2LM 电池驱动实现计划
 
 **2026-11-07当前进度：** 0120a11已实机验证0162的sink CC/Rp分类、独立于APSD
-完成的观测以及正常拔线撤销。仍在第2～3段依赖闭环，runtime1未启充，不等于
-第4段完成；下一步是正式输入能力管理及身份/并联/watchdog依赖。最新结果和
-边界见[0120a11实测](BATTERY-TYPEC-CC.md#0120a11实测cc分类修复通过拔线撤销正常)，
-具体下一动作见[BATTERY-DRIVER-NEXT.md](BATTERY-DRIVER-NEXT.md)。以下保留各次
-实现历史，不能把旧“待云构建/实机”当作最新状态要求重复测试。
+完成的观测及正常拔线撤销。0163正式输入会话/同epoch VBUS短许可、USBIN UV/OV
+保护事件及两段pending撤销已完成本地实现与验证，待用户push和新云产物实测。
+仍在第2～3段依赖闭环，身份限值/parallel隔离/watchdog未完成，runtime1不启充，
+不等于第4段完成。当前接口、边界及最小测试见[输入会话](BATTERY-INPUT-SESSION.md)，
+推进入口见[BATTERY-DRIVER-NEXT.md](BATTERY-DRIVER-NEXT.md)。以下保留历史，不能把
+旧“待云构建/实机”当作最新状态要求重复测试。
 
 0157（2026-11-07）已完成固定profile-prefix tuple和输入快照证据实现，等待云构建/
 实机。复用现有FG锁/有界会话，同grant读前缀24字节、integrity、nominal；输入有

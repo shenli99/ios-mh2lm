@@ -716,6 +716,21 @@ int main(int argc,char **argv) {
         assert(b.fIrqAttached && backendRunning);
         assert(testInstance->bindings[1].events==SWEET_BATT_IRQ_ALL);
         assert(testInstance->routes[7].active && testInstance->routes[8].active);
+        assert(testInstance->routes[16].active && testInstance->routes[17].active);
+        assert((pmic[(0x213<<8)|0x11]&0x5c)==0x5c);
+        assert((pmic[(0x213<<8)|0x12]&0x5c)==0x5c);
+        assert((pmic[(0x213<<8)|0x13]&0x5c)==0x1c);
+        assert((pmic[(0x213<<8)|0x15]&0x5c)==0x5c);
+        assert(!b.fMuxClient->hasPendingEvents(SWEET_BATT_IRQ_ALL));
+        // Run the actual mux callback without yet draining the consumer loop.
+        SweetSpmiMuxClient::routeNotify(b.fMuxClient,SWEET_BATT_IRQ_INPUT_FAULT);
+        assert(b.fMuxClient->hasPendingEvents(SWEET_BATT_IRQ_ALL));pump();
+        assert(!b.fMuxClient->hasPendingEvents(SWEET_BATT_IRQ_ALL));
+        for(unsigned bit:{2u,3u}){
+            auto before=b.fIrqSamples;inject(269,1u<<bit);pump();
+            assert(b.fIrqSamples==before+1 && b.fRuntimeInputEvents==SWEET_BATT_IRQ_INPUT_FAULT);
+            assert(!b.fController.fault && backendRunning);
+        }
         assert(pmic[(0x215<<8)|0x11]==0xff && pmic[(0x215<<8)|0x12]==0xff);
         assert(pmic[(0x215<<8)|0x13]==0xca && pmic[(0x215<<8)|0x15]==0x7d);
         auto samples=b.fIrqSamples;inject(269,0x40);pump();
@@ -738,6 +753,8 @@ int main(int argc,char **argv) {
         assert(b.fRuntimeInputEvents==(SWEET_BATT_IRQ_TYPEC|SWEET_BATT_IRQ_USB|SWEET_BATT_IRQ_SOURCE));
         cleanupBattery(b);
         assert(!testInstance->routes[7].active && !testInstance->routes[8].active);
+        assert(!testInstance->routes[16].active && !testInstance->routes[17].active);
+        assert((pmic[(0x213<<8)|0x15]&0x5c)==0);
         assert((pmic[(0x215<<8)|0x15]&0x7d)==0);
         assert(pmic[(0x215<<8)|0x11]==0x82 && pmic[(0x215<<8)|0x12]==0x82 && pmic[(0x215<<8)|0x13]==0x82);
         endProvider();while(!platform.children.empty())platform.children.back()->terminate(2);

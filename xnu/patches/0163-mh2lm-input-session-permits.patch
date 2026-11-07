@@ -1,0 +1,557 @@
+diff --git a/bsd/dev/sweet_adc5_client.h b/bsd/dev/sweet_adc5_client.h
+index 2d09c3ee025689baee5b0d82c073a99038c5b22d..b231cbd4627d7d14fa1e4c4f3fe1d9c786d2a244 100644
+--- a/bsd/dev/sweet_adc5_client.h
++++ b/bsd/dev/sweet_adc5_client.h
+@@ -10,8 +10,11 @@ class SweetAdc5Client : public OSObject {
+  OSDeclareDefaultStructors(SweetAdc5Client);
+ public:
+  static SweetAdc5Client *withOwner(IOWorkLoop *, SweetAdcNotify, void *);
+- void update(bool inputPresent, bool inputChanged, bool batteryChanged, uint64_t now);
++ void update(bool inputPresent, uint64_t inputEpoch, bool batteryChanged, uint64_t now);
+  bool copyFresh(enum sweet_adc5_channel, uint64_t now, struct sweet_adc5_measurement *);
++ /* USBIN must belong to this exact battery input acquisition, not merely be
++  * a recently completed conversion from before a source/protection event. */
++ bool copyFreshInput(uint64_t inputEpoch, uint64_t now, struct sweet_adc5_measurement *);
+  void invalidate(void); /* own loop, terminal; keeps notifiers until stop */
+  void stop(void); /* outside gate, synchronizes notifiers and queued work */
+  void free(void) APPLE_KEXT_OVERRIDE;
+@@ -26,6 +29,7 @@ private:
+  bool stopping = false, terminal = false, gone = false, eventAdded = false;
+  bool present = false, blocked = false, providerReady = false, valid[2] = {};
+  unsigned needed = 1, active = 0, token = 0, epoch[2] = {}, activeEpoch = 0;
++ uint64_t inputEpoch = 0, activeInputEpoch = 0, sampleInputEpoch = 0;
+  struct sweet_adc5_measurement samples[2] = {};
+  static bool serviceMatched(void *, void *, IOService *, IONotifier *);
+  static bool serviceTerminated(void *, void *, IOService *, IONotifier *);
+diff --git a/bsd/dev/sweet_battery_runtime.h b/bsd/dev/sweet_battery_runtime.h
+index 23f474f3b76c9cff80167cbfa4f392ac57b78612..0693fbf83733869ff485d1e89433c9c7241bce00 100644
+--- a/bsd/dev/sweet_battery_runtime.h
++++ b/bsd/dev/sweet_battery_runtime.h
+@@ -85,7 +85,8 @@ static inline SweetBattSourceType sb_source_type(const SweetBattSnapshot &s)
+ }
+ /* These values mirror the mux consumer events; compile-time checked by the
+  * IOKit adapter. No dependency on mux/service internals in policy code. */
+-enum { SB_INPUT_PLUGIN = 0x01u, SB_INPUT_SOURCE = 0x10u, SB_INPUT_TYPEC = 0x40u };
++enum { SB_INPUT_PLUGIN = 0x01u, SB_INPUT_SOURCE = 0x10u, SB_INPUT_TYPEC = 0x40u,
++ SB_INPUT_PROTECTION = 0x80u };
+ enum SweetBattCcReason : uint32_t {
+  SB_CC_READ=1u<<0, SB_CC_RACE=1u<<1, SB_CC_NO_VBUS=1u<<2,
+  SB_CC_DETACHED=1u<<3, SB_CC_DEBOUNCE=1u<<4, SB_CC_SOURCE=1u<<5,
+@@ -238,6 +239,97 @@ static inline SweetBattInputCapability sb_input_capability(const SweetBattSnapsh
+  }
+  return cap;
+ }
++/* Durable source classification, owned by the battery workloop. Only an input
++ * IRQ acquisition may establish/revalidate it. Voltage refreshes never create
++ * source provenance or renew its event timestamp. Not a standalone IOService.
++ * The observed session cannot distinguish coalesced detach/attach with identical
++ * status; it is not a PD contract and never grants QC/elevated voltage. */
++struct SweetBattInputSession {
++ SweetBattInputKind kind;
++ unsigned maxMa;
++ uint64_t session, epoch, epochCompletedNs, sourceStartedNs, sourceCompletedNs;
++};
++struct SweetBattInputVoltage {
++ bool valid;
++ unsigned microvolts, sequence;
++ uint64_t epoch, startedNs, completedNs;
++};
++struct SweetBattInputPermit {
++ bool valid;
++ SweetBattInputKind kind;
++ unsigned maxMa, vbusMv, voltageSequence;
++ uint64_t session, epoch, voltageStartedNs, validUntilNs;
++};
++static inline bool sb_input_source_matches(const SweetBattInputSession &m,
++ const SweetBattSnapshot &s)
++{
++ if (m.kind==SB_INPUT_NONE || !m.session || m.session!=s.usbSession ||
++     s.usbSession==~0ULL || sb_cc_status(s).reasons || !s.apsdCoherent ||
++     (s.valid&sb_input_mask())!=sb_input_mask()) return false;
++ SweetBattSourceType type=sb_source_type(s);
++ if ((s.raw[SB_APSD]&2) || type==SB_SOURCE_QC2 || type==SB_SOURCE_QC3 ||
++     ((s.raw[SB_APSD]&1) && type==SB_SOURCE_UNKNOWN)) return false;
++ if (m.kind==SB_INPUT_CC) return s.ccFromEvent && s.ccSession==m.session &&
++  s.ccStartedNs==m.sourceStartedNs && s.ccCompletedNs==m.sourceCompletedNs &&
++  sb_cc_status(s).advertisedMa==m.maxMa;
++ return m.kind==SB_INPUT_BC12 && s.apsdFromSource && s.apsdSession==m.session &&
++  (s.raw[SB_APSD_OPTIONS]&8) && (type==SB_SOURCE_DCP || type==SB_SOURCE_CDP) &&
++  s.apsdStartedNs==m.sourceStartedNs && s.apsdCompletedNs==m.sourceCompletedNs;
++}
++static inline void sb_input_observe(SweetBattInputSession &m,
++ const SweetBattSnapshot &s, uint64_t now)
++{
++ SweetBattInputSession next={};
++ if (!sb_input_fresh(s,now)) { m=next;return; }
++ SweetBattInputCapability cap=sb_input_capability(s,now);
++ if (m.kind==SB_INPUT_CC && sb_input_source_matches(m,s)) {
++  next=m; /* LG: a still valid medium/high Rp takes priority over BC1.2. */
++ } else if (cap.kind!=SB_INPUT_NONE) {
++  next.kind=cap.kind;next.maxMa=cap.maxMa;next.session=s.usbSession;
++  next.sourceStartedNs=cap.startedNs;
++  next.sourceCompletedNs=cap.kind==SB_INPUT_CC?s.ccCompletedNs:s.apsdCompletedNs;
++ } else if (sb_input_source_matches(m,s)) {
++  /* Same previously qualified source, revalidated by an actual input event.
++   * Retain its original event time even after the diagnostic 3s window. */
++  next=m;
++ }
++ if (!sb_input_source_matches(next,s)) { m={};return; }
++ next.epoch=s.inputEpoch;next.epochCompletedNs=s.inputCompletedNs;m=next;
++}
++static inline SweetBattInputPermit sb_input_permit(const SweetBattInputSession &m,
++ const SweetBattSnapshot &s,const SweetBattInputVoltage &v,uint64_t now)
++{
++ SweetBattInputPermit p={};
++ if (!sb_input_source_matches(m,s) || !m.epoch || m.epoch==~0ULL ||
++     m.epoch!=s.inputEpoch || !v.valid || v.epoch!=m.epoch || !v.sequence ||
++     !v.startedNs || v.startedNs<m.epochCompletedNs ||
++     v.completedNs<v.startedNs || now<v.completedNs ||
++     now-v.startedNs>=3000000000ULL || v.microvolts<4500000 ||
++     v.microvolts>5500000) return p;
++ p.valid=true;p.kind=m.kind;p.maxMa=m.maxMa;p.vbusMv=v.microvolts/1000;
++ p.session=m.session;p.epoch=m.epoch;p.voltageSequence=v.sequence;
++ p.voltageStartedNs=v.startedNs;p.validUntilNs=sb_evidence_deadline(v.startedNs);
++ return p;
++}
++static inline bool sb_input_permit_valid(const SweetBattInputPermit &p,
++ const SweetBattSnapshot &s,uint64_t now)
++{
++ SweetBattSourceType type=sb_source_type(s);
++ return p.valid && (p.kind==SB_INPUT_CC || p.kind==SB_INPUT_BC12) && p.maxMa &&
++  p.session && p.session==s.usbSession && p.session!=~0ULL &&
++  p.epoch && p.epoch==s.inputEpoch && p.epoch!=~0ULL &&
++  !sb_cc_status(s).reasons && s.apsdCoherent &&
++  (s.valid&sb_input_mask())==sb_input_mask() &&
++  !(s.raw[SB_APSD]&2) && type!=SB_SOURCE_QC2 && type!=SB_SOURCE_QC3 &&
++  (!(s.raw[SB_APSD]&1) || type!=SB_SOURCE_UNKNOWN) &&
++  (p.kind==SB_INPUT_CC ? (s.ccFromEvent && s.ccSession==p.session &&
++    sb_cc_status(s).advertisedMa==p.maxMa) :
++   (s.apsdFromSource && s.apsdSession==p.session && (s.raw[SB_APSD_OPTIONS]&8) &&
++    (type==SB_SOURCE_DCP || type==SB_SOURCE_CDP) && p.maxMa==500)) &&
++  p.voltageSequence && p.voltageStartedNs && p.vbusMv>=4500 && p.vbusMv<=5500 &&
++  p.voltageStartedNs>=s.inputCompletedNs && now>=p.voltageStartedNs &&
++  p.validUntilNs==sb_evidence_deadline(p.voltageStartedNs) && now<p.validUntilNs;
++}
+ /* Diagnostic match only. Both data and metadata came from the same grant;
+  * this is LG's prefix convention, not a full 416-byte profile verification. */
+ static inline unsigned sb_profile_match(const SweetBattSnapshot &s)
+@@ -254,13 +346,14 @@ static inline unsigned sb_profile_match(const SweetBattSnapshot &s)
+  return t?1:l?2:0;
+ }
+ 
+-/* These missing providers intentionally block hardware enable today. Runtime
+- * register values cannot prove battery identity, physical isolation or VBUS.
+- * Synthetic evidence is allowed only in host tests, never by device arguments. */
++/* Identity/bounds and parallel isolation still block hardware enable today.
++ * Input is an explicit source/ADC permit; raw register values alone are not
++ * authorization. Synthetic evidence exists only in host tests. */
+ struct SweetBattLimits {
+- bool batteryVerified, parallelVerified, inputVerified;
+- unsigned maxFccMa, maxFvMv, inputMa, vbusMv;
++ bool batteryVerified, parallelVerified;
++ unsigned maxFccMa, maxFvMv;
+  uint64_t verifiedNs;
++ SweetBattInputPermit input;
+ };
+ enum SweetBattReason : uint32_t {
+  SB_R_TELEMETRY=1u<<0, SB_R_STALE=1u<<1, SB_R_NO_BATTERY=1u<<2,
+@@ -314,33 +407,32 @@ sb_decide(SweetBattController &c, const SweetBattSnapshot &s,
+      s.mv>4450 || (s.currentValid && s.ma>600)) d.reasons|=SB_R_HARDWARE;
+  if (!limits.batteryVerified || !s.profileValid || !(s.integrity&1)) d.reasons|=SB_R_BATTERY_ID;
+  if (!limits.parallelVerified) d.reasons|=SB_R_PARALLEL;
+- SweetBattInputCapability input=sb_input_capability(s,now);
+- if (!limits.inputVerified || now<limits.verifiedNs ||
+-     now-limits.verifiedNs>3000000000ULL || limits.vbusMv<4500 ||
+-     limits.vbusMv>5500 || input.kind==SB_INPUT_NONE ||
++ const SweetBattInputPermit &input=limits.input;
++ if (!sb_input_permit_valid(input,s,now) ||
+      (sb_valid(s,SB_USB) && (s.raw[SB_USB]&16) &&
+       (!(s.raw[SB_PATH]&1) || !(s.raw[SB_PATH]&16)))) d.reasons|=SB_R_INPUT;
+  /* First implementation supports only a proven watchdog-off session. Refuse
+   * enabled/plugin watchdog rather than pet an unverified timing contract. */
+  if (!sb_valid(s,SB_WDOG) || (s.raw[SB_WDOG]&0xc2)) d.reasons|=SB_R_WATCHDOG;
+  d.fccMa=limits.maxFccMa<500?limits.maxFccMa:500;
+- d.iclMa=limits.inputMa<500?limits.inputMa:500;
+- if (input.maxMa<d.iclMa) d.iclMa=input.maxMa;
++ d.iclMa=input.maxMa<500?input.maxMa:500;
+  d.fvMv=limits.maxFvMv<4200?limits.maxFvMv:4200;
+  /* Quantize downward, never silently round above the approved bound. */
+  d.fccMa=d.fccMa/50*50;d.iclMa=d.iclMa/50*50;
+  d.fvMv=d.fvMv>=3600?3600+(d.fvMv-3600)/10*10:0;
+- if (!d.fccMa || !d.iclMa || !d.fvMv || limits.maxFvMv>4430 ||
++ if (!limits.verifiedNs || now<limits.verifiedNs || now-limits.verifiedNs>3000000000ULL ||
++     !d.fccMa || !d.iclMa || !d.fvMv || limits.maxFvMv>4430 ||
+      limits.maxFccMa>2800) d.reasons|=SB_R_LIMITS; /* LG board supplement */
+- if (c.enabled && (s.raw[SB_FCC]*50u>d.fccMa ||
++ /* A revoked permit has no approved ICL. Disable for the input hold without
++  * misdiagnosing the previous programmed limit as a permanent HW fault. */
++ if (c.enabled && !(d.reasons&(SB_R_INPUT|SB_R_LIMITS)) && (s.raw[SB_FCC]*50u>d.fccMa ||
+      3600u+s.raw[SB_FV]*10u>d.fvMv || s.raw[SB_ICL]*50u>d.iclMa)) d.reasons|=SB_R_HARDWARE;
+  if (c.owned && now>=c.deadlineNs) d.reasons|=SB_R_EXPIRED;
+  if (c.fault) d.reasons|=c.faultReasons?c.faultReasons:SB_R_TRANSPORT;
+  if (c.stopped) d.reasons|=SB_R_STOPPED;
+  d.validUntilNs=sb_evidence_deadline(s.startedNs);
+  if (sb_evidence_deadline(limits.verifiedNs)<d.validUntilNs) d.validUntilNs=sb_evidence_deadline(limits.verifiedNs);
+- if (sb_evidence_deadline(s.inputStartedNs)<d.validUntilNs) d.validUntilNs=sb_evidence_deadline(s.inputStartedNs);
+- if (sb_evidence_deadline(input.startedNs)<d.validUntilNs) d.validUntilNs=sb_evidence_deadline(input.startedNs);
++ if (input.validUntilNs<d.validUntilNs) d.validUntilNs=input.validUntilNs;
+  d.allow=d.reasons==0;
+  if (d.reasons&(SB_R_TRANSPORT|SB_R_HARDWARE)) d.state=SB_FAULT;
+  else if (d.reasons&(SB_R_STOPPED|SB_R_EXPIRED)) d.state=SB_STOPPED;
+diff --git a/bsd/dev/sweet_spmi_mux.h b/bsd/dev/sweet_spmi_mux.h
+index 3700280d69aa8feb1b3cf8379b4f778707995947..e3b59d440b81a27b633a1f95416f9d76d1214d87 100644
+--- a/bsd/dev/sweet_spmi_mux.h
++++ b/bsd/dev/sweet_spmi_mux.h
+@@ -20,7 +20,8 @@ int sweet_spmi_mux_start(void);
+ #define SWEET_BATT_IRQ_SOURCE 0x10u
+ #define SWEET_BATT_IRQ_FAULT  0x20u
+ #define SWEET_BATT_IRQ_TYPEC  0x40u
+-#define SWEET_BATT_IRQ_ALL    0x7fu
++#define SWEET_BATT_IRQ_INPUT_FAULT 0x80u
++#define SWEET_BATT_IRQ_ALL    0xffu
+ #define SWEET_MUX_ADC5 2u
+ #define SWEET_ADC5_IRQ_EOC 0x100u
+ #define SWEET_MUX_READY     0x40000000u
+@@ -34,7 +35,7 @@ typedef void (*SweetMuxNotify)(void *context, unsigned events);
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOInterruptEventSource.h>
+ #include <IOKit/IOWorkLoop.h>
+-#define SWEET_MUX_ROUTE_COUNT 16u
++#define SWEET_MUX_ROUTE_COUNT 18u
+ enum { MUX_KEYS = SWEET_MUX_KEYS, MUX_BATTERY = SWEET_MUX_BATTERY, MUX_ADC5 = SWEET_MUX_ADC5, MUX_GROUPS = 3 };
+ struct MuxRoute {
+ 	unsigned sid, per, bit, token, group;
+diff --git a/bsd/dev/sweet_spmi_mux_client.h b/bsd/dev/sweet_spmi_mux_client.h
+index e61b532eb84c20c4a0dea4ccd50c3ab2529ebf9a..d71b3b1df5a1d3ae79ac6f8cd87e64d62020b072 100644
+--- a/bsd/dev/sweet_spmi_mux_client.h
++++ b/bsd/dev/sweet_spmi_mux_client.h
+@@ -18,6 +18,9 @@ public:
+ 	    unsigned group, unsigned events, SweetMuxNotify notify, void *context,
+ 	    SweetMuxPrepare prepare = NULL);
+ 	void detach(void); /* consumer-loop action: terminal, no automatic rebind */
++	/* Owner-loop read-only fence, including events queued by the mux but not
++	 * yet delivered on this consumer's loop. No provider gate or SPMI access. */
++	bool hasPendingEvents(unsigned mask);
+ 	void stop(void);   /* remove notifiers synchronously, then detach/drain */
+ 	void free(void) APPLE_KEXT_OVERRIDE;
+ private:
+diff --git a/iokit/Kernel/arm/SweetAdc5Client.cpp b/iokit/Kernel/arm/SweetAdc5Client.cpp
+index f10b0f637a92c4604559dc8faf1f2dac9aa051dd..db4eb497ff43e805123ea25e0aa994a6499e8381 100644
+--- a/iokit/Kernel/arm/SweetAdc5Client.cpp
++++ b/iokit/Kernel/arm/SweetAdc5Client.cpp
+@@ -76,20 +76,23 @@ SweetAdc5Client::live(void)
+  return ok && !provider->isInactive();
+ }
+ void
+-SweetAdc5Client::update(bool inputPresent, bool inputChanged, bool batteryChanged, uint64_t now)
++SweetAdc5Client::update(bool inputPresent, uint64_t acquisitionEpoch, bool batteryChanged, uint64_t now)
+ {
+  /* Called only on the owner loop, from source IRQ or its protection monitor.
+   * Periodic conversion monitors voltage, never discovers plug state. */
+- if (inputChanged || inputPresent != present) {
++ if (acquisitionEpoch != inputEpoch || inputPresent != present) {
+   ++epoch[1]; valid[1] = false;
+   needed = inputPresent ? needed | 2 : needed & ~2u;
+   SWEET_LOG_INFO("SWEET BATT ADC: invalidate channel=2 epoch=%u present=%u\n", epoch[1], inputPresent);
+  }
++ inputEpoch = acquisitionEpoch;
+  present = inputPresent;
+  if (batteryChanged) { ++epoch[0]; valid[0] = false; needed |= 1; }
+  if (terminal) { return; }
+  if (valid[0] && (now < samples[0].started_ns || now - samples[0].started_ns >= 30000000000ULL)) { needed |= 1; }
+- if (present && valid[1] && (now < samples[1].started_ns || now - samples[1].started_ns >= 2000000000ULL)) { needed |= 2; }
++ /* The owner ticks at 1s: request with margin before the 3s voltage lease.
++  * Delayed scheduling/conversion still expires permission; never extend it. */
++ if (present && valid[1] && (now < samples[1].started_ns || now - samples[1].started_ns >= 1000000000ULL)) { needed |= 2; }
+  if (needed && !active && !blocked) { event->interruptOccurred(NULL, NULL, 0); }
+ }
+ bool
+@@ -103,6 +106,12 @@ SweetAdc5Client::copyFresh(enum sweet_adc5_channel channel, uint64_t now, struct
+      now < s.completed_ns || now < s.started_ns || now - s.started_ns > ageLimit) { return false; }
+  *out = s; return true;
+ }
++bool
++SweetAdc5Client::copyFreshInput(uint64_t expectedEpoch, uint64_t now, struct sweet_adc5_measurement *out)
++{
++ return expectedEpoch && expectedEpoch!=~0ULL && expectedEpoch==inputEpoch &&
++  expectedEpoch==sampleInputEpoch && copyFresh(SWEET_ADC5_USBIN,now,out);
++}
+ void
+ SweetAdc5Client::invalidate(void)
+ {
+@@ -156,10 +165,14 @@ SweetAdc5Client::process(void)
+   unsigned i = active - 1;
+   uint64_t now = adcClientNow();
+   if (rc == kIOReturnSuccess && result.sequence == token && result.channel == active &&
+-      activeEpoch == epoch[i] && (!i || present) && result.completed_ns &&
++      activeEpoch == epoch[i] && (!i || (present && activeInputEpoch==inputEpoch)) && result.completed_ns &&
+       result.completed_ns >= result.started_ns && now >= result.completed_ns &&
+       now >= result.started_ns && now - result.started_ns <= (i ? 3000000000ULL : 60000000000ULL)) {
+    samples[i] = result; valid[i] = true;
++   if (i) {
++    sampleInputEpoch=activeInputEpoch;
++    SWEET_LOG_INFO("SWEET BATT ADC INPUT: v1 token=%u epoch=%llu\n",token,(unsigned long long)sampleInputEpoch);
++   }
+    SWEET_LOG_INFO("SWEET BATT ADC: sample channel=%u token=%u epoch=%u uv=%u valid=1\n", active, token, epoch[i], result.microvolts);
+   } else {
+    valid[i] = false;
+@@ -183,6 +196,7 @@ SweetAdc5Client::process(void)
+   return;
+  }
+  active = channel; token = nextToken; activeEpoch = epoch[channel - 1]; needed &= ~(1u << (channel - 1));
++ activeInputEpoch=inputEpoch;
+ }
+ IOReturn
+ SweetAdc5Client::stopAction(OSObject *owner, void *, void *, void *, void *)
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 580a9857c1d0c4a9cbbae6b5a19454d87de07bd2..36357d137bf30cdfd4d4be763ef5fdb382dce231 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -122,6 +122,9 @@ private:
+ #endif
+ 	SweetBattSnapshot fSnapshot;
+ 	SweetBattLimits fLimits;
++	SweetBattInputSession fInputSession;
++	bool inputChangePending(void);
++	void refreshInputPermit(uint64_t now);
+ 	SweetBattController fController;
+ 	unsigned fMonitorSamples;
+ 	unsigned fRuntimeInputEvents; /* owned by the battery workloop */
+@@ -288,6 +291,7 @@ SweetBattery::init(OSDictionary *dictionary)
+ 	fMonitorAdded = false;
+ 	fSnapshot = {};
+ 	fLimits = {};
++	fInputSession = {};
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+  fAdcClient = NULL;
+ #endif
+@@ -1050,7 +1054,7 @@ SweetBattery::irqAction(OSObject *owner, IOInterruptEventSource *, int count)
+ 		self->fController.faultReasons = SB_R_HARDWARE;
+ 		SWEET_LOG_ERROR("SWEET BATT CONTROL: CHGR fault IRQ latched; recovery requires explicit restart\n");
+ 	}
+-	self->fRuntimeInputEvents = pending & (SWEET_BATT_IRQ_USB | SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_TYPEC);
++	self->fRuntimeInputEvents = pending & (SWEET_BATT_IRQ_USB | SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_TYPEC | SWEET_BATT_IRQ_INPUT_FAULT);
+ 	self->fSettleBudget = 1;
+ 	self->poll();
+ 	++self->fIrqSamples;
+@@ -1076,7 +1080,7 @@ SweetBattery::tryAttachIrq(void)
+ 	if (fIrqMode >= 4) {
+ 		events |= SWEET_BATT_IRQ_MSOC | SWEET_BATT_IRQ_READY;
+ 	}
+-	if (fRuntimeRequested) { events |= SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_FAULT | SWEET_BATT_IRQ_TYPEC; }
++	if (fRuntimeRequested) { events |= SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_FAULT | SWEET_BATT_IRQ_TYPEC | SWEET_BATT_IRQ_INPUT_FAULT; }
+ 	fIrqAttached = true;
+ 	putBool("SweetBatteryIRQWaitingForMux", false);
+ 	putBool("SweetBatteryIRQHealthy", true);
+@@ -1109,7 +1113,7 @@ SweetBattery::startIrqAction(OSObject *owner, void *, void *, void *, void *)
+ 	if (self->fIrqMode >= 4) {
+ 		events |= SWEET_BATT_IRQ_MSOC | SWEET_BATT_IRQ_READY;
+ 	}
+-	if (self->fRuntimeRequested) { events |= SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_FAULT | SWEET_BATT_IRQ_TYPEC; }
++	if (self->fRuntimeRequested) { events |= SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_FAULT | SWEET_BATT_IRQ_TYPEC | SWEET_BATT_IRQ_INPUT_FAULT; }
+ 	SWEET_LOG_INFO("SWEET BATT IRQ: waiting for mux registry match; no timer/status polling\n");
+ 	self->fMuxClient = SweetSpmiMuxClient::withOwner(self, self->fLoop,
+ 	    SWEET_MUX_BATTERY, events, irqNotify, self);
+@@ -1166,7 +1170,7 @@ SweetBattery::sampleRuntime(bool refreshInput)
+ {
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ 	static_assert(SB_INPUT_PLUGIN == SWEET_BATT_IRQ_USB && SB_INPUT_SOURCE == SWEET_BATT_IRQ_SOURCE &&
+-	    SB_INPUT_TYPEC == SWEET_BATT_IRQ_TYPEC,
++	    SB_INPUT_TYPEC == SWEET_BATT_IRQ_TYPEC && SB_INPUT_PROTECTION == SWEET_BATT_IRQ_INPUT_FAULT,
+ 	    "input causes must match mux events");
+ 	/* CHGR/MSOC/READY and bounded SOC confirmation must not renew APSD.
+ 	 * All state and PMIC reads remain on this consumer's workloop. */
+@@ -1182,18 +1186,18 @@ SweetBattery::sampleRuntime(bool refreshInput)
+ 	if (refreshInput) { sb_note_input(next, fSnapshot, inputEvents); }
+ 	/* A newer source/plugin/Type-C notification arriving during sampling must
+ 	 * be handled by its queued action before any input evidence is used. */
+-	if (__atomic_load_n(&fIrqPending, __ATOMIC_ACQUIRE) &
+-	    (SWEET_BATT_IRQ_USB | SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_TYPEC)) {
++	if (inputChangePending()) {
+ 		next.apsdFromSource = false;
+ 		next.ccFromEvent = false;
+ 	}
+ 	bool batteryChanged = next.presentValid != fSnapshot.presentValid || next.present != fSnapshot.present;
++ if (refreshInput) { sb_input_observe(fInputSession,next,next.completedNs); }
+  fSnapshot = next;
+  if (fAdcClient) {
+   IOLockLock(fControlLock); bool stopping = fPowerStopping; IOLockUnlock(fControlLock);
+   if (stopping) { fAdcClient->invalidate(); }
+   fAdcClient->update(sb_valid(next, SB_USB) && (next.raw[SB_USB] & 16),
+-      refreshInput, batteryChanged, next.completedNs);
++      next.inputEpoch, batteryChanged, next.completedNs);
+   publishAdc();
+  }
+  ++fMonitorSamples;
+@@ -1314,12 +1318,54 @@ SweetBattery::publishAdc(void)
+  } else {
+   removePowerValue("SweetBatteryVBUSMicrovolts"); removePowerValue("SweetBatteryVBUSAgeMS");
+  }
+- /* Physical voltage is only one dependency. Identity/profile bounds, source
+-  * current capability, parallel isolation and watchdog remain unverified.
+-  * Do not set inputVerified/verifiedNs or infer maxFcc/maxFv from ADC voltage. */
++ /* Measurement publication is separate from source/voltage permission.
++  * Never infer battery bounds or physical parallel isolation from ADC. */
+ }
+ #endif
+ 
++bool
++SweetBattery::inputChangePending(void)
++{
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ const unsigned mask=SWEET_BATT_IRQ_USB | SWEET_BATT_IRQ_SOURCE |
++  SWEET_BATT_IRQ_TYPEC | SWEET_BATT_IRQ_INPUT_FAULT;
++ return !fIrqAttached || fIrqFailed || !fMuxClient ||
++  (__atomic_load_n(&fIrqPending,__ATOMIC_ACQUIRE) & (mask | SWEET_MUX_FAILED)) ||
++  fMuxClient->hasPendingEvents(mask);
++#else
++ return true;
++#endif
++}
++
++void
++SweetBattery::refreshInputPermit(uint64_t now)
++{
++ SweetBattInputPermit next={};
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ struct sweet_adc5_measurement vbus={};
++ if (!fController.stopped && !inputChangePending() && fAdcClient &&
++     fAdcClient->copyFreshInput(fSnapshot.inputEpoch,now,&vbus)) {
++  SweetBattInputVoltage voltage={true,vbus.microvolts,vbus.sequence,
++   fSnapshot.inputEpoch,vbus.started_ns,vbus.completed_ns};
++  next=sb_input_permit(fInputSession,fSnapshot,voltage,now);
++ }
++#endif
++ const SweetBattInputPermit &old=fLimits.input;
++ if (next.valid!=old.valid || next.epoch!=old.epoch ||
++     next.voltageSequence!=old.voltageSequence || next.maxMa!=old.maxMa) {
++  SWEET_LOG_INFO("SWEET BATT INPUT PERMIT: v1 valid=%u kind=%u max-ma=%u vbus-mv=%u session=%llu epoch=%llu token=%u\n",
++   next.valid,next.kind,next.maxMa,next.vbusMv,(unsigned long long)next.session,
++   (unsigned long long)next.epoch,next.voltageSequence);
++  SWEET_LOG_INFO("SWEET BATT INPUT LEASE: v1 source-ns=%llu voltage-ns=%llu until-ns=%llu\n",
++   (unsigned long long)fInputSession.sourceStartedNs,
++   (unsigned long long)next.voltageStartedNs,(unsigned long long)next.validUntilNs);
++ }
++ fLimits.input=next;
++ putBool("SweetBatteryInputVerified",next.valid);
++ putNumber("SweetBatteryInputKind",next.kind);
++ putNumber("SweetBatteryInputMaxMA",next.maxMa);
++}
++
+ int
+ SweetBattery::runtimeUpdate(void *context, enum sweet_charger_operation operation, unsigned value, uint64_t deadline, unsigned *out)
+ {
+@@ -1331,11 +1377,15 @@ SweetBattery::runtimeUpdate(void *context, enum sweet_charger_operation operatio
+ 	IOLockLock(self->fControlLock);
+ 	bool disable = operation == SWEET_CHARGER_ENABLE && value == 0;
+ 	int rc;
+-	if (!disable && (self->fPowerStopping ||
+-	    (__atomic_load_n(&self->fIrqPending, __ATOMIC_ACQUIRE) &
+-	    (SWEET_BATT_IRQ_USB | SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_TYPEC)))) {
+-		rc = SWEET_SPMI_NOT_READY;
+-	}
++ struct sweet_adc5_measurement voltage={};
++ uint64_t now=sweet_batt_now_ns();
++ bool inputOk=disable || (!self->inputChangePending() && self->fAdcClient &&
++  sb_input_permit_valid(self->fLimits.input,self->fSnapshot,now) &&
++  self->fAdcClient->copyFreshInput(self->fSnapshot.inputEpoch,now,&voltage) &&
++  voltage.sequence==self->fLimits.input.voltageSequence);
++ if (!disable && (self->fPowerStopping || !inputOk)) {
++  rc = SWEET_SPMI_NOT_READY;
++ }
+ 	else {
+ 		self->fControlClaimed = true;
+ 		rc = sweet_charger_execute(operation, value, deadline, out);
+@@ -1354,18 +1404,16 @@ SweetBattery::runtimeUpdate(void *context, enum sweet_charger_operation operatio
+ void
+ SweetBattery::runRuntimePolicy(void)
+ {
+-	/* An input event queued after sampling also revokes the old decision.
+-	 * The queued action must acquire replacement evidence on this workloop. */
+-	if (__atomic_load_n(&fIrqPending, __ATOMIC_ACQUIRE) &
+-	    (SWEET_BATT_IRQ_USB | SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_TYPEC)) {
+-		fSnapshot.apsdFromSource = fSnapshot.ccFromEvent = false;
+-	}
++ /* Pending input notifications suspend the permit without rewriting cached
++  * event timestamps. The next IRQ acquisition revalidates classification and
++  * invalidates USBIN conversions from the previous input epoch. */
+ 	if (fControlLock) {
+ 		IOLockLock(fControlLock);
+ 		if (fPowerStopping) { fController.stopped = true; }
+ 		IOLockUnlock(fControlLock);
+ 	}
+ 	uint64_t now = sweet_batt_now_ns();
++	refreshInputPermit(now);
+ 	SweetBattDecision decision = sb_decide(fController, fSnapshot, fLimits, now);
+ 	if (fLastReasons != decision.reasons || fController.state != decision.state) {
+ 		SWEET_LOG_INFO("SWEET BATT POLICY: v1 mode=%u state=%u reasons=%#x allow=%u fcc=%u fv=%u icl=%u owned=%u\n",
+@@ -1398,8 +1446,9 @@ SweetBattery::startRuntime(OSObject *owner, void *, void *, void *, void *)
+   return kIOReturnNoMemory;
+  }
+ #endif
+-	SWEET_LOG_INFO("SWEET BATT RUNTIME: v1 mode=%u; board identity/input/parallel providers missing; control interlocked\n",
++	SWEET_LOG_INFO("SWEET BATT RUNTIME: v1 mode=%u; board identity/parallel limits missing; input requires IRQ+ADC; control interlocked\n",
+ 	    self->fRuntimeMode);
++	SWEET_LOG_INFO("SWEET BATT INPUT SESSION: v1 IRQ source + same-epoch ADC; UV/OV revoke; trial cap 500mA\n");
+ 	SWEET_LOG_INFO("SWEET BATT HARDWARE: v1 semantic charger operations; sampling via PMIC backend\n");
+ 	self->sampleRuntime(true);
+ 	self->runRuntimePolicy();
+@@ -1439,9 +1488,10 @@ SweetBattery::publishRuntime(void)
+ 	putNumber("SweetBatteryCCObservedFlags", cc.observed);
+ 	putNumber("SweetBatteryCCRp", cc.rp);
+ 	putNumber("SweetBatteryCCAdvertisedMA", cc.advertisedMa);
+-	putBool("SweetBatteryCCEvidenceFresh", !fController.stopped && sb_cc_event_fresh(fSnapshot, now));
+-	putNumber("SweetBatteryObservedInputKind", fController.stopped ? SB_INPUT_NONE : input.kind);
+-	putNumber("SweetBatteryObservedInputMaxMA", fController.stopped ? 0 : input.maxMa);
++	bool inputUsable=!fController.stopped && !inputChangePending();
++	putBool("SweetBatteryCCEvidenceFresh", inputUsable && sb_cc_event_fresh(fSnapshot, now));
++	putNumber("SweetBatteryObservedInputKind", !inputUsable ? SB_INPUT_NONE : input.kind);
++	putNumber("SweetBatteryObservedInputMaxMA", !inputUsable ? 0 : input.maxMa);
+ 	if (!fresh) {
+ 		fSnapshot.tempValid = fSnapshot.currentValid = fSnapshot.voltageValid = false;
+ 	}
+@@ -1509,6 +1559,8 @@ SweetBattery::stopRuntime(void)
+ 	if (fMonitor) { fMonitor->cancelTimeout();fMonitor->disable(); }
+ 	if (!fRuntimeMode) { return; }
+ 	fController.stopped = true;
++	fInputSession = {};
++	refreshInputPermit(sweet_batt_now_ns());
+ 	if (!sb_stop(fController, runtimeUpdate, this)) {
+ 		SWEET_LOG_ERROR("SWEET BATT CONTROL: service stopping; hardware disable unconfirmed error=%d\n",
+ 		    fController.lastError);
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+index 2eae1fca12f56419b7a87ef42b026eb596eb1748..06af9538e965a0c394d9707094719a92404dbdf2 100644
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -60,6 +60,10 @@ static const MuxRoute routeTemplates[] = {
+ 	{2, 0x15, 5, SWEET_BATT_IRQ_TYPEC, MUX_BATTERY, 1, "battery-typec-attach"},
+ 	{2, 0x15, 6, SWEET_BATT_IRQ_TYPEC, MUX_BATTERY, 3, "battery-typec-legacy"},
+ 	{2, 0x31, 0, SWEET_ADC5_IRQ_EOC, MUX_ADC5, 1, "adc5-eoc"},
++	/* LG PM8150B DTS: USBIN UV bit2 / OV bit3 both edges. Their recovery
++	 * also refreshes input; the battery never treats the IRQ as a grant. */
++	{2, 0x13, 2, SWEET_BATT_IRQ_INPUT_FAULT, MUX_BATTERY, 3, "battery-usbin-uv"},
++	{2, 0x13, 3, SWEET_BATT_IRQ_INPUT_FAULT, MUX_BATTERY, 3, "battery-usbin-ov"},
+ };
+ static_assert(sizeof(routeTemplates) / sizeof(routeTemplates[0]) == SWEET_MUX_ROUTE_COUNT,
+     "route layout must match the instance storage");
+diff --git a/iokit/Kernel/arm/SweetSpmiMuxClient.cpp b/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
+index 07f77fe8c6e08dfda21a62b40daca121477e4fba..32df464b1d2b48a0801c1a71e1a19178c779c5cd 100644
+--- a/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
++++ b/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
+@@ -117,6 +117,16 @@ SweetSpmiMuxClient::eventAction(OSObject *owner, IOInterruptEventSource *, int)
+ 	}
+ }
+ 
++bool
++SweetSpmiMuxClient::hasPendingEvents(unsigned mask)
++{
++	IOLockLock(lock);
++	bool unavailable=stopping || terminal || providerGone || !provider ||
++	    !attached || provider->isInactive();
++	IOLockUnlock(lock);
++	return unavailable || (__atomic_load_n(&pending,__ATOMIC_ACQUIRE) & (mask | SWEET_MUX_FAILED));
++}
++
+ void
+ SweetSpmiMuxClient::process(void)
+ {

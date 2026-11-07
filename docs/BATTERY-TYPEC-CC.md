@@ -1,5 +1,10 @@
 # Type-C CC/Rp 输入判断（0160～0162）
 
+0163已把本页CC/APSD事件依据接入长期输入会话和同epoch VBUS短许可，并新增
+独立USBIN UV/OV路由；仅本地验证完成，待云编译/实机，不启充。原3秒观测保留为
+诊断；当前授权接口与测试见[输入会话](BATTERY-INPUT-SESSION.md)。以下0120a11
+结果是已验证的分类基线，不代替0163长期会话/保护验收。
+
 **当前：0120a11已实机验证0162的sink Rp分类修复和拔线撤销。** 稳定输入读到
 Rp3A，CC reasons0/qualified1/kind2，APSD可同时为FLOAT。仍为runtime1观测，
 没有真实启充或完整input provider，详见文末实测结果。

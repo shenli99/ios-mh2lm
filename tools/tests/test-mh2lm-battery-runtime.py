@@ -104,6 +104,7 @@ struct OSDictionary {
 #define kIOReturnSuccess 0
 #define kIOReturnNotReady -1
 #define kIOReturnNoMemory -3
+#define SWEET_MUX_FAILED 0x80000000u
 struct OSObject {virtual ~OSObject()=default;};
 #define OSDynamicCast(type,obj) dynamic_cast<type *>(obj)
 static uint64_t timeNs=1000000000ULL;
@@ -123,11 +124,12 @@ adc_header=strip_includes((root/'bsd/dev/sweet_adc5.h').read_text())
 adc_model=r'''
 class SweetAdc5Client {
 public:
- bool valid[2]={},present=false;unsigned updates=0,sourceUpdates=0;
+ bool valid[2]={},present=false;unsigned updates=0,sourceUpdates=0;uint64_t epoch=0;
  sweet_adc5_measurement samples[2]={};
  static SweetAdc5Client *withOwner(void *,void (*)(void *),void *) {static SweetAdc5Client instance;return &instance;}
  void invalidate(){valid[0]=valid[1]=false;}
- void update(bool input,bool changed,bool,uint64_t){++updates;if(changed)++sourceUpdates;present=input;if(!input)valid[1]=false;}
+ void update(bool input,uint64_t nextEpoch,bool,uint64_t){++updates;if(nextEpoch!=epoch){++sourceUpdates;valid[1]=false;}epoch=nextEpoch;present=input;if(!input)valid[1]=false;}
+ bool copyFreshInput(uint64_t expected,uint64_t now,sweet_adc5_measurement *out){return expected && expected!=UINT64_MAX && epoch==expected && present && copyFresh(SWEET_ADC5_USBIN,now,out);}
  bool copyFresh(sweet_adc5_channel c,uint64_t now,sweet_adc5_measurement *out){auto &s=samples[c-1];if(!valid[c-1] || now<s.completed_ns || now<s.started_ns || now-s.started_ns>(c==1?60000000000ULL:3000000000ULL))return false;*out=s;return true;}
 };
 '''
@@ -184,12 +186,13 @@ public:
  IOLock controlLock;IOLock *fControlLock=&controlLock;bool fPowerStopping=false,fControlClaimed=false;
  static IOReturn runtimePowerNotice(void *,void *,UInt32,IOService *,void *,vm_size_t);
  SweetBattSnapshot fSnapshot={};SweetBattLimits fLimits={};SweetBattController fController={};
+ SweetBattInputSession fInputSession={};bool inputChangePending();void refreshInputPermit(uint64_t);
  unsigned publishes=0;int publishedMa=0;bool publishedCurrentValid=false;
  IOTimerEventSource *fTimer=nullptr;
  bool fIrqFailed=false,fIrqAttached=true;
  unsigned fIrqMode=4,fIrqSamples=0;volatile unsigned fIrqNotifications=0;
- struct MuxStub {unsigned detachments=0;void detach(){++detachments;}};
- MuxStub *fMuxClient=nullptr;
+ struct MuxStub {unsigned detachments=0,pending=0;bool unavailable=false;bool hasPendingEvents(unsigned mask){return unavailable || (pending&(mask|SWEET_MUX_FAILED));}void detach(){++detachments;unavailable=true;}};
+ MuxStub connection;MuxStub *fMuxClient=&connection;
  void failIrq(const char *);
  void sampleRuntime(bool);void runRuntimePolicy();void stopRuntime();void publishRuntime();
  static uint64_t runtimeClock(void *);
@@ -249,6 +252,21 @@ static SweetBattSnapshot sample(){
     s.ccCoherent=true;
     return s;
 }
+static SweetBattInputPermit permitFor(const SweetBattSnapshot &s){
+ SweetBattInputSession manager={};sb_input_observe(manager,s,timeNs);
+ SweetBattInputVoltage v={true,5000000,1,s.inputEpoch,timeNs,timeNs};
+ return sb_input_permit(manager,s,v,timeNs);
+}
+static SweetBattLimits limits(const SweetBattSnapshot &s=sample()){
+ return {true,true,2800,4430,timeNs,permitFor(s)};
+}
+static void authorizeControl(SweetBattery &b){
+ static SweetAdc5Client adc;
+ b.fSnapshot=sample();b.fLimits=limits();b.fAdcClient=&adc;
+ adc.present=true;adc.epoch=b.fSnapshot.inputEpoch;adc.valid[1]=true;
+ adc.samples[1]={};adc.samples[1].sequence=1;
+ adc.samples[1].started_ns=adc.samples[1].completed_ns=timeNs;adc.samples[1].microvolts=5000000;
+}
 static void ccTests(){
     auto s=sample();SweetBattSnapshot empty={};
     s.raw[SB_TYPEC]=4;s.raw[SB_APSD]=s.raw[SB_RESULT]=s.raw[SB_APSD_OPTIONS]=0;
@@ -261,11 +279,14 @@ static void ccTests(){
     // CC works without BC1.2 enable/DONE/result, including read failures there.
     s.valid&=~((1ULL<<SB_APSD)|(1ULL<<SB_RESULT)|(1ULL<<SB_APSD_OPTIONS));
     assert(sb_input_capability(s,timeNs).maxMa==1500);
-    SweetBattController controller={};auto l=SweetBattLimits{true,true,true,2800,4430,1500,5000,timeNs};
+    SweetBattController controller={};auto l=limits(s);
     auto decision=sb_decide(controller,s,l,timeNs);
+    assert(!decision.allow && (decision.reasons&SB_R_INPUT)); // formal permission requires coherent APSD metadata to rule out QC
+    s.valid|=(1ULL<<SB_APSD)|(1ULL<<SB_RESULT)|(1ULL<<SB_APSD_OPTIONS);l=limits(s);
+    decision=sb_decide(controller,s,l,timeNs);
     assert(decision.allow && decision.iclMa==500 && decision.validUntilNs==timeNs+3000000000ULL);
-    l.inputVerified=false;assert(sb_decide(controller,s,l,timeNs).reasons&SB_R_INPUT);
-    l.inputVerified=true;l.batteryVerified=false;
+    l.input.valid=false;assert(sb_decide(controller,s,l,timeNs).reasons&SB_R_INPUT);
+    l.input.valid=true;l.batteryVerified=false;
     assert(sb_decide(controller,s,l,timeNs).reasons&SB_R_BATTERY_ID);
     l.batteryVerified=true;l.parallelVerified=false;
     assert(sb_decide(controller,s,l,timeNs).reasons&SB_R_PARALLEL);
@@ -317,7 +338,7 @@ static void ccTests(){
     previous=s;sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
     assert(s.ccFromEvent && sb_input_capability(s,timeNs).kind==SB_INPUT_CC);
     auto observed=s;
-    const SweetBattLimits limitsForCc={true,true,true,2800,4430,3000,5000,timeNs};
+    const SweetBattLimits limitsForCc=limits(observed);
     assert(sb_decide(controller,observed,limitsForCc,timeNs).allow);
     for(unsigned fault:{4u,8u,12u}){
         s=observed;previous=s;s.raw[SB_USB]|=fault;
@@ -396,7 +417,6 @@ static void apsdEventTests(){
     sb_note_input(s,previous,SWEET_BATT_IRQ_SOURCE);assert(!s.apsdFromSource);
     puts("PASS: APSD source/plugin both orders, startup residue, observed detach/replug, coalesced causes, stale/disabled/incoherent/error rejection");
 }
-static SweetBattLimits limits(){return {true,true,true,2800,4430,1500,5000,timeNs};}
 static void evidenceTests(){
     auto s=sample();auto l=limits();SweetBattController c={};
     assert(sb_source_type(s)==SB_SOURCE_DCP && sb_normal_sink(s) && sb_input_fresh(s,timeNs));
@@ -435,11 +455,11 @@ static void evidenceTests(){
     s.startedNs=s.completedNs=l.verifiedNs=timeNs+3000000001ULL;
     assert(!sb_input_fresh(s,s.completedNs) && (sb_decide(c,s,l,s.completedNs).reasons&SB_R_INPUT));
     s=sample();s.inputStartedNs=timeNs-500000000ULL;
-    auto d=sb_decide(c,s,limits(),timeNs);
-    assert(d.allow && d.validUntilNs==timeNs+2500000000ULL);
+    auto d=sb_decide(c,s,limits(s),timeNs);
+    assert(d.allow && d.validUntilNs==timeNs+3000000000ULL); // voltage lease, no renewal of source time
     s=sample();s.apsdStartedNs=timeNs-750000000ULL;
-    d=sb_decide(c,s,limits(),timeNs);
-    assert(d.allow && d.validUntilNs==timeNs+2250000000ULL);
+    d=sb_decide(c,s,limits(s),timeNs);
+    assert(d.allow && d.validUntilNs==timeNs+3000000000ULL);
     assert(sb_evidence_deadline(UINT64_MAX-1)==UINT64_MAX);
     (void)oldInput;
     s=sample();s.profilePrefixValid=s.nominalValid=true;s.integrity=0x13;s.nominalMah=4027;
@@ -454,8 +474,74 @@ static void evidenceTests(){
     l=limits();l.maxFccMa=3300;s=sample();assert(sb_decide(c,s,l,timeNs).reasons&SB_R_LIMITS);
     puts("PASS: exact source/QC/role classification, missing/stale input and decision expiry, real profile prefixes/metadata, board FCC bound");
 }
+static void inputSessionTests(){
+ const auto originalTime=timeNs;
+ auto s=sample();s.raw[SB_TYPEC]=2;s.raw[SB_MISC]=0x3b;
+ s.ccFromEvent=true;s.ccSession=s.usbSession;
+ s.ccStartedNs=s.ccCompletedNs=timeNs;
+ SweetBattInputSession m={};sb_input_observe(m,s,timeNs);
+ SweetBattInputVoltage v={true,5000000,11,s.inputEpoch,timeNs,timeNs};
+ auto p=sb_input_permit(m,s,v,timeNs);
+ assert(p.valid && p.kind==SB_INPUT_CC && p.maxMa==3000);
+ auto sourceStart=m.sourceStartedNs;
+ timeNs+=10000000000ULL;s.startedNs=s.completedNs=timeNs;
+ v.startedNs=v.completedNs=timeNs;++v.sequence;
+ assert(sb_input_capability(s,timeNs).kind==SB_INPUT_NONE); // diagnostic expired
+ p=sb_input_permit(m,s,v,timeNs);assert(p.valid && m.sourceStartedNs==sourceStart);
+ auto l=limits();l.input=p;SweetBattController c={};
+ assert(sb_decide(c,s,l,timeNs).allow); // durable session + new physical voltage
+ assert(!sb_input_permit(m,s,v,timeNs+3000000000ULL).valid);
+ for(unsigned uv:{4499999u,5500001u}){auto bad=v;bad.microvolts=uv;assert(!sb_input_permit(m,s,bad,timeNs).valid);}
+ for(unsigned uv:{4500000u,5500000u}){auto good=v;good.microvolts=uv;assert(sb_input_permit(m,s,good,timeNs).valid);}
+ auto previous=s;++s.inputEpoch;s.inputStartedNs=s.inputCompletedNs=timeNs;
+ s.raw[SB_RESULT]=0x10;sb_note_input(s,previous,SWEET_BATT_IRQ_SOURCE);
+ sb_input_observe(m,s,timeNs);assert(m.kind==SB_INPUT_CC && m.sourceStartedNs==sourceStart);
+ assert(!sb_input_permit(m,s,v,timeNs).valid); // exact external ADC epoch
+ v.epoch=s.inputEpoch;auto old=v;old.startedNs=previous.inputCompletedNs;
+ assert(!sb_input_permit(m,s,old,timeNs).valid); // no timestamp relabeling either
+ ++v.sequence;assert(sb_input_permit(m,s,v,timeNs).valid); // FLOAT does not defeat valid Rp
+ auto stable=s;auto manager=m;
+ s.raw[SB_APSD]=2;sb_input_observe(m,s,timeNs);assert(m.kind==SB_INPUT_NONE); // QC flag before DONE
+ s=stable;m=manager;
+ for(unsigned field:{SB_USB,SB_APSD,SB_RESULT,SB_TYPEC,SB_ATTACHED,SB_MISC,SB_DEBUG_ACCESS,SB_LEGACY,SB_APSD_OPTIONS}){
+  s=stable;m=manager;s.valid&=~(1ULL<<field);sb_input_observe(m,s,timeNs);
+  assert(m.kind==SB_INPUT_NONE && !sb_input_permit(m,s,v,timeNs).valid);
+ }
+ for(unsigned fault:{4u,8u,12u}){
+  s=stable;m=manager;previous=s;s.raw[SB_USB]|=fault;
+  sb_note_input(s,previous,SWEET_BATT_IRQ_INPUT_FAULT);sb_input_observe(m,s,timeNs);
+  assert(m.kind==SB_INPUT_NONE && !sb_input_permit(m,s,v,timeNs).valid);
+ }
+ for(unsigned flip:{1u,4u,8u,0x20u,0x40u,0x80u}){
+  s=stable;m=manager;previous=s;s.raw[SB_MISC]^=flip;
+  sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);sb_input_observe(m,s,timeNs);
+  assert(!sb_input_permit(m,s,v,timeNs).valid);
+ }
+ for(unsigned result:{0x28u,0x48u,0x20u}){
+  s=stable;m=manager;previous=s;s.raw[SB_APSD]=1;s.raw[SB_RESULT]=result;
+  sb_note_input(s,previous,SWEET_BATT_IRQ_SOURCE);sb_input_observe(m,s,timeNs);
+  assert(m.kind==SB_INPUT_NONE);
+ }
+ s=stable;m=manager;previous=s;s.raw[SB_USB]=0;
+ sb_note_input(s,previous,SWEET_BATT_IRQ_USB);sb_input_observe(m,s,timeNs);
+ assert(m.kind==SB_INPUT_NONE);
+ previous=s;s.raw[SB_USB]=16;++s.inputEpoch;
+ sb_note_input(s,previous,SWEET_BATT_IRQ_USB);sb_input_observe(m,s,timeNs);
+ v.epoch=s.inputEpoch;auto newPermit=sb_input_permit(m,s,v,timeNs);assert(newPermit.valid);
+ assert(!sb_input_permit_valid(p,s,timeNs)); // old observed session not reusable
+ timeNs=originalTime;s=sample();m={};sb_input_observe(m,s,timeNs);
+ v={true,5000000,21,s.inputEpoch,timeNs,timeNs};
+ assert(m.kind==SB_INPUT_BC12 && sb_input_permit(m,s,v,timeNs).maxMa==500);
+ timeNs+=10000000000ULL;v.startedNs=v.completedNs=timeNs;
+ assert(sb_input_permit(m,s,v,timeNs).valid);
+ previous=s;s.inputStartedNs=s.inputCompletedNs=timeNs;++s.inputEpoch;
+ sb_note_input(s,previous,SWEET_BATT_IRQ_USB);sb_input_observe(m,s,timeNs);
+ assert(m.kind==SB_INPUT_BC12 && m.sourceStartedNs==originalTime); // duplicate does not renew BC event time
+ timeNs=originalTime;
+ puts("PASS: durable CC/BC sessions beyond 3s, unchanged source timestamps, exact voltage epoch/window, pending-classification prerequisites, detach/role/QC/UV/OV revocation");
+}
 static void policyTests(){
-    auto s=sample();auto l=limits();SweetBattController c={};SweetBattery control;
+    auto s=sample();auto l=limits();SweetBattController c={};SweetBattery control;authorizeControl(control);
     auto d=sb_decide(c,s,l,timeNs);assert(d.allow && !d.reasons && d.fccMa==500 && d.iclMa==500 && d.fvMv==4200);
     updateCount=0;writes.clear();changed[0x1042]=1;
     assert(sb_apply(c,d,timeNs,true,SweetBattery::runtimeUpdate,&control,testClock));
@@ -478,7 +564,7 @@ static void policyTests(){
     }
     for(unsigned bit:{SB_R_BATTERY_ID,SB_R_PARALLEL,SB_R_INPUT}){
         l=limits();if(bit==SB_R_BATTERY_ID)l.batteryVerified=false;
-        if(bit==SB_R_PARALLEL)l.parallelVerified=false;if(bit==SB_R_INPUT)l.inputVerified=false;
+        if(bit==SB_R_PARALLEL)l.parallelVerified=false;if(bit==SB_R_INPUT)l.input.valid=false;
         auto decision=sb_decide(c,s,l,timeNs);assert(!decision.allow && (decision.reasons&bit));
     }
     l=limits();s.tempCenti=4100;d=sb_decide(c,s,l,timeNs);assert(!d.allow && c.thermalHold);
@@ -489,7 +575,7 @@ static void policyTests(){
     s.raw[SB_WDOG]=2;assert(sb_decide(c,s,l,timeNs).reasons&SB_R_WATCHDOG);s=sample();
     s.raw[SB_RESULT]=0x20;assert(sb_decide(c,s,l,timeNs).reasons&SB_R_INPUT);s=sample();
     s.ma=700;assert(sb_decide(c,s,l,timeNs).reasons&SB_R_HARDWARE);s=sample();
-    l.verifiedNs=1;l.vbusMv=9000;assert(sb_decide(c,s,l,timeNs).reasons&SB_R_INPUT);l=limits();
+    l.verifiedNs=1;l.input.vbusMv=9000;assert(sb_decide(c,s,l,timeNs).reasons&SB_R_INPUT);l=limits();
     assert(sb_decide(c,s,l,timeNs+4000000000ULL).reasons&SB_R_STALE);
     c={};d=sb_decide(c,s,l,timeNs);assert(sb_apply(c,d,timeNs,false,SweetBattery::runtimeUpdate,&control,testClock));
     d=sb_decide(c,s,l,c.deadlineNs);assert(d.reasons&SB_R_EXPIRED);
@@ -498,7 +584,7 @@ static void policyTests(){
     assert(writes.size()==prior+1 && writes.back()==0x1042 && changed[0x1042]==0);
     // Decision expires while programming, before enable. The real clock must
     // prevent using the old decision even though the 60s session is still live.
-    c={};s=sample();l=limits();d=sb_decide(c,s,l,timeNs);
+    c={};s=sample();l=limits();authorizeControl(control);d=sb_decide(c,s,l,timeNs);
     updateCount=0;delayAt=5;writes.clear();
     assert(!sb_apply(c,d,timeNs,false,SweetBattery::runtimeUpdate,&control,testClock));
     assert(c.stopped && !c.enabled && changed[0x1042]==0);
@@ -506,23 +592,31 @@ static void policyTests(){
     // Deadline is checked below the typed API before EACH physical write,
     // including all three writes of the software input mode operation.
     for(unsigned expiredAt=1;expiredAt<=11;++expiredAt){
-        c={};s=sample();l=limits();d=sb_decide(c,s,l,timeNs);
+        c={};s=sample();l=limits();authorizeControl(control);d=sb_decide(c,s,l,timeNs);
         updateCount=0;delayAt=expiredAt;writes.clear();
         assert(!sb_apply(c,d,timeNs,false,SweetBattery::runtimeUpdate,&control,testClock));
         assert(c.stopped && !c.enabled && changed[0x1042]==0);
         assert(writes.size()==expiredAt+1);delayAt=0;
     }
 
-    c={};s=sample();l=limits();d=sb_decide(c,s,l,timeNs);
+    c={};s=sample();l=limits();authorizeControl(control);d=sb_decide(c,s,l,timeNs);
     assert(sb_apply(c,d,timeNs,false,SweetBattery::runtimeUpdate,&control,testClock));
     // Hardware unexpectedly clears enable: disable/confirm and latch a fault.
     d=sb_decide(c,s,l,timeNs);assert(!d.allow && (d.reasons&SB_R_HARDWARE));
     assert(sb_apply(c,d,timeNs,false,SweetBattery::runtimeUpdate,&control,testClock));
     assert(c.fault && !c.enabled);
+    // Loss of authority disables an active controller; the zero approved ICL
+    // is not a fabricated permanent hardware fault against its old setting.
+    c={};c.enabled=c.owned=true;c.deadlineNs=timeNs+60000000000ULL;
+    s=sample();s.raw[SB_ENABLE]=1;s.raw[SB_ICL]=s.raw[SB_FCC]=10;s.raw[SB_FV]=60;
+    l=limits(s);l.input={};d=sb_decide(c,s,l,timeNs);
+    assert(!d.allow && (d.reasons&SB_R_INPUT) && !(d.reasons&SB_R_HARDWARE));
+    assert(sb_apply(c,d,timeNs,false,SweetBattery::runtimeUpdate,&control,testClock));
+    assert(!c.enabled && !c.fault && c.stopConfirmed);
     puts("PASS: policy missing inputs/staleness/thermal hysteresis, dry-run, ordered control, every write failure and expiry");
 }
 int main(){
-    evidenceTests();apsdEventTests();ccTests();policyTests();reads.clear();writes.clear();changed.clear();
+    evidenceTests();apsdEventTests();ccTests();inputSessionTests();policyTests();reads.clear();writes.clear();changed.clear();
     regs={{0x41a0,0xff},{0x41a1,0x7f},{0x41a2,0x60},{0x41a3,0xed},
           {0x41a6,0xff},{0x41a7,0x7f},{0x41a8,0x60},{0x41a9,0xed},
           {0x4009,180},{0x400a,180},{0x4010,2},{0x4107,0},{0x1310,16},{0x1006,3},{0x110b,0x95},{0x1307,1}};
@@ -653,7 +747,7 @@ int main(){
     }
     regs[0x1310]=16;inputSample(b,SWEET_BATT_IRQ_TYPEC);
     b.fIrqPending=SWEET_BATT_IRQ_TYPEC;b.runRuntimePolicy();b.publishRuntime();
-    assert(!b.fSnapshot.ccFromEvent && !b.registry["SweetBatteryCCEvidenceFresh"]);
+    assert(!b.registry["SweetBatteryCCEvidenceFresh"] && !b.fLimits.input.valid);
     assert(b.registry["SweetBatteryObservedInputKind"]==SB_INPUT_NONE);
     // Pending input revokes command submission; an explicit disable still works.
     unsigned actual=0;auto commands=writes.size();
@@ -693,14 +787,14 @@ int main(){
     assert(reads.size()==beforeReads && writes.size()==beforeWrites);
     failed.failIrq("duplicate");assert(failed.publishes==beforePublications+1);
     puts("PASS: actual IRQ failure withdraws modern/legacy source flags and measurement validity, no fallback/read/retry");
-    SweetBattery shutdown;unsigned verified=0;
+    SweetBattery shutdown;authorizeControl(shutdown);unsigned verified=0;
     assert(!SweetBattery::runtimeUpdate(&shutdown,SWEET_CHARGER_ENABLE,1,timeNs+1000000000,&verified));
     std::thread power([&]{assert(!SweetBattery::runtimePowerNotice(&shutdown,nullptr,kIOMessageSystemWillRestart,nullptr,nullptr,0));});
     power.join();assert(shutdown.fPowerStopping && changed[0x1042]==0);
     auto prior=writes.size();assert(SweetBattery::runtimeUpdate(&shutdown,SWEET_CHARGER_ENABLE,1,timeNs+1000000000,&verified)==SWEET_SPMI_NOT_READY);
     assert(writes.size()==prior);
     for(unsigned round=0;round<100;++round){
-        SweetBattery racing;racing.fControlClaimed=true;std::atomic<bool> go{false};
+        SweetBattery racing;authorizeControl(racing);racing.fControlClaimed=true;std::atomic<bool> go{false};
         std::thread submit([&]{while(!go.load()){}for(unsigned i=0;i<20;++i){unsigned v;
             int rc=SweetBattery::runtimeUpdate(&racing,SWEET_CHARGER_ENABLE,1,timeNs+1000000000,&v);assert(rc==0 || rc==SWEET_SPMI_NOT_READY);}});
         std::thread notify([&]{while(!go.load()){}SweetBattery::runtimePowerNotice(&racing,nullptr,kIOMessageSystemWillPowerOff,nullptr,nullptr,0);});
@@ -708,24 +802,50 @@ int main(){
     }
     // Completed ADC values publish as measurements, never charge authority.
     SweetBattery measured;SweetAdc5Client adc;measured.fAdcClient=&adc;measured.fRuntimeMode=1;
-    measured.fSnapshot=sample();adc.valid[0]=adc.valid[1]=true;
+    measured.fSnapshot=sample();sb_input_observe(measured.fInputSession,measured.fSnapshot,timeNs);
+    adc.epoch=measured.fSnapshot.inputEpoch;adc.present=true;adc.valid[0]=adc.valid[1]=true;
     adc.samples[0].started_ns=adc.samples[0].completed_ns=timeNs;
     adc.samples[1].started_ns=adc.samples[1].completed_ns=timeNs;
-    adc.samples[0].microvolts=889684;adc.samples[1].microvolts=4831136;
+    adc.samples[0].microvolts=889684;adc.samples[1].microvolts=4831136;adc.samples[1].sequence=17;
     SweetBattery::adcChanged(&measured);
     assert(measured.registry["SweetBatteryVBUSMeasured"] && measured.registry["SweetBatteryVBUSMicrovolts"]==4831136);
-    assert(!measured.fLimits.batteryVerified && !measured.fLimits.inputVerified && !measured.fLimits.parallelVerified && !measured.fController.owned);
+    assert(!measured.fLimits.batteryVerified && measured.fLimits.input.valid && !measured.fLimits.parallelVerified && !measured.fController.owned);
+    assert(!(measured.fLastReasons&SB_R_INPUT) && (measured.fLastReasons&SB_R_BATTERY_ID) && (measured.fLastReasons&SB_R_PARALLEL));
+    auto originalInputTime=measured.fSnapshot.inputStartedNs;
+    auto writesBeforeInput=writes.size();
+    // Both stages of the delivered/queued IRQ fence must revoke a fresh lease.
+    for(unsigned event:{SWEET_BATT_IRQ_USB,SWEET_BATT_IRQ_SOURCE,SWEET_BATT_IRQ_TYPEC,SWEET_BATT_IRQ_INPUT_FAULT,SWEET_MUX_FAILED}){
+     measured.connection.pending=event;
+     unsigned actual=0;auto prior=writes.size();
+     assert(SweetBattery::runtimeUpdate(&measured,SWEET_CHARGER_ENABLE,1,timeNs+1000,&actual)==SWEET_SPMI_NOT_READY);
+     assert(writes.size()==prior);SweetBattery::adcChanged(&measured);
+     assert(!measured.fLimits.input.valid && !measured.registry["SweetBatteryInputVerified"]);
+     measured.connection.pending=0;SweetBattery::adcChanged(&measured);assert(measured.fLimits.input.valid);
+     measured.fIrqPending=event;SweetBattery::adcChanged(&measured);assert(!measured.fLimits.input.valid);
+     measured.fIrqPending=0;SweetBattery::adcChanged(&measured);assert(measured.fLimits.input.valid);
+    }
+    assert(writes.size()==writesBeforeInput && !measured.fController.owned);
     timeNs+=3000000001ULL;SweetBattery::adcChanged(&measured);
     assert(!measured.registry["SweetBatteryVBUSMeasured"] && !measured.registry.count("SweetBatteryVBUSMicrovolts"));
+    assert(!measured.fLimits.input.valid);
+    adc.samples[1].started_ns=adc.samples[1].completed_ns=timeNs;++adc.samples[1].sequence;
+    measured.fSnapshot.startedNs=measured.fSnapshot.completedNs=timeNs;
+    SweetBattery::adcChanged(&measured);assert(measured.fLimits.input.valid);
+    assert(measured.fSnapshot.inputStartedNs==originalInputTime && !sb_apsd_event_fresh(measured.fSnapshot,timeNs));
+    adc.invalidate();unsigned rejected=0;
+    assert(SweetBattery::runtimeUpdate(&measured,SWEET_CHARGER_ENABLE,1,timeNs+1000,&rejected)==SWEET_SPMI_NOT_READY);
+    SweetBattery::adcChanged(&measured);assert(!measured.fLimits.input.valid);
+    assert(writes.size()==writesBeforeInput && !measured.fController.owned);
     measured.fPowerStopping=true;SweetBattery::adcChanged(&measured);
     assert(!measured.registry["SweetBatteryBATIDMeasured"] && !measured.registry.count("SweetBatteryBATIDMicrovolts"));
     sleepWakeNote note={nullptr,1};
     assert(!SweetBattery::runtimePowerNotice(&shutdown,nullptr,kIOMessageSystemWillSleep,nullptr,&note,sizeof(note)));
     assert(acknowledged==1 && note.returnValue==0);
+    puts("PASS: actual input permission joins source + exact-epoch VBUS, both IRQ queues suspend/revalidate, voltage expiry/loss revokes, missing dependencies never write");
     puts("PASS: actual runtime sampler, units/validity, IRQ-only input acquisition, monitor publication and stop/no rearm");
 }
 '''
-names=['sweet_batt_now_ns','SweetBattery::adcChanged','SweetBattery::publishAdc','SweetBattery::sampleRuntime','SweetBattery::runtimeUpdate',
+names=['SweetBattery::inputChangePending','SweetBattery::refreshInputPermit','sweet_batt_now_ns','SweetBattery::adcChanged','SweetBattery::publishAdc','SweetBattery::sampleRuntime','SweetBattery::runtimeUpdate',
        'SweetBattery::runRuntimePolicy','SweetBattery::startRuntime',
        'SweetBattery::monitorFired','SweetBattery::stopRuntime','SweetBattery::failIrq','SweetBattery::publishRuntime','SweetBattery::runtimeClock','SweetBattery::publish','SweetBattery::removePowerValue','SweetBattery::runtimePowerNotice']
 with tempfile.TemporaryDirectory(prefix='mh2lm-runtime-') as directory:

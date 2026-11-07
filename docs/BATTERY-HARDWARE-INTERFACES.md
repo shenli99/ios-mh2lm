@@ -1,5 +1,11 @@
 # 电池硬件接口与 ADC5 预检（0154）
 
+**0163当前补充（本地完成，待云编译/实机）：** 输入会话与typed短许可在电池loop
+内部管理，来源是已有CC/APSD事件和经registry ADC client核对的同inputEpoch
+VBUS。策略不再读取inputVerified/inputMa/vbusMv散字段。mux新增USBIN UV/OV
+路由；跨服务发现和SPMI/语义后端边界保持，未闭合身份/parallel/watchdog，不启充。
+当前图、接口及验证边界见[输入会话](BATTERY-INPUT-SESSION.md)，以下为0154历史。
+
 2026-11-06，承接0120a2已验证的FG遥测。0154完成本地实现/测试，0120a3云
 产物已核对并打包，实机预检和采样回归结果见末节。本轮先固定接口边界并取得ADC5访问依据；未完成ADC测量、
 电池身份验证、并联控制或watchdog维护，仍不开放受控充电。

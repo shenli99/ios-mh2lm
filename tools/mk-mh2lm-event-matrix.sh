@@ -183,11 +183,13 @@ if [ "$KEY_IRQ_PROFILE" = '--battery-evidence' ]; then
   'SWEET BATT APSD EVENT: v1' 'SWEET BATT APSD TIME: v1' \
   'SWEET BATT CC: v1' 'SWEET BATT CC TIME: v1' 'SWEET BATT INPUT CAP: v1' \
   'SWEET BATT CC ROLE: v1' \
+  'SWEET BATT INPUT SESSION: v1' 'SWEET BATT INPUT PERMIT: v1' 'SWEET BATT INPUT LEASE: v1' 'SWEET BATT ADC INPUT: v1' \
+  'battery-usbin-uv' 'battery-usbin-ov' \
   'battery-typec-cc' 'battery-typec-attach' \
   'SWEET MUX: IRQ read failed route=' \
   'SWEET BATT IRQ: published input invalid; external/charging state withdrawn'; do
   if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
-   printf 'kernel lacks 0162 profile/input/APSD/CC sink classification marker: %s\n' "$marker" >&2
+   printf 'kernel lacks 0163 input session/ADC/protection marker: %s\n' "$marker" >&2
    exit 1
   fi
  done

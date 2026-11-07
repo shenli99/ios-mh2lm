@@ -1,5 +1,20 @@
 # 0119之后的电池驱动推进
 
+**当前实现：0163输入会话/同epoch VBUS许可已完成本地验证，待用户push。** 基于
+0120a11实际源码，CC/APSD只由输入事件建立来源；新鲜的同输入epoch ADC测量
+形成有截止时间的typed permit，稳定会话不再受诊断3秒到期限制。新增USBIN
+UV/OV双边沿路由及两段队列pending检查，旧ADC结果不能复用；仍缺身份限值、
+parallel隔离/watchdog依赖，本轮不启充。架构、LG依据、撤销边界和一次上机步骤见
+[输入会话与VBUS许可](BATTERY-INPUT-SESSION.md)。
+
+本地：33文件严格apply，原106 gate，四个ARM64单文件编译；runtime8/mux66/
+transport122/ADC client19场景+100竞态/日志等级回归通过。CircleCI与GitHub XNU
+配置均未改。新云产物到齐后仍用原battery-evidence/runtime1/IRQ4/ADCconv0，
+核对长期许可、新token、拔线和1～2秒短接后撤销；持久日志即可，无需baseline。
+没有新boot/实机结果/CI run ID，不将本地通过写为硬件验收。
+
+### 0120a11实机结果（作为0163基线）
+
 **最新实机：0120a11通过0162 sink CC分类及正常拔线撤销。** id359先取得独立
 Rp3A依据，id361/362 APSD为FLOAT时仍qualified1/kind2，三个记录保持同一CC
 时间；id535/536拔线清除session/时间/能力和外接标志。226次ADC全部成功，
@@ -7,10 +22,8 @@ Rp3A依据，id361/362 APSD为FLOAT时仍qualified1/kind2，三个记录保持�
 真实启充和完整电池IRQ验收仍未完成。详见
 [0120a11实测](BATTERY-TYPEC-CC.md#0120a11实测cc分类修复通过拔线撤销正常)。
 
-下一步推进正式输入能力管理，将CC/APSD、同会话有效VBUS测量和typed授权接口
-结合，明确长期会话/失效撤销及保护事件；现有3秒观测不能靠轮询续期，也不能
-直接作为inputVerified。电池身份授权、parallel隔离、watchdog及ADC错误快照
-取证仍需闭合。无需重跑当前镜像/baseline，CI配置保持原样。
+该结果作为0163的来源依据；输入会话实现及下一动作以上方当前状态为准。
+电池身份授权、parallel隔离、watchdog及ADC错误快照取证仍需后续闭合。
 
 ### 0120a11产物及实现记录（历史）
 

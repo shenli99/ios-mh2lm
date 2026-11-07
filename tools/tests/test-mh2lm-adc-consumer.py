@@ -135,10 +135,10 @@ static void check(unsigned mode){
  if(mode==2)p->ready=false;
  if(mode==3)p->busyExternal=true;
  if(mode==12)failNotice=1;
- c->update(true,true,false,fakeNs);pump();
+ c->update(true,1,false,fakeNs);pump();
  if(mode==12){assert(!p->begins);c->stop();c->release();goto cleanup;}
  if(mode==2 || mode==3){
-  assert(!p->begins);for(unsigned n=0;n<10;++n){c->update(true,false,false,fakeNs);pump();}assert(!p->begins);
+  assert(!p->begins);for(unsigned n=0;n<10;++n){c->update(true,1,false,fakeNs);pump();}assert(!p->begins);
   p->ready=true;p->busyExternal=false;p->messageClients(1);pump();
  }
  if(mode==13){c->stop();assert(p->active);p->complete();pump();assert(!callbacks);c->release();goto cleanup;}
@@ -147,23 +147,47 @@ static void check(unsigned mode){
  {sweet_adc5_measurement s{};assert(c->copyFresh(SWEET_ADC5_BAT_ID,fakeNs,&s) && s.microvolts==889000);}
  if(mode==4 || mode==5){
   // A source epoch changes while the old EOC is still in flight.
-  c->update(false,true,false,fakeNs);
-  if(mode==5)c->update(true,true,false,fakeNs);
+  c->update(false,2,false,fakeNs);
+  if(mode==5)c->update(true,3,false,fakeNs);
  }
  p->complete();pump();
  if(mode==5){assert(p->begins==3 && p->active);p->complete();pump();}
  {sweet_adc5_measurement s{};assert(c->copyFresh(SWEET_ADC5_USBIN,fakeNs,&s)==(mode!=4));}
+ {sweet_adc5_measurement s{};s.raw=0xcafe;
+  uint64_t current=mode==5?3:mode==4?2:1;
+  assert(c->copyFreshInput(current,fakeNs,&s)==(mode!=4));
+  assert(!c->copyFreshInput(current+1,fakeNs,&s));
+  assert(!c->copyFreshInput(0,fakeNs,&s));assert(!c->copyFreshInput(UINT64_MAX,fakeNs,&s));
+ }
  if(mode==6){
   fakeNs+=3000000001ULL;sweet_adc5_measurement s{};s.raw=0xcafe;
   assert(!c->copyFresh(SWEET_ADC5_USBIN,fakeNs,&s) && s.raw==0xcafe);
+  assert(!c->copyFreshInput(1,fakeNs,&s) && s.raw==0xcafe);
   assert(!c->copyFresh(SWEET_ADC5_BAT_ID,1,&s));
-  c->update(true,false,false,fakeNs);pump();assert(p->active);p->complete();pump();assert(c->copyFresh(SWEET_ADC5_USBIN,fakeNs,&s));
+  c->update(true,1,false,fakeNs);pump();assert(p->active);p->complete();pump();assert(c->copyFresh(SWEET_ADC5_USBIN,fakeNs,&s));
   fakeNs+=60000000001ULL;assert(!c->copyFresh(SWEET_ADC5_BAT_ID,fakeNs,&s));
-  c->update(true,false,false,fakeNs);pump();assert(p->channel==1);
+  c->update(true,1,false,fakeNs);pump();assert(p->channel==1);
  }
- if(mode==7){p->fail();pump();sweet_adc5_measurement s{};assert(!c->copyFresh(SWEET_ADC5_BAT_ID,fakeNs,&s));unsigned n=p->begins;c->update(true,true,true,fakeNs);pump();assert(p->begins==n);}
+ if(mode==7){p->fail();pump();sweet_adc5_measurement s{};assert(!c->copyFresh(SWEET_ADC5_BAT_ID,fakeNs,&s));unsigned n=p->begins;c->update(true,4,true,fakeNs);pump();assert(p->begins==n);}
  if(mode==8){p->terminate();sweet_adc5_measurement s{};assert(!c->copyFresh(SWEET_ADC5_USBIN,fakeNs,&s));pump();}
  if(mode==16){p->ready=false;p->active=false;p->messageClients(1);pump();sweet_adc5_measurement s{};assert(!c->copyFresh(SWEET_ADC5_BAT_ID,fakeNs,&s));assert(!c->copyFresh(SWEET_ADC5_USBIN,fakeNs,&s));}
+ if(mode==17){
+  // A completed old sample cannot be relabeled by a new epoch, even while
+  // still fresh. Old in-flight conversions are discarded, not reassigned.
+  sweet_adc5_measurement s{};s.raw=0xcafe;
+  c->update(true,2,false,fakeNs);
+  assert(!c->copyFreshInput(2,fakeNs,&s) && s.raw==0xcafe);pump();assert(p->active);
+  c->update(true,3,false,fakeNs);p->complete();pump();
+  assert(!c->copyFreshInput(3,fakeNs,&s));assert(p->active);p->complete();pump();
+  assert(c->copyFreshInput(3,fakeNs,&s));assert(!c->copyFreshInput(2,fakeNs,&s));
+  c->invalidate();assert(!c->copyFreshInput(3,fakeNs,&s));
+ }
+ if(mode==18){
+  // Voltage conversion starts before expiration, without input polling.
+  fakeNs+=1500000000ULL;c->update(true,1,false,fakeNs);pump();assert(p->active && p->channel==2);
+  sweet_adc5_measurement s{};assert(c->copyFreshInput(1,fakeNs,&s));
+  p->complete();pump();assert(c->copyFreshInput(1,fakeNs,&s));
+ }
  if(mode==14){std::thread t([&]{for(unsigned n=0;n<100;++n)p->messageClients(1);});c->stop();t.join();}
  if(mode==15){std::thread t([&]{p->terminate();});c->stop();t.join();}
  c->stop();c->stop();c->release();pump();
@@ -171,7 +195,7 @@ static void check(unsigned mode){
  if(!p->isInactive())p->terminate();p->release();loop->release();
  assert(!liveObjects && notices.empty() && services.empty() && queue.empty());
 }
-int main(){for(unsigned i=0;i<17;++i)check(i);for(unsigned i=0;i<50;++i){check(14);check(15);}puts("PASS: ADC consumer 17 scenarios and 100 notification/termination stop races");}
+int main(){for(unsigned i=0;i<19;++i)check(i);for(unsigned i=0;i<50;++i){check(14);check(15);}puts("PASS: ADC consumer 19 scenarios and 100 notification/termination stop races");}
 '''
 with tempfile.TemporaryDirectory(prefix='adc-consumer-') as d:
  src=Path(d)/'test.cpp';binary=Path(d)/'test'
