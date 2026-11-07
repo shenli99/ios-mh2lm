@@ -2,6 +2,51 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a13身份档日志已分析。身份建立/刷新与失败撤销通过；ADC238缺首个EOC，长期输入许可未覆盖。下一项独立inhibit2。**
+
+上一打包/文档提交ba5143e，实现8d6435b；本轮只读日志/实际云源码及更新文档，
+未改驱动/CI、未push/操作设备或重打包。日志
+logs/sweetlog-0120a13-battery-identity.bin，SHA256
+9ce9fabcad010e21bb0bf16be8a0253d1e0316c8f33c6a66613a62ab9d3587a4。
+SWEETLOG v1/4MiB/有效901517/flush67/11510行，无回卷/NUL；约700.009秒、
+711连续采样（39irq含初始化与arm-sync/672保护）。完整证据及边界在
+ docs/BATTERY-DEPENDENCY-TESTS.md末节；INPUT-SESSION、ADC5-CONSUMER、NEXT、
+实施计划已同步本轮结论。
+
+8次BAT_ID身份有效刷新token1/31/61/91/121/151/181/211，889359～889814uV，
+LG公式均95057Ω/profile1/FCC2800/FV4430；58次FG tuple全部match1/13/4027。
+238请求中237成功（8BATID/229USBIN），466EOC，全部valid/restored/接受，无丢弃，
+成功总耗时7.488～49.756ms。238/channel2在WAIT_SETTLE后GROUND/phase2超时，
+无该请求EOC，error-101、restore-error0/cleanup0，provider停止，身份/限值立即
+归零，此后无请求/结果。故障uptime295.883～296.885秒，首拔线305.366秒；
+全部Rp3A分类在故障后，无正permit/lease，所以不能验收长期许可/有效许可内撤销。
+
+0164来源保留已有两组部分实证：id523/524/526/527和545/546/548/549均CC
+qualified1/coherent1/reasons0，重复source保持原CC时间戳；没有复现1.3秒误删。
+但无新VBUS许可，不能把此部分直接升级为长期许可通过。38CONFIG均enable0、
+无CONTROL；37次IRQ refresh全healthy，route→publish100.973～104.479ms；UV12，
+OV未命中。三键配对down/up，touch310/empty0，ACM configured2；无panic或共享
+mux失败/隔离，5条USB EP0/EP5 warning保留旧重复枚举缺陷。
+
+本轮缺的是USBIN第一阶段REF_GND EOC，不等同历史第二EOC超时。当前没有故障
+当时ADC状态/PMIC IRQ latch+enable/arbiter pending及mux排队快照，根因未定；
+不能断言是插拔/身份刷新/某个mux ACK竞态。后续在typed后端及mux各自边界补
+一次性故障快照/阶段时间取证，再定位修复，保留IRQ-only与失败撤销，不能用轮询/
+自动重试或延长deadline掩盖。底稿scratch/artifact-0120a13：
+battery-identity-persistent.txt、analyze-log.py、log-analysis.json、audit-identity.py、
+identity-verification.json；分析显式计入失败请求238，不套旧3正permit断言。
+
+NEXT：用户fastboot boot
+/home/shenli/work1/out-bs/boot-16k-0120a13-battery-inhibit.img，桌面后尽快拔5秒、
+接同一稳定电源20～30秒再拔，确认三键/触摸，导出
+sweetlog-0120a13-battery-inhibit.bin（持久日志即可）。这项不依赖身份/输入许可，
+检查main-enable0、INHIBIT接受、新遥测SMB mask18为08并保持；external parallel
+仍false、不启充。无需push/新编译/baseline；下一步再按日志推进watchdog4。
+组合7与完整验收仍待ADC可靠性/长期许可、外部SMB1355 I²C隔离和managed-watchdog
+正式授权/保护；不要把本轮失败当身份正常路径失败，也不要当全项通过。
+
+### Previous 0120a13 packaging handoff (superseded next action)
+
 **CURRENT: 0120a13云产物已核对，五档boot已生成并回读验证，待第一项identity实机日志。**
 
 实现8d6435b、上一交接fe21cca。实际0120a13的33个选定源码文件与

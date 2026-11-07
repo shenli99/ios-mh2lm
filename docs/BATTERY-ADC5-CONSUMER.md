@@ -1,5 +1,12 @@
 # SweetBattery 的 ADC5 测量接入（0156）
 
+**0120a13故障更新：** 237次转换成功后，token238 USBIN在GROUND/phase2缺首个
+EOC，error-101；恢复/cleanup均0，provider停机、客户端测量和身份/限值撤销正确。
+发生在首次拔线前，无正输入许可，长期许可未覆盖。此次不是已记录的第二阶段
+超时，缺少故障现场寄存器/IRQ快照，根因未定；未以轮询/重试兜底。
+[完整实测与下一步](BATTERY-DEPENDENCY-TESTS.md#0120a13身份档实测身份通过adc故障阻断输入许可验收)。
+下方0120a12待push/缺陷未复现等描述按当时记录保留。
+
 0165已将现有BAT_ID测量与新鲜FG profile/容量交叉核对，身份1档可建立板级限值；
 ADC服务/client接口未改。缺失、过期或provider终止仍撤销，不能凭参数强制通过。
 同轮分档、边界与待测状态见[依赖分步测试](BATTERY-DEPENDENCY-TESTS.md)。

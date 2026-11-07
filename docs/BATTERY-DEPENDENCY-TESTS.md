@@ -1,7 +1,8 @@
 # 电池身份、并联禁止与 watchdog 分步测试（0165）
 
 2026-11-07。用户要求在0164来源保留修复的同一次云编译中推进后三项依赖，
-用参数分开或组合测试。0120a13云产物已核对，五档boot已打包并回读验证，待实机。
+用参数分开或组合测试。0120a13身份档已实测：身份建立/刷新及ADC故障后撤销通过，
+ADC第238次请求缺首个EOC，长期输入许可未覆盖；副路/watchdog/组合待实机。
 **全部档位只允许runtime1；没有主动启充。** 身份可建立板级限值，主PMIC副路
 禁止与watchdog的配置/IRQ链可独立取证；外部SMB1355隔离和managed-watchdog
 最终授权仍未成立。不能将“已有实现”写成“三项实机验收完成”。
@@ -207,3 +208,41 @@ ADC/mux/三键/DWC3/触摸/ACM标记完整。未提供新构建日志或CI run I
 底稿 `scratch/artifact-0120a13/`：verify-artifacts.py、source-compare.json、
 verification.json、packaging.txt、verify-boots.py、boot-verification.json及五份
 回读TOML。本轮只核对、打包和更新文档，未改驱动或CI、未push或操作设备。
+
+## 0120a13身份档实测：身份通过，ADC故障阻断输入许可验收
+
+日志 `logs/sweetlog-0120a13-battery-identity.bin`，SHA256
+`9ce9fabcad010e21bb0bf16be8a0253d1e0316c8f33c6a66613a62ab9d3587a4`。
+SWEETLOG v1，4MiB环、有效901517字节、flush67、11510行，无回卷/NUL。
+约700.009秒、711笔连续电池采样（39 IRQ含初始化/arm-sync、672保护timer）。
+本节是本轮实测结论；上方打包时“待实机”仅为历史状态。
+
+| 项目 | 证据与结论 |
+| --- | --- |
+| 身份正常路径 | token1/31/61/91/121/151/181/211共8次有效建立/刷新；BAT_ID889359～889814µV，LG整数式均95057Ω，profile1、FCC2800mA/FV4430mV板级上界正确。58次FG tuple均match1/integrity0x13/nominal4027mAh |
+| 身份失效撤销 | 第238次ADC请求超时后立即valid0/profile0/token0/限值0；策略撤销身份，不使用缓存冒充新测量 |
+| ADC正常部分 | 238请求中237成功（8 BAT_ID、229 USBIN），全部valid1/restored1并被接受，无epoch丢弃。466 EOC，成功请求总耗时7.488～49.756ms；USBIN4514528～4867472µV |
+| ADC故障 | token238/channel2从WAIT_SETTLE进入GROUND后无本请求EOC，phase2 TIMEOUT/error-101；restore-error0/cleanup0，provider停止并通知撤销，后续无请求/结果 |
+| 0164来源保留 | id523/524/526/527与545/546/548/549两组CC均qualified1、coherent1/reasons0；重复source两笔保持原CC时间戳，未复现0120a12约1.3秒误删 |
+| 长期输入许可 | 未覆盖。故障在uptime295.883～296.885秒之间，第一次拔线在305.366秒；所有Rp3A分类在ADC停止以后，无同epoch新VBUS、无正permit/lease记录。不能据此判0164长期许可通过或失败；有效许可内拔线撤销也未覆盖 |
+| 主路/共享IRQ | 38笔配置全部enable0、无CONTROL。37次IRQ refresh全部healthy，route→publish100.973～104.479ms；UV12次，OV无自然命中，不能算完整保护验收 |
+| 功能回归 | 三键均有配对down/up，触摸hits310/empty0，两次ACM configured；无panic/共享mux失败或隔离。5条USB EP0/EP5命令warning，重复枚举问题仍保留 |
+
+本次phase2明确是USBIN REF_GND的**第一阶段EOC**，不能套用先前记录的“第二EOC
+缺失”。超时日志没有当时的ADC状态、PMIC IRQ latch/enable、arbiter pending和mux
+分发快照，无法区分转换未完成、硬件中断未送达与软件排队/时序问题；也没有证据
+归因于插拔、身份刷新或UI。失败前后的成功不等于这个缺陷已经修复。
+后续ADC修复应先在typed ADC后端和mux各自边界补一次性故障快照及阶段时间，
+保持IRQ-only和失败撤销；不能用轮询结果、自动重试或放宽deadline掩盖缺失EOC。
+
+下一项可独立测同内核 `boot-16k-0120a13-battery-inhibit.img`：桌面后尽快拔5秒、
+接同一稳定电源20～30秒再拔，确认三键/触摸并导出
+`sweetlog-0120a13-battery-inhibit.bin`。检查禁主路、INHIBIT接受、新遥测SMB mask18
+为08且后续保持。此档不依赖身份或输入许可即可取证；外部parallelVerified仍false、
+仍不启充。随后按日志推进watchdog4；组合7和完整验收仍需解决ADC可靠性并补长期
+输入许可。默认不重跑baseline，不要求为本项重新编译。
+
+底稿 `scratch/artifact-0120a13/`：battery-identity-persistent.txt、analyze-log.py、
+log-analysis.json、audit-identity.py、identity-verification.json。分析器显式将238归入
+失败请求，不把“无结果”当日志截断，也不使用0120a12固定3个正permit的旧断言。
+本轮只读日志/源码并更新文档，未改驱动/CI、未push/操作设备或重新打包镜像。
