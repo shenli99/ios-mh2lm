@@ -1,5 +1,9 @@
 # APSD 事件来源与结果时效（0159）
 
+后续0160已将CC/Rp作为独立于APSD的输入依据，接入Type-C状态IRQ及撤销。
+下面的“只允许DCP/CDP”描述0159及0120a8实测时的范围；新实现见
+[CC输入判断](BATTERY-TYPEC-CC.md)，仍未实现PD或解除真实启充互锁。
+
 2026-11-07。补丁 `0159-mh2lm-apsd-event-provenance.patch` 接在0158之后；两者
 一起推送和编译，不要求先推0158。当前仍是 runtime1 证据镜像，不启充。
 

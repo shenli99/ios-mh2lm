@@ -76,7 +76,7 @@ jobs:
             fi
             require_marker() {
               if ! grep -Fq "$2" "$1"; then
-                echo "ERROR: required 0139..0159 marker missing from $1: $2" >&2
+                echo "ERROR: required 0139..0160 marker missing from $1: $2" >&2
                 exit 1
               fi
             }
@@ -134,6 +134,13 @@ jobs:
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT PROFILE: v1'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT INPUT: v4'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT APSD EVENT: v1'
+            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT CC: v1'
+            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT INPUT CAP: v1'
+            require_marker xnu/bsd/dev/sweet_battery_runtime.h 'sb_cc_event_fresh(const SweetBattSnapshot'
+            require_marker xnu/bsd/dev/sweet_battery_runtime.h 'sb_input_capability(const SweetBattSnapshot'
+            require_marker xnu/iokit/Kernel/arm/SweetPmicPower.cpp 'next.ccCoherent = (next.valid & sb_cc_mask()) == sb_cc_mask()'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'battery-typec-cc'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'battery-typec-attach'
             require_marker xnu/bsd/dev/sweet_battery_runtime.h 'sb_apsd_event_fresh(const SweetBattSnapshot'
             require_marker xnu/iokit/Kernel/arm/SweetPmicPower.cpp 'next.apsdCoherent = sb_valid(next, SB_USB)'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT INPUT TIME: v1'

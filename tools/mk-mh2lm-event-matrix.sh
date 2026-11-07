@@ -180,9 +180,11 @@ fi
 if [ "$KEY_IRQ_PROFILE" = '--battery-evidence' ]; then
  for marker in 'SWEET FG PROFILE: v1 fixed prefix24' 'SWEET BATT PROFILE: v1' \
   'SWEET BATT INPUT: v4' 'SWEET BATT INPUT TIME: v1' 'SWEET BATT ICL MODE: v1' \
-  'SWEET BATT APSD EVENT: v1' 'SWEET BATT APSD TIME: v1'; do
+  'SWEET BATT APSD EVENT: v1' 'SWEET BATT APSD TIME: v1' \
+  'SWEET BATT CC: v1' 'SWEET BATT CC TIME: v1' 'SWEET BATT INPUT CAP: v1' \
+  'battery-typec-cc' 'battery-typec-attach'; do
   if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
-   printf 'kernel lacks 0159 profile/input/APSD event marker: %s\n' "$marker" >&2
+   printf 'kernel lacks 0160 profile/input/APSD/CC event marker: %s\n' "$marker" >&2
    exit 1
   fi
  done

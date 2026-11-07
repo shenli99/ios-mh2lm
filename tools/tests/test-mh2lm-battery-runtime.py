@@ -240,7 +240,72 @@ static SweetBattSnapshot sample(){
     s.inputEpoch=1;s.inputStartedNs=s.inputCompletedNs=timeNs;
     s.raw[SB_APSD_OPTIONS]=8;s.usbSession=s.apsdSession=1;
     s.apsdStartedNs=s.apsdCompletedNs=timeNs;s.apsdCoherent=s.apsdFromSource=true;
+    s.ccCoherent=true;
     return s;
+}
+static void ccTests(){
+    auto s=sample();SweetBattSnapshot empty={};
+    s.raw[SB_TYPEC]=4;s.raw[SB_APSD]=s.raw[SB_RESULT]=s.raw[SB_APSD_OPTIONS]=0;
+    sb_note_input(s,empty,0);
+    assert(sb_cc_status(s).advertisedMa==1500 && !sb_cc_event_fresh(s,timeNs));
+    assert(sb_input_capability(s,timeNs).kind==SB_INPUT_NONE); // startup is diagnostic
+    auto previous=s;sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
+    assert(sb_cc_event_fresh(s,timeNs) && !sb_apsd_event_fresh(s,timeNs));
+    assert(sb_input_capability(s,timeNs).kind==SB_INPUT_CC);
+    // CC works without BC1.2 enable/DONE/result, including read failures there.
+    s.valid&=~((1ULL<<SB_APSD)|(1ULL<<SB_RESULT)|(1ULL<<SB_APSD_OPTIONS));
+    assert(sb_input_capability(s,timeNs).maxMa==1500);
+    SweetBattController controller={};auto l=SweetBattLimits{true,true,true,2800,4430,1500,5000,timeNs};
+    auto decision=sb_decide(controller,s,l,timeNs);
+    assert(decision.allow && decision.iclMa==500 && decision.validUntilNs==timeNs+3000000000ULL);
+    l.inputVerified=false;assert(sb_decide(controller,s,l,timeNs).reasons&SB_R_INPUT);
+    l.inputVerified=true;l.batteryVerified=false;
+    assert(sb_decide(controller,s,l,timeNs).reasons&SB_R_BATTERY_ID);
+    l.batteryVerified=true;l.parallelVerified=false;
+    assert(sb_decide(controller,s,l,timeNs).reasons&SB_R_PARALLEL);
+    // Source/plugin/duplicate CC notifications must not renew unchanged CC time.
+    for(unsigned event:{SWEET_BATT_IRQ_SOURCE,SWEET_BATT_IRQ_USB,SWEET_BATT_IRQ_TYPEC}){
+        previous=s;s.inputStartedNs=s.inputCompletedNs=timeNs+1000000000ULL;
+        sb_note_input(s,previous,event);assert(s.ccStartedNs==timeNs);
+    }
+    assert(!sb_cc_event_fresh(s,timeNs+3000000001ULL));
+    previous=s;s.raw[SB_TYPEC]=2;s.inputStartedNs=s.inputCompletedNs=timeNs+2000000000ULL;
+    sb_note_input(s,previous,SWEET_BATT_IRQ_SOURCE);
+    assert(!s.ccFromEvent); // a source change cannot establish changed CC state
+    previous=s;sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
+    assert(sb_input_capability(s,s.inputCompletedNs).maxMa==3000);
+    auto good=s;
+    // Revoke on every status fault, short/mixed Rp, debug/legacy, error or race.
+    for(unsigned flip:{1u,4u,8u,0x10u,0x20u,0x40u,0x80u}){
+        s=good;previous=s;s.raw[SB_MISC]^=flip;sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
+        assert(sb_cc_status(s).reasons && !s.ccFromEvent && sb_input_capability(s,s.inputCompletedNs).kind==SB_INPUT_NONE);
+    }
+    s=good;s.raw[SB_MISC]^=2;assert(!sb_cc_status(s).reasons && sb_cc_status(s).orientation==2);
+    for(unsigned rp:{0u,1u,0x40u,0x20u,0x10u,6u,0x0cu}){
+        s=good;previous=s;s.raw[SB_TYPEC]=rp;sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
+        assert(!s.ccFromEvent && sb_input_capability(s,s.inputCompletedNs).kind==SB_INPUT_NONE);
+    }
+    for(unsigned field:{SB_USB,SB_TYPEC,SB_ATTACHED,SB_MISC,SB_DEBUG_ACCESS,SB_LEGACY}){
+        s=good;previous=s;s.valid&=~(1ULL<<field);sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
+        assert(sb_cc_status(s).reasons&SB_CC_READ);assert(!s.ccFromEvent);
+    }
+    for(unsigned field:{SB_DEBUG_ACCESS,SB_LEGACY,SB_ATTACHED,SB_USB}){
+        s=good;previous=s;s.raw[field]=field==SB_DEBUG_ACCESS||field==SB_LEGACY?1:0;
+        sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);assert(!s.ccFromEvent);
+    }
+    s=good;previous=s;s.ccCoherent=false;sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
+    assert(sb_cc_status(s).reasons&SB_CC_RACE);assert(!s.ccFromEvent);
+    s=good;previous=s;s.raw[SB_TYPEC]=8;sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
+    assert(sb_cc_event_fresh(s,s.inputCompletedNs) && !sb_cc_status(s).advertisedMa);
+    assert(sb_input_capability(s,s.inputCompletedNs).kind==SB_INPUT_NONE); // default needs USB/BC
+    s=good;s.valid|=(1ULL<<SB_APSD)|(1ULL<<SB_RESULT);s.raw[SB_APSD]=3;s.raw[SB_RESULT]=8;
+    assert(sb_input_capability(s,s.inputCompletedNs).kind==SB_INPUT_NONE); // no QC authorization
+    // Reproduce 0120a8: Rp3A is visible, but misc39 rejects VBUS_ERROR explicitly.
+    s=sample();s.raw[SB_TYPEC]=2;s.raw[SB_MISC]=0x39;s.raw[SB_RESULT]=0x10;
+    assert(sb_cc_status(s).advertisedMa==3000 && sb_cc_status(s).reasons==SB_CC_VBUS_ERROR);
+    previous=s;sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC|SWEET_BATT_IRQ_SOURCE);
+    assert(!s.ccFromEvent && sb_input_capability(s,timeNs).kind==SB_INPUT_NONE);
+    puts("PASS: CC independent of APSD, Rp default/1.5A/3A, event provenance/expiry/revocation, fault reasons and existing control interlocks");
 }
 static void apsdEventTests(){
     auto s=sample();SweetBattSnapshot empty={};
@@ -364,7 +429,7 @@ static void policyTests(){
     injectedAt=0;
     c={};l=limits();
     for(unsigned field:{SB_STAGE,SB_ERROR,SB_THERMAL,SB_PATH,SB_USB,SB_ENABLE,SB_PAUSE,
-                       SB_WDOG,SB_WDOG_TIME,SB_APSD,SB_RESULT,SB_ICL,SB_FCC,SB_FV,SB_SUSPEND,SB_MODE,SB_LOAD,SB_OVERRIDE}){
+                       SB_WDOG,SB_WDOG_TIME,SB_ICL,SB_FCC,SB_FV,SB_SUSPEND,SB_MODE,SB_LOAD,SB_OVERRIDE}){
         auto invalid=s;invalid.valid&=~(1ULL<<field);
         auto decision=sb_decide(c,invalid,l,timeNs);assert(!decision.allow && (decision.reasons&SB_R_TELEMETRY));
     }
@@ -414,7 +479,7 @@ static void policyTests(){
     puts("PASS: policy missing inputs/staleness/thermal hysteresis, dry-run, ordered control, every write failure and expiry");
 }
 int main(){
-    evidenceTests();apsdEventTests();policyTests();reads.clear();writes.clear();changed.clear();
+    evidenceTests();apsdEventTests();ccTests();policyTests();reads.clear();writes.clear();changed.clear();
     regs={{0x41a0,0xff},{0x41a1,0x7f},{0x41a2,0x60},{0x41a3,0xed},
           {0x41a6,0xff},{0x41a7,0x7f},{0x41a8,0x60},{0x41a9,0xed},
           {0x4009,180},{0x400a,180},{0x4010,2},{0x4107,0},{0x1310,16},{0x1006,3},{0x110b,0x95},{0x1307,1}};
@@ -501,6 +566,38 @@ int main(){
     b.fIrqPending=0;inputSample(b,SWEET_BATT_IRQ_SOURCE);
     assert(sb_apsd_event_fresh(b.fSnapshot,timeNs));
     assert(logs.find("SWEET BATT APSD EVENT: v1")!=std::string::npos);
+    // Type-C IRQ acquires coherent CC independently of APSD completion.
+    regs[0x1506]=4;regs[0x1509]=0x20;regs[0x150b]=0x29;regs[0x1507]=regs[0x150d]=0;
+    regs[0x1307]=regs[0x1308]=regs[0x1362]=0;
+    inputSample(b,SWEET_BATT_IRQ_TYPEC);
+    assert(b.fSnapshot.ccCoherent && sb_cc_event_fresh(b.fSnapshot,timeNs));
+    assert(sb_input_capability(b.fSnapshot,timeNs).kind==SB_INPUT_CC);
+    assert(!b.fController.owned && !sb_apsd_event_fresh(b.fSnapshot,timeNs));
+    assert(logs.find("SWEET BATT CC: v1")!=std::string::npos && logs.find("SWEET BATT INPUT CAP: v1")!=std::string::npos);
+    for(unsigned addr:{0x1506u,0x1509u,0x150bu,0x1507u,0x150du,0x1310u}){
+        regs[0x1506]=4;regs[0x1509]=0x20;regs[0x150b]=0x29;regs[0x1507]=regs[0x150d]=0;regs[0x1310]=16;
+        mutateAtAddr=addr;mutateNth=2;mutateCount=0;mutateValue=addr==0x1507||addr==0x150d?1:0;
+        inputSample(b,SWEET_BATT_IRQ_TYPEC);
+        assert(!b.fSnapshot.ccCoherent && !b.fSnapshot.ccFromEvent);
+    }
+    mutateAtAddr=0;regs[0x1310]=16;regs[0x1506]=4;regs[0x1509]=0x20;regs[0x150b]=0x29;regs[0x1507]=regs[0x150d]=0;
+    failures={0x1307,0x1308,0x1362};inputSample(b,SWEET_BATT_IRQ_TYPEC);
+    assert(sb_input_capability(b.fSnapshot,timeNs).kind==SB_INPUT_CC);
+    failures.clear();b.fIrqPending=SWEET_BATT_IRQ_TYPEC;
+    inputSample(b,SWEET_BATT_IRQ_TYPEC);assert(!b.fSnapshot.ccFromEvent && !b.fSnapshot.apsdFromSource);
+    b.fIrqPending=0;
+    inputSample(b,SWEET_BATT_IRQ_TYPEC);b.publishRuntime();
+    assert(b.registry["SweetBatteryCCEvidenceFresh"] && b.registry["SweetBatteryCCAdvertisedMA"]==1500);
+    assert(b.registry["SweetBatteryObservedInputKind"]==SB_INPUT_CC);
+    b.fIrqPending=SWEET_BATT_IRQ_TYPEC;b.runRuntimePolicy();b.publishRuntime();
+    assert(!b.fSnapshot.ccFromEvent && !b.registry["SweetBatteryCCEvidenceFresh"]);
+    assert(b.registry["SweetBatteryObservedInputKind"]==SB_INPUT_NONE);
+    // Pending input revokes command submission; an explicit disable still works.
+    unsigned actual=0;auto commands=writes.size();
+    assert(SweetBattery::runtimeUpdate(&b,SWEET_CHARGER_ENABLE,1,timeNs+1000,&actual)==SWEET_SPMI_NOT_READY);
+    assert(writes.size()==commands);
+    assert(!SweetBattery::runtimeUpdate(&b,SWEET_CHARGER_ENABLE,0,0,&actual));
+    b.fIrqPending=0;
     b.fSnapshot.inputEpoch=UINT64_MAX-1;inputSample(b);assert(b.fSnapshot.inputEpoch==UINT64_MAX);
     inputSample(b);assert(!sb_input_fresh(b.fSnapshot,timeNs) && !b.fSnapshot.inputStartedNs);
     // Largest sample id and timestamp must retain the complete time record.

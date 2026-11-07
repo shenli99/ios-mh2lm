@@ -2,6 +2,43 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0160 CC/Rp输入判断已本地完成，待用户push及新云产物。**
+
+用户要求“把cc判断也加进来”。新增补丁0160接0159：typed纯策略解码Rp default/
+1.5A/3A、方向和12类拒绝原因；CC来源/session/3秒期限独立于APSD enable/DONE/
+result。初始读只诊断，plugin/Type-C可建立依据；source仅保留同状态已有依据，
+重复通知不延长旧时间。中高Rp正常sink可产生CC输入依据，不再强求DCP/CDP；
+default仍需BC/USB，已知QC暂拒绝。APSD读错不阻断完整CC。policy选择实际依据
+期限，ICL仍不超过provider/能力/500mA试验上限；inputVerified仍未设置，不启充。
+
+新增SID2/PID15 bit0/2/3/4/5/6路由（rid/cc/vconn/vbus/attach/legacy），边沿取
+本机DTS1/1/3/1/1/3，共用事件0x40。沿用GIC513→mux IOService/workloop→registry
+client→battery workloop，按键/USB/触摸实现不改。新增APID不硬编码，必须通过
+唯一EE0 IRQ ownership及原enable检查；实机权限/交付待验证，不能以host映射271
+当事实。attach失败仍显式报错/回滚/按group隔离，不退回轮询。重SPMI只在consumer
+loop用原typed采样后端，未增写权限。VBUS与全CC字段前后核对，变化/读错撤销。
+输入IRQ采样中或采样后排队撤销旧依据，控制提交前也拒绝pending的非disable操作。
+
+新增INFO日志CC/CC TIME/INPUT CAP及IORegistry诊断属性；保留原APSD/TYPEC原始
+日志与等级。0120a8 Rp3A/misc39会明确reasons80 VBUS_ERROR，仍不认可输入；
+不把Rp当PD合同，不声称Type-C角色管理/DPDM/PD完整provider已实现。
+
+本地：严格apply到实际0120a8云源码，与verify33文件一致；102个源码gate通过，
+旧0120a8被新kernel marker打包gate拒绝。SweetBattery/SweetPmicPower/
+SweetSpmiInterruptMux ARM64单文件交叉编译通过；runtime ASAN/UBSAN、mux/IRQ/
+registry生命周期/6条Type-C路由边沿及邻位保持/按键并行、ADC consumer、charger
+transport、日志分级、board startup回归通过。CI只追加源码gate，编译命令没改。
+底稿scratch/battery-cc，说明docs/BATTERY-TYPEC-CC.md。无新boot/设备结果、未push。
+
+NEXT：告诉用户push本地0160提交。下载新kernel/buildtree后核对并用原
+--battery-evidence打包runtime1/IRQ4/ADCconv0，保留三键/触摸/USB IRQ和USB日志。
+一次boot电脑→拔线→当前充电器→拔线→电脑；记A-to-C/C-to-C及电源标签，持久
+日志足够，不要求baseline。观察Type-C attach/hit、CC reasons、Rp与APSD独立结果。
+若mux路由权限/配置失败按日志定位，不盲改owner或恢复轮询。ADC第二EOC超时、
+完整input/identity/parallel/watchdog授权与真实启充仍是后续，0160未修改ADC。
+
+### Previous 0120a8 log handoff (superseded)
+
 **CURRENT: 0120a8实机日志已分析：APSD使能/source事件正常；ADC5请求196超时。**
 
 日志sweetlog-0120a8-battery-evidence.bin，SHA256

@@ -1,0 +1,163 @@
+# Type-C CC/Rp 输入判断（0160）
+
+2026-11-07。补丁 `0160-mh2lm-typec-cc-input.patch` 接在0159之后。用户要求把
+CC判断加入现有电池输入逻辑；本轮完成事件接入、独立分类、撤销及诊断，仍用
+`--battery-evidence` 的 runtime1 观察镜像，尚无本轮设备结果。
+
+## 为什么不能只等DCP/CDP
+
+工作区 `docs/charging-logic.md` 第3.1节已区分BC1.2/APSD、Type-C CC和PD。
+Android `smb5-lib.c:update_sw_icl_max` 的次序是：PD接管时退出；QC2/3交给独立
+处理；有效Type-C中/高Rp使用Rp能力；其余走BC1.2分支。C口不等于已建立PD，
+CC电流广播也不要求APSD先识别为DCP。之前XNU只把CC作为DCP/CDP的附加条件，
+范围过窄。
+
+参考均为工作区 `ref/android_kernel_lge_sm8150/`：
+
+- `drivers/power/supply/qcom/smb5-reg.h:TYPE_C_SNK_STATUS_REG/TYPE_C_MISC_STATUS_REG`。
+- `drivers/power/supply/qcom/smb5-lib.c:smblib_get_prop_ufp_mode/smblib_get_prop_typec_mode/update_sw_icl_max`。
+- `arch/arm64/boot/dts/qcom/pm8150b.dtsi:qcom,typec@1500`。
+
+## 调用链与IRQ
+
+```text
+PM8150B SID2/PID15 状态事件
+  → 已有GIC INTID513 callback
+  → SweetSpmiInterruptMux IOService/workloop 的路由表
+  → SweetSpmiMuxClient 通知，仅排队
+  → SweetBattery workloop
+  → sweet_pmic_power_read_snapshot（typed内部采样接口）
+  → sb_cc_status / sb_note_cc / sb_input_capability
+  → 策略、IORegistry诊断属性及日志
+```
+
+不新增GIC注册、全局mux桥接或MMIO采样；重SPMI工作仍在电池workloop。
+SPMI操作继续走现有串行化transport。按键、DWC3和触摸IRQ路径不改。
+
+六条路由共用 `SWEET_BATT_IRQ_TYPEC=0x40` 通知位，具体命中由mux路由日志区分。
+边沿来自本机Android DTS，不根据名称猜极性：
+
+| PID15 bit | 路由 | 边沿 |
+| --- | --- | --- |
+| 0 | battery-typec-rid | 上升 |
+| 2 | battery-typec-cc | 上升 |
+| 3 | battery-typec-vconn | 双边沿 |
+| 4 | battery-typec-vbus | 上升 |
+| 5 | battery-typec-attach | 上升 |
+| 6 | battery-typec-legacy | 双边沿 |
+
+仅runtime请求时订阅这些路由。沿用mux的唯一EE0 IRQ-owned APID检查、已使能位
+拒绝接管、按位回滚、按group隔离和detach同步；不能解析/配置时明确报失败，
+不静默退回轮询。本轮没有预先硬编码Type-C的APID，也没有实机验证其IRQ写权限。
+host测试中的APID271是模拟映射，**不是实机结论**。
+
+## 采样与判断
+
+复用已允许的只读状态：`0x1310` USBIN；`0x1506` Rp；`0x1507` debug accessory；
+`0x1509` attach；`0x150b` misc；`0x150d` legacy。不扩大寄存器写权限。
+同一有界采集前后对比VBUS和全部CC状态，变化/读取错误撤销valid，不能拿旧raw
+当新证据。APSD状态和使能也保留前后核对。无sleep、重采循环或补偿轮询；一致
+字节仅是软件检查，不能证明硬件原子快照，不能排除ABA或合并期间漏掉物理插拔。
+
+`sb_cc_status()` 返回明确的Rp、广播电流、方向和拒绝原因：
+
+| Rp原始掩码值（1506 & 0x7f） | rp枚举 | advertised-ma |
+| --- | --- | --- |
+| 0x08 | 1：default | 0，默认档不能直接授予500mA |
+| 0x04 | 2：1.5A | 1500 |
+| 0x02 | 3：3A | 3000 |
+| 其余/组合/short | 0：unknown | 0 |
+
+正常sink须VBUS存在、attach与CC附着、debounce完成、非source角色，且没有water、
+VBUS error、VCONN OC、debug/legacy标记。misc bit1为方向，不按故障拒绝。
+现阶段legacy仍拒绝，未声称实现Android的完整legacy/FLOAT策略。
+
+`reasons`位表（可组合）：
+
+| 值 | 含义 |
+| --- | --- |
+| 0x001 | 读取不完整 |
+| 0x002 | 前后读取不一致 |
+| 0x004 | USBIN或Type-C VBUS缺失 |
+| 0x008 | attach/CC附着未成立 |
+| 0x010 | debounce未完成 |
+| 0x020 | 本机为source角色 |
+| 0x040 | water状态 |
+| 0x080 | VBUS error |
+| 0x100 | VCONN OC |
+| 0x200 | debug accessory |
+| 0x400 | legacy/noncompliant |
+| 0x800 | Rp未知/short/组合值 |
+
+0120a8的`1506=02/misc=39/debug=0/legacy=4`会显示`advertised-ma=3000`，同时
+`reasons=0x80`、qualified0、kind0，明确说明“看见广播，但错误状态阻止认可”。
+不能把这条日志写成充电器已授权3A或已建立PD合同。
+
+## 来源、期限与仲裁
+
+CC依据独立于APSD enable/DONE/result：
+
+- 初始读只诊断。plugin或Type-C事件可以建立稳定普通sink的CC观测依据。
+- source事件只能保留同会话、同状态的已有CC依据，不能建立改变后的CC依据。
+  相同状态的重复plugin/Type-C事件也不延长原始CC采集时间。
+- 沿用观测USB session，另存CC session和开始/结束时间，3秒后不再满足策略。
+  monitor不读输入、不延长CC或APSD期限。这里不是已完成的持久输入能力provider。
+- 拔线、角色/能力变化、读取错误、不一致、未知VBUS或session饱和撤销旧依据。
+  采样中/采样后有新输入IRQ排队时撤销；每次非disable控制命令提交前也检查
+  pending输入IRQ。之后由排队的workloop action取得新状态，不隐藏重试。
+
+`sb_input_capability()` 当前输出：
+
+| kind | 依据 | 当前max-ma的含义 |
+| --- | --- | --- |
+| 0 | 无可认可依据/错误/过期/QC | 0 |
+| 1 | source限定的DCP/CDP完成结果 + 正常sink | 500，现有BC试验上限 |
+| 2 | 事件限定且有效的CC中/高Rp | 1500/3000，广播值 |
+
+CC路径不要求APSD成功，APSD寄存器读错也不阻断其他完整CC证据。default Rp仍需
+BC/USB依据；FLOAT本身不授予电流，有有效CC中/高Rp时可采用CC。已识别QC2/3
+暂拒绝，不伪装为普通5V输入。尚无PD协商/合同provider，不实现高电压授权。
+
+策略采用上述typed结果，执行deadline选择实际采用的CC或APSD时间；ICL仍取
+provider上限、观测能力和原500mA试验上限的最小值。**本轮不设置inputVerified，
+不绕过VBUS测量、电池身份、并联隔离、watchdog和温控互锁，也不启充。**
+ADC请求196第二EOC超时是独立待办，0160没有修改ADC实现。
+
+## 日志与属性
+
+每次输入事件增加INFO短行，保持含等级和换行在255字节内：
+
+```text
+SWEET BATT CC: v1 id=... events=... coherent=... reasons=... rp=... advertised-ma=... orientation=... qualified=...
+SWEET BATT CC TIME: v1 id=... session=... started-ns=... completed-ns=...
+SWEET BATT INPUT CAP: v1 id=... kind=... max-ma=...; observed-only not-PD
+```
+
+`qualified`只指CC观测有效，不是电池充电许可。原始字节仍在同id的TYPEC行，
+APSD来源日志保留。错误沿用ERROR无条件输出，INFO可按既有等级过滤。
+
+IORegistry增加`SweetBatteryCCRejectReasons/CCRp/CCAdvertisedMA/CCEvidenceFresh`及
+`SweetBatteryObservedInputKind/ObservedInputMaxMA`。前缀均为SweetBattery。
+属性发布时重新计算时效，过期/停止不保留有效kind；不借此设置UI充电标志。
+
+## 本地验证与下一次设备验证
+
+0160严格apply到0120a8实际云源码后，与verify的33文件逐字节一致；102个CI源码
+marker通过，旧0120a8缺新CC marker会被拒绝。CI仅增加源码gate，编译命令不变；
+打包器原`--battery-evidence`增加CC/路由kernel marker检查。
+
+SweetBattery、SweetPmicPower、SweetSpmiInterruptMux的ARM64单文件交叉编译通过。
+host ASAN/UBSAN覆盖CC独立于APSD、Rp/方向/错误解码、初始化与来源、过期/撤销、
+读中CC/VBUS变化、pending命令拒绝、registry撤销及既有控制互锁。mux真实源码
+测试覆盖六条路由、合并通知、detach/rollback/group隔离、按键并行和生命周期
+竞态；ADC consumer、charger transport、日志分级和board startup回归通过。
+这些检查不能替代macOS云链接、Type-C真实IRQ权限/交付或实际电源协商。
+
+用户自行push，云产物下载后再核对并打包；本轮无新boot/设备结果。下一次同一
+runtime1镜像做电脑→拔线→当前充电器→拔线→电脑即可，记录A-to-C或C-to-C及
+充电器型号/输出标识。导出持久日志即可，保留按键/触摸/USB IRQ和USB日志。
+重点看Type-C路由attach/hit、CC拒绝原因及CC与APSD各自结果，不重复baseline。
+若IRQ ownership或配置失败，保留该错误分析，不盲改owner或恢复轮询。
+
+底稿工作区`scratch/battery-cc/`：base/edited/verify、cloud-apply、严格应用/源码
+gate报告、测试记录及交叉编译输出。原始设备日志不入git。

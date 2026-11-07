@@ -684,10 +684,14 @@ int main(int argc,char **argv) {
         endProvider();assertNoLeaks();
     } else if (!std::strcmp(mode,"battery-runtime-events")) {
         assert(startMux()==0);sweet_keys_init();pump();
+        // Unregistered VPD/try bits must survive Type-C attach and detach.
+        pmic[(0x215<<8)|0x11]=pmic[(0x215<<8)|0x12]=pmic[(0x215<<8)|0x13]=0x82;
         SweetBattery b;b.fIrqMode=4;b.fRuntimeRequested=b.fRuntimeMode=2;startBattery(b);pump();
         assert(b.fIrqAttached && backendRunning);
         assert(testInstance->bindings[1].events==SWEET_BATT_IRQ_ALL);
         assert(testInstance->routes[7].active && testInstance->routes[8].active);
+        assert(pmic[(0x215<<8)|0x11]==0xff && pmic[(0x215<<8)|0x12]==0xff);
+        assert(pmic[(0x215<<8)|0x13]==0xca && pmic[(0x215<<8)|0x15]==0x7d);
         auto samples=b.fIrqSamples;inject(269,0x40);pump();
         assert(b.fIrqSamples==samples+1 && !b.fController.fault && backendRunning);
         assert(b.fRuntimeInputEvents==SWEET_BATT_IRQ_SOURCE);
@@ -699,8 +703,17 @@ int main(int argc,char **argv) {
         assert(b.fRuntimeInputEvents==SWEET_BATT_IRQ_USB);
         inject(269,0x50);pump();
         assert(b.fRuntimeInputEvents==(SWEET_BATT_IRQ_USB|SWEET_BATT_IRQ_SOURCE));
+        for(unsigned bit:{0u,2u,3u,4u,5u,6u}){
+            auto before=b.fIrqSamples;inject(271,1u<<bit);pump();
+            assert(b.fIrqSamples==before+1 && b.fRuntimeInputEvents==SWEET_BATT_IRQ_TYPEC);
+            assert(backendRunning && !b.fIrqFailed);
+        }
+        inject(271,0x74);inject(269,0x50);pump();
+        assert(b.fRuntimeInputEvents==(SWEET_BATT_IRQ_TYPEC|SWEET_BATT_IRQ_USB|SWEET_BATT_IRQ_SOURCE));
         cleanupBattery(b);
         assert(!testInstance->routes[7].active && !testInstance->routes[8].active);
+        assert((pmic[(0x215<<8)|0x15]&0x7d)==0);
+        assert(pmic[(0x215<<8)|0x11]==0x82 && pmic[(0x215<<8)|0x12]==0x82 && pmic[(0x215<<8)|0x13]==0x82);
         endProvider();while(!platform.children.empty())platform.children.back()->terminate(2);
         assertNoLeaks();
     } else if (!std::strcmp(mode,"hardware") || !std::strcmp(mode,"timeout") || !std::strncmp(mode,"board-",6)) {

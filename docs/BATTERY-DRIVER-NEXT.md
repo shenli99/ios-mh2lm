@@ -1,5 +1,9 @@
 # 0119之后的电池驱动推进
 
+0160已加入独立CC/Rp判断及Type-C IRQ路由，本地验证完成、待云编译/实机。
+见[CC输入判断与测试](BATTERY-TYPEC-CC.md)。这不等于已建立PD或真实启充；
+Type-C/DPDM完整provider与ADC超时仍未完成。
+
 0120a8实机已确认APSD检测开启（1362=18）且3次source-change完成事件工作，
 plugin先读未完成，随后source给出FLOAT/SDP；无DCP/CDP，10次普通sink校验未过。
 新问题是USBIN ADC请求196在ground后缺第二EOC处理，超时后测量撤销；并非本轮

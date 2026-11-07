@@ -256,7 +256,7 @@ static void hwWrite(uintptr_t b,unsigned off,uint32_t value) {
     (void)core;
 }
 static void initialize() {
-    ppids={{248,0x008},{261,0x0c5},{266,0x210},{269,0x213},{300,0x240}};
+    ppids={{248,0x008},{261,0x0c5},{266,0x210},{269,0x213},{271,0x215},{300,0x240}};
     mmio[SWEET_DEV_SPMI_CORE_PA]=0x50000000;
     mmio[SWEET_DEV_SPMI_CORE_PA+4]=512;
     for (auto e:ppids) {
