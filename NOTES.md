@@ -2,6 +2,41 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a16身份档未通过：第三请求USBIN RESULT VERIFY-12；ACK及时，无本档超时。下一实现先细分校验原因/核对LG数据语义，不追加本批硬件测试。**
+
+实现357b26f/0167，上一打包文档8ea64b0。本轮只读日志/源码/参考及写文档，未改驱动/
+CI，未push/操作设备/重打包。日志sweetlog-0120a16-battery-identity.bin，SHA256
+cf1d0c93ea6ca932c73a499f558e63dcb27f1355572ea108f9a53a657aa7f3ba。
+v1/4MiB，有效672132/flush67/8466行，无回卷/NUL；692电池采样/699.666秒。
+ADC只有3请求/2成功/5EOC，约启动53.744秒已停，仅覆盖首ADC起1.2555秒，不能用
+长日志宣布持续ADC或混合IRQ负载通过。首BATID888775µV/94786Ω/profile1/2800/4430，
+USBIN2 raw1/1024µV（近零，不是有效VBUS）；请求3 GND MORE后RESULT-12/count1，
+restore-error/cleanup0，provider停止、身份/token/限值撤销，无后续采样或正permit。
+
+失败时uptime：trigger53.729172604/done53.729846458；GIC53.730575364，scan
+53.730618072，ACK53.730633854，notify53.730637343，callback53.730650833，
+advance lock53.730652031；deadline53.829172395。GIC→notify61.979µs，ACKwait
+0.312µs/hold12.188µs；callback早98.522ms，advance锁等待0.104µs。本档没有-101/
+TIMEOUT；全部5ACK wait0.260～731.094µs/hold12.188～31.615µs，不能扩大成修复验收。
+恢复前snapshot saved1，53.733314427～53.739926770锁内6.612ms，error0/raw
+01 00 08 80 00 00 01 01 00 73。status/channel是后续重读，data lo/hi未记录；-12
+复用status/channel/raw校验，具体失败项未知，不能擅自断言raw>=0x8000。
+
+LG参考具体差异：qcom-spmi-adc5.c的adc_read_voltage_data只拒绝==0x8000；
+qcom-vadc-common.c的hw_calib_volt将>VADC5_MAX_CODE归零，我们>=0x8000停provider。
+差异已找到，但没有本次被拒raw，不能当已证实根因。NEXT：typed ADC后端保存
+已读status/channel/lo/hi及明确错误阶段，核对无效码/零输入语义，再做针对性实现/
+验证。不能直接放宽数据有效性或给充电放行。保留IRQ/deadline/owner/poison/撤销。
+不追加旧identity/watchdog/组合/baseline；新修复完整验证后再通知push。
+
+19IRQ healthy89.934～103.635ms，FG tuple41match1/13/4027；三键power3/down2/up1
+对，touch438/empty0，无panic/mux失败/warning；ACM configured0，不推断USB故障。
+19CONFIG enable0，无CONTROL/WD命令；主插拔事件在ADC停止后。长期许可/外部SMB1355
+隔离/最终managed授权仍未完成。完整文档BATTERY-DEPENDENCY-TESTS末节，路线入口
+已同步；底稿scratch/artifact-0120a16的analyze-log/audit-identity及JSON，断言通过。
+
+### Previous 0120a16 artifact handoff (superseded next action)
+
 **CURRENT: 0120a16云产物核对通过，同核五档boot已打包回读，待用户测identity1。**
 
 实现357b26f/0167。真实buildtree的33个相关源码文件与scratch/spmi-ack-arbitration/

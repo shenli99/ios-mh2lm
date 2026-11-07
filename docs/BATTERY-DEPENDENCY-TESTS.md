@@ -1,5 +1,17 @@
 # 电池身份、并联禁止与 watchdog 分步测试（0165）
 
+**0120a16身份档实测：未通过，阻塞点为USBIN RESULT校验失败-12。**
+只有3请求/2成功/5EOC，约53.744秒终止；失败这次GIC→notify61.979µs，ACK等锁
+0.312µs/持锁12.188µs，callback距deadline仍98.522ms，属于及时交付后的校验错误。
+快照status1/channel8均正常，但未保存原校验值和data lo/hi，不能断言具体是哪项。
+实测ADC仅覆盖约1.255秒，不能用整档约700秒日志宣布旧超时/长期ADC已修复。
+LG拒绝恰好0x8000，其他越界电压码按零处理；本实现拒绝所有raw>=0x8000，存在
+具体语义差异，尚无被拒原始码证实因果。下一实现保留已读校验值/失败阶段并核对
+零电压语义；本批不再重刷identity/watchdog/组合，无新驱动需push，继续禁充。
+[完整时间线、已证实与未证实项](BATTERY-DEPENDENCY-TESTS.md#0120a16身份档实测及时交付后发生校验失败)。
+以下旧待测/待编译动作均为历史，以本段为准。
+
+
 **当前0120a16：真实云源码/内核核对通过，同核五档boot已打包并回读，待测identity1。**
 实现357b26f/0167，相关33源码与本地验证树逐字节一致，原106源码gate、新仲裁/
 ACK计时及snapshot v2标记通过；五档均runtime1、不主动启充，三键/USB/触摸IRQ
@@ -721,3 +733,84 @@ MUX ACK wait/hold及scan/ack/notify；不把hold当作纯硬件耗时，不把v2
 本地底稿`scratch/artifact-0120a16/`：verify-artifacts.py/source-compare.json/
 verification.json、packaging.txt、verify-boots.py/boot-verification.json及最终TOML，
 均不入git。下载归档、实际源码和boot产物不入git。
+
+## 0120a16身份档实测：及时交付后发生校验失败
+
+2026-11-07，日志`sweetlog-0120a16-battery-identity.bin`，SHA256
+`cf1d0c93ea6ca932c73a499f558e63dcb27f1355572ea108f9a53a657aa7f3ba`。
+SWEETLOG v1/4MiB，有效672132字节，flush67/8466行，无回卷/NUL。实现357b26f/0167，
+依赖mode1/runtime1，新仲裁启动和ACK计时标记可见。692连续电池样本、699.666秒，
+但ADC在启动约53.744秒已停止，不能把剩余电池遥测当成ADC连续转换测试。
+
+### 结果与时间线
+
+- 请求1 BAT_ID：raw0x3583/888775µV，7.757ms，restored/valid1；建立profile1、
+  94786Ω、板级2800mA/4430mV，身份token1。
+- 请求2 USBIN：两个EOC正常，raw1/1024µV，51.396ms，restored/valid1且被接收。
+  这个近零电压结果不是可用VBUS证据，不代表充电输入建立。
+- 请求3 USBIN：GROUND EOC进入RESULT/count1，第二EOC在deadline前到达；advance
+  返回`SWEET_SPMI_VERIFY=-12`，phase5/count1，恢复和abort cleanup均0。provider
+  停止并撤销身份/token/限值，无后续转换。没有TIMEOUT/-101。
+
+失败请求的uptime（秒）：
+
+| 事件 | 时间 |
+| --- | --- |
+| 第二阶段trigger进入/命令完成 | 53.729172604 / 53.729846458 |
+| 第二EOC GIC / mux scan | 53.730575364 / 53.730618072 |
+| ACK / notify | 53.730633854 / 53.730637343 |
+| consumer callback / advance取锁 | 53.730650833 / 53.730652031 |
+| 恢复前快照开始 / 首次取锁 / 完成 | 53.733312916 / 53.733314427 / 53.739926770 |
+| fault打印时刻 / 原deadline | 53.743635000 / 53.829172395 |
+
+本次GIC→notify61.979µs，scan→ACK15.782µs；ACK wait0.312µs、hold12.188µs；
+notify→callback13.490µs，advance取锁0.104µs，callback距截止98.522ms。即使
+加上诊断与恢复，fault仍早于deadline85.537ms。明确属于及时交付后的校验失败，
+不属于0120a15那次deadline前pending、ACK却延迟13ms的同一种可见错误。
+
+本档全部5次EOC ACK的wait为0.260～731.094µs，hold12.188～31.615µs，
+GIC→notify61.979～800.312µs，scan→ACK15.782～748.125µs。样本少，且非ADC
+电池路由的主要插拔事件都发生在ADC停止后；不能据此宣称混合负载下的mux长期
+时延已经验收。
+
+### 校验原因的证据边界与LG差异
+
+`-12`对应后端同一错误码，可能来自当时的status低两位、channel回读、或结果
+raw范围校验。恢复错误已排除（restore-error0），SPMI读取错误有不同返回码。
+本次快照saved1/before-restore1、10字段error0：
+`01 00 08 80 00 00 01 01 00 73`，依次为status/sequence/channel/enable/request/
+RT/type/IRQ enable/latched/cal。快照重读时status=EOC、channel=USBIN；latched0
+与ACK已经清除相容。它不包含0x3150/51，也没有保存首次校验时的status/channel，
+不能用之后的正常值倒推具体是哪条校验失败。
+
+saved1现场仍属于协议锁内保存，耗6.612ms；发生在验证失败之后，不能当成这次
+失败之前的ACK延迟。0167拆分的是独立public观察，这条原子恢复路径按设计保留。
+
+本地LG参考发现具体差异：
+
+- `android_kernel_lge_sm8150/drivers/iio/adc/qcom-spmi-adc5.c:254`的
+  `adc_read_voltage_data()`仅拒绝`data == ADC_USR_DATA_CHECK (0x8000)`。
+- 同目录`qcom-vadc-common.c:716`的`qcom_vadc_scale_hw_calib_volt()`对
+  `adc_code > VADC5_MAX_CODE`归零，再进行电压换算。
+- 我们的`sweet_spmi_adc5_advance()`使用
+  `raw >= 0x8000`即终止整个provider。语义确实更严格，但本次未记录被拒raw，
+  因而尚不能断言这就是实机根因，也不能直接取消有效性检查来放行充电。
+
+下一实现应在typed ADC后端保存**已经读出的**status/channel/lo/hi与精确失败阶段，
+避免诊断新增寄存器读改变现场；对照LG区分无效标记、零输入/越界、真正传输故障。
+保留IRQ-only、原deadline、owner/poison、错误恢复及许可撤销，不靠自动重试或延长
+超时掩盖。本批不再要求watchdog4/组合7/重测身份，因为ADC已在早期停止，无法
+验收持续输入许可或混合ADC负载。当前仅分析/记录，无新驱动需push。
+
+### 其他回归与充电边界
+
+19条IRQ refresh均healthy，发布耗89.934～103.635ms（完整电池采样仍存在）。
+41次FG profile tuple均match1/integrity0x13/nominal4027，不代表ADC仍有效。
+电源键3对、音量下2对、音量上1对；touch438/empty0，无panic/mux整体失败或warning。
+ACM configured0，本档没有枚举成功证据，也不能据此认定USB日志路径故障。
+19条CONFIG均main-enable0，无CONTROL、正输入permit或watchdog命令；后段观察到
+CC/源分类，但ADC已失效，长期有效许可/真实充电仍未验收。
+
+底稿`scratch/artifact-0120a16/`：battery-identity-persistent.txt、analyze-log.py/
+log-analysis.json、audit-identity.py/identity-verification.json；全部断言通过，日志与
+底稿不入git。
