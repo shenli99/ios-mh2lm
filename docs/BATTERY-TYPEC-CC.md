@@ -1,7 +1,7 @@
 # Type-C CC/Rp 输入判断（0160）
 
 **当前：0120a9实测在Type-C IRQ配置读取处失败，未完成CC运行验收。** 0161已本地
-修正IRQ读取接口和失败发布，待新云编译/实机；实测与修复见文末。
+修正IRQ读取接口和失败发布；0120a10云产物已核对并打包，待实机。详见文末。
 
 2026-11-07。补丁 `0160-mh2lm-typec-cc-input.patch` 接在0159之后。用户要求把
 CC判断加入现有电池输入逻辑；本轮完成事件接入、独立分类、撤销及诊断，仍用
@@ -251,3 +251,22 @@ runtime1流程；用户push后下载新产物再打包，本轮无新boot或修�
 松线/插稳/拔线是否有plugin/Type-C事件和UI发布。真实充电/PD仍未完成。
 分析底稿`scratch/artifact-0120a9/log-analysis.json`；修复/验证底稿
 `scratch/battery-cc-irq-fix/`。
+
+## 0120a10：0161云产物与测试boot
+
+实现提交`1f953e2`。实际buildtree的33文件与0161 verify逐字节匹配，106个源码
+gate通过；kernel manifest及固定IRQ读取/故障撤销/CC/既有IRQ与ACM标记匹配。
+kernel SHA256：`a1db9878a0d2f1e10574975bd6c7c62645670c900b1f78d861658cad1de13fa4`。
+
+镜像：`/home/shenli/work1/out-bs/boot-16k-0120a10-battery-evidence.img`，
+35,667,968字节，SHA256：
+`55e35f48f094ad85e9c33355dc2283166eadb52fae737c0db1daeb7caf99eb41`。
+仍为runtime1/IRQ4/ADCconv0，保留三键/触摸/USB IRQ及USB日志，不启充。
+最终boot header v1的firmware/ramdisk切片与输入一致，回读FAT中kernel/ADT/
+TOML匹配，参数无重复。底稿`scratch/artifact-0120a10/`。
+
+用户自行fastboot。电脑启动桌面约30秒→拔10秒→当前充电器约30秒→拔10秒→
+电脑约10秒，观察图标插拔变化及三键/触摸，记录线材和电源型号；持久日志
+`sweetlog-0120a10-battery-evidence.bin`即可。先看consumer attach成功，再验
+Type-C/plugin/CC/APSD/UI事件。没有修复版设备结果，本轮不能称已完成实机修复。
+未改驱动/CI、未push/操作设备，也没有用户提供的CI run ID或构建日志。
