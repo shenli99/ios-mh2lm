@@ -1,5 +1,12 @@
 # SweetBattery 的 ADC5 测量接入（0156）
 
+**0120a13-watchdog档补充：** ADC51首EOC已接受（MORE/phase3/count1），随后
+RESULT第二阶段timer超时，mux稍后记录第二个adc5-eoc hit（两次同属irq/work104）。
+无第二次成功EOC回调，restore/cleanup0、provider停止/测量撤销正确。文本hit
+打印晚于routeNotify，缺精确时间戳，不能由行序直接推出硬件完成晚或某个锁的
+等待时长。三档故障证据已汇总，优先补typed ADC/mux时序及一次性故障快照。
+[watchdog实测](BATTERY-DEPENDENCY-TESTS.md#0120a13-watchdog实测bark维护与有限停止通过)；最后组合7只验证并存/撤销，仍不启充。
+
 **0120a13副路禁止档新增故障证据：** ADC68的EOC已被mux投递并进入consumer，
 advance返回-101/phase5/count0，restore/cleanup均0；没有timer TIMEOUT记录。
 因此已有“收到EOC但处理过期”的案例，不能一概按未发硬件中断处理。附近电池

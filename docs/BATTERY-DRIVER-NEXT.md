@@ -1,5 +1,14 @@
 # 0119之后的电池驱动推进
 
+**0120a13-watchdog档更新：** bark路由APID272，配置62/f3读回保持；窗口内8次
+自然bark各完成pet，加初始化共9次。180秒结束后第9次bark未再pet，有限停止
+通过；主路始终禁充。ADC51完成首EOC后等待第二EOC超时，随后mux才记录第二
+hit；缺精确阶段/锁时间戳，根因仍未定。长期输入许可未覆盖。
+下一项现成deps-all7仅检查三项并存/故障撤销：桌面后尽快拔5秒→稳定接至少
+60秒→拔5秒，导出 `sweetlog-0120a13-battery-deps-all.bin`。180秒从驱动准备起算。
+之后优先修ADC时序，再补长期许可/外部I²C隔离/最终watchdog授权，全部不启充。
+[watchdog实测](BATTERY-DEPENDENCY-TESTS.md#0120a13-watchdog实测bark维护与有限停止通过)。下方分档等段落保留为历史，下一动作以本段为准。
+
 **0120a13副路禁止档更新：** 主PMIC输出禁止通过：独立新遥测和后续20笔
 SMB08/select02读回保持，21笔主路enable0，180秒窗口正常终止；外部SMB1355
 隔离仍未验证。ADC68又过期，但这次mux已投递EOC，consumer处理返回-101/count0，

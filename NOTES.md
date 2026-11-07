@@ -2,6 +2,53 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a13 watchdog4自然bark维护/新配置/有限停止通过；ADC51第二阶段超时。下一项deps-all7仅测并存/撤销，之后优先修ADC时序。**
+
+上一文档727c15d，实现8d6435b，打包ba5143e；本轮只读日志/实际云源码与更新
+文档，未改驱动/CI、未push/操作设备或重新打包。日志
+logs/sweetlog-0120a13-battery-watchdog.bin，SHA256
+47eca1cdc7c6ab4dd8b1730afe585b08e2734bb56609cb42fc3e0081ce2987f3。
+SWEETLOG v1/4MiB/有效441261/flush20/5750行，无回卷/NUL；246笔采样、229.202秒
+（26irq含初始化/arm-sync、220保护）。完整证据/边界见
+ docs/BATTERY-DEPENDENCY-TESTS.md末节；NEXT/实施计划/ADC5-CONSUMER/INPUT-SESSION同步。
+
+deps4/runtime1、battery mask1ff，bark APID272/acc0/status0；新遥测main-enable0/
+WD62(maskc2=42)/timef3，16笔CONFIG均enable0、写后均62/f3/error0，无CONTROL。
+9自然bark hit/9 events100 healthy刷新，前8次一一对应pet2..9/pulse-completed1/
+main-enable0/rt0/error0；初始化算入共9pet。rt0为mux ACK后采样，非未发生bark。
+采样完成uptime72.442/88.818/141.232/160.229/176.606/192.984/209.362/225.739秒；
+稳定段约16.377～16.378秒，另含跨拔插52.414秒及18.997秒间隔，不能说每笔16秒。
+180秒窗口约236.531秒正常终止pets9/disable-error0；其后第9bark id231约242.116秒
+仍IRQ采样、无第10pet。无DEPENDENCIES FAILED/配置丢失，诊断正常/有限停止通过，
+非带电bite禁充/深睡恢复/最终managed-watchdog授权全通过。
+
+ADC51请求/50成功（3BATID/47USBIN），98consumer EOC/99mux EOC hit；50全部
+valid/restored/接受，无epoch丢弃，总耗时7.478～48.287ms。51先有首EOC MORE/
+phase3/count1，后RESULT phase3 timer超时，之后mux才记录第二hit（两次irq/work104），
+随后FAILURE error-101、restore/cleanup0，停provider并撤销测量，无第二成功EOC。
+这里hit打印在routeNotify之后，行序不是精确硬件/投递时间；缺trigger/GIC/mux
+scan+notify/consumer入口/锁前后时间戳，不能认定硬件慢或锁根因。三档故障汇总：
+identity238未见首EOC、inhibit68收到首EOC但advance过期、watchdog51第二阶段超时/
+稍后hit。后续先补typed ADC/mux边界有界取证，保留IRQ-only/失败撤销，不用轮询/
+自动重试/简单延长deadline掩盖。ADC失败后watchdog仍自然维护，符合独立诊断。
+
+CC id110/112/113保留原来源时间戳，但在ADC失败后，无新VBUS/正permit，长期
+许可/有效许可内撤销未验收。24 IRQ refresh全healthy，89.839～115.977ms；三键
+配对down/up、touch177/empty0、ACM configured2，无panic或mux失败/隔离；UV5/
+OV未命中，3条USB EP0/EP5 warning保留旧枚举问题。底稿scratch/artifact-0120a13：
+battery-watchdog-persistent.txt、analyze-watchdog.py、watchdog-log-analysis.json、
+audit-watchdog.py、watchdog-verification.json。
+
+NEXT：用户fastboot boot
+/home/shenli/work1/out-bs/boot-16k-0120a13-battery-deps-all.img。
+桌面后尽快拔5秒→接同一稳定电源至少60秒→拔5秒；确认三键/触摸，导出
+sweetlog-0120a13-battery-deps-all.bin（持久日志即可）。诊断从驱动准备起180秒，
+不要在桌面等几分钟。最后组合只增加身份/SMB08/bark pet并存与ADC故障后撤销
+覆盖，不能叫完整验收。无需新编译/baseline、不启充。之后优先修ADC时序及补
+长期输入许可；外部SMB1355 I²C隔离、最终managed-watchdog/保护验收仍待完成。
+
+### Previous 0120a13 inhibit log handoff (superseded next action)
+
 **CURRENT: 0120a13 inhibit2主PMIC输出禁止通过；ADC68收到EOC但处理过期，根因仍待定位。下一项独立watchdog4。**
 
 上一文档3f08ae2，实现8d6435b，打包ba5143e。本轮只读日志/实际云源码和更新

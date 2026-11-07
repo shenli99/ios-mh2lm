@@ -2,8 +2,8 @@
 
 2026-11-07。用户要求在0164来源保留修复的同一次云编译中推进后三项依赖，
 用参数分开或组合测试。0120a13身份建立/刷新及ADC故障后撤销、主PMIC副路输出
-禁止均已有实测；ADC分别在身份档238与禁止档68故障，长期输入许可未覆盖。
-下一项独立watchdog4；外部隔离与组合验收仍待完成。
+禁止、watchdog自然bark维护与有限停止已有分档实测。三档均遇ADC故障，长期
+输入许可未覆盖。下一项组合7仅检查并存/故障撤销；外部隔离/最终授权仍未成立。
 **全部档位只允许runtime1；没有主动启充。** 身份可建立板级限值，主PMIC副路
 禁止与watchdog的配置/IRQ链可独立取证；外部SMB1355隔离和managed-watchdog
 最终授权仍未成立。不能将“已有实现”写成“三项实机验收完成”。
@@ -294,3 +294,65 @@ maskc2=42的新遥测、至少两次自然bark与pet；初次pet/窗口结束不
 底稿 `scratch/artifact-0120a13/`：battery-inhibit-persistent.txt、analyze-inhibit.py、
 inhibit-log-analysis.json、audit-inhibit.py、inhibit-verification.json。本轮只读分析和
 文档更新，未改驱动/CI、未push/操作设备或重新打包。
+
+## 0120a13-watchdog实测：bark维护与有限停止通过
+
+日志 `logs/sweetlog-0120a13-battery-watchdog.bin`，SHA256
+`47eca1cdc7c6ab4dd8b1730afe585b08e2734bb56609cb42fc3e0081ce2987f3`。
+SWEETLOG v1/4MiB/有效441261字节/flush20/5750行，无回卷/NUL；246笔连续电池
+采样、约229.202秒（26 IRQ含初始化/arm-sync、220保护timer）。
+
+**本档诊断目标通过：watchdog配置、新遥测、自然bark驱动pet及有限停止。**
+不等于正式managed-watchdog授权、带电充电下bite禁充或系统深睡恢复全部通过。
+
+- deps4/runtime1，battery mask1ff；bark路由实际APID272/acc0/status0，IRQ健康。
+- 初次pet后，新遥测确认main-enable0、WD1651=62（maskc2=42）、1653=f3。
+  16笔CONFIG均enable0，写后均保持62/f3且error0；无CONTROL/主动启充。
+- 9次自然bark route hit/9次events100 healthy刷新；前8次各有且仅有一笔
+  `bark IRQ pet=2..9`、pulse-completed1、main-enable0、rt0/error0。
+  加初次pet总9次；rt0是mux已ACK之后的快照，不能要求它仍保留原latch位。
+- 对应采样完成时间为uptime72.442/88.818/141.232/160.229/176.606/192.984/
+  209.362/225.739秒。连续稳定段间隔约16.377～16.378秒；全序列还含一次
+  52.414秒跨拔插间隔、一次18.997秒间隔，不能声称每笔均16秒或精确pet时刻。
+- 180秒窗口在uptime236.531秒附近正常终止，pets9/disable-error0。其后第9次
+  bark（id231/uptime242.116秒附近）仍由IRQ采样并发布，但无第10次pet。
+  证明正常有限停止后不再维护；没有DEPENDENCIES FAILED或配置丢失。
+
+ADC仍阻断输入许可。本档51请求中50成功（3 BAT_ID/47 USBIN）、98条consumer
+EOC；成功结果全部valid1/restored1且接受，无epoch丢弃，总耗时7.478～48.287ms。
+USBIN4586144～4853968µV。请求51/channel2第一EOC返回MORE/phase3/count1，
+表示已触发第二转换；随后timer在RESULT/phase3超时。日志顺序为：
+
+```text
+mux adc5-eoc route-hits98 → EOC51 MORE/phase3/count1
+→ TIMEOUT51 phase3 → mux adc5-eoc route-hits99 → FAILURE51 error-101
+```
+
+restore-error0/cleanup0，provider停机并撤销测量，没有第二次EOC51成功回调。
+第二次mux hit与首次同属irq/work104，说明同一drain内ADC和多条Type-C/USBIN
+路由交错，定时器先报告超时，之后才看到第二个hit日志。routeNotify发生在hit
+打印之前，日志没有各层时间戳，不能拿文本行顺序当成精确硬件IRQ/投递时刻，
+也不能直接断言转换硬件没完成或认定某个锁是根因。三档已覆盖首EOC没见到、
+收到首EOC但advance过期、第二阶段超时而稍后记录mux hit；后续ADC时序/一次性
+故障快照应覆盖trigger、GIC、mux scan/notify、consumer入口和锁前后，不用
+轮询/自动重试/单纯延长deadline替代修复。watchdog在ADC失败后仍自然bark/pet，
+与诊断档独立于测量许可的设计相符；这不授予缺测量时启充的权限。
+
+CC id110/112/113保持原来源时间戳，但在ADC失败后，无新VBUS/正permit，
+长期输入许可和有效许可内拔线撤销仍未验收。24次IRQ refresh全healthy，
+route→publish89.839～115.977ms；三键down/up配对、触摸hits177/empty0、ACM
+configured2，无panic/共享mux失败或隔离；UV5、OV未命中，3条USB EP0/EP5
+warning保留旧枚举问题。runtime1未真实启充，其他保护/故障路径不能据此升级。
+
+NEXT：最后一个同内核组合诊断 `boot-16k-0120a13-battery-deps-all.img`（deps7）。
+桌面后尽快拔5秒→接同一稳定电源至少60秒→拔5秒，确认三键/触摸，导出
+`sweetlog-0120a13-battery-deps-all.bin`。同样从驱动准备起只有180秒，不要先在
+桌面等待几分钟。核对身份、SMB08和bark pet并存；若ADC失败，检查身份/限值/
+测量撤销且主路保持enable0，不能把组合诊断叫完整验收。该测试增加三项组合
+覆盖，不是重复baseline；之后优先修ADC时序、补长期许可，再闭合外部SMB1355
+I²C隔离、最终managed-watchdog授权与故障保护。全部不启充，无需新编译。
+
+底稿 `scratch/artifact-0120a13/`：battery-watchdog-persistent.txt、analyze-watchdog.py、
+watchdog-log-analysis.json、audit-watchdog.py、watchdog-verification.json；逐笔连接
+route hit→pet→healthy refresh，确认窗口后的bark没有pet。只读分析/文档更新，
+未改驱动/CI、未push/操作设备或重新打包。

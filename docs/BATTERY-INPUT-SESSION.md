@@ -1,5 +1,10 @@
 # 输入会话与 VBUS 许可（0163～0164）
 
+**0120a13-watchdog档补充：** id110/112/113重复source后保留原CC时间戳，但
+ADC51已先在第二阶段超时，依然无新VBUS/正permit。长期许可与有效许可内撤销
+未验收，不能把bark诊断通过代替输入许可通过。最后组合7仅检查并存/故障撤销，
+随后优先修ADC时序，见[watchdog实测](BATTERY-DEPENDENCY-TESTS.md#0120a13-watchdog实测bark维护与有限停止通过)。
+
 **0120a13副路禁止档补充：** id127/128/130/131的CC来源在重复source后保持，
 但ADC68已先故障，仍无新VBUS/正permit，长期许可与有效许可内撤销尚未验收。
 这次EOC确实由mux投递，consumer以deadline过期拒绝，根因待阶段/锁时间戳取证。
