@@ -2,6 +2,66 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0163输入会话与同epoch VBUS许可已本地完成，提交7b7da93；待用户push。**
+
+基于实际0120a11的33文件源码，新增0163-mh2lm-input-session-permits.patch。
+SweetBattery自己的workloop持有纯SweetBattInputSession；只在输入采集时建立/
+重验CC/APSD来源。SweetBattInputPermit组合该来源与精确输入inputEpoch的ADC
+VBUS：4.5～5.5V、采样开始严格小于3秒、不能早于输入采集完成。原3秒CC/APSD
+诊断保留，长期会话不再靠反复读取续来源时间。中/高Rp优先，APSD未完成/FLOAT
+可与CC并存；正式许可需APSD元数据完整一致以排除QC，default/SDP/FLOAT单独
+不授予许可。仍无PD/QC/DPDM完整协议，不将Rp3A当PD合同或实际取电3A。
+
+ADC client update改为外部uint64 inputEpoch，copyFreshInput核对请求/结果/当前
+输入epoch以及原token/通道/内部generation/时效/服务存活；旧转换不能重新贴
+新epoch标签。USBIN从采样开始满1秒安排下一笔，给3秒许可留余量，迟调度/故障
+仍到期撤销；BATID周期未改。新增ADC INPUT v1 token/epoch日志，原sample格式
+保留。这是电压保护转换，不是定时读取输入状态或轮询EOC。
+
+mux表追加USBIN UV bit2/OV bit3双边沿（LG pm8150b DTS），18路、battery mask ff，
+runtime才订阅。仍从元数据发现owner/APID，不硬编码269，不接管已使能位；
+沿用按组回滚/隔离。新增client.hasPendingEvents只读fence，覆盖mux已排入client
+但尚未送达battery回调的队列及provider消失；再结合battery fIrqPending。策略/
+每个非禁充语义命令都阻断pending/失效ADC/过期permit，安全禁充仍可执行。
+策略撤销时不篡改snapshot来源时间，采样期间撞到新事件则拒绝本笔来源。
+修正撤销后批准ICL=0误触永久HW fault的问题：撤销先禁充，不用无效上界与旧
+设置比较；独立硬件故障检查保留。恢复边沿不能伪造CC/APSD来源；丢来源后等
+下一次合格plugin/Type-C/source，不自动rerun/retry。
+
+SweetBattLimits改为typed input许可；batteryVerified/parallelVerified和电池限值
+仍缺，verifiedNs仅为限值时效，其失败归SB_R_LIMITS。watchdog仍按原只接受已
+证明关闭的状态检查，未改配置；本轮无真实启充，不把input.valid等同全依赖完成。
+GIC→mux IOService→registry client→consumer loop边界保留；无新全局桥接、重
+matched回调、高层寄存器写、轮询fallback，按键/DWC3/触摸/显示代码未改。
+
+本地验证：33文件严格apply并逐字节一致，原106个源码gate通过；四个ARM64
+SweetBattery/Adc5Client/SpmiMuxClient/SpmiInterruptMux编译通过（头文件/格式/
+严格诊断和路由聚合初始化warnings，非macOS全核链接）。ASAN/UBSAN runtime8、
+mux66、transport122、日志1条PASS，ADC consumer19场景+100通知/终止竞态。
+含>3秒稳定会话、新VBUS/旧来源、外部epoch/陈旧转换、两段pending、命令前ADC
+失效、源角色/QC/UV/OV/拔线、撤销非虚假HW故障、缺身份/parallel无控制写等。
+底稿scratch/battery-input-session/{base,edited,verify}/xnu及final-validation.json、
+integration.json、compile/test输出。patch SHA256
+0a7cc0526b28fc27bb6bb66e977430b95d02715a08c45fe7793eec1a5b00b3ec。
+
+CircleCI和GitHub XNU配置逐字节未改；新增marker只放本地打包器，旧0120a11/
+0162内核已被battery-evidence拒绝。未push/操作设备、无新boot/实机结果或CI
+run ID。文档BATTERY-INPUT-SESSION、NEXT、实施计划、CC/ADC/接口/当前架构已
+更新，详细LG来源、保护边界和测试流程见docs/BATTERY-INPUT-SESSION.md。
+
+NEXT：用户push当前main并云编译。新产物下载后核对0163源码/33文件/内核marker，
+原--battery-evidence打包runtime1/IRQ4/ADCconv0，保留三键/USB/触摸IRQ和USB日志。
+不重测baseline/dry档：电脑桌面约15秒→拔5秒→0120a11同一电源稳定45～60秒→
+拔5秒→电源接1～2秒再拔→稳定接15秒再拔；检查输入许可在3秒诊断过期后随新
+VBUS继续、原source时间不续、旧token/epoch不复用、拔线撤销；短接没有建立
+许可则不能算有效许可内撤销通过。导出持久日志即可，USB重复枚举旧bug保留。
+两条新保护路由owner/enable/自然交付尚未实机验证，UV/OV无命中不能当验收，
+不要求制造过压。原enable0时charging仍预期0；输入通过后继续身份/parallel/
+watchdog闭环，ADC旧第二EOC超时取证仍未解决。尚无完整OV debounce/UV storm/
+AICL/collapse-VASHDN恢复或系统深睡恢复，不能将本轮当完整充电验收。
+
+### Previous 0120a11 log-analysis handoff (superseded)
+
 **CURRENT: 0120a11日志分析完成；0162 sink CC分类与正常拔线撤销已实机通过。**
 
 日志sweetlog-0120a11-battery-evidence.bin，SHA256
