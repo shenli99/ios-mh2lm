@@ -1,5 +1,14 @@
 # 电池身份、并联禁止与 watchdog 分步测试（0165）
 
+**0120a15身份档已分析：** 5次身份转换正常；第6请求（首笔USBIN）RESULT超时。
+恢复前读到转换完成/EOC锁存，第二mux scan晚于deadline78.134ms、notify晚109.106ms；
+首EOC回调仅23.178µs、advance锁等待0.312µs，timer是真到期。已定位到存在分发
+延迟，尚未证明硬件在deadline前完成，精确阻塞来源仍待核对。身份/限值撤销正确，
+无有效VBUS或正许可。下一项同核watchdog4：桌面尽快拔5秒→接稳定电源≥60秒→拔5秒，
+导出`sweetlog-0120a15-battery-watchdog.bin`。无新push/编译、不主动启充；不重测身份/
+baseline/inhibit，暂不要求组合。[实测时间线与边界](BATTERY-DEPENDENCY-TESTS.md#0120a15身份档实测捕获result完成后的分发延迟)。
+下方待identity等步骤按历史保留，以本段为当前动作。
+
 **0120a15云产物已核对并打包，待实机：** 0166真实源码33文件与验证树一致，
 原106源码检查、kernel manifest/新诊断marker和五档最终boot回读通过。先测
 `boot-16k-0120a15-battery-identity.img`：进桌面尽快拔5秒→同一稳定电源约5分钟→
@@ -465,3 +474,76 @@ ramdisk/FAT回验kernel、ADT、TOML及外层firmware blob。五份均为boot he
 verification.json、packaging.txt、verify-boots.py、boot-verification.json；脚本/
 产物均未提交。CI配置与驱动本轮未改，未push/操作设备；本轮只核对、打包与更新
 交接文档。时序字段含义和判读边界见[BATTERY-IRQ-TIMING](BATTERY-IRQ-TIMING.md)。
+
+
+## 0120a15身份档实测：捕获RESULT完成后的分发延迟
+
+日志`logs/sweetlog-0120a15-battery-identity.bin`，SHA256
+`38000bb01b639453f18bea952490912bae5524d5c3a4dcfa68bbe25577651df9`。
+SWEETLOG v1/4MiB、有效579259字节/flush54、7268行，无回卷/NUL。runtime1/deps1、
+新TIMING标记存在；565连续采样跨569.517秒（20irq含初始化，545保护）。本轮只
+分析日志/实际云源码和写文档，未改驱动/CI、未push/操作设备/重打包。
+
+5次BAT_ID转换、恢复和consumer接受成功，888516～889035uV、94786/95057Ω，
+profile1/2800mA/4430mV；35笔FG tuple均match1/integrity13/nominal4027。
+第6请求是本档第一笔USBIN，首EOC成功进入RESULT（phase3/count1），随后-101。
+restore/cleanup0，provider停止，身份token/profile/限值归零；未静默重试。
+只有5个有效结果、无有效USBIN、无正permit/CONTROL；18笔CONFIG全部enable0，
+未运行watchdog命令。该档未主动启充，长期输入许可/有效许可内撤销仍未覆盖。
+
+### 可核对的故障时间线
+
+以下是uptime秒，非日志打印顺序。第一/第二ADC hit均irq10/work10，属于同一次
+父GIC屏蔽期间的drain。该父GIC入口481.888655468早于本次REF_GND启动，不是ADC
+专属硬件完成时间；不能把GIC→scan差值直接当ADC自身中断延迟。
+
+| 阶段 | uptime秒 | 结论 |
+| --- | --- | --- |
+| 第一EOC scan / notify | 481.996196093 / 482.002533697 | GROUND EOC已由mux处理 |
+| consumer回调 / advance锁定 | 482.002556875 / 482.002561770 | notify到回调23.178µs；本次advance锁等待0.312µs |
+| RESULT trigger进入 / 总线完成 | 482.003925364 / 482.004609791 | trigger事务0.684ms，命令成功不等于转换完成 |
+| RESULT deadline | 482.103924635 | 原100ms阶段期限，没有延长 |
+| timer执行 | 482.105213854 | 晚于当前期限1.289ms，是真到期，不是提前timer误报 |
+| 故障观察锁定 / 完成 | 482.105971250 / 482.112758802 | 锁等待0.629ms、固定读6.788ms；尚未abort恢复 |
+| 第二EOC scan | 482.182058281 | 晚于deadline78.134ms，距trigger命令完成177.448ms |
+| 第二EOC ACK / notify | 482.213029843 / 482.213030156 | scan→ACK30.972ms；notify晚于deadline109.106ms |
+
+故障现场`before-restore=1,saved=0`，十字段均error0：
+`status1=01/status2=00/channel08/enable80/request00/RT00/type01/EN_SET01/latched01/cal73`。
+即恢复前观察到转换完成状态、正确USBIN通道、EOC锁存且IRQ仍使能；RT为0不能否定
+已经锁存的事件。观察先于第二scan至少69.299ms（以整个快照完成为界），所以
+**存在“EOC已锁存而mux还没处理”的软件延迟证据**。但快照始于deadline之后，
+每字段也非硬件原子读取；尚不能证明硬件在deadline之前就完成，更不能把所有
+过去缺首EOC/advance过期案例统一定为同因。
+
+### 源码关联与修复方向的边界
+
+真实mux按路由表顺序，每路ACK后立即排consumer软件事件；第一/第二EOC之间
+又处理USBIN/UV/多条Type-C路由。对应电池样本157/158/159分别耗98.536/94.587/
+100.053ms，其中profile采集约30.661/30.640/30.899ms；其SPMI事务与同一drain重叠。
+电池的完整input/FG/profile采样在自己的loop，**不是mux同步调用电池重采样**；
+两个loop竞争共享SPMI事务，另有调度及逐条日志开销。scan→ACK包含锁等待、总线
+事务和被抢占时间，现有记录不能把30.972ms全部归因于某一把锁。
+
+下一实现调查和回归重点：急需处理的ADC/watchdog事件与普通路由的公平分发、
+避免逐路notify引发重复重采样、重遥测与IRQ ACK之间的SPMI仲裁/调度。
+优先扫描/有界批次/延后或合并通知是候选设计，**本轮未实现，尚不能保证单改
+路由顺序就足够**。必须保留既有owner/ACK语义、按键不饥饿、group隔离/stop清理，
+用实际代码模型复现竞争再验证；不能直接去锁、跨loop读寄存器、重试或扩大期限。
+
+18次IRQ刷新均healthy，route-to-publish90.115～113.613ms；三键配对5/3/4次，
+touch207/empty1（保留该计数，不称零空中断），ACM配置成功1次，无panic/mux失败。
+后段有EP0/EP5各1条warning，保留已知USB枚举问题，不能据一次配置声称所有插拔
+稳定。UI外接电源有亮灭、charging始终0，符合本档未主动启充边界。
+
+**下一项：同内核watchdog4取证，无需push/新编译。** 用户fastboot boot
+`/home/shenli/work1/out-bs/boot-16k-0120a15-battery-watchdog.img`。
+桌面后尽快拔5秒→接同一稳定电源至少60秒→拔5秒，简单确认三键/触摸，导出
+`sweetlog-0120a15-battery-watchdog.bin`，持久日志即可。180秒诊断从驱动准备起算，
+不要先在桌面等几分钟。重点联查WD COMMAND/START、首bark的GIC/scan/ACK/notify、
+pet及终止快照；ADC失败仍保留分析。当前不重测identity/baseline/inhibit，也暂
+不要求组合7。新证据用于一次后续编译合并修复，全部仍不主动启充。
+
+底稿`scratch/artifact-0120a15/`：battery-identity-persistent.txt、analyze-log.py、
+log-analysis.json、audit-identity.py、identity-verification.json；断言覆盖逐字段/
+请求结果/期限/晚到hit/身份撤销/无正许可与无启充，底稿和原日志不入git。

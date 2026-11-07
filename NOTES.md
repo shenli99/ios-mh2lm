@@ -2,6 +2,49 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a15 identity1已分析：首笔USBIN RESULT超时，抓到EOC锁存后的分发延迟；下一项同核watchdog4。**
+
+实现9f49c1d/0166，上一产物文档f97811f。本轮只读日志/真实云源码、更新文档，
+未改驱动/CI、未push/操作设备/重打包，未开始新修复实现。日志
+logs/sweetlog-0120a15-battery-identity.bin，SHA256
+38000bb01b639453f18bea952490912bae5524d5c3a4dcfa68bbe25577651df9。
+v1/4MiB/有效579259/flush54/7268行，无回卷/NUL；565采样、569.517秒。
+5个有效BAT_ID（888516～889035uV，94786/95057Ω/profile1/2800mA/4430mV），
+35FG tuple均match1/13/4027。6是首USBIN，首EOC MORE/phase3/count1后-101，
+restore/cleanup0，provider停止并撤销身份/token/限值；无有效VBUS/正permit/
+CONTROL，18CONFIG全enable0，无WD命令。长期许可/外部隔离/最终授权仍未验收。
+
+关键uptime：RESULT trigger done482.004609791，deadline482.103924635；
+timer482.105213854（真到期，+1.289ms）；恢复前snapshot锁定482.105971250、
+完成482.112758802，十字段error0：01/00/08/80/00/00/01/01/01/73（status/EOC
+latched证明已完成，不接受为测量）。第二scan482.182058281、notify482.213030156，
+较deadline晚78.134/109.106ms，仍irq10/work10。首notify→callback23.178µs、
+advance锁等待0.312µs；snapshot锁等待0.629ms；第二scan→ACK30.972ms。
+父GIC早于ground trigger，不能当ADC完成时刻；快照发生deadline后，也不证明
+硬件deadline前已完成。已证明锁存后未及时处理，精确阻塞/历史案例同因仍未定。
+
+同drain普通USB/Type-C路由穿插，电池自己的loop样本157/158/159耗98.536/
+94.587/100.053ms，其中profile各约30.6ms；与mux共享SPMI事务重叠。
+notify仅排事件，无同步重采样。调查方向是急/普通事件公平分发、逐路notify/
+重复重采样和SPMI仲裁/调度；优先扫描/有界batch是候选，未实现、不能先承诺
+可根治，不能把ACK30ms全部当锁等待。保留owner/ACK/按键公平/group隔离和期限，
+先代码模型验证，禁轮询/自动重试/直接穿透/扩大期限掩盖。
+18IRQ healthy（90.115～113.613ms），三键配对5/3/4次；touch207/empty1，ACM
+配置1次，无panic/mux失败。2条EP0/EP5 warning保留已知USB问题。完整时间线见
+BATTERY-DEPENDENCY-TESTS末节；NEXT/计划/ADC/IRQ/TIMING入口已同步。
+底稿scratch/artifact-0120a15：persistent、analyze-log.py/log-analysis.json、
+audit-identity.py/identity-verification.json；原日志/底稿不入git。
+
+NEXT：用户fastboot boot
+/home/shenli/work1/out-bs/boot-16k-0120a15-battery-watchdog.img。
+桌面后尽快拔5秒→同一稳定电源≥60秒→拔5秒，简单确认三键/触摸，导出
+sweetlog-0120a15-battery-watchdog.bin（持久日志即可）。180秒从驱动准备起算，
+不要桌面先空等。核对WD COMMAND/START/首bark GIC/scan/ACK/notify与pet/终止
+快照，再决定后续实现合批；当前不重测identity/baseline/inhibit、不要求组合7。
+无需新push/云编译，仍不主动启充。若用户要求先修ADC，再按上述证据实现。
+
+### Previous 0120a15 artifact handoff (superseded next action)
+
 **CURRENT: 0120a15实际云源码/内核核对通过，同核五档boot已打包回读；待用户测identity1。**
 
 实现提交9f49c1d（0166），上一文档4dd3dbb。真实buildtree的33个相关源码文件与

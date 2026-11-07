@@ -1,5 +1,14 @@
 # MH2LM 电池驱动实现计划
 
+**0120a15身份档已分析：** 5次身份转换正常；第6请求（首笔USBIN）RESULT超时。
+恢复前读到转换完成/EOC锁存，第二mux scan晚于deadline78.134ms、notify晚109.106ms；
+首EOC回调仅23.178µs、advance锁等待0.312µs，timer是真到期。已定位到存在分发
+延迟，尚未证明硬件在deadline前完成，精确阻塞来源仍待核对。身份/限值撤销正确，
+无有效VBUS或正许可。下一项同核watchdog4：桌面尽快拔5秒→接稳定电源≥60秒→拔5秒，
+导出`sweetlog-0120a15-battery-watchdog.bin`。无新push/编译、不主动启充；不重测身份/
+baseline/inhibit，暂不要求组合。[实测时间线与边界](BATTERY-DEPENDENCY-TESTS.md#0120a15身份档实测捕获result完成后的分发延迟)。
+下方待identity等步骤按历史保留，以本段为当前动作。
+
 **0120a15云产物已核对并打包，待实机：** 0166真实源码33文件与验证树一致，
 原106源码检查、kernel manifest/新诊断marker和五档最终boot回读通过。先测
 `boot-16k-0120a15-battery-identity.img`：进桌面尽快拔5秒→同一稳定电源约5分钟→
