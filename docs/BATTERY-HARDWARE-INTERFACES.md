@@ -1,6 +1,8 @@
 # 电池硬件接口与 ADC5 预检（0154）
 
-**0163当前补充（0120a12云产物已核对，待实机）：** 输入会话与typed短许可在电池loop
+**0163～0164当前补充：** 0120a12实测确认ADC同epoch检查及UV交付正常，重复
+source IRQ误删来源导致长期许可失败；0164已本地修复，待push/新云产物复测。
+输入会话与typed短许可在电池loop
 内部管理，来源是已有CC/APSD事件和经registry ADC client核对的同inputEpoch
 VBUS。策略不再读取inputVerified/inputMa/vbusMv散字段。mux新增USBIN UV/OV
 路由；跨服务发现和SPMI/语义后端边界保持，未闭合身份/parallel/watchdog，不启充。

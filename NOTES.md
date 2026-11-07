@@ -2,6 +2,61 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a12日志已分析；0164修复重复source排队误删CC来源，已本地验证，待用户push。**
+
+日志logs/sweetlog-0120a12-battery-evidence.bin，SHA256
+d0be98dae2a0f39f7733053f95ecb4259d638f6f5d8df9224bcc691401a9c5c4。SWEETLOG v1/
+4MiB/有效959950/flush49/12437行，无回卷/NUL。底稿scratch/artifact-0120a12/
+battery-evidence-persistent.txt、analyze-log.py、log-analysis.json、audit-permits.py、
+permit-verification.json。约519.191秒、546连续采样（47irq含初始/arm-sync，499保护），
+45运行期IRQ刷新全healthy，route→publish89.106～119.658ms。UV/OV都attach APID269、
+battery mask ff；UV14、USBIN14、source7，Type-C rid27/cc15/vbus14/attach12/legacy6，
+MSOC1。OV、CHGR/VCONN/READY无自然命中，不能冒充完整保护验收。id435/520 UV-only
+事件可发布断线，但不是稳定带电欠压验收。
+
+ADC434请求/434有效且恢复结果/851 EOC，17BATID/417USBIN，424接受、10因epoch变更
+正确丢弃(error0)；BATID888581～889749uV、USBIN4548784～5107264uV。总耗时7.503438～
+205.157344ms，不代替阶段deadline；旧第二EOC超时未复现但未修。47profile全match1/
+integrity13/4027mAh；18次UI发布updateStatus完成，59%/charging0，无屏幕视觉描述。
+
+关键失败：仅id217/429/450取得kind2/max3000的正permit，session6/11/16、epoch11/23/37、
+token170/342/349、VBUS5082/5083/5081mV。随后id219/431/452首个source采样tuple保持一致，
+CC年龄仅1.350070/1.356721/1.339414秒、coherent1/reasons0，但采样中又排进source，
+0163清除ccFromEvent/apsdFromSource，sb_input_observe再清会话。下笔220/432/453只有
+source/FLOAT，不能重建CC；原CC时间清零。最终epoch仍有163/2/66笔新电压也不恢复。
+长期许可未通过；后续拔线前许可早已撤销，不能算有效许可内拔线撤销通过。
+
+0164仅修改SweetBattery::sampleRuntime：保留一致来源历史，以原client与battery两段
+pending检查暂停许可。下次真实输入采集递增epoch、得到同epoch新VBUS后才恢复；
+真实断线/读错/角色或Rp变化/QC/UV/OV仍由sb_note_input及来源匹配撤销。新增INFO
+INPUT QUEUE v1诊断。没有放宽时效/来源、轮询fallback、自动rerun或新控制写，架构
+仍GIC→mux IOService→registry client→consumer loop；按键/USB/触摸/ADC实现未改。
+
+本地scratch/battery-input-queue：实际0120a12的33文件base，0164严格apply并与edited/
+verify逐字节一致，原106 gate通过。新回归在旧代码稳定失败，新代码ASAN/UBSAN
+runtime9及mux66 PASS，SweetBattery ARM64单文件编译通过（有warnings，非全核链接）。
+涵盖采样/保护tick撞重复source、两段pending阻断命令、新epoch新电压、>3秒来源不续、
+七类真实故障撤销及缺依赖无控制写。未重跑未改动的transport/ADC client测试。底稿
+0163-reproduction.txt、battery-runtime-tests.txt、battery-irq-tests.txt、SweetBattery.compile.txt、
+integration.json、final-validation.json。patch SHA256
+1e4345596ab1f458cb9bc28d2aa16cdb7c2ed894b7e7128078ef7105d1faa697。
+
+45 CONFIG全enable0，无CONTROL/allow/owned；身份限值、parallel隔离/watchdog仍阻断，
+watchdog raw62/time8c。无ERROR/panic/mux隔离；power/音量加有down/up，音量减无本轮
+证据，触摸39/empty1。两次ACM configured，后段EP0 warning/reset保留重复枚举旧bug。
+本地打包器新增0164 marker，实际旧0120a12内核已拒绝。CircleCI和GitHub XNU配置未改；
+未push/操作设备，无新boot/CI run ID/0164实机结果。文档INPUT-SESSION/NEXT/实施计划/
+CC/ADC/硬件接口/当前架构已更新，完整证据以BATTERY-INPUT-SESSION.md末节为准。
+
+NEXT：用户push当前main，下载新云产物后核对0164源码/marker，原--battery-evidence
+打包单镜像runtime1/IRQ4/ADCconv0，保留USB日志和三键/USB/触摸IRQ。不重测0120a12/
+baseline/dry或ADC正常bring-up：电脑桌面15秒→拔5秒→原电源稳定45～60秒→拔5秒→
+原电源接1～2秒再拔→稳定接15秒再拔；确认三键/触摸，导出持久日志。验证重复source
+后来源保留、队列清空并取得新epoch电压后恢复、>3秒来源不续、有效许可期间拔线撤销。
+短接无许可不能冒充撤销覆盖。仍不启充，输入通过后再闭合身份/parallel/watchdog。
+
+### Previous 0120a12 packaging handoff (superseded)
+
 **CURRENT: 0120a12云产物核对完成，0163输入会话观察boot已打包，待实机日志。**
 
 驱动提交7b7da93、实现交接0ab66ae。实际0120a12 buildtree的33个选定源码文件

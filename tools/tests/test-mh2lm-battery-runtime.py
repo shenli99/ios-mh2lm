@@ -51,6 +51,7 @@ prelude=r'''
 #include <mutex>
 #include <atomic>
 #include <thread>
+#include <functional>
 #include <set>
 #include <string>
 #include <vector>
@@ -143,11 +144,13 @@ static unsigned injectedAt=0,updateCount=0,delayAt=0;
 static std::map<unsigned,unsigned> changed;
 static unsigned readAdvanceNs;
 static unsigned mutateAtAddr,mutateNth,mutateCount,mutateValue;
+static std::function<void(unsigned)> sampleHook;
 
 static uint8_t profilePrefix[24]={0x09,0x00,0xff,0xe3,0xf1,0x07,0x96,0xda,
  0xb3,0xd5,0x00,0x00,0xa1,0xbd,0xa3,0x8a,0xf8,0x87,0x84,0x92,0x9e,0x94,0x23,0x80};
 extern "C" int sweet_spmi_charger_read(unsigned sid,unsigned addr,uint8_t *out){
     timeNs+=readAdvanceNs;
+    if(sampleHook)sampleHook(addr);
     assert(sid==2);reads.push_back(addr);if(failures.count(addr))return -9;
     if(addr==mutateAtAddr && ++mutateCount==mutateNth)regs[addr]=mutateValue;
     *out=regs[addr];return 0;
@@ -615,8 +618,82 @@ static void policyTests(){
     assert(!c.enabled && !c.fault && c.stopConfirmed);
     puts("PASS: policy missing inputs/staleness/thermal hysteresis, dry-run, ordered control, every write failure and expiry");
 }
+static void queuedSourceTests(){
+ const auto savedTime=timeNs;const auto savedRegs=regs;const auto savedFg=fg;
+ auto writeStart=writes.size();
+ regs={{0x41a0,0x3c},{0x41a1,0x7d},{0x41a2,0x60},{0x41a3,0},
+       {0x41a6,0x3c},{0x41a7,0x7d},{0x41a8,0x60},{0x41a9,0},
+       {0x4107,0},{0x1310,16},{0x110b,0x95},{0x1362,0x18},
+       {0x1506,2},{0x1509,0x23},{0x150b,0x3b},{0x150d,4},{0x1307,0},{0x1308,0}};
+ fg={{0,100},{1,4027},{2,0x13},{3,4027}};
+ SweetBattery b;SweetAdc5Client adc;IOTimerEventSource timer;
+ b.fAdcClient=&adc;b.fRuntimeMode=1;b.fMonitor=&timer;
+ unsigned token=1000;
+ auto voltage=[&]{adc.present=true;adc.epoch=b.fSnapshot.inputEpoch;adc.valid[1]=true;
+  auto &v=adc.samples[1];v={};v.sequence=++token;v.microvolts=5090000;
+  v.started_ns=v.completed_ns=timeNs;SweetBattery::adcChanged(&b);};
+ auto ready=[&]{b.connection.pending=0;b.fIrqPending=0;regs[0x1310]=16;
+  regs[0x1506]=2;regs[0x1509]=0x23;regs[0x150b]=0x3b;regs[0x1507]=0;regs[0x150d]=4;
+  regs[0x1307]=0;regs[0x1308]=0;
+  inputSample(b,SWEET_BATT_IRQ_USB|SWEET_BATT_IRQ_TYPEC);voltage();assert(b.fLimits.input.valid);};
+ inputSample(b,0);voltage();assert(!b.fLimits.input.valid); // residue alone never qualifies
+ ready();auto sourceTime=b.fSnapshot.ccStartedNs;
+ timeNs+=1250000000ULL;regs[0x1307]=0x21;regs[0x1308]=0x10;
+ bool delivered=false;
+ sampleHook=[&](unsigned addr){if(!delivered && addr==0x1509){delivered=true;b.connection.pending=SWEET_BATT_IRQ_SOURCE;}};
+ inputSample(b,SWEET_BATT_IRQ_SOURCE);sampleHook=nullptr;assert(delivered);
+ assert(b.fSnapshot.ccFromEvent && b.fSnapshot.apsdFromSource); // failed by 0163
+ assert(b.fSnapshot.ccStartedNs==sourceTime && b.fInputSession.kind==SB_INPUT_CC);
+ b.runRuntimePolicy();assert(!b.fLimits.input.valid);voltage();assert(!b.fLimits.input.valid);
+ unsigned actual=0;auto prior=writes.size();
+ assert(SweetBattery::runtimeUpdate(&b,SWEET_CHARGER_ENABLE,1,timeNs+1000,&actual)==SWEET_SPMI_NOT_READY);
+ assert(writes.size()==prior);
+ // Deliver the second notification, then acquire its replacement input tuple.
+ b.connection.pending=0;b.fIrqPending=SWEET_BATT_IRQ_SOURCE;b.runRuntimePolicy();assert(!b.fLimits.input.valid);
+ b.fIrqPending=0;inputSample(b,SWEET_BATT_IRQ_SOURCE);b.runRuntimePolicy();assert(!b.fLimits.input.valid);
+ assert(b.fSnapshot.ccFromEvent && b.fSnapshot.ccStartedNs==sourceTime);
+ voltage();assert(b.fLimits.input.valid && b.fLimits.input.maxMa==3000);
+ // A queued source notification during a protection tick is equally harmless
+ // to history. It must block use, not rewrite the cached source acquisition.
+ auto epoch=b.fSnapshot.inputEpoch;auto inputTime=b.fSnapshot.inputStartedNs;
+ for(unsigned n=0;n<10;++n){
+  timeNs+=1000000000ULL;
+  b.connection.pending=SWEET_BATT_IRQ_SOURCE;b.sampleRuntime(false);b.runRuntimePolicy();assert(!b.fLimits.input.valid);
+  assert(b.fSnapshot.ccFromEvent && b.fSnapshot.ccStartedNs==sourceTime && b.fSnapshot.inputEpoch==epoch);
+  b.connection.pending=0;inputSample(b,SWEET_BATT_IRQ_SOURCE);++epoch;voltage();
+  assert(b.fLimits.input.valid && b.fSnapshot.ccStartedNs==sourceTime);
+ }
+ timeNs+=10000000000ULL;b.sampleRuntime(false);voltage();
+ assert(!sb_cc_event_fresh(b.fSnapshot,timeNs) && b.fLimits.input.valid && b.fSnapshot.ccStartedNs==sourceTime);
+ assert(b.fSnapshot.inputStartedNs!=inputTime); // source IRQs acquired; ticks alone never do
+ // Repeated source interrupts cannot hide actual invalid readings, a detach,
+ // changed role/Rp/accessory, OV/UV or unsupported QC.
+ for(unsigned fault=0;fault<7;++fault){
+  ready();regs[0x1307]=0x21;regs[0x1308]=0x10;
+  if(fault==0)regs[0x1310]=0x26;
+  if(fault==1)regs[0x1310]=0x14;
+  if(fault==2)regs[0x1310]=0x18;
+  if(fault==3)regs[0x150b]|=0x40;
+  if(fault==4)regs[0x1506]=4; // changed Rp cannot inherit the old CC event
+  if(fault==5){regs[0x1307]=3;regs[0x1308]=0x28;}
+  if(fault==6)failures={0x1507};
+  b.connection.pending=SWEET_BATT_IRQ_SOURCE;inputSample(b,SWEET_BATT_IRQ_SOURCE);voltage();
+  assert(!b.fLimits.input.valid && b.fInputSession.kind==SB_INPUT_NONE);
+  b.connection.pending=0;inputSample(b,SWEET_BATT_IRQ_SOURCE);voltage();assert(!b.fLimits.input.valid);
+  failures.clear();
+ }
+ // Standalone source IRQs, even duplicated, cannot establish initial CC on
+ // a startup snapshot that has never observed plugin/Type-C provenance.
+ b.fSnapshot={};b.fInputSession={};b.fMonitorSamples=0;
+ regs[0x1310]=16;regs[0x1506]=2;regs[0x150b]=0x3b;regs[0x1507]=0;regs[0x150d]=4;
+ inputSample(b,0);inputSample(b,SWEET_BATT_IRQ_SOURCE);voltage();assert(!b.fLimits.input.valid);
+ inputSample(b,SWEET_BATT_IRQ_SOURCE);voltage();assert(!b.fLimits.input.valid);
+ assert(writes.size()==writeStart && !b.fController.owned);
+ timeNs=savedTime;regs=savedRegs;fg=savedFg;
+ puts("PASS: source IRQ queued during actual sampler/protection tick preserves validated history, both queues and new ADC epoch fence use, long-session recovery, real faults still revoke");
+}
 int main(){
-    evidenceTests();apsdEventTests();ccTests();inputSessionTests();policyTests();reads.clear();writes.clear();changed.clear();
+    queuedSourceTests();evidenceTests();apsdEventTests();ccTests();inputSessionTests();policyTests();reads.clear();writes.clear();changed.clear();
     regs={{0x41a0,0xff},{0x41a1,0x7f},{0x41a2,0x60},{0x41a3,0xed},
           {0x41a6,0xff},{0x41a7,0x7f},{0x41a8,0x60},{0x41a9,0xed},
           {0x4009,180},{0x400a,180},{0x4010,2},{0x4107,0},{0x1310,16},{0x1006,3},{0x110b,0x95},{0x1307,1}};
@@ -699,7 +776,8 @@ int main(){
     failures={0x1362};inputSample(b,SWEET_BATT_IRQ_SOURCE);
     assert(!b.fSnapshot.apsdFromSource && !sb_valid(b.fSnapshot,SB_APSD_OPTIONS));
     failures.clear();b.fIrqPending=SWEET_BATT_IRQ_USB;
-    inputSample(b,SWEET_BATT_IRQ_SOURCE);assert(!b.fSnapshot.apsdFromSource);
+    inputSample(b,SWEET_BATT_IRQ_SOURCE);assert(b.fSnapshot.apsdFromSource);
+    b.runRuntimePolicy();assert(!b.fLimits.input.valid);
     b.fIrqPending=0;inputSample(b,SWEET_BATT_IRQ_SOURCE);
     assert(sb_apsd_event_fresh(b.fSnapshot,timeNs));
     assert(logs.find("SWEET BATT APSD EVENT: v1")!=std::string::npos);
@@ -721,7 +799,8 @@ int main(){
     failures={0x1307,0x1308,0x1362};inputSample(b,SWEET_BATT_IRQ_TYPEC);
     assert(sb_input_capability(b.fSnapshot,timeNs).kind==SB_INPUT_CC);
     failures.clear();b.fIrqPending=SWEET_BATT_IRQ_TYPEC;
-    inputSample(b,SWEET_BATT_IRQ_TYPEC);assert(!b.fSnapshot.ccFromEvent && !b.fSnapshot.apsdFromSource);
+    inputSample(b,SWEET_BATT_IRQ_TYPEC);assert(b.fSnapshot.ccFromEvent && !b.fSnapshot.apsdFromSource);
+    b.runRuntimePolicy();assert(!b.fLimits.input.valid);
     b.fIrqPending=0;
     inputSample(b,SWEET_BATT_IRQ_TYPEC);b.publishRuntime();
     assert(b.registry["SweetBatteryCCEvidenceFresh"] && b.registry["SweetBatteryCCAdvertisedMA"]==1500);

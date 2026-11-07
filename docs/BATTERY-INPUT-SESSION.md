@@ -1,8 +1,9 @@
-# 输入会话与 VBUS 许可（0163）
+# 输入会话与 VBUS 许可（0163～0164）
 
-2026-11-07。接在0120a11已验证的0162之后，本地实现与验证完成；0120a12云产物
-现已核对并打包，待实机测试。本轮不启充。0120a11证明了Rp3A分类和正常拔线撤销，尚未证明
-长期输入授权；本补丁把这个缺口接到现有策略接口，不重复ADC正常转换bring-up。
+2026-11-07最新：0120a12实机确认了同epoch ADC与输入许可的短暂建立、UV路由
+交付，但重复source IRQ使来源丢失，长期许可未通过。0164已本地修复并验证，
+待用户push和新云产物；不重复0120a12测试，不启充。完整证据与下一动作见文末
+[0120a12实测与0164修复](#0120a12实测与0164修复)。以下0163设计保留，排队语义已按0164更正。
 
 ## 对象与调用关系
 
@@ -60,8 +61,9 @@ power stopping或service停止立即阻断后续命令；ADC恢复/重绑策略�
 `SweetSpmiMuxClient::hasPendingEvents(mask)`是owner-loop上的只读检查：同时
 覆盖mux已经排入client、尚未进入电池回调的事件，以及provider离线/不可用。
 电池再检查自己的 `fIrqPending`。检查不调用provider gate或SPMI；修补了仅看
-电池pending遗漏第一段队列的窗口。采样期间检测到新输入事件时不使用该笔来源；
-策略阶段暂时撤销permit但不篡改旧snapshot时间，等待队列里的新采集。
+电池pending遗漏第一段队列的窗口。采样期间检测到新输入事件时保留一致的来源
+历史，两段pending检查暂停许可；等待队列中的输入采集及其新epoch的VBUS。
+真实读取变化/错误仍会撤销来源，不能把保留历史当作允许使用旧电压。
 每个非禁充语义命令还在原control锁下核对pending、permit期限、ADC服务与同一
 epoch/token；安全禁充 `ENABLE=0` 仍可在失效/停止时执行。
 
@@ -75,7 +77,8 @@ epoch/token；安全禁充 `ENABLE=0` 仍可在失效/停止时执行。
 runtime才订阅这两路；battery mask从7f扩到ff，固定路由表从16扩到18。
 沿用唯一IRQ-owned APID发现、已使能位拒绝接管、按位配置/ack/恢复及group隔离；
 不硬编码APID269、不越过已有owner检查。路由接入失败会显式撤销电池功能，
-不能静默只用VBUS定时测量代替保护IRQ。实际IRQ归属/使能状态仍待新镜像验证。
+不能静默只用VBUS定时测量代替保护IRQ。0120a12已确认两路attach于APID269、
+battery mask ff及UV自然交付；OV没有自然命中，尚无完整电压保护实机验收。
 UV/OV恢复边沿会采集新输入并撤销旧电压；故障已经清除了来源时，必须由之后的
 合格plugin/Type-C/source事件重新建立，不用恢复边沿伪造来源或自动rerun APSD。
 
@@ -154,3 +157,77 @@ boot header v1，firmware/ramdisk切片与原输入一致，FAT回读kernel/ADT/
 用户fastboot boot此镜像后按上节单镜像步骤测试，导出
 `sweetlog-0120a12-battery-evidence.bin`，持久日志即可。无需baseline或dry；本轮
 不启充，重点是长期许可、精确ADC批次、拔线撤销及新增保护路由接入健康。
+
+## 0120a12实测与0164修复
+
+日志 `sweetlog-0120a12-battery-evidence.bin`，SHA256
+`d0be98dae2a0f39f7733053f95ecb4259d638f6f5d8df9224bcc691401a9c5c4`。
+SWEETLOG v1/4MiB，有效959950字节、flush49、12437行，无回卷/NUL。
+底稿 `scratch/artifact-0120a12/`：解码文本、`analyze-log.py`、`log-analysis.json`、
+`audit-permits.py`、`permit-verification.json`；设备日志不入git。
+
+约519.191秒、546连续样本（47 IRQ含初始/arm-sync，499保护采样）。45次运行期
+IRQ刷新全部healthy，route到publish约89.106～119.658ms。USBIN UV/OV都attach
+APID269，battery mask ff；UV自然命中14次，USBIN14、source7、Type-C rid27/
+cc15/vbus14/attach12/legacy6、MSOC1。OV、CHGR、VCONN/READY无自然交付证据。
+id435/520只有UV事件也能采集并发布断线状态，证明独立路由可用，不能将拔线时
+UV当作稳定带电欠压保护验收，也不要求人为制造过压。
+
+ADC434请求/434有效且恢复成功结果/851 EOC，含BAT_ID17与USBIN417；接受424、
+因输入epoch改变正确丢弃10（error0）。BAT_ID888581～889749µV，USBIN4548784～
+5107264µV；总请求耗时7.503438～205.157344ms。旧第二EOC超时未复现但未修复，
+总时长不能代替每阶段deadline取证。47笔profile都match1/integrity13/4027mAh。
+
+**长期许可失败证据：** 只有以下三笔正许可，均kind2/max3000；ADC token、epoch
+与电压一一相符。随后source事件把已验证CC来源删掉，并非缺Rp或缺VBUS。
+
+| 正许可样本 / session / epoch / token / mV | 两次source样本 / epoch | 首次source时原CC年龄 | 最后epoch后续新电压结果 |
+| --- | --- | --- | --- |
+| 217 / 6 / 11 / 170 / 5082 | 219、220 / 12、13 | 1.350070秒 | 163笔，仍未恢复 |
+| 429 / 11 / 23 / 342 / 5083 | 431、432 / 24、25 | 1.356721秒 | 2笔，仍未恢复 |
+| 450 / 16 / 37 / 349 / 5081 | 452、453 / 38、39 | 1.339414秒 | 66笔，仍未恢复 |
+
+首笔source时原CC tuple仍为USB10/sink02/attached23/misc3b/debug0/legacy4，
+coherent1/reasons0且原CC时间仍在，但qualified0、APSD source0。下一笔source
+返回APSD21/result10（FLOAT），CC时间已清零。三次拔线id384/435/520都发生于
+许可已经撤销之后，不能算有效许可内拔线撤销通过，更不能算>3秒长期许可通过。
+
+### 根因和修正边界
+
+0163的 `SweetBattery::sampleRuntime()` 在采样期间遇到排队输入事件时直接清除
+`next.ccFromEvent/apsdFromSource`，之后 `sb_input_observe()` 又清除持久会话。
+source IRQ在约100ms采集期间重复进入mux client队列，就会误删一致的CC来源；
+下次只有source原因的采集不能重新建立plugin/Type-C来源。保护tick也有同样窗口。
+这是前次pending清理过度的实现错误。
+
+0164只改SweetBattery这个环节：保留一致来源，由现有client队列与battery队列
+两段pending检查暂停许可；下一次IRQ必须重新采集输入、递增epoch并取得同epoch
+新VBUS才能恢复。`sb_note_input`和来源匹配仍撤销真实断线、读错、角色/Rp变化、
+QC及OV/UV。新增INFO级 `SWEET BATT INPUT QUEUE: v1` 仅在输入采集时记录pending。
+没有放宽来源/电压期限、绕过命令前检查、轮询fallback、自动rerun或新增控制写。
+架构仍为GIC→mux IOService→registry client→consumer workloop，按键/USB/触摸未改。
+
+底稿 `scratch/battery-input-queue/`：实际0120a12的33文件作为base，0164严格apply
+后与edited/verify逐字节一致，原106源码gate通过。新回归在旧代码上稳定失败于
+CC/APSD来源保留断言，修复后ASAN/UBSAN runtime9及mux66条PASS；SweetBattery
+ARM64单文件编译通过（有编译警告，非完整内核链接）。测试涵盖实际采样中注入
+重复source、保护tick排队、两段pending阻断命令、新epoch必须等待新电压、>3秒
+会话和七类真实故障仍撤销；缺其他依赖时无控制写。patch SHA256
+`1e4345596ab1f458cb9bc28d2aa16cdb7c2ed894b7e7128078ef7105d1faa697`。
+本地打包器要求新marker，实际0120a12旧内核已被拒绝；CI两个配置文件没有修改。
+未重复运行未改动的transport/ADC client测试，不将0163历史测试算作本轮重跑。
+
+### 当前下一步
+
+用户push当前main并给出新云产物；核对0164源码与marker后，仍只打包一个原
+`--battery-evidence` 镜像（runtime1/IRQ4/ADCconv0，USB日志/三键/USB/触摸IRQ保留）。
+不重测0120a12、baseline/dry或ADC正常路径bring-up；沿用上方同一电源/线材的
+稳定接入与短接测试，重点是重复source后历史不丢、两段队列清空并取得新epoch
+VBUS后许可恢复，>3秒保持原来源时间，并在有效许可期间拔线撤销。
+
+本轮18次IOPMPowerSource发布均updateStatus完成，电量59、charging0，外接标志
+随输入改变；未提供屏幕现象，不冒充视觉验收。45笔CONFIG全enable0、无CONTROL，
+allow0/owned0；输入短暂成功时策略6c0，否则7c0，watchdog raw62/time8c仍阻断。
+身份限值、parallel隔离及watchdog尚未闭合，下一轮同样不启充。日志无ERROR/
+panic/mux隔离；电源键、音量加有down/up，音量减无本轮证据；触摸计数39/empty1。
+ACM配置成功两次，后段EP0 warning/reset仍保留已知重复枚举问题。

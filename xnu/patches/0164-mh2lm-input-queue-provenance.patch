@@ -1,0 +1,33 @@
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 36357d137bf30cdfd4d4be763ef5fdb382dce231..760a8b4af3c7508b789e2b81329b23e5302d5d54 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -1184,12 +1184,13 @@ SweetBattery::sampleRuntime(bool refreshInput)
+ 	sweet_pmic_power_read_snapshot(next, refreshInput, refreshCapacity, fLastPercent);
+ 	next.completedNs = sweet_batt_now_ns();
+ 	if (refreshInput) { sb_note_input(next, fSnapshot, inputEvents); }
+-	/* A newer source/plugin/Type-C notification arriving during sampling must
+-	 * be handled by its queued action before any input evidence is used. */
+-	if (inputChangePending()) {
+-		next.apsdFromSource = false;
+-		next.ccFromEvent = false;
+-	}
++	/* A queued event blocks permission, not the provenance of a coherent
++	 * observation. Erasing history here strands a valid CC source when the
++	 * next action is only a duplicate APSD source notification. sb_note_input
++	 * already withdraws changed/invalid status; the next input IRQ must still
++	 * acquire a new tuple and ADC epoch before use. Both queues are fenced by
++	 * refreshInputPermit/runtimeUpdate, including events arriving after here. */
++	bool inputPending = inputChangePending();
+ 	bool batteryChanged = next.presentValid != fSnapshot.presentValid || next.present != fSnapshot.present;
+  if (refreshInput) { sb_input_observe(fInputSession,next,next.completedNs); }
+  fSnapshot = next;
+@@ -1231,6 +1232,8 @@ SweetBattery::sampleRuntime(bool refreshInput)
+ 	if (refreshInput) {
+ 		SweetBattCc cc = sb_cc_status(next);
+ 		SweetBattInputCapability capability = sb_input_capability(next, next.completedNs);
++		SWEET_LOG_INFO("SWEET BATT INPUT QUEUE: v1 id=%u pending=%u; history retained, permission fenced\n",
++		    fMonitorSamples, inputPending);
+ 		SWEET_LOG_INFO("SWEET BATT CC: v1 id=%u events=%#x coherent=%u reasons=%#x rp=%u advertised-ma=%u orientation=%u qualified=%u\n",
+ 		    fMonitorSamples, next.inputEvents, next.ccCoherent, cc.reasons, cc.rp,
+ 		    cc.advertisedMa, cc.orientation, sb_cc_event_fresh(next, next.completedNs));

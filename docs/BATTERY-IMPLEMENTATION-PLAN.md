@@ -1,8 +1,10 @@
 # MH2LM 电池驱动实现计划
 
 **2026-11-07当前进度：** 0120a11已实机验证0162的sink CC/Rp分类、独立于APSD
-完成的观测及正常拔线撤销。0163正式输入会话/同epoch VBUS短许可、USBIN UV/OV
-保护事件及两段pending撤销已完成本地实现与验证，0120a12云产物已核对并打包，待实机。
+完成的观测及正常拔线撤销。0120a12已实测：短暂输入许可/ADC同epoch检查和UV
+自然交付正常，重复source IRQ却触发来源误删，长期许可未通过。0164已本地修复：
+保留一致来源，pending阻断使用，新采集/新epoch VBUS后恢复；runtime9/mux66、
+ARM64单文件编译通过，待用户push、新云产物和单镜像复测。CI未改。
 仍在第2～3段依赖闭环，身份限值/parallel隔离/watchdog未完成，runtime1不启充，
 不等于第4段完成。当前接口、边界及最小测试见[输入会话](BATTERY-INPUT-SESSION.md)，
 推进入口见[BATTERY-DRIVER-NEXT.md](BATTERY-DRIVER-NEXT.md)。以下保留历史，不能把

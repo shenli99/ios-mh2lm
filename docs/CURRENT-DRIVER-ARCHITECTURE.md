@@ -1,6 +1,9 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
-**0163当前增量（0120a12云产物已核对，待实机）：** SweetBattery内部新增输入
+**0163～0164当前增量：** 0120a12已实测取得短许可，ADC同epoch检查与UV自然
+交付正常，重复source IRQ误删来源使长期许可失败。0164已本地修复，待push/
+新云产物：保留一致来源历史，pending阻断许可，新采集及新epoch VBUS后恢复。
+不放宽真实故障撤销条件，不改变服务边界。SweetBattery内部新增输入
 session/permit值类型，按输入IRQ更新CC/APSD来源，经已有SweetAdc5Client取得
 精确inputEpoch的VBUS，形成3秒短许可并交给纯策略；不是另一个IOService或全局
 桥接。mux表目前18路/3组，新增USBIN UV/OV双边沿；client可检查尚未送到电池

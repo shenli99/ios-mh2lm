@@ -1,19 +1,23 @@
 # 0119之后的电池驱动推进
 
-**当前：0120a12云产物已核对，测试boot就绪，待实机。** 33个选定源码文件与0163
-验证版一致，原106 gate及kernel manifest/新旧marker通过。镜像为工作区
-`out-bs/boot-16k-0120a12-battery-evidence.img`，SHA256
-`038b794b93a2747030e43e21346ac0c94c1349abe07a9ce2964a3cf2bfabecdb`。
-runtime1/IRQ4/ADCconv0，保留USB日志及三键/USB/触摸IRQ，不启充；回读payload和
-参数核对通过。完整校验与测试见[0120a12测试boot](BATTERY-INPUT-SESSION.md#0120a12云产物核对与测试boot)。
+**当前：0120a12日志已分析，0164来源保留修复已本地完成，待用户push。** 三次
+短暂输入许可均在约1.3秒后被重复source IRQ触发的pending清理误删，长期许可
+未通过。ADC434次成功，10次旧epoch结果正确丢弃，UV路由自然交付正常；OV无
+自然命中，不能当完整保护验收。完整证据、修正与边界见
+[0120a12实测与0164修复](BATTERY-INPUT-SESSION.md#0120a12实测与0164修复)。
 
-下一步用户fastboot boot：电脑桌面15秒→拔5秒→原电源45～60秒→拔5秒→原电源
-接1～2秒再拔→稳定接15秒再拔；确认按键/触摸，导出
-`sweetlog-0120a12-battery-evidence.bin`。只需持久日志，无需baseline/dry或重跑
-ADC bring-up。重点是>3秒后同会话新VBUS持续许可、旧token拒绝和拔线撤销；
-原enable0时charging仍预期0，身份/parallel/watchdog尚未闭合。
+0164保留一致的CC/APSD来源历史，用两段pending检查暂停许可；新输入采集与
+同epoch的新VBUS完成后才恢复。真实变化/错误仍撤销，不放宽期限或添加重试。
+旧代码已稳定复现，新代码ASAN/UBSAN runtime9/mux66、ARM64单文件编译、33文件
+严格apply和原106 gate通过；CI配置未改，本地打包器拒绝缺新marker的旧内核。
 
-### 0163本地实现记录（云产物已核对）
+下一步用户push并下载新云产物，再核对/打包原battery-evidence单镜像。无需重测
+0120a12或baseline/dry：电脑桌面15秒→拔5秒→原电源45～60秒→拔5秒→原电源
+接1～2秒再拔→稳定接15秒再拔。重点是重复source后许可重新建立、>3秒新VBUS
+维持许可且来源时间不续、有效许可期间拔线撤销；确认三键/触摸，导出持久日志。
+仍为runtime1/IRQ4/ADCconv0，保留USB日志，不启充；身份/parallel/watchdog尚未闭合。
+
+### 0163本地实现记录（历史，云产物与实测已取得）
 
 **0163实现记录：输入会话/同epoch VBUS许可已完成本地验证，现已由0120a12核对。** 基于
 0120a11实际源码，CC/APSD只由输入事件建立来源；新鲜的同输入epoch ADC测量
@@ -26,11 +30,11 @@ parallel隔离/watchdog依赖，本轮不启充。架构、LG依据、撤销边�
 transport122/ADC client19场景+100竞态/日志等级回归通过。CircleCI与GitHub XNU
 配置均未改。0120a12仍用原battery-evidence/runtime1/IRQ4/ADCconv0，
 核对长期许可、新token、拔线和1～2秒短接后撤销；持久日志即可，无需baseline。
-已取得下述0120a12新boot，尚无实机结果/CI run ID，不将打包通过写为硬件验收。
+当时已取得0120a12新boot、尚无实机结果/CI run ID；现在实测结论以上方为准。
 
 ### 0120a11实机结果（作为0163基线）
 
-**最新实机：0120a11通过0162 sink CC分类及正常拔线撤销。** id359先取得独立
+**分类基线：0120a11通过0162 sink CC分类及正常拔线撤销。** id359先取得独立
 Rp3A依据，id361/362 APSD为FLOAT时仍qualified1/kind2，三个记录保持同一CC
 时间；id535/536拔线清除session/时间/能力和外接标志。226次ADC全部成功，
 18次运行期电池IRQ健康，三键/触摸有记录。19次配置enable0、无CONTROL，
