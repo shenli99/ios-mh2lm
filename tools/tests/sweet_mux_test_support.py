@@ -185,6 +185,7 @@ extern "C" void ml_io_unmap(vm_offset_t a, vm_size_t n) {
     if (!--p->second) mappings.erase(p);
 }
 extern "C" void sweet_spmi_irq_lock() { assert(lockDepth++ == 0); }
+extern "C" void sweet_spmi_irq_ack_lock() { sweet_spmi_irq_lock(); }
 extern "C" void sweet_spmi_irq_unlock() { assert(--lockDepth == 0); }
 static bool rwLanePoison[512];
 extern "C" int sweet_spmi_rw_poisoned_locked(unsigned apid) {

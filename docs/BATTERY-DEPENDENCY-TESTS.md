@@ -1,5 +1,14 @@
 # 电池身份、并联禁止与 watchdog 分步测试（0165）
 
+**当前0167：ACK/遥测竞争修复已完成本地验证，待用户push/新云内核实测。**
+等待中的mux IRQ写/ACK优先于下一笔普通SPMI事务；每遍先ACK、再合并通知，全部
+有限遍次结束后输出日志；独立故障快照逐字段让锁，协议错误的恢复前快照仍保留
+原子区间。新增ACK等锁/持锁计时，原期限/owner/poison/group隔离及runtime1禁充
+不变。7文件ARM64单编译、并发/故障回归通过，CI未改，尚无实机修复结论。
+下一步用户push，下载新产物后核对/打包同核五档，优先identity1；不再测旧0120a15。
+[实现、锁顺序、计时边界和测试步骤](SPMI-ACK-ARBITRATION.md)。以下旧待测动作均按历史保留。
+
+
 **0120a15-watchdog已分析：** 独立看门狗配置/9次自然bark维护/180秒有限停止通过
 （含初始化10pet，结束后20bark不再pet），仍未主动启充。ADC59又RESULT超时，
 这次mux在deadline前4.003ms已读到EOC pending，却到deadline后9.028ms才notify，

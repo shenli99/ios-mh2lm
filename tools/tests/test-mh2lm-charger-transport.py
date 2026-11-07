@@ -43,6 +43,7 @@ source = source.replace(function(source, 'sp_wr'),
 source = re.sub(r'^\s*__asm__.*\n', '\n', source, flags=re.M)
 prelude = r'''
 #include <cassert>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdarg>
@@ -51,6 +52,7 @@ prelude = r'''
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <condition_variable>
 #include <thread>
 #include <vector>
 #define ARM64_BOARD_CONFIG_SWEET 1
@@ -77,8 +79,13 @@ static void recordLog(const char *format,...) {
 using vm_offset_t=uintptr_t; using vm_size_t=size_t; using IOLock=std::mutex;
 static thread_local unsigned depth,sessionDepth;
 static uint64_t adcTimeNs=123456;
+static bool snapshotArbitration;
+static unsigned snapshotCommands;
+static std::thread snapshotAck;
+static std::atomic<unsigned> snapshotAckDone{0};
+static void armSnapshotAck();
 static bool adcAbortStuck;
-static uint64_t lockAdvanceNs;
+static uint64_t lockAdvanceNs,muxCommandNs;
 static unsigned adcRequests, failAdcWriteAt;
 static void clock_get_uptime(uint64_t *t){*t=adcTimeNs;}
 static void absolutetime_to_nanoseconds(uint64_t t,uint64_t *n){*n=t;}
@@ -101,6 +108,14 @@ static IOLock *IOLockAlloc(){if(failAlloc)return nullptr;auto *p=new IOLock;
 static void IOLockFree(IOLock *l){delete l;}
 static void IOLockLock(IOLock *l){l->lock();if(l==controllerLock){assert(depth++==0);adcTimeNs+=lockAdvanceNs;lockAdvanceNs=0;}else assert(sessionDepth++==0);}
 static void IOLockUnlock(IOLock *l){if(l==controllerLock)assert(--depth==0);else assert(--sessionDepth==0);l->unlock();}
+static std::condition_variable controllerCondition;
+#define THREAD_UNINT 0
+static int IOLockSleep(IOLock *l,void *,int) {
+    assert(l==controllerLock && depth==1); --depth;
+    std::unique_lock<std::mutex> guard(*l,std::adopt_lock);
+    controllerCondition.wait(guard);guard.release();++depth;return 0;
+}
+static void IOLockWakeup(IOLock *l,void *,bool) {assert(l==controllerLock && depth==1);controllerCondition.notify_all();}
 static void delay(unsigned n) {assert(depth==1 || (sessionDepth==1 && n==40));}
 static void IOSleep(unsigned) {
     assert(depth==0 && sessionDepth==1);
@@ -134,6 +149,10 @@ static void modelWrite(vm_offset_t b,unsigned o,uint32_t v){
         observerApids.push_back(apid);
         unsigned address=(((routing[apid]>>8)&0xfff)<<8)|reg;
         observerAddresses.push_back(address);
+        if(snapshotArbitration) {
+            if(++snapshotCommands==1)armSnapshotAck();
+            else assert(snapshotAckDone==1);
+        }
         if(address==0x24370){++stsReads;if(clearPending && --clearPending==0)pmic[address]&=~6u;}
         if(address==0x24371)++ctlReads;
         if(address>=0x24400 && address<0x24a00)assert((pmic[0x24340]&1) && (pmic[0x24350]&0xa0)==0x80);
@@ -142,7 +161,7 @@ static void modelWrite(vm_offset_t b,unsigned o,uint32_t v){
         data[b]=pmic[(((routing[apid]>>8)&0xfff)<<8)|reg];
         if(postDmaError && (address==0x24859 || address==0x246eb))pmic[0x24370]|=4;
     }else{
-        assert(b>=SWEET_DEV_SPMI_CHNLS_PA && (v>>27)==0);++writes;
+        assert(b>=SWEET_DEV_SPMI_CHNLS_PA && (v>>27)==0);++writes;adcTimeNs+=muxCommandNs;
         apid=(b-SWEET_DEV_SPMI_CHNLS_PA)/0x10000;
         assert(ownership[apid]==0); // foreign writer permission is never borrowed
         unsigned address=(((routing[apid]>>8)&0xfff)<<8)|reg;rwAddresses.push_back(address);
@@ -172,7 +191,7 @@ struct MuxRoute {vm_offset_t channel; bool writePoisoned; unsigned apid,group;co
 struct SweetSpmiInterruptMux {
     MuxRoute routes[2];
     vm_offset_t obs=1;
-    bool writePeripheral(MuxRoute &,unsigned,uint16_t,unsigned);
+    bool writePeripheral(MuxRoute &,unsigned,uint16_t,unsigned,uint64_t * = nullptr,uint64_t * = nullptr);
     bool readPeripheral(const MuxRoute &,unsigned,uint8_t *);
 };
 static void write32(vm_offset_t b,unsigned o,uint32_t v){modelWrite(b,o,v);}
@@ -192,6 +211,10 @@ struct SweetBattery : OSObject {
 
 '''
 checks = r'''
+static void armSnapshotAck() {
+    snapshotAck=std::thread([]{sweet_spmi_irq_ack_lock();++snapshotAckDone;sweet_spmi_irq_unlock();});
+    while(!__atomic_load_n(&sp_ack_waiters,__ATOMIC_ACQUIRE))std::this_thread::yield();
+}
 static void own(unsigned apid,unsigned per,unsigned ee=0,bool irq=false){
     routing[apid]=((0x200|per)<<8)|(irq?0x1000000:0);ownership[apid]=ee;
 }
@@ -219,6 +242,20 @@ int main(int argc,char **argv){
     }
     assert(sweet_spmi_init()==0);
     own(10,0x10);own(11,0x13);own(12,0x15);own(13,0x16);
+    if(!strcmp(mode,"ack-timing")) {
+        SweetSpmiInterruptMux mux{};
+        mux.routes[0]={SWEET_DEV_SPMI_CHNLS_PA+11*0x10000u,false,11,1,"usbin"};
+        uint64_t wait=0,hold=0;lockAdvanceNs=12345;muxCommandNs=6789;
+        assert(mux.writePeripheral(mux.routes[0],0x14,16,1,&wait,&hold));
+        assert(wait==12345 && hold==6789);
+        // Failed completed writes unlock and retain separately accumulated
+        // timing, so the existing idempotent ACK attempts remain measurable.
+        lockAdvanceNs=7;rwStatus=3;
+        assert(!mux.writePeripheral(mux.routes[0],0x14,16,1,&wait,&hold));
+        assert(wait==12352 && hold==13578 && !sp_ack_waiters);
+        sweet_spmi_irq_lock();sweet_spmi_irq_unlock();
+        balanced();IOLockFree(sp_lock);puts("PASS: actual mux separate wait/hold timing on success/error");return 0;
+    }
     if(!strncmp(mode,"battery-irq",11)) {
         own(14,0x40);auto initialReads=ioReads;
         for(unsigned per:{0u,1u,0x08u,0x14u,0x31u,0x41u,0x115u})
@@ -257,6 +294,7 @@ int main(int argc,char **argv){
         balanced();IOLockFree(sp_lock);printf("PASS: actual mux-to-SPMI IRQ readback %s\n",mode);return 0;
     }
     if(!strncmp(mode,"fault-",6)) {
+        snapshotArbitration=strstr(mode,"yield")!=nullptr;
         own(20,0x31,0,true);own(21,0x37,0,false);own(22,0x16,0,true);
         const std::vector<unsigned> adcRegs={0x23108,0x23109,0x23144,0x23146,0x23147,0x23110,0x23111,0x23115,0x23118,0x23744};
         const std::vector<unsigned> wdRegs={0x21610,0x21611,0x21615,0x21618,0x21651,0x21653,0x21648};
@@ -285,6 +323,10 @@ int main(int argc,char **argv){
                 assert((wd?absentWd.errors[i]:absentAdc.errors[i])==expected);
                 if(!denied && !timeout)assert((wd?absentWd.raw[i]:absentAdc.raw[i])==(wd?0x42:0x64));
             }
+        }
+        if(snapshotArbitration) {
+            snapshotAck.join();assert(snapshotAckDone==1 && snapshotCommands==(wd?7u:10u));
+            assert(!sp_ack_waiters);
         }
         assert(sweet_spmi_adc5_capture_fault(nullptr)==SWEET_SPMI_INVALID);
         assert(sweet_spmi_watchdog_capture_fault(nullptr)==SWEET_SPMI_INVALID);
@@ -758,7 +800,7 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-charge-io-') as directory:
     subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-O1','-g','-pthread',
         '-fsanitize=address,undefined',str(cpp),'-o',str(binary)],check=True)
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', UBSAN_OPTIONS='halt_on_error=1')
-    for mode in ['fault-adc-timeout','fault-wd-timeout','fault-adc','fault-wd','fault-adc-denied','fault-wd-denied','fault-adc-unsupported','fault-wd-unsupported','dependency','battery-irq','battery-irq-missing','battery-irq-timeout','battery-irq-denied','conversion-normal','conversion-usb-normal','conversion-busy','conversion-enabled','conversion-requested','conversion-type','conversion-foreign','conversion-ambiguous','conversion-cal-foreign','conversion-poison','conversion-read-fail','conversion-abort','conversion-usb-abort','conversion-timeout','conversion-usb-timeout','conversion-invalid-data','conversion-wrong-channel','conversion-false-eoc','conversion-result-read-fail','conversion-restore-fail','conversion-usb-cal-restore-fail','conversion-usb-poison-result','conversion-stuck-abort','charger-semantic','adc-normal','adc-foreign','adc-ambiguous','adc-missing','adc-timeout','adc-denied','adc-poison','normal','alloc-fail','map-fail','fg-v1','fg-v2','fg-busy','fg-unknown','fg-grant','fg-active','fg-read-fail','fg-cleanup-fail','fg-dma-error',
+    for mode in ['ack-timing','fault-adc-yield','fault-wd-yield','fault-adc-timeout','fault-wd-timeout','fault-adc','fault-wd','fault-adc-denied','fault-wd-denied','fault-adc-unsupported','fault-wd-unsupported','dependency','battery-irq','battery-irq-missing','battery-irq-timeout','battery-irq-denied','conversion-normal','conversion-usb-normal','conversion-busy','conversion-enabled','conversion-requested','conversion-type','conversion-foreign','conversion-ambiguous','conversion-cal-foreign','conversion-poison','conversion-read-fail','conversion-abort','conversion-usb-abort','conversion-timeout','conversion-usb-timeout','conversion-invalid-data','conversion-wrong-channel','conversion-false-eoc','conversion-result-read-fail','conversion-restore-fail','conversion-usb-cal-restore-fail','conversion-usb-poison-result','conversion-stuck-abort','charger-semantic','adc-normal','adc-foreign','adc-ambiguous','adc-missing','adc-timeout','adc-denied','adc-poison','normal','alloc-fail','map-fail','fg-v1','fg-v2','fg-busy','fg-unknown','fg-grant','fg-active','fg-read-fail','fg-cleanup-fail','fg-dma-error',
                  'fg-foreign-identity','fg-readonly-pages','fg-local-preferred','fg-first-foreign',
                  'fg-no-memif-writer','fg-no-peek-writer','fg-ambiguous-writer','fg-poisoned-writer',
                  'fg-missing-identity','fg-missing-data','fg-observer-denied','fg-observer-timeout',

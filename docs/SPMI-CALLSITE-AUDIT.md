@@ -1,5 +1,10 @@
 # SPMI 调用点、准备失败与 ready 同步核对
 
+**0167更新：** 控制器仍单锁串行，mux IRQ写/ACK新增等待者优先入场，普通事务
+统一通过可睡眠的入场检查；不在top half取锁。独立ADC/WD诊断读逐字段释放。
+历史调用点/行号按原版本保留；当前仲裁、完整锁顺序和验证边界见
+[SPMI-ACK-ARBITRATION.md](SPMI-ACK-ARBITRATION.md)。
+
 **0148更新：下列行号/哈希保留为0147审计快照。回滚失败处理已改为先尝试按组
 隔离，只有隔离无法确认安全才停整个mux；日志也补齐等级。当前策略见
 [MUX-GROUP-ISOLATION.md](MUX-GROUP-ISOLATION.md)。SPMI事务入口/锁和ready同步

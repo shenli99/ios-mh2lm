@@ -1,0 +1,751 @@
+diff --git a/bsd/dev/sweet_adc5.h b/bsd/dev/sweet_adc5.h
+index 501502519ca7d8f8e98f458551f5933d5cbeab9a..89c57375e99e63b6b7c9a155b0ddc0c44bf7c071 100644
+--- a/bsd/dev/sweet_adc5.h
++++ b/bsd/dev/sweet_adc5.h
+@@ -56,6 +56,8 @@ enum sweet_adc5_cause { SWEET_ADC5_SETTLED = 1, SWEET_ADC5_EOC = 2 };
+ struct sweet_adc5_fault {
+  uint8_t raw[SWEET_ADC5_FAULT_FIELDS];
+  int errors[SWEET_ADC5_FAULT_FIELDS];
++ /* locked_ns is first acquisition; public observers release between fields.
++  * completed-locked is elapsed time, NOT continuous lock occupancy. */
+  uint64_t entered_ns, locked_ns, completed_ns;
+ };
+ struct sweet_adc5_session {
+diff --git a/bsd/dev/sweet_charger.h b/bsd/dev/sweet_charger.h
+index 201496774cf0781215892e05add8905f72725157..919193f4064cf7bcbb0100c516b40e3a04378da3 100644
+--- a/bsd/dev/sweet_charger.h
++++ b/bsd/dev/sweet_charger.h
+@@ -23,6 +23,8 @@ enum sweet_charger_operation {
+ struct sweet_watchdog_fault {
+  uint8_t raw[SWEET_WDOG_FAULT_FIELDS];
+  int errors[SWEET_WDOG_FAULT_FIELDS];
++ /* locked_ns is first acquisition; public observers release between fields.
++  * completed-locked is elapsed time, NOT continuous lock occupancy. */
+  uint64_t entered_ns, locked_ns, completed_ns;
+ };
+ int sweet_spmi_watchdog_capture_fault(struct sweet_watchdog_fault *);
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 411b0d38e26768088b7502be0cf9107246a93c80..4761daa466b1c3d3bf627686a7fba7c58d0cf967 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -40,6 +40,10 @@ extern void ml_io_unmap(vm_offset_t, vm_size_t);
+ 
+ static vm_offset_t sp_core, sp_obs, sp_cfg;
+ static IOLock *sp_lock;
++/* Registered before a mux ACK waits for sp_lock. Normal transactions sleep
++ * rather than reacquiring ahead of an already waiting ACK. No IRQ-context
++ * callers, no preemption of an in-flight command and no new bus concurrency. */
++static unsigned sp_ack_waiters;
+ static unsigned sp_count;
+ static bool sp_attempted, sp_ready;
+ /* A timed-out command may complete late: never reuse that lane this boot. */
+@@ -153,11 +157,11 @@ sweet_spmi_irq_diag(void)
+ 		SWEET_LOG_WARN("SWEET SPMI IRQ: skipped; arbiter is not ready\n");
+ 		return;
+ 	}
+-	IOLockLock(sp_lock);
++	sweet_spmi_irq_lock();
+ 	SWEET_LOG_INFO("SWEET SPMI IRQ: PMIC-arb v5 read-only preflight; no GIC handler, no enable, no clear\n");
+ 	sp_irq_diag_peripheral(2, 0x13, "usbin", SWEET_SPMI_IRQ_DIAG_ROUTE_ALL);
+ 	sp_irq_diag_peripheral(2, 0x10, "chgr", SWEET_SPMI_IRQ_DIAG_ROUTE_ALL);
+-	IOLockUnlock(sp_lock);
++	sweet_spmi_irq_unlock();
+ }
+ 
+ void
+@@ -187,11 +191,11 @@ sweet_spmi_irq_diag_source_parts(unsigned sid, unsigned peripheral,
+ 		    name ? name : "source");
+ 		return;
+ 	}
+-	IOLockLock(sp_lock);
++	sweet_spmi_irq_lock();
+ 	SWEET_LOG_INFO("SWEET SPMI IRQ: %s read-only route parts=%#x; no GIC handler, no enable, no clear\n",
+ 	    name ? name : "source", parts);
+ 	sp_irq_diag_peripheral(sid, peripheral, name ? name : "source", parts);
+-	IOLockUnlock(sp_lock);
++	sweet_spmi_irq_unlock();
+ }
+ 
+ /* Allocate once without depending on which IOService starts first. Allocation
+@@ -263,11 +267,28 @@ void
+ sweet_spmi_irq_lock(void)
+ {
+ 	IOLockLock(sp_lock);
++	while (__atomic_load_n(&sp_ack_waiters, __ATOMIC_ACQUIRE)) {
++		/* Atomically enqueue and drop sp_lock; recheck after every wakeup. */
++		IOLockSleep(sp_lock, &sp_ack_waiters, THREAD_UNINT);
++	}
++}
++
++void
++sweet_spmi_irq_ack_lock(void)
++{
++	__atomic_add_fetch(&sp_ack_waiters, 1u, __ATOMIC_ACQ_REL);
++	IOLockLock(sp_lock);
++	__atomic_sub_fetch(&sp_ack_waiters, 1u, __ATOMIC_ACQ_REL);
+ }
+ 
+ void
+ sweet_spmi_irq_unlock(void)
+ {
++	/* Wake under the same lock used by the sleep predicate: no lost wakeup.
++	 * The finite mux drain/storm bounds remain responsible for IRQ fairness. */
++	if (!__atomic_load_n(&sp_ack_waiters, __ATOMIC_ACQUIRE)) {
++		IOLockWakeup(sp_lock, &sp_ack_waiters, false);
++	}
+ 	IOLockUnlock(sp_lock);
+ }
+ 
+@@ -414,9 +435,9 @@ sweet_spmi_charger_get_route(unsigned sid, unsigned addr,
+ 	if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) {
+ 		return SWEET_SPMI_NOT_READY;
+ 	}
+-	IOLockLock(sp_lock);
++	sweet_spmi_irq_lock();
+ 	int result = sp_charger_route(sid, addr, out);
+-	IOLockUnlock(sp_lock);
++	sweet_spmi_irq_unlock();
+ 	return result;
+ }
+ 
+@@ -430,12 +451,12 @@ sweet_spmi_charger_read(unsigned sid, unsigned addr, uint8_t *out)
+ 		return SWEET_SPMI_NOT_READY;
+ 	}
+ 	struct sweet_spmi_charger_route route;
+-	IOLockLock(sp_lock);
++	sweet_spmi_irq_lock();
+ 	int result = sp_charger_route(sid, addr, &route);
+ 	if (result == SWEET_SPMI_OK) {
+ 		result = sp_charger_read_locked(route.apid, addr, out);
+ 	}
+-	IOLockUnlock(sp_lock);
++	sweet_spmi_irq_unlock();
+ 	return result;
+ }
+ 
+@@ -472,10 +493,10 @@ sweet_spmi_adc5_inspect(struct sweet_adc5_preflight *out)
+ {
+  if (!out) { return SWEET_SPMI_INVALID; }
+  if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
+- IOLockLock(sp_lock);
++ sweet_spmi_irq_lock();
+  uint32_t version = sp_rd(sp_core, 0);
+  if (version < 0x50000000u || version >= 0x60000000u) {
+-  IOLockUnlock(sp_lock); return SWEET_SPMI_UNSUPPORTED;
++  sweet_spmi_irq_unlock(); return SWEET_SPMI_UNSUPPORTED;
+  }
+  struct sweet_adc5_preflight next = {0};
+  sp_adc5_route(0x31, &next.user);
+@@ -492,7 +513,7 @@ sweet_spmi_adc5_inspect(struct sweet_adc5_preflight *out)
+   if (!rc) { next.valid |= 1u << i; }
+  }
+  *out = next;
+- IOLockUnlock(sp_lock);
++ sweet_spmi_irq_unlock();
+  return SWEET_SPMI_OK;
+ }
+ 
+@@ -552,9 +573,9 @@ sp_update_owned(unsigned sid, unsigned addr, unsigned mask,
+     unsigned value, uint8_t *verified)
+ {
+  if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
+- IOLockLock(sp_lock);
++ sweet_spmi_irq_lock();
+  int rc = sp_update_owned_locked(sid, addr, mask, value, verified);
+- IOLockUnlock(sp_lock);
++ sweet_spmi_irq_unlock();
+  return rc;
+ }
+ 
+@@ -578,7 +599,7 @@ int
+ sweet_spmi_charger_pet_watchdog(void)
+ {
+  if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) return SWEET_SPMI_NOT_READY;
+- IOLockLock(sp_lock);
++ sweet_spmi_irq_lock();
+  struct sweet_spmi_charger_route route;
+  int rc=sp_charger_route(2,0x1643,&route);
+  if (!rc && sweet_spmi_rw_poisoned_locked(route.apid)) rc=SWEET_SPMI_POISONED;
+@@ -594,7 +615,7 @@ sweet_spmi_charger_pet_watchdog(void)
+   if (rc==SWEET_SPMI_TIMEOUT) sweet_spmi_rw_poison_locked(route.apid);
+  }
+  if (channel) ml_io_unmap(trunc_page(channel),round_page(0x1000+(channel&PAGE_MASK)));
+- IOLockUnlock(sp_lock);
++ sweet_spmi_irq_unlock();
+  return rc;
+ }
+ 
+@@ -639,9 +660,9 @@ sweet_spmi_battery_irq_read(unsigned peripheral, unsigned offset, uint8_t *out)
+   return SWEET_SPMI_INVALID;
+  }
+  if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
+- IOLockLock(sp_lock);
++ sweet_spmi_irq_lock();
+  int rc = sp_observer_read_locked(2, (peripheral << 8) | offset, out);
+- IOLockUnlock(sp_lock);
++ sweet_spmi_irq_unlock();
+  return rc;
+ }
+ int
+@@ -649,9 +670,9 @@ sweet_spmi_adc5_irq_read(unsigned offset, uint8_t *out)
+ {
+  if (!out || (offset != 0x11 && offset != 0x12 && offset != 0x13 && offset != 0x15)) { return SWEET_SPMI_INVALID; }
+  if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
+- IOLockLock(sp_lock);
++ sweet_spmi_irq_lock();
+  int rc = sp_adc5_read_locked(0x3100 | offset, out);
+- IOLockUnlock(sp_lock);
++ sweet_spmi_irq_unlock();
+  return rc;
+ }
+ 
+@@ -674,10 +695,21 @@ sweet_spmi_adc5_capture_fault(struct sweet_adc5_fault *out)
+ {
+  if (!out) return SWEET_SPMI_INVALID;
+  if (!__atomic_load_n(&sp_ready,__ATOMIC_ACQUIRE)) return SWEET_SPMI_NOT_READY;
+- uint64_t entered=sp_adc5_now();
+- IOLockLock(sp_lock);
+- int rc=sp_adc5_capture_fault_locked(out,entered);
+- IOLockUnlock(sp_lock); return rc;
++ struct sweet_adc5_fault next = {0}; next.entered_ns=sp_adc5_now();
++ static const unsigned regs[SWEET_ADC5_FAULT_FIELDS]={0x3108,0x3109,0x3144,0x3146,0x3147,0x3110,0x3111,0x3115,0x3118,0x3744};
++ /* Independent diagnostic fields, not an atomic image or a conversion result.
++  * Give a waiting ACK the bus between fields; never split protocol restore. */
++ for (unsigned i=0;i<SWEET_ADC5_FAULT_FIELDS;++i) {
++  sweet_spmi_irq_lock();
++  if (!i) next.locked_ns=sp_adc5_now();
++  uint32_t version=sp_rd(sp_core,0);
++  if (version<0x50000000u || version>=0x60000000u) {
++   sweet_spmi_irq_unlock(); return SWEET_SPMI_UNSUPPORTED;
++  }
++  next.errors[i]=sp_observer_read_locked(2,regs[i],&next.raw[i]);
++  sweet_spmi_irq_unlock();
++ }
++ next.completed_ns=sp_adc5_now(); *out=next; return 0;
+ }
+ 
+ /* Called only for a session owned by this protocol, before its error restore.
+@@ -695,14 +727,20 @@ sweet_spmi_watchdog_capture_fault(struct sweet_watchdog_fault *out)
+  if (!out) return SWEET_SPMI_INVALID;
+  if (!__atomic_load_n(&sp_ready,__ATOMIC_ACQUIRE)) return SWEET_SPMI_NOT_READY;
+  struct sweet_watchdog_fault next={0}; next.entered_ns=sp_adc5_now();
+- IOLockLock(sp_lock); next.locked_ns=sp_adc5_now();
+- uint32_t version=sp_rd(sp_core,0);
+- if (version<0x50000000u || version>=0x60000000u) { IOLockUnlock(sp_lock); return SWEET_SPMI_UNSUPPORTED; }
+- /* MISC RT, type, EN_SET, latched, WD_CFG, timeout, SMB output */
++ /* MISC RT, type, EN_SET, latched, WD_CFG, timeout, SMB output.
++  * Like the independent ADC diagnostic, yield between fixed read-only fields. */
+  static const unsigned regs[SWEET_WDOG_FAULT_FIELDS]={0x1610,0x1611,0x1615,0x1618,0x1651,0x1653,0x1648};
+- for (unsigned i=0;i<SWEET_WDOG_FAULT_FIELDS;++i)
++ for (unsigned i=0;i<SWEET_WDOG_FAULT_FIELDS;++i) {
++  sweet_spmi_irq_lock();
++  if (!i) next.locked_ns=sp_adc5_now();
++  uint32_t version=sp_rd(sp_core,0);
++  if (version<0x50000000u || version>=0x60000000u) {
++   sweet_spmi_irq_unlock(); return SWEET_SPMI_UNSUPPORTED;
++  }
+   next.errors[i]=sp_observer_read_locked(2,regs[i],&next.raw[i]);
+- next.completed_ns=sp_adc5_now(); IOLockUnlock(sp_lock); *out=next; return 0;
++  sweet_spmi_irq_unlock();
++ }
++ next.completed_ns=sp_adc5_now(); *out=next; return 0;
+ }
+ 
+ static int
+@@ -807,7 +845,7 @@ sweet_spmi_adc5_begin(struct sweet_adc5_session *session, enum sweet_adc5_channe
+ {
+  if (!session || (channel != SWEET_ADC5_BAT_ID && channel != SWEET_ADC5_USBIN)) { return SWEET_SPMI_INVALID; }
+  if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
+- IOLockLock(sp_lock);
++ sweet_spmi_irq_lock();
+  int rc = SWEET_SPMI_OK;
+  if (sp_adc5_failed) { rc = SWEET_SPMI_POISONED; }
+  else if (sp_adc5_owner) { rc = SWEET_SPMI_BUSY; }
+@@ -839,7 +877,7 @@ sweet_spmi_adc5_begin(struct sweet_adc5_session *session, enum sweet_adc5_channe
+   } else { rc = sp_adc5_launch_locked(session, false); }
+   if (rc) { sp_adc5_save_fault_locked(session); (void)sp_adc5_restore_locked(session); }
+  }
+- IOLockUnlock(sp_lock);
++ sweet_spmi_irq_unlock();
+  return rc;
+ }
+ 
+@@ -850,19 +888,19 @@ sweet_spmi_adc5_advance(struct sweet_adc5_session *session, enum sweet_adc5_caus
+  if (!session || !out) { return SWEET_SPMI_INVALID; }
+  if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
+  uint64_t entered = sp_adc5_now();
+- IOLockLock(sp_lock);
++ sweet_spmi_irq_lock();
+  int rc = SWEET_SPMI_OK;
+- if (sp_adc5_owner != session || !session->active) { IOLockUnlock(sp_lock); return SWEET_SPMI_INVALID; }
++ if (sp_adc5_owner != session || !session->active) { sweet_spmi_irq_unlock(); return SWEET_SPMI_INVALID; }
+  session->advance_enter_ns = entered; session->advance_locked_ns = sp_adc5_now();
+  session->diagnostic_phase = session->phase; session->diagnostic_deadline_ns = session->deadline_ns;
+  uint64_t now = sp_adc5_now();
+  if (now >= session->deadline_ns) { rc = SWEET_ADC5_EXPIRED; }
+  if (!rc && session->phase == SWEET_ADC5_WAIT_SETTLE) {
+-  if (cause != SWEET_ADC5_SETTLED || now < session->settle_until_ns) { IOLockUnlock(sp_lock); return SWEET_SPMI_BUSY; }
++  if (cause != SWEET_ADC5_SETTLED || now < session->settle_until_ns) { sweet_spmi_irq_unlock(); return SWEET_SPMI_BUSY; }
+   rc = sp_adc5_launch_locked(session, true);
+-  if (!rc) { IOLockUnlock(sp_lock); return SWEET_ADC5_MORE; }
++  if (!rc) { sweet_spmi_irq_unlock(); return SWEET_ADC5_MORE; }
+  } else if (!rc) {
+-  if (cause != SWEET_ADC5_EOC) { IOLockUnlock(sp_lock); return SWEET_SPMI_INVALID; }
++  if (cause != SWEET_ADC5_EOC) { sweet_spmi_irq_unlock(); return SWEET_SPMI_INVALID; }
+   uint8_t status = 0, channel = 0;
+   rc = sp_adc5_read_locked(0x3108, &status);
+   if (!rc && (status & 3) != 1) { rc = SWEET_SPMI_VERIFY; }
+@@ -873,7 +911,7 @@ sweet_spmi_adc5_advance(struct sweet_adc5_session *session, enum sweet_adc5_caus
+    session->deadline_ns = sp_adc5_now() + 100000000ULL;
+    rc = sp_adc5_trigger_locked(session);
+    session->phase = SWEET_ADC5_RESULT;
+-   if (!rc) { IOLockUnlock(sp_lock); return SWEET_ADC5_MORE; }
++   if (!rc) { sweet_spmi_irq_unlock(); return SWEET_ADC5_MORE; }
+   } else if (!rc && session->phase == SWEET_ADC5_RESULT) {
+    uint8_t lo = 0, hi = 0;
+    rc = sp_adc5_read_locked(0x3150, &lo);
+@@ -894,11 +932,11 @@ sweet_spmi_adc5_advance(struct sweet_adc5_session *session, enum sweet_adc5_caus
+    if (!rc) { rc = restore; }
+    if (!rc) { session->phase = SWEET_ADC5_DONE; *out = result; }
+    else { session->phase = SWEET_ADC5_FAILED; }
+-   IOLockUnlock(sp_lock); return rc;
++   sweet_spmi_irq_unlock(); return rc;
+   } else if (!rc) { rc = SWEET_SPMI_INVALID; }
+  }
+  if (rc) { sp_adc5_save_fault_locked(session); (void)sp_adc5_restore_locked(session); session->phase = SWEET_ADC5_FAILED; }
+- IOLockUnlock(sp_lock);
++ sweet_spmi_irq_unlock();
+  return rc;
+ }
+ 
+@@ -906,12 +944,12 @@ int
+ sweet_spmi_adc5_abort(struct sweet_adc5_session *session)
+ {
+  if (!session || !__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_INVALID; }
+- IOLockLock(sp_lock);
++ sweet_spmi_irq_lock();
+  int rc = SWEET_SPMI_OK;
+  if (sp_adc5_owner == session && session->active) {
+   rc = sp_adc5_restore_locked(session); session->phase = SWEET_ADC5_FAILED;
+  }
+- IOLockUnlock(sp_lock);
++ sweet_spmi_irq_unlock();
+  return rc;
+ }
+ 
+@@ -959,7 +997,7 @@ sp_fg_route_diagnostics(void)
+ 	 * observer window belongs to EE0 even if an APID's writer is another EE.
+ 	 * Match Linux v5: first mapping, preferring the last local EE mapping. */
+ 	static const unsigned peripherals[] = {0x01, 0x41, 0x43, 0x45, 0x46, 0x47, 0x48};
+-	IOLockLock(sp_lock);
++	sweet_spmi_irq_lock();
+ 	for (unsigned n = 0; n < sizeof(peripherals) / sizeof(peripherals[0]); ++n) {
+ 		unsigned ppid = 0x200u | peripherals[n];
+ 		unsigned matches = 0;
+@@ -976,13 +1014,13 @@ sp_fg_route_diagnostics(void)
+ 			SWEET_LOG_WARN("SWEET FG ROUTE: v2 ppid=%#x has no mapping\n", ppid);
+ 		}
+ 	}
+-	IOLockUnlock(sp_lock);
++	sweet_spmi_irq_unlock();
+ }
+ 
+ static int
+ sp_fg_byte(struct sp_fg_session *session, unsigned addr, uint8_t *out)
+ {
+-	IOLockLock(sp_lock);
++	sweet_spmi_irq_lock();
+ 	uint32_t version = sp_rd(sp_core, 0);
+ 	int result = SWEET_SPMI_UNSUPPORTED;
+ 	if (version >= 0x50000000u && version < 0x60000000u) {
+@@ -990,7 +1028,7 @@ sp_fg_byte(struct sp_fg_session *session, unsigned addr, uint8_t *out)
+ 		result = apid == SP_NO_APID ? SWEET_SPMI_NO_OWNER :
+ 		    sp_charger_read_locked(apid, addr, out);
+ 	}
+-	IOLockUnlock(sp_lock);
++	sweet_spmi_irq_unlock();
+ 	return sp_fg_record(session, addr, "observer-read", result);
+ }
+ 
+@@ -1007,12 +1045,12 @@ static int
+ sp_fg_require_writer(struct sp_fg_session *session, unsigned addr)
+ {
+ 	struct sweet_spmi_charger_route route;
+-	IOLockLock(sp_lock);
++	sweet_spmi_irq_lock();
+ 	int result = sp_charger_route(2, addr, &route);
+ 	if (!result && sweet_spmi_rw_poisoned_locked(route.apid)) {
+ 		result = SWEET_SPMI_POISONED;
+ 	}
+-	IOLockUnlock(sp_lock);
++	sweet_spmi_irq_unlock();
+ 	return sp_fg_record(session, addr, "writer-preflight", result);
+ }
+ 
+@@ -1037,7 +1075,7 @@ sp_fg_prepare_dma(struct sp_fg_session *session)
+ 	uint8_t arb = 0, cfg = 0, before = 0, after = 0, ctl = 0, actual = 0;
+ 	bool afterValid = false, actualValid = false;
+ 	vm_offset_t channel = 0;
+-	IOLockLock(sp_lock);
++	sweet_spmi_irq_lock();
+ 	int result = sp_charger_route(2, 0x4371, &route);
+ 	if (!result && sweet_spmi_rw_poisoned_locked(route.apid)) { result = SWEET_SPMI_POISONED; }
+ 	sp_fg_record(session, 0x4371, "dma-writer", result);
+@@ -1130,7 +1168,7 @@ sp_fg_prepare_dma(struct sp_fg_session *session)
+ 		}
+ 	}
+ 	if (!result) { sp_fg_dma_prepared = true; }
+-	IOLockUnlock(sp_lock);
++	sweet_spmi_irq_unlock();
+ 	return result;
+ }
+ 
+@@ -1356,10 +1394,10 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+ 	    peripheral != 0x48)) {
+ 		return -1;
+ 	}
+-	IOLockLock(sp_lock);
++	sweet_spmi_irq_lock();
+ 	uint16_t apid = sp_find_apid((sid << 8) | peripheral);
+ 	if (apid == SP_NO_APID || sp_poisoned[apid]) {
+-		IOLockUnlock(sp_lock);
++		sweet_spmi_irq_unlock();
+ 		return -1;
+ 	}
+ 	unsigned off = 0x80u * apid;
+@@ -1371,11 +1409,11 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+ 		uint32_t status = sp_rd(sp_obs, off + 0x08u);
+ 		if (status & 1u) {
+ 			if (status & 0x0eu) {
+-				IOLockUnlock(sp_lock);
++				sweet_spmi_irq_unlock();
+ 				return -1;
+ 			}
+ 			*out = (uint8_t)sp_rd(sp_obs, off + 0x18u);
+-			IOLockUnlock(sp_lock);
++			sweet_spmi_irq_unlock();
+ 			return 0;
+ 		}
+ 		delay(1);
+@@ -1383,7 +1421,7 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+ 	sp_poisoned[apid] = true;
+ 	SWEET_LOG_ERROR("SWEET BATTERY: SPMI timeout sid=%u addr=%#x APID=%u disabled\n",
+ 	    sid, addr, apid);
+-	IOLockUnlock(sp_lock);
++	sweet_spmi_irq_unlock();
+ 	return -1;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_spmi.h b/bsd/dev/sweet_spmi.h
+index 108f59f2bcae893c6274065757bc96462eb3eae9..0c0247d19f90fc395f6cb350fc64cf121f2ea76b 100644
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -18,6 +18,10 @@ int sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out);
+  * This does not authorize arbitrary PMIC writes. */
+ void sweet_spmi_irq_lock(void);
+ void sweet_spmi_irq_unlock(void);
++/* Mux-only, thread-context IRQ write/ACK acquisition. Announces urgency before
++ * waiting; normal users yield between transactions. Same unlock and ownership
++ * rules as above. Never hold this lock across a callback or an event wait. */
++void sweet_spmi_irq_ack_lock(void);
+ /* RW timeout state is shared with the IRQ mux. Caller MUST hold the above
+  * lock. Invalid APIDs fail closed. There is no reset/retry during this boot. */
+ int sweet_spmi_rw_poisoned_locked(unsigned apid);
+diff --git a/bsd/dev/sweet_spmi_mux.h b/bsd/dev/sweet_spmi_mux.h
+index b96701d28a1ec9a0603ad2ee5409b534f74ef04f..99c36b70c71a871dfc40870638f837f424c0d68c 100644
+--- a/bsd/dev/sweet_spmi_mux.h
++++ b/bsd/dev/sweet_spmi_mux.h
+@@ -55,7 +55,7 @@ struct MuxRoute {
+  * Atomic publication permits a bounded, read-only copy without the mux gate. */
+ struct SweetMuxIrqTrace {
+  unsigned sequence, hits, irq, work, status, apid;
+- uint64_t gicNs, scanNs, ackNs, notifyNs;
++ uint64_t gicNs, scanNs, ackNs, notifyNs, ackWaitNs, ackHoldNs;
+ };
+ struct MuxBinding {
+ 	IOService *consumer;
+@@ -89,6 +89,10 @@ public:
+ private:
+ 	MuxBinding bindings[MUX_GROUPS] = {};
+  SweetMuxIrqTrace traces[SWEET_MUX_ROUTE_COUNT] = {};
++ /* Bounded workloop-owned history avoids IRQ-time allocation and large stack
++  * frames. Emit logs only after the entire drain has rearmed or failed. */
++ SweetMuxIrqTrace drainTraces[4][SWEET_MUX_ROUTE_COUNT] = {};
++ unsigned drainMasks[4] = {};
+  uint64_t lastGicNs = 0;
+ 	MuxRoute routes[SWEET_MUX_ROUTE_COUNT] = {};
+ 	vm_offset_t gicd = 0, pdc = 0, core = 0, cfg = 0, obs = 0;
+@@ -110,8 +114,12 @@ private:
+ 	bool waitGic(void);
+ 	uint16_t findOwnedApid(unsigned sid, unsigned per, unsigned count);
+ 	bool readPeripheral(const MuxRoute &route, unsigned reg, uint8_t *out);
+-	bool writePeripheral(MuxRoute &route, unsigned reg, uint16_t data, unsigned bytes);
+-	bool ackRoute(MuxRoute &route);
++	bool writePeripheral(MuxRoute &route, unsigned reg, uint16_t data, unsigned bytes,
++    uint64_t *waitNs = NULL, uint64_t *holdNs = NULL);
++	bool ackRoute(MuxRoute &route, uint64_t *waitNs = NULL, uint64_t *holdNs = NULL);
++	void publishBatch(SweetMuxIrqTrace *batch, unsigned acknowledged);
++    void logBatch(const SweetMuxIrqTrace *batch, unsigned acknowledged);
++    void drainPending(void);
+ 	uint32_t allowedMaskForApid(uint16_t apid);
+ 	void disableHardware(void);
+ 	bool configureGic(void);
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index f5e28b0cc26305ca00ddd81a3f6b3265027af80b..8e501ea93ee1905565eb6ffa2afc6c68ba9acad0 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -1392,7 +1392,7 @@ SweetBattery::captureWatchdogFailure(void)
+  SWEET_LOG_ERROR("SWEET BATT WD PATH: v1 gic=%llu scan=%llu ack=%llu notify=%llu\n",
+   (unsigned long long)t.gicNs,(unsigned long long)t.scanNs,(unsigned long long)t.ackNs,(unsigned long long)t.notifyNs);
+  struct sweet_watchdog_fault f={};int rc=sweet_pmic_power_capture_watchdog_fault(&f);
+- SWEET_LOG_ERROR("SWEET BATT WD SNAPSHOT: v1 error=%d enter=%llu locked=%llu done=%llu\n",rc,
++ SWEET_LOG_ERROR("SWEET BATT WD SNAPSHOT: v2 error=%d enter=%llu first-lock=%llu done=%llu\n",rc,
+   (unsigned long long)f.entered_ns,(unsigned long long)f.locked_ns,(unsigned long long)f.completed_ns);
+  if (!rc) for (unsigned i=0;i<SWEET_WDOG_FAULT_FIELDS;++i)
+   SWEET_LOG_ERROR("SWEET BATT WD FIELD: v1 field=%u raw=%#x error=%d\n",i,f.raw[i],f.errors[i]);
+diff --git a/iokit/Kernel/arm/SweetPmicAdc5.cpp b/iokit/Kernel/arm/SweetPmicAdc5.cpp
+index 483b2485f07b6a241954d42f723237d578e740c0..d519b85a02cebe43404da211ef30c9645f3de5d6 100644
+--- a/iokit/Kernel/arm/SweetPmicAdc5.cpp
++++ b/iokit/Kernel/arm/SweetPmicAdc5.cpp
+@@ -210,7 +210,7 @@ SweetPmicAdc5::captureFailure(int error)
+  struct sweet_adc5_fault f=session.fault;
+  bool beforeRestore=session.fault_saved || session.active;
+  int rc=session.fault_saved ? session.fault_error : sweet_spmi_adc5_capture_fault(&f);
+- SWEET_LOG_ERROR("SWEET ADC5 SNAPSHOT: v1 id=%u error=%d before-restore=%u saved=%u enter=%llu locked=%llu done=%llu\n",sequence,rc,beforeRestore,session.fault_saved,
++ SWEET_LOG_ERROR("SWEET ADC5 SNAPSHOT: v2 id=%u error=%d before-restore=%u saved=%u enter=%llu first-lock=%llu done=%llu\n",sequence,rc,beforeRestore,session.fault_saved,
+   (unsigned long long)f.entered_ns,(unsigned long long)f.locked_ns,(unsigned long long)f.completed_ns);
+  if (!rc) for (unsigned i=0;i<SWEET_ADC5_FAULT_FIELDS;++i)
+   SWEET_LOG_ERROR("SWEET ADC5 FIELD: v1 id=%u field=%u raw=%#x error=%d\n",sequence,i,f.raw[i],f.errors[i]);
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+index c9215340d0322c62478576d3e28e19858aa12b38..db17bd52f600226d63521e2b3c9a987c480767e5 100644
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -40,6 +40,7 @@ extern "C" void ml_io_unmap(vm_offset_t, vm_size_t);
+ #define MUX_IRQ_OWNER_BIT 0x01000000u
+ #define MUX_IRQ_LIMIT     256u
+ 
++static_assert(SWEET_MUX_ROUTE_COUNT <= 32u, "bounded batch route mask capacity");
+ static const MuxRoute routeTemplates[] = {
+ 	{0, 0x08, 0, 1u << 0, MUX_KEYS, 3, "power"},
+ 	{0, 0x08, 1, 1u << 2, MUX_KEYS, 3, "volume-down"},
+@@ -214,7 +215,7 @@ SweetSpmiInterruptMux::readPeripheral(const MuxRoute &route, unsigned reg, uint8
+ /* v5 EXT_WRITEL through the EE0 APID's RW channel, 1 or 2 bytes. */
+ bool
+ SweetSpmiInterruptMux::writePeripheral(MuxRoute &route, unsigned reg, uint16_t data,
+-    unsigned bytes)
++    unsigned bytes, uint64_t *waitNs, uint64_t *holdNs)
+ {
+ 	if (!route.channel || route.writePoisoned || bytes == 0 || bytes > 2) {
+ 		return false;
+@@ -225,10 +226,20 @@ SweetSpmiInterruptMux::writePeripheral(MuxRoute &route, unsigned reg, uint16_t d
+ 	    (bytes == 2 && reg != 0x14u))) {
+ 		return false;
+ 	}
+-	sweet_spmi_irq_lock();
++	uint64_t ticks, entered, locked;
++	clock_get_uptime(&ticks); absolutetime_to_nanoseconds(ticks, &entered);
++	sweet_spmi_irq_ack_lock();
++	clock_get_uptime(&ticks); absolutetime_to_nanoseconds(ticks, &locked);
++	if (waitNs) { *waitNs += locked - entered; }
++	auto unlock = [&] {
++		uint64_t done;
++		clock_get_uptime(&ticks); absolutetime_to_nanoseconds(ticks, &done);
++		if (holdNs) { *holdNs += done - locked; }
++		sweet_spmi_irq_unlock();
++	};
+ 	if (sweet_spmi_rw_poisoned_locked(route.apid)) {
+ 		route.writePoisoned = true;
+-		sweet_spmi_irq_unlock();
++		unlock();
+ 		SWEET_LOG_ERROR("SWEET MUX: RW lane poisoned route=%s apid=%u; write refused\n",
+ 		    route.name, route.apid);
+ 		return false;
+@@ -238,7 +249,7 @@ SweetSpmiInterruptMux::writePeripheral(MuxRoute &route, unsigned reg, uint16_t d
+ 	for (unsigned i = 0; i < 1000; ++i) {
+ 		uint32_t status = read32(route.channel, 0x08u);
+ 		if (status & 1u) {
+-			sweet_spmi_irq_unlock();
++			unlock();
+ 			if (status & 0x0eu) {
+ 				SWEET_LOG_WARN("SWEET MUX: write error route=%s reg=%#x data=%#x status=%#x\n",
+ 				    route.name, reg, data, status);
+@@ -255,13 +266,13 @@ SweetSpmiInterruptMux::writePeripheral(MuxRoute &route, unsigned reg, uint16_t d
+ 			routes[i].writePoisoned = true;
+ 		}
+ 	}
+-	sweet_spmi_irq_unlock();
++	unlock();
+ 	SWEET_LOG_ERROR("SWEET MUX: write timeout route=%s reg=%#x; APID poisoned\n", route.name, reg);
+ 	return false;
+ }
+ 
+ bool
+-SweetSpmiInterruptMux::ackRoute(MuxRoute &route)
++SweetSpmiInterruptMux::ackRoute(MuxRoute &route, uint64_t *waitNs, uint64_t *holdNs)
+ {
+ 	uint32_t mask = 1u << route.bit;
+ 	/* A key observer read reported PMIC-arb STATUS 0x9 (DROPPED)
+@@ -270,7 +281,7 @@ SweetSpmiInterruptMux::ackRoute(MuxRoute &route)
+ 	 * IRQ shutdown after three failed attempts. */
+ 	for (unsigned attempt = 1; attempt <= 3; ++attempt) {
+ 		write32(route.channel, 0x108u, mask); /* v5 channel IRQ_CLEAR */
+-		if (writePeripheral(route, 0x14u, (uint16_t)mask, 1)) {
++		if (writePeripheral(route, 0x14u, (uint16_t)mask, 1, waitNs, holdNs)) {
+ 			if (attempt > 1) {
+ 				SWEET_LOG_WARN("SWEET MUX: ack recovered route=%s attempts=%u\n",
+ 				    route.name, attempt);
+@@ -473,8 +484,67 @@ SweetSpmiInterruptMux::configureRoute(MuxRoute &route)
+ 	return true;
+ }
+ 
++void
++SweetSpmiInterruptMux::publishBatch(SweetMuxIrqTrace *batch, unsigned acknowledged)
++{
++	/* One bounded table pass before consumer telemetry may start. Coalesce
++	 * equal Type-C tokens, retain every group and the original route order. */
++	for (unsigned group = 0; group < MUX_GROUPS; ++group) {
++		unsigned events = 0;
++		uint64_t ticks, notifyNs;
++		clock_get_uptime(&ticks); absolutetime_to_nanoseconds(ticks, &notifyNs);
++		for (unsigned i = 0; i < SWEET_MUX_ROUTE_COUNT; ++i) {
++			if (!(acknowledged & (1u << i)) || routes[i].group != group) { continue; }
++			events |= routes[i].token;
++			SweetMuxIrqTrace &t = traces[i];
++			SweetMuxIrqTrace &v = batch[i];
++			v.notifyNs = notifyNs;
++			unsigned seq = __atomic_fetch_add(&t.sequence, 1u, __ATOMIC_ACQ_REL);
++#define TRACE_STORE(field) __atomic_store_n(&t.field, v.field, __ATOMIC_RELAXED)
++			TRACE_STORE(hits); TRACE_STORE(irq); TRACE_STORE(work); TRACE_STORE(status); TRACE_STORE(apid);
++			TRACE_STORE(gicNs); TRACE_STORE(scanNs); TRACE_STORE(ackNs); TRACE_STORE(notifyNs);
++			TRACE_STORE(ackWaitNs); TRACE_STORE(ackHoldNs);
++#undef TRACE_STORE
++			__atomic_store_n(&t.sequence, seq + 2u, __ATOMIC_RELEASE);
++		}
++		MuxBinding &binding = bindings[group];
++		if (events && binding.notify) { binding.notify(binding.context, events); }
++	}
++}
++
++void
++SweetSpmiInterruptMux::logBatch(const SweetMuxIrqTrace *batch, unsigned acknowledged)
++{
++	/* Logging follows ALL bounded passes and the GIC rearm/failure decision. */
++	for (unsigned i = 0; i < SWEET_MUX_ROUTE_COUNT; ++i) {
++		if (!(acknowledged & (1u << i))) { continue; }
++		const MuxRoute &route = routes[i];
++		const SweetMuxIrqTrace &t = batch[i];
++		if (route.group != MUX_KEYS || routeCount <= 32 || (routeCount & 63u) == 0) {
++			if (route.group == MUX_ADC5 || (route.group == MUX_BATTERY && route.token == SWEET_BATT_IRQ_WDOG)) {
++				SWEET_LOG_INFO("SWEET MUX: hit route=%s status=%#x irq=%u work=%u route-hits=%u gic=%llu scan=%llu ack=%llu notify=%llu\n",
++				    route.name,t.status,t.irq,t.work,t.hits,(unsigned long long)t.gicNs,
++				    (unsigned long long)t.scanNs,(unsigned long long)t.ackNs,(unsigned long long)t.notifyNs);
++				SWEET_LOG_INFO("SWEET MUX ACK: v1 route=%s irq=%u work=%u wait=%llu hold=%llu\n",
++				    route.name,t.irq,t.work,(unsigned long long)t.ackWaitNs,(unsigned long long)t.ackHoldNs);
++			} else {
++				SWEET_LOG_INFO("SWEET MUX: hit route=%s status=%#x irq=%u work=%u hits=%u route-hits=%u\n",
++				    route.name,t.status,t.irq,t.work,routeCount,t.hits);
++			}
++		}
++	}
++}
++
+ void
+ SweetSpmiInterruptMux::drainInterrupt(void)
++{
++    for (unsigned pass = 0; pass < 4; ++pass) { drainMasks[pass] = 0; }
++    drainPending();
++    for (unsigned pass = 0; pass < 4; ++pass) { logBatch(drainTraces[pass], drainMasks[pass]); }
++}
++
++void
++SweetSpmiInterruptMux::drainPending(void)
+ {
+ 	++workCount;
+  const uint64_t parentGicNs=__atomic_load_n(&lastGicNs,__ATOMIC_ACQUIRE);
+@@ -498,6 +568,8 @@ SweetSpmiInterruptMux::drainInterrupt(void)
+ 	allowEmptyDrain = false;
+ 	for (unsigned pass = 0; pass < 4; ++pass) {
+ 		bool pending = false;
++		unsigned acknowledged = 0;
++		SweetMuxIrqTrace *batch = drainTraces[pass];
+ 		for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+ 			MuxRoute &route = routes[i];
+ 			if (!route.active) {
+@@ -505,6 +577,7 @@ SweetSpmiInterruptMux::drainInterrupt(void)
+ 			}
+ 			uint32_t status = read32(route.channel, 0x104u);
+ 			if (status & ~allowedMaskForApid(route.apid)) {
++				publishBatch(batch, acknowledged);
+ 				SWEET_LOG_ERROR("SWEET MUX: unregistered PMIC pending apid=%u status=%#x; IRQ disabled\n",
+ 				    route.apid, status);
+ 				disableHardware();
+@@ -514,9 +587,10 @@ SweetSpmiInterruptMux::drainInterrupt(void)
+ 				continue;
+ 			}
+ 			pending = true;
+-   uint64_t stamp, scanNs, ackNs, notifyNs;
++   uint64_t stamp, scanNs, ackNs, waitNs = 0, holdNs = 0;
+    clock_get_uptime(&stamp); absolutetime_to_nanoseconds(stamp, &scanNs);
+-			if (!ackRoute(route)) {
++			if (!ackRoute(route, &waitNs, &holdNs)) {
++				publishBatch(batch, acknowledged);
+ 				SWEET_LOG_ERROR("SWEET MUX: ack failed route=%s status=%#x\n",
+ 				    route.name, status);
+ 				disableHardware();
+@@ -525,34 +599,14 @@ SweetSpmiInterruptMux::drainInterrupt(void)
+    clock_get_uptime(&stamp); absolutetime_to_nanoseconds(stamp, &ackNs);
+ 			++routeCount;
+ 			++route.hits;
+-   clock_get_uptime(&stamp); absolutetime_to_nanoseconds(stamp, &notifyNs);
+-   SweetMuxIrqTrace &t = traces[i];
+-   unsigned seq = __atomic_fetch_add(&t.sequence, 1u, __ATOMIC_ACQ_REL);
+-#define TRACE_STORE(field, value) __atomic_store_n(&t.field, (value), __ATOMIC_RELAXED)
+-   TRACE_STORE(hits, route.hits); TRACE_STORE(irq, irqCount); TRACE_STORE(work, workCount);
+-   TRACE_STORE(status, status); TRACE_STORE(apid, (unsigned)route.apid);
+-   TRACE_STORE(gicNs, parentGicNs);
+-   TRACE_STORE(scanNs, scanNs); TRACE_STORE(ackNs, ackNs); TRACE_STORE(notifyNs, notifyNs);
+-#undef TRACE_STORE
+-   __atomic_store_n(&t.sequence, seq + 2u, __ATOMIC_RELEASE);
+-			MuxBinding &binding = bindings[route.group];
+-			if (binding.notify) {
+-				binding.notify(binding.context, route.token);
+-			}
+-			if (route.group != MUX_KEYS || routeCount <= 32 || (routeCount & 63u) == 0) {
+-    if (route.group==MUX_ADC5 || (route.group==MUX_BATTERY && route.token==SWEET_BATT_IRQ_WDOG)) {
+-     /* Extend the existing hit record, not a second log per EOC. A late hit
+-      * must retain its times even if the consumer has already failed. */
+-     SWEET_LOG_INFO("SWEET MUX: hit route=%s status=%#x irq=%u work=%u route-hits=%u gic=%llu scan=%llu ack=%llu notify=%llu\n",
+-      route.name,status,irqCount,workCount,route.hits,(unsigned long long)parentGicNs,
+-      (unsigned long long)scanNs,(unsigned long long)ackNs,(unsigned long long)notifyNs);
+-    } else {
+-     SWEET_LOG_INFO("SWEET MUX: hit route=%s status=%#x irq=%u work=%u hits=%u route-hits=%u\n",
+-      route.name,status,irqCount,workCount,routeCount,route.hits);
+-    }
+-			}
++   SweetMuxIrqTrace &t = batch[i]; t = {};
++   t.hits = route.hits; t.irq = irqCount; t.work = workCount;
++   t.status = status; t.apid = route.apid; t.gicNs = parentGicNs;
++   t.scanNs = scanNs; t.ackNs = ackNs; t.ackWaitNs = waitNs; t.ackHoldNs = holdNs;
++   acknowledged |= 1u << i; drainMasks[pass] = acknowledged;
+ 			handled = true;
+ 		}
++		publishBatch(batch, acknowledged);
+ 		if (!pending) {
+ 			break;
+ 		}
+@@ -636,6 +690,7 @@ SweetSpmiInterruptMux::copyInterruptTrace(unsigned group, unsigned token, SweetM
+ #define TRACE_LOAD(field) next.field=__atomic_load_n(&t.field,__ATOMIC_RELAXED)
+    TRACE_LOAD(hits); TRACE_LOAD(irq); TRACE_LOAD(work); TRACE_LOAD(status); TRACE_LOAD(apid);
+    TRACE_LOAD(gicNs); TRACE_LOAD(scanNs); TRACE_LOAD(ackNs); TRACE_LOAD(notifyNs);
++   TRACE_LOAD(ackWaitNs); TRACE_LOAD(ackHoldNs);
+ #undef TRACE_LOAD
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    if (seq!=__atomic_load_n(&t.sequence,__ATOMIC_ACQUIRE)) continue;
+@@ -675,6 +730,7 @@ SweetSpmiInterruptMux::irq(unsigned int intid)
+ int
+ SweetSpmiInterruptMux::initializeHardware(void)
+ {
++	SWEET_LOG_INFO("SWEET MUX ARBITRATION: v1 ACK priority, bounded notify batches, split diagnostics\n");
+ 	if (sweet_spmi_init() != 0) {
+ 		SWEET_LOG_ERROR("SWEET MUX: shared SPMI transport unavailable\n");
+ 		return -1;

@@ -217,6 +217,12 @@ if [ "$DEPENDENCY_MATRIX" = 1 ]; then
    exit 1
   fi
  done
+ for marker in 'SWEET MUX ARBITRATION: v1' 'SWEET MUX ACK: v1'; do
+  if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+   printf 'kernel lacks 0167 ACK arbitration marker: %s\n' "$marker" >&2
+   exit 1
+  fi
+ done
 fi
 
 if [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then

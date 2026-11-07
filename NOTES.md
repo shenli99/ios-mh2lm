@@ -2,6 +2,35 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0167 ACK/遥测竞争修复本地完成，待用户push/新云产物；未宣称实机修好。**
+
+用户在ACK/并发阻塞审计后授权实现。基于真实0120a15的0166源码，新增
+0167-mh2lm-spmi-ack-arbitration.patch。控制器仍单sp_lock；mux受限IRQ写先原子
+登记ACK等待者，再取同锁；普通SPMI访问统一经过IOLockSleep谓词复查，释放时
+同锁wakeup，不打断已开始事务。mux每遍最多19路先ACK再按group合并通知，最多
+4遍表；所有遍次及GIC重开/失败后再打日志。原按键/USB/ADC/WD均保留，无表顺序
+硬换；trace在真实notify前一次发布，固定实例历史无热路径分配/大栈。
+public ADC/WD故障观察逐字段让锁，ADC协议错误保存现场+恢复仍原子。快照v2的
+first-lock不是连续占锁；新增MUX ACK v1 wait/hold纳秒分别记录等锁/持锁经过时间，
+包含调度，不能等同纯总线耗时。启动ARBITRATION v1，dependency打包拒绝旧内核。
+
+本地：严格apply真实0120a15/33文件回读，原106源码gate/CI字节不变、原五档参数
+通过；新仲裁100受控调度/1100线程、transport134（含独立快照期间ACK插入）、
+mux67+80竞争（含同批全组/Type-C合并/通知中再触发/trace）、runtime全部、ADC
+client19+100竞争、初始化/按键并发、日志等级均通过ASAN/UBSAN；7文件ARM64单
+编译通过，非云端链接或硬件时延验证。详见docs/SPMI-ACK-ARBITRATION.md及其余
+路线入口；底稿scratch/spmi-ack-arbitration，不入git。提交号见git log -1。
+
+未动CI/未push/未操作设备/未生成新boot；不延ADC100ms或WD23/180秒，不增加
+转换重试/轮询回退/pet/启充；原owner/poison/ACK幂等尝试/group隔离保持。当前
+事务映射/原子恢复仍可阻塞ACK，native调度与真实故障是否修复待下一轮数据。
+NEXT：用户push本轮，云产物到齐核对0167后打包同核deps0/1/2/4/7；优先identity1，
+桌面后尽快拔5秒→稳定电源5～10分钟→拔5秒，三键/触摸及持久日志，关注持续USBIN
+至少覆盖旧59请求。之后按新结果决定watchdog4/组合7，不重刷旧0120a15或baseline。
+全部runtime1不主动启充；首bark起算、长期许可/外部SMB1355隔离/最终授权仍未关闭。
+
+### Previous 0120a15 watchdog handoff (superseded next action)
+
 **CURRENT: 0120a15 watchdog4维护/有限停止通过；ADC59确认deadline前pending、ACK/notify晚。下一实现修关键分发/重遥测竞争，不追加硬件测试。**
 
 实现9f49c1d/0166，上轮文档470a376。本轮只读日志/源码和写文档，未改驱动/CI、

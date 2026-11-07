@@ -37,6 +37,7 @@ prelude = r'''
 #include <cstdlib>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include <thread>
 #include <vector>
 #include <cstring>
@@ -67,13 +68,21 @@ static vm_offset_t ml_io_map(vm_offset_t a,vm_size_t) {
 static void delay(unsigned) {}
 static vm_offset_t sp_core,sp_obs,sp_cfg,keys_obs;
 static IOLock *sp_lock;
+static unsigned sp_ack_waiters;
+#define THREAD_UNINT 0
+static std::condition_variable transportCondition;
+static int IOLockSleep(IOLock *l,void *,int) {
+    std::unique_lock<std::mutex> guard(*l,std::adopt_lock);
+    transportCondition.wait(guard);guard.release();return 0;
+}
+static void IOLockWakeup(IOLock *,void *,bool) {transportCondition.notify_all();}
 static unsigned sp_count;
 static bool sp_attempted,sp_ready,sp_poisoned[512];
 static uint32_t keys_last_status;
 static uint32_t keys_rd(vm_offset_t base,uint32_t off) {return *reinterpret_cast<uint32_t *>(base+off);}
 '''
-units = ''.join(function(spmi, n) for n in ['sp_rd', 'sp_find_apid', 'sp_get_lock',
-    'sp_initialize', 'sweet_spmi_init', 'sweet_spmi_irq_lock', 'sweet_spmi_irq_unlock',
+units = 'void sweet_spmi_irq_lock(); void sweet_spmi_irq_unlock();\n'+''.join(function(spmi, n) for n in ['sp_rd', 'sp_find_apid', 'sp_get_lock',
+    'sp_initialize', 'sweet_spmi_init', 'sweet_spmi_irq_lock', 'sweet_spmi_irq_ack_lock', 'sweet_spmi_irq_unlock',
     'sweet_spmi_read'])+function(keys, 'keys_read')
 checks = r'''
 int main(int argc,char **argv) {

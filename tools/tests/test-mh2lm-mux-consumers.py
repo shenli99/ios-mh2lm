@@ -514,9 +514,45 @@ static void adcCheck(const char *mode) {
     while(!platform.children.empty())platform.children.back()->terminate(2);
     pump();assertNoLeaks();
 }
+
+static unsigned batchCalls[MUX_GROUPS],batchMasks[MUX_GROUPS];
+static bool batchArmed,batchReassert;
+static void batchNotify(void *context,unsigned events) {
+    if(!batchArmed)return;
+    unsigned group=*static_cast<unsigned *>(context);
+    assert(!(events&SWEET_MUX_FAILED));++batchCalls[group];batchMasks[group]|=events;
+    // All first-pass IRQ latches must be cleared before ANY consumer is
+    // allowed to begin its own telemetry; assert this inside real notify.
+    if(!batchReassert)for(unsigned apid:{248u,261u,269u,271u,273u,280u})
+        { auto pending=hwRead(SWEET_DEV_SPMI_CHNLS_PA+apid*0x10000,0x104);
+          if(pending)fprintf(stderr,"batch group=%u apid=%u pending=%#x\n",group,apid,pending);
+          assert(!pending); }
+    if(group==MUX_BATTERY && batchCalls[group]==1) {
+        batchReassert=true;
+        mmio[SWEET_DEV_SPMI_CHNLS_PA+271*0x10000+0x104]|=4;
+    }
+}
+static void batchCheck() {
+    ppids[280]=0x231;mmio[SWEET_DEV_SPMI_CORE_PA+0x900+4*280]=0x01000000|(0x231<<8);
+    assert(startMux()==0);unsigned contexts[]={0,1,2};
+    for(unsigned group=0;group<MUX_GROUPS;++group)
+        assert(!testAttach(group,group==0?7u:group==1?SWEET_BATT_IRQ_ALL:SWEET_ADC5_IRQ_EOC,batchNotify,&contexts[group]));
+    pump();batchArmed=true;
+    inject(248,3);inject(261,1);inject(269,0x50);inject(271,0x7d);inject(273,2);inject(280,1);pump();
+    assert(batchCalls[0]==1 && batchMasks[0]==7);
+    assert(batchCalls[1]==2 && batchMasks[1]==(SWEET_BATT_IRQ_USB|SWEET_BATT_IRQ_SOURCE|SWEET_BATT_IRQ_TYPEC|SWEET_BATT_IRQ_WDOG));
+    assert(batchCalls[2]==1 && batchMasks[2]==SWEET_ADC5_IRQ_EOC);
+    assert(testInstance->state==1 && testInstance->traces[15].hits==1);
+    SweetMuxIrqTrace trace={};assert(testInstance->copyInterruptTrace(2,SWEET_ADC5_IRQ_EOC,&trace));
+    assert(trace.scanNs<=trace.ackNs && trace.ackNs<=trace.notifyNs);
+    batchArmed=false;
+    for(unsigned group=0;group<MUX_GROUPS;++group)testDetach(group,&contexts[group]);
+    endProvider();assertNoLeaks();
+}
 int main(int argc,char **argv) {
     assert(argc>1);const char *mode=argv[1];initialize();
-    if (!std::strncmp(mode,"adc-",4)) adcCheck(mode);
+    if (!std::strcmp(mode,"ack-batch")) batchCheck();
+    else if (!std::strncmp(mode,"adc-",4)) adcCheck(mode);
     else if (!std::strcmp(mode,"early") || !std::strcmp(mode,"late")) ownerCleanup(mode);
     else if (!std::strcmp(mode,"term-before-provider-stop")) {
         SweetBattery b;startBattery(b);assert(startMux()==0);sweet_keys_init();pump();
@@ -862,7 +898,7 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-mux-consumers-') as d:
     src.write_text('#define SWEET_MUX_SERVICE_TEST 1\n#define ARM64_BOARD_CONFIG_SWEET 1\n'+prelude+units)
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-O1','-g','-pthread',
                     '-fsanitize=address,undefined',str(src),'-o',str(binary)],check=True)
-    scenarios=['adc-trace-race','adc-early-timer','adc-phase-timer','adc-capture-fail','adc-idle','adc-bat-id','adc-usb','adc-sequence','adc-loop-fail','adc-timer-add-fail','adc-notifier-fail','adc-begin-fail','adc-timeout','adc-result-fail','adc-restore-fail','adc-stop-active','adc-provider-term','early','late','cancel-before-match','term-before-attach','term-after-attach',
+    scenarios=['ack-batch','adc-trace-race','adc-early-timer','adc-phase-timer','adc-capture-fail','adc-idle','adc-bat-id','adc-usb','adc-sequence','adc-loop-fail','adc-timer-add-fail','adc-notifier-fail','adc-begin-fail','adc-timeout','adc-result-fail','adc-restore-fail','adc-stop-active','adc-provider-term','early','late','cancel-before-match','term-before-attach','term-after-attach',
                'rollback-isolate-keys','detach-isolate-ok','detach-isolate-timeout','detach-isolate-gate-fail',
                'detach-isolate-pending-fail','isolate-shared-apid','isolated-apid-rebind',
                'key-type-mismatch','keys-prepare-fail','keys-late-match','keys-cancel-before-match',

@@ -1,5 +1,10 @@
 # 电池共享 SPMI 访问接口（0150）
 
+**0167更新：** 控制器仍单锁串行，mux IRQ写/ACK新增等待者优先入场，普通事务
+统一通过可睡眠的入场检查；不在top half取锁。独立ADC/WD诊断读逐字段释放。
+历史调用点/行号按原版本保留；当前仲裁、完整锁顺序和验证边界见
+[SPMI-ACK-ARBITRATION.md](SPMI-ACK-ARBITRATION.md)。
+
 后续0151的SRAM/运行层实现及当前缺口见
 [BATTERY-RUNTIME.md](BATTERY-RUNTIME.md)。本文记录0150交付边界。
 
