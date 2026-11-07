@@ -2,6 +2,44 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0162按LG SMB5修正sink Rp误拒绝，本地验证完成，待用户push。**
+
+用户要求读LG参考实现并修复0120a10暴露的CC误拒绝。核对LG树d4f335e，
+smb5-lib:get_prop_typec_mode/ufp_mode、update_sw_icl_max、attach/state handler、
+smb5-reg及LG extension的usbin_ov_check：参考路径先角色后Rp，没有misc bit4
+直接否决sink Rp；USBIN OV/UV另为1310 bit3/2。不能把旧SMB2定义搬过来，也不
+宣称misc bit4仅source有效或已确定物理成因。
+
+新增补丁0162接0161：SweetBattCc增加role/observed，source不解码残留sink Rp；
+misc bit4移到SB_CC_OBS_VBUS_ERROR，原reasons bit7保留不用；独立USBIN OV/UV
+采集拒绝位1000/2000。新增INFO CC ROLE及registry role/observed属性。保持
+water/VCONN/debug/legacy/attach/debounce/一致性/session/3s期限/pending撤销。
+没有新增寄存器访问、IRQ路由或写权限，不清位/改角色/APSD rerun/PD协商，
+不修改mux/keys/USB/touch/ADC。OV/UV检查依赖已有输入事件采样，未实现完整
+独立OV/UV事件保护或LG迟滞/storm恢复。真实启充和长期input provider仍未完成。
+
+本地：严格apply到实际0120a10源码，33文件与verify一致，108源码gate；
+SweetBattery ARM64单文件编译通过（已有工具链/格式/unsafe-buffer warnings，
+不等于macOS整核构建）。ASAN/UBSAN runtime6/mux66/transport122/ADCconsumer1/
+log1条PASS记录，含实际采样→策略→registry的Rp3A/misc39、OV/UV、source残留、
+撤销/时效和缺依赖无控制写。34笔实机快照新旧实际策略离线回放，7笔稳定sink
+（221/222/225/226/357/359/360）新规则kind2/max3000，其余拒绝；无法重建未
+记录的pending IRQ时序，不是新设备结果。底稿scratch/battery-cc-lg-sink，
+integration.json/log-replay.json及各测试/编译输出。测试原始日志不入git。
+
+CI只增2个源码gate，编译命令不变；打包器要求CC ROLE marker，旧0120a10已被
+拒绝。文档BATTERY-TYPEC-CC、BATTERY-DRIVER-NEXT更新。未push/操作设备，无新
+boot/实机结果或CI run ID；本次无需用户再重测旧镜像/baseline。
+
+NEXT：用户push本地0162提交；下载新kernel/buildtree后核对并用原
+--battery-evidence打包runtime1/IRQ4/ADCconv0，保留三种IRQ及USB日志。电脑启动
+→拔线→当前电源稳定约30秒→拔线约10秒→电脑，导出持久日志，记录线材/电源。
+重点验role1/observed1/reasons0/qualified1、INPUT CAP kind2/max3000及拔线撤销；
+APSD仍可FLOAT，charging预期0，3秒后观测到期不续期。之后补长期input/Type-C/
+DPDM及保护事件provider，ADC故障取证/identity授权/parallel/watchdog仍需闭合。
+
+### Previous 0120a10 log handoff (superseded)
+
 **CURRENT: 0120a10实机分析完成：0161初始化修复通过，CC输入仍被策略拒绝。**
 
 日志sweetlog-0120a10-battery-evidence.bin，SHA256

@@ -1,5 +1,22 @@
 # 0119之后的电池驱动推进
 
+**最新实现：0162按LG SMB5修正sink Rp误拒绝，本地完成，待用户push。**
+角色先于Rp解释；misc bit4移到独立诊断，不再作为sink直接否决条件，复用1310
+字节独立检查USBIN OV/UV。无新寄存器访问/写权限/IRQ路由，没有改mux/keys/USB/
+touch或ADC。真实启充互锁仍在；不表示已实现PD或完整input provider。
+
+33文件严格apply/108源码gate，SweetBattery ARM64单文件编译及runtime/mux/
+ADC consumer/transport/日志回归通过；0120a10的34笔输入离线回放，7笔一致
+Rp3A可建立CC观测，其余拒绝，不是新设备证据。详见
+[0162依据、修改与验证](BATTERY-TYPEC-CC.md#0162按lg-smb5修正sink-rp误拒绝)。
+用户push后新云产物核对，用原battery-evidence/runtime1一次测试；观察稳定
+电源接入CC role1/observed1/reasons0/qualified1及kind2/max-ma3000、拔线撤销，
+APSD为FLOAT也可。观测3秒期限未改，不能靠定时读取续许可。无需重跑baseline。
+下一步补长期input/Type-C/DPDM及错误保护事件provider；ADC错误路径取证、identity/
+parallel/watchdog仍需后续，禁止用本次Rp分类成功直接代替这些依赖。
+
+### 0120a10及更早结果（历史）
+
 **0120a10最新：0161初始化修复已实机通过。** battery group成功attach，Type-C
 路由有实际命中，34次运行期IRQ刷新healthy1，13次UI源状态发布，插拔撤销/恢复
 正常出现在日志中。不能把内核发布结果直接当作屏幕视觉验收。ADC273次全部成功，

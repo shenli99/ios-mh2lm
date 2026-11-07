@@ -1,8 +1,8 @@
-# Type-C CC/Rp 输入判断（0160）
+# Type-C CC/Rp 输入判断（0160～0162）
 
-**当前：0120a10已验证0161初始化修复，Type-C IRQ与插拔发布正常运行。** 已读到
-3A Rp广播，但misc=0x39中的bit4触发当前VBUS_ERROR拒绝规则，尚无输入许可或
-真实启充。该拒绝规则与LG SMB5分类路径有差异，不能据此认定充电器故障。详见文末。
+**当前：0162已按LG SMB5修正sink Rp误拒绝，本地验证通过，待用户push。**
+先按角色解释Rp，misc bit4保留为诊断观测；USBIN OV/UV独立拒绝。0120a10的7笔
+一致Rp3A快照离线回放可建立CC观测依据，尚无修复版实机结果，不启充。详见文末。
 
 2026-11-07。补丁 `0160-mh2lm-typec-cc-input.patch` 接在0159之后。用户要求把
 CC判断加入现有电池输入逻辑；本轮完成事件接入、独立分类、撤销及诊断，仍用
@@ -52,8 +52,8 @@ SPMI操作继续走现有串行化transport。按键、DWC3和触摸IRQ路径不
 
 仅runtime请求时订阅这些路由。沿用mux的唯一EE0 IRQ-owned APID检查、已使能位
 拒绝接管、按位回滚、按group隔离和detach同步；不能解析/配置时明确报失败，
-不静默退回轮询。本轮没有预先硬编码Type-C的APID，也没有实机验证其IRQ写权限。
-host测试中的APID271是模拟映射，**不是实机结论**。
+不静默退回轮询。APID不硬编码；0160最初的host映射不能作为实机结论，后续
+0120a10已实际解析APID271并验证配置及自然IRQ交付，见文末结果。
 
 ## 采样与判断
 
@@ -63,7 +63,9 @@ host测试中的APID271是模拟映射，**不是实机结论**。
 当新证据。APSD状态和使能也保留前后核对。无sleep、重采循环或补偿轮询；一致
 字节仅是软件检查，不能证明硬件原子快照，不能排除ABA或合并期间漏掉物理插拔。
 
-`sb_cc_status()` 返回明确的Rp、广播电流、方向和拒绝原因：
+`sb_cc_status()` 返回角色、独立观测标志、Rp、广播电流、方向和拒绝原因。
+角色由misc bit6区分（1为本机source，0为本机sink），仍需有效的附着/VBUS等
+条件才可使用；source角色不解释残留sink Rp。不是配置角色或建立PD合同。
 
 | Rp原始掩码值（1506 & 0x7f） | rp枚举 | advertised-ma |
 | --- | --- | --- |
@@ -73,7 +75,9 @@ host测试中的APID271是模拟映射，**不是实机结论**。
 | 其余/组合/short | 0：unknown | 0 |
 
 正常sink须VBUS存在、attach与CC附着、debounce完成、非source角色，且没有water、
-VBUS error、VCONN OC、debug/legacy标记。misc bit1为方向，不按故障拒绝。
+VCONN OC、debug/legacy和USBIN OV/UV标记。misc bit1为方向，不按故障拒绝。
+0162起misc bit4只进入`observed`诊断，不再单独否决sink Rp。该改变依据LG SMB5
+分类/限流路径，不是证明该状态永远无害，也没有清位、切换角色或重置PMIC。
 现阶段legacy仍拒绝，未声称实现Android的完整legacy/FLOAT策略。
 
 `reasons`位表（可组合）：
@@ -87,15 +91,18 @@ VBUS error、VCONN OC、debug/legacy标记。misc bit1为方向，不按故障�
 | 0x010 | debounce未完成 |
 | 0x020 | 本机为source角色 |
 | 0x040 | water状态 |
-| 0x080 | VBUS error |
+| 0x080 | 保留；0160/0161曾用misc bit4拒绝，0162已修正 |
 | 0x100 | VCONN OC |
 | 0x200 | debug accessory |
 | 0x400 | legacy/noncompliant |
 | 0x800 | Rp未知/short/组合值 |
+| 0x1000 | USBIN实际OV状态，1310 bit3 |
+| 0x2000 | USBIN实际UV状态，1310 bit2 |
 
-0120a8的`1506=02/misc=39/debug=0/legacy=4`会显示`advertised-ma=3000`，同时
-`reasons=0x80`、qualified0、kind0，明确说明“看见广播，但错误状态阻止认可”。
-不能把这条日志写成充电器已授权3A或已建立PD合同。
+0120a8～0120a10的`1506=02/misc=39/debug=0/legacy=4`在0160/0161下显示
+`advertised-ma=3000/reasons=0x80/qualified0/kind0`，是当时软件拒绝结果；
+0162在其他有效性条件满足时应为`role=1/observed=1/reasons=0`，由plugin/Type-C
+事件建立CC依据，不能据此宣称PD或真实启充。
 
 ## 来源、期限与仲裁
 
@@ -133,6 +140,7 @@ ADC请求196第二EOC超时是独立待办，0160没有修改ADC实现。
 
 ```text
 SWEET BATT CC: v1 id=... events=... coherent=... reasons=... rp=... advertised-ma=... orientation=... qualified=...
+SWEET BATT CC ROLE: v1 id=... role=... observed=...; LG-SMB5 sink classification
 SWEET BATT CC TIME: v1 id=... session=... started-ns=... completed-ns=...
 SWEET BATT INPUT CAP: v1 id=... kind=... max-ma=...; observed-only not-PD
 ```
@@ -142,6 +150,9 @@ APSD来源日志保留。错误沿用ERROR无条件输出，INFO可按既有等�
 
 IORegistry增加`SweetBatteryCCRejectReasons/CCRp/CCAdvertisedMA/CCEvidenceFresh`及
 `SweetBatteryObservedInputKind/ObservedInputMaxMA`。前缀均为SweetBattery。
+0162增加`SweetBatteryCCRole/CCObservedFlags`，role0未知/1本机sink/2本机source，
+observed bit0表示misc的VBUS error状态位。诊断用INFO，不把原始状态当作已证明
+故障而伪报ERROR；已确认的IRQ/transport错误仍沿用原等级处理。
 属性发布时重新计算时效，过期/停止不保留有效kind；不借此设置UI充电标志。
 
 ## 本地验证与下一次设备验证
@@ -369,3 +380,69 @@ configured，后段重接电脑继续出现reset/ep0 warning，无新configured�
 观察，未执行启充，不构成真实充电验收。本轮仅分析/记录，未改驱动或CI，未push、
 未操作设备。无需重跑baseline或当前镜像；下一实现先解决上述输入策略语义，
 ADC故障诊断及identity/parallel/watchdog互锁仍为独立待办。
+
+## 0162：按LG SMB5修正sink Rp误拒绝
+
+补丁`0162-mh2lm-lg-typec-sink-classification.patch`接0161。用户要求阅读LG
+参考实现并修复。核对基准仍为LG树HEAD
+`d4f335e13d73c4aa2af85581a6ec11b670ee5b94`，未套用旧SMB2的寄存器定义。
+
+### 依据和边界
+
+| LG参考入口（drivers/power/supply/下） | 与本次修正的关系 |
+| --- | --- |
+| qcom/smb5-lib.c:smblib_get_prop_typec_mode | misc bit6先区分UFP/DFP，不能把source时残留的sink Rp当输入能力 |
+| qcom/smb5-lib.c:smblib_get_prop_ufp_mode | debug accessory另行分类，普通Rp按1506掩码解码，没有misc bit4直接否决sink的规则 |
+| qcom/smb5-lib.c:typec_attach_detach_irq_handler/typec_state_change_irq_handler | 附着和CC事件驱动状态更新；保留现有XNU IRQ与撤销流程 |
+| qcom/smb5-lib.c:update_sw_icl_max/typec_rp_med_high | PD/QC另有所有者，中高Rp可独立于普通BC1.2；legacy还受额外条件约束 |
+| qcom/smb5-reg.h:TYPE_C_MISC_STATUS_REG/USBIN_OV_RT_STS_BIT/USBIN_UV_RT_STS_BIT | 150b bit4与1310 bit3(OV)/bit2(UV)是不同状态，不可混用 |
+| lge/extension-smb5.c:usbin_ov_check | LG检查独立USBIN OV；不能因Rp可解码就认定输入电压无异常 |
+
+修复将角色、诊断观测和拒绝原因分开：
+
+- `SweetBattCcRole`表示本次读取的方向，sink才解释Rp；source始终拒绝输入且
+  advertisedMa为0。失效读取时role未知，不发布伪造的有效角色。
+- misc bit4保留在`SB_CC_OBS_VBUS_ERROR`及原始TYPEC日志，移出sink拒绝原因；
+  旧reasons bit7保留不用，避免重用旧日志含义。**没有宣称bit4只适用于source，
+  或确定其物理成因**；修正的是原先没有参考实现依据的直接否决。
+- 新增独立USBIN OV/UV拒绝原因0x1000/0x2000，复用已经采集、前后核对的1310，
+  不增加寄存器读取或写权限。这是当前窄范围策略的保守拒绝，不等于完整移植LG
+  的OV/UV迟滞、storm处理或输入恢复状态机。本次不新增OV/UV IRQ路由，只在已有
+  输入事件采集中检查；不能宣称已实现独立OV/UV事件保护，完整provider仍待补齐。
+- water/VCONN、debug/legacy、附着/debounce、未知Rp、采集一致性、事件来源、
+  session及3秒期限继续约束观测。原始misc变化也参与一致性/同状态检查；不因
+  bit4改为诊断就忽略采集中变化。source-only事件不能建立变化后的CC依据。
+
+新增INFO `SWEET BATT CC ROLE: v1`及role/observed registry属性；原CC日志格式
+保留。mux/keys/USB/touch、SPMI transport、PMIC写表、ADC实现和UI状态计算未改。
+沿用GIC→mux IOService→registry client→battery workloop→typed采样/策略，
+没有轮询fallback、补偿重试或上层寄存器写。没有主动enable/rerun APSD、DPDM
+切换、Type-C角色管理或PD协商；FLOAT单独仍不授权，只有独立有效中高Rp可给出
+CC观测能力。`inputVerified`等真实启充互锁仍未建立。
+
+### 本地验证与后续设备验收
+
+严格应用到实际0120a10源码，33文件与verify逐字节一致，108个CI源码gate通过。
+SweetBattery ARM64单文件交叉编译通过；不是完整macOS构建/链接验收。host
+ASAN/UBSAN runtime6、mux/IRQ66、charger transport122、ADC consumer1、日志1条
+PASS记录。新增覆盖真实Rp3A/misc39组合的采样→策略→属性发布、独立OV/UV拒绝、
+source残留Rp、原始状态变化/时效撤销和真实授权缺失时无控制写。测试中的完整
+授权仅为host合成数据，不进入设备驱动。控制提交pending检查及故障撤销仍通过。
+
+离线回放0120a10全部34次实际输入快照：旧规则能力全0；新规则7次稳定sink
+（221/222/225/226/357/359/360）为CC/3000mA观测，其余27次仍拒绝。该回放
+执行实际新旧策略代码，但不能重建未记录的pending IRQ时刻，也不是新设备结果。
+底稿`scratch/battery-cc-lg-sink/`，含base/edited/verify、cloud-apply、测试输出、
+`integration.json`与`log-replay.json`；原始日志不入git。
+
+CircleCI仅加2个源码gate，编译命令不变；打包器要求新CC ROLE marker，已验证旧
+0120a10 kernel被拒绝。用户push后下载新kernel/buildtree，核对再用同一
+`--battery-evidence`打包：runtime1/IRQ4/ADCconv0，保留USB日志与三种IRQ驱动。
+电脑启动→拔线→当前电源稳定接入约30秒→拔线约10秒→电脑，持久日志即可；
+无需重复baseline。记录电源/线材，观察插拔图标并顺手确认按键/触摸。
+
+验收重点是稳定电源接入后的CC `role1/observed1/reasons0/qualified1`、
+INPUT CAP `kind2/max-ma3000`及拔线撤销，APSD仍可为FLOAT，不强求DCP。
+qualified是短期观测，超过3秒没有新的有效证据会过期，不应靠定时读刷新许可；
+长期input provider仍待后续。真实charging保持0，本次不能作为充电验收。
+本地完成，未push，无新boot/设备结果或新CI run ID。

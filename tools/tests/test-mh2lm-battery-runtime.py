@@ -281,8 +281,8 @@ static void ccTests(){
     previous=s;sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
     assert(sb_input_capability(s,s.inputCompletedNs).maxMa==3000);
     auto good=s;
-    // Revoke on every status fault, short/mixed Rp, debug/legacy, error or race.
-    for(unsigned flip:{1u,4u,8u,0x10u,0x20u,0x40u,0x80u}){
+    // Revoke on input faults, short/mixed Rp, debug/legacy, error or race.
+    for(unsigned flip:{1u,4u,8u,0x20u,0x40u,0x80u}){
         s=good;previous=s;s.raw[SB_MISC]^=flip;sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
         assert(sb_cc_status(s).reasons && !s.ccFromEvent && sb_input_capability(s,s.inputCompletedNs).kind==SB_INPUT_NONE);
     }
@@ -306,12 +306,49 @@ static void ccTests(){
     assert(sb_input_capability(s,s.inputCompletedNs).kind==SB_INPUT_NONE); // default needs USB/BC
     s=good;s.valid|=(1ULL<<SB_APSD)|(1ULL<<SB_RESULT);s.raw[SB_APSD]=3;s.raw[SB_RESULT]=8;
     assert(sb_input_capability(s,s.inputCompletedNs).kind==SB_INPUT_NONE); // no QC authorization
-    // Reproduce 0120a8: Rp3A is visible, but misc39 rejects VBUS_ERROR explicitly.
-    s=sample();s.raw[SB_TYPEC]=2;s.raw[SB_MISC]=0x39;s.raw[SB_RESULT]=0x10;
-    assert(sb_cc_status(s).advertisedMa==3000 && sb_cc_status(s).reasons==SB_CC_VBUS_ERROR);
-    previous=s;sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC|SWEET_BATT_IRQ_SOURCE);
+    // Real 0120a10 tuple: classify sink Rp as LG SMB5 does. misc bit4 remains
+    // observable but is not the independent USBIN over/undervoltage indicator.
+    s=sample();s.raw[SB_TYPEC]=2;s.raw[SB_ATTACHED]=0x23;s.raw[SB_MISC]=0x39;
+    s.raw[SB_DEBUG_ACCESS]=0;s.raw[SB_LEGACY]=4;s.raw[SB_RESULT]=0x10;
+    auto cc=sb_cc_status(s);
+    assert(cc.role==SB_CC_ROLE_SINK && cc.observed==SB_CC_OBS_VBUS_ERROR);
+    assert(cc.advertisedMa==3000 && !cc.reasons);
+    sb_note_input(s,empty,0);assert(!s.ccFromEvent); // startup still diagnostic
+    previous=s;sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
+    assert(s.ccFromEvent && sb_input_capability(s,timeNs).kind==SB_INPUT_CC);
+    auto observed=s;
+    const SweetBattLimits limitsForCc={true,true,true,2800,4430,3000,5000,timeNs};
+    assert(sb_decide(controller,observed,limitsForCc,timeNs).allow);
+    for(unsigned fault:{4u,8u,12u}){
+        s=observed;previous=s;s.raw[SB_USB]|=fault;
+        sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
+        assert(sb_cc_status(s).reasons==((fault&4?SB_CC_USB_UV:0)|(fault&8?SB_CC_USB_OV:0)));
+        assert(!s.ccFromEvent && sb_input_capability(s,timeNs).kind==SB_INPUT_NONE);
+        assert(!sb_decide(controller,s,limitsForCc,timeNs).allow);
+    }
+    // A source role cannot advertise input current from stale sink Rp bytes.
+    s=observed;previous=s;s.raw[SB_MISC]|=0x40;
+    sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
+    cc=sb_cc_status(s);
+    assert(cc.role==SB_CC_ROLE_SOURCE && cc.observed==SB_CC_OBS_VBUS_ERROR);
+    assert((cc.reasons&SB_CC_SOURCE) && cc.rp==SB_RP_UNKNOWN && !cc.advertisedMa);
     assert(!s.ccFromEvent && sb_input_capability(s,timeNs).kind==SB_INPUT_NONE);
-    puts("PASS: CC independent of APSD, Rp default/1.5A/3A, event provenance/expiry/revocation, fault reasons and existing control interlocks");
+    // Changed raw misc must still revoke provenance on a source-only event.
+    s=observed;previous=s;s.raw[SB_MISC]&=~0x10;
+    sb_note_input(s,previous,SWEET_BATT_IRQ_SOURCE);assert(!s.ccFromEvent);
+    previous=s;sb_note_input(s,previous,SWEET_BATT_IRQ_TYPEC);
+    assert(s.ccFromEvent && !sb_cc_status(s).observed);
+    s=observed;previous=s;s.raw[SB_USB]=0;
+    sb_note_input(s,previous,SWEET_BATT_IRQ_USB);
+    assert(!s.ccFromEvent && sb_input_capability(s,timeNs).kind==SB_INPUT_NONE);
+    s=observed;assert(!sb_cc_event_fresh(s,timeNs+3000000001ULL));
+    s.valid&=~(1ULL<<SB_MISC);cc=sb_cc_status(s);
+    assert(cc.role==SB_CC_ROLE_UNKNOWN && cc.reasons==SB_CC_READ && !cc.observed);
+    // Even a valid Rp3A observation must not make the device control providers
+    // valid. Synthetic limit authorization exists only in this host test.
+    s=observed;l=SweetBattLimits{};
+    assert(!sb_decide(controller,s,l,timeNs).allow);
+    puts("PASS: LG SMB5 sink/source Rp classification, misc observation vs USBIN OV/UV, CC provenance/expiry/revocation and unchanged control interlocks");
 }
 static void apsdEventTests(){
     auto s=sample();SweetBattSnapshot empty={};
@@ -383,7 +420,7 @@ static void evidenceTests(){
         s=sample();s.raw[SB_TYPEC]=value;assert(!sb_normal_sink(s));
         assert(sb_decide(c,s,l,timeNs).reasons&SB_R_INPUT);
     }
-    for(unsigned flip:{1u,4u,8u,0x10u,0x20u,0x40u,0x80u}){
+    for(unsigned flip:{1u,4u,8u,0x20u,0x40u,0x80u}){
         s=sample();s.raw[SB_MISC]^=flip;assert(!sb_normal_sink(s));
     }
     for(unsigned field:{SB_DEBUG_ACCESS,SB_LEGACY,SB_ATTACHED}){
@@ -595,6 +632,26 @@ int main(){
     inputSample(b,SWEET_BATT_IRQ_TYPEC);b.publishRuntime();
     assert(b.registry["SweetBatteryCCEvidenceFresh"] && b.registry["SweetBatteryCCAdvertisedMA"]==1500);
     assert(b.registry["SweetBatteryObservedInputKind"]==SB_INPUT_CC);
+    // Actual sampler -> policy -> publication with the captured Rp3A/misc39
+    // tuple. Neither an observation nor registry publication submits a write.
+    auto ccWrites=writes.size();
+    regs[0x1506]=2;regs[0x1509]=0x23;regs[0x150b]=0x39;regs[0x150d]=4;
+    regs[0x1307]=0x21;regs[0x1308]=0x10;regs[0x1362]=0x18;
+    inputSample(b,SWEET_BATT_IRQ_TYPEC);b.runRuntimePolicy();b.publishRuntime();
+    assert(b.registry["SweetBatteryCCRole"]==SB_CC_ROLE_SINK);
+    assert(b.registry["SweetBatteryCCObservedFlags"]==SB_CC_OBS_VBUS_ERROR);
+    assert(!b.registry["SweetBatteryCCRejectReasons"] && b.registry["SweetBatteryCCAdvertisedMA"]==3000);
+    assert(b.registry["SweetBatteryCCEvidenceFresh"] && b.registry["SweetBatteryObservedInputKind"]==SB_INPUT_CC);
+    assert(!b.fController.owned && !b.fController.enabled && writes.size()==ccWrites);
+    assert(logs.find("SWEET BATT CC ROLE: v1")!=std::string::npos);
+    for(unsigned fault:{4u,8u}){
+        regs[0x1310]=16|fault;
+        inputSample(b,SWEET_BATT_IRQ_TYPEC);b.publishRuntime();
+        assert(!b.registry["SweetBatteryCCEvidenceFresh"]);
+        assert(b.registry["SweetBatteryObservedInputKind"]==SB_INPUT_NONE);
+        assert(b.registry["SweetBatteryCCRejectReasons"]==(fault==4?SB_CC_USB_UV:SB_CC_USB_OV));
+    }
+    regs[0x1310]=16;inputSample(b,SWEET_BATT_IRQ_TYPEC);
     b.fIrqPending=SWEET_BATT_IRQ_TYPEC;b.runRuntimePolicy();b.publishRuntime();
     assert(!b.fSnapshot.ccFromEvent && !b.registry["SweetBatteryCCEvidenceFresh"]);
     assert(b.registry["SweetBatteryObservedInputKind"]==SB_INPUT_NONE);

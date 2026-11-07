@@ -1,0 +1,76 @@
+diff --git a/bsd/dev/sweet_battery_runtime.h b/bsd/dev/sweet_battery_runtime.h
+index 225c2e9d60e56fada08020d50208cc25ac712789..23f474f3b76c9cff80167cbfa4f392ac57b78612 100644
+--- a/bsd/dev/sweet_battery_runtime.h
++++ b/bsd/dev/sweet_battery_runtime.h
+@@ -89,12 +89,17 @@ enum { SB_INPUT_PLUGIN = 0x01u, SB_INPUT_SOURCE = 0x10u, SB_INPUT_TYPEC = 0x40u
+ enum SweetBattCcReason : uint32_t {
+  SB_CC_READ=1u<<0, SB_CC_RACE=1u<<1, SB_CC_NO_VBUS=1u<<2,
+  SB_CC_DETACHED=1u<<3, SB_CC_DEBOUNCE=1u<<4, SB_CC_SOURCE=1u<<5,
+- SB_CC_WATER=1u<<6, SB_CC_VBUS_ERROR=1u<<7, SB_CC_VCONN_OC=1u<<8,
+- SB_CC_DEBUG=1u<<9, SB_CC_LEGACY=1u<<10, SB_CC_RP=1u<<11
++ SB_CC_WATER=1u<<6,
++ /* Bit7 is reserved: 0160/0161 incorrectly vetoed sink Rp on misc bit4. */
++ SB_CC_VCONN_OC=1u<<8, SB_CC_DEBUG=1u<<9, SB_CC_LEGACY=1u<<10,
++ SB_CC_RP=1u<<11, SB_CC_USB_OV=1u<<12, SB_CC_USB_UV=1u<<13
+ };
++enum SweetBattCcRole { SB_CC_ROLE_UNKNOWN, SB_CC_ROLE_SINK, SB_CC_ROLE_SOURCE };
++enum SweetBattCcObserved : uint32_t { SB_CC_OBS_VBUS_ERROR=1u<<0 };
+ enum SweetBattRp { SB_RP_UNKNOWN, SB_RP_DEFAULT, SB_RP_1P5, SB_RP_3P0 };
+ struct SweetBattCc {
+- uint32_t reasons;
++ uint32_t reasons, observed;
++ SweetBattCcRole role; /* observed misc direction, not a managed PD role */
+  SweetBattRp rp;
+  unsigned advertisedMa, orientation; /* default Rp does not grant 500mA */
+ };
+@@ -104,16 +109,25 @@ static inline SweetBattCc sb_cc_status(const SweetBattSnapshot &s)
+  if ((s.valid&sb_cc_mask())!=sb_cc_mask()) { cc.reasons=SB_CC_READ;return cc; }
+  if (!s.ccCoherent) cc.reasons|=SB_CC_RACE;
+  unsigned misc=s.raw[SB_MISC],rp=s.raw[SB_TYPEC]&0x7f;
++ /* LG SMB5 smblib_get_prop_typec_mode selects UFP/DFP from misc bit6,
++  * then smblib_get_prop_ufp_mode interprets Rp. It does not use misc bit4
++  * as a sink Rp veto. Preserve that observation without calling it a USBIN
++  * voltage fault or clearing hardware. Actual USBIN OV/UV are separate
++  * RT_STS bits (smb5-reg.h), rejected below even when Rp looks valid. */
++ cc.role=(misc&0x40)?SB_CC_ROLE_SOURCE:SB_CC_ROLE_SINK;
++ if (misc&0x10) cc.observed|=SB_CC_OBS_VBUS_ERROR;
++ if (s.raw[SB_USB]&8) cc.reasons|=SB_CC_USB_OV;
++ if (s.raw[SB_USB]&4) cc.reasons|=SB_CC_USB_UV;
+  if (!(s.raw[SB_USB]&16) || !(misc&0x20)) cc.reasons|=SB_CC_NO_VBUS;
+  if (!(s.raw[SB_ATTACHED]&0x20) || !(misc&1)) cc.reasons|=SB_CC_DETACHED;
+  if (!(misc&8)) cc.reasons|=SB_CC_DEBOUNCE;
+- if (misc&0x40) cc.reasons|=SB_CC_SOURCE;
++ if (cc.role==SB_CC_ROLE_SOURCE) cc.reasons|=SB_CC_SOURCE;
+  if (misc&0x80) cc.reasons|=SB_CC_WATER;
+- if (misc&0x10) cc.reasons|=SB_CC_VBUS_ERROR;
+  if (misc&4) cc.reasons|=SB_CC_VCONN_OC;
+  if ((s.raw[SB_DEBUG_ACCESS]&0x3f) || (rp&0x70)) cc.reasons|=SB_CC_DEBUG;
+  if (s.raw[SB_LEGACY]&3) cc.reasons|=SB_CC_LEGACY;
+- switch(rp) {
++ /* Never interpret stale sink-status Rp as an input source while sourcing. */
++ if (cc.role==SB_CC_ROLE_SINK) switch(rp) {
+  case 8: cc.rp=SB_RP_DEFAULT;break;
+  case 4: cc.rp=SB_RP_1P5;cc.advertisedMa=1500;break;
+  case 2: cc.rp=SB_RP_3P0;cc.advertisedMa=3000;break;
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index f7e22df5d4b93e55b820d45c78d9d7d3bc0ec9fa..580a9857c1d0c4a9cbbae6b5a19454d87de07bd2 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -1230,6 +1230,8 @@ SweetBattery::sampleRuntime(bool refreshInput)
+ 		SWEET_LOG_INFO("SWEET BATT CC: v1 id=%u events=%#x coherent=%u reasons=%#x rp=%u advertised-ma=%u orientation=%u qualified=%u\n",
+ 		    fMonitorSamples, next.inputEvents, next.ccCoherent, cc.reasons, cc.rp,
+ 		    cc.advertisedMa, cc.orientation, sb_cc_event_fresh(next, next.completedNs));
++		SWEET_LOG_INFO("SWEET BATT CC ROLE: v1 id=%u role=%u observed=%#x; LG-SMB5 sink classification\n",
++		    fMonitorSamples, cc.role, cc.observed);
+ 		SWEET_LOG_INFO("SWEET BATT CC TIME: v1 id=%u session=%llu started-ns=%llu completed-ns=%llu\n",
+ 		    fMonitorSamples, (unsigned long long)next.ccSession,
+ 		    (unsigned long long)next.ccStartedNs, (unsigned long long)next.ccCompletedNs);
+@@ -1433,6 +1435,8 @@ SweetBattery::publishRuntime(void)
+ 	SweetBattCc cc = sb_cc_status(fSnapshot);
+ 	SweetBattInputCapability input = sb_input_capability(fSnapshot, now);
+ 	putNumber("SweetBatteryCCRejectReasons", cc.reasons);
++	putNumber("SweetBatteryCCRole", cc.role);
++	putNumber("SweetBatteryCCObservedFlags", cc.observed);
+ 	putNumber("SweetBatteryCCRp", cc.rp);
+ 	putNumber("SweetBatteryCCAdvertisedMA", cc.advertisedMa);
+ 	putBool("SweetBatteryCCEvidenceFresh", !fController.stopped && sb_cc_event_fresh(fSnapshot, now));
