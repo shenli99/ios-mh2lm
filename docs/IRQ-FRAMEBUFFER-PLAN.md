@@ -1,5 +1,13 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
+**0166本地实现更新（待新云编译/实测）：** 已补ADC trigger→父GIC→mux扫描/ACK/
+notify→consumer→SPMI锁的时间与一次性故障现场；timer先核对当前阶段的原截止
+时间，未到时重挂，真超时仍撤销。watchdog补命令/软件plugin/故障取证，先禁充再
+读现场，保留23秒/180秒，不额外pet。根因仍待新硬件证据，未宣布故障已修复。
+本地回归和7文件ARM64编译通过；CI未改，可由用户push。下一次一次云编译、同核
+分档，优先identity1；旧0120a13四档不重测。架构、字段、判读边界及步骤见
+[IRQ时序取证](BATTERY-IRQ-TIMING.md)。以下均按历史时点保留，以本段为当前动作。
+
 0120a4补充：0155 ADC5 provider实机已得到BAT_ID 889684uV、USBIN 4831136uV，
 三次EOC及配置恢复成功，无ADC错误；下一步接入测量provider并核对充电证据。
 充电仍互锁，不能把转换成功等同于真实充电。详细数据和回归边界见

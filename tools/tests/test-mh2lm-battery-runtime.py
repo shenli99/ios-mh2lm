@@ -22,6 +22,7 @@ power = (root/'iokit/Kernel/arm/SweetPmicPower.cpp').read_text()
 mux_header = (root/'bsd/dev/sweet_spmi_mux.h').read_text()
 event_defines = "\n".join(re.findall(r'^#define SWEET_BATT_IRQ_.*$', mux_header, re.M))+"\n"
 power_header = (root/'bsd/dev/sweet_pmic_power.h').read_text()
+trace_header = re.search(r'struct SweetMuxIrqTrace \{.*?\n\};',mux_header,re.S).group(0)+'\n'
 def strip_includes(text):
     return re.sub(r'^#include[^\n]*\n', '', text, flags=re.M)
 
@@ -70,7 +71,7 @@ static void recordLog(const char *fmt,...) {
     std::lock_guard<std::mutex> guard(logMutex);logs+=buffer;
 }
 #define SWEET_LOG_INFO(...) recordLog(__VA_ARGS__)
-#define SWEET_LOG_ERROR(...) ((void)0)
+#define SWEET_LOG_ERROR(...) recordLog(__VA_ARGS__)
 using UInt32=uint32_t;
 using IOReturn=int;using vm_size_t=size_t;
 using IOLock=std::mutex;
@@ -184,6 +185,13 @@ extern "C" int sweet_spmi_charger_pet_watchdog(void){
     writes.push_back(0x1643);++updateCount;
     return updateCount==injectedAt?-9:0;
 }
+static unsigned wdCaptures;
+extern "C" int sweet_spmi_watchdog_capture_fault(sweet_watchdog_fault *out){
+    ++wdCaptures;
+    // Prompt disable must precede fault reads even when main enable was lost.
+    assert(!writes.empty() && writes.back()==0x1042 && !(changed[0x1042]&1));
+    *out={};out->entered_ns=out->locked_ns=out->completed_ns=timeNs;return 0;
+}
 class SweetBattery : public OSObject {
 public:
  unsigned fDependencyMode=0,fWatchdogPets=0;
@@ -194,6 +202,7 @@ public:
  void refreshDependencies(uint64_t);
  int dependencyCommand(sweet_charger_operation,uint64_t,unsigned *);
  void dependencyFailure(const char *,int);
+ void captureWatchdogFailure();
  unsigned fRuntimeMode=2,fRuntimeRequested=2,fMonitorSamples=0,fLastPercent=70,fLastMv=4000;
  uint32_t fLastReasons=~0u;
  unsigned fRuntimeInputEvents=0;volatile unsigned fIrqPending=0;
@@ -208,7 +217,7 @@ public:
  IOTimerEventSource *fTimer=nullptr;
  bool fIrqFailed=false,fIrqAttached=true;
  unsigned fIrqMode=4,fIrqSamples=0;volatile unsigned fIrqNotifications=0;
- struct MuxStub {unsigned detachments=0,pending=0;bool unavailable=false;bool hasPendingEvents(unsigned mask){return unavailable || (pending&(mask|SWEET_MUX_FAILED));}void detach(){++detachments;unavailable=true;}};
+ struct MuxStub {unsigned detachments=0,pending=0;bool unavailable=false;bool copyInterruptTrace(unsigned,SweetMuxIrqTrace *){return false;}bool hasPendingEvents(unsigned mask){return unavailable || (pending&(mask|SWEET_MUX_FAILED));}void detach(){++detachments;unavailable=true;}};
  MuxStub connection;MuxStub *fMuxClient=&connection;
  void failIrq(const char *);
  void sampleRuntime(bool);void runRuntimePolicy();void stopRuntime();void publishRuntime();
@@ -740,6 +749,10 @@ static void dependencyTests(){
  assert(timing.fWatchdogLastNs==barkDeadline && !timing.fDependencyFailed);
  timeNs+=7000000000ULL;timing.sampleRuntime(false);timing.runRuntimePolicy();
  assert(timing.fDependencyFailed); // no recurring source/ADC sample extends it
+ assert(wdCaptures && logs.find("SWEET BATT WD START: v1")!=std::string::npos && logs.find("SWEET BATT WD FAULT: v1")!=std::string::npos);
+ auto captures=wdCaptures;auto writeCount=writes.size();timing.fWatchdogPending=true;
+ timing.dependencyFailure("repeated",-1);timing.runRuntimePolicy();
+ assert(wdCaptures==captures && writes.size()==writeCount);
  // The same lock serializes a pet against priority sleep/shutdown disable.
  for(unsigned n=0;n<20;++n){
   baseline();SweetBattery racing;racing.fRuntimeMode=1;racing.fDependencyMode=4;
@@ -1074,12 +1087,12 @@ int main(){
     puts("PASS: actual runtime sampler, units/validity, IRQ-only input acquisition, monitor publication and stop/no rearm");
 }
 '''
-names=['sweet_batt_now_ns','SweetBattery::dependencyCommand','SweetBattery::dependencyFailure','SweetBattery::refreshDependencies','SweetBattery::inputChangePending','SweetBattery::refreshInputPermit','SweetBattery::adcChanged','SweetBattery::publishAdc','SweetBattery::sampleRuntime','SweetBattery::runtimeUpdate',
+names=['sweet_batt_now_ns','SweetBattery::captureWatchdogFailure','SweetBattery::dependencyCommand','SweetBattery::dependencyFailure','SweetBattery::refreshDependencies','SweetBattery::inputChangePending','SweetBattery::refreshInputPermit','SweetBattery::adcChanged','SweetBattery::publishAdc','SweetBattery::sampleRuntime','SweetBattery::runtimeUpdate',
        'SweetBattery::runRuntimePolicy','SweetBattery::startRuntime',
        'SweetBattery::monitorFired','SweetBattery::stopRuntime','SweetBattery::failIrq','SweetBattery::publishRuntime','SweetBattery::runtimeClock','SweetBattery::publish','SweetBattery::removePowerValue','SweetBattery::runtimePowerNotice']
 with tempfile.TemporaryDirectory(prefix='mh2lm-runtime-') as directory:
     cpp=Path(directory)/'test.cpp';binary=Path(directory)/'test'
-    cpp.write_text(prelude+charger+strip_includes(header)+spmi+strip_includes(power_header)+adc_header+event_defines+adc_model+shim+strip_includes(backend)+strip_includes(power)+''.join(function(n) for n in names)+checks)
+    cpp.write_text(prelude+charger+strip_includes(header)+spmi+strip_includes(power_header)+adc_header+event_defines+trace_header+adc_model+shim+strip_includes(backend)+strip_includes(power)+''.join(function(n) for n in names)+checks)
     subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-O1','-g',
         '-fsanitize=address,undefined',str(cpp),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],env=dict(os.environ,ASAN_OPTIONS='detect_leaks=0',UBSAN_OPTIONS='halt_on_error=1'),check=True,timeout=30)

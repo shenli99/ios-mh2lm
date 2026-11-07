@@ -1,0 +1,572 @@
+diff --git a/bsd/dev/sweet_adc5.h b/bsd/dev/sweet_adc5.h
+index 7833fc3fe014857396307a3d2ac6e92079527c00..501502519ca7d8f8e98f458551f5933d5cbeab9a 100644
+--- a/bsd/dev/sweet_adc5.h
++++ b/bsd/dev/sweet_adc5.h
+@@ -50,11 +50,26 @@ enum sweet_adc5_channel { SWEET_ADC5_BAT_ID = 1, SWEET_ADC5_USBIN = 2 };
+ enum sweet_adc5_phase { SWEET_ADC5_IDLE, SWEET_ADC5_WAIT_SETTLE, SWEET_ADC5_GROUND,
+  SWEET_ADC5_RESULT, SWEET_ADC5_DONE, SWEET_ADC5_FAILED };
+ enum sweet_adc5_cause { SWEET_ADC5_SETTLED = 1, SWEET_ADC5_EOC = 2 };
++/* Finite diagnostic observation only, no data bytes or PMIC writes.
++ * Per-field errors remain explicit; this can NEVER complete a conversion. */
++#define SWEET_ADC5_FAULT_FIELDS 10u
++struct sweet_adc5_fault {
++ uint8_t raw[SWEET_ADC5_FAULT_FIELDS];
++ int errors[SWEET_ADC5_FAULT_FIELDS];
++ uint64_t entered_ns, locked_ns, completed_ns;
++};
+ struct sweet_adc5_session {
+  uint8_t saved[6];
+  unsigned channel, phase, touched, active, eoc_count;
+  int restore_error;
+  uint64_t started_ns, deadline_ns, settle_until_ns;
++ /* Diagnostic only; no timestamp below can renew a deadline or validate EOC. */
++ uint64_t trigger_enter_ns, trigger_done_ns, advance_enter_ns, advance_locked_ns;
++ unsigned diagnostic_phase;
++ uint64_t diagnostic_deadline_ns;
++ /* Error snapshot saved under the controller lock before protocol restore. */
++ unsigned fault_saved; int fault_error;
++ struct sweet_adc5_fault fault;
+ };
+ struct sweet_adc5_measurement {
+  unsigned channel, microvolts, eoc_count;
+@@ -66,6 +81,7 @@ int sweet_spmi_adc5_begin(struct sweet_adc5_session *, enum sweet_adc5_channel);
+ int sweet_spmi_adc5_advance(struct sweet_adc5_session *, enum sweet_adc5_cause,
+  struct sweet_adc5_measurement *);
+ int sweet_spmi_adc5_abort(struct sweet_adc5_session *);
++int sweet_spmi_adc5_capture_fault(struct sweet_adc5_fault *);
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/bsd/dev/sweet_adc5_service.h b/bsd/dev/sweet_adc5_service.h
+index 27aae84894d92c2de9ad65e12cbaabe70ae89fae..a4b081a7dfca6b58e48b5b040adab69a4e56b2b5 100644
+--- a/bsd/dev/sweet_adc5_service.h
++++ b/bsd/dev/sweet_adc5_service.h
+@@ -33,6 +33,9 @@ private:
+  bool valid[2] = {}, timerAdded = false, ready = false, failed = false;
+  volatile unsigned stopping = 0;
+  unsigned diagnostics = 0, sequence = 0, strayEoc = 0;
++ unsigned traceBaselineHits = 0;
++ uint64_t lastCallbackNs = 0, lastTimerNs = 0;
++ void captureFailure(int);
+  static IOReturn subscribeAction(OSObject *, void *, void *, void *, void *);
+  static IOReturn statusAction(OSObject *, void *, void *, void *, void *);
+  static IOReturn sampleAction(OSObject *, void *, void *, void *, void *);
+diff --git a/bsd/dev/sweet_charger.h b/bsd/dev/sweet_charger.h
+index 53d9f3776cf35a4948eda3ac9ef6d490d46e1e29..201496774cf0781215892e05add8905f72725157 100644
+--- a/bsd/dev/sweet_charger.h
++++ b/bsd/dev/sweet_charger.h
+@@ -17,6 +17,15 @@ enum sweet_charger_operation {
+   * external isolation or managed-watchdog policy from a command result. */
+  SWEET_CHARGER_PARALLEL_INHIBIT, SWEET_CHARGER_WATCHDOG_PREPARE, SWEET_CHARGER_WATCHDOG_PET
+ };
++/* Fixed MISC watchdog fault observation, no caller-supplied register address.
++ * The transport owns the layout; field errors must be inspected individually. */
++#define SWEET_WDOG_FAULT_FIELDS 7u
++struct sweet_watchdog_fault {
++ uint8_t raw[SWEET_WDOG_FAULT_FIELDS];
++ int errors[SWEET_WDOG_FAULT_FIELDS];
++ uint64_t entered_ns, locked_ns, completed_ns;
++};
++int sweet_spmi_watchdog_capture_fault(struct sweet_watchdog_fault *);
+ /* Fixed PM8150B backend; uses the restricted shared SPMI transport. Exact
+  * quantization required, no rounding up. First-stage caps: 500mA / 4200mV.
+  * SOFTWARE_INPUT_LIMIT accepts only 1 and configures its three verified modes.
+diff --git a/bsd/dev/sweet_pmic_power.h b/bsd/dev/sweet_pmic_power.h
+index c8f0912d171051df47d7c6c603e4687c8916dab3..6782dc456ad424b364edc7d4cb4e42fd912058b0 100644
+--- a/bsd/dev/sweet_pmic_power.h
++++ b/bsd/dev/sweet_pmic_power.h
+@@ -6,6 +6,9 @@
+ #define SWEET_PMIC_POWER_H
+ #include "sweet_battery_runtime.h"
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
++struct sweet_watchdog_fault;
++/* Fixed semantic watchdog diagnostics; no caller-supplied addresses. */
++int sweet_pmic_power_capture_watchdog_fault(struct sweet_watchdog_fault *);
+ /* Refresh input/APSD/Type-C only on initial observation or plugin/source/Type-C IRQ.
+  * Capacity may remain cached on protection ticks; every fresh read reports its
+  * own validity/error. The fixed profile-prefix/metadata tuple shares a grant.
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index dee3eac9060e5ab8ac39ef4a40ba79e74376c051..411b0d38e26768088b7502be0cf9107246a93c80 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -17,6 +17,7 @@
+ #include <pexpert/arm64/sweet_dev.h>
+ #include "sweet_spmi.h"
+ #include "sweet_adc5.h"
++#include "sweet_charger.h"
+ #include <kern/clock.h>
+ #include "sweet_log_level.h"
+ 
+@@ -654,6 +655,56 @@ sweet_spmi_adc5_irq_read(unsigned offset, uint8_t *out)
+  return rc;
+ }
+ 
++static int
++sp_adc5_capture_fault_locked(struct sweet_adc5_fault *out, uint64_t entered)
++{
++ uint32_t version=sp_rd(sp_core,0);
++ if (version<0x50000000u || version>=0x60000000u) return SWEET_SPMI_UNSUPPORTED;
++ struct sweet_adc5_fault next = {0}; next.entered_ns=entered;
++ next.locked_ns=sp_adc5_now();
++ /* status, sequence, channel, enable, request, RT, type, EN_SET, latched, cal */
++ static const unsigned regs[SWEET_ADC5_FAULT_FIELDS]={0x3108,0x3109,0x3144,0x3146,0x3147,0x3110,0x3111,0x3115,0x3118,0x3744};
++ for (unsigned i=0;i<SWEET_ADC5_FAULT_FIELDS;++i)
++  next.errors[i]=sp_observer_read_locked(2,regs[i],&next.raw[i]);
++ next.completed_ns=sp_adc5_now(); *out=next; return 0;
++}
++
++int
++sweet_spmi_adc5_capture_fault(struct sweet_adc5_fault *out)
++{
++ if (!out) return SWEET_SPMI_INVALID;
++ if (!__atomic_load_n(&sp_ready,__ATOMIC_ACQUIRE)) return SWEET_SPMI_NOT_READY;
++ uint64_t entered=sp_adc5_now();
++ IOLockLock(sp_lock);
++ int rc=sp_adc5_capture_fault_locked(out,entered);
++ IOLockUnlock(sp_lock); return rc;
++}
++
++/* Called only for a session owned by this protocol, before its error restore.
++ * Preserve the original error/output contract; a snapshot grants no result. */
++static void
++sp_adc5_save_fault_locked(struct sweet_adc5_session *session)
++{
++ session->fault_error=sp_adc5_capture_fault_locked(&session->fault,sp_adc5_now());
++ session->fault_saved=1;
++}
++
++int
++sweet_spmi_watchdog_capture_fault(struct sweet_watchdog_fault *out)
++{
++ if (!out) return SWEET_SPMI_INVALID;
++ if (!__atomic_load_n(&sp_ready,__ATOMIC_ACQUIRE)) return SWEET_SPMI_NOT_READY;
++ struct sweet_watchdog_fault next={0}; next.entered_ns=sp_adc5_now();
++ IOLockLock(sp_lock); next.locked_ns=sp_adc5_now();
++ uint32_t version=sp_rd(sp_core,0);
++ if (version<0x50000000u || version>=0x60000000u) { IOLockUnlock(sp_lock); return SWEET_SPMI_UNSUPPORTED; }
++ /* MISC RT, type, EN_SET, latched, WD_CFG, timeout, SMB output */
++ static const unsigned regs[SWEET_WDOG_FAULT_FIELDS]={0x1610,0x1611,0x1615,0x1618,0x1651,0x1653,0x1648};
++ for (unsigned i=0;i<SWEET_WDOG_FAULT_FIELDS;++i)
++  next.errors[i]=sp_observer_read_locked(2,regs[i],&next.raw[i]);
++ next.completed_ns=sp_adc5_now(); IOLockUnlock(sp_lock); *out=next; return 0;
++}
++
+ static int
+ sp_adc5_set_locked(struct sweet_adc5_session *session, unsigned index, unsigned value)
+ {
+@@ -670,6 +721,8 @@ static int
+ sp_adc5_trigger_locked(struct sweet_adc5_session *session)
+ {
+  if (sp_adc5_now() >= session->deadline_ns) { return SWEET_ADC5_EXPIRED; }
++ session->trigger_enter_ns = sp_adc5_now();
++ session->trigger_done_ns = 0;
+  struct sweet_spmi_charger_route route;
+  int rc = sp_charger_route(2, 0x3147, &route);
+  if (!rc && sweet_spmi_rw_poisoned_locked(route.apid)) { rc = SWEET_SPMI_POISONED; }
+@@ -680,6 +733,7 @@ sp_adc5_trigger_locked(struct sweet_adc5_session *session)
+  sp_wr(channel, 0x10u, 0x80);
+  sp_wr(channel, 0, 0x47u << 4);
+  rc = sp_charger_wait(channel);
++ session->trigger_done_ns = sp_adc5_now();
+  if (rc == SWEET_SPMI_TIMEOUT) { sweet_spmi_rw_poison_locked(route.apid); }
+  ml_io_unmap(trunc_page(channel), round_page(0x1000 + (channel & PAGE_MASK)));
+  return rc;
+@@ -783,7 +837,7 @@ sweet_spmi_adc5_begin(struct sweet_adc5_session *session, enum sweet_adc5_channe
+    session->settle_until_ns = sp_adc5_now() + 20000000ULL;
+    session->phase = SWEET_ADC5_WAIT_SETTLE;
+   } else { rc = sp_adc5_launch_locked(session, false); }
+-  if (rc) { (void)sp_adc5_restore_locked(session); }
++  if (rc) { sp_adc5_save_fault_locked(session); (void)sp_adc5_restore_locked(session); }
+  }
+  IOLockUnlock(sp_lock);
+  return rc;
+@@ -795,9 +849,12 @@ sweet_spmi_adc5_advance(struct sweet_adc5_session *session, enum sweet_adc5_caus
+ {
+  if (!session || !out) { return SWEET_SPMI_INVALID; }
+  if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
++ uint64_t entered = sp_adc5_now();
+  IOLockLock(sp_lock);
+  int rc = SWEET_SPMI_OK;
+  if (sp_adc5_owner != session || !session->active) { IOLockUnlock(sp_lock); return SWEET_SPMI_INVALID; }
++ session->advance_enter_ns = entered; session->advance_locked_ns = sp_adc5_now();
++ session->diagnostic_phase = session->phase; session->diagnostic_deadline_ns = session->deadline_ns;
+  uint64_t now = sp_adc5_now();
+  if (now >= session->deadline_ns) { rc = SWEET_ADC5_EXPIRED; }
+  if (!rc && session->phase == SWEET_ADC5_WAIT_SETTLE) {
+@@ -832,6 +889,7 @@ sweet_spmi_adc5_advance(struct sweet_adc5_session *session, enum sweet_adc5_caus
+     result.started_ns = session->started_ns; result.completed_ns = sp_adc5_now();
+     result.eoc_count = session->eoc_count;
+    }
++   if (rc) { sp_adc5_save_fault_locked(session); }
+    int restore = sp_adc5_restore_locked(session);
+    if (!rc) { rc = restore; }
+    if (!rc) { session->phase = SWEET_ADC5_DONE; *out = result; }
+@@ -839,7 +897,7 @@ sweet_spmi_adc5_advance(struct sweet_adc5_session *session, enum sweet_adc5_caus
+    IOLockUnlock(sp_lock); return rc;
+   } else if (!rc) { rc = SWEET_SPMI_INVALID; }
+  }
+- if (rc) { (void)sp_adc5_restore_locked(session); session->phase = SWEET_ADC5_FAILED; }
++ if (rc) { sp_adc5_save_fault_locked(session); (void)sp_adc5_restore_locked(session); session->phase = SWEET_ADC5_FAILED; }
+  IOLockUnlock(sp_lock);
+  return rc;
+ }
+diff --git a/bsd/dev/sweet_spmi_mux.h b/bsd/dev/sweet_spmi_mux.h
+index f82d75cab835ab422955c103c9679b72c8320f02..b96701d28a1ec9a0603ad2ee5409b534f74ef04f 100644
+--- a/bsd/dev/sweet_spmi_mux.h
++++ b/bsd/dev/sweet_spmi_mux.h
+@@ -50,6 +50,13 @@ struct MuxRoute {
+ 	uint32_t oldAccess;
+ 	unsigned hits;
+ };
++/* Last completed ACK/notify observation per table route. Timestamp is the
++ * parent GIC entry for the whole drain, NOT this peripheral's hardware EOC.
++ * Atomic publication permits a bounded, read-only copy without the mux gate. */
++struct SweetMuxIrqTrace {
++ unsigned sequence, hits, irq, work, status, apid;
++ uint64_t gicNs, scanNs, ackNs, notifyNs;
++};
+ struct MuxBinding {
+ 	IOService *consumer;
+ 	SweetMuxNotify notify;
+@@ -78,8 +85,11 @@ public:
+ 	 * detach synchronizes all callbacks. Both methods require thread context. */
+ 	virtual IOReturn attachConsumer(IOService *consumer, unsigned group, unsigned events, SweetMuxNotify notify, void *context);
+ 	virtual void detachConsumer(IOService *consumer, unsigned group, void *context);
++ bool copyInterruptTrace(unsigned group, unsigned token, SweetMuxIrqTrace *out) const;
+ private:
+ 	MuxBinding bindings[MUX_GROUPS] = {};
++ SweetMuxIrqTrace traces[SWEET_MUX_ROUTE_COUNT] = {};
++ uint64_t lastGicNs = 0;
+ 	MuxRoute routes[SWEET_MUX_ROUTE_COUNT] = {};
+ 	vm_offset_t gicd = 0, pdc = 0, core = 0, cfg = 0, obs = 0;
+ 	IOWorkLoop *workLoop = NULL;
+diff --git a/bsd/dev/sweet_spmi_mux_client.h b/bsd/dev/sweet_spmi_mux_client.h
+index d71b3b1df5a1d3ae79ac6f8cd87e64d62020b072..c65b80d4ad94c797c4ba30f8baa9202604c97106 100644
+--- a/bsd/dev/sweet_spmi_mux_client.h
++++ b/bsd/dev/sweet_spmi_mux_client.h
+@@ -21,6 +21,8 @@ public:
+ 	/* Owner-loop read-only fence, including events queued by the mux but not
+ 	 * yet delivered on this consumer's loop. No provider gate or SPMI access. */
+ 	bool hasPendingEvents(unsigned mask);
++ /* Owner loop only. Diagnostic observation, never substitute event delivery. */
++ bool copyInterruptTrace(unsigned token, SweetMuxIrqTrace *out);
+ 	void stop(void);   /* remove notifiers synchronously, then detach/drain */
+ 	void free(void) APPLE_KEXT_OVERRIDE;
+ private:
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 9209ad8b543a2baea4360d565b6709eb78720ba0..f5e28b0cc26305ca00ddd81a3f6b3265027af80b 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -115,6 +115,7 @@ private:
+  void refreshDependencies(uint64_t);
+  int dependencyCommand(enum sweet_charger_operation, uint64_t, unsigned *);
+  void dependencyFailure(const char *, int);
++ void captureWatchdogFailure(void);
+  unsigned fRuntimeMode, fRuntimeRequested;
+ 	IOTimerEventSource *fMonitor;
+ 	IOLock *fControlLock;
+@@ -1358,30 +1359,59 @@ SweetBattery::dependencyCommand(enum sweet_charger_operation operation, uint64_t
+   return SWEET_SPMI_INVALID;
+  if (!disable && !(fDependencyMode & (operation==SWEET_CHARGER_PARALLEL_INHIBIT?2:4)))
+   return SWEET_SPMI_INVALID;
++ uint64_t entered=sweet_batt_now_ns();
+  IOLockLock(fControlLock);
++ uint64_t locked=sweet_batt_now_ns();
+  int rc=SWEET_SPMI_NOT_READY;
+  if (disable || (!fPowerStopping && fRuntimeMode==1 && fDependencyStarted && !fDependencyFailed && !fDependencyFinished)) {
+   fControlClaimed=true;
+   rc=sweet_charger_execute(operation,disable?0:1,deadline,out);
+  }
+  IOLockUnlock(fControlLock);
++ if (operation==SWEET_CHARGER_WATCHDOG_PREPARE || operation==SWEET_CHARGER_WATCHDOG_PET) {
++  SWEET_LOG_INFO("SWEET BATT WD COMMAND: v1 op=%u enter=%llu locked=%llu done=%llu error=%d actual=%u\n",
++   (unsigned)operation,(unsigned long long)entered,(unsigned long long)locked,
++   (unsigned long long)sweet_batt_now_ns(),rc,rc?0:*out);
++ }
+  return rc;
+ #else
+  return -1;
+ #endif
+ }
+ 
++void
++SweetBattery::captureWatchdogFailure(void)
++{
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ SweetMuxIrqTrace t={};bool trace=fMuxClient && fMuxClient->copyInterruptTrace(SWEET_BATT_IRQ_WDOG,&t);
++ SWEET_LOG_ERROR("SWEET BATT WD FAULT: v1 now=%llu last=%llu epoch=%llu pets=%u input=%u pending=%u\n",
++  (unsigned long long)sweet_batt_now_ns(),(unsigned long long)fWatchdogLastNs,
++  (unsigned long long)fWatchdogInputEpoch,fWatchdogPets,fWatchdogInput,fWatchdogPending);
++ SWEET_LOG_ERROR("SWEET BATT WD MUX: v1 valid=%u hits=%u irq=%u work=%u apid=%u status=%#x\n",
++  trace,t.hits,t.irq,t.work,t.apid,t.status);
++ SWEET_LOG_ERROR("SWEET BATT WD PATH: v1 gic=%llu scan=%llu ack=%llu notify=%llu\n",
++  (unsigned long long)t.gicNs,(unsigned long long)t.scanNs,(unsigned long long)t.ackNs,(unsigned long long)t.notifyNs);
++ struct sweet_watchdog_fault f={};int rc=sweet_pmic_power_capture_watchdog_fault(&f);
++ SWEET_LOG_ERROR("SWEET BATT WD SNAPSHOT: v1 error=%d enter=%llu locked=%llu done=%llu\n",rc,
++  (unsigned long long)f.entered_ns,(unsigned long long)f.locked_ns,(unsigned long long)f.completed_ns);
++ if (!rc) for (unsigned i=0;i<SWEET_WDOG_FAULT_FIELDS;++i)
++  SWEET_LOG_ERROR("SWEET BATT WD FIELD: v1 field=%u raw=%#x error=%d\n",i,f.raw[i],f.errors[i]);
++#endif
++}
++
+ void
+ SweetBattery::dependencyFailure(const char *reason, int error)
+ {
+  if (fDependencyFailed) return;
+- fDependencyFailed=true;fWatchdogArmed=false;fWatchdogPending=false;
++ fDependencyFailed=true;fWatchdogArmed=false;
+  putBool("SweetBatterySecondaryOutputInhibited",false);
+  putBool("SweetBatteryWatchdogDiagnosticActive",false);
+  SWEET_LOG_ERROR("SWEET BATT DEPENDENCIES: FAILED %s error=%d; no restart or enable\n",reason,error);
+  unsigned disabled=0;
+  int rc=dependencyCommand(SWEET_CHARGER_ENABLE,0,&disabled);
+  if (rc) SWEET_LOG_ERROR("SWEET BATT DEPENDENCIES: fault disable unconfirmed error=%d\n",rc);
++ if ((fDependencyMode & 4) && fDependencyStarted) captureWatchdogFailure();
++ fWatchdogPending=false;
+ }
+ 
+ void
+@@ -1488,7 +1518,12 @@ SweetBattery::refreshDependencies(uint64_t now)
+    fSnapshot.inputEpoch!=fWatchdogInputEpoch;
+   fWatchdogInputEpoch=fSnapshot.inputEpoch;
+   if (!input) fWatchdogInput=false;
+-  if (plugin && !fWatchdogInput) {fWatchdogInput=true;fWatchdogLastNs=now;}
++  if (plugin && !fWatchdogInput) {
++  fWatchdogInput=true;fWatchdogLastNs=now;
++  SWEET_LOG_INFO("SWEET BATT WD START: v1 epoch=%llu input-start=%llu input-end=%llu observed=%llu pets=%u; hardware-start unproven\n",
++   (unsigned long long)fSnapshot.inputEpoch,(unsigned long long)fSnapshot.inputStartedNs,
++   (unsigned long long)fSnapshot.inputCompletedNs,(unsigned long long)now,fWatchdogPets);
++ }
+   if (input && fWatchdogInput && now-fWatchdogLastNs>=23000000000ULL) {
+    dependencyFailure("watchdog bark missing/late",SWEET_CHARGER_EXPIRED);return;
+   }
+diff --git a/iokit/Kernel/arm/SweetPmicAdc5.cpp b/iokit/Kernel/arm/SweetPmicAdc5.cpp
+index 23e43783092a9595e7a22b154fbccd8bc2c36f0c..483b2485f07b6a241954d42f723237d578e740c0 100644
+--- a/iokit/Kernel/arm/SweetPmicAdc5.cpp
++++ b/iokit/Kernel/arm/SweetPmicAdc5.cpp
+@@ -48,6 +48,7 @@ SweetPmicAdc5::start(IOService *provider)
+  }
+  provider->setProperty("SweetADC5ServiceStarted", true);
+  registerService();
++ SWEET_LOG_INFO("SWEET ADC5 TIMING: v1 phase deadline guard; terminal observer snapshot, no fallback\n");
+  SWEET_LOG_INFO("SWEET ADC5 SERVICE: v1 mode=%u registry consumer; IRQ-only completion, no charging permission\n", mode);
+  return true;
+ }
+@@ -90,7 +91,11 @@ SweetPmicAdc5::sampleAction(OSObject *owner, void *argument, void *token, void *
+  if (self->session.active) { return kIOReturnBusy; }
+  self->valid[channel - 1] = false;
+  self->setProperty(channel == SWEET_ADC5_BAT_ID ? "SweetADC5BATIDValid" : "SweetADC5USBINValid", false);
++ self->session = {}; /* Rejected begin must not inherit a previous request. */
+  ++self->sequence;
++ SweetMuxIrqTrace baseline = {};
++ self->traceBaselineHits = self->connection && self->connection->copyInterruptTrace(SWEET_ADC5_IRQ_EOC,&baseline) ? baseline.hits : 0;
++ self->lastCallbackNs = self->lastTimerNs = 0;
+  int rc = sweet_spmi_adc5_begin(&self->session, channel);
+  SWEET_LOG_INFO("SWEET ADC5 REQUEST: v1 id=%u channel=%u error=%d phase=%u\n",
+      self->sequence, channel, rc, self->session.phase);
+@@ -145,6 +150,7 @@ SweetPmicAdc5::muxEvent(void *context, unsigned events)
+   }
+  }
+  if (events & SWEET_ADC5_IRQ_EOC) {
++  self->lastCallbackNs=adcNow();
+   if (!self->session.active || self->session.phase == SWEET_ADC5_WAIT_SETTLE) {
+    ++self->strayEoc;
+    SWEET_LOG_WARN("SWEET ADC5 EOC: stale/unsolicited phase=%u count=%u; no sample accepted\n", self->session.phase, self->strayEoc);
+@@ -165,6 +171,11 @@ SweetPmicAdc5::timerFired(OSObject *owner, IOTimerEventSource *)
+ {
+  SweetPmicAdc5 *self = OSDynamicCast(SweetPmicAdc5, owner);
+  if (__atomic_load_n(&self->stopping, __ATOMIC_ACQUIRE) || !self->session.active) { return; }
++ uint64_t now=adcNow(); self->lastTimerNs=now;
++ uint64_t due=self->session.phase==SWEET_ADC5_WAIT_SETTLE ? self->session.settle_until_ns : self->session.deadline_ns;
++ /* A timer notification is not proof the CURRENT phase has expired. Never
++  * accept data here, and never extend its existing conversion deadline. */
++ if (now<due) { self->armDeadline(); return; }
+  if (self->session.phase == SWEET_ADC5_WAIT_SETTLE) {
+   struct sweet_adc5_measurement unused = {};
+   int rc = sweet_spmi_adc5_advance(&self->session, SWEET_ADC5_SETTLED, &unused);
+@@ -177,13 +188,42 @@ SweetPmicAdc5::timerFired(OSObject *owner, IOTimerEventSource *)
+  }
+ }
+ 
++void
++SweetPmicAdc5::captureFailure(int error)
++{
++ /* Failed/valid state is already withdrawn. Protocol errors retain their
++  * pre-restore snapshot; timer errors observe before abort. Other failures
++  * explicitly report a post-restore/inactive snapshot. No result is read. */
++ SweetMuxIrqTrace t={};
++ bool trace=connection && connection->copyInterruptTrace(SWEET_ADC5_IRQ_EOC,&t);
++ SWEET_LOG_ERROR("SWEET ADC5 FAULT: v1 id=%u error=%d phase=%u count=%u now=%llu deadline=%llu callback=%llu timer=%llu\n",
++  sequence,error,session.phase,session.eoc_count,(unsigned long long)adcNow(),(unsigned long long)session.deadline_ns,
++  (unsigned long long)lastCallbackNs,(unsigned long long)lastTimerNs);
++ SWEET_LOG_ERROR("SWEET ADC5 STAGE: v1 id=%u trigger=%llu done=%llu enter=%llu locked=%llu phase=%u due=%llu\n",
++  sequence,(unsigned long long)session.trigger_enter_ns,(unsigned long long)session.trigger_done_ns,
++  (unsigned long long)session.advance_enter_ns,(unsigned long long)session.advance_locked_ns,
++  session.diagnostic_phase,(unsigned long long)session.diagnostic_deadline_ns);
++ SWEET_LOG_ERROR("SWEET ADC5 MUX: v1 id=%u valid=%u baseline=%u hits=%u irq=%u work=%u apid=%u status=%#x\n",
++  sequence,trace,traceBaselineHits,t.hits,t.irq,t.work,t.apid,t.status);
++ SWEET_LOG_ERROR("SWEET ADC5 PATH: v1 id=%u gic=%llu scan=%llu ack=%llu notify=%llu\n",sequence,
++  (unsigned long long)t.gicNs,(unsigned long long)t.scanNs,(unsigned long long)t.ackNs,(unsigned long long)t.notifyNs);
++ struct sweet_adc5_fault f=session.fault;
++ bool beforeRestore=session.fault_saved || session.active;
++ int rc=session.fault_saved ? session.fault_error : sweet_spmi_adc5_capture_fault(&f);
++ SWEET_LOG_ERROR("SWEET ADC5 SNAPSHOT: v1 id=%u error=%d before-restore=%u saved=%u enter=%llu locked=%llu done=%llu\n",sequence,rc,beforeRestore,session.fault_saved,
++  (unsigned long long)f.entered_ns,(unsigned long long)f.locked_ns,(unsigned long long)f.completed_ns);
++ if (!rc) for (unsigned i=0;i<SWEET_ADC5_FAULT_FIELDS;++i)
++  SWEET_LOG_ERROR("SWEET ADC5 FIELD: v1 id=%u field=%u raw=%#x error=%d\n",sequence,i,f.raw[i],f.errors[i]);
++}
++
+ void
+ SweetPmicAdc5::complete(int error, const struct sweet_adc5_measurement *result)
+ {
+  timer->cancelTimeout();
+  if (error) {
+-  int cleanup = sweet_spmi_adc5_abort(&session);
+   failed = true; ready = false; valid[0] = valid[1] = false;
++  captureFailure(error);
++  int cleanup = sweet_spmi_adc5_abort(&session);
+   diagnostics = 0;
+   setProperty("SweetADC5IRQHealthy", false);
+   setProperty("SweetADC5BATIDValid", false); setProperty("SweetADC5USBINValid", false);
+diff --git a/iokit/Kernel/arm/SweetPmicPower.cpp b/iokit/Kernel/arm/SweetPmicPower.cpp
+index 1a3451d6c6ad459bff477ee23976c889d7c4140c..f9c98eda7d1b5d332cb9d9969fae085a16322591 100644
+--- a/iokit/Kernel/arm/SweetPmicPower.cpp
++++ b/iokit/Kernel/arm/SweetPmicPower.cpp
+@@ -5,8 +5,15 @@
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ #include "../../../bsd/dev/sweet_spmi.h"
+ #include "../../../bsd/dev/sweet_pmic_power.h"
++#include "../../../bsd/dev/sweet_charger.h"
+ #include <kern/clock.h>
+ 
++int
++sweet_pmic_power_capture_watchdog_fault(struct sweet_watchdog_fault *out)
++{
++ return sweet_spmi_watchdog_capture_fault(out);
++}
++
+ static uint64_t powerNow(void)
+ {
+ 	uint64_t ticks, ns;
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+index a32ac7c96a19443608a8418ea88d09c296e5712c..c9215340d0322c62478576d3e28e19858aa12b38 100644
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -477,6 +477,7 @@ void
+ SweetSpmiInterruptMux::drainInterrupt(void)
+ {
+ 	++workCount;
++ const uint64_t parentGicNs=__atomic_load_n(&lastGicNs,__ATOMIC_ACQUIRE);
+ 	if (__atomic_load_n(&state, __ATOMIC_ACQUIRE) != 2u) {
+ 		return;
+ 	}
+@@ -513,21 +514,42 @@ SweetSpmiInterruptMux::drainInterrupt(void)
+ 				continue;
+ 			}
+ 			pending = true;
++   uint64_t stamp, scanNs, ackNs, notifyNs;
++   clock_get_uptime(&stamp); absolutetime_to_nanoseconds(stamp, &scanNs);
+ 			if (!ackRoute(route)) {
+ 				SWEET_LOG_ERROR("SWEET MUX: ack failed route=%s status=%#x\n",
+ 				    route.name, status);
+ 				disableHardware();
+ 				return;
+ 			}
++   clock_get_uptime(&stamp); absolutetime_to_nanoseconds(stamp, &ackNs);
+ 			++routeCount;
+ 			++route.hits;
++   clock_get_uptime(&stamp); absolutetime_to_nanoseconds(stamp, &notifyNs);
++   SweetMuxIrqTrace &t = traces[i];
++   unsigned seq = __atomic_fetch_add(&t.sequence, 1u, __ATOMIC_ACQ_REL);
++#define TRACE_STORE(field, value) __atomic_store_n(&t.field, (value), __ATOMIC_RELAXED)
++   TRACE_STORE(hits, route.hits); TRACE_STORE(irq, irqCount); TRACE_STORE(work, workCount);
++   TRACE_STORE(status, status); TRACE_STORE(apid, (unsigned)route.apid);
++   TRACE_STORE(gicNs, parentGicNs);
++   TRACE_STORE(scanNs, scanNs); TRACE_STORE(ackNs, ackNs); TRACE_STORE(notifyNs, notifyNs);
++#undef TRACE_STORE
++   __atomic_store_n(&t.sequence, seq + 2u, __ATOMIC_RELEASE);
+ 			MuxBinding &binding = bindings[route.group];
+ 			if (binding.notify) {
+ 				binding.notify(binding.context, route.token);
+ 			}
+ 			if (route.group != MUX_KEYS || routeCount <= 32 || (routeCount & 63u) == 0) {
+-				SWEET_LOG_INFO("SWEET MUX: hit route=%s status=%#x irq=%u work=%u hits=%u route-hits=%u\n",
+-				    route.name, status, irqCount, workCount, routeCount, route.hits);
++    if (route.group==MUX_ADC5 || (route.group==MUX_BATTERY && route.token==SWEET_BATT_IRQ_WDOG)) {
++     /* Extend the existing hit record, not a second log per EOC. A late hit
++      * must retain its times even if the consumer has already failed. */
++     SWEET_LOG_INFO("SWEET MUX: hit route=%s status=%#x irq=%u work=%u route-hits=%u gic=%llu scan=%llu ack=%llu notify=%llu\n",
++      route.name,status,irqCount,workCount,route.hits,(unsigned long long)parentGicNs,
++      (unsigned long long)scanNs,(unsigned long long)ackNs,(unsigned long long)notifyNs);
++    } else {
++     SWEET_LOG_INFO("SWEET MUX: hit route=%s status=%#x irq=%u work=%u hits=%u route-hits=%u\n",
++      route.name,status,irqCount,workCount,routeCount,route.hits);
++    }
+ 			}
+ 			handled = true;
+ 		}
+@@ -597,6 +619,34 @@ SweetSpmiInterruptMux::workAction(OSObject *owner, IOInterruptEventSource *sourc
+ 	}
+ }
+ 
++bool
++SweetSpmiInterruptMux::copyInterruptTrace(unsigned group, unsigned token, SweetMuxIrqTrace *out) const
++{
++ if (!out || !token || (token & (token - 1u))) return false;
++ SweetMuxIrqTrace best = {};
++ /* Route metadata is immutable after init; trace fields are all atomic. There
++  * is no gate acquisition, SPMI, MMIO or unbounded seqlock spin here. */
++ for (unsigned i=0; i<SWEET_MUX_ROUTE_COUNT; ++i) {
++  if (routes[i].group!=group || routes[i].token!=token) continue;
++  const SweetMuxIrqTrace &t=traces[i];
++  for (unsigned attempt=0; attempt<3; ++attempt) {
++   unsigned seq=__atomic_load_n(&t.sequence,__ATOMIC_ACQUIRE);
++   if (!seq || (seq & 1u)) continue;
++   SweetMuxIrqTrace next={}; next.sequence=seq;
++#define TRACE_LOAD(field) next.field=__atomic_load_n(&t.field,__ATOMIC_RELAXED)
++   TRACE_LOAD(hits); TRACE_LOAD(irq); TRACE_LOAD(work); TRACE_LOAD(status); TRACE_LOAD(apid);
++   TRACE_LOAD(gicNs); TRACE_LOAD(scanNs); TRACE_LOAD(ackNs); TRACE_LOAD(notifyNs);
++#undef TRACE_LOAD
++   __atomic_thread_fence(__ATOMIC_ACQUIRE);
++   if (seq!=__atomic_load_n(&t.sequence,__ATOMIC_ACQUIRE)) continue;
++   if (!best.sequence || next.notifyNs>=best.notifyNs) best=next;
++   break;
++  }
++ }
++ if (!best.sequence) return false;
++ *out=best; return true;
++}
++
+ bool
+ SweetSpmiInterruptMux::irq(unsigned int intid)
+ {
+@@ -614,6 +664,9 @@ SweetSpmiInterruptMux::irq(unsigned int intid)
+ 		return expected == 2u || expected == 3u || expected == 5u;
+ 	}
+ 	write32(gicd, 0x180u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
++ uint64_t ticks, ns;
++ clock_get_uptime(&ticks); absolutetime_to_nanoseconds(ticks, &ns);
++ __atomic_store_n(&lastGicNs, ns, __ATOMIC_RELEASE);
+ 	++irqCount;
+ 	eventSource->interruptOccurred(NULL, NULL, 0);
+ 	return true;
+diff --git a/iokit/Kernel/arm/SweetSpmiMuxClient.cpp b/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
+index 32df464b1d2b48a0801c1a71e1a19178c779c5cd..52d8cbc048c0e96e18e77e7cf759d3ba43e163fd 100644
+--- a/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
++++ b/iokit/Kernel/arm/SweetSpmiMuxClient.cpp
+@@ -127,6 +127,15 @@ SweetSpmiMuxClient::hasPendingEvents(unsigned mask)
+ 	return unavailable || (__atomic_load_n(&pending,__ATOMIC_ACQUIRE) & (mask | SWEET_MUX_FAILED));
+ }
+ 
++bool
++SweetSpmiMuxClient::copyInterruptTrace(unsigned token, SweetMuxIrqTrace *out)
++{
++ IOLockLock(lock);
++ bool ok = !stopping && provider && provider->copyInterruptTrace(group, token, out);
++ IOLockUnlock(lock);
++ return ok;
++}
++
+ void
+ SweetSpmiMuxClient::process(void)
+ {

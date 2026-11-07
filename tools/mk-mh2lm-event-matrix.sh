@@ -210,6 +210,13 @@ if [ "$DEPENDENCY_MATRIX" = 1 ]; then
    exit 1
   fi
  done
+ for marker in 'SWEET ADC5 TIMING: v1' 'SWEET ADC5 FAULT: v1' \
+  'SWEET BATT WD START: v1' 'SWEET BATT WD COMMAND: v1' 'SWEET BATT WD FAULT: v1'; do
+  if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+   printf 'kernel lacks 0166 IRQ timing marker: %s\n' "$marker" >&2
+   exit 1
+  fi
+ done
 fi
 
 if [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then

@@ -1,5 +1,13 @@
 # SweetBattery 的 ADC5 测量接入（0156）
 
+**0166本地实现更新（待新云编译/实测）：** 已补ADC trigger→父GIC→mux扫描/ACK/
+notify→consumer→SPMI锁的时间与一次性故障现场；timer先核对当前阶段的原截止
+时间，未到时重挂，真超时仍撤销。watchdog补命令/软件plugin/故障取证，先禁充再
+读现场，保留23秒/180秒，不额外pet。根因仍待新硬件证据，未宣布故障已修复。
+本地回归和7文件ARM64编译通过；CI未改，可由用户push。下一次一次云编译、同核
+分档，优先identity1；旧0120a13四档不重测。架构、字段、判读边界及步骤见
+[IRQ时序取证](BATTERY-IRQ-TIMING.md)。以下均按历史时点保留，以本段为当前动作。
+
 **0120a13组合档更新：** ADC19在首EOC已接受后等待RESULT超时，随后mux打印
 第二hit（同属irq/work39），与watchdog4的ADC51现象一致；restore/cleanup0，
 身份/测量/限值正确撤销。组合同时暴露首bark晚于23秒期待，未通过运行验收。

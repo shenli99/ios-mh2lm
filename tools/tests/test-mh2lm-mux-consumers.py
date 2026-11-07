@@ -257,7 +257,9 @@ extern "C" void sweet_keys_event(unsigned) { assert(backendRunning); ++backendEv
 
 adc_adapter=r'''
 static constexpr unsigned kIOMessageServicePropertyChange=1;
-static unsigned adcBegins,adcAborts,adcAdvances;
+static SweetPmicAdc5 *adcInstance;
+static unsigned adcBegins,adcAborts,adcAdvances,adcCaptures;
+static bool adcCaptureFail;
 static bool adcBeginFail,adcResultFail,adcAbortFail;
 int sweet_spmi_adc5_begin(sweet_adc5_session *s,sweet_adc5_channel c) {
     ++adcBegins;if(adcBeginFail)return -1;
@@ -283,7 +285,12 @@ int sweet_spmi_adc5_advance(sweet_adc5_session *s,sweet_adc5_cause cause,sweet_a
     out->raw=1234;out->eoc_count=s->eoc_count;out->started_ns=s->started_ns;out->completed_ns=fakeNs;
     s->active=0;s->phase=SWEET_ADC5_DONE;return 0;
 }
-static SweetPmicAdc5 *adcInstance;
+int sweet_spmi_adc5_capture_fault(sweet_adc5_fault *out) {
+    ++adcCaptures;assert(adcInstance && adcInstance->failed && !adcInstance->ready);
+    assert(!adcInstance->valid[0] && !adcInstance->valid[1] && !adcAborts);
+    if(adcCaptureFail)return SWEET_SPMI_IO;
+    *out={};out->entered_ns=out->locked_ns=out->completed_ns=fakeNs;return 0;
+}
 '''
 registry_impl=r'''
 void IOService::registerService(unsigned) {
@@ -389,6 +396,11 @@ static void adcCheck(const char *mode) {
     assert(b.fIrqAttached && backendRunning);
     adcMode=!std::strcmp(mode,"adc-idle")?0:!std::strcmp(mode,"adc-usb")?2:!std::strcmp(mode,"adc-sequence")?3:1;
     bool sequence=adcMode==3;
+    bool earlyTimer=!std::strcmp(mode,"adc-early-timer");
+    bool phaseTimer=!std::strcmp(mode,"adc-phase-timer");
+    bool captureFail=!std::strcmp(mode,"adc-capture-fail");
+    if(phaseTimer)adcMode=2;
+    adcCaptureFail=captureFail;
     adcBeginFail=!std::strcmp(mode,"adc-begin-fail");
     bool setupFail=!std::strcmp(mode,"adc-loop-fail") || !std::strcmp(mode,"adc-timer-add-fail") || !std::strcmp(mode,"adc-notifier-fail");
     if(!std::strcmp(mode,"adc-loop-fail"))testLoopFail=1;
@@ -414,10 +426,15 @@ static void adcCheck(const char *mode) {
         assert(adcBegins==1);
         sweet_adc5_measurement sample{};sample.raw=0xcafe;
         assert(a->copySample(SWEET_ADC5_BAT_ID,&sample)==kIOReturnNotReady && sample.raw==0xcafe);
-        if(!std::strcmp(mode,"adc-timeout") || !std::strcmp(mode,"adc-restore-fail")) {
+        if(earlyTimer) {
+            auto due=a->session.deadline_ns;auto advances=adcAdvances;
+            a->timer->armed=false;a->timer->timerAction(a,a->timer);
+            assert(a->timer->armed && a->session.deadline_ns==due && !adcCaptures && adcAdvances==advances && a->ready);
+        }
+        if(!std::strcmp(mode,"adc-timeout") || !std::strcmp(mode,"adc-restore-fail") || captureFail) {
             adcAbortFail=!std::strcmp(mode,"adc-restore-fail");
             a->loop->runAction(fireAdcTimer,a);
-            assert(a->failed && adcAborts==1 && !testInstance->bindings[2].notify);
+            assert(a->failed && adcAborts==1 && adcCaptures==1 && !testInstance->bindings[2].notify);
             assert(!a->valid[0] && !a->valid[1] && !a->timer->armed);
         } else if(!std::strcmp(mode,"adc-stop-active")) {
             inject(280,1); // queued EOC is cancelled/synchronized before owner release
@@ -428,11 +445,31 @@ static void adcCheck(const char *mode) {
             assert(a->session.active);pump();
             assert(a->failed && adcAborts==1 && !a->session.active && !testInstance->bindings[2].notify);
         } else {
-            if(adcMode==2) {a->loop->runAction(fireAdcTimer,a);inject(280,1);pump();assert(a->session.active && !a->valid[1]);}
+            if(adcMode==2) {
+                a->loop->runAction(fireAdcTimer,a);inject(280,1);pump();assert(a->session.active && !a->valid[1]);
+                if(phaseTimer) {
+                    // An old timer delivery must rearm the RESULT deadline, never abort.
+                    auto due=a->session.deadline_ns;auto advances=adcAdvances;
+                    a->timer->armed=false;a->timer->timerAction(a,a->timer);
+                    assert(a->session.phase==SWEET_ADC5_RESULT && a->session.deadline_ns==due && a->timer->armed);
+                    assert(!adcCaptures && adcAdvances==advances && a->ready);
+                }
+            }
             adcResultFail=!std::strcmp(mode,"adc-result-fail");
             inject(280,1);pump();
             if(adcResultFail) assert(a->failed && !testInstance->bindings[2].notify);
             else {
+                SweetMuxIrqTrace trace={};
+                assert(a->connection->copyInterruptTrace(SWEET_ADC5_IRQ_EOC,&trace));
+                assert(trace.hits==(adcMode==2?2u:1u) && (sequence?trace.hits==a->traceBaselineHits:trace.hits>a->traceBaselineHits));
+                assert(trace.gicNs<=trace.scanNs && trace.scanNs<=trace.ackNs && trace.ackNs<=trace.notifyNs);
+                auto saved=trace;
+                assert(!a->connection->copyInterruptTrace(0,&trace) && !memcmp(&trace,&saved,sizeof(trace)));
+                // Writer in-progress: three bounded attempts, no gate/IO, untouched output.
+                auto seq=testInstance->traces[15].sequence;
+                __atomic_store_n(&testInstance->traces[15].sequence,seq|1u,__ATOMIC_RELEASE);
+                assert(!a->connection->copyInterruptTrace(SWEET_ADC5_IRQ_EOC,&trace) && !memcmp(&trace,&saved,sizeof(trace)));
+                __atomic_store_n(&testInstance->traces[15].sequence,seq,__ATOMIC_RELEASE);
                 unsigned channel=adcMode==2?2:1;
                 assert(!a->copySample(static_cast<sweet_adc5_channel>(channel),&sample));
                 assert(sample.sequence==1 && a->status()==kIOReturnSuccess);
@@ -444,8 +481,26 @@ static void adcCheck(const char *mode) {
                     a->loop->runAction(fireAdcTimer,a);inject(280,1);pump();inject(280,1);pump();
                     assert(a->valid[0] && a->valid[1] && !a->session.active && a->messages==3);
                 }
+                unsigned extra=0;
+                if(!std::strcmp(mode,"adc-trace-race")) {
+                    std::atomic<bool> done{false};std::atomic<unsigned> observations{0};
+                    std::thread reader([&]{
+                        while(!done.load()) {
+                            SweetMuxIrqTrace got={};
+                            if(testInstance->copyInterruptTrace(SWEET_MUX_ADC5,SWEET_ADC5_IRQ_EOC,&got)) {
+                                assert(got.sequence==2*got.hits && got.apid==280);
+                                assert(got.gicNs<=got.scanNs && got.scanNs<=got.ackNs && got.ackNs<=got.notifyNs);
+                                ++observations;
+                            }
+                        }
+                    });
+                    while(!observations.load())std::this_thread::yield();
+                    for(extra=0;extra<200;++extra){inject(280,1);pump();}
+                    done=true;reader.join();assert(observations>0);
+                    assert(!a->session.active && adcBegins==1 && a->messages==2 && !adcCaptures);
+                }
                 // Unsolicited EOC cannot overwrite the cached sample or start another request.
-                inject(280,1);pump();assert(a->strayEoc==1 && adcBegins==(sequence?2u:1u) && a->messages==(sequence?3u:2u));
+                inject(280,1);pump();assert(a->strayEoc==extra+1 && adcBegins==(sequence?2u:1u) && a->messages==(sequence?3u:2u));
             }
         }
     }
@@ -807,7 +862,7 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-mux-consumers-') as d:
     src.write_text('#define SWEET_MUX_SERVICE_TEST 1\n#define ARM64_BOARD_CONFIG_SWEET 1\n'+prelude+units)
     subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-O1','-g','-pthread',
                     '-fsanitize=address,undefined',str(src),'-o',str(binary)],check=True)
-    scenarios=['adc-idle','adc-bat-id','adc-usb','adc-sequence','adc-loop-fail','adc-timer-add-fail','adc-notifier-fail','adc-begin-fail','adc-timeout','adc-result-fail','adc-restore-fail','adc-stop-active','adc-provider-term','early','late','cancel-before-match','term-before-attach','term-after-attach',
+    scenarios=['adc-trace-race','adc-early-timer','adc-phase-timer','adc-capture-fail','adc-idle','adc-bat-id','adc-usb','adc-sequence','adc-loop-fail','adc-timer-add-fail','adc-notifier-fail','adc-begin-fail','adc-timeout','adc-result-fail','adc-restore-fail','adc-stop-active','adc-provider-term','early','late','cancel-before-match','term-before-attach','term-after-attach',
                'rollback-isolate-keys','detach-isolate-ok','detach-isolate-timeout','detach-isolate-gate-fail',
                'detach-isolate-pending-fail','isolate-shared-apid','isolated-apid-rebind',
                'key-type-mismatch','keys-prepare-fail','keys-late-match','keys-cancel-before-match',

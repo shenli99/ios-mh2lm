@@ -2,6 +2,42 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0166 ADC/watchdog时序取证本地实现完成，验证通过；待用户push并下载新云产物。尚无新实机修复结论。**
+
+承接4dd3dbb四档结果；新patch0166-mh2lm-battery-irq-timing.patch，基于真实
+0120a13云源码33文件（scratch/artifact-0120a13/xnu）。本轮未改CI/未push/未操作
+设备/未打新boot。详情docs/BATTERY-IRQ-TIMING.md；NEXT/实施计划/依赖测试/ADC
+consumer/IRQ路线图已同步。以下旧动作均为历史，勿再让用户重刷0120a13。
+
+实现：mux每route原子奇偶sequence有界拷贝、GIC/drain/ACK/notify时间；现有
+ADC/WD hit单行附时间，保留晚到hit。client通过保留provider提供typed trace；
+无gate/SPMI/MMIO，不分发事件。ADC trigger/advance锁前后/回调/timer时间、
+每request新baseline；timer核对当前phase原deadline，未到仅重挂。底层错误
+恢复前锁内保存固定10字段只读现场，timer错误先失效再snapshot/abort；日志
+标明before-restore/saved，未建session或restore本身失败现场不冒充恢复前。
+WD经SweetPmicPower语义接口固定7字段取证，terminal后先尝试禁主路再读；
+prepare/pet命令和软件plugin起点有时间，hardware-start明确unproven。
+
+保留100ms/23秒/180秒、原IRQ-only和运行互锁；无重试/延长期限/新增pet/启充，
+不认为防御timer修正已证明修好实机故障。LG参考仍是plugin使能和bark IRQ pet，
+没有软件plugin epoch等于硬件计时零点证据。长期许可/外部SMB1355 I²C隔离/
+最终managed-watchdog授权仍缺。
+
+验证底稿scratch/battery-irq-timing：strict apply+byte compare33；原106源码
+gate、CI字节未改、同核profiles0/1/2/4/7与runtime1、旧0120a13 marker拒绝通过；
+新增日志最大222字节。ASAN/UBSAN transport131、mux66+80竞争（含trace并发200
+IRQ）、runtime全部、ADCclient19+100竞争、日志等级通过；7文件ARM64单编译
+通过（非完整云链接）。新patch/hash与结果见integration.json，scratch不入git。
+
+NEXT：用户push本轮0166提交（不代用户push）。用户下载新云产物后
+先验证真实源码/内核再打包--battery-dependencies五档；优先identity1，桌面尽快
+拔5秒→稳定电源≥60秒→拔5秒，若未复现可延长至旧故障时长，导出持久日志；
+再按新时序证据安排watchdog4/组合7。无需重测0120a13/baseline/独立inhibit。
+本轮提交题目为 Add bounded battery IRQ timing diagnostics and guard ADC deadlines；
+提交号见git log -1。无新boot路径，不能重贴旧kernel当新版本。
+
+### Previous 0120a13 combined log handoff (superseded next action)
+
 **CURRENT: 0120a13 deps-all7未通过：ADC19第二阶段超时；首bark晚于23秒期待。四档日志分析已完成，本批不再重刷，下一步定位两项时序。**
 
 上一文档c194b5c，实现8d6435b、打包ba5143e。本轮只读日志/云源码与更新文档，
