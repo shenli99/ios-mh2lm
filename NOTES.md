@@ -4,6 +4,8 @@
 
 **CURRENT: 0120a12日志已分析；0164修复重复source排队误删CC来源，已本地验证，待用户push。**
 
+实现/回归/文档提交e73cf94，当前main包含该修复；未push。下一动作是用户push后云编译。
+
 日志logs/sweetlog-0120a12-battery-evidence.bin，SHA256
 d0be98dae2a0f39f7733053f95ecb4259d638f6f5d8df9224bcc691401a9c5c4。SWEETLOG v1/
 4MiB/有效959950/flush49/12437行，无回卷/NUL。底稿scratch/artifact-0120a12/
