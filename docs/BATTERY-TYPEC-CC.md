@@ -1,6 +1,8 @@
 # Type-C CC/Rp 输入判断（0160～0162）
 
-**当前：0162已按LG SMB5修正sink Rp误拒绝，本地验证通过，待用户push。**
+**当前：0162已按LG SMB5修正sink Rp误拒绝，本地验证通过，待新云产物。**
+40e2e91新增的CI marker检查因未转义`<<`破坏CircleCI模板解析，已在后续修正中
+撤回；CI文件恢复为其父提交原样，驱动修复及本地/打包器校验保留，详见文末。
 先按角色解释Rp，misc bit4保留为诊断观测；USBIN OV/UV独立拒绝。0120a10的7笔
 一致Rp3A快照离线回放可建立CC观测依据，尚无修复版实机结果，不启充。详见文末。
 
@@ -446,3 +448,16 @@ INPUT CAP `kind2/max-ma3000`及拔线撤销，APSD仍可为FLOAT，不强求DCP�
 qualified是短期观测，超过3秒没有新的有效证据会过期，不应靠定时读刷新许可；
 长期input provider仍待后续。真实charging保持0，本次不能作为充电验收。
 本地完成，未push，无新boot/设备结果或新CI run ID。
+
+### 0162后续：撤回新增CircleCI检查
+
+用户反馈配置损坏后，核对40e2e91的CI差异，只有新增两条require_marker。
+其中`SB_CC_USB_OV=1u<<12, SB_CC_USB_UV=1u<<13`含未转义`<<`，CircleCI会在
+执行shell前解析参数模板；即使字符串在shell单引号中，也不能避开该层解析。
+之前108个源码marker通过，只证明本地字符串存在，不是CircleCI配置有效性的
+验证，不能据此承诺云端可运行。
+
+本次删除这两条新增CI检查，逐字节恢复a5ee894的circleci.yml（106个原有gate），
+没有撤销0162驱动修复或打包器CC ROLE检查。恢复后检查所有模板仅为原有合法
+pipeline.parameters引用，并提取各run命令验证bash语法；未在线重跑CircleCI，
+无新产物。后续相同类型的marker检查在本地/打包阶段完成，不再修改既有CI。

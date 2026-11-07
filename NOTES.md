@@ -2,6 +2,25 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0162驱动修复保留；撤回40e2e91新增CI检查，恢复原CircleCI配置。**
+
+用户反馈CircleCI配置损坏。40e2e91只改了circleci.yml两条require_marker，
+其中字符串含未转义的`1u<<12`/`1u<<13`；CircleCI配置模板阶段会处理`<<`，
+shell单引号不能保护它。前一轮只核对源码marker/本地shell与编译，漏掉了
+CircleCI模板层校验，这是本次引入的配置错误，不归因于云端环境。
+
+本轮删除这两条新增检查，circleci.yml逐字节恢复为40e2e91父提交a5ee894版本；
+驱动0162、host测试和打包器CC ROLE marker保留。检查恢复后所有`<<`仅为原有
+合法pipeline.parameters表达式，提取的run命令bash语法通过；没有在线触发/
+验证CircleCI，不宣称云端重跑已成功。旧108 gate记录为当时本地源码校验结果，
+恢复后CI保持原106 gate。未push，无新boot/设备结果或CI run ID。
+
+后续驱动marker校验放在本地验证/打包器中，不再为此修改既有CircleCI配置。
+NEXT：用户push本地CI回退提交后重跑云端构建；得到新产物继续0162镜像核对/
+打包与设备测试，步骤见下一段交接。本次没有撤销电池驱动修复。
+
+### Previous 0162 implementation handoff (superseded for CI status)
+
 **CURRENT: 0162按LG SMB5修正sink Rp误拒绝，本地验证完成，待用户push。**
 
 用户要求读LG参考实现并修复0120a10暴露的CC误拒绝。核对LG树d4f335e，

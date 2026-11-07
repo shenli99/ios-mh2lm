@@ -135,8 +135,6 @@ jobs:
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT INPUT: v4'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT APSD EVENT: v1'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT CC: v1'
-            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT CC ROLE: v1'
-            require_marker xnu/bsd/dev/sweet_battery_runtime.h 'SB_CC_USB_OV=1u<<12, SB_CC_USB_UV=1u<<13'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT INPUT CAP: v1'
             require_marker xnu/bsd/dev/sweet_battery_runtime.h 'sb_cc_event_fresh(const SweetBattSnapshot'
             require_marker xnu/bsd/dev/sweet_battery_runtime.h 'sb_input_capability(const SweetBattSnapshot'
