@@ -1,12 +1,23 @@
 # 0119之后的电池驱动推进
 
-0120a9实测Type-C IRQ配置读误走旧SPMI白名单，battery consumer attach失败，
-并保留旧external UI状态。0161已本地修复固定IRQ只读接口及故障撤销发布，
-待用户push/新云产物；不能把本轮当作CC运行成功或充电器协议异常的证据。
+**0120a10最新：0161初始化修复已实机通过。** battery group成功attach，Type-C
+路由有实际命中，34次运行期IRQ刷新healthy1，13次UI源状态发布，插拔撤销/恢复
+正常出现在日志中。不能把内核发布结果直接当作屏幕视觉验收。ADC273次全部成功，
+旧第二EOC超时未复现但未修复；本轮没有触发consumer故障撤销分支。
 
-0160已加入独立CC/Rp判断及Type-C IRQ路由；0120a9初始化失败，运行验收未完成。
-见[CC输入判断与测试](BATTERY-TYPEC-CC.md)。这不等于已建立PD或真实启充；
-Type-C/DPDM完整provider与ADC超时仍未完成。
+当前输入卡点：7次一致记录已读到Rp3A，misc39含bit4；当前XNU CC规则以
+VBUS_ERROR直接拒绝，capability仍0。LG SMB5的sink Rp分类没有同样的bit4
+拒绝规则，需要离线核对该位适用角色/保护语义和provider生命周期；不能将当前
+软件拒绝直接解释为充电器损坏，也不能直接删检查或清位。APSD实际开启且source
+完成已返回FLOAT/SDP，无DCP/CDP。本轮34配置均enable0、无CONTROL，runtime1
+未启充。详见[0120a10完整结果](BATTERY-TYPEC-CC.md#0120a10实测irq修复通过rp已读到但输入授权未成立)。
+
+下一步不重复baseline/本轮镜像：先核对输入角色/错误位语义，明确Type-C/DPDM
+provider与FLOAT策略接口，再做必要实现与有目标取证；ADC错误路径typed快照、
+identity授权、parallel隔离及watchdog仍需后续闭合。现有GIC→mux IOService→
+registry client→consumer workloop保持，不引入轮询fallback或高层直接寄存器写。
+
+以下保留0120a8及更早的诊断过程；以顶部最新结论为准。
 
 0120a8实机已确认APSD检测开启（1362=18）且3次source-change完成事件工作，
 plugin先读未完成，随后source给出FLOAT/SDP；无DCP/CDP，10次普通sink校验未过。

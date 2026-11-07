@@ -2,6 +2,45 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a10实机分析完成：0161初始化修复通过，CC输入仍被策略拒绝。**
+
+日志sweetlog-0120a10-battery-evidence.bin，SHA256
+8c26b574212b60f1a3dd46011e84449f509c79d1a4b72a2ee22bf890c66783ab，v1/4MiB/
+有效896826/flush70/11356行，无回卷/NUL。分析底稿scratch/artifact-0120a10/
+analyze-log.py、log-analysis.json。约729.588秒、737连续遥测（irq36/保护701），
+36次profile全match1/integrity13/4027mAh。
+
+Type-C六路实际APID271，battery group1/events7f/INTID513 attach成功，IRQ4
+armed，34次运行期刷新全healthy1。rid19/cc12/vbus10/attach9/legacy5命中，
+usbin10/source5/msoc1；无VCONN自然事件。13次UI发布含external多次撤销/恢复，
+已非0120a9冻结；未收到用户屏幕反馈，不扩张为视觉验收。正常运行没有触发
+0161 failIrq撤销分支，不宣称该分支已有实机覆盖。
+
+34输入均APSD options18/enabled1，5次source完成为4 FLOAT/1 SDP，无DCP/CDP。
+7笔一致Rp3A/misc39（id221/222/225/226/357/359/360）仅CC reasons80，
+全qualified0/capability0。当前sb_cc_status以150b bit4直接拒绝。LG smb5-reg.h
+确实定义VBUS_ERROR，但smb5-lib的get_prop_typec_mode/ufp_mode没有同样的sink
+Rp拒绝；这是当前软件规则与参考实现的差异，不能认定硬件故障或立即删检查。
+6笔切换采集因字节变化VERIFY/-12撤销，后续IRQ得到一致结果，没有总线超时。
+电脑misc28/debug1/legacy6，亦不当普通sink许可；线材/电源型号尚未提供。
+
+ADC273请求/273有效且restored结果/522EOC，24 BATID/249 USBIN，266接受、
+7次因epoch变化丢弃(error0)。BATID888581..889684uV，USBIN4430448..5106224uV。
+旧第二EOC超时未复现（本轮请求196也成功），不宣称已修。无[ERROR]/panic/mux
+隔离；power/volume-up完整down/up，volume-down无本轮证据；touch至少327。
+两次ACM configured，后段电脑reset未再次configured，保留已知gadget枚举bug。
+34config全enable0，无CONTROL，UI charging0；runtime1观察没有真实启充。
+
+本轮只分析与更新文档，未改驱动/CI、未push/操作设备，无新boot或CI run ID。
+结果docs/BATTERY-TYPEC-CC.md，推进入口docs/BATTERY-DRIVER-NEXT.md。
+
+NEXT：无需重复baseline或本镜像。先离线核对SMB5 bit4在sink/source角色下的
+适用范围及保护语义，明确Type-C/DPDM input provider与FLOAT策略接口；静态证据
+不足再加入明确typed只读诊断，不盲清错误位/改角色/重跑APSD或放宽许可。ADC
+失败快照、identity授权/parallel/watchdog互锁仍待闭合，不跳到真实启充/PD。
+
+### Previous 0120a10 packaging handoff (superseded)
+
 **CURRENT: 0120a10云产物已核对，0161测试boot已打包，待设备日志。**
 
 实现提交1f953e2。0120a10 buildtree的33文件与battery-cc-irq-fix/verify逐字节

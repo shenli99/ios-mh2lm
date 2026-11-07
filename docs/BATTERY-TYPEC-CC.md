@@ -1,7 +1,8 @@
 # Type-C CC/Rp 输入判断（0160）
 
-**当前：0120a9实测在Type-C IRQ配置读取处失败，未完成CC运行验收。** 0161已本地
-修正IRQ读取接口和失败发布；0120a10云产物已核对并打包，待实机。详见文末。
+**当前：0120a10已验证0161初始化修复，Type-C IRQ与插拔发布正常运行。** 已读到
+3A Rp广播，但misc=0x39中的bit4触发当前VBUS_ERROR拒绝规则，尚无输入许可或
+真实启充。该拒绝规则与LG SMB5分类路径有差异，不能据此认定充电器故障。详见文末。
 
 2026-11-07。补丁 `0160-mh2lm-typec-cc-input.patch` 接在0159之后。用户要求把
 CC判断加入现有电池输入逻辑；本轮完成事件接入、独立分类、撤销及诊断，仍用
@@ -270,3 +271,101 @@ TOML匹配，参数无重复。底稿`scratch/artifact-0120a10/`。
 `sweetlog-0120a10-battery-evidence.bin`即可。先看consumer attach成功，再验
 Type-C/plugin/CC/APSD/UI事件。没有修复版设备结果，本轮不能称已完成实机修复。
 未改驱动/CI、未push/操作设备，也没有用户提供的CI run ID或构建日志。
+
+## 0120a10实测：IRQ修复通过，Rp已读到但输入授权未成立
+
+日志`logs/sweetlog-0120a10-battery-evidence.bin`（工作区路径），SHA256：
+`8c26b574212b60f1a3dd46011e84449f509c79d1a4b72a2ee22bf890c66783ab`。
+SWEETLOG v1，4MiB ring，有效896826字节、flush70、11356行，无回卷或正文NUL。
+分析脚本及机器结果：工作区`scratch/artifact-0120a10/{analyze-log.py,log-analysis.json}`。
+
+### 0161修复与事件交付
+
+- Type-C六条路由实际解析到APID271；battery consumer成功attach，group1/
+  events0x7f/INTID513，随后`armed mode=4`，没有回到2秒输入轮询。
+- 34次运行期battery刷新全部healthy1：Type-C单独18次，Type-C+plugin6次，
+  plugin单独4次，source5次，MSOC1次。另有初始/arm-sync，合计36次irq来源遥测。
+  mux命中rid19、cc12、vbus10、attach9、legacy5、usbin10、source5、msoc1；
+  VCONN路由未见自然命中，不能将无过流事件当失败或宣称已覆盖该路。
+- UI源状态发布13次，外接电源标志多次撤销/恢复，每次都有updateStatus完成。
+  例如遥测id357 external1 → id568 external0 → id647 external1，已不是0120a9
+  只保留开机一次发布的冻结状态。这里只证明内核发布链，不代替用户视觉反馈。
+  日志route-to-publish为89.117～118.138ms，不是物理插拔到屏幕动画的完整延迟。
+- 本轮没有consumer故障，0161的故障撤销分支没有实机触发；该分支仍只有本地
+  测试覆盖，不能把初始化修复成功扩张为所有故障恢复均已验收。
+
+关键窗口（相对首次遥测开始时间，采样时刻，不是物理插拔时间）：
+
+| 遥测id | 相对秒 | 状态 |
+| --- | --- | --- |
+| 1 | 0 | 开机电脑段，APSD SDP；开机结果仅诊断，不作新会话完成证据 |
+| 221/222 | 217.323/217.435 | 第一次稳定Rp3A，misc39，CC reasons80；UI外接状态恢复 |
+| 225/226 | 218.677/218.788 | source IRQ给出FLOAT，APSD qualified1，CC仍拒绝 |
+| 233 | 224.976 | USBIN拔线，external/capable撤销 |
+| 357 | 344.498 | 再次稳定Rp3A，misc39，CC reasons80，external1 |
+| 359/360 | 345.757/345.868 | source IRQ再次给出FLOAT，CC仍拒绝 |
+| 568 | 560.727 | 拔线发布external0 |
+| 647/649 | 638.333/639.005 | 重接电脑先发布external1，随后source完成为SDP |
+
+这些是日志状态窗口。用户尚未提供线材/电源型号，不能仅凭日志确定A-to-C或
+C-to-C，也不能精确对应每次手部松线动作。
+
+### CC/APSD已工作的部分与当前拒绝点
+
+34次输入采集均`options=0x18/0 enabled=1`；5次source完成得到4次FLOAT及1次
+SDP，均qualified1，无DCP/CDP/QC结果。两次稳定电源接入后，首次FLOAT分别比
+同会话plugin晚1.242/1.259秒；重接电脑SDP晚0.672秒。证明APSD使能和完成事件
+路径在工作，不需要把本问题解释为“APSD一直没开”或“没等完成就只读一次”。
+
+7次一致的中高Rp记录（id221/222/225/226/357/359/360）全部为：
+
+```text
+sink=0x02 attached=0x23 misc=0x39 debug=0 legacy=0x04
+rp=3 advertised-ma=3000 orientation=1 coherent=1
+reasons=0x80 qualified=0; INPUT CAP kind=0 max-ma=0
+```
+
+`misc39`含VBUS(bit5)、VBUS_ERROR(bit4)、debounce(bit3)、CC attached(bit0)，
+本机非source(bit6=0)。当前`sb_cc_status()`把bit4直接作为拒绝原因，因此单凭
+Rp3A不会建立许可。广播不是PD合同，亦不等于本机已经能吸收3A。
+
+**需要核对的是拒绝规则本身及角色生命周期，不能先下硬件故障结论。** LG主源
+`smb5-reg.h:TYPEC_VBUS_ERROR_STATUS_BIT`确实把150b bit4命名为VBUS error；
+但`smb5-lib.c:smblib_get_prop_typec_mode/smblib_get_prop_ufp_mode`按角色和Rp
+分类，没有以bit4直接否决sink Rp；`update_sw_icl_max`另行处理PD/QC/Rp/BC1.2。
+这说明当前XNU规则比该分类路径严格，**不证明bit4可忽略，也不证明必须清位或
+复位PMIC**。更旧`smb-lib.c`使用另一套地址/bit定义，只能作逻辑参考，不能将其
+寄存器或处理方式搬到本机SMB5。下一步离线核对sink/source时bit4适用范围、
+输入保护与Type-C/DPDM provider职责；若静态证据不足，新增明确的typed只读取证，
+而不是直接放宽规则、改角色、重跑APSD或反复刷同一镜像。
+
+电脑段misc28/debug1/legacy6、Rp未知，被拒为普通sink；需要完整角色/配件处理，
+不能把电脑USB configured当作充电电流许可。34次输入均sink-ok0、CC qualified0、
+capability kind0。UI的capable布尔值沿用上报含义，不是inputVerified或电流授权。
+
+6次CC不一致采集id212/217/350/356/646/647，相关字节为-12（VERIFY）；发生在
+切换段，撤销fresh/CC依据，后续IRQ有一致的新结果。本日志没有SPMI timeout或
+总线错误证据，不把一致性拒绝称为总线损坏；也不新增轮询/自动重试。
+
+### ADC、遥测与回归边界
+
+约729.588秒，737笔连续遥测（36 irq、701 protection-timer）；电压/电流有效，
+3835～3928mV、IOPM符号电流-560～+8mA。保护timer仍用于保护/测量维护，不是
+恢复USBIN/Type-C状态轮询。36次profile均match1/integrity13/nominal4027mAh。
+
+ADC273请求/273有效结果/522EOC，全部restored1；BATID24次，USBIN249次。
+266结果接受，7次USBIN因源epoch变化正确丢弃，error均0。有效BATID
+888581～889684uV，USBIN4430448～5106224uV；插拔附近低电压样本不等于稳定
+适配器电压。旧0120a8第二EOC超时本轮未复现；本轮请求196也有两次EOC并成功，
+但请求编号不是根因，不能宣称修复。ADC总耗时7.492～116.525ms，仅凭总耗时
+不能推断每阶段deadline行为。
+
+无`[ERROR]`、kernel panic或mux隔离记录。按键日志只有power/volume-up完整
+down/up，不能宣称volume-down也已本轮测试；触摸计数至少327。USB两次ACM
+configured，后段重接电脑继续出现reset/ep0 warning，无新configured，保留
+已知gadget重复枚举问题，不能把它当电池IRQ已停。
+
+34笔充电配置均enable0，没有CONTROL，UI charging始终0；本镜像是runtime1
+观察，未执行启充，不构成真实充电验收。本轮仅分析/记录，未改驱动或CI，未push、
+未操作设备。无需重跑baseline或当前镜像；下一实现先解决上述输入策略语义，
+ADC故障诊断及identity/parallel/watchdog互锁仍为独立待办。
