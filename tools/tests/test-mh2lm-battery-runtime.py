@@ -145,6 +145,7 @@ static std::map<unsigned,unsigned> changed;
 static unsigned readAdvanceNs;
 static unsigned mutateAtAddr,mutateNth,mutateCount,mutateValue;
 static std::function<void(unsigned)> sampleHook;
+static bool reflectWrites;
 
 static uint8_t profilePrefix[24]={0x09,0x00,0xff,0xe3,0xf1,0x07,0x96,0xda,
  0xb3,0xd5,0x00,0x00,0xa1,0xbd,0xa3,0x8a,0xf8,0x87,0x84,0x92,0x9e,0x94,0x23,0x80};
@@ -175,11 +176,24 @@ extern "C" int sweet_spmi_charger_update(unsigned sid,unsigned addr,unsigned mas
     if(updateCount==delayAt)timeNs+=4000000000ULL;
     // A failed transaction may already have reached hardware.
     changed[addr]=(changed[addr]&~mask)|value;
+    if(reflectWrites)regs[addr]=(regs[addr]&~mask)|value;
     if(updateCount==injectedAt)return -9;
     *out=changed[addr];return 0;
 }
+extern "C" int sweet_spmi_charger_pet_watchdog(void){
+    writes.push_back(0x1643);++updateCount;
+    return updateCount==injectedAt?-9:0;
+}
 class SweetBattery : public OSObject {
 public:
+ unsigned fDependencyMode=0,fWatchdogPets=0;
+ bool fDependencyStarted=false,fDependencyFailed=false,fDependencyFinished=false,fDependencyConfirmed=false,
+      fWatchdogArmed=false,fWatchdogPending=false,fWatchdogInput=false;
+ uint64_t fDependencyDeadlineNs=0,fDependencyReadAfterNs=0,fWatchdogLastNs=0,fWatchdogInputEpoch=0;
+ SweetBattIdentity fIdentity={};
+ void refreshDependencies(uint64_t);
+ int dependencyCommand(sweet_charger_operation,uint64_t,unsigned *);
+ void dependencyFailure(const char *,int);
  unsigned fRuntimeMode=2,fRuntimeRequested=2,fMonitorSamples=0,fLastPercent=70,fLastMv=4000;
  uint32_t fLastReasons=~0u;
  unsigned fRuntimeInputEvents=0;volatile unsigned fIrqPending=0;
@@ -261,7 +275,7 @@ static SweetBattInputPermit permitFor(const SweetBattSnapshot &s){
  return sb_input_permit(manager,s,v,timeNs);
 }
 static SweetBattLimits limits(const SweetBattSnapshot &s=sample()){
- return {true,true,2800,4430,timeNs,permitFor(s)};
+ return {true,true,2800,4430,timeNs,permitFor(s),timeNs+60000000000ULL};
 }
 static void authorizeControl(SweetBattery &b){
  static SweetAdc5Client adc;
@@ -618,6 +632,142 @@ static void policyTests(){
     assert(!c.enabled && !c.fault && c.stopConfirmed);
     puts("PASS: policy missing inputs/staleness/thermal hysteresis, dry-run, ordered control, every write failure and expiry");
 }
+
+static void dependencyTests(){
+ const auto savedTime=timeNs;const auto savedRegs=regs;const auto savedFg=fg;
+ reflectWrites=true;readAdvanceNs=1000;injectedAt=0;
+ auto baseline=[&]{
+  regs={{0x41a0,0x3c},{0x41a1,0x7d},{0x41a2,0x60},{0x41a3,0},
+        {0x41a6,0x3c},{0x41a7,0x7d},{0x41a8,0x60},{0x41a9,0},
+        {0x4107,0},{0x4009,160},{0x400a,160},{0x4010,2},
+        {0x1042,1},{0x1310,16},{0x110b,0x95},{0x1362,0x18},
+        {0x1506,2},{0x1509,0x23},{0x150b,0x3b},{0x1507,0},{0x150d,4},
+        {0x1307,0x21},{0x1308,0x10},{0x1651,0x62},{0x1653,0x8c},{0x1648,0xa4}};
+  fg={{0,100},{1,4027},{2,0x13},{3,4027}};
+  changed.clear();failures.clear();injectedAt=0;
+ };
+ auto freshId=[&](SweetBattery &b,SweetAdc5Client &adc){
+  adc.valid[0]=true;adc.samples[0]={};auto &id=adc.samples[0];
+  id.sequence=100;id.microvolts=889000;id.started_ns=id.completed_ns=timeNs;
+  b.fAdcClient=&adc;
+ };
+ for(unsigned mask:{0u,1u,2u,4u,7u}){
+  baseline();SweetBattery b;IOTimerEventSource timer;SweetAdc5Client adc;
+  b.fMonitor=&timer;b.fRuntimeMode=1;b.fDependencyMode=mask;
+  b.sampleRuntime(true);freshId(b,adc);auto prior=writes.size();b.runRuntimePolicy();
+  assert(!b.fLimits.parallelVerified && !b.fController.owned);
+  if(mask<=1){assert(writes.size()==prior && !b.fDependencyStarted);}
+  else {
+   assert(b.fDependencyStarted && !b.fDependencyFailed && !(regs[0x1042]&1));
+   assert(writes[prior]==0x1042);
+   if(mask&2)assert((regs[0x1648]&0x18)==8 && (regs[0x1648]&~0x18)==(0xa4&~0x18));
+   if(mask&4)assert(regs[0x1653]==0xf3 && regs[0x1651]==0x62 && b.fWatchdogPets==1);
+   // An ADC callback before post-write telemetry must wait, never fail.
+   auto before=writes.size();SweetBattery::adcChanged(&b);
+   assert(!b.fDependencyFailed && writes.size()==before);
+   timeNs+=1000000000ULL;b.sampleRuntime(false);b.runRuntimePolicy();
+   assert(!b.fDependencyFailed);
+   if(mask&2)assert(b.properties->values["SweetBatterySecondaryOutputInhibited"]);
+  }
+  assert(b.fLimits.batteryVerified==bool(mask&1));
+  if(mask&1){
+   assert(b.fIdentity.profile==1 && b.fIdentity.ohms>=94000 && b.fIdentity.ohms<=96000);
+   assert(b.fLimits.maxFccMa==2800 && b.fLimits.maxFvMv==4430);
+   auto snap=b.fSnapshot;auto &id=adc.samples[0];
+   auto join=[&]{return sb_battery_identity(snap,true,id.microvolts,id.sequence,id.started_ns,id.completed_ns,timeNs);};
+   assert(join().valid);
+   snap.profilePrefix[0]^=1;assert(!join().valid);snap=b.fSnapshot;
+   snap.nominalMah=4073;assert(!join().valid);snap=b.fSnapshot;
+   snap.integrity=0;assert(!join().valid);snap=b.fSnapshot;
+   id.microvolts=200000;assert(!join().valid);id.microvolts=889000;
+   for(unsigned uv:{0u,999u,1825000u,UINT32_MAX}){id.microvolts=uv;assert(!join().valid);}id.microvolts=889000;
+   snap.present=false;assert(!join().valid);snap=b.fSnapshot;
+   snap.profileStartedNs=timeNs+1;snap.profileCompletedNs=timeNs+1;assert(!join().valid);snap=b.fSnapshot;
+   auto ts=timeNs;timeNs=id.started_ns+60000000000ULL;assert(!join().valid);timeNs=ts;
+   adc.valid[0]=false;b.runRuntimePolicy();assert(!b.fLimits.batteryVerified && !b.fLimits.maxFccMa);
+   freshId(b,adc);
+  }
+  if(mask&4){
+   // Pet exclusively on delivered bark; protection ticks do not pet.
+   auto before=writes.size();timeNs+=1000000000ULL;b.sampleRuntime(false);b.runRuntimePolicy();assert(writes.size()==before);
+   for(unsigned n=0;n<3;++n){
+    timeNs+=16000000000ULL;b.fWatchdogPending=true;b.sampleRuntime(false);b.runRuntimePolicy();
+    assert(!b.fDependencyFailed && b.fWatchdogPets==n+2 && writes.back()==0x1643);
+   }
+   unsigned actual=99;auto count=writes.size();
+   assert(SweetBattery::runtimeUpdate(&b,SWEET_CHARGER_WATCHDOG_PET,1,timeNs+1000000,&actual)==SWEET_SPMI_INVALID);
+   b.fPowerStopping=true;
+   assert(b.dependencyCommand(SWEET_CHARGER_WATCHDOG_PET,b.fDependencyDeadlineNs,&actual)==SWEET_SPMI_NOT_READY);
+   assert(writes.size()==count);b.fPowerStopping=false;
+   timeNs=b.fDependencyDeadlineNs;b.runRuntimePolicy();assert(b.fDependencyFinished && !b.fWatchdogArmed && !b.fDependencyFailed);
+   count=writes.size();b.fWatchdogPending=true;b.runRuntimePolicy();assert(writes.size()==count);
+  }
+  if(mask&6){b.stopRuntime();assert(!(regs[0x1042]&1) && !b.fWatchdogArmed);}
+ }
+ // Every preparation write and the first pet may have reached hardware before
+ // returning an error. Fail terminally, disable, and never silently retry.
+ for(unsigned write=1;write<=5;++write){
+  baseline();SweetBattery b;IOTimerEventSource timer;b.fMonitor=&timer;
+  b.fRuntimeMode=1;b.fDependencyMode=6;b.sampleRuntime(true);injectedAt=updateCount+write;
+  b.runRuntimePolicy();assert(b.fDependencyFailed && !b.fWatchdogArmed && !b.fLimits.parallelVerified);
+  injectedAt=0;auto count=writes.size();b.runRuntimePolicy();assert(writes.size()==count);
+ }
+ for(unsigned fault=0;fault<6;++fault){
+  baseline();SweetBattery b;IOTimerEventSource timer;b.fMonitor=&timer;b.fRuntimeMode=1;b.fDependencyMode=6;
+  b.sampleRuntime(true);b.runRuntimePolicy();assert(b.fWatchdogArmed);
+  timeNs+=1000000000ULL;b.sampleRuntime(false);b.runRuntimePolicy();
+  b.fWatchdogPending=true;b.runRuntimePolicy(); // an actual bark establishes the maintenance expectation
+  if(fault==0)regs[0x1648]=0;
+  if(fault==1)regs[0x1653]=0x8c;
+  if(fault==2)regs[0x1042]=1;
+  if(fault==3)failures={0x1651};
+  if(fault==4)b.connection.unavailable=true;
+  if(fault==5)timeNs+=24000000000ULL;
+  b.sampleRuntime(false);b.runRuntimePolicy();assert(b.fDependencyFailed && !b.fWatchdogArmed);
+  assert(!(regs[0x1042]&1));failures.clear();
+ }
+ // A cable inherited across configuration does not prove the plugin-enabled
+ // timer started. A new source sample must not arm or renew the bark deadline.
+ baseline();SweetBattery timing;timing.fRuntimeMode=1;timing.fDependencyMode=4;
+ timing.sampleRuntime(true);timing.runRuntimePolicy();
+ timeNs+=24000000000ULL;timing.sampleRuntime(false);timing.runRuntimePolicy();
+ assert(!timing.fDependencyFailed && !timing.fWatchdogInput);
+ inputSample(timing,SWEET_BATT_IRQ_SOURCE);timing.runRuntimePolicy();
+ assert(!timing.fWatchdogInput);
+ inputSample(timing,SWEET_BATT_IRQ_USB);timing.runRuntimePolicy();assert(timing.fWatchdogInput);
+ auto barkDeadline=timing.fWatchdogLastNs;
+ timeNs+=16000000000ULL;inputSample(timing,SWEET_BATT_IRQ_SOURCE);timing.runRuntimePolicy();
+ assert(timing.fWatchdogLastNs==barkDeadline && !timing.fDependencyFailed);
+ timeNs+=7000000000ULL;timing.sampleRuntime(false);timing.runRuntimePolicy();
+ assert(timing.fDependencyFailed); // no recurring source/ADC sample extends it
+ // The same lock serializes a pet against priority sleep/shutdown disable.
+ for(unsigned n=0;n<20;++n){
+  baseline();SweetBattery racing;racing.fRuntimeMode=1;racing.fDependencyMode=4;
+  racing.sampleRuntime(true);racing.runRuntimePolicy();std::atomic<bool> go{false};
+  std::thread pet([&]{while(!go.load())std::this_thread::yield();unsigned v=0;
+   int rc=racing.dependencyCommand(SWEET_CHARGER_WATCHDOG_PET,racing.fDependencyDeadlineNs,&v);
+   assert(rc==0 || rc==SWEET_SPMI_NOT_READY);});
+  std::thread power([&]{while(!go.load())std::this_thread::yield();
+   SweetBattery::runtimePowerNotice(&racing,nullptr,kIOMessageSystemWillPowerOff,nullptr,nullptr,0);});
+  go=true;pet.join();power.join();assert(racing.fPowerStopping && writes.back()==0x1042 && !(regs[0x1042]&1));
+ }
+ // No mux means no writes or first-time initialization, and wrong diagnostic
+ // operation/mask cannot submit unrelated preparation.
+ baseline();SweetBattery waiting;waiting.fRuntimeMode=1;waiting.fDependencyMode=2;waiting.fIrqAttached=false;
+ auto before=writes.size();waiting.runRuntimePolicy();assert(writes.size()==before && !waiting.fDependencyStarted);
+ unsigned actual=123;
+ assert(waiting.dependencyCommand(SWEET_CHARGER_WATCHDOG_PREPARE,timeNs+1000,&actual)==SWEET_SPMI_INVALID);
+ auto snapshot=sample();auto bounded=limits(snapshot);SweetBattController controller={};
+ bounded.batteryUntilNs=timeNs+100;
+ auto decision=sb_decide(controller,snapshot,bounded,timeNs);
+ assert(decision.allow && decision.validUntilNs==timeNs+100);
+ assert(sb_decide(controller,snapshot,bounded,timeNs+100).reasons&SB_R_BATTERY_ID);
+ bounded.batteryUntilNs=0;assert(sb_decide(controller,snapshot,bounded,timeNs).reasons&SB_R_BATTERY_ID);
+ reflectWrites=false;readAdvanceNs=0;injectedAt=0;failures.clear();
+ regs=savedRegs;fg=savedFg;timeNs=savedTime;writes.clear();changed.clear();updateCount=0;
+ puts("PASS: dependency masks, fresh BAT_ID/profile identity and board bounds; no parallel authorization, no implicit main enable");
+ puts("PASS: disabled-charge preparation, post-write telemetry, bark-only pulse, finite watchdog window, every write failure and real config/mux loss terminate without retry");
+}
 static void queuedSourceTests(){
  const auto savedTime=timeNs;const auto savedRegs=regs;const auto savedFg=fg;
  auto writeStart=writes.size();
@@ -693,7 +843,7 @@ static void queuedSourceTests(){
  puts("PASS: source IRQ queued during actual sampler/protection tick preserves validated history, both queues and new ADC epoch fence use, long-session recovery, real faults still revoke");
 }
 int main(){
-    queuedSourceTests();evidenceTests();apsdEventTests();ccTests();inputSessionTests();policyTests();reads.clear();writes.clear();changed.clear();
+    dependencyTests();queuedSourceTests();evidenceTests();apsdEventTests();ccTests();inputSessionTests();policyTests();reads.clear();writes.clear();changed.clear();
     regs={{0x41a0,0xff},{0x41a1,0x7f},{0x41a2,0x60},{0x41a3,0xed},
           {0x41a6,0xff},{0x41a7,0x7f},{0x41a8,0x60},{0x41a9,0xed},
           {0x4009,180},{0x400a,180},{0x4010,2},{0x4107,0},{0x1310,16},{0x1006,3},{0x110b,0x95},{0x1307,1}};
@@ -924,7 +1074,7 @@ int main(){
     puts("PASS: actual runtime sampler, units/validity, IRQ-only input acquisition, monitor publication and stop/no rearm");
 }
 '''
-names=['SweetBattery::inputChangePending','SweetBattery::refreshInputPermit','sweet_batt_now_ns','SweetBattery::adcChanged','SweetBattery::publishAdc','SweetBattery::sampleRuntime','SweetBattery::runtimeUpdate',
+names=['sweet_batt_now_ns','SweetBattery::dependencyCommand','SweetBattery::dependencyFailure','SweetBattery::refreshDependencies','SweetBattery::inputChangePending','SweetBattery::refreshInputPermit','SweetBattery::adcChanged','SweetBattery::publishAdc','SweetBattery::sampleRuntime','SweetBattery::runtimeUpdate',
        'SweetBattery::runRuntimePolicy','SweetBattery::startRuntime',
        'SweetBattery::monitorFired','SweetBattery::stopRuntime','SweetBattery::failIrq','SweetBattery::publishRuntime','SweetBattery::runtimeClock','SweetBattery::publish','SweetBattery::removePowerValue','SweetBattery::runtimePowerNotice']
 with tempfile.TemporaryDirectory(prefix='mh2lm-runtime-') as directory:

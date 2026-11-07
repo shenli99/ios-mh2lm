@@ -1,5 +1,13 @@
 # MH2LM 电池驱动实现计划
 
+**最新增量：0165按参数推进后三项依赖，和0164同轮编译。** 不等待长期输入许可
+验收再开发：身份交叉验证/板级限值、主PMIC副路禁止、watchdog配置与bark IRQ
+pet已本地实现，支持独立和组合档。runtime11/transport123/mux70、日志和五个
+ARM64单文件编译通过，待push/新产物。仍在第2～3段；外部SMB1355 I²C隔离、
+managed-watchdog最终授权及全部实机验收未完成，不启充。下一轮先identity1
+同时验0164，再inhibit2、watchdog4，最后组合；详见
+[依赖分步测试](BATTERY-DEPENDENCY-TESTS.md)。下方保留0164等历史进度。
+
 **2026-11-07当前进度：** 0120a11已实机验证0162的sink CC/Rp分类、独立于APSD
 完成的观测及正常拔线撤销。0120a12已实测：短暂输入许可/ADC同epoch检查和UV
 自然交付正常，重复source IRQ却触发来源误删，长期许可未通过。0164已本地修复：

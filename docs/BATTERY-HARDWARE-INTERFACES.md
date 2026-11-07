@@ -1,5 +1,11 @@
 # 电池硬件接口与 ADC5 预检（0154）
 
+**0165接口增量（本地验证，待新云产物/实机）：** 纯身份校验经现有ADC client与
+FG tuple建立限值；诊断控制经语义操作PARALLEL_INHIBIT/WATCHDOG_PREPARE/PET，
+不在高层写寄存器。transport新增固定watchdog脉冲API，和稳定RMW分开；mux表
+追加可选bark IRQ。全部新档runtime1，外部隔离/最终watchdog授权仍阻断启充。
+当前契约和测试见[依赖分步测试](BATTERY-DEPENDENCY-TESTS.md)。
+
 **0163～0164当前补充：** 0120a12实测确认ADC同epoch检查及UV交付正常，重复
 source IRQ误删来源导致长期许可失败；0164已本地修复，待push/新云产物复测。
 输入会话与typed短许可在电池loop

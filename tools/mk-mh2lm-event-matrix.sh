@@ -5,13 +5,14 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--board-startup]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--board-startup]\n' "$0" >&2
 	exit 2
 fi
 
 ARTIFACT=$1
 LABEL=$2
 KEY_IRQ_PROFILE=${3:-}
+DEPENDENCY_MATRIX=0
 case "$KEY_IRQ_PROFILE" in
 	'')
 		;;
@@ -30,6 +31,10 @@ case "$KEY_IRQ_PROFILE" in
 	--touch-irq)
 		;;
 	--irq-only)
+		;;
+	--battery-dependencies)
+		DEPENDENCY_MATRIX=1
+		KEY_IRQ_PROFILE='--battery-evidence'
 		;;
 	--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--board-startup)
 		;;
@@ -196,6 +201,17 @@ if [ "$KEY_IRQ_PROFILE" = '--battery-evidence' ]; then
  done
 fi
 
+if [ "$DEPENDENCY_MATRIX" = 1 ]; then
+ for marker in 'SWEET BATT DEPENDENCIES: v1' 'SWEET BATT IDENTITY: v1' \
+  'SWEET BATT INHIBIT: v1' 'SWEET BATT DEP CHECK: v1' \
+  'SWEET BATT WATCHDOG: v1' 'battery-wdog-bark'; do
+  if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+   printf 'kernel lacks 0165 dependency diagnostic marker: %s\n' "$marker" >&2
+   exit 1
+  fi
+ done
+fi
+
 if [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 	for marker in 'SWEET BOARD: late init before root lookup; independent of UFS' \
 	    'SWEET MUX: infrastructure ready intid=' \
@@ -255,7 +271,17 @@ if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-ir
 	if [ "$KEY_IRQ_PROFILE" = '--battery-evidence' ]; then
   make_profile battery-evidence \
    "LG G8X - XNU battery profile/input evidence (${LABEL})" \
-   "$IRQ_ARGS sweetbattirq=4 sweetbattuidiag=1 sweetbattruntime=1 sweetbattadcconv=0"
+   "$IRQ_ARGS sweetbattirq=4 sweetbattuidiag=1 sweetbattruntime=1 sweetbattadcconv=0 sweetbattdeps=0"
+  if [ "$DEPENDENCY_MATRIX" = 1 ]; then
+   for entry in 'identity:1' 'inhibit:2' 'watchdog:4' 'deps-all:7'; do
+    name=${entry%:*}
+    mask=${entry#*:}
+    make_profile "battery-${name}" \
+     "LG G8X - XNU battery ${name} observation (${LABEL})" \
+     "$IRQ_ARGS sweetbattirq=4 sweetbattuidiag=1 sweetbattruntime=1 sweetbattadcconv=0 sweetbattdeps=$mask"
+   done
+   printf 'dependency matrix ready: evidence / identity / inhibit / watchdog / deps-all; all runtime1, no charging enable\n'
+  fi
   printf 'kernel SHA256: %s\ncreated battery profile/input evidence profile for %s; charging remains interlocked\n' "$KERNEL_SHA256" "$LABEL"
   exit 0
  fi

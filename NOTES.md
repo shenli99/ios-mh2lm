@@ -2,6 +2,76 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 按用户新要求，0165后三项依赖已同轮推进，和0164一起待用户push/云编译。**
+
+用户明确：不必等长期输入许可验收才开发身份/parallel/watchdog，下一轮同内核分步
+测试。新0165-mh2lm-battery-dependency-probes.patch基于0164验证树，架构仍GIC→mux
+IOService→registry client→SweetBattery自己的workloop；没有新增全局桥接、匹配回调
+重SPMI、高层寄存器写、轮询IRQ fallback或真正启充。所有新档强制runtime1，deps非0
+与runtime2/3组合会显式拒绝，参数只能请求工作，不能强行把硬件依据设true。
+
+sweetbattdeps位：1身份、2主PMIC副路禁止、4watchdog诊断；默认0。身份将现有ADC
+BAT_ID（live/token/60秒）和固定FG profile tuple（前缀24/integrity/nominal/60秒）
+交叉核对，复现LG1825mV整数公式及91/12kΩ最近15%匹配，无默认profile fallback。
+通过后batteryVerified及板级maxFCC2800mA/maxFV4430mV可用；原试验仍500mA/4200mV。
+batteryUntilNs保存BAT_ID/profile最早到期点，并收紧策略/命令期限，不能用新策略
+核对时间延长原身份依据的寿命；本地测试包含两次保护采样之间跨过该期限的拒绝。
+身份档30秒保护遥测刷新profile，不续输入来源时间，不改ADC provider/client接口。
+
+并联档先禁主路，再语义PARALLEL_INHIBIT使SID2:1648 mask18为08，仅强制SMB_EN
+低，保留CP/STAT位，记录1690选择但不写。命令即时回读与写后新遥测分别确认。
+外部SMB1355仍缺SE4 I²C typed provider及CHG_EN_SRC/polarity/actual状态依据，
+parallelVerified始终false。不能把主PMIC输出禁止当外部充电芯片已隔离。
+
+watchdog档同样先禁主路。mux表尾新增index18 SID2/PID16/bit1 rising bark路由，
+19路/3组，WDOG consumer bit100、合法ALL1ff；默认实际订阅仍ff，只有deps含4才1ff。
+保留唯一owner发现、已启用位拒绝接管、按组回滚/隔离。语义WATCHDOG_PREPARE固定
+1653=f3（snarl8s/bark16s/bite8s/bite禁充），1651 maskc2为42（plugin+bark，AFP按LG
+主路初始化关闭，保留其他位）。WATCHDOG_PET走专用固定1643 bit0脉冲，transport锁/
+唯一EE0/v5/timeout poison，无RMW/readback/相同值跳过/重试；成功只算总线命令完成。
+初次pet后仅真实bark事件pet，不是定时读状态或定时喂狗。现有策略watchdog授权
+仍只支持off，尚未授予managed许可，必须实机验证后再接正式控制，不开enable1。
+
+写后必须等snapshot.start>=配置完成的新遥测；中间ADC通知等待，不能拿旧快照误报。
+新遥测缺失/过3秒、main-enable变化、禁止位/WD配置读错或丢失、mux丢失均ERROR
+终止并尽力禁主路，无自动重试/重启。继承插线不证明plugin计时器已启动，只有
+配置后新plugin采集或真实bark才建立23秒无中断期限；source/ADC/保护tick不续期。
+诊断从准备最多180秒，结束再次禁主路并停止pet；不恢复未知enable/副路/WD配置，
+保持bite禁充。priority sleep/shutdown与诊断提交用同一control锁，停止后不再pet。
+初次pet1或window complete但无自然bark不能算硬件验收。息屏非系统深睡，恢复待办。
+
+工具--battery-dependencies复用实际同一云kernel，生成battery-evidence(deps0)、
+battery-identity(1)、battery-inhibit(2)、battery-watchdog(4)、battery-deps-all(7)。
+均runtime1/IRQ4/ADCconv0，保留USB日志和三键/DWC3/触摸IRQ。旧evidence档仍保留，
+不需要默认再测一次baseline。打包器要求0164/0165 marker，旧0120a12被拒绝。
+CircleCI/.github/workflows/xnu.yml逐字节未改，未push/操作设备，无新boot/云run ID。
+
+本地底稿scratch/battery-dependencies：实际0120a12的33文件依次严格apply0164+0165
+并与edited/verify逐字节一致，原106源码gate通过；ASAN/UBSAN runtime11、transport123、
+mux70 PASS（包括新bark交付/外部owner/已有enable拒绝/读错回滚、按键并行与原80次
+退出竞态），日志等级1 PASS。runtime新增各准备操作故障、真实配置/mux丢失、新快照/
+旧回调时序、继承插线/source不伪造中断期限、180秒终止与20次pet/priority停止竞态。
+五个ARM64单文件编译通过：SweetBattery/SweetPmicPower/SweetSpmiInterruptMux/
+sweet_spmi/sweet_charger，Mach-O arm64对象，有warnings，非完整macOS内核链接。
+实际packager分档分支参数唯一性/五组mask、bash语法、diff检查及旧内核拒绝通过；
+未重跑未改动的ADC client独立测试，不将历史通过算本轮重跑。integration.json、
+final-validation.json、*-tests.txt及*.compile.txt保存本地证据。0165 patch SHA256
+fc4896cc0727b4896dc83604087ccf5cc3bb4e830f2d99c0b8006e74277dc21c。
+完整契约/LG符号/验收步骤在docs/BATTERY-DEPENDENCY-TESTS.md；NEXT、实施计划、
+输入会话/ADC/硬件接口/当前架构已更新。下面0164结果与历史硬件缺口仍有效。
+
+NEXT：用户push当前main并下载新产物。核对0164+0165源码/marker，使用新的
+--battery-dependencies打包五档并回读payload/参数。先identity1：沿用45～60秒稳定
+电源+拔线/短接，同时验0164重复source后恢复、>3秒原来源不续、同epoch新VBUS与
+有效许可内拔线撤销，并看身份约95kΩ/profile1/板级上界。再inhibit2：桌面后尽快
+插拔并稳定20～30秒，查enable0和新遥测SMB输出禁止；再watchdog4：桌面后尽快
+拔5秒再接稳定电源至少50秒，取得至少两次自然bark/pet及配置持续相符。180秒从
+驱动准备开始，过时需明确日志，不能插拔自动重启。各档日志检查后再deps-all7验证
+并存；持久日志即可，不重测0120a12/baseline/ADC bring-up。所有档不启充，外部
+SMB1355 I²C隔离、正式managed-watchdog/保护验收和0164输入长期实测仍未闭合。
+
+### Previous 0164 implementation handoff (superseded next action)
+
 **CURRENT: 0120a12日志已分析；0164修复重复source排队误删CC来源，已本地验证，待用户push。**
 
 实现/回归/文档提交e73cf94，当前main包含该修复；未push。下一动作是用户push后云编译。

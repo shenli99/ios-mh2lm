@@ -1,0 +1,172 @@
+# 电池身份、并联禁止与 watchdog 分步测试（0165）
+
+2026-11-07。用户要求在0164来源保留修复的同一次云编译中推进后三项依赖，
+用参数分开或组合测试。0165已本地实现与验证，待push、新云产物及实机结果。
+**全部档位只允许runtime1；没有主动启充。** 身份可建立板级限值，主PMIC副路
+禁止与watchdog的配置/IRQ链可独立取证；外部SMB1355隔离和managed-watchdog
+最终授权仍未成立。不能将“已有实现”写成“三项实机验收完成”。
+
+## 参数和同内核镜像
+
+`sweetbattdeps` 是请求执行的位集合，不是强制通过条件。仅接受0～7，非0时要求
+`sweetbattruntime=1`，否则服务启动显式失败。保留IRQ4、ADCconv0、三键/DWC3/
+触摸IRQ与USB日志；不修改CircleCI或GitHub XNU触发/检查配置。
+
+新产物核对后使用 `tools/mk-mh2lm-event-matrix.sh ARTIFACT LABEL --battery-dependencies`。
+同一个实际内核生成下列五份boot，名称包含产物LABEL；本轮尚无新boot。
+
+| 镜像后缀 | deps | 作用 / 写入边界 |
+| --- | --- | --- |
+| `battery-evidence` | 0 | 原输入观察；包括0164修复，不执行新增准备写入，不订阅bark |
+| `battery-identity` | 1 | BAT_ID/profile/容量交叉验证和板级限值；不执行新增充电配置写入 |
+| `battery-inhibit` | 2 | 先禁主路，再禁止主PMIC的SMB_EN副路输出；核对即时与后续读回 |
+| `battery-watchdog` | 4 | 先禁主路，再配置有限watchdog观察、初次pet和bark IRQ维护 |
+| `battery-deps-all` | 7 | 上述三项一起；仍保留外部隔离/最终watchdog授权互锁 |
+
+位集合3/5/6也受支持，可由打包参数安排有目标的组合；默认不额外生成它们。
+每份镜像保留同一内核、ADT和基线ramdisk内容，只改测试参数。打包器要求0164
+和0165的marker，拒绝旧内核；原0120a12不要重测。新产物仍需源码/marker与boot
+payload/参数回读核对，不能用本地主机测试替代云内核验证。
+
+## 架构与身份契约
+
+```mermaid
+flowchart TD
+  IRQ[GIC callback] --> M[SweetSpmiInterruptMux IOService / 表路由]
+  M --> C[SweetSpmiMuxClient / 只通知排队]
+  C --> B[SweetBattery IOPMPowerSource / 自己的 workloop]
+  A[ADC5 IOService] --> AC[SweetAdc5Client / READY、token、时效]
+  AC --> B
+  B --> I[纯 sb_battery_identity / BAT_ID + FG profile]
+  B --> D[有限依赖测试 / 生命周期和新快照核对]
+  D --> H[语义 sweet_charger_execute]
+  H --> T[共享 SPMI transport / owner、锁、timeout poison]
+  I --> P[板级限值 / 原纯策略]
+  B --> PM[IOPMPowerSource 属性 / updateStatus]
+```
+
+`SweetBattIdentity` 是电池loop拥有的值类型，没有新单例、假IOService、跨层
+寄存器写或Linux votable。实际SPMI读取仍在PMIC采样组件，准备写入在语义后端。
+匹配/IRQ通知不做重SPMI；bark在原consumer loop里处理，mux只管理IRQ寄存器。
+
+身份要求电池present、ADC client存活且BAT_ID结果有效，非零token，ADC与profile
+各自开始/完成时间有效且从开始严格小于60秒。完整固定tuple要求integrity白名单、
+24字节前缀与nominal capacity一致；该前缀比较沿用LG选择依据，不是全416字节
+profile散列验证。BAT_ID换算复现LG的整数顺序：
+
+```text
+mv = microvolts / 1000
+ohms = 100000000 / (1825000 / mv - 1000)
+kohm = ohms / 1000
+```
+
+拒绝零、越界、未来时间、到期/缺失测量和不匹配。按91kΩ Tocad / 12kΩ LGC的
+15%整数容差选最近候选，不采用Android“无匹配默认Tocad”fallback。profile/容量
+须分别匹配Tocad4027或LGC4073mAh。通过后板级上界FCC2800mA、FV4430mV；原
+试验策略继续最多FCC/ICL500mA、FV4200mV，绝不是立即按2800mA取电。
+
+身份开启时每30秒保护采样刷新FG tuple，BAT_ID沿用ADC client已有30秒刷新/
+60秒时效；不是轮询输入/IRQ。每次策略执行重新交叉核对，失去测量、profile错误、
+present变化、ADC终止、停止或过期均撤销身份与限值，不给旧值续原采集时间。
+`verifiedNs`只是本笔遥测下的限值核对时间，不替代两份原证据的60秒期限。
+`batteryUntilNs`保存两份证据的最早到期点，策略同时检查该点，并将控制命令
+截止时间收紧到它，避免两次保护采样之间越过身份期限仍使用上一笔决定。
+
+主要诊断：INFO `SWEET BATT IDENTITY: v1`，含valid/profile/ohms/token及板级上界；
+IORegistry `SweetBatteryIdentityVerified/IdentityProfile/ApprovedFCCMA/ApprovedFVMV`。
+identity1可以同时检验0164输入修复，无需先重复一个baseline。
+
+## 并联禁止能证明什么
+
+`SWEET_CHARGER_PARALLEL_INHIBIT=1` 仅执行LG SEC_NONE的语义：SID2:0x1648，
+mask0x18、value0x08，强制SMB_EN override低，保留CP/STAT等其他位；不改0x1690
+选择位，也不开放任意副路寄存器写。新操作要求已读回主路enable0，逐事务owner/
+错误检查与即时回读，再由写入后的新遥测核对。读错、状态改变、主路重新使能或
+mux丢失会终止诊断并尽力禁主路，不自动重试或还原继承的enable。
+
+`SWEET BATT INHIBIT`表示命令接受，`SWEET BATT DEP CHECK`和
+`SweetBatterySecondaryOutputInhibited`表示后续PMIC读回相符；`select`只记录选择。
+**`SweetBatteryParallelVerified`始终false。** LG SMB1355支持CHG_EN_SRC/polarity和
+独立command控制，主PMIC的SMB_EN低不足以证明外部器件已停充。仍需SE4 I²C的
+typed provider发现芯片、读取/核对并安全禁用实际充电源与状态；当前没有该provider，
+不能把缺I²C访问当作器件不存在或默认关闭，也不假装已完成外部隔离。
+
+## Watchdog 配置、中断与有限责任
+
+新增路由表尾索引18：SID2/PID16/bit1、rising `battery-wdog-bark`，consumer事件
+`SWEET_BATT_IRQ_WDOG=0x100`。表19路/3组，合法battery mask1ff；默认实际订阅
+仍ff，仅deps含4才请求1ff。复用原GIC INTID513、IOService/registry client与共享
+SPMI锁；按原owner、已使能位拒绝接管、回滚/隔离规则处理，不能因新路失败影响
+按键组，更不能静默切到轮询。实际MISC APID/owner与路由使能仍待新镜像确认。
+
+主路禁充后，`WATCHDOG_PREPARE=1`固定配置：0x1653=f3，snarl8秒/bark16秒/
+bite8秒且bite禁充；0x1651仅mask c2置42，plugin-enable和bark IRQ开启、AFP按LG
+主路初始化方式关闭，保留其他位，不关闭watchdog。不重写JEITA/温度阈值。
+这不是逐字复制LG主路整套默认值；bite禁充是本轮明确保留的保护选择。
+
+初次执行一次pet，然后仅在真实bark consumer事件上pet。`WATCHDOG_PET=1`走
+专用 `sweet_spmi_charger_pet_watchdog()` 固定0x1643 bit0脉冲：同一transport锁、
+唯一EE0 writer、v5和共享RW timeout poison；不使用稳定值RMW，不读回比较、不因
+上次读到1跳过，也不重试。成功只说明总线命令完成，不能单凭它证明计时器已复位。
+所有新语义操作检查主路禁充，非禁充的诊断写与priority power通知共用control锁。
+原runtime控制提交入口拒绝这三种诊断操作，不能借它们绕过充电策略。
+
+配置返回后要等 `snapshot.startedNs >= 配置完成时间` 的新遥测。ADC通知可能先到，
+此时等待，不能拿旧配置误报失败；新遥测缺失/过3秒、配置变化/读错都会终止。
+plugin-enable不证明继承的插线已启动计时器：只有配置后的新plugin采集或实际bark
+才启动中断期限检查。source/ADC/保护tick不能续此期限；有输入且该期待已建立时，
+23秒没有新bark则ERROR终止，早于16+8秒名义窗口的末端。
+
+整个准备诊断从开始最多180秒，时间到再次禁主路并停止pet，不自动重启；停止/
+IRQ失败/关机/系统睡眠也不再pet。保持副路禁止和watchdog bite保护配置，不恢复
+未知继承enable。普通息屏不等于系统深睡，尚无本轮深睡恢复验收。
+INFO `SWEET BATT WATCHDOG`区分prepared与bark IRQ pet；配置读回见DEP CHECK，
+错误为必出ERROR。初次pet计数1不算自然bark验收；`window complete`也不代表没有
+发生中断时自动通过。最终策略仍只接受原watchdog-off契约，未授予managed-watchdog
+许可；待真实IRQ/保护语义验收后再接入正式控制策略。
+
+## 下一轮逐步测试
+
+同一云内核，按以下顺序分别fastboot，由用户操作；保留持久日志即可。任一项失败
+先分析该档日志，后续独立档可按原因选择，不要求重跑旧0120a12/baseline或ADC正常
+路径bring-up。不在本轮增加enable=1镜像。
+
+1. **identity1**：桌面约15秒→拔5秒→原同一电源/线材稳定45～60秒→拔5秒→接
+   1～2秒再拔→稳定接15秒再拔。检查IDENTITY valid1/profile1/约95kΩ、2800/4430
+   上界；同时验0164重复source后恢复输入许可、>3秒来源时间不续、新epoch电压
+   匹配及有效许可期间拔线撤销。默认evidence0只留作有目标的输入隔离对照。
+2. **inhibit2**：桌面后尽快操作，插拔一次并稳定20～30秒；检查主路enable0、
+   INHIBIT接受、新遥测DEP CHECK的SMB mask18为08且选择位有记录，后续不被改回。
+   外部隔离仍为false属于本档预期。
+3. **watchdog4**：桌面后尽快拔线5秒，再接稳定电源至少50秒，期间确认按键/
+   触摸；检查bark路由attach/healthy、f3/42掩码、新遥测确认，以及至少两个自然
+   bark与成功pet。若无中断或配置失败，保留日志而不继续宣称维护通过。180秒从
+   驱动开始算，若此前等待过长导致窗口结束，日志会明确指出，不能靠插拔重启。
+4. 前三项看过日志后再测 **deps-all7**，确认同一供电下身份、输入许可、禁止副路、
+   bark pet和三键/USB/触摸并存；它仍不启充。正式启充前继续完成外部I²C隔离与
+   watchdog授权/故障保护验收。
+
+## 源码依据与本地验证
+
+参考根 `ref/android_kernel_lge_sm8150`，HEAD
+`d4f335e13d73c4aa2af85581a6ec11b670ee5b94`，并对照工作区`docs/INDEX.md`六章。
+
+- `drivers/of/of_batterydata.c:of_batterydata_get_best_profile`、MH2LM common PM
+  DTS及两份BLT42 profile；详细整数依据见[身份审计](BATTERY-IDENTITY-INPUT-AUDIT.md)。
+- `smb5-lib.c:smblib_select_sec_charger_locked/smblib_smb_disable_override_vote_callback`，
+  `smb1355-charger.c:smb1355_set_parallel_charging`：输出禁止与实际并联状态的区别。
+- `smb5-reg.h`的SMB_EN/WD_CFG/timeout/pet，`qpnp-smb5.c:smb5_init_hw`和
+  `smb5-lib.c:wdog_bark_irq_handler`；`pm8150b.dtsi:qcom,misc@1600`的bark bit1 rising。
+
+底稿 `scratch/battery-dependencies/`：从实际0120a12的33文件依次严格apply0164/
+0165，与edited/verify逐字节一致；原106源码gate通过。ASAN/UBSAN runtime11、
+transport123、mux70条PASS（含新bark交付/owner冲突/已有enable拒绝/失败回滚与
+按键并行，原80次退出竞态），日志等级检查通过。新增runtime覆盖所有准备操作
+错误、写后新遥测、真实配置/mux丢失、初始插线不伪造计时器启动、source不续bark
+期限、有限结束及20次pet/优先电源停止竞态。五个ARM64单文件编译通过：
+SweetBattery、SweetPmicPower、SweetSpmiInterruptMux、sweet_spmi、sweet_charger；
+有编译警告，非macOS全内核链接或硬件验收。
+
+打包器bash语法、实际分档分支的参数唯一性/0、1、2、4、7、旧内核拒绝已验证；
+未生成假新boot。未重跑未改动的ADC client独立测试。CI文件逐字节未改，未push/
+操作设备。失败路径不静默fallback，尚无新CI run ID/0165实机结果。

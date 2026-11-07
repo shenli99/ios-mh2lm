@@ -216,7 +216,7 @@ int main(int argc,char **argv){
     own(10,0x10);own(11,0x13);own(12,0x15);own(13,0x16);
     if(!strncmp(mode,"battery-irq",11)) {
         own(14,0x40);auto initialReads=ioReads;
-        for(unsigned per:{0u,1u,0x08u,0x14u,0x16u,0x31u,0x41u,0x115u})
+        for(unsigned per:{0u,1u,0x08u,0x14u,0x31u,0x41u,0x115u})
             assert(sweet_spmi_battery_irq_read(per,0x11,&out)==SWEET_SPMI_INVALID && out==0xa5);
         for(unsigned reg:{0u,6u,0x10u,0x14u,0x16u,0x18u,0x111u})
             assert(sweet_spmi_battery_irq_read(0x15,reg,&out)==SWEET_SPMI_INVALID && out==0xa5);
@@ -242,7 +242,7 @@ int main(int argc,char **argv){
                 assert(mux.readPeripheral(route,reg,&out) && out==0x5a);
                 assert(observerApids.back()==12 && !writes && !maps);
             }
-            for(unsigned per:{0x10u,0x13u,0x15u,0x40u})for(unsigned reg:{0x11u,0x12u,0x13u,0x15u}) {
+            for(unsigned per:{0x10u,0x13u,0x15u,0x16u,0x40u})for(unsigned reg:{0x11u,0x12u,0x13u,0x15u}) {
                 pmic[0x20000|(per<<8)|reg]=0x64;
                 assert(!sweet_spmi_battery_irq_read(per,reg,&out) && out==0x64);
             }
@@ -372,7 +372,7 @@ int main(int argc,char **argv){
         for(unsigned mv:{0u,3590u,3601u,4201u,4430u})assert(sweet_charger_execute(SWEET_CHARGER_FLOAT_VOLTAGE_MV,mv,1000000000,&value)==SWEET_SPMI_INVALID);
         assert(sweet_charger_execute(SWEET_CHARGER_ENABLE,2,1000000000,&value)==SWEET_SPMI_INVALID);
         assert(sweet_charger_execute(SWEET_CHARGER_SOFTWARE_INPUT_LIMIT,0,1000000000,&value)==SWEET_SPMI_INVALID);
-        assert(sweet_charger_execute(static_cast<sweet_charger_operation>(7),1,1000000000,&value)==SWEET_SPMI_INVALID);
+        assert(sweet_charger_execute(static_cast<sweet_charger_operation>(10),1,1000000000,&value)==SWEET_SPMI_INVALID);
         assert(commands==before && value==0xa5);
         assert(sweet_charger_execute(SWEET_CHARGER_ENABLE,1,0,&value)==SWEET_CHARGER_EXPIRED && commands==before && value==0xa5);
         assert(sweet_charger_execute(SWEET_CHARGER_ENABLE,1,123456,&value)==SWEET_CHARGER_EXPIRED && commands==before);
@@ -387,6 +387,40 @@ int main(int argc,char **argv){
         value=0xa5;rwStatus=3;
         assert(sweet_charger_execute(SWEET_CHARGER_ENABLE,0,1000000000,&value)==SWEET_SPMI_IO && value==0xa5);
         balanced();IOLockFree(sp_lock);puts("PASS: semantic operations, unit bounds, physical readback and failure preservation");return 0;
+    }
+    if(!strcmp(mode,"dependency")){
+        unsigned value=0xa5;
+        pmic[0x21042]=1;
+        for(auto op:{SWEET_CHARGER_PARALLEL_INHIBIT,SWEET_CHARGER_WATCHDOG_PREPARE,SWEET_CHARGER_WATCHDOG_PET})
+            assert(sweet_charger_execute(op,1,1000000000,&value)==SWEET_SPMI_NOT_READY && !writes && value==0xa5);
+        assert(!sweet_charger_execute(SWEET_CHARGER_ENABLE,0,0,&value));
+        pmic[0x21648]=0xa5;pmic[0x21651]=0x62;pmic[0x21653]=0x8c;
+        assert(!sweet_charger_execute(SWEET_CHARGER_PARALLEL_INHIBIT,1,1000000000,&value) && value==1);
+        assert(pmic[0x21648]==0xad); // only override/value bits changed
+        assert(!sweet_charger_execute(SWEET_CHARGER_WATCHDOG_PREPARE,1,1000000000,&value) && value==1);
+        assert(pmic[0x21651]==0x62 && pmic[0x21653]==0xf3);
+        // Fixed pet always emits a pulse, even if the previous command reads 1.
+        auto prior=writes,readBefore=readCommands;
+        assert(!sweet_spmi_charger_pet_watchdog());assert(!sweet_spmi_charger_pet_watchdog());
+        assert(writes==prior+2 && readCommands==readBefore && pmic[0x21643]==1);
+        auto commandsBefore=commands;
+        assert(sweet_spmi_charger_update(2,0x1643,1,1,&out)==SWEET_SPMI_INVALID && commands==commandsBefore);
+        assert(sweet_spmi_charger_update(2,0x1648,4,4,&out)==SWEET_SPMI_INVALID);
+        assert(sweet_spmi_charger_update(2,0x1651,0x20,0,&out)==SWEET_SPMI_INVALID);
+        assert(sweet_spmi_charger_update(2,0x1690,0x10,0,&out)==SWEET_SPMI_INVALID);
+        value=0xa5;
+        assert(sweet_charger_execute(SWEET_CHARGER_WATCHDOG_PET,1,0,&value)==SWEET_CHARGER_EXPIRED && value==0xa5);
+        prior=writes;ownership[13]=3;
+        assert(sweet_spmi_charger_pet_watchdog()==SWEET_SPMI_NO_OWNER && writes==prior);
+        ownership[13]=0;own(21,0x16);
+        assert(sweet_spmi_charger_pet_watchdog()==SWEET_SPMI_AMBIGUOUS && writes==prior);routing.erase(21);
+        failMap=true;assert(sweet_spmi_charger_pet_watchdog()==SWEET_SPMI_MAP_FAILED && writes==prior);failMap=false;
+        rwStatus=3;assert(sweet_spmi_charger_pet_watchdog()==SWEET_SPMI_IO);
+        rwStatus=0;assert(sweet_spmi_charger_pet_watchdog()==SWEET_SPMI_TIMEOUT && sp_rw_poisoned[13]);
+        commandsBefore=commands;rwStatus=1;
+        assert(sweet_spmi_charger_pet_watchdog()==SWEET_SPMI_POISONED && commands==commandsBefore);
+        balanced();IOLockFree(sp_lock);
+        puts("PASS: dependency semantic bounds/readback, fixed non-skipped pet pulse, owner/map/error/timeout poison and no generic trigger writer");return 0;
     }
     if(!strncmp(mode,"fg-",3)) {
         for(unsigned n=0;n<7;++n)own(30+n,n==0?1:n==1?0x41:n==2?0x43:0x46+n-3);
@@ -676,7 +710,7 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-charge-io-') as directory:
     subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-O1','-g','-pthread',
         '-fsanitize=address,undefined',str(cpp),'-o',str(binary)],check=True)
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', UBSAN_OPTIONS='halt_on_error=1')
-    for mode in ['battery-irq','battery-irq-missing','battery-irq-timeout','battery-irq-denied','conversion-normal','conversion-usb-normal','conversion-busy','conversion-enabled','conversion-requested','conversion-type','conversion-foreign','conversion-ambiguous','conversion-cal-foreign','conversion-poison','conversion-read-fail','conversion-abort','conversion-usb-abort','conversion-timeout','conversion-usb-timeout','conversion-invalid-data','conversion-wrong-channel','conversion-false-eoc','conversion-result-read-fail','conversion-restore-fail','conversion-usb-cal-restore-fail','conversion-usb-poison-result','conversion-stuck-abort','charger-semantic','adc-normal','adc-foreign','adc-ambiguous','adc-missing','adc-timeout','adc-denied','adc-poison','normal','alloc-fail','map-fail','fg-v1','fg-v2','fg-busy','fg-unknown','fg-grant','fg-active','fg-read-fail','fg-cleanup-fail','fg-dma-error',
+    for mode in ['dependency','battery-irq','battery-irq-missing','battery-irq-timeout','battery-irq-denied','conversion-normal','conversion-usb-normal','conversion-busy','conversion-enabled','conversion-requested','conversion-type','conversion-foreign','conversion-ambiguous','conversion-cal-foreign','conversion-poison','conversion-read-fail','conversion-abort','conversion-usb-abort','conversion-timeout','conversion-usb-timeout','conversion-invalid-data','conversion-wrong-channel','conversion-false-eoc','conversion-result-read-fail','conversion-restore-fail','conversion-usb-cal-restore-fail','conversion-usb-poison-result','conversion-stuck-abort','charger-semantic','adc-normal','adc-foreign','adc-ambiguous','adc-missing','adc-timeout','adc-denied','adc-poison','normal','alloc-fail','map-fail','fg-v1','fg-v2','fg-busy','fg-unknown','fg-grant','fg-active','fg-read-fail','fg-cleanup-fail','fg-dma-error',
                  'fg-foreign-identity','fg-readonly-pages','fg-local-preferred','fg-first-foreign',
                  'fg-no-memif-writer','fg-no-peek-writer','fg-ambiguous-writer','fg-poisoned-writer',
                  'fg-missing-identity','fg-missing-data','fg-observer-denied','fg-observer-timeout',

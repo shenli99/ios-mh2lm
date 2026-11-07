@@ -1,0 +1,617 @@
+diff --git a/bsd/dev/sweet_battery_runtime.h b/bsd/dev/sweet_battery_runtime.h
+index 0693fbf83733869ff485d1e89433c9c7241bce00..ccb52f74b1fd0b67171bf688a8c91f5a908df132 100644
+--- a/bsd/dev/sweet_battery_runtime.h
++++ b/bsd/dev/sweet_battery_runtime.h
+@@ -12,7 +12,7 @@ enum SweetBattReg {
+  SB_PATH, SB_SETTLED, SB_APSD, SB_RESULT, SB_USB, SB_SUSPEND, SB_OVERRIDE,
+  SB_LOAD, SB_MODE, SB_ICL, SB_AICL, SB_TYPEC, SB_ATTACHED, SB_MISC,
+  SB_SMB, SB_WDOG, SB_WDOG_TIME, SB_SMB_CFG, SB_JEITA, SB_ITERM_HI,
+- SB_ITERM_LO, SB_RECHARGE, SB_DEBUG_ACCESS, SB_LEGACY, SB_APSD_OPTIONS, SB_REG_COUNT
++ SB_ITERM_LO, SB_RECHARGE, SB_DEBUG_ACCESS, SB_LEGACY, SB_APSD_OPTIONS, SB_WDOG_RT, SB_REG_COUNT
+ };
+ struct SweetBattSnapshot {
+  uint8_t raw[SB_REG_COUNT];
+@@ -346,7 +346,45 @@ static inline unsigned sb_profile_match(const SweetBattSnapshot &s)
+  return t?1:l?2:0;
+ }
+ 
+-/* Identity/bounds and parallel isolation still block hardware enable today.
++
++/* Board identity is a bounded join of fresh ADC BAT_ID and the fixed FG
++ * profile tuple. LG's integer resistor formula and nearest 15% range match;
++ * never use the Android default-profile fallback as an identity proof. */
++struct SweetBattIdentity {
++ bool valid;
++ unsigned profile, ohms, adcToken, maxFccMa, maxFvMv;
++ uint64_t validUntilNs;
++};
++static inline SweetBattIdentity sb_battery_identity(const SweetBattSnapshot &s,
++ bool measured, unsigned microvolts, unsigned token, uint64_t idStarted,
++ uint64_t idCompleted, uint64_t now)
++{
++ SweetBattIdentity id={};
++ if (!measured || !token || !s.presentValid || !s.present || !s.profilePrefixValid ||
++     !s.profileStartedNs || s.profileCompletedNs<s.profileStartedNs ||
++     now<s.profileCompletedNs || now-s.profileStartedNs>=60000000000ULL ||
++     !idStarted || idCompleted<idStarted || now<idCompleted || now-idStarted>=60000000000ULL ||
++     microvolts<1000 || microvolts>=1825000) return id;
++ unsigned mv=microvolts/1000;
++ unsigned divisor=1825000/mv;
++ if (divisor<=1000) return id;
++ id.ohms=100000000/(divisor-1000);
++ unsigned kohm=id.ohms/1000;
++ const unsigned nominal[]={91,12};unsigned best=~0u,profile=0;
++ for(unsigned i=0;i<2;++i) {
++  unsigned delta=kohm>nominal[i]?kohm-nominal[i]:nominal[i]-kohm;
++  if(delta<=nominal[i]*15/100 && delta<best) {best=delta;profile=i+1;}
++ }
++ if (!profile || sb_profile_match(s)!=profile) return {};
++ id.valid=true;id.profile=profile;id.adcToken=token;
++ id.maxFccMa=2800;id.maxFvMv=4430; /* MH2LM board supplement, not 3300mA profile. */
++ uint64_t start=idStarted<s.profileStartedNs?idStarted:s.profileStartedNs;
++ id.validUntilNs=start>~0ULL-60000000000ULL?~0ULL:start+60000000000ULL;
++ return id;
++}
++
++/* Identity can now be joined when diagnostics request it; external parallel
++ * isolation and managed-watchdog authorization still block hardware enable.
+  * Input is an explicit source/ADC permit; raw register values alone are not
+  * authorization. Synthetic evidence exists only in host tests. */
+ struct SweetBattLimits {
+@@ -354,6 +392,7 @@ struct SweetBattLimits {
+  unsigned maxFccMa, maxFvMv;
+  uint64_t verifiedNs;
+  SweetBattInputPermit input;
++ uint64_t batteryUntilNs; /* earliest BAT_ID/profile expiry, not policy-refresh time */
+ };
+ enum SweetBattReason : uint32_t {
+  SB_R_TELEMETRY=1u<<0, SB_R_STALE=1u<<1, SB_R_NO_BATTERY=1u<<2,
+@@ -405,7 +444,8 @@ sb_decide(SweetBattController &c, const SweetBattSnapshot &s,
+      (sb_valid(s,SB_THERMAL) && (s.raw[SB_THERMAL]&15)) ||
+      (c.enabled && (!(s.raw[SB_ENABLE]&1) || (s.raw[SB_PAUSE]&1))) ||
+      s.mv>4450 || (s.currentValid && s.ma>600)) d.reasons|=SB_R_HARDWARE;
+- if (!limits.batteryVerified || !s.profileValid || !(s.integrity&1)) d.reasons|=SB_R_BATTERY_ID;
++ if (!limits.batteryVerified || !limits.batteryUntilNs || now>=limits.batteryUntilNs ||
++     !s.profileValid || !(s.integrity&1)) d.reasons|=SB_R_BATTERY_ID;
+  if (!limits.parallelVerified) d.reasons|=SB_R_PARALLEL;
+  const SweetBattInputPermit &input=limits.input;
+  if (!sb_input_permit_valid(input,s,now) ||
+@@ -421,6 +461,7 @@ sb_decide(SweetBattController &c, const SweetBattSnapshot &s,
+  d.fccMa=d.fccMa/50*50;d.iclMa=d.iclMa/50*50;
+  d.fvMv=d.fvMv>=3600?3600+(d.fvMv-3600)/10*10:0;
+  if (!limits.verifiedNs || now<limits.verifiedNs || now-limits.verifiedNs>3000000000ULL ||
++     !limits.batteryUntilNs || now>=limits.batteryUntilNs ||
+      !d.fccMa || !d.iclMa || !d.fvMv || limits.maxFvMv>4430 ||
+      limits.maxFccMa>2800) d.reasons|=SB_R_LIMITS; /* LG board supplement */
+  /* A revoked permit has no approved ICL. Disable for the input hold without
+@@ -433,6 +474,7 @@ sb_decide(SweetBattController &c, const SweetBattSnapshot &s,
+  d.validUntilNs=sb_evidence_deadline(s.startedNs);
+  if (sb_evidence_deadline(limits.verifiedNs)<d.validUntilNs) d.validUntilNs=sb_evidence_deadline(limits.verifiedNs);
+  if (input.validUntilNs<d.validUntilNs) d.validUntilNs=input.validUntilNs;
++ if (limits.batteryUntilNs<d.validUntilNs) d.validUntilNs=limits.batteryUntilNs;
+  d.allow=d.reasons==0;
+  if (d.reasons&(SB_R_TRANSPORT|SB_R_HARDWARE)) d.state=SB_FAULT;
+  else if (d.reasons&(SB_R_STOPPED|SB_R_EXPIRED)) d.state=SB_STOPPED;
+diff --git a/bsd/dev/sweet_charger.c b/bsd/dev/sweet_charger.c
+index 501cc8d076d694e115bbf57962cf1b3c20dc60d9..41531b08ecdd787791d13805ee8a3e720892678e 100644
+--- a/bsd/dev/sweet_charger.c
++++ b/bsd/dev/sweet_charger.c
+@@ -23,6 +23,13 @@ sweet_charger_execute(enum sweet_charger_operation operation,
+ {
+  unsigned addr, mask, code, scale = 1, offset = 0;
+  if (!verified) { return SWEET_SPMI_INVALID; }
++ if (operation>=SWEET_CHARGER_PARALLEL_INHIBIT && operation<=SWEET_CHARGER_WATCHDOG_PET) {
++  if (value!=1) return SWEET_SPMI_INVALID;
++  uint8_t enabled;
++  int rc=sweet_spmi_charger_read(2,0x1042,&enabled);
++  if (rc) return rc;
++  if (enabled&1) return SWEET_SPMI_NOT_READY;
++ }
+  switch (operation) {
+  case SWEET_CHARGER_ENABLE:
+  case SWEET_CHARGER_PAUSE:
+@@ -40,6 +47,34 @@ sweet_charger_execute(enum sweet_charger_operation operation,
+   if (value < 3600 || value > 4200 || value % 10) { return SWEET_SPMI_INVALID; }
+   addr = 0x1070; mask = 255; scale = 10; offset = 3600;
+   code = (value - offset) / scale; break;
++
++ case SWEET_CHARGER_PARALLEL_INHIBIT:
++  if (value!=1) return SWEET_SPMI_INVALID;
++  /* LG SEC_NONE override: force SMB_EN low; preserve all CP/STAT bits.
++   * Does NOT prove the I2C charger's CHG_EN_SRC/polarity or actual state. */
++  addr=0x1648;mask=0x18;code=8;break;
++ case SWEET_CHARGER_WATCHDOG_PREPARE: {
++  if (value!=1) return SWEET_SPMI_INVALID;
++  /* LG encodings: snarl8s/bark16s/bite8s, bite disables charging.
++   * Keep watchdog plugin enable and bark IRQ, AFP off per SMB5 init.
++   * Do not modify inherited thermal/JEITA or turn off the watchdog. */
++  uint8_t actual;
++  int rc=sc_update(0x1653,255,0xf3,deadline_ns,&actual);
++  if (rc) return rc;
++  if (actual!=0xf3) return SWEET_SPMI_VERIFY;
++  rc=sc_update(0x1651,0xc2,0x42,deadline_ns,&actual);
++  if (rc) return rc;
++  if ((actual&0xc2)!=0x42) return SWEET_SPMI_VERIFY;
++  *verified=1;return SWEET_SPMI_OK;
++ }
++ case SWEET_CHARGER_WATCHDOG_PET: {
++  if (value!=1) return SWEET_SPMI_INVALID;
++  uint64_t ticks,ns;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);
++  if (!deadline_ns || ns>=deadline_ns) return SWEET_CHARGER_EXPIRED;
++  int rc=sweet_spmi_charger_pet_watchdog();
++  if (!rc) *verified=1; /* Bus completion only, never a timer readback. */
++  return rc;
++ }
+  case SWEET_CHARGER_SOFTWARE_INPUT_LIMIT: {
+   if (value != 1) { return SWEET_SPMI_INVALID; }
+   /* LG smb5-lib.c: ICL override mode, then override-after-APSD. Keep this
+@@ -60,7 +95,7 @@ sweet_charger_execute(enum sweet_charger_operation operation,
+  int rc = sc_update(addr, mask, code, deadline_ns, &actual);
+  if (rc) { return rc; }
+  if ((actual & mask) != code) { return SWEET_SPMI_VERIFY; }
+- *verified = (actual & mask) * scale + offset;
++ *verified = operation==SWEET_CHARGER_PARALLEL_INHIBIT ? 1 : (actual & mask) * scale + offset;
+  return SWEET_SPMI_OK;
+ }
+ #endif /* ARM64_BOARD_CONFIG_MH2LM */
+diff --git a/bsd/dev/sweet_charger.h b/bsd/dev/sweet_charger.h
+index 512d9a1f41a419cb676fcffac9f4c5a3a3ebad93..53d9f3776cf35a4948eda3ac9ef6d490d46e1e29 100644
+--- a/bsd/dev/sweet_charger.h
++++ b/bsd/dev/sweet_charger.h
+@@ -12,7 +12,10 @@ extern "C" {
+ enum sweet_charger_operation {
+  SWEET_CHARGER_ENABLE, SWEET_CHARGER_PAUSE, SWEET_CHARGER_INPUT_SUSPEND,
+  SWEET_CHARGER_INPUT_LIMIT_MA, SWEET_CHARGER_SOFTWARE_INPUT_LIMIT,
+- SWEET_CHARGER_FAST_CURRENT_MA, SWEET_CHARGER_FLOAT_VOLTAGE_MV
++ SWEET_CHARGER_FAST_CURRENT_MA, SWEET_CHARGER_FLOAT_VOLTAGE_MV,
++ /* Diagnostic preparation only: require charge disabled, never authorize
++  * external isolation or managed-watchdog policy from a command result. */
++ SWEET_CHARGER_PARALLEL_INHIBIT, SWEET_CHARGER_WATCHDOG_PREPARE, SWEET_CHARGER_WATCHDOG_PET
+ };
+ /* Fixed PM8150B backend; uses the restricted shared SPMI transport. Exact
+  * quantization required, no rounding up. First-stage caps: 500mA / 4200mV.
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index e5f1770335f8eff813f3a1544c4c71cba8d421c3..dee3eac9060e5ab8ac39ef4a40ba79e74376c051 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -287,7 +287,8 @@ sweet_spmi_rw_poison_locked(unsigned apid)
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ /* LG smb5-reg.h / smb5-lib.c. These CMD bits are persistent controls (Linux
+  * uses masked writes); pulse/W1C commands intentionally have no writer here.
+- * Security unlock, SRAM, parallel charger override and IRQ offsets are absent.
++ * Security unlock, SRAM and IRQ offsets are absent. Watchdog pet has its own
++ * fixed pulse API; it must never use this stable-value update table.
+  * This table describes access semantics, not approval to enable charging. */
+ struct sp_charger_register {
+ 	uint16_t addr;
+@@ -305,7 +306,7 @@ static const struct sp_charger_register sp_charger_registers[] = {
+ 	{0x1366, 0x07}, {0x1370, 0xff}, {0x1380, 0x9c},
+ 	/* Only these Type-C status bytes; no peripheral-wide permission. */
+ 	{0x1506, 0}, {0x1507, 0}, {0x1509, 0}, {0x150b, 0}, {0x150d, 0},
+-	{0x1648, 0}, {0x1651, 0}, {0x1653, 0}, {0x1661, 0}, {0x1690, 0}
++	{0x1610, 0}, {0x1648, 0x18}, {0x1651, 0xc2}, {0x1653, 0xff}, {0x1661, 0}, {0x1690, 0}
+ };
+ 
+ static const struct sp_charger_register *
+@@ -569,6 +570,33 @@ sweet_spmi_charger_update(unsigned sid, unsigned addr, unsigned mask,
+ }
+ 
+ 
++/* Fixed BARK_BITE_WDOG_PET pulse (LG smb5-lib.c:wdog_bark_irq_handler).
++ * Completion proves bus acceptance, not that the hardware timer restarted.
++ * No read/modify/write/readback, no skipped identical value, no retry. */
++int
++sweet_spmi_charger_pet_watchdog(void)
++{
++ if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) return SWEET_SPMI_NOT_READY;
++ IOLockLock(sp_lock);
++ struct sweet_spmi_charger_route route;
++ int rc=sp_charger_route(2,0x1643,&route);
++ if (!rc && sweet_spmi_rw_poisoned_locked(route.apid)) rc=SWEET_SPMI_POISONED;
++ vm_offset_t channel=0;
++ if (!rc) {
++  channel=ml_io_map_unmappable(SP_CHNLS_PA+SP_CHNLS_APID_STRIDE*route.apid,0x1000,VM_WIMG_IO);
++  if (!channel) rc=SWEET_SPMI_MAP_FAILED;
++ }
++ if (!rc) {
++  sp_wr(channel,0x10,1);
++  sp_wr(channel,0,0x43u<<4);
++  rc=sp_charger_wait(channel);
++  if (rc==SWEET_SPMI_TIMEOUT) sweet_spmi_rw_poison_locked(route.apid);
++ }
++ if (channel) ml_io_unmap(trunc_page(channel),round_page(0x1000+(channel&PAGE_MASK)));
++ IOLockUnlock(sp_lock);
++ return rc;
++}
++
+ /* ADC5 fixed protocol. The lease belongs to the controller, not a discoverable
+  * service singleton. No arbitrary register API or conversion-time sleeps.
+  * Every phase and cleanup is under sp_lock; EOC/settle waits release it. */
+@@ -605,7 +633,7 @@ int
+ sweet_spmi_battery_irq_read(unsigned peripheral, unsigned offset, uint8_t *out)
+ {
+  if (!out || (peripheral != 0x10 && peripheral != 0x13 &&
+-     peripheral != 0x15 && peripheral != 0x40) ||
++     peripheral != 0x15 && peripheral != 0x16 && peripheral != 0x40) ||
+      (offset != 0x11 && offset != 0x12 && offset != 0x13 && offset != 0x15)) {
+   return SWEET_SPMI_INVALID;
+  }
+diff --git a/bsd/dev/sweet_spmi.h b/bsd/dev/sweet_spmi.h
+index 9c9c811a6162ed748a89a86ae313f978fa61fc0f..108f59f2bcae893c6274065757bc96462eb3eae9 100644
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -59,7 +59,7 @@ int sweet_spmi_charger_get_route(unsigned sid, unsigned addr,
+ /* Exact readable-register table. Does not widen sweet_spmi_read's whitelist. */
+ int sweet_spmi_charger_read(unsigned sid, unsigned addr, uint8_t *out);
+ /* Mux-only readback of fixed battery IRQ configuration: USID2 peripherals
+- * CHGR/USBIN/TYPEC/FG-SOC and offsets SET_TYPE/POLARITY_HIGH/POLARITY_LOW/
++ * CHGR/USBIN/TYPEC/MISC/FG-SOC and offsets SET_TYPE/POLARITY_HIGH/POLARITY_LOW/
+  * EN_SET. No PMIC writes, ownership changes or arbitrary status access.
+  * Internally serialized; output unchanged on error. Not primary IRQ context. */
+ int sweet_spmi_battery_irq_read(unsigned peripheral, unsigned offset, uint8_t *out);
+@@ -71,6 +71,10 @@ int sweet_spmi_battery_irq_read(unsigned peripheral, unsigned offset, uint8_t *o
+  * the future battery controller must validate limits/protection before calling. */
+ int sweet_spmi_charger_update(unsigned sid, unsigned addr, unsigned mask,
+ 	unsigned value, uint8_t *verified);
++/* Fixed USID2:0x1643 bit0 pulse, serialized/owner checked/timeout poisoned.
++ * No general pulse API or readable-value verification. Success is command
++ * completion only. Caller must enforce lifetime and disabled-charge state. */
++int sweet_spmi_charger_pet_watchdog(void);
+ /* Gen4 read-only SRAM data via bounded DMA request/grant/release. This does
+  * write MEMIF protocol controls, never profile/learned SRAM contents. Fixed
+  * four scalar fields; serial session lock releases the controller lock at waits.
+diff --git a/bsd/dev/sweet_spmi_mux.h b/bsd/dev/sweet_spmi_mux.h
+index e3b59d440b81a27b633a1f95416f9d76d1214d87..f82d75cab835ab422955c103c9679b72c8320f02 100644
+--- a/bsd/dev/sweet_spmi_mux.h
++++ b/bsd/dev/sweet_spmi_mux.h
+@@ -21,7 +21,8 @@ int sweet_spmi_mux_start(void);
+ #define SWEET_BATT_IRQ_FAULT  0x20u
+ #define SWEET_BATT_IRQ_TYPEC  0x40u
+ #define SWEET_BATT_IRQ_INPUT_FAULT 0x80u
+-#define SWEET_BATT_IRQ_ALL    0xffu
++#define SWEET_BATT_IRQ_WDOG   0x100u
++#define SWEET_BATT_IRQ_ALL    0x1ffu
+ #define SWEET_MUX_ADC5 2u
+ #define SWEET_ADC5_IRQ_EOC 0x100u
+ #define SWEET_MUX_READY     0x40000000u
+@@ -35,7 +36,7 @@ typedef void (*SweetMuxNotify)(void *context, unsigned events);
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOInterruptEventSource.h>
+ #include <IOKit/IOWorkLoop.h>
+-#define SWEET_MUX_ROUTE_COUNT 18u
++#define SWEET_MUX_ROUTE_COUNT 19u
+ enum { MUX_KEYS = SWEET_MUX_KEYS, MUX_BATTERY = SWEET_MUX_BATTERY, MUX_ADC5 = SWEET_MUX_ADC5, MUX_GROUPS = 3 };
+ struct MuxRoute {
+ 	unsigned sid, per, bit, token, group;
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 760a8b4af3c7508b789e2b81329b23e5302d5d54..9209ad8b543a2baea4360d565b6709eb78720ba0 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -106,7 +106,16 @@ public:
+ 	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void free(void) APPLE_KEXT_OVERRIDE;
+ private:
+-	unsigned fRuntimeMode, fRuntimeRequested;
++
++ unsigned fDependencyMode;
++ bool fDependencyStarted, fDependencyFailed, fDependencyFinished, fDependencyConfirmed, fWatchdogArmed, fWatchdogPending, fWatchdogInput;
++ unsigned fWatchdogPets;
++ uint64_t fDependencyDeadlineNs, fDependencyReadAfterNs, fWatchdogLastNs, fWatchdogInputEpoch;
++ SweetBattIdentity fIdentity;
++ void refreshDependencies(uint64_t);
++ int dependencyCommand(enum sweet_charger_operation, uint64_t, unsigned *);
++ void dependencyFailure(const char *, int);
++ unsigned fRuntimeMode, fRuntimeRequested;
+ 	IOTimerEventSource *fMonitor;
+ 	IOLock *fControlLock;
+ 	IONotifier *fPowerNotice;
+@@ -283,6 +292,9 @@ SweetBattery::init(OSDictionary *dictionary)
+ 		return false;
+ 	}
+ 	fRuntimeMode = fRuntimeRequested = fMonitorSamples = fRuntimeInputEvents = 0;
++	fDependencyMode = fWatchdogPets = 0;
++	fDependencyStarted = fDependencyFailed = fDependencyFinished = fDependencyConfirmed = fWatchdogArmed = fWatchdogPending = fWatchdogInput = false;
++	fDependencyDeadlineNs = fDependencyReadAfterNs = fWatchdogLastNs = fWatchdogInputEpoch = 0; fIdentity = {};
+ 	fLastReasons = ~0u;
+ 	fMonitor = NULL;
+ 	fControlLock = NULL;
+@@ -1054,6 +1066,7 @@ SweetBattery::irqAction(OSObject *owner, IOInterruptEventSource *, int count)
+ 		self->fController.faultReasons = SB_R_HARDWARE;
+ 		SWEET_LOG_ERROR("SWEET BATT CONTROL: CHGR fault IRQ latched; recovery requires explicit restart\n");
+ 	}
++	if (pending & SWEET_BATT_IRQ_WDOG) { self->fWatchdogPending = true; }
+ 	self->fRuntimeInputEvents = pending & (SWEET_BATT_IRQ_USB | SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_TYPEC | SWEET_BATT_IRQ_INPUT_FAULT);
+ 	self->fSettleBudget = 1;
+ 	self->poll();
+@@ -1081,6 +1094,7 @@ SweetBattery::tryAttachIrq(void)
+ 		events |= SWEET_BATT_IRQ_MSOC | SWEET_BATT_IRQ_READY;
+ 	}
+ 	if (fRuntimeRequested) { events |= SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_FAULT | SWEET_BATT_IRQ_TYPEC | SWEET_BATT_IRQ_INPUT_FAULT; }
++	if (fDependencyMode & 4) { events |= SWEET_BATT_IRQ_WDOG; }
+ 	fIrqAttached = true;
+ 	putBool("SweetBatteryIRQWaitingForMux", false);
+ 	putBool("SweetBatteryIRQHealthy", true);
+@@ -1114,6 +1128,7 @@ SweetBattery::startIrqAction(OSObject *owner, void *, void *, void *, void *)
+ 		events |= SWEET_BATT_IRQ_MSOC | SWEET_BATT_IRQ_READY;
+ 	}
+ 	if (self->fRuntimeRequested) { events |= SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_FAULT | SWEET_BATT_IRQ_TYPEC | SWEET_BATT_IRQ_INPUT_FAULT; }
++	if (self->fDependencyMode & 4) { events |= SWEET_BATT_IRQ_WDOG; }
+ 	SWEET_LOG_INFO("SWEET BATT IRQ: waiting for mux registry match; no timer/status polling\n");
+ 	self->fMuxClient = SweetSpmiMuxClient::withOwner(self, self->fLoop,
+ 	    SWEET_MUX_BATTERY, events, irqNotify, self);
+@@ -1178,6 +1193,10 @@ SweetBattery::sampleRuntime(bool refreshInput)
+ 	unsigned inputEvents = fRuntimeInputEvents;
+ 	fRuntimeInputEvents = 0;
+ 	bool refreshCapacity = refreshInput || !fMonitorSamples;
++	/* Identity/profile refresh is protection telemetry, never input discovery. */
++	if ((fDependencyMode & 1) && fSnapshot.profileStartedNs &&
++	    sweet_batt_now_ns() >= fSnapshot.profileStartedNs &&
++	    sweet_batt_now_ns() - fSnapshot.profileStartedNs >= 30000000000ULL) refreshCapacity = true;
+ 	refreshInput = refreshInput && (!fMonitorSamples || inputEvents);
+ 	SweetBattSnapshot next = fSnapshot;
+ 	next.startedNs = sweet_batt_now_ns();
+@@ -1223,7 +1242,7 @@ SweetBattery::sampleRuntime(bool refreshInput)
+ 			prefix[2 * i + 1] = hex[next.profilePrefix[i] & 15];
+ 		}
+ 		prefix[48] = 0;
+-		SWEET_LOG_INFO("SWEET BATT PROFILE: v1 id=%u valid=%u error=%d match=%u integrity=%#x nominal=%u prefix=%s; diagnostic-only\n",
++		SWEET_LOG_INFO("SWEET BATT PROFILE: v1 id=%u valid=%u error=%d match=%u integrity=%#x nominal=%u prefix=%s; identity also requires ADC\n",
+ 		    fMonitorSamples, next.profilePrefixValid, next.profilePrefixError,
+ 		    sb_profile_match(next), next.integrity, next.nominalMah, prefix);
+ 		SWEET_LOG_INFO("SWEET BATT PROFILE TIME: v1 id=%u started-ns=%llu completed-ns=%llu\n",
+@@ -1326,6 +1345,172 @@ SweetBattery::publishAdc(void)
+ }
+ #endif
+ 
++/* The diagnostic mask requests work, never asserts evidence. Inhibit/watchdog
++ * experiments run with main charging disabled and cannot call runtime enable. */
++int
++SweetBattery::dependencyCommand(enum sweet_charger_operation operation, uint64_t deadline, unsigned *out)
++{
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ if (!fControlLock || !out) return SWEET_SPMI_NOT_READY;
++ bool disable=operation==SWEET_CHARGER_ENABLE;
++ if (!disable && operation!=SWEET_CHARGER_PARALLEL_INHIBIT &&
++     operation!=SWEET_CHARGER_WATCHDOG_PREPARE && operation!=SWEET_CHARGER_WATCHDOG_PET)
++  return SWEET_SPMI_INVALID;
++ if (!disable && !(fDependencyMode & (operation==SWEET_CHARGER_PARALLEL_INHIBIT?2:4)))
++  return SWEET_SPMI_INVALID;
++ IOLockLock(fControlLock);
++ int rc=SWEET_SPMI_NOT_READY;
++ if (disable || (!fPowerStopping && fRuntimeMode==1 && fDependencyStarted && !fDependencyFailed && !fDependencyFinished)) {
++  fControlClaimed=true;
++  rc=sweet_charger_execute(operation,disable?0:1,deadline,out);
++ }
++ IOLockUnlock(fControlLock);
++ return rc;
++#else
++ return -1;
++#endif
++}
++
++void
++SweetBattery::dependencyFailure(const char *reason, int error)
++{
++ if (fDependencyFailed) return;
++ fDependencyFailed=true;fWatchdogArmed=false;fWatchdogPending=false;
++ putBool("SweetBatterySecondaryOutputInhibited",false);
++ putBool("SweetBatteryWatchdogDiagnosticActive",false);
++ SWEET_LOG_ERROR("SWEET BATT DEPENDENCIES: FAILED %s error=%d; no restart or enable\n",reason,error);
++ unsigned disabled=0;
++ int rc=dependencyCommand(SWEET_CHARGER_ENABLE,0,&disabled);
++ if (rc) SWEET_LOG_ERROR("SWEET BATT DEPENDENCIES: fault disable unconfirmed error=%d\n",rc);
++}
++
++void
++SweetBattery::refreshDependencies(uint64_t now)
++{
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ if (!fDependencyMode) return;
++ if (fDependencyMode & 1) {
++  struct sweet_adc5_measurement id={};
++  bool measured=!fController.stopped && fRunning && !fIrqFailed && fAdcClient &&
++   fAdcClient->copyFresh(SWEET_ADC5_BAT_ID,now,&id);
++  SweetBattIdentity next=sb_battery_identity(fSnapshot,measured,id.microvolts,id.sequence,
++   id.started_ns,id.completed_ns,now);
++  if (next.valid!=fIdentity.valid || next.adcToken!=fIdentity.adcToken || next.profile!=fIdentity.profile) {
++   SWEET_LOG_INFO("SWEET BATT IDENTITY: v1 valid=%u profile=%u ohms=%u token=%u fcc-ma=%u fv-mv=%u\n",
++    next.valid,next.profile,next.ohms,next.adcToken,next.maxFccMa,next.maxFvMv);
++  }
++  fIdentity=next;fLimits.batteryVerified=next.valid;
++  fLimits.maxFccMa=next.maxFccMa;fLimits.maxFvMv=next.maxFvMv;
++  fLimits.verifiedNs=next.valid?fSnapshot.startedNs:0;
++  fLimits.batteryUntilNs=next.validUntilNs;
++  putBool("SweetBatteryIdentityVerified",next.valid);
++  putNumber("SweetBatteryIdentityProfile",next.profile);
++  putNumber("SweetBatteryApprovedFCCMA",next.maxFccMa);
++  putNumber("SweetBatteryApprovedFVMV",next.maxFvMv);
++ }
++ /* A primary SMB_EN override cannot verify an I2C chip configured for command
++  * control. Keep final isolation authorization false until that provider exists. */
++ fLimits.parallelVerified=false;
++ putBool("SweetBatteryParallelVerified",false);
++ if (fController.stopped) {
++  fWatchdogArmed=false;fWatchdogPending=false;
++  putBool("SweetBatteryWatchdogDiagnosticActive",false);
++  return;
++ }
++ if (!(fDependencyMode & 6) || fDependencyFailed || fDependencyFinished) return;
++ if (!fIrqAttached || fIrqFailed || !fMuxClient || fMuxClient->hasPendingEvents(0)) {
++  if (fDependencyStarted) dependencyFailure("mux unavailable",SWEET_SPMI_NOT_READY);
++  return;
++ }
++ if (!fDependencyStarted) {
++  fDependencyStarted=true;
++  fDependencyDeadlineNs=now+180000000000ULL; /* bounded one-shot observation */
++  unsigned actual=0;int rc=dependencyCommand(SWEET_CHARGER_ENABLE,0,&actual);
++  if (rc || actual) { dependencyFailure("initial disable",rc?rc:SWEET_SPMI_VERIFY);return; }
++  if (fDependencyMode & 2) {
++   rc=dependencyCommand(SWEET_CHARGER_PARALLEL_INHIBIT,fDependencyDeadlineNs,&actual);
++   if (rc || actual!=1) {dependencyFailure("parallel inhibit",rc?rc:SWEET_SPMI_VERIFY);return;}
++   SWEET_LOG_INFO("SWEET BATT INHIBIT: v1 command accepted; awaiting telemetry; external isolation unverified\n");
++  }
++  if (fDependencyMode & 4) {
++   rc=dependencyCommand(SWEET_CHARGER_WATCHDOG_PREPARE,fDependencyDeadlineNs,&actual);
++   if (rc || actual!=1) {dependencyFailure("watchdog prepare",rc?rc:SWEET_SPMI_VERIFY);return;}
++   rc=dependencyCommand(SWEET_CHARGER_WATCHDOG_PET,fDependencyDeadlineNs,&actual);
++   if (rc || actual!=1) {dependencyFailure("watchdog initial pet",rc?rc:SWEET_SPMI_VERIFY);return;}
++   fWatchdogArmed=true;fWatchdogLastNs=now;fWatchdogPets=1;fWatchdogPending=false;
++   fWatchdogInputEpoch=fSnapshot.inputEpoch;fWatchdogInput=false;
++   putBool("SweetBatteryWatchdogDiagnosticActive",true);
++   SWEET_LOG_INFO("SWEET BATT WATCHDOG: v1 prepared bark16s bite8s snarl8s bite-disable1; pulse completed, replug then await IRQ\n");
++  }
++  fDependencyReadAfterNs=sweet_batt_now_ns();
++  return; /* delayed snapshot must independently confirm the writes */
++ }
++ if (now>=fDependencyDeadlineNs) {
++  fWatchdogArmed=false;fWatchdogPending=false;
++  /* Successful finite completion is terminal too; no implicit rearm. */
++  unsigned actual=0;int rc=dependencyCommand(SWEET_CHARGER_ENABLE,0,&actual);
++  fDependencyFinished=true;
++  putBool("SweetBatteryWatchdogDiagnosticActive",false);
++  if (rc) {dependencyFailure("window disable",rc);return;}
++  SWEET_LOG_INFO("SWEET BATT DEPENDENCIES: v1 window complete pets=%u disable-error=%d; restart required\n",fWatchdogPets,rc);
++  return;
++ }
++ /* ADC notifications can run before the first post-write telemetry sample.
++  * They must neither verify the old tuple nor misdiagnose it as lost config. */
++ if (fSnapshot.startedNs<fDependencyReadAfterNs) {
++  if (now-fDependencyReadAfterNs>=3000000000ULL)
++   dependencyFailure("post-write telemetry missing",SWEET_CHARGER_EXPIRED);
++  return;
++ }
++ if (!fSnapshot.startedNs || fSnapshot.completedNs<fSnapshot.startedNs ||
++     now<fSnapshot.completedNs || now-fSnapshot.startedNs>=3000000000ULL) {
++  dependencyFailure("protection telemetry stale",SWEET_CHARGER_EXPIRED);return;
++ }
++ if (!sb_valid(fSnapshot,SB_ENABLE) || (fSnapshot.raw[SB_ENABLE]&1)) {
++  dependencyFailure("main disable lost",SWEET_SPMI_VERIFY);return;
++ }
++ if (fDependencyMode & 2) {
++  bool inhibited=sb_valid(fSnapshot,SB_SMB) && sb_valid(fSnapshot,SB_SMB_CFG) &&
++   (fSnapshot.raw[SB_SMB]&0x18)==8;
++  putBool("SweetBatterySecondaryOutputInhibited",inhibited);
++  if (!inhibited) {dependencyFailure("parallel inhibit lost",SWEET_SPMI_VERIFY);return;}
++ }
++ if (fWatchdogArmed) {
++  if (!sb_valid(fSnapshot,SB_WDOG) || !sb_valid(fSnapshot,SB_WDOG_TIME) ||
++      (fSnapshot.raw[SB_WDOG]&0xc2)!=0x42 || fSnapshot.raw[SB_WDOG_TIME]!=0xf3) {
++   dependencyFailure("watchdog config lost",SWEET_SPMI_VERIFY);return;
++  }
++  bool input=sb_valid(fSnapshot,SB_USB) && (fSnapshot.raw[SB_USB]&16);
++  /* Plugin-enable does not prove a timer started for an inherited cable.
++   * Expect bark only after a post-config plugin acquisition or actual bark.
++   * Source/protection/ADC callbacks must not keep renewing this deadline. */
++  bool plugin=input && (fSnapshot.inputEvents&SB_INPUT_PLUGIN) &&
++   fSnapshot.inputEpoch!=fWatchdogInputEpoch;
++  fWatchdogInputEpoch=fSnapshot.inputEpoch;
++  if (!input) fWatchdogInput=false;
++  if (plugin && !fWatchdogInput) {fWatchdogInput=true;fWatchdogLastNs=now;}
++  if (input && fWatchdogInput && now-fWatchdogLastNs>=23000000000ULL) {
++   dependencyFailure("watchdog bark missing/late",SWEET_CHARGER_EXPIRED);return;
++  }
++  if (fWatchdogPending) {
++   fWatchdogPending=false;
++   unsigned actual=0;int rc=dependencyCommand(SWEET_CHARGER_WATCHDOG_PET,fDependencyDeadlineNs,&actual);
++   if (rc || actual!=1) {dependencyFailure("watchdog IRQ pet",rc?rc:SWEET_SPMI_VERIFY);return;}
++   fWatchdogLastNs=now;fWatchdogInput=input;++fWatchdogPets;
++   SWEET_LOG_INFO("SWEET BATT WATCHDOG: v1 bark IRQ pet=%u pulse-completed=1 main-enable=0 rt=%#x rt-error=%d\n",
++    fWatchdogPets,fSnapshot.raw[SB_WDOG_RT],fSnapshot.errors[SB_WDOG_RT]);
++   putNumber("SweetBatteryWatchdogPets",fWatchdogPets);
++  }
++ }
++ if (!fDependencyConfirmed) {
++  fDependencyConfirmed=true;
++  SWEET_LOG_INFO("SWEET BATT DEP CHECK: v1 mode=%u main-enable=%#x smb=%#x select=%#x wdog=%#x time=%#x; external isolation unverified\n",
++   fDependencyMode,fSnapshot.raw[SB_ENABLE],fSnapshot.raw[SB_SMB],fSnapshot.raw[SB_SMB_CFG],
++   fSnapshot.raw[SB_WDOG],fSnapshot.raw[SB_WDOG_TIME]);
++ }
++#endif
++}
++
+ bool
+ SweetBattery::inputChangePending(void)
+ {
+@@ -1375,6 +1560,7 @@ SweetBattery::runtimeUpdate(void *context, enum sweet_charger_operation operatio
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ 	SweetBattery *self = (SweetBattery *)context;
+ 	if (!self || !self->fControlLock) { return SWEET_SPMI_NOT_READY; }
++ if (operation>=SWEET_CHARGER_PARALLEL_INHIBIT) return SWEET_SPMI_INVALID;
+ 	/* Serialize the stop notification with command submission. A flag check
+ 	 * outside this lock would race a final enable after a shutdown disable. */
+ 	IOLockLock(self->fControlLock);
+@@ -1416,6 +1602,7 @@ SweetBattery::runRuntimePolicy(void)
+ 		IOLockUnlock(fControlLock);
+ 	}
+ 	uint64_t now = sweet_batt_now_ns();
++	refreshDependencies(now);
+ 	refreshInputPermit(now);
+ 	SweetBattDecision decision = sb_decide(fController, fSnapshot, fLimits, now);
+ 	if (fLastReasons != decision.reasons || fController.state != decision.state) {
+@@ -1449,8 +1636,9 @@ SweetBattery::startRuntime(OSObject *owner, void *, void *, void *, void *)
+   return kIOReturnNoMemory;
+  }
+ #endif
+-	SWEET_LOG_INFO("SWEET BATT RUNTIME: v1 mode=%u; board identity/parallel limits missing; input requires IRQ+ADC; control interlocked\n",
++	SWEET_LOG_INFO("SWEET BATT RUNTIME: v1 mode=%u; identity optional, external isolation/watchdog authorization missing; control interlocked\n",
+ 	    self->fRuntimeMode);
++	SWEET_LOG_INFO("SWEET BATT DEPENDENCIES: v1 mode=%u; identity1 inhibit2 watchdog4; observation only, no enable\n", self->fDependencyMode);
+ 	SWEET_LOG_INFO("SWEET BATT INPUT SESSION: v1 IRQ source + same-epoch ADC; UV/OV revoke; trial cap 500mA\n");
+ 	SWEET_LOG_INFO("SWEET BATT HARDWARE: v1 semantic charger operations; sampling via PMIC backend\n");
+ 	self->sampleRuntime(true);
+@@ -1562,7 +1750,14 @@ SweetBattery::stopRuntime(void)
+ 	if (fMonitor) { fMonitor->cancelTimeout();fMonitor->disable(); }
+ 	if (!fRuntimeMode) { return; }
+ 	fController.stopped = true;
+-	fInputSession = {};
++	fInputSession = {}; fIdentity = {};
++	fLimits.batteryVerified = false; fWatchdogArmed = false; fWatchdogPending = false;
++ putBool("SweetBatteryIdentityVerified",false);
++ putBool("SweetBatteryWatchdogDiagnosticActive",false);
++	if (fDependencyStarted) {
++		unsigned disabled = 0; int rc = dependencyCommand(SWEET_CHARGER_ENABLE, 0, &disabled);
++		if (rc) SWEET_LOG_ERROR("SWEET BATT DEPENDENCIES: stop disable unconfirmed error=%d\n", rc);
++	}
+ 	refreshInputPermit(sweet_batt_now_ns());
+ 	if (!sb_stop(fController, runtimeUpdate, this)) {
+ 		SWEET_LOG_ERROR("SWEET BATT CONTROL: service stopping; hardware disable unconfirmed error=%d\n",
+@@ -1669,6 +1864,13 @@ SweetBattery::start(IOService *provider)
+ 		return false;
+ 	}
+ 	fRuntimeRequested = (unsigned)runtime;
++	int dependencies = 0;
++	(void)PE_parse_boot_argn("sweetbattdeps", &dependencies, sizeof(dependencies));
++	if (dependencies < 0 || dependencies > 7 || (dependencies && runtime != 1)) {
++		SWEET_LOG_ERROR("SWEET BATT DEPENDENCIES: invalid mode=%d; runtime1 observation required\n", dependencies);
++		return false;
++	}
++	fDependencyMode = (unsigned)dependencies;
+ 	int adcPreflight = 0;
+ 	(void)PE_parse_boot_argn("sweetbattadcdiag", &adcPreflight, sizeof(adcPreflight));
+ 	fAdcPreflightRequested = adcPreflight == 1;
+diff --git a/iokit/Kernel/arm/SweetPmicPower.cpp b/iokit/Kernel/arm/SweetPmicPower.cpp
+index 39bfeae11bea2a40ebc4be4a1660580a6cef863e..1a3451d6c6ad459bff477ee23976c889d7c4140c 100644
+--- a/iokit/Kernel/arm/SweetPmicPower.cpp
++++ b/iokit/Kernel/arm/SweetPmicPower.cpp
+@@ -82,7 +82,7 @@ sweet_pmic_power_read_snapshot(SweetBattSnapshot &next, bool refreshInput,
+ 		0x1006,0x1007,0x100d,0x1042,0x1043,0x1051,0x1061,0x1070,
+ 		0x110b,0x1108,0x1307,0x1308,0x1310,0x1340,0x1342,0x1365,
+ 		0x1366,0x1370,0x1380,0x1506,0x1509,0x150b,0x1648,0x1651,
+-		0x1653,0x1690,0x1090,0x1067,0x1068,0x107d,0x1507,0x150d,0x1362
++		0x1653,0x1690,0x1090,0x1067,0x1068,0x107d,0x1507,0x150d,0x1362,0x1610
+ 	};
+ 	if (refreshInput) {
+ 		/* Invalidate before acquiring a replacement. Saturation fails closed;
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+index 06af9538e965a0c394d9707094719a92404dbdf2..a32ac7c96a19443608a8418ea88d09c296e5712c 100644
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -64,6 +64,8 @@ static const MuxRoute routeTemplates[] = {
+ 	 * also refreshes input; the battery never treats the IRQ as a grant. */
+ 	{2, 0x13, 2, SWEET_BATT_IRQ_INPUT_FAULT, MUX_BATTERY, 3, "battery-usbin-uv"},
+ 	{2, 0x13, 3, SWEET_BATT_IRQ_INPUT_FAULT, MUX_BATTERY, 3, "battery-usbin-ov"},
++	/* LG pm8150b.dtsi: MISC bark bit1, rising; opt-in diagnostic only. */
++	{2, 0x16, 1, SWEET_BATT_IRQ_WDOG, MUX_BATTERY, 1, "battery-wdog-bark"},
+ };
+ static_assert(sizeof(routeTemplates) / sizeof(routeTemplates[0]) == SWEET_MUX_ROUTE_COUNT,
+     "route layout must match the instance storage");

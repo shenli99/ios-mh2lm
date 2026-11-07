@@ -1,5 +1,13 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0165最新增量（本地完成，待push/实机）：** SweetBattery自己的loop可选择执行
+身份交叉验证、主PMIC副路禁止和有限watchdog配置/bark IRQ维护。后两项经语义
+后端与共享transport，pulse有独立固定API；mux表19路/3组，默认battery订阅仍ff，
+watchdog档才1ff。不新增GIC callback或服务单例；三键/DWC3/触摸/显示路径保持。
+身份可提供板级限值，外部SMB1355隔离和最终watchdog授权仍缺；所有新档runtime1
+不启充。架构图、接口与分档见[依赖分步测试](BATTERY-DEPENDENCY-TESTS.md)。
+下方0163的18路和“身份未实现”按当时状态保留，以此段为准。
+
 **0163～0164当前增量：** 0120a12已实测取得短许可，ADC同epoch检查与UV自然
 交付正常，重复source IRQ误删来源使长期许可失败。0164已本地修复，待push/
 新云产物：保留一致来源历史，pending阻断许可，新采集及新epoch VBUS后恢复。

@@ -708,13 +708,40 @@ int main(int argc,char **argv) {
         cleanupBattery(b);endProvider();
         while (!platform.children.empty()) platform.children.back()->terminate(2);
         assertNoLeaks();
+    } else if (!std::strncmp(mode,"battery-watchdog",16)) {
+        assert(startMux()==0);sweet_keys_init();pump();assert(backendRunning);
+        bool bad=std::strcmp(mode,"battery-watchdog")!=0;
+        pmic[(0x216<<8)|0x11]=pmic[(0x216<<8)|0x12]=pmic[(0x216<<8)|0x13]=0x80;
+        if (!std::strcmp(mode,"battery-watchdog-read-fail")) failReadPer=0x16;
+        if (!std::strcmp(mode,"battery-watchdog-foreign")) mmio[SWEET_DEV_SPMI_CFG_PA+0x700+4*273]=1;
+        if (!std::strcmp(mode,"battery-watchdog-enabled")) pmic[(0x216<<8)|0x15]=2;
+        SweetBattery b;b.fIrqMode=4;b.fRuntimeRequested=b.fRuntimeMode=1;b.fDependencyMode=4;
+        startBattery(b);pump();
+        if(bad){
+            assert(b.fIrqFailed && !b.fRunning && !testInstance->routes[18].active);
+            assert(!testInstance->bindings[1].notify);
+        }else{
+            assert(b.fIrqAttached && testInstance->routes[18].active);
+            assert(pmic[(0x216<<8)|0x11]==0x82 && pmic[(0x216<<8)|0x12]==0x82);
+            assert(pmic[(0x216<<8)|0x13]==0x80 && (pmic[(0x216<<8)|0x15]&2));
+            auto count=b.fIrqSamples;inject(273,2);pump();
+            assert(b.fWatchdogPending && b.fIrqSamples==count+1 && !b.fRuntimeInputEvents);
+            assert(testInstance->routes[18].hits==1);
+        }
+        inject(248,1);pump();assert(backendRunning && testInstance->routes[0].hits==1);
+        cleanupBattery(b);
+        assert(!testInstance->routes[18].active && testInstance->bindings[0].notify);
+        assert(pmic[(0x216<<8)|0x11]==0x80 && pmic[(0x216<<8)|0x12]==0x80 && pmic[(0x216<<8)|0x13]==0x80);
+        endProvider();while(!platform.children.empty())platform.children.back()->terminate(2);
+        assertNoLeaks();
     } else if (!std::strcmp(mode,"battery-runtime-events")) {
         assert(startMux()==0);sweet_keys_init();pump();
         // Unregistered VPD/try bits must survive Type-C attach and detach.
         pmic[(0x215<<8)|0x11]=pmic[(0x215<<8)|0x12]=pmic[(0x215<<8)|0x13]=0x82;
         SweetBattery b;b.fIrqMode=4;b.fRuntimeRequested=b.fRuntimeMode=2;startBattery(b);pump();
         assert(b.fIrqAttached && backendRunning);
-        assert(testInstance->bindings[1].events==SWEET_BATT_IRQ_ALL);
+        assert(testInstance->bindings[1].events==(SWEET_BATT_IRQ_ALL & ~SWEET_BATT_IRQ_WDOG));
+        assert(!testInstance->routes[18].active); // default observer never takes bark ownership
         assert(testInstance->routes[7].active && testInstance->routes[8].active);
         assert(testInstance->routes[16].active && testInstance->routes[17].active);
         assert((pmic[(0x213<<8)|0x11]&0x5c)==0x5c);
@@ -789,6 +816,7 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-mux-consumers-') as d:
                'notifier-fail-first','notifier-fail-second','attach-fail','keys','keys-worker-fail',
                'parallel','identity','notifier-stop-race','provider-stop-race','client-event-fail',
                'mux-fail-missing','mux-fail-init','mux-fail-loop','mux-fail-event','mux-fail-map',
+               'battery-watchdog','battery-watchdog-read-fail','battery-watchdog-foreign','battery-watchdog-enabled',
                'battery-typec-read-fail','battery-runtime-events','hardware','timeout','board-no-keys','board-key-fail','board-key-rollback',
                'board-key-detach','board-arm-fail']
     # LSan cannot operate in this sandbox's ptrace environment. Explicit
