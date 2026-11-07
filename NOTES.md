@@ -2,6 +2,29 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a6 云产物已核对并打包，等待实机 profile/input evidence 日志。**
+
+0120a6 SHA256：`xnu-kernel-0120a6.gz` `c11a13767ac100fbc3cb345cec4fd0e4092085e6bc384af633ae9080fdd4d4f8`；
+`xnu-buildtree-0120a6.gz` `2f3945678c0aff6543a9bda6d9c0f33ad7509d78350a79208ba0b6443e5fb1ed`。
+云 buildtree 中9个0157关键文件与本地verify逐字节匹配，kernel strings含新
+`SWEET FG PROFILE`、`SWEET BATT PROFILE`、`SWEET BATT INPUT v4`、`SWEET BATT ICL MODE`
+markers；源码gate/packager通过，没有旧内核冒充。
+
+已生成镜像：`out-bs/boot-16k-0120a6-battery-evidence.img`，35,667,968字节，
+SHA256 `6a7c939d7c2b1356251ac68e895655d4619393d52466ba5b5e0c4cb898e0b90a`。
+内核SHA256 `3b597fc3924bd346c7ebad678b04a1b63673878fd690ccbc65b9ba04f3f80066`。
+TOML参数确认：`sweetbattirq=4 sweetbattuidiag=1 sweetbattruntime=1
+sweetbattadcconv=0`，保留按键/USB/触摸IRQ和USB日志；无启充参数。
+
+本轮仍需用户 `fastboot boot`，再导出 `sweetlog-0120a6-battery-evidence.bin`。
+测试顺序：电脑USB启动桌面约30秒→拔10秒→已知普通5V充电器20～30秒→拔10秒→
+电脑10秒；注明每段电源。关注 `SWEET BATT PROFILE` 是否 match=1、integrity=0x13、
+nominal=4027、Tocad prefix，及每段 INPUT/TYPEC/ICL raw/error/epoch/time。检查
+无FG cleanup/poison、无mux隔离、无错误CONTROL。即使sink-ok=0也保留原始状态，
+不判成单纯驱动故障；本批充电仍互锁。
+
+底稿 `scratch/artifact-0120a6/{source-compare.json,unixnu.toml}`。
+
 **CURRENT: 0157 profile/输入证据实现已完成，等待用户push与新云产物。**
 
 实现提交 `39f9cc7`，补丁 `xnu/patches/0157-mh2lm-battery-profile-input-evidence.patch`。
