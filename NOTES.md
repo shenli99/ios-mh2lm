@@ -2,6 +2,37 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a15实际云源码/内核核对通过，同核五档boot已打包回读；待用户测identity1。**
+
+实现提交9f49c1d（0166），上一文档4dd3dbb。真实buildtree的33个相关源码文件与
+scratch/battery-irq-timing/verify逐字节一致，原106源码gate通过；kernel manifest
+及ADC TIMING/FAULT/STAGE/SNAPSHOT、WD COMMAND/START/FAULT/SNAPSHOT和既有
+驱动/输入marker均通过。用户仅提供buildtree/kernel，未提供构建日志或CI run
+ID，不宣称全量警告已检查。无0120a15实机日志，ADC/首bark根因仍未定。
+
+本轮未改驱动/CI、未push/操作设备。实际生成out-bs下五份
+boot-16k-0120a15-battery-{evidence,identity,inhibit,watchdog,deps-all}.img。
+均35,667,968字节、boot header v1；从最终boot回读外层blob/ramdisk和内层FAT
+kernel/ADT/TOML逐字节一致。参数唯一、同一内核/16K ADT，deps0/1/2/4/7，
+runtime1/IRQ4/ADCconv0、三键/USB/触摸IRQ及USB日志保留，全部不主动启充。
+实际kernel SHA256：83294f81fd0df1d3303eebc82daa0733ae747c4f059e4d1bcd818f9e76e6d552。
+
+完整归档/boot SHA、核对范围及步骤在docs/BATTERY-DEPENDENCY-TESTS.md末节；
+BATTERY-IRQ-TIMING/NEXT/实施计划/ADC consumer/IRQ路线图已有最新入口。底稿
+scratch/artifact-0120a15：verify-artifacts.py、source-compare.json、verification.json、
+packaging.txt、verify-boots.py、boot-verification.json；scratch/产物不入git。
+
+NEXT：用户fastboot boot
+/home/shenli/work1/out-bs/boot-16k-0120a15-battery-identity.img。
+桌面后尽快拔5秒→同一稳定电源保持约5分钟→拔5秒，简单确认三键/触摸，导出
+sweetlog-0120a15-battery-identity.bin（持久日志即可）。5分钟覆盖旧身份档约296秒
+故障窗口，若已明显异常可提前导出；优先分析新时序/故障快照，再决定同核
+watchdog4/组合7。后两档180秒从驱动准备起算，不先空等。当前无需evidence0/
+baseline/旧0120a13四档/独立inhibit，无需新push/编译。长期许可/外部SMB1355
+I²C隔离及最终managed-watchdog授权仍缺，不把boot打包通过当实机修复结论。
+
+### Previous 0166 implementation handoff (superseded next action)
+
 **CURRENT: 0166 ADC/watchdog时序取证本地实现完成，验证通过；待用户push并下载新云产物。尚无新实机修复结论。**
 
 承接4dd3dbb四档结果；新patch0166-mh2lm-battery-irq-timing.patch，基于真实

@@ -1,5 +1,13 @@
 # MH2LM 电池驱动实现计划
 
+**0120a15云产物已核对并打包，待实机：** 0166真实源码33文件与验证树一致，
+原106源码检查、kernel manifest/新诊断marker和五档最终boot回读通过。先测
+`boot-16k-0120a15-battery-identity.img`：进桌面尽快拔5秒→同一稳定电源约5分钟→
+拔5秒，导出`sweetlog-0120a15-battery-identity.bin`，持久日志即可。之后按新证据
+安排同核watchdog/组合档；当前不重测baseline/旧四档/独立inhibit，不主动启充。
+[镜像、哈希与步骤](BATTERY-DEPENDENCY-TESTS.md#0120a15云产物与同内核测试镜像)。
+下方待push/待云构建段落按历史保留，当前动作以本段为准。
+
 **0166本地实现更新（待新云编译/实测）：** 已补ADC trigger→父GIC→mux扫描/ACK/
 notify→consumer→SPMI锁的时间与一次性故障现场；timer先核对当前阶段的原截止
 时间，未到时重挂，真超时仍撤销。watchdog补命令/软件plugin/故障取证，先禁充再

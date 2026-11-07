@@ -1,5 +1,13 @@
 # 电池身份、并联禁止与 watchdog 分步测试（0165）
 
+**0120a15云产物已核对并打包，待实机：** 0166真实源码33文件与验证树一致，
+原106源码检查、kernel manifest/新诊断marker和五档最终boot回读通过。先测
+`boot-16k-0120a15-battery-identity.img`：进桌面尽快拔5秒→同一稳定电源约5分钟→
+拔5秒，导出`sweetlog-0120a15-battery-identity.bin`，持久日志即可。之后按新证据
+安排同核watchdog/组合档；当前不重测baseline/旧四档/独立inhibit，不主动启充。
+[镜像、哈希与步骤](BATTERY-DEPENDENCY-TESTS.md#0120a15云产物与同内核测试镜像)。
+下方待push/待云构建段落按历史保留，当前动作以本段为准。
+
 **0166本地实现更新（待新云编译/实测）：** 已补ADC trigger→父GIC→mux扫描/ACK/
 notify→consumer→SPMI锁的时间与一次性故障现场；timer先核对当前阶段的原截止
 时间，未到时重挂，真超时仍撤销。watchdog补命令/软件plugin/故障取证，先禁充再
@@ -413,3 +421,47 @@ NEXT：本批上机测试收束，不再重刷identity/inhibit/watchdog/all或�
 底稿 `scratch/artifact-0120a13/`：battery-deps-all-persistent.txt、analyze-deps-all.py、
 deps-all-log-analysis.json、audit-deps-all.py、deps-all-verification.json。只读分析与
 文档更新，未改驱动/CI、未push/操作设备或重新打包。
+
+
+## 0120a15云产物与同内核测试镜像
+
+2026-11-07。实现提交`9f49c1d`（0166）。实际buildtree的33个相关源码文件与
+`scratch/battery-irq-timing/verify`逐字节一致，原106项源码gate通过；实际kernel
+的manifest及ADC TIMING/FAULT/STAGE/SNAPSHOT、WD COMMAND/START/FAULT/SNAPSHOT
+和原输入/mux/三键/DWC3/触摸/ACM标记均通过。确认0166生效，不是旧内核换编号。
+本次用户只提供buildtree/kernel两个归档，没有构建日志或CI run ID；未检查全量
+构建警告。尚无0120a15实机结果，ADC及首bark根因仍未定位。
+
+| 产物 | SHA256 |
+| --- | --- |
+| `xnu-buildtree-0120a15.gz` | `97d95acfb4934ed0dea259398a3ae9c49fb0c6adbcb1774f2b359b9c07a0f0de` |
+| `xnu-kernel-0120a15.gz` | `a8b26dd4164300761b29243d45e775e50e17340d4fe412ddfb0078ac30697320` |
+| 实际kernel | `83294f81fd0df1d3303eebc82daa0733ae747c4f059e4d1bcd818f9e76e6d552` |
+
+镜像目录`/home/shenli/work1/out-bs/`，已实际执行打包并从最终Android boot读取
+ramdisk/FAT回验kernel、ADT、TOML及外层firmware blob。五份均为boot header v1、
+35,667,968字节、同一实际内核与既有16K ADT。参数无重复，除deps/菜单标题外
+一致；runtime1/IRQ4/ADCconv0，保留USB日志及三键/USB/触摸IRQ，全部不主动启充。
+
+| 镜像 | deps | SHA256 |
+| --- | --- | --- |
+| `boot-16k-0120a15-battery-evidence.img` | 0 | `e232181726fdf089d015745c49aef4119dec61a1d2806080c6664163cb459482` |
+| `boot-16k-0120a15-battery-identity.img` | 1 | `36d99c96991f60a815cba2d5c81b3246f21ca01e5fdabf9ddc8423926402311c` |
+| `boot-16k-0120a15-battery-inhibit.img` | 2 | `dd6958ad2d58906be4e396459ac9ee081f2a09b99069375e83424403a68b255d` |
+| `boot-16k-0120a15-battery-watchdog.img` | 4 | `4205279fdebb7f04fa32fd123229c4f2dd2d171bbde6266caccc54df5b75dc2e` |
+| `boot-16k-0120a15-battery-deps-all.img` | 7 | `45f4c0c2914b01cafafa91dca2f4a3e8442d49b29db0401198b2354db23d8ba7` |
+
+**当前先测identity1：** 用户fastboot boot
+`/home/shenli/work1/out-bs/boot-16k-0120a15-battery-identity.img`。
+进桌面后尽快拔线5秒→接同一稳定电源保持约5分钟→拔线5秒，期间简单确认三键/
+触摸；导出`sweetlog-0120a15-battery-identity.bin`，持久日志即可。5分钟是为覆盖
+旧identity约296秒的故障窗口，不是更改ADC硬件deadline；若已出现明显异常可
+提前导出。优先分析新FAULT/STAGE/MUX/PATH/SNAPSHOT/FIELD及晚到hit时间，区分
+转换/投递/consumer排队/共享SPMI锁等待，再安排同核watchdog4或组合7。后两档
+180秒窗口从驱动准备起算，测试时不要先在桌面空等。evidence0/inhibit2只是同核
+预备镜像，当前无需重测baseline、旧0120a13四档或独立inhibit。
+
+底稿`scratch/artifact-0120a15/`：verify-artifacts.py、source-compare.json、
+verification.json、packaging.txt、verify-boots.py、boot-verification.json；脚本/
+产物均未提交。CI配置与驱动本轮未改，未push/操作设备；本轮只核对、打包与更新
+交接文档。时序字段含义和判读边界见[BATTERY-IRQ-TIMING](BATTERY-IRQ-TIMING.md)。
