@@ -1,7 +1,7 @@
 # 输入会话与 VBUS 许可（0163）
 
-2026-11-07。接在0120a11已验证的0162之后，本地实现与验证完成，待用户push、
-云编译和实机测试。本轮不启充。0120a11证明了Rp3A分类和正常拔线撤销，尚未证明
+2026-11-07。接在0120a11已验证的0162之后，本地实现与验证完成；0120a12云产物
+现已核对并打包，待实机测试。本轮不启充。0120a11证明了Rp3A分类和正常拔线撤销，尚未证明
 长期输入授权；本补丁把这个缺口接到现有策略接口，不重复ADC正常转换bring-up。
 
 ## 对象与调用关系
@@ -131,3 +131,26 @@ token不复用。`SweetBatteryInputVerified/Kind/MaxMA`描述正式输入，旧
 命中不冒充保护实机验收，也不要求制造电压故障。本轮预期无CONTROL/enable，
 沿用本机现有enable0时充电仍为0；输入成功后再闭合身份限值、parallel隔离与
 watchdog阶段。短接若未建立许可，只算未授权插拔覆盖，不冒充有效许可内的撤销验收。
+
+## 0120a12云产物核对与测试boot
+
+实现提交7b7da93，交接0ab66ae。0120a12的33个选定源码文件与本地0163验证树
+逐字节一致，原106个源码gate通过；kernel manifest和新INPUT SESSION/PERMIT/
+LEASE、ADC INPUT、USBIN UV/OV及既有CC/APSD/共享mux/三键/USB/触摸/ACM标记齐全。
+无新实机结果或CI run ID，本轮未修改驱动/CI、未push或操作设备。
+
+| 项目 | SHA256 |
+| --- | --- |
+| `xnu-buildtree-0120a12.gz` | `09e47b9329f0d01f0785be6fa2a3ba4c58bdcb03726f3580de30805549db83df` |
+| `xnu-kernel-0120a12.gz` | `ad17d450a4773b175f38e66674cc9998cd50cb82978d2b319680783f08824919` |
+| 实际kernel | `4402489776e4dfb0eb42ff9247972465269c516fd60cc13c65c2822e36f72ac6` |
+| 测试boot | `038b794b93a2747030e43e21346ac0c94c1349abe07a9ce2964a3cf2bfabecdb` |
+
+镜像：工作区 `out-bs/boot-16k-0120a12-battery-evidence.img`，35,667,968字节。
+boot header v1，firmware/ramdisk切片与原输入一致，FAT回读kernel/ADT/TOML一致，
+参数无重复；runtime1/IRQ4/ADCconv0，USB日志及三键/USB/触摸IRQ保留。底稿
+`scratch/artifact-0120a12/`，含源码对比、manifest/marker、打包和boot回读报告。
+
+用户fastboot boot此镜像后按上节单镜像步骤测试，导出
+`sweetlog-0120a12-battery-evidence.bin`，持久日志即可。无需baseline或dry；本轮
+不启充，重点是长期许可、精确ADC批次、拔线撤销及新增保护路由接入健康。

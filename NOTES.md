@@ -2,6 +2,40 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a12云产物核对完成，0163输入会话观察boot已打包，待实机日志。**
+
+驱动提交7b7da93、实现交接0ab66ae。实际0120a12 buildtree的33个选定源码文件
+与scratch/battery-input-session/verify/xnu逐字节一致，原106个CI源码gate通过。
+内核manifest有效，INPUT SESSION/PERMIT/LEASE、ADC INPUT v1、两条USBIN UV/OV
+及既有CC/APSD/mux/三键/DWC3/触摸/ACM标记完整。未提供CI run ID或新构建日志，
+没有因此宣称所有构建warning已排查；实际kernel和源码核对通过。
+
+产物SHA256：buildtree 09e47b9329f0d01f0785be6fa2a3ba4c58bdcb03726f3580de30805549db83df；
+kernel包 ad17d450a4773b175f38e66674cc9998cd50cb82978d2b319680783f08824919；
+实际kernel 4402489776e4dfb0eb42ff9247972465269c516fd60cc13c65c2822e36f72ac6。
+镜像out-bs/boot-16k-0120a12-battery-evidence.img，35,667,968字节，SHA256
+038b794b93a2747030e43e21346ac0c94c1349abe07a9ce2964a3cf2bfabecdb。
+
+原--battery-evidence参数：runtime1/IRQ4/ADCconv0，保留USB日志和三键/DWC3/
+触摸IRQ、framebuffer30Hz；不启充。boot header v1，firmware/ramdisk切片、FAT
+回读kernel/ADT/TOML全部一致，参数无重复。底稿scratch/artifact-0120a12：
+verify-artifacts.py、source-compare.json、verification.json、packaging.txt、
+verify-boot.py、boot-verification.json及最终TOML。本轮只核对/打包/文档，无新
+驱动或CI修改，未push/操作设备，无0120a12实机结果。
+
+NEXT：用户fastboot boot上述镜像。不重测baseline/dry：电脑桌面15秒→拔5秒→
+0120a11同一电源/线材稳定45～60秒→拔5秒→接该电源1～2秒再拔→再次稳定接
+15秒再拔。确认三键/触摸及UI拔插变化，导出sweetlog-0120a12-battery-evidence.bin，
+持久日志即可。关注battery mask ff、UV/OV route attach/healthy，CC/APSD原始
+时间不续、>3秒后新ADC token/同inputEpoch的INPUT PERMIT仍有效及拔线撤销。
+短接没建立permit时不算有效许可内撤销覆盖；OV/UV无自然命中也不当保护验收。
+电脑SDP/default/debug附件仍可无许可。原enable0时charging预期0：身份限值、
+parallel隔离/watchdog仍未闭合，不能把输入许可成功当真实充电成功。旧ADC第二
+EOC超时取证、USB重复枚举问题及完整协议/恢复缺口保持待办。详细接口、LG依据
+和本地结果见docs/BATTERY-INPUT-SESSION.md；下一动作以上方为准。
+
+### Previous 0163 implementation handoff (superseded)
+
 **CURRENT: 0163输入会话与同epoch VBUS许可已本地完成，提交7b7da93；待用户push。**
 
 基于实际0120a11的33文件源码，新增0163-mh2lm-input-session-permits.patch。

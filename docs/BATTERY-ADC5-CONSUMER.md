@@ -1,6 +1,6 @@
 # SweetBattery 的 ADC5 测量接入（0156）
 
-**0163接口更新（待云编译/实机）：** update第二参数从inputChanged bool改为电池
+**0163接口更新（0120a12云产物已核对，待实机）：** update第二参数从inputChanged bool改为电池
 输入采集的uint64_t inputEpoch；新增copyFreshInput(expectedEpoch,now,out)，精确
 绑定请求/结果与当前输入批次。USBIN提前到采样开始满1秒安排新转换，给3秒许可
 留余量，非输入发现轮询。ADC值经会话管理器与CC/APSD一起形成typed输入许可，

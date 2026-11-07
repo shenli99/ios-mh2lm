@@ -1,6 +1,21 @@
 # 0119之后的电池驱动推进
 
-**当前实现：0163输入会话/同epoch VBUS许可已完成本地验证，待用户push。** 基于
+**当前：0120a12云产物已核对，测试boot就绪，待实机。** 33个选定源码文件与0163
+验证版一致，原106 gate及kernel manifest/新旧marker通过。镜像为工作区
+`out-bs/boot-16k-0120a12-battery-evidence.img`，SHA256
+`038b794b93a2747030e43e21346ac0c94c1349abe07a9ce2964a3cf2bfabecdb`。
+runtime1/IRQ4/ADCconv0，保留USB日志及三键/USB/触摸IRQ，不启充；回读payload和
+参数核对通过。完整校验与测试见[0120a12测试boot](BATTERY-INPUT-SESSION.md#0120a12云产物核对与测试boot)。
+
+下一步用户fastboot boot：电脑桌面15秒→拔5秒→原电源45～60秒→拔5秒→原电源
+接1～2秒再拔→稳定接15秒再拔；确认按键/触摸，导出
+`sweetlog-0120a12-battery-evidence.bin`。只需持久日志，无需baseline/dry或重跑
+ADC bring-up。重点是>3秒后同会话新VBUS持续许可、旧token拒绝和拔线撤销；
+原enable0时charging仍预期0，身份/parallel/watchdog尚未闭合。
+
+### 0163本地实现记录（云产物已核对）
+
+**0163实现记录：输入会话/同epoch VBUS许可已完成本地验证，现已由0120a12核对。** 基于
 0120a11实际源码，CC/APSD只由输入事件建立来源；新鲜的同输入epoch ADC测量
 形成有截止时间的typed permit，稳定会话不再受诊断3秒到期限制。新增USBIN
 UV/OV双边沿路由及两段队列pending检查，旧ADC结果不能复用；仍缺身份限值、
@@ -9,9 +24,9 @@ parallel隔离/watchdog依赖，本轮不启充。架构、LG依据、撤销边�
 
 本地：33文件严格apply，原106 gate，四个ARM64单文件编译；runtime8/mux66/
 transport122/ADC client19场景+100竞态/日志等级回归通过。CircleCI与GitHub XNU
-配置均未改。新云产物到齐后仍用原battery-evidence/runtime1/IRQ4/ADCconv0，
+配置均未改。0120a12仍用原battery-evidence/runtime1/IRQ4/ADCconv0，
 核对长期许可、新token、拔线和1～2秒短接后撤销；持久日志即可，无需baseline。
-没有新boot/实机结果/CI run ID，不将本地通过写为硬件验收。
+已取得下述0120a12新boot，尚无实机结果/CI run ID，不将打包通过写为硬件验收。
 
 ### 0120a11实机结果（作为0163基线）
 
