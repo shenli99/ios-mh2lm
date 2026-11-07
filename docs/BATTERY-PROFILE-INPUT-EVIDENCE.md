@@ -118,9 +118,27 @@ provider 的事件契约/重验证尚需实现，本批不宣称已有可持续�
 host 模型不能证明 DMA1 实机可读、native IOKit 时序或物理电流许可。云产物和
 本批实机日志尚未取得，不把本地通过写成设备已验证。
 
+## 0120a6 实机结果
+
+`logs/sweetlog-0120a6-battery-evidence.bin` 已解码到
+`scratch/artifact-0120a6/battery-evidence-persistent.txt`。本次 11 次 FG
+profile tuple 均为 `valid=1/error=0/match=1`，integrity 为 `0x13`、nominal
+为 4027 mAh，24 字节前缀一致且为 Tocad 候选。输入快照字段也全部成功读取，
+但电脑口只得到 SDP，普通充电器阶段得到 OCP/UNKNOWN，没有出现可接受的
+DCP/CDP，因此策略保持 `sink-ok=0`，没有输出启充 CONTROL；这符合 0157 的
+只读取证范围，不能证明真实充电失败或成功。
+
+同一份日志还显示第二次电脑 USB 插入只出现反复 `bus reset`/`connected`，没有
+再次出现 `ACM endpoints configured`，这是已知 DWC3 gadget 枚举问题，和输入
+识别策略分开处理。日志末尾另有一次共享 PMIC mux 故障：第 373 次 ADC5 测量
+已完成且 `restored=1`，随后出现 `handled=1 pending=1`，mux 按保护逻辑停用并
+终止 keys、battery、ADC consumer。当前记录没有保存故障后的 per-route pending
+mask，不能据此认定是 ADC、按键或电池 route；下一轮先增加 route/APID/status/
+ack 取证，并尝试只隔离故障 group，避免全 mux 停止。
+
 ## 一次编译、同镜像的下一轮步骤
 
-用户 push 并下载新编号 kernel/buildtree 后，先核对0157源文件和新函数符号，再打包：
+用户 push 并下载新编号 kernel/buildtree 后，先核对0158源文件和新函数符号，再打包：
 
 ```bash
 tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编号 --battery-evidence

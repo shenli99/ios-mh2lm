@@ -76,7 +76,7 @@ jobs:
             fi
             require_marker() {
               if ! grep -Fq "$2" "$1"; then
-                echo "ERROR: required 0139..0157 marker missing from $1: $2" >&2
+                echo "ERROR: required 0139..0158 marker missing from $1: $2" >&2
                 exit 1
               fi
             }
@@ -87,6 +87,8 @@ jobs:
             require_marker xnu/bsd/dev/sweet_touch_tcm.c 'SWEET TOUCH IRQ: FAILED'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET_LOG_ERROR'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET MUX: consumer attached group='
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'quarantinePendingGroups(unsigned groups)'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET MUX: pending route='
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT IRQ: armed mode='
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT DIAG READ: sid=%u addr=%#x error=%d; value=unknown'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'config-valid=%#x/0x7f'

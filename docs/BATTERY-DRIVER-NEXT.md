@@ -1,6 +1,7 @@
 # 0119之后的电池驱动推进
 
-0157已实现固定profile tuple读取与输入快照/时效，待用户push和新云产物。仍不
+0157已实现固定profile tuple读取与输入快照/时效；0158增加共享mux pending route
+取证与按组隔离，待用户push和新云产物。仍不
 启充；下一轮同一镜像采电脑/普通5V电源证据，无需再跑ADC bring-up。接口及步骤见
 [profile/输入证据实现](BATTERY-PROFILE-INPUT-EVIDENCE.md)，之后继续身份/输入许可
 consumer、并联隔离和watchdog依赖。
@@ -155,3 +156,16 @@ Type-C当前被软件白名单拒绝，不将unknown当成零，也不为补日�
 每次源码改动仍用增量patch与同一次云编译的多档镜像，保留mode4/三键/USB/
 触摸回归。服务匹配、SPMI事务锁及mux路由边界继续沿用，不重新引入全局桥接。
 资料入口为工作区 `docs/INDEX.md` 六章与LG目标源码；复杂时序回查实际函数。
+
+### 0120a6 结果：profile 已闭合，mux 仍需定位
+
+0120a6 的 0157 证据镜像已完成设备采集。11 次 profile 读取全部有效，Tocad
+前缀、integrity `0x13` 和 4027 mAh 一致；输入只观察到 SDP、UNKNOWN 和 OCP，
+没有 DCP/CDP，也没有 `SWEET BATT CONTROL`，所以没有真实启充动作。第二次电脑
+USB 枚举失败仍属于已知 gadget 问题。
+
+末尾共享 PMIC mux 在 ADC5 token 373 完成后报告 `handled=1 pending=1` 并停用
+所有 consumer。该错误会撤销电池/ADC测量和按键 IRQ，但 profile/ADC转换本身在
+故障前成功。现有日志未保存具体 pending route，下一步是给 mux 增加 route、APID、
+status、ack 后读回和 group 信息，再决定按 group 隔离还是修正 ADC/按键清除顺序。
+在故障 route 未确认前不启用充电控制，也不把 USB 枚举问题并入电池修复。

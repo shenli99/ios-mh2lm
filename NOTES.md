@@ -4840,3 +4840,17 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
 - 仍不得 arm：PON/GPIO6 现有 gate/latch/owner 状态、PMIC-arb v5 清除顺序、PDC
   input 和 GIC 上游 trigger 仍需 0128 的只读 `sweetkeysirqdiag=1` 预检。0128 输出的
   `latched` 是 `LATCHED_STS (+0x18)`，不是写入用的 `LATCHED_CLR (+0x14)`。
+
+## 0120a6 电池证据与共享 mux 故障（2026-11-07）
+
+`sweetlog-0120a6-battery-evidence.bin`：11 次 FG profile tuple 全部
+`valid=1/error=0/match=1`，Tocad 24 字节前缀一致，integrity `0x13`、nominal
+4027 mAh。输入快照没有 DCP/CDP，只见电脑 SDP、UNKNOWN 和普通充电器 OCP，
+策略保持 `sink-ok=0`，没有控制写入；这轮仍是诊断证据，不是充电验收。
+
+第二次电脑 USB 插入只有重复 bus reset/connected，没有 ACM endpoint 配置，按已知
+DWC3 gadget 枚举缺陷单独跟踪。日志末尾 ADC5 token 373 已得到有效、恢复完成的
+样本，随后 PMIC mux 报 `handled=1 pending=1` 并终止 keys/battery/ADC consumer。
+0120a6 没有记录故障后的 route/APID/status/ack 读回，暂不能判断 ADC、按键或电池
+route；下一轮先补充这些取证并实现按 group 隔离候选，避免共享 mux 的一个 pending
+位停掉无关 consumer。

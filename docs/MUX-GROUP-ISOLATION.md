@@ -1,6 +1,7 @@
 # PMIC mux 回滚失败隔离与日志等级
 
 2026-11-05，新增 `0148-mh2lm-mux-group-isolation.patch`，接在0147之后。
+2026-11-07，新增 `0158-mh2lm-mux-pending-group-diagnostics.patch`，接在0157之后。
 0119原生内核及buildtree已核对：23个最终源文件与0148树逐字节一致，
 新符号存在、无未定义符号；随后keys+USBIN组合实机通过，未触发隔离路径。
 0148异常隔离仍待硬件取证；0118镜像不含0146～0148。
@@ -20,16 +21,16 @@ PMIC配置失败”与“无法关闭共享中断源”：优先隔离失败组�
    读回要求 access=0 且 IRQ_STATUS=0。这里不发 SPMI 外设命令，poisoned RW
    lane 也不复用。会尝试关闭其它受影响 APID，即使某一个隔离检查已失败。
 6. 全部检查成功：该组按本次启动永久隔离，清绑定；设置
-   `SweetMuxIsolatedGroups` 位图（bit0按键、bit1电池），生命周期标为 degraded，
+   `SweetMuxIsolatedGroups` 位图（bit0按键、bit1电池、bit2 ADC5），生命周期标为 degraded，
    输出 WARN。`endRouteUpdate()`/已排队 IRQ worker 仅恢复其它活动路由。
    后续该组 attach 明确拒绝；其它组也不能经新路由重新开启已隔离的APID，
    不做静默重试或轮询回退。
 7. 跨组共享活动 APID、关门读回失败或 pending 未清空：输出 ERROR，调用原有
    `disableHardware()`，保持共享 GIC/PDC 关闭并报告相关 consumer FAILED。
 
-适用范围是 attach 失败回滚和 consumer detach 清理。当前运行期 ack 耗尽、
-未知/卡住中断、storm、GIC/PDC 本身失败等共享故障仍保留原全局停止处理；
-本补丁没有把这些来源不明的故障改成盲目继续运行。
+适用范围是 attach 失败回滚和 consumer detach 清理。0158 另外处理运行期
+pending drain 故障：记录具体 route、group、APID、bit、status 后，只有能安全
+关闭独立 APID 时才隔离对应 group；跨组共享 APID 或隔离读回失败仍全局停止。
 
 该隔离提供的是“中断路径封闭”，不是“PMIC已完全恢复原状态”。未恢复的
 触发配置或 enable 可能留在 PMIC，但经过验证的本地 APID 门保持关闭，直到
@@ -83,6 +84,10 @@ compile-results、registry-tests、transport-tests、log-tests及CI gate结果�
 这些模型不能证明真实 ACC_ENABLE/pending 的硬件行为；下一轮新内核直接测
 keys+USBIN组合，保留三键、USB/触摸IRQ、ACM、息屏唤醒回归。不重跑用户已跳过
 的 no-keys 阶段；无新内核前不生成声称包含0148的boot。
+
+0158 的 host 回归复用了同一组 mux/client/ADC/按键生命周期测试，并验证补丁可
+在 0157 最终源码上严格 apply。硬件验收必须看到 `SWEET MUX: pending route=`；
+只有该记录才能判断 0120a6 末尾故障属于 ADC、按键还是电池 route。
 
 ## 0119 原生产物与下一步
 

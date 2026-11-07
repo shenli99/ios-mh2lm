@@ -1,0 +1,93 @@
+--- a/bsd/dev/sweet_spmi_mux.h
++++ b/bsd/dev/sweet_spmi_mux.h
+@@ -109,6 +109,7 @@
+ 	bool endRouteUpdate(void);
+ 	bool removeGroup(unsigned group);
+ 	bool isolateGroup(unsigned group);
++	bool quarantinePendingGroups(unsigned groups);
+ 	IOReturn updateBinding(BindingRequest *request, bool detach);
+ 	static void workAction(OSObject *owner, IOInterruptEventSource *source, int count);
+ 	static IOReturn bindingAction(OSObject *owner, void *, void *, void *, void *);
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -524,8 +524,35 @@
+ 	}
+ 	if ((!handled && !maintenance) || stillPending) {
+ 		++faultCount;
+-		SWEET_LOG_ERROR("SWEET MUX: unhandled/stuck irq handled=%u pending=%u faults=%u; IRQ disabled\n",
+-		    handled ? 1 : 0, stillPending ? 1 : 0, faultCount);
++		unsigned pendingGroups = 0;
++		for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
++			const MuxRoute &route = routes[i];
++			if (!route.active) {
++				continue;
++			}
++			uint32_t status = read32(route.channel, 0x104u);
++			if (status & (1u << route.bit)) {
++				pendingGroups |= 1u << route.group;
++				SWEET_LOG_ERROR("SWEET MUX: pending route=%s group=%u apid=%u bit=%u status=%#x\n",
++				    route.name, route.group, route.apid, route.bit, status);
++			}
++		}
++		SWEET_LOG_ERROR("SWEET MUX: unhandled/stuck irq handled=%u pending=%u groups=%#x faults=%u\n",
++		    handled ? 1 : 0, stillPending ? 1 : 0, pendingGroups, faultCount);
++		if (pendingGroups && quarantinePendingGroups(pendingGroups)) {
++			/* Keep healthy groups alive; only the pending group is revoked. */
++			__atomic_store_n(&state, 1u, __ATOMIC_RELEASE);
++			for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
++				if (routes[i].active) {
++					write32(gicd, 0x100u + 4u * MUX_SPI_WORD, MUX_SPI_BIT);
++					break;
++				}
++			}
++			SWEET_LOG_WARN("SWEET MUX: isolated pending groups=%#x; other groups remain available\n",
++			    pendingGroups);
++			return;
++		}
++		SWEET_LOG_ERROR("SWEET MUX: pending group isolation failed; IRQ disabled\n");
+ 		disableHardware();
+ 		return;
+ 	}
+@@ -758,6 +785,42 @@
+ 	return isolated;
+ }
+ 
++bool
++SweetSpmiInterruptMux::quarantinePendingGroups(unsigned groups)
++{
++	/* drainInterrupt runs on the mux workloop with the GIC masked. Mark the
++	 * affected groups inactive before isolateGroup(), so a private APID can be
++	 * closed without taking unrelated consumers offline. If an APID is shared
++	 * with another still-active group, isolation is unsafe and the caller must
++	 * use the fail-closed whole-mux path. */
++	bool ok = true;
++	for (unsigned group = 0; group < MUX_GROUPS; ++group) {
++		if (!(groups & (1u << group))) {
++			continue;
++		}
++		for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
++			if (routes[i].group == group) {
++				routes[i].active = false;
++				/* isolateGroup already closed this route; later consumer detach
++				 * must not issue a second PMIC restore transaction. */
++				routes[i].touched = false;
++			}
++		}
++		if (!isolateGroup(group)) {
++			ok = false;
++		}
++	}
++	if (!ok) {
++		return false;
++	}
++	for (unsigned group = 0; group < MUX_GROUPS; ++group) {
++		if ((groups & (1u << group)) && bindings[group].notify) {
++			bindings[group].notify(bindings[group].context, SWEET_MUX_FAILED);
++		}
++	}
++	return true;
++}
++
+ IOReturn
+ SweetSpmiInterruptMux::updateBinding(BindingRequest *request, bool detach)
+ {
