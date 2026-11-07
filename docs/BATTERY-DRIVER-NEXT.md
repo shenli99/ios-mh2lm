@@ -1,5 +1,13 @@
 # 0119之后的电池驱动推进
 
+0120a8实机已确认APSD检测开启（1362=18）且3次source-change完成事件工作，
+plugin先读未完成，随后source给出FLOAT/SDP；无DCP/CDP，10次普通sink校验未过。
+新问题是USBIN ADC请求196在ground后缺第二EOC处理，超时后测量撤销；并非本轮
+mux全局停止，battery IRQ和touch继续。先复核ADC第二阶段/超时并补错误路径
+typed快照；输入需Type-C/DPDM/角色provider及FLOAT限流策略，不是盲写APSD使能。
+详见[0120a8结果与后续](BATTERY-APSD-EVENTS.md#0120a8实机结果apsd已使能且source路径工作adc5另有超时)。
+无需重复本轮/baseline或ADC正常测试。本轮未改驱动/CI，仍不启充。
+
 0159已修正APSD事件来源与时效：0151早已接入source-change bit6，本轮保留路由，
 仅初始/plugin/source采输入，防止CHGR/SOC续期；新增只读1362 bit3实际使能观察，
 结果前后状态一致性检查及source会话期限。0158+0159一起待push/云编译，继续

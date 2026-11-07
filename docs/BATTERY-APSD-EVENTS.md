@@ -110,3 +110,94 @@ runtime1/IRQ4/ADCconv0，三键/触摸/USB IRQ及USB日志保留；未启充。r
 baseline、dry或重新测ADC bring-up。尚无设备结果，不能称APSD/充电已修复验收。
 
 底稿工作区`scratch/artifact-0120a8/`；本轮未改驱动/CI、未push/操作设备。
+
+## 0120a8实机结果：APSD已使能且source路径工作，ADC5另有超时
+
+日志 `logs/sweetlog-0120a8-battery-evidence.bin`，SHA256
+`f242bb5eb22f8440d40c35e90e8bde52e020a6ee2c94b7210a3d10a23b84b3cd`。
+SWEETLOG v1/ring4194304/有效810725字节/flush76，未回卷，有效正文无NUL。
+771组遥测完整连续，跨度789.563秒；12组irq/启动/arm采样、759保护tick。
+12次profile全match1、integrity13、nominal4027mAh，维持Tocad候选证据。
+
+### APSD事实与事件顺序
+
+10组输入采集：初始1、USBIN6、source-change3。**全部1362=0x18/error0，bit3=1，
+BC1.2检测实际已使能。** XNU未主动写enable不等于硬件未开启，本轮数据排除
+“APSD没开所以没结果”的解释，仍不能确定最初由哪个固件writer使能。
+
+以下时间相对第一组输入获取；不是物理接头触碰的硬件时间。电源名称仅按测试
+顺序理解，日志本身没有记录适配器型号。
+
+| 相对时间/样本 | 原因 | STATUS/RESULT | 结论 |
+| --- | --- | --- | --- |
+| 0秒/id1 | 初始 | 11/01，SDP | source0、qualified0；启动已有DONE只作诊断 |
+| 402.703/id391 | plugin | 00/00，VBUS有 | 尚未完成 |
+| 402.843/id392 | plugin | 00/00，VBUS无 | 已观测到短暂掉线，撤销旧会话 |
+| 403.709/id394 | plugin | 00/00，VBUS有 | 开始观测会话5，未完成 |
+| 405.058/id397 | source | 21/10，FLOAT | source1/coherent1/qualified1 |
+| 405.165/id398 | source | 21/10，FLOAT | 再次source变化，仍FLOAT；不是第二次插线 |
+| 610.394/id596 | plugin | 00/00，VBUS无 | 撤销会话5 |
+| 736.390/id718 | plugin | 00/00，VBUS有 | 会话7，等待结果 |
+| 737.141/id720 | source | 01/01，SDP | source1/coherent1/qualified1 |
+
+中段稳定plugin到首次完成读取相差约1.350秒；最后重新接入相差约0.751秒。
+这直接说明只在plugin时采一次不能及时得到最终识别结果。3次source均由mux
+battery-source命中，10次电池IRQ全healthy1（plugin6/source3/MSOC1），发布延迟
+88.863～112.859ms。MSOC id390没有重采输入；759保护tick没有新增输入采集。
+10次输入全coherent1，没有实际覆盖“读中状态变化/错误”的拒绝分支。
+
+**qualified1只表示事件限定的检测证据有效，不代表允许充电。** 本轮只有
+UNKNOWN、SDP、FLOAT，没有DCP/CDP；10次sink-ok均0。中段Type-C：1506=02、
+1509=23、150b=39、debug0、legacy4；按LG smb5-reg.h，misc39含VBUS_ERROR bit4。
+回电脑后1506=40、1509=2c、misc28、debug1、legacy6，包含debug/legacy状态。
+这些字节不满足现有普通sink校验，不能仅凭Rp或实测5V授予输入电流。
+VBUS_ERROR究竟是瞬态、遗留配置还是实际输入问题，本日志不能独立证明。
+
+FLOAT不是“APSD没有完成”，也不等于物理适配器必坏。LG
+`override_usb_source_change_irq_handler`对FLOAT有SW_ICL_MAX=500mA投票路径；
+当前XNU未实现完整Type-C/DPDM/输入仲裁，窄策略只允许已证明的DCP/CDP，不能
+把本轮结果强改DCP，或把换到DCP当作实现input provider的替代方案。
+
+10次充电配置均enable0/pause0/watchdog62/time8c，没有CONTROL，runtime1没有
+获得控制权。IOPM电流-548～+20mA不足以证明充电；真实充电仍未恢复。
+
+### 新异常：ADC5请求196缺少第二次完成回调
+
+- 请求1～195均得到有效、已恢复的结果：BAT_ID16、USBIN179，合计374次EOC。
+  consumer接受193（BAT_ID16/USBIN177），另2次因epoch变化正确丢弃。
+- 请求196是USBIN：先经过ground阶段，收到第一次EOC，advance返回
+  `SWEET_ADC5_MORE=1`并进入RESULT phase3。日志的`error=1`在这里是继续标志，
+  不是SPMI错误。之后没有第二次EOC处理记录，timer报告EXPIRED(-101)。
+- `restore-error=0 cleanup=0`，provider按当前设计停止并撤销BAT_ID/VBUS测量，
+  后续没有再提交/接受ADC测量；不能拿停止前旧值继续授权。
+- 这不是本轮的“mux pending后全局停机”：无mux ERROR/pending隔离/IRQ storm，
+  ADC失败后仍有3次电池IRQ、后续触摸计数到229。三键完整down/up在故障前有
+  记录，**没有故障后的按键操作证据**，不能宣称已外部验证故障后三键。
+- 全程375次ADC EOC=成功374+失败请求首次1。没有硬件status/request/IRQ pending
+  的超时快照及实际deadline时间，不能区分转换未完成、完成但IRQ丢失/合并、
+  或事件交付/超时竞态，不能直接定性GIC配置错误或把超时阈值调大了事。
+  IOTimerEventSource有calloutGeneration取消保护，仅凭假想旧timer无法定根因。
+
+有效BAT_ID888516～889684uV；USBIN4550864～5103104uV，范围来自被接受的测量。
+与电源能力许可分别解释。ADC失败发生于中段source完成后约80秒，日志未见
+同时插拔；不将其直接归于重插竞态。
+
+USB首次及启动阶段另一次reset后共2次ACM configured；最后重接电脑反复reset/
+connected、无新的configured，符合已知gadget重复枚举问题，独立于APSD。
+没有kernel panic记录。原先0120a6的mux pending故障本轮未复现，因此0158隔离
+故障分支仍未得到实机覆盖，不能把“没报错”写成已经根治。
+
+### 下一步
+
+1. 不重复baseline、ADC正常bring-up或同镜像APSD开关测试。本轮已足够确认APSD
+   开启、source路径正常以及识别实际结果；不盲目重写1362或无限rerun。
+2. 先复核ADC RESULT阶段的trigger/ack/交付与deadline。下一代码批在**错误路径**
+   通过typed接口保存有界只读status/request/IRQ和时间快照，并核查实际deadline；
+   只诊断，不把timeout查询到的完成位当作轮询样本，也不静默重试。
+3. 输入侧接Type-C/DPDM/角色与撤销的provider，按LG参考处理FLOAT受限输入及
+   debug/legacy/VBUS-error，之后才设计APSD enable/条件rerun和电流合同。
+   battery identity/parallel/watchdog仍需闭合，不直接解除充电互锁。
+
+本轮仅分析与文档，没有改驱动/CI、没有新boot或push。复现分析脚本、逐事件时间表
+及计数在工作区 `scratch/artifact-0120a8/{analyze-log.py,log-analysis.json,
+battery-evidence-persistent.txt}`，原始日志不入git。

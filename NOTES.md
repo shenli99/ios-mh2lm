@@ -2,6 +2,45 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a8实机日志已分析：APSD使能/source事件正常；ADC5请求196超时。**
+
+日志sweetlog-0120a8-battery-evidence.bin，SHA256
+f242bb5eb22f8440d40c35e90e8bde52e020a6ee2c94b7210a3d10a23b84b3cd，
+v1/ring4194304/total810725/flush76，未回卷，有效正文无NUL。771连续遥测，
+跨度789.563s；12profile全match1/integrity13/4027mAh。10输入（初始1/plugin6/
+source3）全options18/error0/enabled1/coherent1，确认BC1.2实际已开；XNU没写
+enable不是硬件关闭的证据。启动DONE不认可；id394plugin未完成，1.350s后
+id397source21/result10=FLOAT qualified1，id398再次source同结果；id718重新
+接电脑未完成，0.751s后id720source01/result01=SDP qualified1。无DCP/CDP，
+10次sink-ok0。MSOC id390不采输入，759保护tick不刷新输入，时序区分已实测。
+中段TypeC misc39含VBUS_ERROR bit4，后段debug/legacy，不能认作普通sink许可。
+LG有FLOAT500mA投票路径，XNU完整输入provider尚缺，不伪装DCP也不以换充电器
+替代实现。10config均enable0，无CONTROL，runtime1未启充。
+
+新独立故障：ADC请求1..195成功（BATID16/USBIN179），374EOC；接受193、两次
+插拔/source epoch变化正确丢弃。USBIN请求196首个ground EOC处理后phase3/
+MORE1，缺第二EOC处理，报TIMEOUT/-101；restore-error0/cleanup0，停止provider
+并撤销测量。全375EOC，失败后无新ADC。没有超时status/request/IRQ/deadline
+快照，转换未完成/IRQ未交付/时序竞态尚不能区分。IOTimer有generation保护，
+不将假想旧timer直接当根因。此次不是mux全停：没有mux错误或隔离，故障后3次
+电池IRQ和触摸229仍有记录；三键完整down/up仅在故障前，不声称故障后已测。
+0120a6 mux pending本轮没复现，0158隔离错误分支仍缺设备覆盖。
+
+最后回电脑重复reset/connected未再次ACM configured，保留已知gadget问题；
+全程两次ACM configured属于启动段。有效BATID888516..889684uV，VBUS
+4550864..5103104uV。无kernel panic记录，无真实充电证据。
+底稿工作区scratch/artifact-0120a8/{analyze-log.py,log-analysis.json,
+battery-evidence-persistent.txt}，结果docs/BATTERY-APSD-EVENTS.md。
+本轮只分析/记文档，无驱动/CI修改、新boot、push或设备操作。
+
+NEXT：不要求重测本轮/baseline或ADC正常bring-up。先离线复核ADC第二阶段
+trigger/ack/交付/100ms deadline，下一批错误路径加typed有界只读故障快照与
+真实deadline核对，不在timeout里补读发布样本/静默重试。输入并行推进方向是
+Type-C/DPDM/角色撤销provider及FLOAT受限输入策略，之后补APSD生命周期与合同，
+不是简单补enable。真实充电仍缺identity授权/parallel/watchdog等依赖。
+
+### Previous 0120a8 artifact handoff (superseded)
+
 **CURRENT: 0120a8云产物已核对，0158/0159生效，boot已打包，等待实机日志。**
 
 实现提交775d009。实际0120a8 buildtree的33文件与最终verify逐字节一致，95个
