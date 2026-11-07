@@ -1,5 +1,16 @@
 # 0119之后的电池驱动推进
 
+**当前：0120a13云产物核对通过，五档同内核boot已打包并回读验证，待实机。**
+33源码文件与0164+0165验证树一致，原106源码检查及kernel manifest/marker通过。
+先用工作区 `out-bs/boot-16k-0120a13-battery-identity.img`，同时验证身份和长期
+输入许可；桌面15秒→拔5秒→原同一电源45～60秒→拔5秒→接1～2秒再拔→再接
+15秒后拔。确认三键/触摸，导出 `sweetlog-0120a13-battery-identity.bin` 即可。
+无需重测baseline/evidence0/0120a12；inhibit2、watchdog4和组合7已就绪，先看身份
+档日志再继续。全部runtime1/IRQ4/ADCconv0，不启充。路径、SHA与验证边界见
+[0120a13五档boot](BATTERY-DEPENDENCY-TESTS.md#0120a13云产物与五档boot)。
+
+### 0165本地实现记录（历史，已取得0120a13云产物）
+
 **最新：按用户要求，0165后三项依赖已与0164合入同一待编译版本，待用户push。**
 支持同内核deps0/1/2/4/7：输入观察、身份校验、主PMIC副路禁止、watchdog配置/
 bark IRQ pet和组合档。全部runtime1，不启充。身份可结合新鲜BAT_ID/profile建立

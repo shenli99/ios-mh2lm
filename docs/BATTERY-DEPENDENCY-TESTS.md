@@ -1,7 +1,7 @@
 # 电池身份、并联禁止与 watchdog 分步测试（0165）
 
 2026-11-07。用户要求在0164来源保留修复的同一次云编译中推进后三项依赖，
-用参数分开或组合测试。0165已本地实现与验证，待push、新云产物及实机结果。
+用参数分开或组合测试。0120a13云产物已核对，五档boot已打包并回读验证，待实机。
 **全部档位只允许runtime1；没有主动启充。** 身份可建立板级限值，主PMIC副路
 禁止与watchdog的配置/IRQ链可独立取证；外部SMB1355隔离和managed-watchdog
 最终授权仍未成立。不能将“已有实现”写成“三项实机验收完成”。
@@ -13,7 +13,7 @@
 触摸IRQ与USB日志；不修改CircleCI或GitHub XNU触发/检查配置。
 
 新产物核对后使用 `tools/mk-mh2lm-event-matrix.sh ARTIFACT LABEL --battery-dependencies`。
-同一个实际内核生成下列五份boot，名称包含产物LABEL；本轮尚无新boot。
+同一个实际内核生成下列五份boot，名称包含产物LABEL；0120a13镜像见文末。
 
 | 镜像后缀 | deps | 作用 / 写入边界 |
 | --- | --- | --- |
@@ -170,3 +170,40 @@ SweetBattery、SweetPmicPower、SweetSpmiInterruptMux、sweet_spmi、sweet_charg
 打包器bash语法、实际分档分支的参数唯一性/0、1、2、4、7、旧内核拒绝已验证；
 未生成假新boot。未重跑未改动的ADC client独立测试。CI文件逐字节未改，未push/
 操作设备。失败路径不静默fallback，尚无新CI run ID/0165实机结果。
+
+
+## 0120a13云产物与五档boot
+
+实现提交8d6435b、交接fe21cca。实际0120a13 buildtree的33个选定源码文件与
+`scratch/battery-dependencies/verify/xnu`逐字节一致，原106项CI源码检查通过；
+kernel manifest及0164来源保留、0165身份/副路禁止/watchdog/bark和既有输入/
+ADC/mux/三键/DWC3/触摸/ACM标记完整。未提供新构建日志或CI run ID，不据此
+宣称所有构建警告已排查。尚无0120a13实机结果。
+
+| 产物 | SHA256 |
+| --- | --- |
+| `xnu-buildtree-0120a13.gz` | `e383562860e87913d89cf1dfae10ce96f34128be4c972660f662501fb72fa12b` |
+| `xnu-kernel-0120a13.gz` | `5bfa27a403b5dda60887f2a35cb47efd5abdd9d5bc1b2c05f7614ce0f01ab0e2` |
+| 实际kernel | `1e66616567862cf52c3eb67ba0aa1feb27b3d4018b51b47d00578e5fe3b3dc24` |
+
+镜像目录：`/home/shenli/work1/out-bs/`。每份35,667,968字节，boot header v1；
+外层firmware/ramdisk切片、内层FAT的kernel/ADT/TOML回读全部一致，同一内核与
+16K ADT。参数无重复，除deps及菜单标题外一致；runtime1/IRQ4/ADCconv0，USB日志
+和三键/USB/触摸IRQ保留。全部不启充。五档SHA256：
+
+| 镜像文件 | deps | SHA256 |
+| --- | --- | --- |
+| `boot-16k-0120a13-battery-evidence.img` | 0 | `17db8436a398f3ae05e688dbff506b1ec6ded20272f13bd2ad74fa2f2db0b439` |
+| `boot-16k-0120a13-battery-identity.img` | 1 | `db6368d1490bd31e8ecb1bc08703d174a0eb6ed6d7150e444fce9a0daec58f4a` |
+| `boot-16k-0120a13-battery-inhibit.img` | 2 | `2073d315d6dc7f4fa02d8659238bb2e31ab303ac29f5182caa0aeef9f3f770fe` |
+| `boot-16k-0120a13-battery-watchdog.img` | 4 | `c28a600770f70ccaf04b05e58ad69cbf8e6df7052c13adf1ef7fd8586b6e7342` |
+| `boot-16k-0120a13-battery-deps-all.img` | 7 | `4a237cab72ce67e0d41abb1b4f8bc21cf78764d867e379efeb38c8d5bfcde095` |
+
+先由用户fastboot boot `boot-16k-0120a13-battery-identity.img`，按上方identity1步骤
+操作，导出 `sweetlog-0120a13-battery-identity.bin`；持久日志即可。默认evidence0
+无需再测，待本档日志分析后再给inhibit2/watchdog4的具体下一项；组合7保留到分项
+结果核对后。watchdog4从驱动准备起只有180秒，届时需桌面后尽快完成插线取证。
+
+底稿 `scratch/artifact-0120a13/`：verify-artifacts.py、source-compare.json、
+verification.json、packaging.txt、verify-boots.py、boot-verification.json及五份
+回读TOML。本轮只核对、打包和更新文档，未改驱动或CI、未push或操作设备。

@@ -2,6 +2,44 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a13云产物已核对，五档boot已生成并回读验证，待第一项identity实机日志。**
+
+实现8d6435b、上一交接fe21cca。实际0120a13的33个选定源码文件与
+scratch/battery-dependencies/verify/xnu逐字节一致，原106项源码gate和内核
+manifest/0164+0165 marker通过。未提供本轮构建日志或CI run ID，不能据此称所有
+云编译warning已排查。本轮未改驱动/CI，未push或操作设备；实机尚未验收。
+
+输入产物在工作区logs：xnu-buildtree-0120a13.gz SHA256
+ e383562860e87913d89cf1dfae10ce96f34128be4c972660f662501fb72fa12b；
+xnu-kernel-0120a13.gz SHA256
+ 5bfa27a403b5dda60887f2a35cb47efd5abdd9d5bc1b2c05f7614ce0f01ab0e2；
+实际kernel SHA256 1e66616567862cf52c3eb67ba0aa1feb27b3d4018b51b47d00578e5fe3b3dc24。
+
+已运行tools/mk-mh2lm-event-matrix.sh的--battery-dependencies，五个boot均在
+/home/shenli/work1/out-bs/，每份35,667,968字节，文件前缀boot-16k-0120a13-：
+battery-evidence.img(deps0)、battery-identity.img(1)、battery-inhibit.img(2)、
+battery-watchdog.img(4)、battery-deps-all.img(7)。全部runtime1/IRQ4/ADCconv0，
+保留USB日志和三键/DWC3/触摸IRQ，不启充。boot header v1、外层firmware/ramdisk
+切片与FAT内kernel/ADT/TOML回读通过，同kernel/16K ADT，参数无重复且除deps及
+菜单标题外一致。全部SHA与路径见docs/BATTERY-DEPENDENCY-TESTS.md末节。
+第一项identity SHA256 db6368d1490bd31e8ecb1bc08703d174a0eb6ed6d7150e444fce9a0daec58f4a。
+
+底稿scratch/artifact-0120a13/：verify-artifacts.py、source-compare.json、
+verification.json、packaging.txt、verify-boots.py、boot-verification.json及五份
+回读TOML。完整本地实现验证仍见下方0165历史交接，不重复算本轮重跑。
+
+NEXT：用户fastboot boot
+/home/shenli/work1/out-bs/boot-16k-0120a13-battery-identity.img。
+桌面约15秒→拔线5秒→同一充电器/线材稳定45～60秒→拔5秒→接1～2秒再拔→
+稳定接15秒再拔；确认三键/触摸。导出sweetlog-0120a13-battery-identity.bin，
+持久日志即可。检查身份约95kΩ/profile1/板级上界及0164重复source后长期输入
+许可恢复、来源不续期、同epoch新VBUS和有效许可内拔线撤销。先分析此日志，
+再依次inhibit2/watchdog4，分项核对后组合7；默认无需evidence0/baseline重测。
+watchdog诊断从驱动准备起180秒，届时桌面后须尽快拔5秒再接稳定至少50秒。
+仍待外部SMB1355 I²C隔离、正式managed-watchdog授权/保护验收，所有镜像不启充。
+
+### Previous 0165 implementation handoff (superseded next action)
+
 **CURRENT: 按用户新要求，0165后三项依赖已同轮推进，和0164一起待用户push/云编译。**
 
 实现/回归/文档提交8d6435b；当前main已含0164和0165，尚未push。
