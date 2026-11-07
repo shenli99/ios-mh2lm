@@ -4,6 +4,8 @@
 
 **CURRENT: 按用户新要求，0165后三项依赖已同轮推进，和0164一起待用户push/云编译。**
 
+实现/回归/文档提交8d6435b；当前main已含0164和0165，尚未push。
+
 用户明确：不必等长期输入许可验收才开发身份/parallel/watchdog，下一轮同内核分步
 测试。新0165-mh2lm-battery-dependency-probes.patch基于0164验证树，架构仍GIC→mux
 IOService→registry client→SweetBattery自己的workloop；没有新增全局桥接、匹配回调
