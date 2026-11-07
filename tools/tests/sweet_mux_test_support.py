@@ -194,9 +194,17 @@ extern "C" void sweet_spmi_rw_poison_locked(unsigned apid) {
     assert(lockDepth==1 && apid<512);rwLanePoison[apid]=true;
 }
 extern "C" int sweet_spmi_read(unsigned sid, unsigned a, uint8_t *v) {
+    if ((a >> 8) == 0x15) return -1; // production legacy API rejects Type-C
     if ((a >> 8) == failReadPer) return -1;
     assert(lockDepth == 0); // the API itself acquires the observer lock
     *v=pmic[(sid<<16)|a]; return 0;
+}
+extern "C" int sweet_spmi_battery_irq_read(unsigned peripheral, unsigned reg, uint8_t *v) {
+    if (!v || (peripheral!=0x10 && peripheral!=0x13 && peripheral!=0x15 && peripheral!=0x40) ||
+        (reg!=0x11 && reg!=0x12 && reg!=0x13 && reg!=0x15)) return -1;
+    assert(lockDepth==0);
+    if (peripheral==failReadPer) return -1;
+    *v=pmic[(2u<<16)|(peripheral<<8)|reg];return 0;
 }
 static void batteryNotify(void *, unsigned event) {
     if (event == 0x80000000u) ++batteryFailures; else batteryEvents |= event;

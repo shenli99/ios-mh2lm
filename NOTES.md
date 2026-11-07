@@ -2,6 +2,49 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a9电池consumer初始化失败根因已定；0161修复本地完成，待用户push。**
+
+日志sweetlog-0120a9-battery-evidence.bin，SHA256
+4e788faad4f31f902caada05a38085c7586986090176806994b052b640370214，v1/4MiB/
+有效273261/flush60/3870行，无回卷或NUL。29组遥测（初始1+保护28，29.219s），
+只有初始输入/UI external1 capable1 charging0，config enable0，无CONTROL，
+无后续battery IRQ refresh或Type-C hit。用户松线/插稳/拔线图标不消失；
+初次视觉变化不能由本日志定位为新IRQ，外接电源缓存确实未撤销。
+
+Type-C元数据解析成功：实际EE0 IRQ-owned APID271；首条battery-typec-rid
+configureRoute首读0x1511经旧sweet_spmi_read被软件白名单拒绝（不含per15），
+未发起该硬件事务，battery attach失败0xe00002ca并回滚，服务stop。不是
+CC极性/APSD未完成/适配器协议导致的route失败。状态采样原先用另一个typed
+精确表，能读Type-C，不要混淆两个入口。0160测试的宽松read mock漏掉此限制。
+不是mux全停：失败后ADC2请求/2成功/3EOC，三键都有down/up，触摸到74。
+2次ACM configured，最后重插reset无新configured按已知gadget bug保留；
+ADC请求196问题本轮未覆盖，不能宣称修复。底稿scratch/artifact-0120a9。
+
+新增0161接0160：sweet_spmi_battery_irq_read固定SID2，per10/13/15/40和
+offset11/12/13/15的配置只读，走原observer共享锁/timeout poison，不改通用
+白名单、写表或owner。mux用此接口，读错ERROR含route/SID/per/offset/rc。
+failIrq停止后撤销snapshot/CC/APSD/测量及ADC consumer有效性，走原publish/
+updateStatus撤销modern/legacy external/capable/charging/full，input/status
+valid=false，保留上次百分比，不假装新断线测量；仍先走原控制disable，不新增
+重试/轮询/自动fallback。错误措辞不再把consumer失败笼统称为整个mux/keys停机。
+
+本地：严格apply到实际0120a9云源码，verify33文件一致，106个源码gate通过；
+SweetBattery/sweet_spmi/SweetSpmiInterruptMux ARM64单文件编译通过。ASAN/UBSAN
+实际mux readPeripheral→完整transport联测成功/拒绝/缺route/timeout poison，
+固定权限表拒绝范围和输出保留；mux mock恢复旧Type-C拒绝，新增单consumer
+失败但keys继续案例；实际failIrq/publish验证modern/legacy源标志与有效性
+撤销。runtime6/mux66/transport122/SPMI4/ADCclient1/log1/board6个PASS记录。
+CI只追加源码gate，编译命令不变；打包器拒绝旧0120a9。文档BATTERY-TYPEC-CC、
+IRQ-BRINGUP-LESSONS、BATTERY-DRIVER-NEXT。底稿scratch/battery-cc-irq-fix。
+未push，无新boot或修复版设备结果。
+
+NEXT：用户push本地0161提交；新产物下载后核对并用原--battery-evidence打包
+runtime1/IRQ4/ADCconv0，保留三键/触摸/USB IRQ和USB日志。不重测0120a9，
+下一轮先看battery group成功attach，再看当前充电器松线/插稳/拔线的plugin/
+Type-C事件和UI发布。真实充电/PD、完整input provider和ADC第二EOC仍未完成。
+
+### Previous 0120a9 packaging handoff (superseded)
+
 **CURRENT: 0120a9云产物已核对，0160 CC镜像已打包，待实机日志。**
 
 实现提交0b1cf56。0120a9 buildtree的33文件与battery-cc/verify逐字节一致，

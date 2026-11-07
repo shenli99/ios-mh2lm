@@ -188,7 +188,18 @@ startup_adapter=startup_adapter.replace('fMuxWatching=false','fTimerAdded=true')
 # This suite substitutes sampling, not the new runtime's protection timer. The
 # runtime/controller suite separately exercises actual monitor and stop methods.
 if 'SweetBattery::stopRuntime' in battery:
-    startup_adapter=startup_adapter.replace('public:', 'public: void stopRuntime() {} unsigned fRuntimeMode=0, fRuntimeRequested=0; SweetBattController fController={};\n', 1)
+    startup_adapter=startup_adapter.replace('public:', '''public: void stopRuntime() {} unsigned fRuntimeMode=0, fRuntimeRequested=0;
+    SweetBattController fController={}; SweetBattSnapshot fSnapshot={}; unsigned fLastReasons=0,fLastPercent=70,fLastMv=4000;
+    unsigned withdrawals=0;
+    void publishRuntime() {
+        assert(!fSnapshot.valid && !fSnapshot.ccFromEvent && !fSnapshot.apsdFromSource);
+        assert(!fSnapshot.currentValid && !fSnapshot.socValid && !fSnapshot.voltageValid);
+        assert(fController.fault && fController.state==SB_FAULT); ++withdrawals;
+    }
+    void publish(unsigned,unsigned,int,bool external,bool capable,bool charging,bool full,bool measured,bool currentValid) {
+        assert(!external && !capable && !charging && !full && !measured && !currentValid);++withdrawals;
+    }
+''', 1)
     startup_adapter=read('bsd/dev/sweet_charger.h')+'\n'+strip(read('bsd/dev/sweet_battery_runtime.h'))+'\n'+startup_adapter
     startup_adapter=startup_adapter.replace('IOInterruptEventSource *fIrqEvent;',
         'IOInterruptEventSource *fIrqEvent; IOTimerEventSource *fMonitor=nullptr;')
@@ -505,6 +516,7 @@ int main(int argc,char **argv) {
         }
         endProvider();assert(b.fIrqFailed && !b.fIrqAttached && !b.fRunning && !b.valid);
         assert(b.reads<=2 && b.fIrqNotifications==0);
+        assert(b.withdrawals==1); // failure also withdraws the UI source state
         cleanupBattery(b);assertNoLeaks();
     } else if (!std::strcmp(mode,"notifier-fail-first") || !std::strcmp(mode,"notifier-fail-second")) {
         assert(startMux()==0);
@@ -682,6 +694,20 @@ int main(int argc,char **argv) {
         testInstance->detachConsumer(&keyOwner,1,&context);assert(testInstance->bindings[1].notify);
         testDetach(1,&context);assert(!testInstance->bindings[1].consumer);
         endProvider();assertNoLeaks();
+    } else if (!std::strcmp(mode,"battery-typec-read-fail")) {
+        assert(startMux()==0);sweet_keys_init();pump();assert(backendRunning);
+        failReadPer=0x15;
+        SweetBattery b;b.fIrqMode=4;b.fRuntimeRequested=b.fRuntimeMode=1;
+        b.fSnapshot.valid=~0ULL;b.fSnapshot.ccFromEvent=b.fSnapshot.apsdFromSource=true;
+        b.fSnapshot.currentValid=b.fSnapshot.voltageValid=b.fSnapshot.socValid=true;
+        startBattery(b);pump();
+        assert(b.fIrqFailed && !b.fRunning && !b.fIrqAttached && b.withdrawals==1);
+        assert(!testInstance->bindings[1].notify && !b.fSnapshot.valid);
+        assert(testInstance->bindings[0].notify && backendRunning);
+        inject(248,1);pump();assert(backendRunning && testInstance->routes[0].hits==1);
+        cleanupBattery(b);endProvider();
+        while (!platform.children.empty()) platform.children.back()->terminate(2);
+        assertNoLeaks();
     } else if (!std::strcmp(mode,"battery-runtime-events")) {
         assert(startMux()==0);sweet_keys_init();pump();
         // Unregistered VPD/try bits must survive Type-C attach and detach.
@@ -746,7 +772,7 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-mux-consumers-') as d:
                'notifier-fail-first','notifier-fail-second','attach-fail','keys','keys-worker-fail',
                'parallel','identity','notifier-stop-race','provider-stop-race','client-event-fail',
                'mux-fail-missing','mux-fail-init','mux-fail-loop','mux-fail-event','mux-fail-map',
-               'battery-runtime-events','hardware','timeout','board-no-keys','board-key-fail','board-key-rollback',
+               'battery-typec-read-fail','battery-runtime-events','hardware','timeout','board-no-keys','board-key-fail','board-key-rollback',
                'board-key-detach','board-arm-fail']
     # LSan cannot operate in this sandbox's ptrace environment. Explicit
     # object/registry/notifier/MMIO accounting accompanies ASAN/UBSAN instead.

@@ -1,0 +1,113 @@
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 2fb0583cd99bf58220fe96736990b07d1e2918fe..e5f1770335f8eff813f3a1544c4c71cba8d421c3 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -602,6 +602,20 @@ sp_adc5_read_locked(unsigned addr, uint8_t *out)
+  return sp_observer_read_locked(2, addr, out);
+ }
+ int
++sweet_spmi_battery_irq_read(unsigned peripheral, unsigned offset, uint8_t *out)
++{
++ if (!out || (peripheral != 0x10 && peripheral != 0x13 &&
++     peripheral != 0x15 && peripheral != 0x40) ||
++     (offset != 0x11 && offset != 0x12 && offset != 0x13 && offset != 0x15)) {
++  return SWEET_SPMI_INVALID;
++ }
++ if (!__atomic_load_n(&sp_ready, __ATOMIC_ACQUIRE)) { return SWEET_SPMI_NOT_READY; }
++ IOLockLock(sp_lock);
++ int rc = sp_observer_read_locked(2, (peripheral << 8) | offset, out);
++ IOLockUnlock(sp_lock);
++ return rc;
++}
++int
+ sweet_spmi_adc5_irq_read(unsigned offset, uint8_t *out)
+ {
+  if (!out || (offset != 0x11 && offset != 0x12 && offset != 0x13 && offset != 0x15)) { return SWEET_SPMI_INVALID; }
+diff --git a/bsd/dev/sweet_spmi.h b/bsd/dev/sweet_spmi.h
+index 0f7c1b36f296ebb06a46b0f960f9353927ed3327..9c9c811a6162ed748a89a86ae313f978fa61fc0f 100644
+--- a/bsd/dev/sweet_spmi.h
++++ b/bsd/dev/sweet_spmi.h
+@@ -58,6 +58,11 @@ int sweet_spmi_charger_get_route(unsigned sid, unsigned addr,
+ 	struct sweet_spmi_charger_route *out);
+ /* Exact readable-register table. Does not widen sweet_spmi_read's whitelist. */
+ int sweet_spmi_charger_read(unsigned sid, unsigned addr, uint8_t *out);
++/* Mux-only readback of fixed battery IRQ configuration: USID2 peripherals
++ * CHGR/USBIN/TYPEC/FG-SOC and offsets SET_TYPE/POLARITY_HIGH/POLARITY_LOW/
++ * EN_SET. No PMIC writes, ownership changes or arbitrary status access.
++ * Internally serialized; output unchanged on error. Not primary IRQ context. */
++int sweet_spmi_battery_irq_read(unsigned peripheral, unsigned offset, uint8_t *out);
+ /* Stable configuration only. mask must be nonzero and a subset of the table;
+  * value must contain no bits outside mask. Read/modify/write/readback is atomic
+  * against all local controller users. W1C/trigger, IRQ, SRAM and secure writes
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index ad32605f475c60e70cb9bb5cda0912c647eb4b01..f7e22df5d4b93e55b820d45c78d9d7d3bc0ec9fa 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -462,7 +462,7 @@ SweetBattery::publish(unsigned percent, unsigned mv, int ma, bool external,
+ 	int mode = measured ? 1 : 0;
+ 	if (mode != fLastMode) {
+ 		SWEET_LOG_INFO("SWEET BATTERY: %s, %u%% %umV external=%d charging=%d\n",
+-		    !measured ? "static fallback" :
++		    !measured ? (fIrqFailed ? "IRQ fault / sample invalid" : "static fallback") :
+ 		    (fSid2 ? "PM6150B / gauge SOC" : "PM6150 / estimated SOC"),
+ 		    percent, mv, external, charging);
+ 		fLastMode = mode;
+@@ -979,7 +979,28 @@ SweetBattery::failIrq(const char *reason)
+ 	putBool("SweetBatteryIRQHealthy", false);
+ 	putBool("SweetBatteryIRQWaitingForMux", false);
+ 	putBool("SweetBatteryHardwareSampleValid", false);
+-	updateStatus();
++	/* Stop discovery, but also withdraw the last published cable/charge state.
++	 * Unknown input is not a fresh disconnected measurement: validity stays
++	 * false while the IOPM booleans cease advertising an unusable source. */
++	fSnapshot.valid = 0;
++	fSnapshot.apsdFromSource = fSnapshot.ccFromEvent = false;
++	fSnapshot.socValid = fSnapshot.currentValid = fSnapshot.voltageValid = false;
++	fSnapshot.tempValid = fSnapshot.presentValid = false;
++	putBool("SweetBatteryExternalValid", false);
++	putBool("SweetBatteryChargeStateValid", false);
++	if (fRuntimeMode) {
++		fController.fault = true;
++		fController.faultReasons |= SB_R_TRANSPORT;
++		fController.state = SB_FAULT;
++		fLastReasons |= SB_R_TRANSPORT | SB_R_STOPPED;
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++		if (fAdcClient) { fAdcClient->invalidate(); publishAdc(); }
++#endif
++		publishRuntime();
++	} else {
++		publish(fLastPercent, fLastMv, 0, false, false, false, false, false, false);
++	}
++	SWEET_LOG_ERROR("SWEET BATT IRQ: published input invalid; external/charging state withdrawn\n");
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ 	if (fMuxClient) {
+ 		fMuxClient->detach();
+@@ -1012,7 +1033,7 @@ SweetBattery::irqAction(OSObject *owner, IOInterruptEventSource *, int count)
+ 	}
+ 	unsigned pending = __atomic_exchange_n(&self->fIrqPending, 0u, __ATOMIC_ACQ_REL);
+ 	if (pending & SWEET_MUX_FAILED) {
+-		self->failIrq("shared PMIC mux stopped; keys may also be unavailable");
++		self->failIrq("mux connection unavailable; consumer attach or provider failure");
+ 		return;
+ 	}
+ 	if (pending & SWEET_MUX_READY) {
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+index 95f7185184d7625a6e4f97798d85cef1f43d8481..2eae1fca12f56419b7a87ef42b026eb596eb1748 100644
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -173,7 +173,14 @@ SweetSpmiInterruptMux::readPeripheral(const MuxRoute &route, unsigned reg, uint8
+ 		return sweet_spmi_adc5_irq_read(reg, out) == 0;
+ 	}
+ 	if (route.group == MUX_BATTERY) {
+-		return sweet_spmi_read(route.sid, (route.per << 8) | reg, out) == 0;
++		/* Generic sweet_spmi_read deliberately excludes Type-C. IRQ readback
++		 * has its own fixed, read-only capability, separate from charger data. */
++		int rc = route.sid == 2 ? sweet_spmi_battery_irq_read(route.per, reg, out) : SWEET_SPMI_INVALID;
++		if (rc) {
++			SWEET_LOG_ERROR("SWEET MUX: IRQ read failed route=%s sid=%u per=%#x reg=%#x error=%d\n",
++			    route.name, route.sid, route.per, reg, rc);
++		}
++		return rc == 0;
+ 	}
+ 	sweet_spmi_irq_lock();
+ 	vm_offset_t lane = obs + 0x80u * route.apid;

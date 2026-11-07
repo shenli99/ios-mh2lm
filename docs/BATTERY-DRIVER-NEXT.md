@@ -1,6 +1,10 @@
 # 0119之后的电池驱动推进
 
-0160已加入独立CC/Rp判断及Type-C IRQ路由，本地验证完成、待云编译/实机。
+0120a9实测Type-C IRQ配置读误走旧SPMI白名单，battery consumer attach失败，
+并保留旧external UI状态。0161已本地修复固定IRQ只读接口及故障撤销发布，
+待用户push/新云产物；不能把本轮当作CC运行成功或充电器协议异常的证据。
+
+0160已加入独立CC/Rp判断及Type-C IRQ路由；0120a9初始化失败，运行验收未完成。
 见[CC输入判断与测试](BATTERY-TYPEC-CC.md)。这不等于已建立PD或真实启充；
 Type-C/DPDM完整provider与ADC超时仍未完成。
 

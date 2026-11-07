@@ -185,6 +185,12 @@ public:
  static IOReturn runtimePowerNotice(void *,void *,UInt32,IOService *,void *,vm_size_t);
  SweetBattSnapshot fSnapshot={};SweetBattLimits fLimits={};SweetBattController fController={};
  unsigned publishes=0;int publishedMa=0;bool publishedCurrentValid=false;
+ IOTimerEventSource *fTimer=nullptr;
+ bool fIrqFailed=false,fIrqAttached=true;
+ unsigned fIrqMode=4,fIrqSamples=0;volatile unsigned fIrqNotifications=0;
+ struct MuxStub {unsigned detachments=0;void detach(){++detachments;}};
+ MuxStub *fMuxClient=nullptr;
+ void failIrq(const char *);
  void sampleRuntime(bool);void runRuntimePolicy();void stopRuntime();void publishRuntime();
  static uint64_t runtimeClock(void *);
  OSDictionary storage;OSDictionary *properties=&storage;
@@ -610,6 +616,26 @@ int main(){
     b.stopRuntime();assert(timer.disabled && !timer.armed && !b.fController.enabled);
     auto arms=timer.arms;auto samples=b.fMonitorSamples;SweetBattery::monitorFired(&b,&timer);
     assert(timer.arms==arms && b.fMonitorSamples==samples);
+    // Actual IRQ failure path must withdraw all modern/legacy source flags,
+    // preserve the last percentage, and invalidate measured data without IO.
+    SweetBattery failed;IOTimerEventSource failedTimer;SweetBattery::MuxStub connection;
+    failed.fRuntimeMode=1;failed.fMonitor=&failedTimer;failed.fTimer=&failedTimer;
+    failed.fMuxClient=&connection;failed.fSnapshot=sample();failed.fUiDiag=true;
+    failed.fSnapshot.raw[SB_ENABLE]=1;failed.fSnapshot.raw[SB_STAGE]=3;
+    failed.publishRuntime();assert(failed.registry["External"] && failed.registry["Charging"]);
+    auto beforeReads=reads.size(),beforeWrites=writes.size();auto beforePublications=failed.publishes;
+    failed.failIrq("test Type-C attach rejected");
+    assert(failed.fIrqFailed && !failed.fRunning && !failed.fIrqAttached && connection.detachments==1);
+    assert(failed.publishes==beforePublications+1 && !failed.registry["External"] && !failed.registry["Capable"] && !failed.registry["Charging"]);
+    assert(!failed.registry["AppleRawExternalConnected"] && failed.legacy["Flags"]==kIOBatteryInstalled);
+    assert(!failed.registry["SweetBatteryExternalValid"] && !failed.registry["SweetBatteryChargeStateValid"]);
+    assert(!failed.registry["SweetBatteryHardwareSampleValid"] && !failed.registry["SweetBatteryCurrentValid"]);
+    assert(!failed.registry.count("Amperage") && !failed.registry.count("Temperature"));
+    assert(failed.registry["SweetBatteryPercent"]==70 && !failed.fSnapshot.valid);
+    assert(!failed.fSnapshot.apsdFromSource && !failed.fSnapshot.ccFromEvent);
+    assert(reads.size()==beforeReads && writes.size()==beforeWrites);
+    failed.failIrq("duplicate");assert(failed.publishes==beforePublications+1);
+    puts("PASS: actual IRQ failure withdraws modern/legacy source flags and measurement validity, no fallback/read/retry");
     SweetBattery shutdown;unsigned verified=0;
     assert(!SweetBattery::runtimeUpdate(&shutdown,SWEET_CHARGER_ENABLE,1,timeNs+1000000000,&verified));
     std::thread power([&]{assert(!SweetBattery::runtimePowerNotice(&shutdown,nullptr,kIOMessageSystemWillRestart,nullptr,nullptr,0));});
@@ -644,7 +670,7 @@ int main(){
 '''
 names=['sweet_batt_now_ns','SweetBattery::adcChanged','SweetBattery::publishAdc','SweetBattery::sampleRuntime','SweetBattery::runtimeUpdate',
        'SweetBattery::runRuntimePolicy','SweetBattery::startRuntime',
-       'SweetBattery::monitorFired','SweetBattery::stopRuntime','SweetBattery::publishRuntime','SweetBattery::runtimeClock','SweetBattery::publish','SweetBattery::removePowerValue','SweetBattery::runtimePowerNotice']
+       'SweetBattery::monitorFired','SweetBattery::stopRuntime','SweetBattery::failIrq','SweetBattery::publishRuntime','SweetBattery::runtimeClock','SweetBattery::publish','SweetBattery::removePowerValue','SweetBattery::runtimePowerNotice']
 with tempfile.TemporaryDirectory(prefix='mh2lm-runtime-') as directory:
     cpp=Path(directory)/'test.cpp';binary=Path(directory)/'test'
     cpp.write_text(prelude+charger+strip_includes(header)+spmi+strip_includes(power_header)+adc_header+event_defines+adc_model+shim+strip_includes(backend)+strip_includes(power)+''.join(function(n) for n in names)+checks)

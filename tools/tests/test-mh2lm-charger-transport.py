@@ -164,10 +164,15 @@ static void modelWrite(vm_offset_t b,unsigned o,uint32_t v){
 '''
 mux_prelude = r'''
 #define MUX_KEYS 0
-struct MuxRoute {vm_offset_t channel; bool writePoisoned; unsigned apid,group;const char *name;};
+#define MUX_BATTERY 1
+#define MUX_ADC5 2
+#define MUX_NO_APID 0xffffu
+struct MuxRoute {vm_offset_t channel; bool writePoisoned; unsigned apid,group;const char *name;unsigned sid,per;};
 struct SweetSpmiInterruptMux {
     MuxRoute routes[2];
+    vm_offset_t obs=1;
     bool writePeripheral(MuxRoute &,unsigned,uint16_t,unsigned);
+    bool readPeripheral(const MuxRoute &,unsigned,uint8_t *);
 };
 static void write32(vm_offset_t b,unsigned o,uint32_t v){modelWrite(b,o,v);}
 static uint32_t read32(vm_offset_t b,unsigned o){return modelRead(b,o);}
@@ -193,6 +198,7 @@ static void balanced(){assert(depth==0 && maps==unmaps);}
 int main(int argc,char **argv){
     assert(argc==2);const char *mode=argv[1];uint8_t out=0xa5;
     assert(sweet_spmi_charger_read(2,0x1042,&out)==SWEET_SPMI_NOT_READY && out==0xa5);
+    assert(sweet_spmi_battery_irq_read(0x15,0x11,&out)==SWEET_SPMI_NOT_READY && out==0xa5);
     sweet_adc5_preflight notReady;memset(&notReady,0xa5,sizeof(notReady));auto savedNotReady=notReady;
     assert(sweet_spmi_adc5_inspect(&notReady)==SWEET_SPMI_NOT_READY && !memcmp(&notReady,&savedNotReady,sizeof(notReady)));
     sweet_fg_profile absent;memset(&absent,0xa5,sizeof(absent));auto savedAbsent=absent;
@@ -208,6 +214,43 @@ int main(int argc,char **argv){
     }
     assert(sweet_spmi_init()==0);
     own(10,0x10);own(11,0x13);own(12,0x15);own(13,0x16);
+    if(!strncmp(mode,"battery-irq",11)) {
+        own(14,0x40);auto initialReads=ioReads;
+        for(unsigned per:{0u,1u,0x08u,0x14u,0x16u,0x31u,0x41u,0x115u})
+            assert(sweet_spmi_battery_irq_read(per,0x11,&out)==SWEET_SPMI_INVALID && out==0xa5);
+        for(unsigned reg:{0u,6u,0x10u,0x14u,0x16u,0x18u,0x111u})
+            assert(sweet_spmi_battery_irq_read(0x15,reg,&out)==SWEET_SPMI_INVALID && out==0xa5);
+        assert(sweet_spmi_battery_irq_read(0x15,0x11,nullptr)==SWEET_SPMI_INVALID && ioReads==initialReads);
+        SweetSpmiInterruptMux mux;MuxRoute route={};
+        route.sid=2;route.per=0x15;route.group=MUX_BATTERY;route.apid=12;route.name="battery-typec-rid";
+        if(!strcmp(mode,"battery-irq-missing"))routing.erase(12);
+        if(!strcmp(mode,"battery-irq-timeout"))observerStatus=0;
+        if(!strcmp(mode,"battery-irq-denied"))observerStatus=3;
+        if(strcmp(mode,"battery-irq")) {
+            assert(!mux.readPeripheral(route,0x11,&out) && out==0xa5 && !writes && !maps);
+            assert(logs.find("IRQ read failed route=battery-typec-rid")!=std::string::npos);
+            if(!strcmp(mode,"battery-irq-timeout")) {
+                observerStatus=1;auto before=commands;
+                assert(sweet_spmi_battery_irq_read(0x15,0x11,&out)==SWEET_SPMI_POISONED && commands==before);
+            }
+        } else {
+            for(unsigned reg:{0x11u,0x12u,0x13u,0x15u}) {
+                auto before=commands;
+                assert(sweet_spmi_read(2,0x1500|reg,&out)==-1 && commands==before);
+                assert(sweet_spmi_charger_read(2,0x1500|reg,&out)==SWEET_SPMI_INVALID);
+                pmic[0x21500|reg]=0x5a;
+                assert(mux.readPeripheral(route,reg,&out) && out==0x5a);
+                assert(observerApids.back()==12 && !writes && !maps);
+            }
+            for(unsigned per:{0x10u,0x13u,0x15u,0x40u})for(unsigned reg:{0x11u,0x12u,0x13u,0x15u}) {
+                pmic[0x20000|(per<<8)|reg]=0x64;
+                assert(!sweet_spmi_battery_irq_read(per,reg,&out) && out==0x64);
+            }
+            auto before=commands;route.sid=0;
+            assert(!mux.readPeripheral(route,0x11,&out) && commands==before && out==0x64);
+        }
+        balanced();IOLockFree(sp_lock);printf("PASS: actual mux-to-SPMI IRQ readback %s\n",mode);return 0;
+    }
     if(!strncmp(mode,"conversion-",11)) {
         own(20,0x31,0,true);own(21,0x37,0,false);own(30,1,4,true);
         pmic[0x23104]=8;pmic[0x23105]=0x28;pmic[0x20105]=0x20;pmic[0x20103]=2;
@@ -629,11 +672,11 @@ int main(int argc,char **argv){
 with tempfile.TemporaryDirectory(prefix='mh2lm-charge-io-') as directory:
     cpp = Path(directory)/'test.cpp'
     binary = Path(directory)/'test'
-    cpp.write_text(prelude+header+adc_header+charger_header+source+mux_prelude+function(mux,'SweetSpmiInterruptMux::writePeripheral')+preflight_prelude+charger_backend+re.sub(r'^#if[^\n]*\n', '', function(battery,'SweetBattery::transportPreflightAction'), flags=re.M)+checks)
+    cpp.write_text(prelude+header+adc_header+charger_header+source+mux_prelude+function(mux,'SweetSpmiInterruptMux::writePeripheral')+function(mux,'SweetSpmiInterruptMux::readPeripheral')+preflight_prelude+charger_backend+re.sub(r'^#if[^\n]*\n', '', function(battery,'SweetBattery::transportPreflightAction'), flags=re.M)+checks)
     subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-O1','-g','-pthread',
         '-fsanitize=address,undefined',str(cpp),'-o',str(binary)],check=True)
     env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0', UBSAN_OPTIONS='halt_on_error=1')
-    for mode in ['conversion-normal','conversion-usb-normal','conversion-busy','conversion-enabled','conversion-requested','conversion-type','conversion-foreign','conversion-ambiguous','conversion-cal-foreign','conversion-poison','conversion-read-fail','conversion-abort','conversion-usb-abort','conversion-timeout','conversion-usb-timeout','conversion-invalid-data','conversion-wrong-channel','conversion-false-eoc','conversion-result-read-fail','conversion-restore-fail','conversion-usb-cal-restore-fail','conversion-usb-poison-result','conversion-stuck-abort','charger-semantic','adc-normal','adc-foreign','adc-ambiguous','adc-missing','adc-timeout','adc-denied','adc-poison','normal','alloc-fail','map-fail','fg-v1','fg-v2','fg-busy','fg-unknown','fg-grant','fg-active','fg-read-fail','fg-cleanup-fail','fg-dma-error',
+    for mode in ['battery-irq','battery-irq-missing','battery-irq-timeout','battery-irq-denied','conversion-normal','conversion-usb-normal','conversion-busy','conversion-enabled','conversion-requested','conversion-type','conversion-foreign','conversion-ambiguous','conversion-cal-foreign','conversion-poison','conversion-read-fail','conversion-abort','conversion-usb-abort','conversion-timeout','conversion-usb-timeout','conversion-invalid-data','conversion-wrong-channel','conversion-false-eoc','conversion-result-read-fail','conversion-restore-fail','conversion-usb-cal-restore-fail','conversion-usb-poison-result','conversion-stuck-abort','charger-semantic','adc-normal','adc-foreign','adc-ambiguous','adc-missing','adc-timeout','adc-denied','adc-poison','normal','alloc-fail','map-fail','fg-v1','fg-v2','fg-busy','fg-unknown','fg-grant','fg-active','fg-read-fail','fg-cleanup-fail','fg-dma-error',
                  'fg-foreign-identity','fg-readonly-pages','fg-local-preferred','fg-first-foreign',
                  'fg-no-memif-writer','fg-no-peek-writer','fg-ambiguous-writer','fg-poisoned-writer',
                  'fg-missing-identity','fg-missing-data','fg-observer-denied','fg-observer-timeout',

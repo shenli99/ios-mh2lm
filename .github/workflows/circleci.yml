@@ -76,7 +76,7 @@ jobs:
             fi
             require_marker() {
               if ! grep -Fq "$2" "$1"; then
-                echo "ERROR: required 0139..0160 marker missing from $1: $2" >&2
+                echo "ERROR: required 0139..0161 marker missing from $1: $2" >&2
                 exit 1
               fi
             }
@@ -141,6 +141,10 @@ jobs:
             require_marker xnu/iokit/Kernel/arm/SweetPmicPower.cpp 'next.ccCoherent = (next.valid & sb_cc_mask()) == sb_cc_mask()'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'battery-typec-cc'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'battery-typec-attach'
+            require_marker xnu/bsd/dev/sweet_spmi.c 'sweet_spmi_battery_irq_read(unsigned peripheral'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'sweet_spmi_battery_irq_read(route.per, reg, out)'
+            require_marker xnu/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp 'SWEET MUX: IRQ read failed route='
+            require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT IRQ: published input invalid; external/charging state withdrawn'
             require_marker xnu/bsd/dev/sweet_battery_runtime.h 'sb_apsd_event_fresh(const SweetBattSnapshot'
             require_marker xnu/iokit/Kernel/arm/SweetPmicPower.cpp 'next.apsdCoherent = sb_valid(next, SB_USB)'
             require_marker xnu/iokit/Kernel/arm/SweetBattery.cpp 'SWEET BATT INPUT TIME: v1'

@@ -1,5 +1,8 @@
 # Type-C CC/Rp 输入判断（0160）
 
+**当前：0120a9实测在Type-C IRQ配置读取处失败，未完成CC运行验收。** 0161已本地
+修正IRQ读取接口和失败发布，待新云编译/实机；实测与修复见文末。
+
 2026-11-07。补丁 `0160-mh2lm-typec-cc-input.patch` 接在0159之后。用户要求把
 CC判断加入现有电池输入逻辑；本轮完成事件接入、独立分类、撤销及诊断，仍用
 `--battery-evidence` 的 runtime1 观察镜像，尚无本轮设备结果。
@@ -180,3 +183,71 @@ firmware及ramdisk实际载荷一致，从最终boot内FAT回读kernel/ADT/TOML�
 `sweetlog-0120a9-battery-evidence.bin`即可。仍是输入判断观察，不能当作真实
 启充或PD验收；ADC超时未修复。本轮只核对、打包及记文档，未push/操作设备，
 尚无本轮设备结果或用户提供的CI run ID/构建日志。
+
+## 0120a9实测：IRQ配置读取被旧接口拒绝（0161修复）
+
+日志`sweetlog-0120a9-battery-evidence.bin`，SHA256：
+`4e788faad4f31f902caada05a38085c7586986090176806994b052b640370214`。
+SWEETLOG v1，4MiB ring，有效273261字节、flush60、3870行，未回卷且正文无NUL。
+用户观察：充电线松脱/重新插稳后图标保持，最终拔线图标也不消失。
+
+事实：
+
+- 29组遥测（初始1/保护tick28，约29.219秒），输入只读过初始化1次。
+  UI仅开机一次`external=1 capable=1 charging=0`发布，初始化配置`enable=0`，
+  无CONTROL，无任何插拔电池IRQ刷新或Type-C hit；不能将首次视觉变化归于
+  已收到新电池事件，也不能把图标当真实启充。
+- mux正确解析Type-C唯一EE0 IRQ-owned APID为**271**，六路元数据解析通过。
+  第一条`battery-typec-rid`配置失败，client attach返回`0xe00002ca`，
+  电池组回滚，battery标记IRQ失败并停止刷新。它发生在实际插拔验收之前。
+- 其他group没有全局停止：失败后ADC有2请求/2结果/3EOC；三键都有down/up，
+  触摸计数到74。旧battery日志“shared PMIC mux stopped; keys may also be
+  unavailable”混淆了consumer attach失败与provider整体失败，不能按字面定性。
+- 两次ACM configured，后段重接电脑反复reset而未再次configured，保留已知
+  gadget问题；ADC第二EOC超时这轮没有覆盖，不能宣称已修复。
+
+根因链（源码可确定，不需要再让用户测极性）：
+
+```text
+configureRoute(battery-typec-rid)
+  → readPeripheral(offset=0x11)
+  → sweet_spmi_read(SID2, 0x1511)
+  → 旧通用白名单不含peripheral 0x15，直接返回-1，未发起该SPMI命令
+  → 电池consumer整体attach失败/回滚
+  → failIrq停止采样，却只改健康标志，保留此前外接电源/充电相关布尔值
+  → 用户空间继续看到旧状态
+```
+
+这里不是APSD、CC极性或充电器协议导致的route失败。Type-C**状态**原本通过
+`sweet_spmi_charger_read()`精确表读取，初始化读取成功；漏掉的是新IRQ**配置**
+读取走了另一个旧接口。本地0160 mux测试把后者替换为可读模拟，没执行真实
+transport白名单，因此漏测此错误。
+
+### 0161的具体修改
+
+1. 新增`sweet_spmi_battery_irq_read(peripheral, offset, out)`，SID固定2；只准
+   CHGR/USBIN/TYPEC/FG-SOC（0x10/13/15/40）的0x11/12/13/15配置字节。
+   用现有observer/共享锁/timeout poison，失败不改输出。mux用此固定只读接口，
+   不扩大旧通用白名单或charger写表，不修改owner，不增加MMIO/轮询路径。
+2. IRQ读取失败增加ERROR，含route/SID/peripheral/offset/返回码；consumer故障
+   描述不再推断整个mux或按键停止。
+3. `failIrq()`停止运行后撤销输入/CC/APSD/测量有效性，通过原publish/updateStatus
+   清除modern及legacy的external/capable/charging/full标志。保留上次百分比，
+   ExternalValid/ChargeStateValid保持false，表示输入未知，不假造一次“已测到
+   拔线”。ADC consumer测量也撤销；已有硬件控制仍先走原disable流程。
+   这不是证明硬件已停充，不增加自动重试/轮询/静默fallback。
+
+本地：0161严格apply到0120a9实际云源码，与verify33文件一致；106个源码gate
+通过。SweetBattery/sweet_spmi/SweetSpmiInterruptMux ARM64交叉编译通过。
+ASAN/UBSAN测试直接连接真实`readPeripheral`和完整transport，覆盖旧API拒绝
+0x1511而新API可读、固定表拒绝、错误输出保留/超时poison；mux测试恢复旧API
+对Type-C的拒绝，新增Type-C读取失败仅撤销battery而保留keys；实际failIrq及
+publish测试确认现代/legacy/UI状态撤销、无新读取/重试；SPMI串行化、ADC
+consumer、board和日志回归通过。CI只追加gate，编译命令不变。
+
+打包器新增0161 marker，拒绝旧0120a9冒充修复版。仍用原`--battery-evidence`
+runtime1流程；用户push后下载新产物再打包，本轮无新boot或修复版实机结果。
+无需重跑0120a9；下一轮先看battery consumer attach成功，再看同一充电器
+松线/插稳/拔线是否有plugin/Type-C事件和UI发布。真实充电/PD仍未完成。
+分析底稿`scratch/artifact-0120a9/log-analysis.json`；修复/验证底稿
+`scratch/battery-cc-irq-fix/`。

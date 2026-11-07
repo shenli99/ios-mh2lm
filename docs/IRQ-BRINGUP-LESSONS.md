@@ -83,3 +83,22 @@ attach/drain 在窗口内重新开 IRQ。C 兼容 API 需先取得服务引用�
 的 include 顺序和 private 宏；本机适配单独记录。此次同一 IOKit 命令下
 修正前复现、修正后通过，才构成编译修复的证据。剥离 include 的 mock
 运行测试不能验证真实头文件依赖；本地交叉编译也不能替代原生完整链接。
+
+## 0120a9 / 0161：新IRQ路由必须核对真实transport权限链
+
+0160添加Type-C路由后，mux解析出APID271，但配置第一条route就失败。原因是
+`readPeripheral`仍用旧`sweet_spmi_read`，其软件白名单拒绝0x15；状态采样的
+另一个typed接口能读Type-C，不代表IRQ配置也能读。第一笔0x1511在软件校验
+阶段被拒绝，没有硬件事务，不能按极性/IRQ owner/充电器协议去试错。
+
+新增route前逐项核对：调用接口、SID/peripheral/offset、observer/writer/IRQ
+权限、锁和错误输出；实际transport与mux至少有一条贯通测试。旧mux模拟读取
+允许所有外设，掩盖了白名单限制。0161用固定SID2/外设/配置offset只读接口，
+不扩大通用原始访问范围；新增真实readPeripheral+完整SPMI代码联测，模拟层
+也恢复旧接口对Type-C的拒绝。
+
+consumer attach失败仅说明该订阅不可用，不能自动把日志写成共享mux或所有
+按键已停止。这轮失败后keys/ADC/touch仍工作。失败停止事件生成时，还必须
+通过正常IOPM发布撤销旧external/charging及legacy标志并标记input-invalid，
+不能只停线程、保留用户可见的有效旧状态。保留上次百分比不等于伪造新测量。
+完整证据与修复见[CC记录](BATTERY-TYPEC-CC.md)。
