@@ -93,3 +93,20 @@ SPMI串行化、日志分级和board startup回归通过。mock不能证明真�
 
 底稿：工作区 `scratch/battery-apsd-events/`，含base/edited/verify、cloud-apply、
 cloud-validation.json、测试输出及三个交叉编译结果。未push，无新设备结果。
+
+## 0120a8云产物与测试镜像
+
+用户已下载0120a8，33文件与最终0159验证树一致，95个源码gate通过，kernel包含
+0158/0159日志标记且manifest一致。已使用原battery-evidence档打包：
+
+`/home/shenli/work1/out-bs/boot-16k-0120a8-battery-evidence.img`
+
+大小35,667,968字节，SHA256
+`1b44219c37d3d4247582bcc19781109108b331b5f0deaa87082c42ef078b9481`。
+内核SHA256 `b5e1546a6d8207003b8a4812a9e17e9fbb01d4ee50130d1cff30f4c6d420de7e`。
+runtime1/IRQ4/ADCconv0，三键/触摸/USB IRQ及USB日志保留；未启充。ramdisk
+三件套回读与boot header实际载荷均已核验。用户自行fastboot，等待
+`sweetlog-0120a8-battery-evidence.bin`，按上面的电脑/5V电源流程测试；本轮无需
+baseline、dry或重新测ADC bring-up。尚无设备结果，不能称APSD/充电已修复验收。
+
+底稿工作区`scratch/artifact-0120a8/`；本轮未改驱动/CI、未push/操作设备。

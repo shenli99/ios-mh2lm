@@ -2,6 +2,33 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a8云产物已核对，0158/0159生效，boot已打包，等待实机日志。**
+
+实现提交775d009。实际0120a8 buildtree的33文件与最终verify逐字节一致，95个
+源码gate markers全部匹配；kernel manifest有效，包含APSD EVENT/TIME、mux
+pending/isolated日志、profile/input以及三键/USB/触摸IRQ/ACM标记。
+产物SHA256：kernel gz b56fe9ee1f0fb286c501d1563f5f2bea079cac1fa22a651c7f12e092e04d42e7；
+buildtree gz 5cf510d30a9332f3f039a94820bb5bd381811aea77d13f96481e67f5909f355c。
+实际内核SHA256 b5e1546a6d8207003b8a4812a9e17e9fbb01d4ee50130d1cff30f4c6d420de7e。
+
+镜像工作区out-bs/boot-16k-0120a8-battery-evidence.img，35,667,968字节，SHA256
+1b44219c37d3d4247582bcc19781109108b331b5f0deaa87082c42ef078b9481。
+原 --battery-evidence 单镜像；runtime1/IRQ4/ADCconv0，保留按键/触摸/USB IRQ与
+USB日志，仍未主动enable/rerun APSD、不启充。ramdisk内kernel/ADT/TOML回读
+一致，boot header v1的kernel blob/ramdisk实际切片与输入一致；无重复runtime参数。
+底稿工作区scratch/artifact-0120a8/{verification.json,source-compare.json,
+boot-verification.json,unixnu.toml,packaging.txt}。本轮只核对/打包/写文档，未push
+或fastboot，无新设备运行结果；没有用户提供的本轮云编译日志/CI run ID。
+
+NEXT：用户fastboot boot上述镜像。电脑USB启动桌面30秒→拔10秒→已知普通5V
+充电器20～30秒→拔10秒→电脑10秒，确认三键/触摸正常；导出
+sweetlog-0120a8-battery-evidence.bin并注明电源类型，无live也可。APSD重点观察
+1362 bit3 enabled、source事件0x10、DONE/result、一致性与独立source时间；不要
+把plugin读取到DONE解释为本次检测完成。继续观察0158 pending route及group。
+第二次电脑枚举失败仍按已知gadget问题保留证据，不要求反复插拔到成功。
+
+### Previous 0159 implementation handoff (superseded)
+
 **CURRENT: 0159 APSD事件来源/时效修复本地完成；用户不单独push0158，一起提交。**
 
 更正前次对话：0151已实现battery-source（SID2/PID13/bit6）、SOURCE事件位及
