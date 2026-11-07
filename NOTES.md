@@ -2,6 +2,35 @@
 
 ## Agent handoff / active work (2026-11-07, latest)
 
+**CURRENT: 0120a11云产物已核对，0162输入分类测试boot已打包，待实机日志。**
+
+驱动实现40e2e91，CI配置修复2ecfcef，GitHub XNU手动触发c239241。
+实际0120a11 buildtree的33文件与battery-cc-lg-sink/verify逐字节一致，106个
+现有CI源码gate通过；kernel manifest有效，新增CC ROLE/LG-SMB5分类及既有
+CC/APSD/mux/三键/USB/touch/ACM标记完整。buildtree gz SHA256
+f13aa3b0b6da1e687f8e4e8ff79b9855dde62121e07a3ee3b5310396310c5da2；kernel gz
+3e2c7d106788b5322b9d5042bb560c5364eb448cc28c78b3f66664d83ec024fe；实际kernel
+0f9f352da3ffed32066605451ec1f063d1c2add6cc0f7d94fb6f3e58237e2ecc。
+
+镜像out-bs/boot-16k-0120a11-battery-evidence.img，35,667,968字节，SHA256
+41b0ceab10ab97f6767e1fd87556b0238387652a15e46bd5a4504aed15b055c5。
+原--battery-evidence，runtime1/IRQ4/ADCconv0，保留三种IRQ与USB日志，不启充。
+boot header v1 firmware/ramdisk切片与输入一致，回读FAT中kernel/ADT/TOML一致，
+参数无重复。底稿scratch/artifact-0120a11，verification.json/source-compare.json/
+boot-verification.json及验证脚本、打包记录。本轮只核对/打包/记录，未改驱动或
+任何CI配置，未push/操作设备。没有新实机结果，未提供CI run ID或构建日志。
+
+NEXT：用户fastboot boot上述镜像。电脑启动桌面约30秒→拔10秒→当前电源稳定
+约30秒→拔10秒→电脑约10秒；确认图标插拔变化及按键/触摸，记录线材和电源。
+导出sweetlog-0120a11-battery-evidence.bin，持久日志即可。关注CC role/observed/
+reasons/qualified、INPUT CAP及拔线撤销；沿用原电源若仍Rp3A/misc39，应看到
+role1/observed1/reasons0和事件有效期内kind2/max3000。misc bit4清除亦正常，
+不强求observed1或APSD DCP。3秒观测期限仍在，charging预期0，不是真实启充。
+无需重跑baseline或0120a10；长期input provider、ADC故障取证及身份/parallel/
+watchdog互锁仍待后续，不以本轮分类成功代替这些依赖。
+
+### Previous CI/manual-trigger handoff (superseded)
+
 用户要求将GitHub Actions的XNU构建改为手动：已删除`.github/workflows/xnu.yml`
 的push触发，仅保留workflow_dispatch及原有手动参数；构建job和CircleCI配置
 未改。YAML解析与结构比较通过。修改尚未push，推送后生效；未在线禁用整个

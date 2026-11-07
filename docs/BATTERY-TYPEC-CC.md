@@ -1,6 +1,7 @@
 # Type-C CC/Rp 输入判断（0160～0162）
 
-**当前：0162已按LG SMB5修正sink Rp误拒绝，本地验证通过，待新云产物。**
+**当前：0120a11云源码已确认包含0162修复，测试boot已打包，待实机日志。**
+保留三种IRQ驱动及USB日志，仍为runtime1输入观测，不启充。
 40e2e91新增的CI marker检查因未转义`<<`破坏CircleCI模板解析，已在后续修正中
 撤回；CI文件恢复为其父提交原样，驱动修复及本地/打包器校验保留，详见文末。
 先按角色解释Rp，misc bit4保留为诊断观测；USBIN OV/UV独立拒绝。0120a10的7笔
@@ -461,3 +462,29 @@ qualified是短期观测，超过3秒没有新的有效证据会过期，不应�
 没有撤销0162驱动修复或打包器CC ROLE检查。恢复后检查所有模板仅为原有合法
 pipeline.parameters引用，并提取各run命令验证bash语法；未在线重跑CircleCI，
 无新产物。后续相同类型的marker检查在本地/打包阶段完成，不再修改既有CI。
+
+## 0120a11：0162云产物核对与测试boot
+
+实际buildtree的33个文件与`scratch/battery-cc-lg-sink/verify/xnu`逐字节一致，
+106个原有源码gate通过。kernel manifest有效，新CC ROLE/LG-SMB5标记、既有
+APSD/CC/IRQ/USB ACM标记均存在。本轮未修改任何CI配置或驱动源码。
+
+- buildtree gz SHA256：`f13aa3b0b6da1e687f8e4e8ff79b9855dde62121e07a3ee3b5310396310c5da2`。
+- kernel gz SHA256：`3e2c7d106788b5322b9d5042bb560c5364eb448cc28c78b3f66664d83ec024fe`。
+- kernel SHA256：`0f9f352da3ffed32066605451ec1f063d1c2add6cc0f7d94fb6f3e58237e2ecc`。
+
+镜像：`/home/shenli/work1/out-bs/boot-16k-0120a11-battery-evidence.img`，
+35,667,968字节，SHA256：
+`41b0ceab10ab97f6767e1fd87556b0238387652a15e46bd5a4504aed15b055c5`。
+原`--battery-evidence`参数，runtime1/IRQ4/ADCconv0；三键、触摸、USB IRQ及
+USB日志保留，不启充。验证boot header v1与firmware/ramdisk实际切片一致，
+从boot内FAT回读kernel/ADT/TOML匹配，参数无重复。
+底稿`scratch/artifact-0120a11/`，无新设备结果或提供的CI run ID/构建日志。
+
+用户自行fastboot boot。电脑桌面约30秒→拔10秒→当前电源约30秒→拔10秒→
+电脑约10秒，记录线材/电源，确认插拔图标和按键/触摸。持久日志
+`sweetlog-0120a11-battery-evidence.bin`足够。先看consumer/路由正常，再看稳定
+sink CC分类、短期能力依据及拔线撤销。若沿用电源仍报Rp3A/misc39，预期事件
+有效期内role1/observed1/reasons0/qualified1，kind2/max3000；如果misc bit4
+清除，observed0同样正常，不要求它必须保持错误观测。APSD可FLOAT，3秒观测
+到期与真实charging0仍为现有设计边界，不重复baseline或旧镜像。
