@@ -9,7 +9,8 @@ agent 按 F0→F7 顺序做。每步通过验收后，在本文 §7“进度记�
 再进入下一步。不跳步；每步的新行为都由 boot-arg 打开，默认路径在该步验收前不变。
 
 0121 结论与证据见 [F0 实测报告](FRAMEBUFFER-F0-0121.md)：普通档电池/按键 group 先后被 mux
-隔离，解释两条唤醒来源失效；preserveoff 实际保留像素，但未解决全部缺时间现象。
+隔离，解释两条唤醒来源失效；该独立问题转入 [BUG-002](BUGS.md)，不自动增加显示步骤或验收前置。
+preserveoff 实际保留像素，但未解决全部缺时间现象。
 0170 不能核验时钟区域像素或 TE 频率；SMMU stream 配置为 TRANS/CB2，F4 前须补转换核对。
 
 ## 1. 现状（0120a18 buildtree 源码 + 0120a17 日志）
@@ -350,7 +351,8 @@ SSPP 格式/裁剪/地址状态、INTF 计数差值和 apps SMMU SID 0x800 匹�
 - CA surface：2/3，1125×2436 BGRA、bpr4608、alloc11239424、cache 属性 0x400；完整键表待补。
 - 显示根因：preserveoff 有效保留像素，但不足以修复缺时间/滑条重叠，具体根因未定。
 - SSPP 格式和 SMMU stream 已读；TE 频率、CB2 有效转换/映射范围待补，不能假定 bypass。
-- mux 故障：普通档 USBIN group1 → power group0 被隔离；独立跟踪持续 pending 原因。
+- mux 故障：普通档 USBIN group1 → power group0 被隔离；由 [BUG-002](BUGS.md) 独立跟踪，
+  不将故障后的无唤醒当作显示路径故障证据。
 - F5 缓存方案对比：未开始。
 
 ## 7. 进度记录

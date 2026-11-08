@@ -26,6 +26,9 @@ boot.img（Android header v1, page 2048）
 分工：**用户**负责 push、下载 CI 产物、所有 fastboot 操作和 sudo；**agent** 负责补丁、本地验证、
 核对产物、打包、写记录。调试期只 `fastboot boot`；刷分区前说明风险并得到确认。
 
+已实现功能在后续使用中暴露的独立问题统一记入 [Bug 台账](BUGS.md)，
+不自动作为当前主计划的新步骤或前置测试。
+
 ## 1. 写补丁（agent）
 
 1. 基线：从最新 `logs/xnu-buildtree-<最新LABEL>.gz` 解出相关文件当 `base/`，复制一份为 `edited/`，

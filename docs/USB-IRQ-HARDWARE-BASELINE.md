@@ -65,7 +65,7 @@ USB gadget 重连缺陷。并行 IRQ 测试保持线缆连接，观察 USB IRQ �
 USB IRQ 至少 512 次、实时 CDC-ACM TX 超过 214 次、三键各有真实
 IRQ 与 HID 按下/松开，均无回退。一次音量上松开时 PMIC PON 读取
 失败，但 GPIO 状态与 HID 松开正常，见 `NOTES.md`。后续单独处理
-重连状态清理。
+重连状态清理，统一跟踪于 [BUG-001](BUGS.md#bug-001usb-多次插拔后无法识别)。
 
 ## 当前无需单独测试
 
