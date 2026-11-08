@@ -2,7 +2,13 @@
 
 ## Agent handoff / active work (2026-11-08, latest)
 
-**CURRENT: 0169（FG温度变化IRQ+电源转换证据日志）本地完成，待用户push→CircleCI→实机。**
+**CURRENT: 0120a18（fc876d3/0169）云产物核对通过，两档boot已打包回读，待用户测tempirq档。**
+logs/xnu-buildtree-0120a18.gz SHA256 2dcb6e19…97ec23、xnu-kernel-0120a18.gz 4c0ff197…c97e7e；34源码与
+scratch/battery-0169/verify逐字节一致，114个require_marker通过；kernel 61d3cbda702d7218d1e32de513cd27728f121bab63812e4336501e8a3c645e59
+含TEMP IRQ v1/battery-temp-delta/BASIC POWER v1。无CI run ID，未查全量警告。out-bs/boot-16k-0120a18-
+battery-basic-charge.img（1dc8ce6b…6c1f）与-tempirq.img（93340afc…ed7a），各35,667,968字节，回读一致，
+参数仅差sweetbatttempirq=1。底稿scratch/artifact-0120a18。
+（以下为0169实现记录）
 xnu/patches/0169-mh2lm-battery-temp-irq.patch（4文件）；测试/CI/打包脚本已更新。12个host测试全过，
 7文件交叉编译rc0，strict apply逐字节一致（scratch/battery-0169）。NEXT：用户push；下载0120a18产物后
 `tools/mk-mh2lm-event-matrix.sh <kernel> 0120a18 --battery-basic-charge`，得到普通档和-tempirq档。
