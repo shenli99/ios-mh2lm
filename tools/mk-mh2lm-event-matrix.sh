@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0]\n' "$0" >&2
 	exit 2
 fi
 
@@ -37,6 +37,8 @@ case "$KEY_IRQ_PROFILE" in
 		KEY_IRQ_PROFILE='--battery-evidence'
 		;;
 	--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-basic-charge|--board-startup)
+		;;
+	--framebuffer-f0)
 		;;
 	*)
 		printf 'unknown optional profile: %s\n' "$KEY_IRQ_PROFILE" >&2
@@ -113,7 +115,7 @@ if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-ir
 			exit 1
 		fi
 	done
-elif grep -Fqa 'SWEET KEYS IRQ: three routes active; IRQ-only' \
+elif [ "$KEY_IRQ_PROFILE" != '--framebuffer-f0' ] && grep -Fqa 'SWEET KEYS IRQ: three routes active; IRQ-only' \
     "$TMPDIR/kernel.development.mh2lm"; then
 	printf 'fixed IRQ kernel requires --irq-only, --battery-irq, --battery-charge-check, --battery-transport, --battery-runtime, --battery-adc5-conversion, --battery-adc5-consumer, --battery-evidence, --battery-basic-charge or --board-startup packaging profile\n' >&2
 	exit 1
@@ -250,6 +252,16 @@ if [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 	done
 fi
 
+if [ "$KEY_IRQ_PROFILE" = '--framebuffer-f0' ]; then
+	for marker in 'SWEET FB TRACE: enabled' 'SWEET DISP: smmu id0' \
+	    'SWEET SURF: %s create id %u parent %u'; do
+		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+			printf 'kernel artifact lacks framebuffer F0 marker: %s\n' "$marker" >&2
+			exit 1
+		fi
+	done
+fi
+
 make_profile() {
 	local name=$1
 	local title=$2
@@ -287,6 +299,20 @@ make_profile() {
 	file "$image"
 	sha256sum "$image"
 }
+
+if [ "$KEY_IRQ_PROFILE" = '--framebuffer-f0' ]; then
+	# F0 is read-only display evidence. The two images differ only in the
+	# existing display-off behavior so the black-block cause can be separated
+	# from the preserve-off experiment without another kernel build.
+	make_profile fb-trace \
+		"LG G8X - XNU framebuffer F0 trace (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1 sweetbattirq=4 sweetbattruntime=3 sweetfbtrace=1 sweetdispprobe=1"
+	make_profile fb-trace-preserveoff \
+		"LG G8X - XNU framebuffer F0 preserve-off (${LABEL})" \
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1 sweetbattirq=4 sweetbattruntime=3 sweetfbtrace=1 sweetdispprobe=1 sweetfbpreserveoff=1"
+	printf 'kernel SHA256: %s\ncreated framebuffer F0 trace and preserve-off profiles for %s\n' "$KERNEL_SHA256" "$LABEL"
+	exit 0
+fi
 
 if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--battery-transport' ] || [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-consumer' ] || [ "$KEY_IRQ_PROFILE" = '--battery-evidence' ] || [ "$KEY_IRQ_PROFILE" = '--battery-basic-charge' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 	# Fixed IRQ images retain the validated PM8150B gauge/UI path. Without

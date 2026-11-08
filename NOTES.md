@@ -16,10 +16,13 @@
   0120a18 tempirq 档原样参数（runtime3 充电、温度中断、USB ACM、三键）。之后 Restart/Power off/Tools。
 - 镜像回读：header v1/page 2048、kernel 段解压后 = BootShim + RELEASE FD、DTB 相同、ramdisk 内 4 个文件逐字节一致。
 
-**并行线：显示/面板重构计划（第二版）已写好，F0 待实现。** 见 docs/FRAMEBUFFER-PANEL-PLAN.md：
+**并行线：显示/面板重构计划（第二版）已写好，F0 取证补丁 0170 已准备，待云编译/上机。** 见 docs/FRAMEBUFFER-PANEL-PLAN.md：
 F0 取证→F1 SweetMDSS IOService 分层→F2 DCS真关屏→F3 MDSS RD_PTR vsync→F4 自有扫描缓冲+SSPP硬件裁剪+
 双缓冲翻页→F5 CA surface 直接扫描（cache clean，零拷贝）→F6 可选kickoff→F7 IOPM/panic/清理。
-接手 agent：从 F0 开始，按“每步通用要求”做，一步一个补丁（从0170起），通过验收后更新该文档§7和本段。
+接手 agent：0170 只做只读取证；通过验收后再更新该文档§6/§7和本段，不能提前进入 F1。
+打包脚本新增 `--framebuffer-f0`，同一内核产出 `fb-trace`、`fb-trace-preserveoff` 两档；
+两档均保留已验证的按键/USB/触摸/电池 IRQ 与 runtime3 参数，后者额外设置
+`sweetfbpreserveoff=1`。
 已复核工作区根目录 `docs/panel.md`：量产节点为 Tianma/R66456A 1080×2340@60、RGB888、DSI0
 四 lane command mode，TE=GPIO8，ON/OFF DCS 顺序必须原样保留；vendor payload 仍是 opaque。
 另外，Android DTS 的 `splash_region`（0x9c000000/36 MiB）与 0120a17 运行时

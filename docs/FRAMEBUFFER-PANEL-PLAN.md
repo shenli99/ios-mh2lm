@@ -1,6 +1,6 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**状态（2026-11-08，第二版）：计划已定，F0 未开始。** 本文是 `IRQ-FRAMEBUFFER-PLAN.md`
+**状态（2026-11-08，第二版）：0170 已准备，待云编译/上机验收。** 本文是 `IRQ-FRAMEBUFFER-PLAN.md`
 “大目标二”的实施文档。第二版目标从“修好接手的 ABL framebuffer”提升为：**驱动自己
 分配和管理扫描缓冲（simplefb 式），硬件双缓冲翻页，CoreAnimation 渲染的 surface
 直接被 MDP 扫描，消除每帧 CPU 拷贝。**
@@ -304,7 +304,13 @@ autorefresh 且画面不冻结。
 - 不把电池/充电 UI 问题当显示问题修。
 - 所有设备操作 `fastboot boot`；不写盘。
 
-## 6. F0 取证结果（待填）
+## 6. F0 取证结果（0170 待上机填充）
+
+0170 只增加只读取证，不改变显示行为。`sweetfbtrace=1` 记录选择子、最近 swap、
+off/on 前后扫描区与 source surface 稀疏校验和；`sweetdispprobe=1` 的显示探针增加
+SSPP 格式/裁剪/地址状态、INTF 计数差值和 apps SMMU SID 0x800 匹配信息。
+打包脚本 `--framebuffer-f0` 会从同一内核产物生成 `fb-trace` 与
+`fb-trace-preserveoff` 两档，后者只额外设置 `sweetfbpreserveoff=1`。
 
 - 选择子使用表：
 - CA surface 创建属性：
@@ -316,4 +322,4 @@ autorefresh 且画面不冻结。
 
 | 步骤 | 补丁 | 产物/日志 | 结论 |
 |---|---|---|---|
-| F0 | — | — | 未开始 |
+| F0 | 0170 | 待云编译/上机 | 补丁和两档打包 profile 已准备；尚无实机结论 |

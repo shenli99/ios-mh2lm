@@ -1,0 +1,328 @@
+# mh2lm framebuffer F0: read-only display evidence (0170)
+# sweetfbtrace=1 enables selector/swap/surface/checksum tracing; no writes are added.
+# Display-probe SMMU reads are status/config reads only and preserve the existing clock gate.
+
+--- a/bsd/dev/sweet_display_probe.c
++++ b/bsd/dev/sweet_display_probe.c
+@@ -49,8 +49,12 @@
+ #define CBCR_OFF        (1u << 31)
+ #define MDP_PA          0x0ae00000u
+ #define DSI0_PA         0x0ae94000u
++#define SMMU_PA         0x15000000u
++#define SMMU_SID        0x0800u
+ 
+ static int dp_chan;
++static uint32_t dp_last_frame[2];
++static uint32_t dp_last_line[2];
+ 
+ /* Register windows, mapped once; dp_lock serialises every DSI write. */
+ static LCK_GRP_DECLARE(dp_grp, "sweet_disp");
+@@ -58,7 +62,7 @@
+ static int dp_mapped;           /* 0 not yet, 1 mapped, -1 failed */
+ static int dp_failed;           /* consecutive failed DCS writes */
+ static unsigned dp_logged;
+-static vm_offset_t dp_gcc, dp_dispcc, dp_sspp, dp_ctl, dp_intf1, dp_intf2, dp_dsi;
++static vm_offset_t dp_gcc, dp_dispcc, dp_sspp, dp_ctl, dp_intf1, dp_intf2, dp_dsi, dp_smmu;
+ 
+ /* Caller holds dp_lock. */
+ static int
+@@ -72,7 +76,10 @@
+ 		dp_intf1 = ml_io_map(MDP_PA + 0x6b800u, 0x800);
+ 		dp_intf2 = ml_io_map(MDP_PA + 0x6c000u, 0x800);
+ 		dp_dsi = ml_io_map(DSI0_PA, 0x400);
+-		dp_mapped = (dp_gcc && dp_dispcc && dp_sspp && dp_ctl && dp_intf1 && dp_intf2 && dp_dsi) ? 1 : -1;
++		dp_smmu = ml_io_map(SMMU_PA, 0x2000);
++		/* SMMU is optional evidence: a mapping failure must not disable display DCS. */
++		dp_mapped = (dp_gcc && dp_dispcc && dp_sspp && dp_ctl && dp_intf1 && dp_intf2 &&
++		    dp_dsi) ? 1 : -1;
+ 		if (dp_mapped < 0) {
+ 			printf("SWEET DISP: mapping failed\n");
+ 		}
+@@ -109,7 +116,7 @@
+ 
+ static void
+ dp_probe(unsigned pass, vm_offset_t gcc, vm_offset_t dispcc, vm_offset_t sspp, vm_offset_t ctl,
+-    vm_offset_t intf1, vm_offset_t intf2, vm_offset_t dsi)
++    vm_offset_t intf1, vm_offset_t intf2, vm_offset_t dsi, vm_offset_t smmu)
+ {
+ 	/*
+ 	 * Same gate as the K20 Pro code (raphael_display_init), without its enable
+@@ -129,9 +136,12 @@
+ 		printf("SWEET DISP: dispcc +0x2080 clock off: no MDSS read\n");
+ 		return;
+ 	}
+-	/* VIG0 source: +0x00 size, +0x14 plane-0 address, +0x24 stride (K20 Pro checks these). */
+-	printf("SWEET DISP: vig0 size %#x addr %#x stride %#x (expect %#x %#x %#x)\n",
+-	    dp_rd(sspp, 0x00), dp_rd(sspp, 0x14), dp_rd(sspp, 0x24),
++	/* VIG0 source: read-only geometry, format and address latch. */
++	printf("SWEET DISP: vig0 size %#x xy %#x out %#x addr %#x stride %#x fmt %#x unpack %#x op %#x addr-status %#x\n",
++	    dp_rd(sspp, 0x00), dp_rd(sspp, 0x08), dp_rd(sspp, 0x0c), dp_rd(sspp, 0x14),
++	    dp_rd(sspp, 0x24), dp_rd(sspp, 0x30), dp_rd(sspp, 0x34), dp_rd(sspp, 0x38),
++	    dp_rd(sspp, 0x70));
++	printf("SWEET DISP: vig0 expect size %#x addr %#x stride %#x\n",
+ 	    (uint32_t)(SWEET_DEV_FB_H << 16 | SWEET_DEV_FB_W), (uint32_t)SWEET_DEV_FB_PA,
+ 	    (uint32_t)SWEET_DEV_FB_STRIDE);
+ 	printf("SWEET DISP: ctl0 flush %#x start %#x\n", dp_rd(ctl, 0x18), dp_rd(ctl, 0x1c));
+@@ -141,6 +151,28 @@
+ 		printf("SWEET DISP: intf%u te-en %#x cfg %#x height %#x init %#x count %#x line %#x auto %#x frame %#x\n",
+ 		    i + 1, dp_rd(p, 0x284), dp_rd(p, 0x288), dp_rd(p, 0x28c), dp_rd(p, 0x294),
+ 		    dp_rd(p, 0x298), dp_rd(p, 0x2b0), dp_rd(p, 0x2b4), dp_rd(p, 0xac));
++		uint32_t frame = dp_rd(p, 0x2b4), line = dp_rd(p, 0x2b0);
++		if (pass != 0) {
++			printf("SWEET DISP: intf%u delta frame %#x line %#x\n", i + 1, frame - dp_last_frame[i], line - dp_last_line[i]);
++		}
++		dp_last_frame[i] = frame; dp_last_line[i] = line;
++	}
++	/* Read-only ARM SMMU v2 stream matching. Never write or probe a gated status FIFO. */
++	if (smmu != 0) {
++		uint32_t id0 = dp_rd(smmu, 0x20), id1 = dp_rd(smmu, 0x24);
++		uint32_t nsmr = id0 & 0xffu;
++		printf("SWEET DISP: smmu id0 %#x id1 %#x num-smr=%u sid=%#x\n", id0, id1, nsmr, SMMU_SID);
++		for (uint32_t i = 0; i < nsmr && i < 256; i++) {
++			uint32_t smr = dp_rd(smmu, 0x800u + i * 4u);
++			uint32_t smask = (smr >> 16) & 0x7fffu;
++			if ((smr & 0x80000000u) && ((smr & 0x7fffu & ~smask) == (SMMU_SID & ~smask))) {
++				uint32_t s2cr = dp_rd(smmu, 0xc00u + i * 4u);
++				printf("SWEET DISP: smmu match idx=%u smr=%#x s2cr=%#x type=%u cb=%u\n",
++				    i, smr, s2cr, (s2cr >> 16) & 3u, s2cr & 0xffu);
++			}
++		}
++	} else {
++		printf("SWEET DISP: smmu mapping unavailable\n");
+ 	}
+ 	/* DSI0: +0x004 ctrl (mode bits), +0x008 status, +0x03c cmd DMA ctrl, +0x04c length,
+ 	 * +0x084 trigger, +0x15c embedded cmd FIFO ctrl (the K20 Pro code reads these). */
+@@ -312,7 +344,8 @@
+ 	lck_mtx_lock(&dp_lock);
+ 	if (dp_map() == 0) {
+ 		for (unsigned pass = 0; pass < 3; pass++) {
+-			dp_probe(pass, dp_gcc, dp_dispcc, dp_sspp, dp_ctl, dp_intf1, dp_intf2, dp_dsi);
++			dp_probe(pass, dp_gcc, dp_dispcc, dp_sspp, dp_ctl, dp_intf1, dp_intf2,
++			    dp_dsi, dp_smmu);
+ 			if (pass < 2) {
+ 				lck_mtx_unlock(&dp_lock);
+ 				dp_wait(1000);
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -707,9 +707,12 @@
+ 		char name[32];
+ 		proc_selfname(name, sizeof(name));
+ 		sweet_surface_creates_logged++;
+-		IOLog("SWEET SURF: %s create id %u %ux%u fmt 0x%x bpe %u bpr %u planes %u size %u keys %u -> 0x%x\n",
+-		    name, s->id, s->width, s->height, s->pixelFormat, s->bytesPerElement,
+-		    s->bytesPerRow, s->planeCount, s->allocSize, props->getCount(), ret);
++		uint32_t displayable = props->getObject("IOSurfaceIsDisplayable") != NULL;
++		uint32_t gpu = props->getObject("IOSurfaceIsGPUAddressable") != NULL;
++		IOLog("SWEET SURF: %s create id %u parent %u %ux%u fmt 0x%x bpe %u bpr %u planes %u size %u alloc %u cache %#x offset %u displayable=%u gpu=%u keys %u -> 0x%x\n",
++		    name, s->id, s->parentID, s->width, s->height, s->pixelFormat, s->bytesPerElement,
++		    s->bytesPerRow, s->planeCount, s->allocSize, s->allocSize, s->cacheMode,
++		    s->offset, displayable, gpu, props->getCount(), ret);
+ 	}
+ 	props->release();
+ 	if (ret != kIOReturnSuccess) {
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -82,6 +82,36 @@
+ #define SWEET_FB_LOGICAL_W              1125
+ #define SWEET_FB_LOGICAL_H              2436
+ #define SWEET_FB_FORMAT_BGRA            0x42475241
++#define SWEET_FB_TRACE_SLOTS            4
++#define SWEET_FB_TRACE_MAX_SELECTOR     32
++
++typedef struct {
++	uint32_t swapID;
++	uint32_t mask;
++	uint32_t surface[SWEET_FB_LAYERS];
++	int32_t rect[SWEET_FB_LAYERS][4];
++} SweetFBTraceSwap;
++
++static uint32_t sweet_fb_selector_trace[64];
++
++static uint64_t
++sweet_fb_trace_hash(uintptr_t base, uint32_t height, uint32_t stride)
++{
++	uint64_t hash = 1469598103934665603ULL;
++	if (base == 0 || height == 0 || stride == 0) {
++		return 0;
++	}
++	uint32_t first = height > 1400 ? 900 : 0;
++	uint32_t last = height > 1400 ? 1400 : height;
++	for (uint32_t y = first; y < last; y += 8) {
++		volatile const uint8_t *row = (volatile const uint8_t *)(base + (uint64_t)y * stride);
++		for (uint32_t x = 0; x < stride; x += 64) {
++			hash ^= row[x];
++			hash *= 1099511628211ULL;
++		}
++	}
++	return hash;
++}
+ 
+ class IOMobileFramebuffer : public IOService {
+ 	OSDeclareDefaultStructors(IOMobileFramebuffer);
+@@ -118,7 +148,13 @@
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
+ 	bool          fPreserveOff;   /* leave scanout contents intact while off */
++	bool          fTrace;
++	bool          fTracePowerAfter;
++	bool          fTraceOffAfter;
++	SweetFBTraceSwap fTraceSwaps[SWEET_FB_TRACE_SLOTS];
++	uint32_t      fTraceSwapNext;
+ 
++	void traceFrame(const char *phase);
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void addClient(IOMobileFramebufferUserClient *client);
+ 	void removeClient(IOMobileFramebufferUserClient *client);
+@@ -368,6 +404,12 @@
+ 	int preserveOff = 0;
+ 	(void)PE_parse_boot_argn("sweetfbpreserveoff", &preserveOff, sizeof(preserveOff));
+ 	fPreserveOff = preserveOff != 0;
++	int trace = 0;
++	(void)PE_parse_boot_argn("sweetfbtrace", &trace, sizeof(trace));
++	fTrace = trace != 0;
++	if (fTrace) {
++		IOLog("SWEET FB TRACE: enabled; reads only, selector limit=%u\n", SWEET_FB_TRACE_MAX_SELECTOR);
++	}
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+@@ -422,6 +464,10 @@
+ 		if (!preserve && step <= 6) {
+ 			fb->fFadeStep = step + 1;
+ 		}
++		bool traceOff = fb->fTraceOffAfter && (preserve || step >= 6);
++		if (traceOff) {
++			fb->fTraceOffAfter = false;
++		}
+ 		IOLockUnlock(fb->fLock);
+ 		if (!preserve && step <= 6) {
+ 			for (uint32_t y = 0; y < fb->fHeight; y++) {
+@@ -431,6 +477,9 @@
+ 				}
+ 			}
+ 		}
++		if (traceOff) {
++			fb->traceFrame("off-after");
++		}
+ 		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 		return;
+ 	}
+@@ -447,6 +496,14 @@
+ 	if (rec != NULL) {
+ 		fb->present(rec);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
++		bool traceOn = false;
++		IOLockLock(fb->fLock);
++		traceOn = fb->fTracePowerAfter;
++		fb->fTracePowerAfter = false;
++		IOLockUnlock(fb->fLock);
++		if (traceOn) {
++			fb->traceFrame("on-after");
++		}
+ 	}
+ 	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ }
+@@ -494,6 +551,19 @@
+ 	IOLockLock(fLock);
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+ 	fDirty = true;
++	if (fTrace) {
++		SweetFBTraceSwap *t = &fTraceSwaps[fTraceSwapNext++ % SWEET_FB_TRACE_SLOTS];
++		bzero(t, sizeof(*t));
++		t->swapID = get32(rec, 0x50);
++		t->mask = get32(rec, 0x104);
++		for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
++			t->surface[layer] = get32(rec, 0x54 + 4 * layer);
++			const uint8_t *b = rec + 0xc4 + 16 * layer;
++			for (uint32_t n = 0; n < 4; n++) {
++				t->rect[layer][n] = (int32_t)get32(b, n * 4);
++			}
++		}
++	}
+ 	IOLockUnlock(fLock);
+ 	if ((++sweet_fb_swap_count % 1000) == 0) {
+ 		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
+@@ -501,6 +571,43 @@
+ }
+ 
+ void
++AppleCLCD::traceFrame(const char *phase)
++{
++	if (!fTrace) {
++		return;
++	}
++	uint64_t panel = sweet_fb_trace_hash(fPixels, fHeight, fRowBytes);
++	SweetFBTraceSwap local[SWEET_FB_TRACE_SLOTS];
++	uint32_t next;
++	IOLockLock(fLock);
++	memcpy(local, fTraceSwaps, sizeof(local));
++	next = fTraceSwapNext;
++	IOLockUnlock(fLock);
++	IOLog("SWEET FB TRACE: %s panel-hash=%llx swap-next=%u\n", phase, panel, next);
++	for (uint32_t n = 0; n < SWEET_FB_TRACE_SLOTS; n++) {
++		SweetFBTraceSwap *t = &local[n];
++		IOLog("SWEET FB TRACE: %s recent[%u] swap=%u mask=%#x ids=%u,%u,%u,%u r0=%d,%d,%d,%d\n",
++		    phase, n, t->swapID, t->mask, t->surface[0], t->surface[1],
++		    t->surface[2], t->surface[3], t->rect[0][0], t->rect[0][1],
++		    t->rect[0][2], t->rect[0][3]);
++	}
++	uint32_t id = 0;
++	for (uint32_t n = 0; n < SWEET_FB_TRACE_SLOTS; n++) {
++		if (local[n].mask & 1u) {
++			id = local[n].surface[0];
++		}
++	}
++	SweetSurface *s = id != 0 ? sweet_surface_copy(id) : NULL;
++	if (s != NULL) {
++		uint64_t source = sweet_fb_trace_hash(s->kernelAddress(), s->height, s->bytesPerRow);
++		IOLog("SWEET FB TRACE: %s source-surface=%u hash=%llx %ux%u fmt=%#x bpr=%u alloc=%u cache=%#x offset=%u\n",
++		    phase, id, source, s->width, s->height, s->pixelFormat, s->bytesPerRow,
++		    s->allocSize, s->cacheMode, s->offset);
++		s->release();
++	}
++}
++
++void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+ 	uint32_t mask = get32(rec, 0x104);
+@@ -727,11 +834,18 @@
+ 	case kSweetFBRequestPowerChange:
+ 		if (args->scalarInputCount >= 1) {
+ 			bool off = args->scalarInput[0] == 0;
++			if (off && fFB->fTrace) {
++				fFB->traceFrame("off-before");
++			}
+ 			IOLockLock(fFB->fLock);
+ 			if (off != fFB->fPowerOff) {
+ 				fFB->fPowerOff = off;
+ 				fFB->fFadeStep = 0;
+ 				fFB->fDirty = true;     /* on: redraw the latest frame */
++				if (fFB->fTrace) {
++					if (off) fFB->fTraceOffAfter = true;
++					else fFB->fTracePowerAfter = true;
++				}
+ 			}
+ 			IOLockUnlock(fFB->fLock);
+ 			IOLog("SWEET FB: display %s\n", off ? "off" : "on");
+@@ -758,6 +872,20 @@
+ 		    args->scalarInputCount, args->structureInputSize,
+ 		    args->scalarOutputCount, args->structureOutputSize, ret);
+ 	}
++	if (fFB->fTrace && selector < 64) {
++		uint32_t n = OSIncrementAtomic((volatile SInt32 *)&sweet_fb_selector_trace[selector]);
++		if (n <= SWEET_FB_TRACE_MAX_SELECTOR) {
++			char name[32];
++			proc_selfname(name, sizeof(name));
++			uint64_t a0 = args->scalarInputCount > 0 ? args->scalarInput[0] : 0;
++			uint64_t a1 = args->scalarInputCount > 1 ? args->scalarInput[1] : 0;
++			uint64_t a2 = args->scalarInputCount > 2 ? args->scalarInput[2] : 0;
++			uint64_t a3 = args->scalarInputCount > 3 ? args->scalarInput[3] : 0;
++			uint32_t b0 = args->structureInput != NULL && args->structureInputSize >= 4 ? get32((const uint8_t *)args->structureInput, 0) : 0;
++			IOLog("SWEET FB TRACE: sel=%u n=%u proc=%s a=%llx,%llx,%llx,%llx struct0=%#x size=%u rc=0x%x\n",
++			    selector, n, name, a0, a1, a2, a3, b0, args->structureInputSize, ret);
++		}
++	}
+ 	return ret;
+ }
+ #endif /* SWEET */
