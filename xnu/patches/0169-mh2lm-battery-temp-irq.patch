@@ -1,0 +1,168 @@
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 4761daa466b1c3d3bf627686a7fba7c58d0cf967..a7c68c771c969375ec8a6446b4bb5bf10bd196de 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -655,7 +655,7 @@ int
+ sweet_spmi_battery_irq_read(unsigned peripheral, unsigned offset, uint8_t *out)
+ {
+  if (!out || (peripheral != 0x10 && peripheral != 0x13 &&
+-     peripheral != 0x15 && peripheral != 0x16 && peripheral != 0x40) ||
++     peripheral != 0x15 && peripheral != 0x16 && peripheral != 0x40 && peripheral != 0x42) ||
+      (offset != 0x11 && offset != 0x12 && offset != 0x13 && offset != 0x15)) {
+   return SWEET_SPMI_INVALID;
+  }
+@@ -996,7 +996,7 @@ sp_fg_route_diagnostics(void)
+ 	/* Metadata only: no interrupt-bank mapping or foreign RW access. The
+ 	 * observer window belongs to EE0 even if an APID's writer is another EE.
+ 	 * Match Linux v5: first mapping, preferring the last local EE mapping. */
+-	static const unsigned peripherals[] = {0x01, 0x41, 0x43, 0x45, 0x46, 0x47, 0x48};
++	static const unsigned peripherals[] = {0x01, 0x41, 0x42, 0x43, 0x45, 0x46, 0x47, 0x48};
+ 	sweet_spmi_irq_lock();
+ 	for (unsigned n = 0; n < sizeof(peripherals) / sizeof(peripherals[0]); ++n) {
+ 		unsigned ppid = 0x200u | peripherals[n];
+diff --git a/bsd/dev/sweet_spmi_mux.h b/bsd/dev/sweet_spmi_mux.h
+index 99c36b70c71a871dfc40870638f837f424c0d68c..d95cdc8ef843d3928c7b9d9b67f8f6183c6397d6 100644
+--- a/bsd/dev/sweet_spmi_mux.h
++++ b/bsd/dev/sweet_spmi_mux.h
+@@ -22,7 +22,8 @@ int sweet_spmi_mux_start(void);
+ #define SWEET_BATT_IRQ_TYPEC  0x40u
+ #define SWEET_BATT_IRQ_INPUT_FAULT 0x80u
+ #define SWEET_BATT_IRQ_WDOG   0x100u
+-#define SWEET_BATT_IRQ_ALL    0x1ffu
++#define SWEET_BATT_IRQ_TEMP   0x200u
++#define SWEET_BATT_IRQ_ALL    0x3ffu
+ #define SWEET_MUX_ADC5 2u
+ #define SWEET_ADC5_IRQ_EOC 0x100u
+ #define SWEET_MUX_READY     0x40000000u
+@@ -36,7 +37,7 @@ typedef void (*SweetMuxNotify)(void *context, unsigned events);
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOInterruptEventSource.h>
+ #include <IOKit/IOWorkLoop.h>
+-#define SWEET_MUX_ROUTE_COUNT 19u
++#define SWEET_MUX_ROUTE_COUNT 20u
+ enum { MUX_KEYS = SWEET_MUX_KEYS, MUX_BATTERY = SWEET_MUX_BATTERY, MUX_ADC5 = SWEET_MUX_ADC5, MUX_GROUPS = 3 };
+ struct MuxRoute {
+ 	unsigned sid, per, bit, token, group;
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+index 99b2d2383b1274eedfe9bbe832d122be048406e5..495fb798d209023efdd763dd2ec13e81f02a50a4 100644
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -122,6 +122,8 @@ private:
+ 	IOLock *fControlLock;
+ 	IONotifier *fPowerNotice;
+ 	bool fPowerStopping, fControlClaimed;
++	bool fTempIrq;
++	unsigned fTempIrqs;
+ 	SweetChargeBasic fBasic;
+ 	static int basicCommand(void *, enum sweet_charger_operation, unsigned, unsigned *);
+ 	void runBasicCharge(uint64_t now);
+@@ -305,6 +307,8 @@ SweetBattery::init(OSDictionary *dictionary)
+ 	fControlLock = NULL;
+ 	fPowerNotice = NULL;
+ 	fPowerStopping = fControlClaimed = false;
++	fTempIrq = false;
++	fTempIrqs = 0;
+ 	fBasic = {};
+ 	fMonitorAdded = false;
+ 	fSnapshot = {};
+@@ -1073,6 +1077,9 @@ SweetBattery::irqAction(OSObject *owner, IOInterruptEventSource *, int count)
+ 		SWEET_LOG_ERROR("SWEET BATT CONTROL: CHGR fault IRQ latched; recovery requires explicit restart\n");
+ 	}
+ 	if (pending & SWEET_BATT_IRQ_WDOG) { self->fWatchdogPending = true; }
++	/* LG fg_delta_batt_temp_irq_handler: re-read temperature, then notify.
++	 * poll() below takes a fresh FG snapshot and re-runs the battemp vote. */
++	if (pending & SWEET_BATT_IRQ_TEMP) { ++self->fTempIrqs; }
+ 	self->fRuntimeInputEvents = pending & (SWEET_BATT_IRQ_USB | SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_TYPEC | SWEET_BATT_IRQ_INPUT_FAULT);
+ 	self->fSettleBudget = 1;
+ 	self->poll();
+@@ -1101,6 +1108,7 @@ SweetBattery::tryAttachIrq(void)
+ 	}
+ 	if (fRuntimeRequested) { events |= SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_FAULT | SWEET_BATT_IRQ_TYPEC | SWEET_BATT_IRQ_INPUT_FAULT; }
+ 	if ((fDependencyMode & 4) || fRuntimeRequested == 3) { events |= SWEET_BATT_IRQ_WDOG; }
++	if (fTempIrq) { events |= SWEET_BATT_IRQ_TEMP; }
+ 	fIrqAttached = true;
+ 	putBool("SweetBatteryIRQWaitingForMux", false);
+ 	putBool("SweetBatteryIRQHealthy", true);
+@@ -1135,6 +1143,7 @@ SweetBattery::startIrqAction(OSObject *owner, void *, void *, void *, void *)
+ 	}
+ 	if (self->fRuntimeRequested) { events |= SWEET_BATT_IRQ_SOURCE | SWEET_BATT_IRQ_FAULT | SWEET_BATT_IRQ_TYPEC | SWEET_BATT_IRQ_INPUT_FAULT; }
+ 	if ((self->fDependencyMode & 4) || self->fRuntimeRequested == 3) { events |= SWEET_BATT_IRQ_WDOG; }
++	if (self->fTempIrq) { events |= SWEET_BATT_IRQ_TEMP; }
+ 	SWEET_LOG_INFO("SWEET BATT IRQ: waiting for mux registry match; no timer/status polling\n");
+ 	self->fMuxClient = SweetSpmiMuxClient::withOwner(self, self->fLoop,
+ 	    SWEET_MUX_BATTERY, events, irqNotify, self);
+@@ -1709,9 +1718,9 @@ SweetBattery::runBasicCharge(uint64_t now)
+ 		SWEET_LOG_INFO("SWEET BATT BASIC: v2 step=%u reasons=%#x enabled=%u health=%u chilly=%u fcc=%u fv=%u failures=%u failed=%u enables=%u error=%d\n",
+ 		    step, fBasic.reasons, fBasic.enabled, fBasic.health, fBasic.chilly, fBasic.fccMa,
+ 		    fBasic.fvMv, fBasic.failures, fBasic.failed, fBasic.enables, fBasic.lastError);
+-		SWEET_LOG_INFO("SWEET BATT BASIC STATE: v2 temp-centi=%d mv=%u ma=%d usb=%#x stage=%u pets=%u pet-errors=%u next-ms=%u\n",
++		SWEET_LOG_INFO("SWEET BATT BASIC STATE: v2 temp-centi=%d mv=%u ma=%d usb=%#x stage=%u pets=%u pet-errors=%u next-ms=%u temp-irqs=%u\n",
+ 		    fSnapshot.tempCenti, fSnapshot.mv, fSnapshot.ma, fSnapshot.raw[SB_USB],
+-		    fSnapshot.raw[SB_STAGE] & 7u, fBasic.pets, fBasic.petErrors, scb_period_ms(fBasic));
++		    fSnapshot.raw[SB_STAGE] & 7u, fBasic.pets, fBasic.petErrors, scb_period_ms(fBasic), fTempIrqs);
+ 	}
+ 	fLastReasons = fBasic.reasons;
+ 	putBool("SweetBatteryBasicChargeEnabled", fBasic.enabled);
+@@ -1719,6 +1728,7 @@ SweetBattery::runBasicCharge(uint64_t now)
+ 	putNumber("SweetBatteryBasicChargeHealth", fBasic.health);
+ 	putNumber("SweetBatteryBasicChargeFailures", fBasic.failures);
+ 	putNumber("SweetBatteryBasicChargeWatchdogPets", fBasic.pets);
++	putNumber("SweetBatteryTemperatureIRQs", fTempIrqs);
+ 	/* LG polling_status_work cadence; each IRQ evaluation restarts it. */
+ 	if (fMonitor && fRunning && !fController.stopped) { fMonitor->setTimeoutMS(scb_period_ms(fBasic)); }
+ }
+@@ -1735,6 +1745,8 @@ SweetBattery::startRuntime(OSObject *owner, void *, void *, void *, void *)
+   /* No ADC5 consumer: charging must not depend on shared-mux conversions. */
+   SWEET_LOG_INFO("SWEET BATT BASIC: v2 runtime3 IRQ control fcc=%u fv=%u; LG battemp cadence %u/%u/%ums, bark-IRQ pet; no ADC/identity/permit gates\n",
+       SCB_FCC_MA, SCB_FV_MV, SCB_PERIOD_GOOD_MS, SCB_PERIOD_WARNING_MS, SCB_PERIOD_EMERGENCY_MS);
++  SWEET_LOG_INFO("SWEET BATT TEMP IRQ: v1 fg batt-temp-delta route=%u; battemp timer kept as fallback\n",
++      self->fTempIrq ? 1u : 0u);
+   self->sampleRuntime(true);
+   self->runRuntimePolicy();
+   self->publishRuntime();
+@@ -1829,6 +1841,7 @@ SweetBattery::runtimePowerNotice(void *target, void *, UInt32 message,
+ 	if (message == kIOMessageSystemWillSleep && self->fRuntimeMode == 3) {
+ 		/* LG keeps charging in suspend: PMIC limits stay active, and if the
+ 		 * bark IRQ is not serviced the watchdog bite stops charging. */
++		SWEET_LOG_INFO("SWEET BATT BASIC POWER: v1 will-sleep acknowledged; charging kept\n");
+ 		if (argument) {
+ 			sleepWakeNote *note = (sleepWakeNote *)argument;
+ 			note->returnValue = 0;
+@@ -1847,6 +1860,8 @@ SweetBattery::runtimePowerNotice(void *target, void *, UInt32 message,
+ 		int rc = sweet_charger_execute(SWEET_CHARGER_ENABLE, 0, 0, &verified);
+ 		if (rc || verified != 0) {
+ 			SWEET_LOG_ERROR("SWEET BATT CONTROL: power transition=%#x disable unconfirmed error=%d\n", message, rc);
++		} else if (self->fRuntimeMode == 3) {
++			SWEET_LOG_INFO("SWEET BATT BASIC POWER: v1 transition=%#x disabled readback=0\n", message);
+ 		}
+ #endif
+ 	}
+@@ -1993,6 +2008,13 @@ SweetBattery::start(IOService *provider)
+ 		return false;
+ 	}
+ 	fRuntimeRequested = (unsigned)runtime;
++	int tempIrq = 0;
++	(void)PE_parse_boot_argn("sweetbatttempirq", &tempIrq, sizeof(tempIrq));
++	if (tempIrq < 0 || tempIrq > 1 || (tempIrq && runtime != 3)) {
++		SWEET_LOG_ERROR("SWEET BATT TEMP IRQ: invalid mode=%d; runtime3 required\n", tempIrq);
++		return false;
++	}
++	fTempIrq = tempIrq == 1;
+ 	int dependencies = 0;
+ 	(void)PE_parse_boot_argn("sweetbattdeps", &dependencies, sizeof(dependencies));
+ 	if (dependencies < 0 || dependencies > 7 || (dependencies && runtime != 1)) {
+diff --git a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+index db17bd52f600226d63521e2b3c9a987c480767e5..069d230f7638657b784b69bd0977541d177817b2 100644
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -67,6 +67,10 @@ static const MuxRoute routeTemplates[] = {
+ 	{2, 0x13, 3, SWEET_BATT_IRQ_INPUT_FAULT, MUX_BATTERY, 3, "battery-usbin-ov"},
+ 	/* LG pm8150b.dtsi: MISC bark bit1, rising; opt-in diagnostic only. */
+ 	{2, 0x16, 1, SWEET_BATT_IRQ_WDOG, MUX_BATTERY, 1, "battery-wdog-bark"},
++	/* LG pm8150b.dtsi fg-rradc@4200 irq2 "batt-temp-delta", both edges; LG
++	 * qpnp-fg-gen4 re-reads temperature and notifies the battery. The FG keeps
++	 * its own delta threshold; this route only ACKs, never writes FG SRAM. */
++	{2, 0x42, 2, SWEET_BATT_IRQ_TEMP, MUX_BATTERY, 3, "battery-temp-delta"},
+ };
+ static_assert(sizeof(routeTemplates) / sizeof(routeTemplates[0]) == SWEET_MUX_ROUTE_COUNT,
+     "route layout must match the instance storage");

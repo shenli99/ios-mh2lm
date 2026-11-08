@@ -2,6 +2,15 @@
 
 ## Agent handoff / active work (2026-11-08, latest)
 
+**CURRENT: 0169（FG温度变化IRQ+电源转换证据日志）本地完成，待用户push→CircleCI→实机。**
+xnu/patches/0169-mh2lm-battery-temp-irq.patch（4文件）；测试/CI/打包脚本已更新。12个host测试全过，
+7文件交叉编译rc0，strict apply逐字节一致（scratch/battery-0169）。NEXT：用户push；下载0120a18产物后
+`tools/mk-mh2lm-event-matrix.sh <kernel> 0120a18 --battery-basic-charge`，得到普通档和-tempirq档。
+测tempirq档：充满后继续插≥60分钟看回充；中途从iOS关机或重启一次留POWER日志；看状态栏闪电/满电。
+详细见docs/BATTERY-BASIC-CHARGE.md 0169节。
+
+### Previous 0120a17 handoff
+
 **CURRENT: 0120a17实机充满：CC约1.97A→404s起CV 4400mV TAPER→4878s硬件TERMINATE，71%→100%，喂狗305次无错。前一次15分钟实测也成功。**
 
 证据见docs/BATTERY-BASIC-CHARGE.md末节及scratch/artifact-0120a17/basic-charge-persistent.txt。

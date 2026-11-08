@@ -201,7 +201,7 @@ extern "C" int sweet_spmi_read(unsigned sid, unsigned a, uint8_t *v) {
     *v=pmic[(sid<<16)|a]; return 0;
 }
 extern "C" int sweet_spmi_battery_irq_read(unsigned peripheral, unsigned reg, uint8_t *v) {
-    if (!v || (peripheral!=0x10 && peripheral!=0x13 && peripheral!=0x15 && peripheral!=0x16 && peripheral!=0x40) ||
+    if (!v || (peripheral!=0x10 && peripheral!=0x13 && peripheral!=0x15 && peripheral!=0x16 && peripheral!=0x40 && peripheral!=0x42) ||
         (reg!=0x11 && reg!=0x12 && reg!=0x13 && reg!=0x15)) return -1;
     assert(lockDepth==0);
     if (peripheral==failReadPer) return -1;
@@ -265,7 +265,7 @@ static void hwWrite(uintptr_t b,unsigned off,uint32_t value) {
     (void)core;
 }
 static void initialize() {
-    ppids={{248,0x008},{261,0x0c5},{266,0x210},{269,0x213},{271,0x215},{273,0x216},{300,0x240}};
+    ppids={{248,0x008},{261,0x0c5},{266,0x210},{269,0x213},{271,0x215},{273,0x216},{285,0x242},{300,0x240}};
     mmio[SWEET_DEV_SPMI_CORE_PA]=0x50000000;
     mmio[SWEET_DEV_SPMI_CORE_PA+4]=512;
     for (auto e:ppids) {
@@ -297,7 +297,8 @@ public:
     bool fSettlePending=false, healthy=false, waiting=false, valid=true;
     unsigned fIrqMode=2, fIrqSamples=0, fSettleBudget=0, reads=0, publications=0;
     unsigned fRuntimeInputEvents=0,fDependencyMode=0;
-    bool fWatchdogPending=false;
+    bool fWatchdogPending=false, fTempIrq=false;
+    unsigned fTempIrqs=0;
     volatile unsigned fIrqPending=0, fIrqNotifications=0;
     volatile uint64_t fIrqNotifyTime=0;
     SweetBattery() {

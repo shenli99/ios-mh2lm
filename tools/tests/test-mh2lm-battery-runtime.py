@@ -211,7 +211,7 @@ public:
  bool fRunning=true,fPercentValid=true;
  IOTimerEventSource *fMonitor; void *fLoop=nullptr;
  SweetAdc5Client *fAdcClient=nullptr;void publishAdc();static void adcChanged(void *);
- IOLock controlLock;IOLock *fControlLock=&controlLock;bool fPowerStopping=false,fControlClaimed=false;
+ IOLock controlLock;IOLock *fControlLock=&controlLock;bool fPowerStopping=false,fControlClaimed=false,fTempIrq=false;unsigned fTempIrqs=0;
  SweetChargeBasic fBasic={};static int basicCommand(void *,enum sweet_charger_operation,unsigned,unsigned *);void runBasicCharge(uint64_t);
  static IOReturn runtimePowerNotice(void *,void *,UInt32,IOService *,void *,vm_size_t);
  SweetBattSnapshot fSnapshot={};SweetBattLimits fLimits={};SweetBattController fController={};

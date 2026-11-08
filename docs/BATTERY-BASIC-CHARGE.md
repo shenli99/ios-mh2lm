@@ -123,3 +123,24 @@ deps 诊断路径代码不动；runtime3 需要 `sweetbattery=1 sweetbatt=1 swee
   说明 CPU 一直在跑、系统没有进入真睡眠；0168 的 WillSleep 分支不打日志，无法从日志直接看到
   是否收到过 WillSleep。真睡眠下 bark 能否唤醒仍【待核实】。
 
+## 0169：FG 温度变化中断（本地完成，待云编译/实机）
+
+- 新路由 `battery-temp-delta`：SID2 外设 0x42（FG RRADC）bit2，双边沿，事件 `SWEET_BATT_IRQ_TEMP`
+  0x200。依据 LG pm8150b.dtsi:428-435 `fg-rradc@4200` 与 qpnp-fg-gen4.c:3940
+  `fg_delta_batt_temp_irq_handler`（重读温度后通知电池）。mux 只做 IRQ 配置/ACK，不写 FG SRAM，
+  沿用固件留下的 delta 阈值。路由表 19→20 路，电池组 mask 0x1ff→0x3ff。
+- SweetBattery：`sweetbatttempirq=1`（仅 runtime3）时订阅；IRQ 到来走已有路径：新快照 →
+  `runBasicCharge` 温度表投票 → 重置 60/30/10s 定时器。定时器保留为兜底。计数发布为
+  `SweetBatteryTemperatureIRQs`，并出现在 `BASIC STATE ... temp-irqs=`。
+- 关机/重启：runtime3 在优先级电源通知里停充成功后打 `SWEET BATT BASIC POWER: v1 transition=...
+  disabled readback=0`；WillSleep 打 `will-sleep acknowledged; charging kept`。行为不变，只补证据。
+- 默认镜像不带 `sweetbatttempirq`，与 0168 行为完全一致；打包脚本在 0169 内核上额外生成
+  `battery-basic-charge-tempirq`。
+- 本地验证：12 个 host 测试全过，新增 mux 场景 battery-temp / -read-fail / -enabled（成功挂接、
+  只改 bit2、命中一次触发一次采样、拆除恢复原配置；读失败或固件已使能时整组可见失败）；
+  7 文件 CI buildtree 交叉编译 rc0，告警与 0168 树相比只多 1 条同类 missing-field（新路由表项）。
+  patch 对 0168 结果树 strict apply、逐字节一致；CI 新增 4 个 require_marker，本地 114 条全部命中。
+- 【待核实】0x242 在本机是否唯一 EE0 IRQ-owned APID（0120a17 路由诊断未列 0x242，0169 已加入
+  诊断列表）；若不是，tempirq 镜像会在挂接时整组失败、不启充，退回普通镜像即可。
+  FG 默认 delta 阈值和实际触发频率未知。
+

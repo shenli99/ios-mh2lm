@@ -298,6 +298,15 @@ if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-ir
   make_profile battery-basic-charge \
    "LG G8X - XNU runtime3 basic charge (${LABEL})" \
    "$IRQ_ARGS sweetbattirq=4 sweetbattuidiag=1 sweetbattruntime=3 sweetbattadcconv=0 sweetbattdeps=0"
+  # 0169 kernels add the opt-in FG batt-temp-delta route; same kernel, one extra argument.
+  if grep -Fqa 'SWEET BATT TEMP IRQ: v1' "$TMPDIR/kernel.development.mh2lm" &&
+     grep -Fqa 'battery-temp-delta' "$TMPDIR/kernel.development.mh2lm" &&
+     grep -Fqa 'SWEET BATT BASIC POWER: v1' "$TMPDIR/kernel.development.mh2lm"; then
+   make_profile battery-basic-charge-tempirq \
+    "LG G8X - XNU runtime3 charge + temp IRQ (${LABEL})" \
+    "$IRQ_ARGS sweetbattirq=4 sweetbattuidiag=1 sweetbattruntime=3 sweetbattadcconv=0 sweetbattdeps=0 sweetbatttempirq=1"
+   printf 'created runtime3 + FG temp-delta IRQ profile for %s (0169)\n' "$LABEL"
+  fi
   printf 'kernel SHA256: %s\ncreated runtime3 basic charge profile for %s; charging is ENABLED by software\n' "$KERNEL_SHA256" "$LABEL"
   exit 0
  fi
