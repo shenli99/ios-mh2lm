@@ -4,6 +4,21 @@
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
+**CURRENT：原版内核SwapWait语义核对与帧状态设计已完成文档；未实现新行为。**
+见`docs/FRAMEBUFFER-SWAP-CONTRACT.md`，接续1d8c71d。原版16.7.16 kernelcache解压SHA
+2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221，UUID28E24CE2-BA1C-38B1-AC56-C0BE08A077BC。
+28项原始指令/dispatch记录通过，底稿scratch/framebuffer-abi-0121a2/kernel-wait-verification.json。
+legacy gated wait正常分支：options0=ID既非display也不在pending/queue，1=不在pending/queue，
+2=整队列空；3/4=配置字段0x1478非0/为0，失败直接BadArgument。高位noBlock对等待分支返回Busy。
+ID0含义取决于options；不能把0x80000003当排空，也不能统一lastCompleted或copy-done。
+selector6原生dispatch/用户wrapper已核对；provider虚表至gated实现的完整链尚未恢复，不冒称已直连。
+方案明确workloop/gate唯一改状态、非阻塞查询、有界commandSleep、独立copy执行者、queued/reading/
+源释放/displayCurrent/终态分离、ID回卷和客户端归属、stop唤醒与同步清理。源释放后重放必须来自
+自有像素；retain不保像素。显示计划§2.4已撤掉“覆盖pending统一算完成”的粗略表述。
+NEXT：继续核对取消入口/虚表/配置ready来源和当前copy后端display节点；将状态设计落实为实际驱动
+复用的逻辑与host测试，再接独立行为实验档。F0仍未验收，不偷跑F1/F3/F4，不混入只读取证开关。
+本轮仅文档、未改CI/内核/设备，未push，无新镜像，不要求重复0121a2。具体UI根因仍未定。
+
 **CURRENT：F0 本版用户态 ABI 离线核对已推进；症状校正为关机滑条区域半透明颜色未正常渲染。**
 见 `docs/FRAMEBUFFER-USERLAND-ABI.md`。不是控件几何重叠，相关计划/报告已校正。
 本地scratch/dsc由ipsw识别iOS16.7/arm64，cache UUID 8f970452c9e33e88b114feb1864bc9e0；

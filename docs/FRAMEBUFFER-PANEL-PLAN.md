@@ -14,7 +14,8 @@ preserveoff 实际保留像素，但未解决全部缺时间现象。
 0170 不能核验时钟区域像素或 TE 频率；SMMU stream 配置为 TRANS/CB2，F4 前须补转换核对。
 0121a1 的 include 路径错误由0172修复；0121a2两档实测见 [新报告](FRAMEBUFFER-F0-0121A2.md)。
 用户确认两档异常相同；时钟区域当前source/扫描同黑，不能仅归因于擦除/漏拷。模式查询、
-update/disable/background和完成/复用ABI待核对，不提前进入F1。
+update/disable/background已由原始框架核对；原版内核的等待参数与状态设计见
+[帧完成契约](FRAMEBUFFER-SWAP-CONTRACT.md)。F0仍未验收，不提前进入F1。
 
 ## 1. 现状（0120a18 buildtree 源码 + 0120a17 日志）
 
@@ -127,8 +128,12 @@ RD_PTR(vsync) ── pending 存在 ──► clean cache ─► 写 SRC0_ADDR(+
 
 - 一个 surface 在被扫描期间不得交还给 CA 继续绘制：必须核对并实现本版用户态实际使用的
   完成/复用协议；**retain 只保对象存活，不阻止 CA 改写像素**（0121a2 已捕获复用证据）。
-  翻页确认后才释放上一帧、按协议完成 swap；`SwapWait` 在命令门上等到目标 swap 完成（带超时）。
-- 队列深度 1：新 swap 覆盖尚未上屏的 pending 时，被覆盖的 swap 立即按完成释放。
+  翻页确认后才释放上一帧，按不同options更新查询条件；`SwapWait`的非阻塞请求立即查询，
+  阻塞请求用有界`commandSleep`释放gate等待，不能堵住完成事件。
+- 队列深度1只允许替换尚未进入reading/硬件提交的queued：记录取消/替换原因，并在确认
+  无读者后归还源。不能把reading、displayCurrent和被丢弃的queued统一算“完成”。
+  当前显示ID、pending集合、源读取权和配置ready分别维护；ID0的意义由options决定。
+  options0/1/2/3/4及副作用边界以[原版内核核对与设计](FRAMEBUFFER-SWAP-CONTRACT.md)为准。
 
 ### 2.5 IOKit 原则
 
@@ -403,3 +408,12 @@ bit31、全disable合法blank和SwapWait成功后CA推进页回收均已确认�
 完成/复用契约（先厘清flags/id0/非阻塞）→持久layer/background和blank→一致的模式属性/查询。
 模式输出+4/+8已确认，但不能任意填ID；半透明/blur症状还需局部像素证据，不直接加内核混色。
 本轮离线审计无新kernel补丁，不要求重复刷机；F0未验收，F1仍未开始。
+
+### F0 后续：原版内核等待语义与状态设计
+
+从本地同版IPSW解压原生kernelcache，核对legacy gated wait；28项指令/dispatch记录通过。
+详见[帧完成契约](FRAMEBUFFER-SWAP-CONTRACT.md)：options0区分当前显示与pending，1检查pending，
+2检查整队列；3/4检查配置状态及其反向条件，高位noBlock未就绪返回Busy（3/4各有立即返回规则）。
+不能将id0配置查询写成队列排空，也不能让所有options仅比较lastCompleted。
+本次修正§2.4笼统的pending覆盖完成策略，写明gate等待、源释放后自有像素重放、取消/停止边界。
+尚未实现行为补丁；不改变F0只读取证、不跳过F1/F3/F4。视觉异常的单一根因仍未证实。
