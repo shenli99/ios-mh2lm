@@ -6,7 +6,7 @@
 
 证据见docs/BATTERY-BASIC-CHARGE.md末节及scratch/artifact-0120a17/basic-charge-persistent.txt。
 喂狗54次无错，failures=0。开机电脑口SDP不充（用户确认正常）。
-NEXT（见docs/BATTERY-IMPLEMENTATION-PLAN.md顶部段落表）：第5～6段补强一批——0169 batt-temp-delta IRQ、回充、停止留证、UI核对，之后电池IRQ结案转framebuffer；0169 batt-temp-delta IRQ待用户决定。
+NEXT（见docs/BATTERY-IMPLEMENTATION-PLAN.md顶部段落表）：第5～6段补强一批——0169 batt-temp-delta IRQ、回充、停止留证、UI核对，之后电池IRQ结案转framebuffer。0169待用户确认后实现。
 
 ### Previous 0120a17 artifact handoff (superseded)
 
