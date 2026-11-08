@@ -2,6 +2,18 @@
 
 ## Agent handoff / active work (2026-11-08, latest)
 
+**persist4 持久镜像已生成，待用户先 fastboot boot 验证再刷 boot_a/boot_b。**
+`/home/shenli/work1/out-bs/boot-persist4.img`，35,543,040 字节，SHA256
+729a858db55cbddf465bbd730a69d5567a4f224a10e74b3ed93982e26987bc84（脚本 out-bs/mk-boot-persist4.sh，无 sudo）。
+- Mu-Silicium **RELEASE** FD：同一源码（Mu-Silicium cca95b7、DarwinBoot 4ad0c42），FD_BASE=0xA0000000
+  （scripts/build-mh2-uefi.sh 默认 0x9FC00000 是错的，与 Resources/Configs/mh2.toml 不符；本次用 0xA0000000）。
+  FD SHA256 cfb79257…6e05。BootShim 与已验证 blob 逐字节相同，追加 DTB 相同。验证方法：同法重编 DEBUG
+  与旧 DEBUG FD 仅差编译时间戳及其导致的地址常量，已恢复旧 DEBUG 构建目录。
+- RELEASE FD **从未在设备上启动过**，这是本镜像唯一新增风险；ABL/fastboot 不受影响，失败可 fastboot 刷回 boot-persist2/3。
+- 菜单：默认 `msd`（RELEASE MassStorage.efi，超时 5s）；第二项 iOS：0120a18 内核（61d3cbda…）+ adt-16k-3g.adt +
+  0120a18 tempirq 档原样参数（runtime3 充电、温度中断、USB ACM、三键）。之后 Restart/Power off/Tools。
+- 镜像回读：header v1/page 2048、kernel 段解压后 = BootShim + RELEASE FD、DTB 相同、ramdisk 内 4 个文件逐字节一致。
+
 **并行线：显示/面板重构计划（第二版）已写好，F0 待实现。** 见 docs/FRAMEBUFFER-PANEL-PLAN.md：
 F0 取证→F1 SweetMDSS IOService 分层→F2 DCS真关屏→F3 MDSS RD_PTR vsync→F4 自有扫描缓冲+SSPP硬件裁剪+
 双缓冲翻页→F5 CA surface 直接扫描（cache clean，零拷贝）→F6 可选kickoff→F7 IOPM/panic/清理。
