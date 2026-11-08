@@ -12,7 +12,7 @@ agent 按 F0→F7 顺序做。每步通过验收后，在本文 §7“进度记�
 隔离，解释两条唤醒来源失效；该独立问题转入 [BUG-002](BUGS.md)，不自动增加显示步骤或验收前置。
 preserveoff 实际保留像素，但未解决全部缺时间现象。
 0170 不能核验时钟区域像素或 TE 频率；SMMU stream 配置为 TRANS/CB2，F4 前须补转换核对。
-0121a1 的 0171 编译失败为 include 路径错误；0172 修复并本地复现/复验，待重编译/实机，详见 [F0 v2](FRAMEBUFFER-F0-V2.md)。
+0121a1 的 include 路径错误由0172修复；0121a2源码/内核核对与两档镜像回读通过，待实机，详见 [F0 v2](FRAMEBUFFER-F0-V2.md)。
 
 ## 1. 现状（0120a18 buildtree 源码 + 0120a17 日志）
 
@@ -369,3 +369,8 @@ SSPP 格式/裁剪/地址状态、INTF 计数差值和 apps SMMU SID 0x800 匹�
 
 像素/实际拷贝/属性/计数补证据，详见 [F0 v2](FRAMEBUFFER-F0-V2.md)。本地编译和 host 检查通过，
 未得到实机结果，F0 继续进行。CircleCI 配置未改；打包门要求新 v2 marker。独立 bug 不在本轮修复。
+
+### 0121a2 / 0171+0172 产物就绪（待实机）
+
+38文件源码比对、114项门检查、新kernel manifest/marker以及两档boot回读通过。
+镜像路径、SHA及测试顺序见 [F0 v2](FRAMEBUFFER-F0-V2.md)末节；尚无设备日志，F0仍未验收。

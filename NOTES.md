@@ -4,7 +4,21 @@
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
-**CURRENT：0121a1 云编译失败已定位并修复，0172 待用户 push 重编译。**
+**CURRENT：0121a2 云产物核对通过，F0 v2 两档测试镜像已生成并回读，待用户 fastboot boot。**
+见 `docs/FRAMEBUFFER-F0-V2.md` 末节。38个源码与预期逐字节一致（显示4文件全含），
+114个require_marker通过；新kernel manifest与v2/IRQ/充电marker通过。
+kernel SHA256 `5bc262e74534dbc2952a09342a0d97348561226d58a16a5a7c937ebad10966b1`，与0121不同。
+未提供0121a2构建日志或CI run ID，未查全量警告。两档在 `/home/shenli/work1/out-bs/`：
+- `boot-16k-0121a2-fb-trace.img`，SHA256 `172075a5072304c319e57d2a2482cbf01b035da1b4fb3a76f480750e26a5a7cc`。
+- `boot-16k-0121a2-fb-trace-preserveoff.img`，SHA256 `4b51c5050dfdff3b61c398a1cf72b9778a28147eea80aba974a9e358af9ba232`。
+各35,667,968字节，header v1/page2048；kernel blob/ramdisk内核/ADT/TOML回读一致、参数无重复。
+共同trace2/dispprobe1/loglevel2/runtime3、三键/触摸/USB ACM/电池IRQ；仅差preserveoff=1，tempirq未开。
+先普通后preserveoff；启动先等35秒，手动息屏插/拔，观察大电池logo消失后及滑条/取消画面，
+异常画面停5–10秒，导出前等≥15秒；分别命名sweetlog-0121a2-fb-trace[‑preserveoff].bin。
+不安排自动息屏或USB压力；BUG-001/002独立跟踪。F0未验收，无新驱动待push。
+底稿scratch/artifact-0121a2的verification.json、boot-verification.json和核对脚本。
+
+**0121a1 编译失败与0172修复记录（0121a2产物核对已完成，以上段为准）。**
 日志 `logs/xnu-build-log-0121a1.txt`，SHA256
 `902da91ad88582b5c4118dd7e600d7b4689729d358a2be07b5e045580c7cb090`。
 0171已应用；失败是新增3源码的私有头文件引用用了`<bsd/dev/...>`，CI没有XNU根目录搜索路径。

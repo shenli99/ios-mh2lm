@@ -1,6 +1,6 @@
 # F0 补充取证：0171
 
-状态：0121a1 编译失败已定位；0172 修复 include 路径，待 push / 重编译 / 实机。
+状态：0121a2 云产物核对通过，两档镜像已打包回读，待实机。0121a1 include 编译问题已修复。
 当前仍是 F0，未进入 F1。
 上一轮结果见 [0121 报告](FRAMEBUFFER-F0-0121.md)，总路线见 [显示计划](FRAMEBUFFER-PANEL-PLAN.md)。
 
@@ -122,3 +122,33 @@ BSD 用同目录的 `"sweet_log_level.h"`，IOKit 用
 
 日志 SHA256：`902da91ad88582b5c4118dd7e600d7b4689729d358a2be07b5e045580c7cb090`。
 无需额外下载本次失败构建的产物；下一步是 push 修复提交后重新编译。
+
+## 0121a2 产物与镜像（待实机）
+
+预期源码提交 `2bc0251`（0171+0172）。38 个核对文件与本地预期逐字节一致，
+包含显示补丁涉及的全部四文件；现有 114 个 CI require_marker 通过，kernel manifest 及 v2 / IRQ /
+充电标记通过。新内核 SHA 与 0121 不同。未提供本轮构建日志和 CI run ID，未查全量告警。
+
+内核 SHA256：`5bc262e74534dbc2952a09342a0d97348561226d58a16a5a7c937ebad10966b1`。
+
+- `xnu-buildtree-0121a2.gz`：`b309ea46c0601419c7490bd896a47ae715f2716f590d2adea4946d83e10d4ba2`。
+- `xnu-kernel-0121a2.gz`：`e6cdee52f2013b4d222502e2aad9a3e23ea49ee1a635e4e0540ab5a4cd1b5c7d`。
+
+两档镜像均在 `/home/shenli/work1/out-bs/`，各 35,667,968 字节，header v1/page 2048。
+
+- `boot-16k-0121a2-fb-trace.img`：`172075a5072304c319e57d2a2482cbf01b035da1b4fb3a76f480750e26a5a7cc`。
+- `boot-16k-0121a2-fb-trace-preserveoff.img`：`4b51c5050dfdff3b61c398a1cf72b9778a28147eea80aba974a9e358af9ba232`。
+
+镜像整体回读：kernel blob、FAT ramdisk、内嵌 XNU、ADT、TOML 均一致；启动参数无重复。
+两档同内核、同 ADT、同 IRQ/runtime3/USB ACM 参数；仅 preserveoff 档多
+`sweetfbpreserveoff=1`。共同启用 `sweetfbtrace=2 sweetdispprobe=1 sweetloglevel=2`，
+未启用温度 IRQ 扩展。不再需要 push 来制作本轮测试镜像。
+
+先 `fastboot boot` 普通 `fb-trace` 档，按上文手动息屏插电/拔电、滑条及取消流程测试；
+启动后先留 35 秒，异常画面停留 5–10 秒，结束后留至少 15 秒再导出持久日志。
+再 boot `fb-trace-preserveoff` 档重复；分别命名
+`sweetlog-0121a2-fb-trace.bin` / `sweetlog-0121a2-fb-trace-preserveoff.bin`。
+没有自动息屏测试，没有新增 USB 重连压力测试。需记录稳定画面的时间显示和滑条重叠情况。
+
+核对底稿：`scratch/artifact-0121a2/{verify-artifacts.py,verification.json,source-compare.json,
+verify-boots.py,boot-verification.json}`。尚无本轮设备日志，F0 未验收。
