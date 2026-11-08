@@ -4,6 +4,19 @@
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
+**CURRENT 显示线：0121（d58e7fc / 0170）云产物已核对，两档 F0 boot 已打包回读，待用户实机测试。**
+buildtree 中 27 个核对文件与 0120a18 + 0170 预期逐字节一致（含 0170 改动的全部 3 文件），
+现有 114 个源码 require_marker 通过；kernel SHA256SUMS 通过且包含 F0/原 IRQ/充电 marker。
+kernel SHA256 `6e3be4432ea04c331ac9aef8e5783e0980ed2174dc463c44f76eda24bfbb48a0`，不同于 0120a18。
+用户未提供本次构建日志/CI run ID，未查全量编译警告。核对底稿 `scratch/artifact-0121/verification.json`。
+镜像均在 `/home/shenli/work1/out-bs/`，35,667,968 字节，header v1/page 2048；
+kernel blob/ramdisk 内 kernel、ADT、TOML 回读一致，启动参数唯一，两档只差 `sweetfbpreserveoff=1`：
+- `boot-16k-0121-fb-trace.img`，SHA256 `e5aaead64c1736690ed18f645c91f3cab49b3a5b9f42d920be8d11706e998ed5`。
+- `boot-16k-0121-fb-trace-preserveoff.img`，SHA256 `39d5837bf3992f7d5a91b29a7ff39d3b7e8e9a108678b1311bff0a018cbdccd4`。
+两档保留三键/触摸/USB ACM/电池 IRQ 与 runtime3 充电，温度 IRQ 扩展未启用。
+NEXT：先普通档、再 preserveoff 档；进桌面等至少 35 秒（显示探针约 30 秒开始），按显示计划 §6
+操作并每档单独导出日志。尚无上机结论；不进入 F1。完整回读记录 `scratch/artifact-0121/boot-verification.json`。
+
 **persist4 持久镜像已生成，待用户先 fastboot boot 验证再刷 boot_a/boot_b。**
 `/home/shenli/work1/out-bs/boot-persist4.img`，35,543,040 字节，SHA256
 729a858db55cbddf465bbd730a69d5567a4f224a10e74b3ed93982e26987bc84（脚本 out-bs/mk-boot-persist4.sh，无 sudo）。
@@ -16,7 +29,7 @@
   0120a18 tempirq 档原样参数（runtime3 充电、温度中断、USB ACM、三键）。之后 Restart/Power off/Tools。
 - 镜像回读：header v1/page 2048、kernel 段解压后 = BootShim + RELEASE FD、DTB 相同、ramdisk 内 4 个文件逐字节一致。
 
-**并行线：显示/面板重构计划（第二版）已写好，F0 取证补丁 0170 已准备，待云编译/上机。** 见 docs/FRAMEBUFFER-PANEL-PLAN.md：
+**并行线：显示/面板重构计划（第二版）已写好，F0 取证补丁 0170 云编译/打包已核对，待上机。** 见 docs/FRAMEBUFFER-PANEL-PLAN.md：
 F0 取证→F1 SweetMDSS IOService 分层→F2 DCS真关屏→F3 MDSS RD_PTR vsync→F4 自有扫描缓冲+SSPP硬件裁剪+
 双缓冲翻页→F5 CA surface 直接扫描（cache clean，零拷贝）→F6 可选kickoff→F7 IOPM/panic/清理。
 接手 agent：0170 只做只读取证；通过验收后再更新该文档§6/§7和本段，不能提前进入 F1。

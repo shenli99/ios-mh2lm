@@ -1,6 +1,6 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**状态（2026-11-08，第二版）：0170 已准备，待云编译/上机验收。** 本文是 `IRQ-FRAMEBUFFER-PLAN.md`
+**状态（2026-11-08，第二版）：0121 / 0170 云产物核对和打包完成，待上机验收。** 本文是 `IRQ-FRAMEBUFFER-PLAN.md`
 “大目标二”的实施文档。第二版目标从“修好接手的 ABL framebuffer”提升为：**驱动自己
 分配和管理扫描缓冲（simplefb 式），硬件双缓冲翻页，CoreAnimation 渲染的 surface
 直接被 MDP 扫描，消除每帧 CPU 拷贝。**
@@ -304,13 +304,38 @@ autorefresh 且画面不冻结。
 - 不把电池/充电 UI 问题当显示问题修。
 - 所有设备操作 `fastboot boot`；不写盘。
 
-## 6. F0 取证结果（0170 待上机填充）
+## 6. F0 取证结果（0121 / 0170 待上机填充）
 
 0170 只增加只读取证，不改变显示行为。`sweetfbtrace=1` 记录选择子、最近 swap、
 off/on 前后扫描区与 source surface 稀疏校验和；`sweetdispprobe=1` 的显示探针增加
 SSPP 格式/裁剪/地址状态、INTF 计数差值和 apps SMMU SID 0x800 匹配信息。
 打包脚本 `--framebuffer-f0` 会从同一内核产物生成 `fb-trace` 与
 `fb-trace-preserveoff` 两档，后者只额外设置 `sweetfbpreserveoff=1`。
+
+### 0121 产物核对与操作
+
+- 0170 三个改动文件与 0120a18 基线严格应用补丁后的结果逐字节一致；连同现有源码门检查文件
+  共核对 27 个文件，114 项 require_marker 通过。内核 manifest 和 F0 marker 检查通过。
+- 内核 SHA256：`6e3be4432ea04c331ac9aef8e5783e0980ed2174dc463c44f76eda24bfbb48a0`。
+- buildtree 包 SHA256：`4e3a9c10d373c3815e3558180eb64b8fe28083e2c209435195c3927da77c62b8`；
+  kernel 包 SHA256：`b1d3de0b788a91c3ed39ad706c9cdde10127b48e9e77afc7dd193136c88a8fbb`。
+- 镜像位于 `out-bs/boot-16k-0121-fb-trace.img` 与
+  `out-bs/boot-16k-0121-fb-trace-preserveoff.img`；每个 35,667,968 字节。
+  header/kernel blob/ramdisk/kernel/ADT/TOML 均已回读核对。SHA256 见 NOTES 顶部。
+- 本轮未提供构建日志或 CI run ID，未检查全量编译警告。底稿在 `scratch/artifact-0121/`。
+
+先测普通档，再测 preserveoff 档。每档都执行相同操作：
+
+1. 进桌面后等至少 35 秒，让启动约 30 秒后的三次显示探针完成；确认三键、触摸正常。
+2. 未接充电器时按电源键息屏，等 3 秒，插充电器；大充电 logo 消失后观察锁屏时间/中间区域。
+   正常亮屏后拔线，重复 5 次。
+3. 接着充电器按电源键息屏，等 3 秒后拔线，观察唤醒和画面，重复 5 次。
+4. 让系统自动锁屏，再做插/拔唤醒，各重复 5 次。记录普通档和 preserveoff 档表现是否不同。
+5. 结束后等至少 15 秒再导出持久日志，每档分别命名
+   `sweetlog-0121-fb-trace.bin` / `sweetlog-0121-fb-trace-preserveoff.bin`。
+   USB ACM 日志可同时保留，但无需依赖实时抓取来完成测试。
+
+尚无实机结果，下列结论保持待填：
 
 - 选择子使用表：
 - CA surface 创建属性：
@@ -322,4 +347,4 @@ SSPP 格式/裁剪/地址状态、INTF 计数差值和 apps SMMU SID 0x800 匹�
 
 | 步骤 | 补丁 | 产物/日志 | 结论 |
 |---|---|---|---|
-| F0 | 0170 | 待云编译/上机 | 补丁和两档打包 profile 已准备；尚无实机结论 |
+| F0 | 0170 / d58e7fc | 0121；两档 boot 已生成并回读 | 源码/内核核对通过；待上机日志，尚无实机结论 |
