@@ -417,3 +417,12 @@ bit31、全disable合法blank和SwapWait成功后CA推进页回收均已确认�
 不能将id0配置查询写成队列排空，也不能让所有options仅比较lastCompleted。
 本次修正§2.4笼统的pending覆盖完成策略，写明gate等待、源释放后自有像素重放、取消/停止边界。
 尚未实现行为补丁；不改变F0只读取证、不跳过F1/F3/F4。视觉异常的单一根因仍未证实。
+
+### 0173 / CPU源像素所有权行为实验（尚未上机）
+
+F0未验收，另列[自有快照实验](FRAMEBUFFER-OWNED-CONTRACT.md)，不宣称F1/F3/F4完成。
+独立开关sweetfbcontract=1，默认旧路径。一次编译两档，仅开关不同，均保留息屏像素并关闭重采样。
+实现gate状态/有界wait、提交线程复制到自有内存、源归还后仅读自有像素、持久layer0/背景/blank、
+取消/close/stop。没有切换MDP扫描地址，没有真实vsync fence，也不认定半透明异常已定因。
+三文件strict apply/arm64编译、14项host回归通过，LSan受ptrace限制未验收。
+NEXT：用户push并下载产物→核对打包→对照/实验档手动息屏插拔与关机界面半透明/取消测试。

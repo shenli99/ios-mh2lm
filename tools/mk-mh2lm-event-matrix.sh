@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract]\n' "$0" >&2
 	exit 2
 fi
 
@@ -38,7 +38,7 @@ case "$KEY_IRQ_PROFILE" in
 		;;
 	--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-basic-charge|--board-startup)
 		;;
-	--framebuffer-f0)
+	--framebuffer-f0|--framebuffer-contract)
 		;;
 	*)
 		printf 'unknown optional profile: %s\n' "$KEY_IRQ_PROFILE" >&2
@@ -105,7 +105,7 @@ if [ "$KEY_IRQ_PROFILE" = '--touch-irq' ]; then
 	grep -Fqa 'SWEET USB IRQ: software-pending probe hits=' "$TMPDIR/kernel.development.mh2lm"
 	grep -Fqa 'SWEET MUX: armed mode=' "$TMPDIR/kernel.development.mh2lm"
 fi
-if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--battery-transport' ] || [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-consumer' ] || [ "$KEY_IRQ_PROFILE" = '--battery-evidence' ] || [ "$KEY_IRQ_PROFILE" = '--battery-basic-charge' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
+if [ "$KEY_IRQ_PROFILE" = '--irq-only' ] || [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--battery-transport' ] || [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-consumer' ] || [ "$KEY_IRQ_PROFILE" = '--battery-evidence' ] || [ "$KEY_IRQ_PROFILE" = '--battery-basic-charge' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ] || [ "$KEY_IRQ_PROFILE" = '--framebuffer-contract' ]; then
 	for marker in 'SWEET KEYS IRQ: three routes active; IRQ-only' \
 	    'SWEET TOUCH: TouchComm ready (sda=%u scl=%u), max %ux%u, IRQ-only' \
 	    'SWEET USB IRQ: FAILED %s hits=%u empty=%u; gadget stopped' \
@@ -120,7 +120,7 @@ elif [ "$KEY_IRQ_PROFILE" != '--framebuffer-f0' ] && grep -Fqa 'SWEET KEYS IRQ: 
 	printf 'fixed IRQ kernel requires --irq-only, --battery-irq, --battery-charge-check, --battery-transport, --battery-runtime, --battery-adc5-conversion, --battery-adc5-consumer, --battery-evidence, --battery-basic-charge or --board-startup packaging profile\n' >&2
 	exit 1
 fi
-if [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--battery-transport' ] || [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-consumer' ] || [ "$KEY_IRQ_PROFILE" = '--battery-evidence' ] || [ "$KEY_IRQ_PROFILE" = '--battery-basic-charge' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
+if [ "$KEY_IRQ_PROFILE" = '--battery-irq' ] || [ "$KEY_IRQ_PROFILE" = '--battery-charge-check' ] || [ "$KEY_IRQ_PROFILE" = '--battery-transport' ] || [ "$KEY_IRQ_PROFILE" = '--battery-runtime' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-conversion' ] || [ "$KEY_IRQ_PROFILE" = '--battery-adc5-consumer' ] || [ "$KEY_IRQ_PROFILE" = '--battery-evidence' ] || [ "$KEY_IRQ_PROFILE" = '--battery-basic-charge' ] || [ "$KEY_IRQ_PROFILE" = '--board-startup' ] || [ "$KEY_IRQ_PROFILE" = '--framebuffer-contract' ]; then
 	for marker in 'SWEET BATT IRQ: armed mode=' \
 	    'SWEET MUX: controller transactions serialized across keys and battery' \
 	    'SWEET MUX: isolated group=%u; other groups remain available' \
@@ -262,6 +262,16 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-f0' ]; then
 	done
 fi
 
+if [ "$KEY_IRQ_PROFILE" = '--framebuffer-contract' ]; then
+	for marker in 'SWEET FB CONTRACT: v1 enabled' 'SWEET FB CONTRACT: setup failed; refusing legacy fallback' \
+	    'SWEET BATT BASIC: v2 runtime3 IRQ control'; do
+		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+			printf 'kernel artifact lacks framebuffer contract marker: %s\n' "$marker" >&2
+			exit 1
+		fi
+	done
+fi
+
 make_profile() {
 	local name=$1
 	local title=$2
@@ -299,6 +309,19 @@ make_profile() {
 	file "$image"
 	sha256sum "$image"
 }
+
+if [ "$KEY_IRQ_PROFILE" = '--framebuffer-contract' ]; then
+	# Keep source-sampling probes off. Isolate source ownership from off erasure.
+	FB_ARGS='ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1 sweetbattirq=4 sweetbattruntime=3 sweetfbpreserveoff=1 sweetfbtrace=0 sweetdispprobe=0 sweetloglevel=2'
+	make_profile fb-contract-baseline \
+		"LG G8X - XNU framebuffer contract baseline (${LABEL})" \
+		"$FB_ARGS sweetfbcontract=0"
+	make_profile fb-contract-owned \
+		"LG G8X - XNU framebuffer owned snapshots (${LABEL})" \
+		"$FB_ARGS sweetfbcontract=1"
+	printf 'kernel SHA256: %s\ncreated framebuffer contract baseline and owned profiles for %s\n' "$KERNEL_SHA256" "$LABEL"
+	exit 0
+fi
 
 if [ "$KEY_IRQ_PROFILE" = '--framebuffer-f0' ]; then
 	# F0 is read-only display evidence. The two images differ only in the

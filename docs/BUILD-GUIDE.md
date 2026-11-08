@@ -88,7 +88,9 @@ tools/mk-mh2lm-event-matrix.sh W/logs/xnu-kernel-<LABEL>.gz <LABEL> --battery-ba
 - 回读：参照 `scratch/artifact-0120a18/verify-boots.py`，检查 header、kernel 段、ramdisk 内
   kernel/ADT/TOML 逐字节一致、参数无重复且符合预期。
 - 常用 profile：`--battery-basic-charge`（runtime3 充电，0169 内核额外出 `-tempirq`）、`--irq-only`
-  （三键/触摸/USB 基线）。完整列表看脚本 usage。
+  （三键/触摸/USB 基线）。`--framebuffer-contract` 需要0173，输出 baseline/owned 两档，
+  只差 `sweetfbcontract=0/1`；测试与限制见[自有快照实验](FRAMEBUFFER-OWNED-CONTRACT.md)。
+  完整列表看脚本 usage。
 
 用户测试：`fastboot boot W/out-bs/boot-16k-<LABEL>-<profile>.img`，测完导出日志（第 6 节）。
 

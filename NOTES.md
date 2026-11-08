@@ -4,6 +4,29 @@
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
+**CURRENT：0173 CPU自有快照实验实现/本地验证完成，尚未云编译或上机。**
+详见`docs/FRAMEBUFFER-OWNED-CONTRACT.md`。新增0173补丁（三文件：SweetFramebuffer.cpp、
+SweetFBContract.inc、SweetFBContractState.h）；sweetfbcontract默认0，仅MH2LM可开启。
+提交线程在gate外复制源到自有快照/组帧/写panel，gate内维护归属/reading/cache/display/终态，
+源释放后重放只读自有内存；timer仅保留原软件vsync通知。支持无缩放单layer0 BGRA、持久背景、
+disable/合法blank；其它启用层明确Unsupported。options0/1区别、2整队列、3/4配置ready、noBlock
+及有界commandSleep均接入。52/81取消和77时间ABI核对；81使用同mach_absolute_time的Begin
+cutoff是实验策略，原生provider虚表/内部完整语义未恢复，非零timeout毫秒是显式兼容边界。
+source/自有像素/display分开，CPU写完不等于硬件整帧显示完成；约28.9MiB、同步多次copy会影响性能。
+取消不提前归还读者；commit后取消不回滚已输出像素。helper每调用retain，stop撤入口、唤醒/等调用
+退出再释放；初始化失败不fallback。实验用户客户端显式共享外部调用锁，避免wait挡住提交。
+三文件strict apply及逐字节比对通过；基线/修改后CI参数arm64单文件编译rc0，无新增告警类别
+（非零告警）。14项tools/tests通过，ASan/UBSan通过；LSan报ptrace fatal未通过，detect_leaks=0
+重跑且fixture对象/缓冲计数归零。底稿scratch/framebuffer-0173/{verification.json,tests.json,...}。
+打包新增--framebuffer-contract，baseline/owned两档仅sweetfbcontract=0/1不同，均preserveoff=1、
+trace/probe=0、loglevel=2，共用已验收IRQ/电池runtime3参数。旧0121a2内核被marker检查正确拒绝。
+F0仍未验收，不代表F1/F3/F4已做完，不认定缺时间/滑条区域半透明异常已修好。
+NEXT：用户push本次提交（git log顶部），下载新kernel/buildtree→核对0173三文件/marker/构建
+日志→一次打包两档→手动息屏插/拔电、关机半透明/取消观察，导出两档持久日志。不测自动息屏。
+未改CircleCI，未push；没有本轮CI编号/新可刷镜像。BUG-001/002仍独立，不扩本轮。
+
+**以下为前轮交接，0173实现状态以上段为准。**
+
 **CURRENT：原版内核SwapWait语义核对与帧状态设计已完成文档；未实现新行为。**
 见`docs/FRAMEBUFFER-SWAP-CONTRACT.md`，接续1d8c71d。原版16.7.16 kernelcache解压SHA
 2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221，UUID28E24CE2-BA1C-38B1-AC56-C0BE08A077BC。
