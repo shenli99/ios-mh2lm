@@ -2,6 +2,12 @@
 
 ## Agent handoff / active work (2026-11-08, latest)
 
+**并行线：显示/面板重构计划已写好，F0 待实现。** 计划与分步验收见
+docs/FRAMEBUFFER-PANEL-PLAN.md（F0 取证→F1 SweetMDSS IOService 分层→F2 DCS真关屏→F3 MDSS RD_PTR
+vsync→F4 一致呈现/swap完成→F5 可选kickoff→F6 IOPM/清理）。接手 agent：从 F0 开始，按文档“每步通用要求”
+做，一步一个补丁（下一个编号0170），通过验收后更新该文档§6进度记录和本段，再进下一步。
+电池线 0120a18 用户正在实测（见下段），两条线互不阻塞，但同一内核产物可同时打两边的 profile。
+
 **CURRENT: 0120a18（fc876d3/0169）云产物核对通过，两档boot已打包回读，待用户测tempirq档。**
 logs/xnu-buildtree-0120a18.gz SHA256 2dcb6e19…97ec23、xnu-kernel-0120a18.gz 4c0ff197…c97e7e；34源码与
 scratch/battery-0169/verify逐字节一致，114个require_marker通过；kernel 61d3cbda702d7218d1e32de513cd27728f121bab63812e4336501e8a3c645e59

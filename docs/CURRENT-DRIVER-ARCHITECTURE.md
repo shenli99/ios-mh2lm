@@ -265,6 +265,8 @@ IOKit 事件源和 HID 发布都在使用；中断源的注册/路由尚未交�
 
 ## 画面、背光与电源
 
+> 2026-11-08：重构计划见 [FRAMEBUFFER-PANEL-PLAN.md](FRAMEBUFFER-PANEL-PLAN.md)；下文是重构前的现状。
+
 1. `SweetPlatformExpert` 从 ADT 发布 `/arm-io/disp0` nub；`AppleCLCD`
    作为 `IOService` 匹配它，`IOMobileFramebufferUserClient` 实现 iOS
    `IOMobileFramebuffer` 所需的部分 selector。`IOCoreSurfaceRoot` 与

@@ -444,13 +444,23 @@ FG 状态验证事件，不为 IRQ 化重载 profile；
 **目的：** 解决已记录的局部重绘/锁屏唤醒渲染问题，特别是 display-off 后插拔电源
 会唤醒、状态栏和 home indicator 可见但中间时钟/锁屏区域保持黑色的现象。
 
-**当前边界：** 此阶段暂不定义子目标、实现方案或验收细节。先完成大目标一，再基于
-当时的 IRQ 回归基线与 framebuffer 实验结果撰写详细计划。
+**2026-11-08 详细计划已定：[FRAMEBUFFER-PANEL-PLAN.md](FRAMEBUFFER-PANEL-PLAN.md)。**
+agent 实施时以该文档为准，按步骤顺序推进，每步通过验收后在该文档“进度记录”和
+`NOTES.md` 记录，再开始下一步：
 
-在此之前，保持当前保守方向：先验证 `sweetfbpreserveoff=1` 的非破坏性 display-off
-实验；若仍不足，再评估受限的全屏 shadow buffer。不要把 UniXNU、Hakios 或其他项目
-的整个 framebuffer 栈直接移植进来，也不要将电池事件或充电 UI 伪装成 framebuffer
-问题的修复。
+| 步骤 | 内容 | 修复 |
+|---|---|---|
+| F0 | 取证不改行为：选择子/swap/off-on 校验和、preserveoff A/B、TE 频率 | 定位黑块根因 |
+| F1 | 分层为 `SweetMDSS : IOService`（ADT reg/中断、mapDeviceMemory）+ `AppleCLCD` workloop/命令门/分发表 | 符合 IOKit 常规 |
+| F2 | 真显示电源：DCS 28/29（后续 10/11），不再擦像素 | 息屏唤醒局部黑屏 |
+| F3 | MDSS INTF1 RD_PTR 中断做 vsync，定时器降为看门狗 | 假 vsync |
+| F4 | vsync 驱动的一致呈现、surface retain/释放、SwapWait/完成通知 | 撕裂与读写竞争 |
+| F5 | （可选）关 autorefresh，按帧 kickoff | 功耗/残余撕裂 |
+| F6 | IOPM 生命周期、关机/重启面板状态、panic 显示、删除旧路径 | 收尾 |
+
+新行为全部 opt-in（`sweetfbtrace/sweetmdss/sweetfbpower/sweetfbvsync/sweetfbpresent/
+sweetfbkickoff`），验收通过后再切默认。不要把 UniXNU、Hakios 或其他项目的整个
+framebuffer 栈直接移植进来，也不要将电池事件或充电 UI 伪装成 framebuffer 问题的修复。
 
 ## 大目标三：优化日志结构与管理
 
