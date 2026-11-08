@@ -4,7 +4,19 @@
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
-**CURRENT：0171 / F0 v2 已实现并本地验证，待用户 push、云编译。**
+**CURRENT：0121a1 云编译失败已定位并修复，0172 待用户 push 重编译。**
+日志 `logs/xnu-build-log-0121a1.txt`，SHA256
+`902da91ad88582b5c4118dd7e600d7b4689729d358a2be07b5e045580c7cb090`。
+0171已应用；失败是新增3源码的私有头文件引用用了`<bsd/dev/...>`，CI没有XNU根目录搜索路径。
+fatal在16504（sweet_display_probe）、22940（SweetSurface）、23034（SweetFramebuffer）。
+上轮本地验证额外加了`-I edited根目录`，掩盖错误，不能将其视作等价CI编译。
+0172仅改4条include：BSD同目录双引号，IOKit使用../../../bsd/dev/，与现有PMIC驱动一致。
+去掉额外源码根目录和arm目录搜索路径后，原0171三文件均复现同一fatal，修复后三文件rc0。
+0171→0172严格应用、4文件逐字节比对通过；scratch/framebuffer-0172保留编译日志和verification.json。
+未改circleci.yml，未push。无需产物诊断此编译故障；需要用户push后下载新kernel/buildtree，
+再按下段F0 v2两档流程核对打包。0171诊断策略不变，F0仍未验收。
+
+**0171 / F0 v2 实现摘要（0121a1 include 编译问题由顶部 0172 修复）。**
 见 `docs/FRAMEBUFFER-F0-V2.md`。新增 BGRA 四通道/时钟中心/横条 ROI 取证，
 同坐标 source-panel 比较（含裁剪/stride/offset bounds）、最新提交与最近实际拷贝帧分开记录；
 亮屏每秒采样上限600次；selector追到127；surface前32次create最多各64键。

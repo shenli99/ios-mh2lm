@@ -1,6 +1,7 @@
 # F0 补充取证：0171
 
-状态：本地实现、验证完成，待 push / 云编译 / 实机。当前仍是 F0，未进入 F1。
+状态：0121a1 编译失败已定位；0172 修复 include 路径，待 push / 重编译 / 实机。
+当前仍是 F0，未进入 F1。
 上一轮结果见 [0121 报告](FRAMEBUFFER-F0-0121.md)，总路线见 [显示计划](FRAMEBUFFER-PANEL-PLAN.md)。
 
 ## 本轮要回答什么
@@ -93,3 +94,31 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-<编号>.gz <�
 
 下轮分析需把用户描述的稳定状态与 ns 时间、copied/attempt swap、ROI 差异对齐。
 F0 未验收前不进入 F1，不直接切扫描缓冲或修改 panel 序列。
+
+## 0121a1 编译失败与 0172 修复
+
+构建日志确认 0171 已应用；停止原因是三个新增 include 无法解析：
+
+| 日志行 | 源码 | 错误 |
+|---|---|---|
+| 16504 | sweet_display_probe.c:36 | bsd/dev/sweet_log_level.h not found |
+| 22940 | SweetSurface.cpp:47 | bsd/dev/sweet_log_level.h not found |
+| 23034 | SweetFramebuffer.cpp:54 | bsd/dev/sweet_fb_trace.h not found |
+
+CI 的 BSD 搜索根是 xnu/bsd，IOKit 也没有将整个 xnu 根加入搜索路径。
+因此文件虽存在，`<bsd/dev/...>` 仍找不到。上轮本地编译额外加入了 edited 根目录的 `-I`，
+掩盖了该问题；原“三源码通过”记录只能说明该额外环境下通过，不代表等价 CI 的 include 验证。
+日志中的 TrustCache、Monterey/Sonoma 等跳过警告并非本次停止原因。
+
+修复补丁 `0172-mh2lm-framebuffer-f0-includes.patch` 只改四条 include：
+BSD 用同目录的 `"sweet_log_level.h"`，IOKit 用
+`"../../../bsd/dev/sweet_log_level.h"` / `"../../../bsd/dev/sweet_fb_trace.h"`，
+沿用现有 PMIC 驱动的做法。不扩大 CI 搜索路径，不修改 circleci.yml，不改诊断运行行为。
+
+验证：移除本地额外源码根目录/arm目录搜索路径，旧三源码全部复现云端相同 fatal；
+修复后三源码 arm64 交叉编译全部 rc=0。0171→0172 strict apply，四文件逐字节一致。
+详细记录在 `scratch/framebuffer-0172/`；本轮无新状态机或像素算法修改，不重复无关 host 测试。
+完整云编译及实机仍待完成，不宣称云端已通过。
+
+日志 SHA256：`902da91ad88582b5c4118dd7e600d7b4689729d358a2be07b5e045580c7cb090`。
+无需额外下载本次失败构建的产物；下一步是 push 修复提交后重新编译。

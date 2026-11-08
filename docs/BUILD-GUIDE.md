@@ -47,6 +47,10 @@ boot.img（Android header v1, page 2048）
 4. host 测试：`for t in ios-mh2lm/tools/tests/test-*.py; do python3 $t <源码树>; done`，
    源码树是 `edited/` 或 `verify/`（含 `bsd/`、`iokit/`）。全部 PASS 才提交。改了结构体/路由表要同步改测试里的
    mock（`tools/tests/sweet_mux_test_support.py` 等）。
+   **0121a1 教训：** 验证不得额外加 `-I <整个XNU或edited根目录>` 来让私有头文件可见。
+   这会掩盖 CI 中不存在的搜索路径。保证源码同目录头文件齐全，沿用真实的 component 搜索路径；
+   对未导出的 BSD 私有头，BSD 用同目录双引号，IOKit 用项目已有的源码相对路径。
+   若为移植本地工具链添加兼容参数，须说明哪些是兼容调整，不将其误称等价 CI。
 5. CI 门：在 `.github/workflows/circleci.yml` 的 Build 步骤加 `require_marker <文件> '<补丁独有字符串>'`，
    防止补丁被静默拒绝。**字符串里不能有 `<<`**（CircleCI 模板会解析，曾导致配置损坏）。本地可用
    `python3 -c "import yaml;yaml.safe_load(open(...))"` 和对 `verify/` 逐条检查 marker。

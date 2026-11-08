@@ -1,0 +1,40 @@
+# MH2LM F0 v2 build fix: use source-relative private header includes.
+# CI exports per-component include roots, not the XNU source root.
+# Keep the existing CI configuration and all diagnostic behavior unchanged.
+
+--- a/bsd/dev/sweet_display_probe.c
++++ b/bsd/dev/sweet_display_probe.c
+@@ -33,7 +33,7 @@
+ #include <kern/locks.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+-#include <bsd/dev/sweet_log_level.h>
++#include "sweet_log_level.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -51,9 +51,9 @@
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
+ #include <sys/proc.h>
+-#include <bsd/dev/sweet_fb_trace.h>
++#include "../../../bsd/dev/sweet_fb_trace.h"
+ #define SWEET_LOG_SINK IOLog
+-#include <bsd/dev/sweet_log_level.h>
++#include "../../../bsd/dev/sweet_log_level.h"
+ 
+ enum {
+ 	kSweetFBGetLayerDefaultSurface  = 3,
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -44,7 +44,7 @@
+ #include <libkern/c++/OSString.h>
+ #include <libkern/c++/OSBoolean.h>
+ #define SWEET_LOG_SINK IOLog
+-#include <bsd/dev/sweet_log_level.h>
++#include "../../../bsd/dev/sweet_log_level.h"
+ 
+ enum {
+ 	kSweetSurfaceCreate             = 0,
