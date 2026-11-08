@@ -450,16 +450,17 @@ agent 实施时以该文档为准，按步骤顺序推进，每步通过验收�
 
 | 步骤 | 内容 | 修复 |
 |---|---|---|
-| F0 | 取证不改行为：选择子/swap/off-on 校验和、preserveoff A/B、TE 频率 | 定位黑块根因 |
+| F0 | 取证不改行为：选择子/surface 创建属性/off-on 校验和、preserveoff A/B、SSPP/TE/SMMU 状态 | 定位黑块根因，确认零拷贝前提 |
 | F1 | 分层为 `SweetMDSS : IOService`（ADT reg/中断、mapDeviceMemory）+ `AppleCLCD` workloop/命令门/分发表 | 符合 IOKit 常规 |
 | F2 | 真显示电源：DCS 28/29（后续 10/11），不再擦像素 | 息屏唤醒局部黑屏 |
 | F3 | MDSS INTF1 RD_PTR 中断做 vsync，定时器降为看门狗 | 假 vsync |
-| F4 | vsync 驱动的一致呈现、surface retain/释放、SwapWait/完成通知 | 撕裂与读写竞争 |
-| F5 | （可选）关 autorefresh，按帧 kickoff | 功耗/残余撕裂 |
-| F6 | IOPM 生命周期、关机/重启面板状态、panic 显示、删除旧路径 | 收尾 |
+| F4 | 驱动自有扫描缓冲（simplefb 式）+ SSPP 硬件裁剪 + 双缓冲翻页 | 撕裂、依赖 ABL 缓冲 |
+| F5 | CA surface 由扫描池分配、MDP 直接扫描（cache clean），不兼容时回退拷贝 | 每帧 CPU 拷贝 |
+| F6 | （可选）关 autorefresh，按帧 kickoff | 功耗/残余撕裂 |
+| F7 | IOPM 生命周期、关机/重启交还面板、panic 显示、删除旧路径 | 收尾 |
 
-新行为全部 opt-in（`sweetfbtrace/sweetmdss/sweetfbpower/sweetfbvsync/sweetfbpresent/
-sweetfbkickoff`），验收通过后再切默认。不要把 UniXNU、Hakios 或其他项目的整个
+新行为全部 opt-in（`sweetfbtrace/sweetmdss/sweetfbpower/sweetfbvsync/sweetfbown/
+sweetfbdirect/sweetfbkickoff`），验收通过后再切默认。不要把 UniXNU、Hakios 或其他项目的整个
 framebuffer 栈直接移植进来，也不要将电池事件或充电 UI 伪装成 framebuffer 问题的修复。
 
 ## 大目标三：优化日志结构与管理
