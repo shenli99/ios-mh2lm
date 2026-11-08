@@ -144,3 +144,24 @@ deps 诊断路径代码不动；runtime3 需要 `sweetbattery=1 sweetbatt=1 swee
   诊断列表）；若不是，tempirq 镜像会在挂接时整组失败、不启充，退回普通镜像即可。
   FG 默认 delta 阈值和实际触发频率未知。
 
+## 0120a18 tempirq 档实测（sweetlog-0120a18-battery-basic-charge-tempirq.bin）
+
+日志 SHA256 6b676f2e65bd0a872608cdcba81c22b745eec7ef2479cb3d937e45e14c624f19，553773 字节/6907 行，
+无回卷/NUL；底稿 scratch/artifact-0120a18/（文本与 table.txt）。启动参数含 `sweetbatttempirq=1`。
+
+- 温度中断路由：`SWEET FG ROUTE ppid=0x242 apid=285 write-ee=0 irq-owner=1`，唯一 EE0 归属；
+  `attach route=battery-temp-delta apid=285`，电池组 events=0x3ff 挂接成功，无错误，充电正常。
+  0169 的【待核实】（APID 归属）关闭。
+- 本次 temp-irqs=0：全程温度 27.50～28.75°C，只变 1.25°C，低于 FG 默认 delta 阈值
+  （LG 绑定文档：0～3°C 可配，本机未配置，默认值未知）。不是失败，但 IRQ 实际触发仍未观察到。
+- 充电：开机已 100%。2795s 插入（抖动期间正确不启充）→ FULLON → 立即 TAPER，VBAT 4401mV，
+  电流 431→190mA → 3433s 硬件 TERMINATE（0x45），UI event7 `full=1`。
+- 回充：截止后观察约 25 分钟（3433～4924s），VBAT 4401→4361mV 后稳定，电流约 0，未回充。
+  0x1051 CFG2=0x2c，bit2:1=10 即 **VBAT 回充模式**，阈值寄存器 0x107e/0x107f 未采样；
+  LG 配置是 `qcom,auto-recharge-soc = <98>`（SOC 回充，`sm8150_common-pm.dtsi:385`），
+  本移植沿用固件的 VBAT 模式。回充仍未验证【待核实阈值】。
+- 关机：约 4941s SpringBoard 发起关机，插着充电器。日志在 shutdown 开始后结束，
+  **没有 `SWEET BATT BASIC POWER` 行**：持久日志每 10s 刷一次（sweet_ufs.c `SWEET_LOG_SECS`），
+  关机通知在系统断电前来不及落盘。关机停充是否执行无法从本日志判断。
+- bark 喂狗路由命中 131 次，无 ERROR 行；三键/触摸正常。
+
