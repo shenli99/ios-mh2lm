@@ -1,5 +1,13 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0168当前充电路径（0120a17实机通过）：** `sweetbattruntime=3`时SweetBattery在自己的
+workloop上，由mux电池IRQ（USB/CHG/MSOC/READY/SOURCE/FAULT/TYPEC/INPUT_FAULT/WDOG）
+或LG battemp周期定时器（60/30/10s，每次IRQ重置）触发：快照→`sweet_charge_basic.h`
+纯策略→`sweet_charger.c`语义命令（逐条回读）→IOPM发布。不建ADC5 client，不依赖
+身份/许可/租约。PMIC负责APSD/AICL/CC/CV/截止；软件设FCC2000/FV4400、拉低SMB_EN、
+配WD并只在bark IRQ喂狗、按LG温度表降流/停充。硬件JEITA补偿保持关闭（同LG）。
+详见[BATTERY-BASIC-CHARGE.md](BATTERY-BASIC-CHARGE.md)。下方0165及更早为历史。
+
 **0165最新增量（本地完成，待push/实机）：** SweetBattery自己的loop可选择执行
 身份交叉验证、主PMIC副路禁止和有限watchdog配置/bark IRQ维护。后两项经语义
 后端与共享transport，pulse有独立固定API；mux表19路/3组，默认battery订阅仍ff，

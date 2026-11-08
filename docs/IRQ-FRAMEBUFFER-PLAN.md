@@ -1,5 +1,10 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
+**2026-11-08电池IRQ子目标：** 0168 runtime3（IRQ驱动、LG SMB5分工）在0120a17实机
+充满，CHGR/USBIN/TYPEC/MSOC/WDOG路由均有自然命中，三键/触摸并行正常。剩余第5～6段
+补强（回充、温度事件IRQ、停止留证、UI核对）完成后结案，再开始本文第2项framebuffer。
+详见[电池实现计划](BATTERY-IMPLEMENTATION-PLAN.md)顶部。
+
 **0120a16身份档实测：未通过，阻塞点为USBIN RESULT校验失败-12。**
 只有3请求/2成功/5EOC，约53.744秒终止；失败这次GIC→notify61.979µs，ACK等锁
 0.312µs/持锁12.188µs，callback距deadline仍98.522ms，属于及时交付后的校验错误。

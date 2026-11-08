@@ -1,5 +1,11 @@
 # 0119之后的电池驱动推进
 
+**0120a17实机：0168已真实充电并充满。** 71%→100%：CC约1.97A→404s起CV 4400mV→
+4878s硬件TERMINATE，绝大部分时间熄屏，喂狗305次无错，拔出即停。段落验收状态与
+下一步见[实现计划](BATTERY-IMPLEMENTATION-PLAN.md)顶部；证据见
+[BATTERY-BASIC-CHARGE.md](BATTERY-BASIC-CHARGE.md)。下一段“待push/实机”已过时。
+
+
 **当前0168：runtime3基础充电（IRQ驱动，按LG SMB5分工），本地验证通过，待用户push/CircleCI/实机。**
 旧放行链（parallelVerified恒false、WD门与实测0x62/0x8c不符、ADC同epoch、租约）
 永远走不通，0120a16全部CONFIG enable0。0168不再加门：PMIC做APSD/AICL/ICL、CC/CV、
