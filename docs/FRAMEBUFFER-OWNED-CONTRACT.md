@@ -1,6 +1,6 @@
 # CPU framebuffer 自有快照契约实验（0173）
 
-2026-11-08。状态：实现及本地验证完成，**尚未云编译、上机或验收视觉效果**。
+2026-11-08。状态：0121a3产物核对、两档boot打包完成，**尚未上机或验收视觉效果**。
 接续[原版帧契约核对](FRAMEBUFFER-SWAP-CONTRACT.md)和[0121a2 实测](FRAMEBUFFER-F0-0121A2.md)。
 F0 尚未验收；这是独立行为实验，不代表 F1/F3/F4 已完成。
 
@@ -128,7 +128,7 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 ```
 
 产出名字为 `boot-16k-编号-fb-contract-baseline.img` 和
-`boot-16k-编号-fb-contract-owned.img`，在 work1/out-bs；**目前尚未生成**。
+`boot-16k-编号-fb-contract-owned.img`，在 work1/out-bs。0121a3已生成，核验记录见下节。
 两档共用同内核和已验证 IRQ/电池 runtime3 参数，只差 sweetfbcontract=0/1，
 均 preserveoff=1、trace/probe=0、loglevel=2。
 
@@ -142,3 +142,22 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 本机没有自动息屏，不安排 auto-lock。若发生已知 mux 隔离/USB 重连故障，按
 [独立BUG台账](BUGS.md)分开判断。两档视觉无差别也有价值，不能因此静默判成功；
 需结合失败/Unsupported/等待日志决定继续模式契约核对还是正式拆分显示后端。
+
+## 0121a3 产物与镜像记录
+
+预期实现提交6c2e77d。40个源码文件逐字节匹配，114个CI源码marker及实验内核marker通过；
+内核manifest匹配，SHA256为`513d16fa31f746cac23573ba1ac87343a0ffe03c361cf7eb0835b4c44f04a8c8`。
+本地未收到构建日志/CI run ID，不声明已查全量编译告警。
+
+两档均在`/home/shenli/work1/out-bs/`，35,667,968字节：
+
+| 文件 | SHA256 |
+|---|---|
+| boot-16k-0121a3-fb-contract-baseline.img | 33ee5f10df8230b6071cc4c9c5ab689334b239eaf56cf97685cc2398d88ef30c |
+| boot-16k-0121a3-fb-contract-owned.img | 67e8a96ea29c57e8e0c59d63d5d999e508d010e15096fd8ad0cbe3f48a70c085 |
+
+从最终boot回读Android v1 header/FAT；kernel blob、kernel payload、ADT、TOML逐字节核验通过。
+启动参数没有重复，两档仅sweetfbcontract=0/1不同。底稿在
+`scratch/artifact-0121a3/{verification.json,source-compare.json,boot-verification.json}`。
+依上节顺序测baseline再owned，各留`sweetlog-0121a3-fb-contract-baseline.bin`、
+`sweetlog-0121a3-fb-contract-owned.bin`。尚未上机，不将打包完成记为视觉修复验收。

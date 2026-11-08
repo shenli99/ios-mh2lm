@@ -4,6 +4,21 @@
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
+**CURRENT：0121a3 / 0173 产物核对与两档boot打包完成，等待用户实测。**
+用户已下载xnu-buildtree-0121a3.gz、xnu-kernel-0121a3.gz，对应预期实现提交6c2e77d。
+40个源码文件（含0173三文件）逐字节匹配，114个CI源码marker及新内核marker通过；
+manifest核验通过，kernel SHA256=513d16fa31f746cac23573ba1ac87343a0ffe03c361cf7eb0835b4c44f04a8c8，
+与0121a2不同。无本轮构建日志/CI run ID，未检查全量编译告警，不据产物反推零告警。
+已生成out-bs/boot-16k-0121a3-fb-contract-{baseline,owned}.img，两档均35,667,968字节。
+baseline SHA256=33ee5f10df8230b6071cc4c9c5ab689334b239eaf56cf97685cc2398d88ef30c；
+owned SHA256=67e8a96ea29c57e8e0c59d63d5d999e508d010e15096fd8ad0cbe3f48a70c085。
+从最终boot回读header/FAT，kernel blob、kernel payload、ADT、TOML逐字节核验通过，参数无重复；
+两档只差sweetfbcontract=0/1，均preserveoff=1、trace/probe=0、loglevel=2、既有IRQ/电池runtime3。
+底稿scratch/artifact-0121a3/{verification.json,source-compare.json,boot-verification.json,verify-*.py}。
+NEXT：用户依次测试baseline/owned：手动息屏插/拔电后时间、关机滑条区域半透明颜色、取消后的时间，
+各留持久日志sweetlog-0121a3-fb-contract-{baseline,owned}.bin；关注冻结/延迟并回归输入与充电。
+尚未刷机/上机或验收F0，不测自动锁屏；未改驱动/CI，未push，本次仅核对打包与文档记录。
+
 **CURRENT：0173 CPU自有快照实验实现/本地验证完成，尚未云编译或上机。**
 详见`docs/FRAMEBUFFER-OWNED-CONTRACT.md`。新增0173补丁（三文件：SweetFramebuffer.cpp、
 SweetFBContract.inc、SweetFBContractState.h）；sweetfbcontract默认0，仅MH2LM可开启。
