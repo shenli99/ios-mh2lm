@@ -4,12 +4,27 @@
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
+**CURRENT：F0 本版用户态 ABI 离线核对已推进；症状校正为关机滑条区域半透明颜色未正常渲染。**
+见 `docs/FRAMEBUFFER-USERLAND-ABI.md`。不是控件几何重叠，相关计划/报告已校正。
+本地scratch/dsc由ipsw识别iOS16.7/arm64，cache UUID 8f970452c9e33e88b114feb1864bc9e0；
+定位原IOMFB/QuartzCore并核对17项实际指令，底稿scratch/framebuffer-abi-0121a2（含验证JSON）。
+确认：record+0x10c是背景色，bit31背景更新；CA set_all_layers_to_null明确生成黑背景+三层null，
+日志0x80000007全disable是合法blank。当前跳过surface ID0、忽略disable/background是实现缺口。
+确认：CA can_update_在SwapWait返回0后清除页swap ID并推进资源回收；实机具体ID等待均rc0，
+而内核仅排队尚未copy。这是假完成/复用契约缺口，优先于单补模式ID；尚未证明所有症状同因。
+GetDigitalOutMode确实用block0x40/40字节，读+4/+8两ID；当前清0，但0是否匹配fallback未知，
+不能仅填1。SWContext有blur_surface，不能仅按缺GPU认定半透明无解，也不能直接给memcpy加混色。
+NEXT：厘清SwapWait flags阶段/非阻塞Busy/id0 ready/取消覆盖，设计workloop+gate内状态与可释放
+gate的有界等待；同时处理持久layer/background和blank。模式契约成组核对另档验证。半透明效果
+如需取证做局部alpha分布，避免每秒79ms取证。F0未验收，不进入F1，不要求重复刷0121a2。
+本轮只改文档；没有新kernel补丁、待push版本；未改CI、用户态二进制或设备，未push。
+
 **CURRENT：0121a2 F0 v2 两档持久日志已分析；用户确认两档显示异常相同。F0 未验收。**
 详见 `docs/FRAMEBUFFER-F0-0121A2.md`。普通/保留档日志完整未回卷，SHA/行号/统计见报告。
 插电后多次稳定观察：时钟 ROI 的当前 source 与扫描内存同为 RGB0、差异0，且期间继续 copy；
 不能仅用息屏擦除或漏拷解释，更不能据此认定 CA 自身 bug。普通首次 off 擦黑且 on 重放空记录，
 preserveoff 确实保留旧像素，但两档后续均同黑；空记录可能是合法 blank，不能直接过滤/硬恢复。
-关机滑条重叠未独立定因，本版正常充电过渡 UI 尚未独立核验。
+关机滑条区域半透明效果异常未独立定因，本版正常充电过渡 UI 尚未独立核验。
 接口候选：每次 on 后 selector79/block0x40 输出40字节，当前全清0；参考 HakiOS 为当前模式ID，
 并与 TimingElements/ColorElements/IOMFBDisplayRefresh 一致。当前无模式属性，SwapWait 也为空。
 需先核对本项目用户态 ABI，不能凭跨版本参考直接定因。source 复用证据已捕获：留在panel的画面
@@ -20,7 +35,7 @@ SMMU虽route TRANS/CB2，但CB2 SCTLR=0xe0/M0、TTBR/TTBCR/MAIR0，本次stage1�
 两档本轮未见ERROR/WARN、mux隔离或panic，BUG-002仅未复现，未修复；独立bug不扩入显示线。
 trace每秒样本中位约79ms（含读/比较/日志），明显增加workloop负担，不能代表默认性能。
 NEXT：离线核对GetBlock模式/属性、SwapEnd/SwapWait/完成通知和update/disable/background语义，
-再设计针对性修复；本地scratch/dsc有缓存，尚未定位目标framework。不立即重复同类上机读数，
+再设计针对性修复；目标framework后续已定位，离线结果以上段及ABI文档为准。不立即重复同类上机读数，
 不进入F1，不直接改panel/SMMU。本轮只改分析/计划文档，无新驱动待push，未改CI，未push。
 底稿 `scratch/artifact-0121a2/{fb-trace*.txt,*.timeline.txt,log-analysis.json,analyze-logs.py}`。
 产物核对历史：38源码、114marker、kernel/两档boot回读通过，记录提交e89754d；
@@ -58,7 +73,7 @@ C/C++ ASan/UBSan边界测试通过；13个host测试最终全过（充电测试�
 **独立 Bug 台账：`docs/BUGS.md`。** 按用户要求，将原功能基本完成后暴露的遗留/回归问题独立
 登记：BUG-001 USB多次插拔枚举失败；BUG-002 PMIC持续pending后电池/按键group被隔离。
 不自动加入当前显示计划、不自动作为显示阶段前置；需修复时单独安排。该两项只建档、整理证据，
-本轮未改其驱动；显示F0补丁待编译（见顶部）。显示缺时间/滑条重叠及F0取证不足仍在显示计划中。
+本轮未改其驱动；显示F0补丁待编译（见顶部）。显示缺时间/滑条区域半透明效果异常及F0取证不足仍在显示计划中。
 
 **CURRENT 显示线：0121（d58e7fc / 0170）两档持久日志已分析；F0 未验收，不重复要求本轮测试。**
 详见 `docs/FRAMEBUFFER-F0-0121.md`。普通档 USBIN(group1/APID269/bit4) 在第6436行触发 pending
@@ -66,7 +81,7 @@ C/C++ ASan/UBSan边界测试通过；13个host测试最终全过（充电测试�
 按键 worker 停止，最后 display off 后再无电池/按键唤醒，触摸和用户态仍输出，未记录 panic。
 保留像素档无ERROR；不能据一次对照断言 preserveoff 修复 mux。下一启动 gauge 原始MSOC
 0xfa=97%，上次最后0xfe=99%；故障间无遥测，实际消耗/电量计重估贡献未知。
-用户确认当前无自动息屏，已撤掉auto-lock项；插电大logo后缺时间、拔电有时间、关机滑条重叠、
+用户确认当前无自动息屏，已撤掉auto-lock项；插电大logo后缺时间、拔电有时间、关机滑条区域半透明效果异常、
 取消后缺时间均已记录，黑背景本身不算故障。Apple同版正常UI对照尚未核验（网络/DNS失败）。
 普通档首次off hash改变，preserveoff首次off/on不变，证实保留参数有效；仍未解决全部显示现象。
 0170取证缺口：hash只读稀疏B通道且不覆盖时钟；source选择未按ring时间序、常被id0覆盖；
