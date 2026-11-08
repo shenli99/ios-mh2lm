@@ -6,7 +6,7 @@
 
 证据见docs/BATTERY-BASIC-CHARGE.md末节及scratch/artifact-0120a17/basic-charge-persistent.txt。
 喂狗54次无错，failures=0。开机电脑口SDP不充（用户确认正常）。
-NEXT：可选回充（满后插着放更久）、熄屏、温度档；0169 batt-temp-delta IRQ待用户决定。
+NEXT：熄屏充电已覆盖（系统未真睡眠）；可选回充、温度档；0169 batt-temp-delta IRQ待用户决定。
 
 ### Previous 0120a17 artifact handoff (superseded)
 

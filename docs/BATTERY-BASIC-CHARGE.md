@@ -118,4 +118,8 @@ deps 诊断路径代码不动；runtime3 需要 `sweetbattery=1 sweetbatt=1 swee
   之后 5 分钟 VBAT 4401→4363mV，未到回充点，回充未观察到。
 - 5189s 拔出 → 写 0042=0。全程温度最高 31.75°C，一直 GOOD；喂狗 305 次、pet-errors 0；
   无 MUX 读失败/隔离；未发生 protection-timer 采样（bark 每约 16.4s 先到）。
+- 熄屏：`SWEET FB: display off/on` 显示 205s 熄屏，此后到 5189s 只有 7 次瞬间亮屏（不到 1 秒），
+  充电约 98% 时间在熄屏。熄屏期间 FG 采样连续（相邻采样最大间隔 36.7s，bark 约每 16.4s 一次），
+  说明 CPU 一直在跑、系统没有进入真睡眠；0168 的 WillSleep 分支不打日志，无法从日志直接看到
+  是否收到过 WillSleep。真睡眠下 bark 能否唤醒仍【待核实】。
 
