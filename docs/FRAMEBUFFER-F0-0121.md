@@ -117,3 +117,8 @@ parent0；未带 `IOSurfaceIsDisplayable`/`IOSurfaceIsGPUAddressable` 键。仅�
 下一步继续补 F0 证据；mux pending 由独立 Bug 台账跟踪，修复另行安排。
 F0 完成验收前不进入 F1 或直接自有缓冲翻页。
 F4 前必须明确 SMMU 映射路径；32 位物理分配约束无法替代设备地址映射。
+
+## 7. 后续：0171 补充取证
+
+本地实现及下一轮测试流程见 [F0 v2](FRAMEBUFFER-F0-V2.md)。旧 0121 日志结论不变，
+新诊断尚待云产物与实机，不据本地通过提前宣布像素根因已找到。

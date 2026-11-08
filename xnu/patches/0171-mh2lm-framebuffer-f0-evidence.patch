@@ -1,0 +1,535 @@
+# MH2LM framebuffer F0 v2: bounded BGRA evidence, actual-copy metadata,
+# complete bounded IOSurface property tracing and corrected frame/config reads.
+# No changes to swap/copy/blanking policy, DCS writes, IRQ or battery behavior.
+# sweetfbtrace=2 also enables read-only known-layout SMMU CB2 configuration.
+
+--- /dev/null
++++ b/bsd/dev/sweet_fb_trace.h
+@@ -0,0 +1,71 @@
++/* F0 read-only BGRA observations. No rendering or allocation policy lives here. */
++#ifndef _SWEET_FB_TRACE_H_
++#define _SWEET_FB_TRACE_H_
++#include <stdint.h>
++
++struct SweetFBTraceView {
++	const volatile uint8_t *base;
++	uint64_t length, offset;
++	uint32_t width, height, stride;
++};
++struct SweetFBTracePixels {
++	uint64_t hash;
++	uint32_t samples, rgb, alpha, differentRGB, differentAlpha;
++};
++
++/* Validate every coordinate and the last byte before touching either mapping. */
++static inline int
++sweet_fb_trace_bounds(const struct SweetFBTraceView *v,
++    uint32_t x, uint32_t y, uint32_t w, uint32_t h)
++{
++	if (!v->base || !w || !h || !v->width || !v->height ||
++	    v->width > 16384 || v->height > 16384 ||
++	    v->stride < (uint64_t)v->width * 4 ||
++	    x >= v->width || y >= v->height || w > v->width - x || h > v->height - y ||
++	    v->offset > v->length) {
++		return 0;
++	}
++	uint64_t end = (uint64_t)(y + h - 1) * v->stride + (uint64_t)(x + w) * 4;
++	return end <= v->length - v->offset &&
++	       v->length <= (uint64_t)UINTPTR_MAX - (uintptr_t)v->base;
++}
++
++/* A complete BGRA word at the same destination pixel coordinates in both views.
++ * Stride padding is excluded. Step=8 bounds cost, so this remains a sample,
++ * never proof that unsampled pixels (or an entire glyph) are absent. */
++static inline int
++sweet_fb_trace_pixels(const struct SweetFBTraceView *v, uint32_t x, uint32_t y,
++    const struct SweetFBTraceView *other, uint32_t ox, uint32_t oy,
++    uint32_t w, uint32_t h, uint32_t step, struct SweetFBTracePixels *out)
++{
++	*out = (struct SweetFBTracePixels){1469598103934665603ULL, 0, 0, 0, 0, 0};
++	if (!step || step > 16384 || !sweet_fb_trace_bounds(v, x, y, w, h) ||
++	    (other && !sweet_fb_trace_bounds(other, ox, oy, w, h))) {
++		return 0;
++	}
++	for (uint32_t row = 0; row < h; row += step) {
++		for (uint32_t col = 0; col < w; col += step) {
++			uint64_t at = v->offset + (uint64_t)(y + row) * v->stride + (uint64_t)(x + col) * 4;
++			uint32_t pixel = 0, compare = 0;
++			for (uint32_t c = 0; c < 4; c++) {
++				uint8_t b = v->base[at + c];
++				pixel |= (uint32_t)b << (c * 8);
++				out->hash = (out->hash ^ b) * 1099511628211ULL;
++			}
++			++out->samples;
++			out->rgb += (pixel & 0xffffffu) != 0;
++			out->alpha += (pixel >> 24) != 0;
++			if (other) {
++				uint64_t there = other->offset + (uint64_t)(oy + row) * other->stride +
++				    (uint64_t)(ox + col) * 4;
++				for (uint32_t c = 0; c < 4; c++) {
++					compare |= (uint32_t)other->base[there + c] << (c * 8);
++				}
++				out->differentRGB += ((pixel ^ compare) & 0xffffffu) != 0;
++				out->differentAlpha += ((pixel ^ compare) >> 24) != 0;
++			}
++		}
++	}
++	return 1;
++}
++#endif
+--- a/bsd/dev/sweet_display_probe.c
++++ b/bsd/dev/sweet_display_probe.c
+@@ -33,6 +33,7 @@
+ #include <kern/locks.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include <bsd/dev/sweet_log_level.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+@@ -54,7 +55,8 @@
+ 
+ static int dp_chan;
+ static uint32_t dp_last_frame[2];
+-static uint32_t dp_last_line[2];
++static uint64_t dp_last_ns[2];
++static vm_offset_t dp_smmu_gr1, dp_smmu_cb2;
+ 
+ /* Register windows, mapped once; dp_lock serialises every DSI write. */
+ static LCK_GRP_DECLARE(dp_grp, "sweet_disp");
+@@ -112,6 +114,35 @@
+ 		    dp_rd(base, o), dp_rd(base, o + 4), dp_rd(base, o + 8), dp_rd(base, o + 12),
+ 		    dp_rd(base, o + 16), dp_rd(base, o + 20), dp_rd(base, o + 24), dp_rd(base, o + 28));
+ 	}
++}
++
++/* LG arm-smmu.c: ID1=0x60000038 => 4K pages, GR half 0x80000,
++ * whole resource 0x100000 (also apps_smmu DT resource). Only known CB2 config;
++ * never dereference TTBR or read TLB/fault/command registers. Unknown IDs stop. */
++static void
++dp_smmu_context(uint32_t id0, uint32_t id1, uint32_t s2cr)
++{
++	int trace = 0;
++	(void)PE_parse_boot_argn("sweetfbtrace", &trace, sizeof(trace));
++	if (trace < 2 || !sweet_log_level_enabled(2u)) { return; }
++	if (id0 != 0x4c017e5eu || id1 != 0x60000038u ||
++	    ((s2cr >> 16) & 3u) != 0 || (s2cr & 0xffu) != 2) {
++		SWEET_LOG_WARN("SWEET DISP: F0 v2 unknown SMMU layout/route, skip CB config\n");
++		return;
++	}
++	/* dp_smmu already maps both GR0 and GR1 pages. */
++	dp_smmu_gr1 = dp_smmu + 0x1000u;
++	if (!dp_smmu_cb2) { dp_smmu_cb2 = ml_io_map(SMMU_PA + 0x82000u, 0x1000); }
++	if (!dp_smmu_gr1 || !dp_smmu_cb2) {
++		SWEET_LOG_WARN("SWEET DISP: F0 v2 optional CB2 mapping unavailable\n");
++		return;
++	}
++	vm_offset_t cb = dp_smmu_cb2;
++	SWEET_LOG_INFO("SWEET DISP: F0 v2 cb2 pa=0x15082000 cbar=%#x cba2r=%#x sctlr=%#x actlr=%#x ttbcr2=%#x ttbcr=%#x ttbr0=%08x:%08x ttbr1=%08x:%08x mair=%08x:%08x\n",
++	    dp_rd(dp_smmu_gr1, 2u * 4u), dp_rd(dp_smmu_gr1, 0x800u + 2u * 4u),
++	    dp_rd(cb, 0x00), dp_rd(cb, 0x04), dp_rd(cb, 0x10), dp_rd(cb, 0x30),
++	    dp_rd(cb, 0x24), dp_rd(cb, 0x20), dp_rd(cb, 0x2c), dp_rd(cb, 0x28),
++	    dp_rd(cb, 0x3c), dp_rd(cb, 0x38));
+ }
+ 
+ static void
+@@ -151,11 +182,14 @@
+ 		printf("SWEET DISP: intf%u te-en %#x cfg %#x height %#x init %#x count %#x line %#x auto %#x frame %#x\n",
+ 		    i + 1, dp_rd(p, 0x284), dp_rd(p, 0x288), dp_rd(p, 0x28c), dp_rd(p, 0x294),
+ 		    dp_rd(p, 0x298), dp_rd(p, 0x2b0), dp_rd(p, 0x2b4), dp_rd(p, 0xac));
+-		uint32_t frame = dp_rd(p, 0x2b4), line = dp_rd(p, 0x2b0);
+-		if (pass != 0) {
+-			printf("SWEET DISP: intf%u delta frame %#x line %#x\n", i + 1, frame - dp_last_frame[i], line - dp_last_line[i]);
+-		}
+-		dp_last_frame[i] = frame; dp_last_line[i] = line;
++		uint32_t frame = dp_rd(p, 0xac), line = dp_rd(p, 0x2b0);
++		uint64_t ns;
++		absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++		if (dp_last_ns[i] != 0) {
++			SWEET_LOG_INFO("SWEET DISP: F0 v2 intf%u elapsed-ns=%llu frame-delta=%u tear-line-phase=%#x frame-en=%#x raster-line=%#x command-mode-not-TE-rate\n",
++			    i + 1, ns - dp_last_ns[i], frame - dp_last_frame[i], line, dp_rd(p, 0xa8), dp_rd(p, 0xb0));
++		}
++		dp_last_frame[i] = frame; dp_last_ns[i] = ns;
+ 	}
+ 	/* Read-only ARM SMMU v2 stream matching. Never write or probe a gated status FIFO. */
+ 	if (smmu != 0) {
+@@ -169,6 +203,7 @@
+ 				uint32_t s2cr = dp_rd(smmu, 0xc00u + i * 4u);
+ 				printf("SWEET DISP: smmu match idx=%u smr=%#x s2cr=%#x type=%u cb=%u\n",
+ 				    i, smr, s2cr, (s2cr >> 16) & 3u, s2cr & 0xffu);
++				if (pass == 0) { dp_smmu_context(id0, id1, s2cr); }
+ 			}
+ 		}
+ 	} else {
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -51,6 +51,9 @@
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
+ #include <sys/proc.h>
++#include <bsd/dev/sweet_fb_trace.h>
++#define SWEET_LOG_SINK IOLog
++#include <bsd/dev/sweet_log_level.h>
+ 
+ enum {
+ 	kSweetFBGetLayerDefaultSurface  = 3,
+@@ -86,31 +89,19 @@
+ #define SWEET_FB_TRACE_MAX_SELECTOR     32
+ 
+ typedef struct {
+-	uint32_t swapID;
+-	uint32_t mask;
++	uint32_t swapID, mask, disabled, raw10c, raw110;
+ 	uint32_t surface[SWEET_FB_LAYERS];
+ 	int32_t rect[SWEET_FB_LAYERS][4];
+ } SweetFBTraceSwap;
+ 
+-static uint32_t sweet_fb_selector_trace[64];
++static uint32_t sweet_fb_selector_trace[128];
+ 
+ static uint64_t
+-sweet_fb_trace_hash(uintptr_t base, uint32_t height, uint32_t stride)
+-{
+-	uint64_t hash = 1469598103934665603ULL;
+-	if (base == 0 || height == 0 || stride == 0) {
+-		return 0;
+-	}
+-	uint32_t first = height > 1400 ? 900 : 0;
+-	uint32_t last = height > 1400 ? 1400 : height;
+-	for (uint32_t y = first; y < last; y += 8) {
+-		volatile const uint8_t *row = (volatile const uint8_t *)(base + (uint64_t)y * stride);
+-		for (uint32_t x = 0; x < stride; x += 64) {
+-			hash ^= row[x];
+-			hash *= 1099511628211ULL;
+-		}
+-	}
+-	return hash;
++sweet_fb_trace_now(void)
++{
++	uint64_t ns;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns;
+ }
+ 
+ class IOMobileFramebuffer : public IOService {
+@@ -153,8 +144,16 @@
+ 	bool          fTraceOffAfter;
+ 	SweetFBTraceSwap fTraceSwaps[SWEET_FB_TRACE_SLOTS];
+ 	uint32_t      fTraceSwapNext;
++	uint32_t      fTraceSourceID; /* observe only, no lifetime extension */
++	uint32_t      fTraceCopiedSwap, fTraceAttemptSwap, fTraceAttempts;
++	int32_t       fTraceCopy[6]; /* sx, sy, dx, dy, width, height of last actual copy */
++	uint64_t      fTraceCopiedNs, fTraceNextNs;
++	uint32_t      fTracePeriodic;
++	uint64_t      fTraceSelectorMask[2];
+ 
+ 	void traceFrame(const char *phase);
++	void traceCopy(const uint8_t *rec, SweetSurface *source, int32_t sx, int32_t sy,
++	    int32_t dx, int32_t dy, int32_t w, int32_t h);
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void addClient(IOMobileFramebufferUserClient *client);
+ 	void removeClient(IOMobileFramebufferUserClient *client);
+@@ -408,7 +407,8 @@
+ 	(void)PE_parse_boot_argn("sweetfbtrace", &trace, sizeof(trace));
+ 	fTrace = trace != 0;
+ 	if (fTrace) {
+-		IOLog("SWEET FB TRACE: enabled; reads only, selector limit=%u\n", SWEET_FB_TRACE_MAX_SELECTOR);
++		SWEET_LOG_INFO("SWEET FB TRACE: v2 enabled; BGRA samples step=8, interval=1s limit=600; read-only\n");
++		fTraceNextNs = sweet_fb_trace_now() + 1000000000ULL;
+ 	}
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 
+@@ -482,6 +482,15 @@
+ 		}
+ 		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 		return;
++	}
++	bool tracePeriodic = false;
++	if (fb->fTrace && fb->fTracePeriodic < 600) {
++		uint64_t ns = sweet_fb_trace_now();
++		if (ns >= fb->fTraceNextNs) {
++			fb->fTraceNextNs = ns + 1000000000ULL;
++			++fb->fTracePeriodic;
++			tracePeriodic = true;
++		}
+ 	}
+ 	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
+ 	uint8_t *rec = NULL;
+@@ -505,6 +514,9 @@
+ 			fb->traceFrame("on-after");
+ 		}
+ 	}
++	if (tracePeriodic) {
++		fb->traceFrame("periodic");
++	}
+ 	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ }
+ 
+@@ -556,6 +568,9 @@
+ 		bzero(t, sizeof(*t));
+ 		t->swapID = get32(rec, 0x50);
+ 		t->mask = get32(rec, 0x104);
++		t->disabled = get32(rec, 0x108);
++		t->raw10c = get32(rec, 0x10c);
++		t->raw110 = get32(rec, 0x110);
+ 		for (uint32_t layer = 0; layer < SWEET_FB_LAYERS; layer++) {
+ 			t->surface[layer] = get32(rec, 0x54 + 4 * layer);
+ 			const uint8_t *b = rec + 0xc4 + 16 * layer;
+@@ -570,48 +585,119 @@
+ 	}
+ }
+ 
++/* Preserve metadata for the copy made into the boot scanout buffer. A later null-surface
++ * request must not make diagnostics silently switch to an unrelated ring slot. */
++void
++AppleCLCD::traceCopy(const uint8_t *rec, SweetSurface *source, int32_t sx, int32_t sy,
++    int32_t dx, int32_t dy, int32_t w, int32_t h)
++{
++	if (!fTrace) { return; }
++	IOLockLock(fLock);
++	fTraceSourceID = source->id;
++	fTraceCopiedSwap = get32(rec, 0x50);
++	fTraceCopiedNs = sweet_fb_trace_now();
++	fTraceCopy[0] = sx; fTraceCopy[1] = sy;
++	fTraceCopy[2] = dx; fTraceCopy[3] = dy;
++	fTraceCopy[4] = w; fTraceCopy[5] = h;
++	IOLockUnlock(fLock);
++}
++
+ void
+ AppleCLCD::traceFrame(const char *phase)
+ {
+-	if (!fTrace) {
+-		return;
+-	}
+-	uint64_t panel = sweet_fb_trace_hash(fPixels, fHeight, fRowBytes);
+-	SweetFBTraceSwap local[SWEET_FB_TRACE_SLOTS];
+-	uint32_t next;
++	if (!fTrace || !sweet_log_level_enabled(2u)) { return; }
++	SweetFBTraceSwap recent[SWEET_FB_TRACE_SLOTS];
++	uint32_t next, attempted, attempts, copied;
++	uint64_t copiedNs, selectors[2];
++	int32_t box[6];
+ 	IOLockLock(fLock);
+-	memcpy(local, fTraceSwaps, sizeof(local));
+-	next = fTraceSwapNext;
++	memcpy(recent, fTraceSwaps, sizeof(recent));
++	next = fTraceSwapNext; attempted = fTraceAttemptSwap; attempts = fTraceAttempts;
++	copied = fTraceCopiedSwap; copiedNs = fTraceCopiedNs;
++	memcpy(box, fTraceCopy, sizeof(box));
++	memcpy(selectors, fTraceSelectorMask, sizeof(selectors));
++	uint32_t sourceID = fTraceSourceID;
+ 	IOLockUnlock(fLock);
+-	IOLog("SWEET FB TRACE: %s panel-hash=%llx swap-next=%u\n", phase, panel, next);
+-	for (uint32_t n = 0; n < SWEET_FB_TRACE_SLOTS; n++) {
+-		SweetFBTraceSwap *t = &local[n];
+-		IOLog("SWEET FB TRACE: %s recent[%u] swap=%u mask=%#x ids=%u,%u,%u,%u r0=%d,%d,%d,%d\n",
+-		    phase, n, t->swapID, t->mask, t->surface[0], t->surface[1],
+-		    t->surface[2], t->surface[3], t->rect[0][0], t->rect[0][1],
+-		    t->rect[0][2], t->rect[0][3]);
+-	}
+-	uint32_t id = 0;
+-	for (uint32_t n = 0; n < SWEET_FB_TRACE_SLOTS; n++) {
+-		if (local[n].mask & 1u) {
+-			id = local[n].surface[0];
+-		}
+-	}
+-	SweetSurface *s = id != 0 ? sweet_surface_copy(id) : NULL;
+-	if (s != NULL) {
+-		uint64_t source = sweet_fb_trace_hash(s->kernelAddress(), s->height, s->bytesPerRow);
+-		IOLog("SWEET FB TRACE: %s source-surface=%u hash=%llx %ux%u fmt=%#x bpr=%u alloc=%u cache=%#x offset=%u\n",
+-		    phase, id, source, s->width, s->height, s->pixelFormat, s->bytesPerRow,
+-		    s->allocSize, s->cacheMode, s->offset);
+-		s->release();
+-	}
++	SweetSurface *source = sourceID ? sweet_surface_copy(sourceID) : NULL;
++	uint64_t ns = sweet_fb_trace_now();
++	SWEET_LOG_INFO("SWEET FB TRACE: v2 phase=%s ns=%llu attempt=%u attempts=%u copied=%u copy-ns=%llu source=%u alive=%u selectors=%llx/%llx\n",
++	    phase, ns, attempted, attempts, copied, copiedNs, sourceID, source != NULL, selectors[0], selectors[1]);
++	uint32_t count = next < SWEET_FB_TRACE_SLOTS ? next : SWEET_FB_TRACE_SLOTS;
++	for (uint32_t n = 0; n < count; n++) {
++		const SweetFBTraceSwap &t = recent[(next - count + n) % SWEET_FB_TRACE_SLOTS];
++		SWEET_LOG_INFO("SWEET FB TRACE: v2 %s recent[%u] swap=%u update=%#x disable=%#x raw10c=%#x raw110=%#x ids=%u,%u,%u,%u r0=%d,%d,%d,%d\n",
++		    phase, n, t.swapID, t.mask, t.disabled, t.raw10c, t.raw110, t.surface[0], t.surface[1],
++		    t.surface[2], t.surface[3], t.rect[0][0], t.rect[0][1], t.rect[0][2], t.rect[0][3]);
++	}
++	if (source) {
++		SWEET_LOG_INFO("SWEET FB TRACE: v2 source=%u %ux%u fmt=%#x bpe=%u bpr=%u alloc=%u length=%llu offset=%u planes=%u copy=%d,%d->%d,%d %dx%d\n",
++		    source->id, source->width, source->height, source->pixelFormat, source->bytesPerElement,
++		    source->bytesPerRow, source->allocSize, source->memory ? source->memory->getLength() : 0,
++		    source->offset, source->planeCount, box[0], box[1], box[2], box[3], box[4], box[5]);
++	}
++	/* Compare the same destination bands, intersected with the last actual copy.
++	 * These observations do not lock a CA renderer or turn a sample into a frame fence. */
++	SweetFBTraceView panel = {(const volatile uint8_t *)fPixels,
++	    fSurface && fSurface->memory ? fSurface->memory->getLength() : 0, 0, fWidth, fHeight, fRowBytes};
++	SweetFBTraceView src = {};
++	if (source && source->memory && source->pixelFormat == SWEET_FB_FORMAT_BGRA &&
++	    source->bytesPerElement == 4 && source->planeCount == 0) {
++		src = {(const volatile uint8_t *)source->kernelAddress(), source->memory->getLength(),
++		    source->offset, source->width, source->height, source->bytesPerRow};
++	}
++	struct Region { const char *name; uint32_t x, y, w, h; };
++	const Region regions[] = {
++		{"upper", 0, 0, fWidth, fHeight / 3},
++		{"middle", 0, fHeight / 3, fWidth, fHeight * 2 / 3 - fHeight / 3},
++		{"lower", 0, fHeight * 2 / 3, fWidth, fHeight - fHeight * 2 / 3},
++		/* Geometric ROIs, not a claim about UIKit glyph locations. */
++		{"clock-center", fWidth / 6, fHeight / 12, fWidth * 2 / 3, fHeight / 4},
++		{"home-indicator", fWidth / 4, fHeight * 9 / 10, fWidth / 2, fHeight / 10},
++	};
++	for (const Region &r : regions) {
++		SweetFBTracePixels pixels;
++		if (sweet_fb_trace_pixels(&panel, r.x, r.y, NULL, 0, 0, r.w, r.h, 8, &pixels)) {
++			SWEET_LOG_INFO("SWEET FB TRACE: v2 %s panel roi=%s xy=%u,%u wh=%u,%u hash=%llx samples=%u rgb=%u alpha=%u\n",
++			    phase, r.name, r.x, r.y, r.w, r.h, pixels.hash, pixels.samples, pixels.rgb, pixels.alpha);
++		}
++		/* present() already validated this rectangle. Recheck before diagnostic reads. */
++		if (!src.base || box[0] < 0 || box[1] < 0 || box[2] < 0 || box[3] < 0 ||
++		    box[4] <= 0 || box[5] <= 0 || (uint64_t)box[2] + box[4] > fWidth ||
++		    (uint64_t)box[3] + box[5] > fHeight) { continue; }
++		uint32_t top = r.y > (uint32_t)box[3] ? r.y : (uint32_t)box[3];
++		uint32_t bottom = r.y+r.h < (uint32_t)(box[3]+box[5]) ? r.y+r.h : (uint32_t)(box[3]+box[5]);
++		uint32_t left = r.x > (uint32_t)box[2] ? r.x : (uint32_t)box[2];
++		uint32_t right = r.x+r.w < (uint32_t)(box[2]+box[4]) ? r.x+r.w : (uint32_t)(box[2]+box[4]);
++		if (bottom <= top || right <= left) { continue; }
++		uint32_t sy = box[1] + top - box[3], sx = box[0] + left - box[2];
++		if (sweet_fb_trace_pixels(&src, sx, sy, &panel, left, top,
++		    right-left, bottom-top, 8, &pixels)) {
++			SWEET_LOG_INFO("SWEET FB TRACE: v2 %s pair roi=%s src=%u src-xy=%u,%u dst-xy=%u,%u wh=%u,%u hash=%llx samples=%u rgb=%u alpha=%u diff-rgb=%u diff-alpha=%u live-sample=1\n",
++			    phase, r.name, source->id, sx, sy, left, top, right-left, bottom-top,
++			    pixels.hash, pixels.samples, pixels.rgb, pixels.alpha, pixels.differentRGB, pixels.differentAlpha);
++		} else {
++			SWEET_LOG_WARN("SWEET FB TRACE: v2 source bounds rejected id=%u\n", source->id);
++		}
++	}
++	IOLockLock(fLock);
++	bool changed = copiedNs != fTraceCopiedNs;
++	IOLockUnlock(fLock);
++	SWEET_LOG_INFO("SWEET FB TRACE: v2 %s sample-us=%llu copy-changed=%u live-sample=1\n",
++	    phase, (sweet_fb_trace_now()-ns)/1000, changed);
++
++	OSSafeReleaseNULL(source);
+ }
+ 
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+ 	uint32_t mask = get32(rec, 0x104);
+-
++	if (fTrace) {
++		IOLockLock(fLock);
++		fTraceAttemptSwap = get32(rec, 0x50);
++		++fTraceAttempts;
++		IOLockUnlock(fLock);
++	}
+ 
+ 	if (!fConsolePaused) {
+ 		int quiet = 0;
+@@ -695,6 +781,7 @@
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+ 				    (size_t)w * 4);
+ 			}
++			traceCopy(rec, s, sx, sy, dx, dy, w, h);
+ 		}
+ 		s->release();
+ 	}
+@@ -872,9 +959,12 @@
+ 		    args->scalarInputCount, args->structureInputSize,
+ 		    args->scalarOutputCount, args->structureOutputSize, ret);
+ 	}
+-	if (fFB->fTrace && selector < 64) {
++	if (fFB->fTrace && selector < 128) {
+ 		uint32_t n = OSIncrementAtomic((volatile SInt32 *)&sweet_fb_selector_trace[selector]);
+-		if (n <= SWEET_FB_TRACE_MAX_SELECTOR) {
++		IOLockLock(fFB->fLock);
++		fFB->fTraceSelectorMask[selector / 64] |= 1ULL << (selector % 64);
++		IOLockUnlock(fFB->fLock);
++		if (n < SWEET_FB_TRACE_MAX_SELECTOR) {
+ 			char name[32];
+ 			proc_selfname(name, sizeof(name));
+ 			uint64_t a0 = args->scalarInputCount > 0 ? args->scalarInput[0] : 0;
+@@ -882,8 +972,8 @@
+ 			uint64_t a2 = args->scalarInputCount > 2 ? args->scalarInput[2] : 0;
+ 			uint64_t a3 = args->scalarInputCount > 3 ? args->scalarInput[3] : 0;
+ 			uint32_t b0 = args->structureInput != NULL && args->structureInputSize >= 4 ? get32((const uint8_t *)args->structureInput, 0) : 0;
+-			IOLog("SWEET FB TRACE: sel=%u n=%u proc=%s a=%llx,%llx,%llx,%llx struct0=%#x size=%u rc=0x%x\n",
+-			    selector, n, name, a0, a1, a2, a3, b0, args->structureInputSize, ret);
++			SWEET_LOG_INFO("SWEET FB TRACE: v2 sel=%u n=%u proc=%s a=%llx,%llx,%llx,%llx struct0=%#x size=%u rc=0x%x\n",
++			    selector, n + 1, name, a0, a1, a2, a3, b0, args->structureInputSize, ret);
+ 		}
+ 	}
+ 	return ret;
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -39,6 +39,12 @@
+ #include <libkern/c++/OSNumber.h>
+ #include <libkern/c++/OSUnserialize.h>
+ #include <sys/proc.h>
++#include <pexpert/pexpert.h>
++#include <libkern/c++/OSCollectionIterator.h>
++#include <libkern/c++/OSString.h>
++#include <libkern/c++/OSBoolean.h>
++#define SWEET_LOG_SINK IOLog
++#include <bsd/dev/sweet_log_level.h>
+ 
+ enum {
+ 	kSweetSurfaceCreate             = 0,
+@@ -646,6 +652,49 @@
+ 	return ret;
+ }
+ 
++/* Bound diagnostics independently of failed/retried creates. Never dump payloads. */
++static volatile SInt32 sweet_surface_trace_creates;
++static void
++sweet_surface_trace_properties(uint32_t id, OSDictionary *props)
++{
++	int trace = 0;
++	(void)PE_parse_boot_argn("sweetfbtrace", &trace, sizeof(trace));
++	if (!trace || !sweet_log_level_enabled(2u) ||
++	    OSIncrementAtomic(&sweet_surface_trace_creates) >= 32) { return; }
++	OSCollectionIterator *it = OSCollectionIterator::withCollection(props);
++	if (!it) {
++		SWEET_LOG_WARN("SWEET SURF TRACE: properties iterator allocation failed\n");
++		return;
++	}
++	SWEET_LOG_INFO("SWEET SURF TRACE: v2 id=%u keys=%u limit=64\n", id, props->getCount());
++	OSObject *key;
++	uint32_t count = 0;
++	while (count < 64 && (key = it->getNextObject()) != NULL) {
++		++count;
++		OSString *name = OSDynamicCast(OSString, key);
++		if (!name) { continue; }
++		OSObject *value = props->getObject(name);
++		OSNumber *number = OSDynamicCast(OSNumber, value);
++		OSBoolean *boolean = OSDynamicCast(OSBoolean, value);
++		OSString *string = OSDynamicCast(OSString, value);
++		if (number) {
++			SWEET_LOG_INFO("SWEET SURF TRACE: id=%u key=%.96s number=%#llx bits=%u\n",
++			    id, name->getCStringNoCopy(), number->unsigned64BitValue(), number->numberOfBits());
++		} else if (boolean) {
++			SWEET_LOG_INFO("SWEET SURF TRACE: id=%u key=%.96s bool=%u\n",
++			    id, name->getCStringNoCopy(), boolean->isTrue());
++		} else {
++			SWEET_LOG_INFO("SWEET SURF TRACE: id=%u key=%.96s type=%s string=%.96s\n",
++			    id, name->getCStringNoCopy(), value ? value->getMetaClass()->getClassName() : "null",
++			    string ? string->getCStringNoCopy() : "-");
++		}
++	}
++	if (props->getCount() > count) {
++		SWEET_LOG_INFO("SWEET SURF TRACE: id=%u remaining=%u omitted\n", id, props->getCount()-count);
++	}
++	it->release();
++}
++
+ IOReturn
+ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ {
+@@ -714,6 +763,7 @@
+ 		    s->bytesPerRow, s->planeCount, s->allocSize, s->allocSize, s->cacheMode,
+ 		    s->offset, displayable, gpu, props->getCount(), ret);
+ 	}
++	sweet_surface_trace_properties(s->id, props);
+ 	props->release();
+ 	if (ret != kIOReturnSuccess) {
+ 		s->release();

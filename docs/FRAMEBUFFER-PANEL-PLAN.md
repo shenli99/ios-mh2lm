@@ -12,6 +12,7 @@ agent 按 F0→F7 顺序做。每步通过验收后，在本文 §7“进度记�
 隔离，解释两条唤醒来源失效；该独立问题转入 [BUG-002](BUGS.md)，不自动增加显示步骤或验收前置。
 preserveoff 实际保留像素，但未解决全部缺时间现象。
 0170 不能核验时钟区域像素或 TE 频率；SMMU stream 配置为 TRANS/CB2，F4 前须补转换核对。
+0171 补充实现已完成本地验证、待云编译/实机，详见 [F0 v2](FRAMEBUFFER-F0-V2.md)。
 
 ## 1. 现状（0120a18 buildtree 源码 + 0120a17 日志）
 
@@ -143,7 +144,7 @@ RD_PTR(vsync) ── pending 存在 ──► clean cache ─► 写 SRC0_ADDR(+
 
 | boot-arg | 步骤 | 含义 |
 |---|---|---|
-| `sweetfbtrace=1` | F0 | 显示诊断日志 |
+| `sweetfbtrace=1/2` | F0 | v2 显示诊断；2 额外读取已知布局 CB2 配置 |
 | `sweetmdss=1` | F1 | 使用 SweetMDSS IOService 后端（行为不变） |
 | `sweetfbpower=1` | F2 | DCS 真关屏，不擦像素 |
 | `sweetfbvsync=1` | F3 | MDSS RD_PTR 中断做 vsync |
@@ -161,13 +162,14 @@ host 测试）；patch 对上一结果树 strict apply；CI 加 `require_marker`
 ### F0：取证，不改行为
 
 **做什么**
-- `sweetfbtrace=1`：每个 IOMFB 选择子记录进程名、参数个数与前 4 个标量（各前 32 次后计数）；
-  off/on 前后最近 4 次 swap 的 surface id/mask/rect；off/on 时扫描内存与来源 surface 中间
-  区域（行 900–1400，稀疏采样）校验和。
-- IOSurface `create` 记录属性字典的键与关键值（宽高、格式、bpr、alloc size、cache mode、
-  是否有 displayable/scanout 类属性），以及创建者进程——为 F5 识别可扫描 surface 提供依据。
-- 只读：SSPP VIG0 `SRC_XY/OUT_SIZE/SRC_FORMAT/UNPACK/OP_MODE/ADDR_SW_STATUS`，INTF1
-  帧/行计数 1 秒变化（TE 频率），SMMU 对 MDSS SID 0x800 的 SMR/S2CR 状态（判断旁路）。
+- 0171 / `sweetfbtrace=2`：selector 0–127 各前 32 次参数，最近 4 次提交按时间排序，
+  增加 update/disable 和 +0x10c/+0x110 原始字段；另记实际完成 CPU 拷贝的 surface、swap、裁剪和时间。
+- 息屏/唤醒以及亮屏每秒（上限 600 次）读取 BGRA，覆盖上/中/下、时钟中心和底部横条 ROI；
+  按相同目的像素对齐源图和 panel，排除 padding、验证映射边界。明确是实时稀疏样本，不能当 CA fence。
+- IOSurface create 前 32 次记录最多各 64 个属性键及关键值；保留创建者/尺寸等日志，为 F5 提供依据。
+- 只读：SSPP 格式/地址、INTF1 真正 frame(+0xac)、计数使能及实际间隔/行相位；
+  不把循环行差当 TE 频率。SMMU 记录 SMR/S2CR，已知 ID/TRANS/CB2 时增加只读配置；
+  CB2 PA 经原机 DT 与 LG 驱动核对为 0x15082000。地址转换可用范围仍待实机证据。
 - 打包两档：`fb-trace`、`fb-trace-preserveoff`。
 
 **验收**
@@ -175,7 +177,9 @@ host 测试）；patch 对上一结果树 strict apply；CI 加 `require_marker`
    当前未实现自动息屏，不安排 auto-lock；增加关机界面及取消后的显示观察。
 2. 回答黑块根因：来源帧本身黑（CA 侧）还是被擦后没重画（内核侧）。
 3. 得到选择子使用表、CA surface 创建属性表，写入 §6。
-4. 得到 SSPP 格式寄存器值、TE 频率、SMMU 是否旁路，写入 §6。
+4. 得到 SSPP 格式寄存器值、计数使能/实际间隔和 SMMU route/CB2 有效配置，写入 §6。
+   command mode 计数若不能表征 TE，明确保留未知，TE 实测在 F3 的 IRQ 时间戳中完成；
+   不用无效行差填充频率结论。F4 前仍必须明确新扫描地址的映射可行性。
 5. 原始日志 SHA 记入 §7。
 
 ### F1：IOKit 分层重构，行为不变
@@ -360,3 +364,8 @@ SSPP 格式/裁剪/地址状态、INTF 计数差值和 apps SMMU SID 0x800 匹�
 | 步骤 | 补丁 | 产物/日志 | 结论 |
 |---|---|---|---|
 | F0 | 0170 / d58e7fc | 0121 两档持久日志；SHA 见实测报告 §1 | 已分析；mux 双组隔离已证实，显示/TE/CB2 仍待补证据，未验收 |
+
+### 0171 / F0 补充实现（2026-11-08，待云编译）
+
+像素/实际拷贝/属性/计数补证据，详见 [F0 v2](FRAMEBUFFER-F0-V2.md)。本地编译和 host 检查通过，
+未得到实机结果，F0 继续进行。CircleCI 配置未改；打包门要求新 v2 marker。独立 bug 不在本轮修复。

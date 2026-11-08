@@ -1,0 +1,95 @@
+# F0 补充取证：0171
+
+状态：本地实现、验证完成，待 push / 云编译 / 实机。当前仍是 F0，未进入 F1。
+上一轮结果见 [0121 报告](FRAMEBUFFER-F0-0121.md)，总路线见 [显示计划](FRAMEBUFFER-PANEL-PLAN.md)。
+
+## 本轮要回答什么
+
+插电唤醒、大电池图标消失之后缺时间，以及关机滑条重叠/取消后缺时间，究竟对应什么提交记录和
+扫描缓冲内容？0170 的单通道、中间区域 hash 无法回答。0171 补充证据，不改变原有呈现策略。
+
+| 取证项 | 0171 实现 | 解读限制 |
+|---|---|---|
+| 最近提交 | 按时间顺序打印最近 4 份 swap：id、update(+0x104)、disable(+0x108)、4 个 surface id、layer0 目标矩形、+0x10c/+0x110 原始值 | 后两个字段先以原始偏移命名，未证明本版背景色 ABI 前不按猜测执行 |
+| 实际拷贝 | 在 memcpy 完成分支记录 swap id、source id、时间戳和最终 sx/sy/dx/dy/w/h；另记尝试呈现的 swap | 指最近实际拷贝的图层；多图层时仅最后一层。不是硬件 latch 或 CA 完成 fence |
+| 像素 | BGRA 四字节，横纵步长 8，排除行 padding；上/中/下三区、中央时钟 ROI、底部横条 ROI | ROI 是几何区域，不识别字形；稀疏采样不能证明所有未采到的像素为空 |
+| 对应比较 | 在上次实际拷贝矩形与 ROI 的交集中，按裁剪偏移比较 source 和 panel 的同一目标像素；分开统计 RGB、alpha 差异 | panel 整 ROI 的 hash 与 pair 交集 hash 未必同范围，不能直接比；以 pair 的 diff 为准 |
+| 稳定画面 | 沿用现有 vsync workloop，亮屏期间每秒一次，最多 600 次；保留 off-before/off-after/on-after | 不是新增硬件输入轮询。600 次用尽后周期采样停止，电源转换采样仍在 |
+| 开销/竞争 | 每次采样记录 sample-us、copy-changed、live-sample=1 | copy-changed=0 也不能排除 CA 正在写源图。采样会增加内存读取和日志开销 |
+| surface 属性 | trace 开启时，前 32 次 create 的属性最多各 64 键：键名、number/bool/string 值或对象类型；字符串限长 | 不打印任意数据 payload；不改变分配或映射属性。配合原 create 日志确定进程/几何 |
+| selector | 0–127 各前 32 次参数日志，并汇总两个 64 位使用掩码 | 记录调用不等于已实现该 selector 的语义；范围外仍按原路径处理 |
+| 硬件计数 | frame 改读 +0xac；打印真实 elapsed-ns、frame enable(+0xa8)、raster line(+0xb0)、tear line(+0x2b0) | 不将循环行计数相减称为 TE 频率；command mode 下 frame 计数也可能无进展 |
+| SMMU | trace≥2，且 ID0/ID1、TRANS/CB2 匹配已知值时，只读 CB2 配置 | 不遍历页表，不改地址转换，不据 TTBR 值直接宣称可扫描任意新物理页 |
+
+诊断不长时间 retain 源 surface：仅保存 id，采样时通过 surface 表取得临时引用，结束后 release。
+对象已释放则打印 alive=0，保留上次实际拷贝元数据，避免为了取证改变源图生命周期。
+读取前重新验证维度、stride、offset、descriptor length、ROI 和地址加法边界。
+
+新增日志使用 `sweet_log_level.h` 的 INFO/WARN 等级；测试参数显式 `sweetloglevel=2`。
+既有非 F0 日志尚未统一改造，日志大计划另行处理。
+
+## SMMU 地址核对
+
+不能从旧摘要中的 `0x42000` 推算 CB2。此次已对照原机 DT 和 LG 驱动重新核对：
+
+- 原机解码 DT：`scratch/mh2lm-dt/android-mh2lm.dts:20096`，apps-smmu base 为
+  `0x15000000/0x100000`；LG `msm-arm-smmu-sm8150.dtsi:67` 相同。
+- ID1=`0x60000038`：pgshift=12；NUMPAGENDXB=6；全局半区大小
+  `(1 << (6+1)) << 12 = 0x80000`，完整寄存器资源 `0x100000`，与 DT 一致。
+- LG `drivers/iommu/arm-smmu.c:5121`：cb_base=base+resource_size/2；
+  `ARM_SMMU_CB(smmu,n)` 再加 n<<pgshift。所以 CB2 为 **0x15082000**。
+- GR1 是 base+0x1000，复用已有 0x2000 映射，不重复映射同一页；CB2 仅映射一页。
+- 只读 CBAR/CBA2R、SCTLR/ACTLR、TTBCR2/TTBCR、TTBR0/1、MAIR。未知 ID/route 跳过，
+  映射失败只给 WARN，不影响既有亮度路径；沿用探针时钟门检查与 dp_lock 串行化。
+- 新读数尚未实机获得。CB2 的有效转换和页表可访问范围仍待核实。
+
+不新增 DCS、CTL、SSPP 或 SMMU 写入；现有 DCS 写入函数保持原样。
+
+## 验证记录
+
+- 以 0121 / 0170 四文件为基线生成 `0171-mh2lm-framebuffer-f0-evidence.patch`（包含新 helper）；
+  strict `git apply --check`、apply 后与 edited 四文件逐字节一致。
+- SweetFramebuffer.cpp、SweetSurface.cpp、sweet_display_probe.c：使用 CI 参数和本地
+  clang 19 进行 arm64-apple-darwin 单文件编译，三个 rc=0；对照基线无新增告警类别。
+  新增边界已检查的数组访问仍触发既有 `-Wunsafe-buffer-usage`，不宣称零告警或完整链接通过。
+- 新 host 测试在 C11/C++17 + ASan/UBSan 下通过：不同 stride/offset/裁剪、padding 排除、
+  红/绿/alpha 变化、descriptor 截断、空/越界/整数溢出输入、稀疏采样的限制。
+  workspace runner 不支持 LSan，测试关闭 leak detection；此测试无堆分配，地址/UB 检查仍启用。
+- 打包脚本 `bash -n` 通过；实际传入旧 0121 内核包，因缺少 v2 marker 正确拒绝打包。
+- 13 个 host 测试最终全部通过；原充电测试首跑也遇到同一 LSan/ptrace 限制，
+  仅用 `ASAN_OPTIONS=detect_leaks=0` 重跑该项即通过，未改其源码。
+  回归测试与详细结果见 `scratch/framebuffer-0171/{tests.json,compile-report.json}`。
+  这些 host 检查不能证明上机效果。
+- 按用户要求未改 `.github/workflows/circleci.yml`；补丁生效由下载后的 buildtree 逐字节核对、
+  新内核四个 v2 marker 和打包门检查。本轮不加 CI 配置步骤。
+
+## 一次编译，两档取证
+
+push 后沿用 CircleCI。用户下载新 kernel/buildtree（最好同时下载 build log）并给出编号，
+agent 核对、打包、回读后提供真实镜像路径。当前没有本轮可刷的新内核，不能复用 0121 当新版本。
+
+```sh
+tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-<编号>.gz <编号> --framebuffer-f0
+```
+
+两档 `fb-trace` / `fb-trace-preserveoff` 都使用 `sweetfbtrace=2 sweetloglevel=2`，
+保留已验证的三键、USB ACM、触摸和电池 IRQ / runtime3 充电。第二档额外
+`sweetfbpreserveoff=1`；只比较是否保留息屏像素，其他驱动参数相同。
+若需区分新 CB 配置读取的影响，同一内核可用 `sweetfbtrace=1` 跳过 CB2 扩展读取，
+仍保留 v2 像素和提交诊断，不需要重新云编译。
+
+每档在周期采样窗口内做以下手动操作，并各留持久日志：
+
+1. 启动后留亮屏约 35 秒，让只读硬件探针完成；普通亮屏/锁屏稳定画面停 5–10 秒。
+2. 无充电线时，用电源键息屏，等 3 秒，插充电器；大电池 logo 消失后停 5–10 秒，记录有无时间。
+3. 保持接电，用电源键息屏，等 3 秒，拔线；亮屏后停 5–10 秒，记录有无时间。
+4. 唤出关机滑条，停 5–10 秒观察重叠，再取消，停 5–10 秒观察时间。此项不执行关机。
+5. 按显示计划累计插/拔各 5 次；每次保留稳定画面至少 5 秒，尽量记下异常发生的操作次序。
+   当前没有自动息屏，不安排自动锁屏测试。
+
+无需新增 USB 重连压力测试。USB 日志可照常使用，失败时导出持久日志即可。
+若电池/按键 group 再被隔离，把发生点及其后的观察记为 [BUG-002](BUGS.md) 影响；
+不要把输入已经失效后的无法唤醒当作 framebuffer 根因。本轮不改这两个独立 bug。
+
+下轮分析需把用户描述的稳定状态与 ns 时间、copied/attempt swap、ROI 差异对齐。
+F0 未验收前不进入 F1，不直接切扫描缓冲或修改 panel 序列。

@@ -253,8 +253,8 @@ if [ "$KEY_IRQ_PROFILE" = '--board-startup' ]; then
 fi
 
 if [ "$KEY_IRQ_PROFILE" = '--framebuffer-f0' ]; then
-	for marker in 'SWEET FB TRACE: enabled' 'SWEET DISP: smmu id0' \
-	    'SWEET SURF: %s create id %u parent %u'; do
+	for marker in 'SWEET FB TRACE: v2 enabled' 'SWEET FB TRACE: v2 %s pair roi=' \
+	    'SWEET DISP: F0 v2 cb2' 'SWEET SURF TRACE: v2 id='; do
 		if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
 			printf 'kernel artifact lacks framebuffer F0 marker: %s\n' "$marker" >&2
 			exit 1
@@ -306,10 +306,10 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-f0' ]; then
 	# from the preserve-off experiment without another kernel build.
 	make_profile fb-trace \
 		"LG G8X - XNU framebuffer F0 trace (${LABEL})" \
-		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1 sweetbattirq=4 sweetbattruntime=3 sweetfbtrace=1 sweetdispprobe=1"
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1 sweetbattirq=4 sweetbattruntime=3 sweetfbtrace=2 sweetdispprobe=1 sweetloglevel=2"
 	make_profile fb-trace-preserveoff \
 		"LG G8X - XNU framebuffer F0 preserve-off (${LABEL})" \
-		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1 sweetbattirq=4 sweetbattruntime=3 sweetfbtrace=1 sweetdispprobe=1 sweetfbpreserveoff=1"
+		"ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1 sweetbattirq=4 sweetbattruntime=3 sweetfbtrace=2 sweetdispprobe=1 sweetloglevel=2 sweetfbpreserveoff=1"
 	printf 'kernel SHA256: %s\ncreated framebuffer F0 trace and preserve-off profiles for %s\n' "$KERNEL_SHA256" "$LABEL"
 	exit 0
 fi

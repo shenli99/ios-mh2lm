@@ -4,10 +4,26 @@
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
+**CURRENT：0171 / F0 v2 已实现并本地验证，待用户 push、云编译。**
+见 `docs/FRAMEBUFFER-F0-V2.md`。新增 BGRA 四通道/时钟中心/横条 ROI 取证，
+同坐标 source-panel 比较（含裁剪/stride/offset bounds）、最新提交与最近实际拷贝帧分开记录；
+亮屏每秒采样上限600次；selector追到127；surface前32次create最多各64键。
+仅记录source id，采样时临时retain，不长期延长surface生命周期；明确live-sample限制。
+frame改读+0xac，记录真实间隔、计数使能、行相位，不声称已测TE频率。
+**SMMU地址校正：** 原机DT resource=0x100000；ID1 NUMPAGENDXB6 ⇒ GR半区0x80000，
+与LG cb_base=resource_size/2一致，CB2 PA为**0x15082000**，不是0x15042000。
+trace≥2且已知ID/TRANS/CB2才读配置，不遍历页表、不写硬件。
+四文件strict apply逐字节一致；三源码arm64交叉编译rc0、无新增告警类别（并非零告警）；
+C/C++ ASan/UBSan边界测试通过；13个host测试最终全过（充电测试因LSan/ptrace限制，
+仅加detect_leaks=0重跑通过）；全套结果在scratch/framebuffer-0171/tests.json。
+打包脚本旧0121内核拒绝通过；两档现用sweetfbtrace=2/sweetloglevel=2，仅差preserveoff。
+没有新内核/可刷镜像；下载新kernel/buildtree后核对并打包回读。测试手动息屏插拔、滑条/取消，
+不安排自动锁屏。保持原渲染/擦屏/DCS/IRQ/充电策略，未改circleci.yml，未push；F0未验收。
+
 **独立 Bug 台账：`docs/BUGS.md`。** 按用户要求，将原功能基本完成后暴露的遗留/回归问题独立
 登记：BUG-001 USB多次插拔枚举失败；BUG-002 PMIC持续pending后电池/按键group被隔离。
-不自动加入当前显示计划、不自动作为显示阶段前置；需修复时单独安排。当前只建档、整理证据，
-未改驱动/CI，无新内核待编译。显示缺时间/滑条重叠及F0取证不足仍在显示计划中。
+不自动加入当前显示计划、不自动作为显示阶段前置；需修复时单独安排。该两项只建档、整理证据，
+本轮未改其驱动；显示F0补丁待编译（见顶部）。显示缺时间/滑条重叠及F0取证不足仍在显示计划中。
 
 **CURRENT 显示线：0121（d58e7fc / 0170）两档持久日志已分析；F0 未验收，不重复要求本轮测试。**
 详见 `docs/FRAMEBUFFER-F0-0121.md`。普通档 USBIN(group1/APID269/bit4) 在第6436行触发 pending
@@ -22,7 +38,7 @@
 delta frame误用0x2b4 autorefresh配置，无法得TE频率；未记disable/bg/实际present像素。
 SMMU SMR3=0x84200800/S2CR=0x2=TRANS/CB2，CB2使能/页表范围待查，F4不可假定新物理页可用。
 NEXT：继续补F0取证；mux四遍drain后永久隔离问题另记BUG-002，修复单独安排，保留无轮询回退原则；
-不进入F1，不直接改panel序列/切自有扫描缓冲。本轮只改文档，无新驱动待push/编译。
+不进入F1，不直接改panel序列/切自有扫描缓冲。0121分析轮仅改文档；后续0171补充实现见顶部。
 底稿 `scratch/artifact-0121/{fb-trace.txt,fb-trace-preserveoff.txt,log-analysis.json,analyze-logs.py}`。
 日志SHA/有效字节/flush及详细源码证据见报告。以下保留产物核对记录：
 buildtree 中 27 个核对文件与 0120a18 + 0170 预期逐字节一致（含 0170 改动的全部 3 文件），
