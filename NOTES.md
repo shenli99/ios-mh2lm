@@ -2,11 +2,11 @@
 
 ## Agent handoff / active work (2026-11-08, latest)
 
-**CURRENT: 0120a17实机充电成功：充电器插上0.1秒内FULLON，FG约+1975mA持续约15分钟，SOC 56→71%，拔出即停。**
+**CURRENT: 0120a17实机充满：CC约1.97A→404s起CV 4400mV TAPER→4878s硬件TERMINATE，71%→100%，喂狗305次无错。前一次15分钟实测也成功。**
 
 证据见docs/BATTERY-BASIC-CHARGE.md末节及scratch/artifact-0120a17/basic-charge-persistent.txt。
 喂狗54次无错，failures=0。开机电脑口SDP不充（用户确认正常）。
-NEXT：可选长时间到充满（截止/回充）、熄屏、温度档；0169 batt-temp-delta IRQ待用户决定。
+NEXT：可选回充（满后插着放更久）、熄屏、温度档；0169 batt-temp-delta IRQ待用户决定。
 
 ### Previous 0120a17 artifact handoff (superseded)
 

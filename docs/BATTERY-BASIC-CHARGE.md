@@ -102,6 +102,20 @@ deps 诊断路径代码不动；runtime3 需要 `sweetbattery=1 sweetbatt=1 swee
 - 1054s 拔出：usb=0x26 → 同一次 IRQ 写 0042=0，回读 0。
 - 无 MUX 读失败/隔离、无 ADC 请求；采样 168 次 IRQ、1 次 protection-timer（145s，未充电时）。
 
-仍未验证：温度档切换（WARM/COOL 实机）、充满/截止/回充、SMB1355 是否参与、熄屏睡眠、
-bite 恢复。ICL settled 0x13 与约 2A 电池电流的输入功率关系未核对【待核实】。
+仍未验证：温度档切换（WARM/COOL 实机）、SMB1355 是否参与、熄屏睡眠、bite 恢复。ICL settled 0x13 与约 2A 电池电流的输入功率关系未核对【待核实】。
+
+## 0120a17 充满（sweetlog-0120a17-battery-basic-charge1.bin）
+
+日志 SHA256 6ff39821a4c3fdc783859f69d4f67b31561955f255085c2b98841b4124163d48，983088 字节/
+12104 行，无回卷/NUL；底稿 scratch/artifact-0120a17/basic-charge1-persistent.txt、charge1-table.txt。
+
+- 106～107.6s 插入抖动：一次部分快照（INPUT error -12）在已启充时触发遥测缺失停充，
+  0.9s 后输入稳定重新启充（enables=2，failures=0），符合设计。
+- CC：107.7s 0x1006=0x03 FULLON，约 1940～1980mA，VBAT 升到 4392mV。
+- CV：404s（75%）起 0x1006=0x04 TAPER，VBAT 稳在 4400～4401mV（=FV 4400），电流逐步降到约 190mA。
+- FG 在 3748s 报 100%，此时仍在 TAPER（约 300mA）。
+- 截止：4878s 0x1006=0x45 TERMINATE，FG 约 0mA，软件保持 enable=1 不干预（同 LG）。
+  之后 5 分钟 VBAT 4401→4363mV，未到回充点，回充未观察到。
+- 5189s 拔出 → 写 0042=0。全程温度最高 31.75°C，一直 GOOD；喂狗 305 次、pet-errors 0；
+  无 MUX 读失败/隔离；未发生 protection-timer 采样（bark 每约 16.4s 先到）。
 
