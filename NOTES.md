@@ -2,6 +2,8 @@
 
 ## Agent handoff / active work (2026-11-08, latest)
 
+编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
+
 **persist4 持久镜像已生成，待用户先 fastboot boot 验证再刷 boot_a/boot_b。**
 `/home/shenli/work1/out-bs/boot-persist4.img`，35,543,040 字节，SHA256
 729a858db55cbddf465bbd730a69d5567a4f224a10e74b3ed93982e26987bc84（脚本 out-bs/mk-boot-persist4.sh，无 sudo）。
