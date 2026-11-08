@@ -1,5 +1,12 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
+**2026-11-08 / 0121 最新补充：显示 F0 两档实测已分析，尚未验收。** 普通档先隔离电池 USBIN
+group1，后隔离电源键 group0，解释息屏后插线和按键均无法再唤醒；具体持续 pending 原因待查，
+不能宣布 PMIC 事件长期稳定。保留像素档无该错误，但缺时间/滑条重叠仍需像素取证；
+自动息屏未实现，移除 auto-lock 测试前置。详见 [0121 F0 报告](FRAMEBUFFER-F0-0121.md)
+及 [显示分步计划](FRAMEBUFFER-PANEL-PLAN.md)。后续先补 F0 与 mux 判定/恢复，不跳到 F1/F4。
+以下为历史阶段记录，以本段和 NOTES 顶部为当前状态。
+
 **2026-11-08电池IRQ子目标：** 0168 runtime3（IRQ驱动、LG SMB5分工）在0120a17实机
 充满，CHGR/USBIN/TYPEC/MSOC/WDOG路由均有自然命中，三键/触摸并行正常。剩余第5～6段
 补强（回充、温度事件IRQ、停止留证、UI核对）完成后结案，再开始本文第2项framebuffer。

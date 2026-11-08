@@ -4,7 +4,22 @@
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
-**CURRENT 显示线：0121（d58e7fc / 0170）云产物已核对，两档 F0 boot 已打包回读，待用户实机测试。**
+**CURRENT 显示线：0121（d58e7fc / 0170）两档持久日志已分析；F0 未验收，不重复要求本轮测试。**
+详见 `docs/FRAMEBUFFER-F0-0121.md`。普通档 USBIN(group1/APID269/bit4) 在第6436行触发 pending
+隔离，电池 consumer 失败后禁充并保留99%；第6618行 power(group0/APID248/bit0)同样隔离，
+按键 worker 停止，最后 display off 后再无电池/按键唤醒，触摸和用户态仍输出，未记录 panic。
+保留像素档无ERROR；不能据一次对照断言 preserveoff 修复 mux。下一启动 gauge 原始MSOC
+0xfa=97%，上次最后0xfe=99%；故障间无遥测，实际消耗/电量计重估贡献未知。
+用户确认当前无自动息屏，已撤掉auto-lock项；插电大logo后缺时间、拔电有时间、关机滑条重叠、
+取消后缺时间均已记录，黑背景本身不算故障。Apple同版正常UI对照尚未核验（网络/DNS失败）。
+普通档首次off hash改变，preserveoff首次off/on不变，证实保留参数有效；仍未解决全部显示现象。
+0170取证缺口：hash只读稀疏B通道且不覆盖时钟；source选择未按ring时间序、常被id0覆盖；
+delta frame误用0x2b4 autorefresh配置，无法得TE频率；未记disable/bg/实际present像素。
+SMMU SMR3=0x84200800/S2CR=0x2=TRANS/CB2，CB2使能/页表范围待查，F4不可假定新物理页可用。
+NEXT：补F0取证，独立处理mux四遍drain后永久隔离的判定/有界恢复，保留无轮询回退原则；
+不进入F1，不直接改panel序列/切自有扫描缓冲。本轮只改文档，无新驱动待push/编译。
+底稿 `scratch/artifact-0121/{fb-trace.txt,fb-trace-preserveoff.txt,log-analysis.json,analyze-logs.py}`。
+日志SHA/有效字节/flush及详细源码证据见报告。以下保留产物核对记录：
 buildtree 中 27 个核对文件与 0120a18 + 0170 预期逐字节一致（含 0170 改动的全部 3 文件），
 现有 114 个源码 require_marker 通过；kernel SHA256SUMS 通过且包含 F0/原 IRQ/充电 marker。
 kernel SHA256 `6e3be4432ea04c331ac9aef8e5783e0980ed2174dc463c44f76eda24bfbb48a0`，不同于 0120a18。
@@ -14,8 +29,7 @@ kernel blob/ramdisk 内 kernel、ADT、TOML 回读一致，启动参数唯一，
 - `boot-16k-0121-fb-trace.img`，SHA256 `e5aaead64c1736690ed18f645c91f3cab49b3a5b9f42d920be8d11706e998ed5`。
 - `boot-16k-0121-fb-trace-preserveoff.img`，SHA256 `39d5837bf3992f7d5a91b29a7ff39d3b7e8e9a108678b1311bff0a018cbdccd4`。
 两档保留三键/触摸/USB ACM/电池 IRQ 与 runtime3 充电，温度 IRQ 扩展未启用。
-NEXT：先普通档、再 preserveoff 档；进桌面等至少 35 秒（显示探针约 30 秒开始），按显示计划 §6
-操作并每档单独导出日志。尚无上机结论；不进入 F1。完整回读记录 `scratch/artifact-0121/boot-verification.json`。
+原两档测试已完成，当前结论以上段为准。完整回读记录 `scratch/artifact-0121/boot-verification.json`。
 
 **persist4 持久镜像已生成，待用户先 fastboot boot 验证再刷 boot_a/boot_b。**
 `/home/shenli/work1/out-bs/boot-persist4.img`，35,543,040 字节，SHA256
@@ -29,7 +43,7 @@ NEXT：先普通档、再 preserveoff 档；进桌面等至少 35 秒（显示�
   0120a18 tempirq 档原样参数（runtime3 充电、温度中断、USB ACM、三键）。之后 Restart/Power off/Tools。
 - 镜像回读：header v1/page 2048、kernel 段解压后 = BootShim + RELEASE FD、DTB 相同、ramdisk 内 4 个文件逐字节一致。
 
-**并行线：显示/面板重构计划（第二版）已写好，F0 取证补丁 0170 云编译/打包已核对，待上机。** 见 docs/FRAMEBUFFER-PANEL-PLAN.md：
+**显示/面板重构计划（第二版）：F0 两档实测已分析，取证尚不充分，待补齐。** 见 docs/FRAMEBUFFER-PANEL-PLAN.md：
 F0 取证→F1 SweetMDSS IOService 分层→F2 DCS真关屏→F3 MDSS RD_PTR vsync→F4 自有扫描缓冲+SSPP硬件裁剪+
 双缓冲翻页→F5 CA surface 直接扫描（cache clean，零拷贝）→F6 可选kickoff→F7 IOPM/panic/清理。
 接手 agent：0170 只做只读取证；通过验收后再更新该文档§6/§7和本段，不能提前进入 F1。

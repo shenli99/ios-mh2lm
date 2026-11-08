@@ -1,12 +1,16 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**状态（2026-11-08，第二版）：0121 / 0170 云产物核对和打包完成，待上机验收。** 本文是 `IRQ-FRAMEBUFFER-PLAN.md`
+**状态（2026-11-08，第二版）：0121 / 0170 两档实测已分析，F0 需补证据，尚未验收。** 本文是 `IRQ-FRAMEBUFFER-PLAN.md`
 “大目标二”的实施文档。第二版目标从“修好接手的 ABL framebuffer”提升为：**驱动自己
 分配和管理扫描缓冲（simplefb 式），硬件双缓冲翻页，CoreAnimation 渲染的 surface
 直接被 MDP 扫描，消除每帧 CPU 拷贝。**
 
 agent 按 F0→F7 顺序做。每步通过验收后，在本文 §7“进度记录”和 `NOTES.md` 写结果，
 再进入下一步。不跳步；每步的新行为都由 boot-arg 打开，默认路径在该步验收前不变。
+
+0121 结论与证据见 [F0 实测报告](FRAMEBUFFER-F0-0121.md)：普通档电池/按键 group 先后被 mux
+隔离，解释两条唤醒来源失效；preserveoff 实际保留像素，但未解决全部缺时间现象。
+0170 不能核验时钟区域像素或 TE 频率；SMMU stream 配置为 TRANS/CB2，F4 前须补转换核对。
 
 ## 1. 现状（0120a18 buildtree 源码 + 0120a17 日志）
 
@@ -22,7 +26,7 @@ agent 按 F0→F7 顺序做。每步通过验收后，在本文 §7“进度记�
 | SSPP 寄存器 | `SRC_SIZE`0x00、`SRC_XY`0x08（源裁剪起点）、`OUT_SIZE`0x0c、`SRC0_ADDR`0x14、`YSTRIDE0`0x24、`SRC_FORMAT`0x30、`UNPACK`0x34、`OP_MODE`0x38、`ADDR_SW_STATUS`0x70 | `sde_hw_sspp.c:25-82` |
 | CTL | `FLUSH`0x018、`START`0x01c，VIG0 的 flush 位 BIT(0) | `sde_hw_ctl.c:29-30,167` |
 | MDSS 中断 | `interrupts=<0 83 0>` → INTID 115【待核实】；INTF1 tear 中断块 MDP+0x6E800（EN/STATUS/CLEAR=+0/+4/+8），bit2 RD_PTR、bit0 AUTOREFRESH_DONE；顶层 HW_INTR_STATUS=MDP+0x10 | `sm8150-sde.dtsi:44`；`sde_hw_interrupts.c:25,37-41,194-198` |
-| SMMU | MDSS 在 apps_smmu 下（SID 0x800/0x420）。ABL 留下的 VIG0 地址就是物理地址 0x9d200000，说明当前上下文是旁路或恒等映射【待核实】 | `sm8150-sde.dtsi:47`；日志 |
+| SMMU | MDSS SID=0x800、匹配 mask=0x420。0121 SMR3=0x84200800、S2CR=0x2（TRANS/CB2）；CB2 使能和页表范围待核实，不可假定新物理页均可扫描 | `sm8150-sde.dtsi:47`；0121 两档日志；F0 报告 §6 |
 
 **地址范围待核对。** `docs/panel.md` 还记录 Android DTS 的 `splash_region` 为
 `0x9c000000/0x02400000`（36 MiB），而运行时 VIG0 使用的是 `0x9d200000`。
@@ -42,7 +46,7 @@ CA(backboardd) 画进 IOSurface 2/3（普通可缓存内存，双缓冲）
 
 | # | 问题 | 原因 |
 |---|---|---|
-| P1 | 息屏插拔唤醒中间黑块 | off 擦扫描内存，on 只重放最近帧（源码可证；0127 preserveoff A/B 从未实测） |
+| P1 | 插线唤醒/取消关机后缺时间、关机滑条重叠 | off 擦除与无有效 surface 的记录重放是已知缺口；0121 preserveoff 未消除全部现象，具体像素/合成根因待查 |
 | P2 | 假 vsync | 60 Hz 定时器；两份日志里 `sel 72` 从未出现 |
 | P3 | 撕裂/竞争 | 往正在被 autorefresh 扫描的内存里 memcpy；present 时才查 surface，CA 可能已在画下一帧；`SwapWait` 空操作 |
 | P4 | CPU 拷贝开销 | 每次呈现约 11 MB memcpy 进写合并内存，所以限到 30 Hz |
@@ -73,7 +77,8 @@ ADT /arm-io/mdss (reg: MDP/DSI0/DISPCC/GCC 页; interrupts: 115)
 - 驱动启动时分配**物理连续、64 字节对齐行距**的扫描缓冲：用
   `IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, kIOMemoryPhysicallyContiguous |
   kIOMapWriteCombineCache | kIODirectionInOut, size, mask)`（mask 限 32 位以内物理地址，
-  覆盖 SMMU 旁路/恒等映射的不确定性）。
+  仅限制物理位置，不能替代 SMMU 映射）。0121 已读到 stream 为 TRANS/CB2；在 F4 写扫描地址前
+  必须核实 CB2 的有效转换配置和页表可访问范围，必要时先完成独立的 F4a 映射子步骤。
 - 尺寸按**逻辑画布** 1125×2436 分配（行距 4608，与 CA 的 surface 一致，约 10.7 MiB/个），
   面板只显示中间 1080×2340：通过 SSPP `SRC_XY=(22,48)`、`SRC_SIZE/OUT_SIZE=1080×2340`
   做**硬件裁剪**，不再 CPU 裁剪拷贝。（22=(1125−1080)/2，48=(2436−2340)/2，与现
@@ -165,7 +170,8 @@ host 测试）；patch 对上一结果树 strict apply；CI 加 `require_marker`
 - 打包两档：`fb-trace`、`fb-trace-preserveoff`。
 
 **验收**
-1. 两档各做：电源键息屏→3 秒→插充电器→亮屏→拔；auto-lock→插拔；各 5 次。
+1. 两档各做：电源键息屏→3 秒→插充电器；接充电器时电源键息屏→3 秒→拔；各 5 次。
+   当前未实现自动息屏，不安排 auto-lock；增加关机界面及取消后的显示观察。
 2. 回答黑块根因：来源帧本身黑（CA 侧）还是被擦后没重画（内核侧）。
 3. 得到选择子使用表、CA surface 创建属性表，写入 §6。
 4. 得到 SSPP 格式寄存器值、TE 频率、SMMU 是否旁路，写入 §6。
@@ -199,7 +205,8 @@ host 测试）；patch 对上一结果树 strict apply；CI 加 `require_marker`
 - 背光与电源解耦，亮度由 CoreBrightness 恢复。
 
 **验收**
-1. 20 次循环（电源键/auto-lock/息屏插拔/通知唤醒各 5）全部完整显示，无黑块。
+1. 电源键息屏/亮屏、息屏插电、息屏拔电各 5 次，以及关机界面/取消返回，全部完整显示。
+   auto-lock/通知唤醒仅在对应功能已实现时加入，不作当前测试前置。
 2. 息屏时面板肉眼全黑（非最低亮度），DCS rc 全 0。
 3. 唤醒亮度恢复，触摸立即可用；30 分钟息屏充电后唤醒正常。
 4. 日志 `SWEET FB POWER: off/on rc=0 elapsed-ms=`。
@@ -304,13 +311,15 @@ autorefresh 且画面不冻结。
 - 不把电池/充电 UI 问题当显示问题修。
 - 所有设备操作 `fastboot boot`；不写盘。
 
-## 6. F0 取证结果（0121 / 0170 待上机填充）
+## 6. F0 取证结果（0121 / 0170 部分完成）
 
 0170 只增加只读取证，不改变显示行为。`sweetfbtrace=1` 记录选择子、最近 swap、
 off/on 前后扫描区与 source surface 稀疏校验和；`sweetdispprobe=1` 的显示探针增加
 SSPP 格式/裁剪/地址状态、INTF 计数差值和 apps SMMU SID 0x800 匹配信息。
 打包脚本 `--framebuffer-f0` 会从同一内核产物生成 `fb-trace` 与
 `fb-trace-preserveoff` 两档，后者只额外设置 `sweetfbpreserveoff=1`。
+**0121 校正：** frame 差值误读 AUTOREFRESH_CONFIG，不能测 TE 频率；稀疏 hash 未覆盖时钟区域，
+不能判定缺时间来自 CA 还是呈现路径。实现不足和实测结果详见 [F0 实测报告](FRAMEBUFFER-F0-0121.md)。
 
 ### 0121 产物核对与操作
 
@@ -324,27 +333,28 @@ SSPP 格式/裁剪/地址状态、INTF 计数差值和 apps SMMU SID 0x800 匹�
   header/kernel blob/ramdisk/kernel/ADT/TOML 均已回读核对。SHA256 见 NOTES 顶部。
 - 本轮未提供构建日志或 CI run ID，未检查全量编译警告。底稿在 `scratch/artifact-0121/`。
 
-先测普通档，再测 preserveoff 档。每档都执行相同操作：
+原两档操作（用户已完成手动息屏插拔，不重复要求）：
 
 1. 进桌面后等至少 35 秒，让启动约 30 秒后的三次显示探针完成；确认三键、触摸正常。
 2. 未接充电器时按电源键息屏，等 3 秒，插充电器；大充电 logo 消失后观察锁屏时间/中间区域。
    正常亮屏后拔线，重复 5 次。
 3. 接着充电器按电源键息屏，等 3 秒后拔线，观察唤醒和画面，重复 5 次。
-4. 让系统自动锁屏，再做插/拔唤醒，各重复 5 次。记录普通档和 preserveoff 档表现是否不同。
+4. 记录普通档和 preserveoff 档表现是否不同；自动锁屏项已删除，当前设备没有实现自动息屏。
 5. 结束后等至少 15 秒再导出持久日志，每档分别命名
    `sweetlog-0121-fb-trace.bin` / `sweetlog-0121-fb-trace-preserveoff.bin`。
    USB ACM 日志可同时保留，但无需依赖实时抓取来完成测试。
 
-尚无实机结果，下列结论保持待填：
+0121 已有结果：
 
-- 选择子使用表：
-- CA surface 创建属性：
-- 黑块根因：
-- SSPP 格式寄存器 / TE 频率 / SMMU 状态：
-- F5 缓存方案对比：
+- 选择子：可见 3/4/5/6/8/12/15/17/22/27/28/29/33/50/55/57；无 72 调用，完整参数/统计待补。
+- CA surface：2/3，1125×2436 BGRA、bpr4608、alloc11239424、cache 属性 0x400；完整键表待补。
+- 显示根因：preserveoff 有效保留像素，但不足以修复缺时间/滑条重叠，具体根因未定。
+- SSPP 格式和 SMMU stream 已读；TE 频率、CB2 有效转换/映射范围待补，不能假定 bypass。
+- mux 故障：普通档 USBIN group1 → power group0 被隔离；独立跟踪持续 pending 原因。
+- F5 缓存方案对比：未开始。
 
 ## 7. 进度记录
 
 | 步骤 | 补丁 | 产物/日志 | 结论 |
 |---|---|---|---|
-| F0 | 0170 / d58e7fc | 0121；两档 boot 已生成并回读 | 源码/内核核对通过；待上机日志，尚无实机结论 |
+| F0 | 0170 / d58e7fc | 0121 两档持久日志；SHA 见实测报告 §1 | 已分析；mux 双组隔离已证实，显示/TE/CB2 仍待补证据，未验收 |
