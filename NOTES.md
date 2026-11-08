@@ -4,19 +4,28 @@
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
-**CURRENT：0121a2 云产物核对通过，F0 v2 两档测试镜像已生成并回读，待用户 fastboot boot。**
-见 `docs/FRAMEBUFFER-F0-V2.md` 末节。38个源码与预期逐字节一致（显示4文件全含），
-114个require_marker通过；新kernel manifest与v2/IRQ/充电marker通过。
-kernel SHA256 `5bc262e74534dbc2952a09342a0d97348561226d58a16a5a7c937ebad10966b1`，与0121不同。
-未提供0121a2构建日志或CI run ID，未查全量警告。两档在 `/home/shenli/work1/out-bs/`：
-- `boot-16k-0121a2-fb-trace.img`，SHA256 `172075a5072304c319e57d2a2482cbf01b035da1b4fb3a76f480750e26a5a7cc`。
-- `boot-16k-0121a2-fb-trace-preserveoff.img`，SHA256 `4b51c5050dfdff3b61c398a1cf72b9778a28147eea80aba974a9e358af9ba232`。
-各35,667,968字节，header v1/page2048；kernel blob/ramdisk内核/ADT/TOML回读一致、参数无重复。
-共同trace2/dispprobe1/loglevel2/runtime3、三键/触摸/USB ACM/电池IRQ；仅差preserveoff=1，tempirq未开。
-先普通后preserveoff；启动先等35秒，手动息屏插/拔，观察大电池logo消失后及滑条/取消画面，
-异常画面停5–10秒，导出前等≥15秒；分别命名sweetlog-0121a2-fb-trace[‑preserveoff].bin。
-不安排自动息屏或USB压力；BUG-001/002独立跟踪。F0未验收，无新驱动待push。
-底稿scratch/artifact-0121a2的verification.json、boot-verification.json和核对脚本。
+**CURRENT：0121a2 F0 v2 两档持久日志已分析；用户确认两档显示异常相同。F0 未验收。**
+详见 `docs/FRAMEBUFFER-F0-0121A2.md`。普通/保留档日志完整未回卷，SHA/行号/统计见报告。
+插电后多次稳定观察：时钟 ROI 的当前 source 与扫描内存同为 RGB0、差异0，且期间继续 copy；
+不能仅用息屏擦除或漏拷解释，更不能据此认定 CA 自身 bug。普通首次 off 擦黑且 on 重放空记录，
+preserveoff 确实保留旧像素，但两档后续均同黑；空记录可能是合法 blank，不能直接过滤/硬恢复。
+关机滑条重叠未独立定因，本版正常充电过渡 UI 尚未独立核验。
+接口候选：每次 on 后 selector79/block0x40 输出40字节，当前全清0；参考 HakiOS 为当前模式ID，
+并与 TimingElements/ColorElements/IOMFBDisplayRefresh 一致。当前无模式属性，SwapWait 也为空。
+需先核对本项目用户态 ABI，不能凭跨版本参考直接定因。source 复用证据已捕获：留在panel的画面
+与上次copy来源surface的当前内容不同；retain 只保对象存活，不防 CA 改写，必须核对完成/复用协议。
+硬件：VIG0仍0x9d200000/stride4320/1080x2340；INTF frame-en=0，不能测TE，F3用IRQ时间戳。
+SMMU虽route TRANS/CB2，但CB2 SCTLR=0xe0/M0、TTBR/TTBCR/MAIR0，本次stage1转换未使能；
+不再据TRANS单独要求F4a。F4前仍重查live配置/新扫描内存归属和可达性，不假定任意物理页可用。
+两档本轮未见ERROR/WARN、mux隔离或panic，BUG-002仅未复现，未修复；独立bug不扩入显示线。
+trace每秒样本中位约79ms（含读/比较/日志），明显增加workloop负担，不能代表默认性能。
+NEXT：离线核对GetBlock模式/属性、SwapEnd/SwapWait/完成通知和update/disable/background语义，
+再设计针对性修复；本地scratch/dsc有缓存，尚未定位目标framework。不立即重复同类上机读数，
+不进入F1，不直接改panel/SMMU。本轮只改分析/计划文档，无新驱动待push，未改CI，未push。
+底稿 `scratch/artifact-0121a2/{fb-trace*.txt,*.timeline.txt,log-analysis.json,analyze-logs.py}`。
+产物核对历史：38源码、114marker、kernel/两档boot回读通过，记录提交e89754d；
+kernel SHA256 `5bc262e74534dbc2952a09342a0d97348561226d58a16a5a7c937ebad10966b1`。
+镜像仍在out-bs，SHA/参数见F0-V2；无本次CI run ID/构建日志，未查全量编译告警。
 
 **0121a1 编译失败与0172修复记录（0121a2产物核对已完成，以上段为准）。**
 日志 `logs/xnu-build-log-0121a1.txt`，SHA256

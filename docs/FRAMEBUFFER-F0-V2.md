@@ -1,6 +1,7 @@
 # F0 补充取证：0171
 
-状态：0121a2 云产物核对通过，两档镜像已打包回读，待实机。0121a1 include 编译问题已修复。
+状态：0121a2 两档实测已分析，用户确认显示异常相同；详见 [0121a2 报告](FRAMEBUFFER-F0-0121A2.md)。
+时钟区域 source/panel 同黑，模式/帧完成 ABI 仍待核对；0121a1 include 编译问题已修复。
 当前仍是 F0，未进入 F1。
 上一轮结果见 [0121 报告](FRAMEBUFFER-F0-0121.md)，总路线见 [显示计划](FRAMEBUFFER-PANEL-PLAN.md)。
 
@@ -42,7 +43,8 @@
 - GR1 是 base+0x1000，复用已有 0x2000 映射，不重复映射同一页；CB2 仅映射一页。
 - 只读 CBAR/CBA2R、SCTLR/ACTLR、TTBCR2/TTBCR、TTBR0/1、MAIR。未知 ID/route 跳过，
   映射失败只给 WARN，不影响既有亮度路径；沿用探针时钟门检查与 dp_lock 串行化。
-- 新读数尚未实机获得。CB2 的有效转换和页表可访问范围仍待核实。
+- 0121a2 已获得读数：SCTLR=0xe0/M0，TTBR0/1、TTBCR、MAIR 均0；本次 CB2 stage1
+  转换未使能。TRANS route 本身不证明活跃转换，新扫描地址可达性仍须在 F4 写入前核对。
 
 不新增 DCS、CTL、SSPP 或 SMMU 写入；现有 DCS 写入函数保持原样。
 
@@ -123,7 +125,7 @@ BSD 用同目录的 `"sweet_log_level.h"`，IOKit 用
 日志 SHA256：`902da91ad88582b5c4118dd7e600d7b4689729d358a2be07b5e045580c7cb090`。
 无需额外下载本次失败构建的产物；下一步是 push 修复提交后重新编译。
 
-## 0121a2 产物与镜像（待实机）
+## 0121a2 产物与镜像（实测完成，以下保留原操作）
 
 预期源码提交 `2bc0251`（0171+0172）。38 个核对文件与本地预期逐字节一致，
 包含显示补丁涉及的全部四文件；现有 114 个 CI require_marker 通过，kernel manifest 及 v2 / IRQ /
@@ -151,4 +153,20 @@ BSD 用同目录的 `"sweet_log_level.h"`，IOKit 用
 没有自动息屏测试，没有新增 USB 重连压力测试。需记录稳定画面的时间显示和滑条重叠情况。
 
 核对底稿：`scratch/artifact-0121a2/{verify-artifacts.py,verification.json,source-compare.json,
-verify-boots.py,boot-verification.json}`。尚无本轮设备日志，F0 未验收。
+verify-boots.py,boot-verification.json}`。实测结果见下节，F0 未验收。
+
+## 0121a2 日志分析结果
+
+两档已完成，用户确认插电缺时间、拔电有时间及关机滑条/取消异常均同之前，保留像素无改善。
+详见 [完整报告](FRAMEBUFFER-F0-0121A2.md)，包含日志 SHA、行号、属性表和硬件配置。
+
+- 首次 off 后，普通44次/preserveoff45次周期时钟对照两侧RGB全0且相等，期间copy持续推进。
+  不能仅归因于息屏擦除/漏拷，也不能宣布CA自身bug；source为实时样本，有复用证据。
+- 普通首次 off 擦黑、on 遇空记录未copy；保留档留像素成功，后续却仍源图/扫描同黑。
+  update/disable/background 的合法blank语义待核对，不直接过滤空记录。
+- selector集合21种、surface11键已得到；每次亮屏selector79/block0x40当前返回全0，是模式
+  ABI的具体核对线索。SwapWait/完成通知/缓冲复用需一起核对，retain不能替代所有权协议。
+- CB2 SCTLR.M=0；INTF frame-en=0，TE留给F3 IRQ时间戳，不重复同类寄存器差值取证。
+- 本轮未复现BUG-002；采样中位约79ms，不以诊断档评价默认动画性能。
+
+NEXT：先离线核对本版框架ABI与帧语义，再做针对性修复。无新驱动待push/云编译；F0未验收。

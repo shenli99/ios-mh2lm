@@ -1,6 +1,6 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**状态（2026-11-08，第二版）：0121 / 0170 两档实测已分析，F0 需补证据，尚未验收。** 本文是 `IRQ-FRAMEBUFFER-PLAN.md`
+**状态（2026-11-08，第二版）：0121a2 / F0 v2 两档已分析，像素和硬件证据已补；帧接口解释未闭环，F0 尚未验收。** 本文是 `IRQ-FRAMEBUFFER-PLAN.md`
 “大目标二”的实施文档。第二版目标从“修好接手的 ABL framebuffer”提升为：**驱动自己
 分配和管理扫描缓冲（simplefb 式），硬件双缓冲翻页，CoreAnimation 渲染的 surface
 直接被 MDP 扫描，消除每帧 CPU 拷贝。**
@@ -12,7 +12,9 @@ agent 按 F0→F7 顺序做。每步通过验收后，在本文 §7“进度记�
 隔离，解释两条唤醒来源失效；该独立问题转入 [BUG-002](BUGS.md)，不自动增加显示步骤或验收前置。
 preserveoff 实际保留像素，但未解决全部缺时间现象。
 0170 不能核验时钟区域像素或 TE 频率；SMMU stream 配置为 TRANS/CB2，F4 前须补转换核对。
-0121a1 的 include 路径错误由0172修复；0121a2源码/内核核对与两档镜像回读通过，待实机，详见 [F0 v2](FRAMEBUFFER-F0-V2.md)。
+0121a1 的 include 路径错误由0172修复；0121a2两档实测见 [新报告](FRAMEBUFFER-F0-0121A2.md)。
+用户确认两档异常相同；时钟区域当前source/扫描同黑，不能仅归因于擦除/漏拷。模式查询、
+update/disable/background和完成/复用ABI待核对，不提前进入F1。
 
 ## 1. 现状（0120a18 buildtree 源码 + 0120a17 日志）
 
@@ -28,7 +30,7 @@ preserveoff 实际保留像素，但未解决全部缺时间现象。
 | SSPP 寄存器 | `SRC_SIZE`0x00、`SRC_XY`0x08（源裁剪起点）、`OUT_SIZE`0x0c、`SRC0_ADDR`0x14、`YSTRIDE0`0x24、`SRC_FORMAT`0x30、`UNPACK`0x34、`OP_MODE`0x38、`ADDR_SW_STATUS`0x70 | `sde_hw_sspp.c:25-82` |
 | CTL | `FLUSH`0x018、`START`0x01c，VIG0 的 flush 位 BIT(0) | `sde_hw_ctl.c:29-30,167` |
 | MDSS 中断 | `interrupts=<0 83 0>` → INTID 115【待核实】；INTF1 tear 中断块 MDP+0x6E800（EN/STATUS/CLEAR=+0/+4/+8），bit2 RD_PTR、bit0 AUTOREFRESH_DONE；顶层 HW_INTR_STATUS=MDP+0x10 | `sm8150-sde.dtsi:44`；`sde_hw_interrupts.c:25,37-41,194-198` |
-| SMMU | MDSS SID=0x800、匹配 mask=0x420。0121 SMR3=0x84200800、S2CR=0x2（TRANS/CB2）；CB2 使能和页表范围待核实，不可假定新物理页均可扫描 | `sm8150-sde.dtsi:47`；0121 两档日志；F0 报告 §6 |
+| SMMU | MDSS SID=0x800、匹配 mask=0x420。0121a2 SMR3=0x84200800、S2CR=0x2（TRANS/CB2），但 CB2 SCTLR=0xe0/M0、TTBR/TTBCR/MAIR0，本次 stage1 转换未使能；新物理页可达性仍需核实 | `sm8150-sde.dtsi:47`；0121a2 报告 §6 |
 
 **地址范围待核对。** `docs/panel.md` 还记录 Android DTS 的 `splash_region` 为
 `0x9c000000/0x02400000`（36 MiB），而运行时 VIG0 使用的是 `0x9d200000`。
@@ -123,8 +125,9 @@ RD_PTR(vsync) ── pending 存在 ──► clean cache ─► 写 SRC0_ADDR(+
 下一次 RD_PTR ── 读 ADDR_SW_STATUS/确认新地址生效 ──► 旧前台 surface 释放 + swap 完成通知
 ```
 
-- 一个 surface 在被扫描期间不得交还给 CA 继续绘制：翻页确认后才释放上一帧，并发
-  swap 完成通知（类型按 F0 结果）；`SwapWait` 在命令门上等到目标 swap 完成（带超时）。
+- 一个 surface 在被扫描期间不得交还给 CA 继续绘制：必须核对并实现本版用户态实际使用的
+  完成/复用协议；**retain 只保对象存活，不阻止 CA 改写像素**（0121a2 已捕获复用证据）。
+  翻页确认后才释放上一帧、按协议完成 swap；`SwapWait` 在命令门上等到目标 swap 完成（带超时）。
 - 队列深度 1：新 swap 覆盖尚未上屏的 pending 时，被覆盖的 swap 立即按完成释放。
 
 ### 2.5 IOKit 原则
@@ -175,7 +178,8 @@ host 测试）；patch 对上一结果树 strict apply；CI 加 `require_marker`
 **验收**
 1. 两档各做：电源键息屏→3 秒→插充电器；接充电器时电源键息屏→3 秒→拔；各 5 次。
    当前未实现自动息屏，不安排 auto-lock；增加关机界面及取消后的显示观察。
-2. 回答黑块根因：来源帧本身黑（CA 侧）还是被擦后没重画（内核侧）。
+2. 区分当前 source 同黑、擦除后未重画和提交/完成/复用语义。source 同黑不直接等于 CA 自身错误；
+   需结合本版 ABI 与正常充电过渡 UI 核验，关机滑条重叠独立闭环。
 3. 得到选择子使用表、CA surface 创建属性表，写入 §6。
 4. 得到 SSPP 格式寄存器值、计数使能/实际间隔和 SMMU route/CB2 有效配置，写入 §6。
    command mode 计数若不能表征 TE，明确保留未知，TE 实测在 F3 的 IRQ 时间戳中完成；
@@ -301,7 +305,7 @@ autorefresh 且画面不冻结。
 
 | 风险 | 预案 |
 |---|---|
-| SMMU 非旁路，MDP 访问不到自有缓冲（花屏/总线错误） | F0 先读 SMR/S2CR 判断。F4 首次翻页只在诊断档做，用 `ADDR_SW_STATUS` 和肉眼确认后再继续。ABL 预留区只有 18 MiB，放不下两个 1080×2340 缓冲（约 20.2 MB），不能作为双缓冲退路；若确认非旁路，在 F4 前插入子步骤 F4a：为 MDSS 上下文建立恒等映射（只映射扫描池），单独验收 |
+| 新缓冲不可达，MDP 花屏/总线错误 | 同时核对 SMR/S2CR 与 CBAR/SCTLR，不能只按 TRANS route 判断。0121a2 的 CB2.M=0，不据此强加 F4a。F4 首次写新地址前重查 live 配置、内存归属与可达性，用 `ADDR_SW_STATUS` 和肉眼验证。ABL 暂按18 MiB，放不下两个1080×2340缓冲，不能作为双缓冲退路；只有确认需要地址转换时才另设计 F4a（仅扫描池映射），单独验收 |
 | 物理连续 10.7 MiB 分配失败 | 启动早期分配；失败回退旧路径并记录；考虑使用 ADT 预留区 |
 | 写 SSPP 格式寄存器出错导致花屏 | 先写回与 ABL 相同的值验证读写；再改裁剪；每次改动后读回比对 |
 | cache clean 不足导致残影 | F5 验收 3 专门检查；回退方案 B |
@@ -316,7 +320,7 @@ autorefresh 且画面不冻结。
 - 不把电池/充电 UI 问题当显示问题修。
 - 所有设备操作 `fastboot boot`；不写盘。
 
-## 6. F0 取证结果（0121 / 0170 部分完成）
+## 6. F0 取证结果（0121a2 已补像素/硬件，ABI 待闭环）
 
 0170 只增加只读取证，不改变显示行为。`sweetfbtrace=1` 记录选择子、最近 swap、
 off/on 前后扫描区与 source surface 稀疏校验和；`sweetdispprobe=1` 的显示探针增加
@@ -363,14 +367,30 @@ SSPP 格式/裁剪/地址状态、INTF 计数差值和 apps SMMU SID 0x800 匹�
 
 | 步骤 | 补丁 | 产物/日志 | 结论 |
 |---|---|---|---|
-| F0 | 0170 / d58e7fc | 0121 两档持久日志；SHA 见实测报告 §1 | 已分析；mux 双组隔离已证实，显示/TE/CB2 仍待补证据，未验收 |
+| F0 | 0170 / d58e7fc | 0121 两档持久日志；SHA 见实测报告 §1 | 已分析；mux 双组隔离独立记 BUG-002，0170 取证不足，未验收 |
+| F0 v2 | 0171+0172 / 2bc0251 | 0121a2 两档持久日志；SHA 见新报告 §1 | 两档异常相同；source/扫描时钟同黑，模式/帧语义待核对；CB2.M0，frame计数关闭，未验收 |
 
-### 0171 / F0 补充实现（2026-11-08，待云编译）
+### 0171 / F0 补充实现（历史记录，0121a2 已完成实测）
 
 像素/实际拷贝/属性/计数补证据，详见 [F0 v2](FRAMEBUFFER-F0-V2.md)。本地编译和 host 检查通过，
-未得到实机结果，F0 继续进行。CircleCI 配置未改；打包门要求新 v2 marker。独立 bug 不在本轮修复。
+实机结果见下节。CircleCI 配置未改；打包门要求新 v2 marker。独立 bug 不在本轮修复。
 
-### 0121a2 / 0171+0172 产物就绪（待实机）
+### 0121a2 / 0171+0172 实测已分析
 
 38文件源码比对、114项门检查、新kernel manifest/marker以及两档boot回读通过。
-镜像路径、SHA及测试顺序见 [F0 v2](FRAMEBUFFER-F0-V2.md)末节；尚无设备日志，F0仍未验收。
+镜像路径、SHA及原测试顺序见 [F0 v2](FRAMEBUFFER-F0-V2.md)；日志分析见 [0121a2 报告](FRAMEBUFFER-F0-0121A2.md)。
+
+本轮新增事实：
+
+- 用户确认两档肉眼异常相同；时钟ROI多次当前source/扫描RGB同为0、差异0，copy持续推进。
+  普通息屏擦黑、保留档留像素均捕获，但不能解释全部异常，不把source同黑直接定为CA错误。
+- surface2/3的11键属性表与21种selector集合已得到。selector79/block0x40当前全清0，
+  参考实现为当前模式ID，需核对本版ABI；SwapWait/完成通知/复用协议仍有缺口。
+- 只见layer0非零surface；update/disable及raw10c=0xff000000形态已捕获。空记录可能是合法
+  blank，不能通过过滤空记录或硬恢复旧图绕过语义。关机滑条重叠仍未独立定因。
+- CB2 SCTLR.M0，TTBR/TTBCR/MAIR0，本次stage1转换未使能；新地址可达性仍在F4前验证。
+  frame-en0，TE实测留给F3 IRQ时间戳，不追加同类一秒差值实验。
+- BUG-002本轮未复现，未宣布修复。采样中位约79ms，有诊断开销，不以此评价默认性能。
+
+NEXT：先离线核对模式查询/属性和提交/完成/复用ABI，再定针对性修复。不立即重编译或重复
+两档测试，不直接改面板/SMMU，不进入F1；F0仍未验收。
