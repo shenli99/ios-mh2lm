@@ -18,11 +18,17 @@ agent 按 F0→F7 顺序做。每步通过验收后，在本文 §7“进度记�
 | TE / 上下电 DCS | TE 走 GPIO8；on …`35 00`→`29`→`11`+150 ms；off `51 00 00`+90 ms→`28`→`10`+150 ms | `docs/panel.md` 84、139-156 行 |
 | ABL 交接 | VIG0 SSPP：`SRC_SIZE`(+0x00)=0x0924_0438、`SRC0_ADDR`(+0x14)=0x9d200000、`YSTRIDE0`(+0x24)=0x10e0；INTF1 tear-check 开、**autorefresh=0x80000001**；CTL0 FLUSH/START=0；DSI0 cmd 模式 | 0120a17 日志 `SWEET DISP: pass 0..2` |
 | 含义 | MDP 每个 TE 自动从 SSPP 源地址取整帧发给面板。**改 `SRC0_ADDR` 并 flush 即可换扫描缓冲**，这是硬件翻页和零拷贝的基础 | 同上；`sde_hw_sspp.c:25-37` |
-| ABL 缓冲 | 0x9d200000 起 0x1200000（18 MiB），Mu-Silicium 标 `Display Reserved`、WRITE_THROUGH；Android DTS `disp_rdump` 0x9c000000 起 0x1200000 | `MemoryMapLib.c:25`；`sm8150-mh2lm_common.dtsi:80` |
+| ABL 缓冲 | 当前 0120a17 运行探针看到 VIG0 `SRC0_ADDR=0x9d200000`，计划暂按其后 0x1200000（18 MiB）处理；Mu-Silicium 标 `Display Reserved`、WRITE_THROUGH | `MemoryMapLib.c:25`；0120a17 `SWEET DISP` 日志 |
 | SSPP 寄存器 | `SRC_SIZE`0x00、`SRC_XY`0x08（源裁剪起点）、`OUT_SIZE`0x0c、`SRC0_ADDR`0x14、`YSTRIDE0`0x24、`SRC_FORMAT`0x30、`UNPACK`0x34、`OP_MODE`0x38、`ADDR_SW_STATUS`0x70 | `sde_hw_sspp.c:25-82` |
 | CTL | `FLUSH`0x018、`START`0x01c，VIG0 的 flush 位 BIT(0) | `sde_hw_ctl.c:29-30,167` |
 | MDSS 中断 | `interrupts=<0 83 0>` → INTID 115【待核实】；INTF1 tear 中断块 MDP+0x6E800（EN/STATUS/CLEAR=+0/+4/+8），bit2 RD_PTR、bit0 AUTOREFRESH_DONE；顶层 HW_INTR_STATUS=MDP+0x10 | `sm8150-sde.dtsi:44`；`sde_hw_interrupts.c:25,37-41,194-198` |
 | SMMU | MDSS 在 apps_smmu 下（SID 0x800/0x420）。ABL 留下的 VIG0 地址就是物理地址 0x9d200000，说明当前上下文是旁路或恒等映射【待核实】 | `sm8150-sde.dtsi:47`；日志 |
+
+**地址范围待核对。** `docs/panel.md` 还记录 Android DTS 的 `splash_region` 为
+`0x9c000000/0x02400000`（36 MiB），而运行时 VIG0 使用的是 `0x9d200000`。
+这可能是同一预留区内的不同交接子区，也可能是 ABL/ADT 版本差异；在 F0 之前不能
+把两者合并、扩大或拿来分配扫描缓冲。F0 必须同时记录 `SRC0_ADDR`、stride、内存
+内容校验和以及实际映射边界，确认后再决定 F4 的分配地址。
 
 ### 1.2 软件现状与问题
 

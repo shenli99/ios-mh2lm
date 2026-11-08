@@ -20,6 +20,10 @@
 F0 取证→F1 SweetMDSS IOService 分层→F2 DCS真关屏→F3 MDSS RD_PTR vsync→F4 自有扫描缓冲+SSPP硬件裁剪+
 双缓冲翻页→F5 CA surface 直接扫描（cache clean，零拷贝）→F6 可选kickoff→F7 IOPM/panic/清理。
 接手 agent：从 F0 开始，按“每步通用要求”做，一步一个补丁（从0170起），通过验收后更新该文档§7和本段。
+已复核工作区根目录 `docs/panel.md`：量产节点为 Tianma/R66456A 1080×2340@60、RGB888、DSI0
+四 lane command mode，TE=GPIO8，ON/OFF DCS 顺序必须原样保留；vendor payload 仍是 opaque。
+另外，Android DTS 的 `splash_region`（0x9c000000/36 MiB）与 0120a17 运行时
+`SRC0_ADDR=0x9d200000` 的范围关系尚未证明，已列为 F0 的硬性核对项。
 电池线 0120a18 用户正在实测（见下段），两条线互不阻塞，但同一内核产物可同时打两边的 profile。
 
 **CURRENT: 0120a18 tempirq档已实测：温度中断路由挂接成功（APID285）但温度只变1.25°C未触发；截止后25分钟未回充（固件为VBAT回充模式，LG用SOC98%）；关机日志未落盘。** 详见docs/BATTERY-BASIC-CHARGE.md 0120a18节。
