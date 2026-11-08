@@ -1,8 +1,26 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-11-07, latest)
+## Agent handoff / active work (2026-11-08, latest)
 
-**CURRENT: 0168 runtime3基础充电已实现并本地验证，未push/未云编译/未上机。用户push后CircleCI出内核，再打包fastboot boot测试。**
+**CURRENT: 0120a17（e30cf81/0168）云产物核对通过，runtime3基础充电boot已打包回读，待用户实机测。**
+
+用户给logs/xnu-buildtree-0120a17.gz（SHA256 8ff69927…ba575）、xnu-kernel-0120a17.gz
+（ab0e4f4b…363b6）。buildtree中34个源码与scratch/battery-basic-charge/verify逐字节一致，
+CI 110个require_marker通过；kernel SHA256SUMS校验OK，
+kernel 5ef5143973ce163510b5e78c7de8123f096f2ddc734eee199072437d4bd24e63，含BASIC v2各marker。
+没有CI run ID/构建日志，未查全量警告。打包：/home/shenli/work1/out-bs/
+boot-16k-0120a17-battery-basic-charge.img，35,667,968字节，SHA256 acd5da77…924b4e，
+header v1；回读kernel/ADT/TOML/ramdisk逐字节一致，参数唯一，runtime3/irq4/adcconv0/deps0。
+底稿scratch/artifact-0120a17（verify-artifacts.py、verify-boots.py、*.json），不入git。
+硬件JEITA结论（docs/BATTERY-BASIC-CHARGE.md新节）：LG init关硬件补偿、从不开HARDLIMIT，
+mh2lm电池档无jeita阈值；实测0x1090=0。硬限是否生效【待核实】，不能当保护层。
+NEXT：用户`fastboot boot`上面的img → 接充电器10分钟以上 → 导出sweetlog-0120a17-*.bin。
+期望：`SWEET BATT BASIC: v2 step=1 ... enabled=1`、pets递增、FG电流为负、stage1～3。
+可选0169（未做，待用户决定）：FG RRADC batt-temp-delta IRQ接入电池workloop。
+
+### Previous 0168 implementation handoff (superseded)
+
+**0168 runtime3基础充电已实现并本地验证。**
 
 改动（ios-mh2lm提交见git log）：xnu/patches/0168-mh2lm-basic-charge-control.patch
 （新sweet_charge_basic.h；sweet_charger.c/h新增BOARD_FAST_CURRENT_MA≤2800、

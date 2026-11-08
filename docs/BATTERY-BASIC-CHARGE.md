@@ -16,7 +16,8 @@ runtime1/2 的放行链路在实机上永远无法全部满足，所以 0042 从
 ## 新设计：按 LG 的分工驱动硬件
 
 LG 的 SMB5 驱动（`android_kernel_lge_sm8150/drivers/power/supply/qcom/`）里，
-APSD/AICL/ICL、CC/CV、截止、回充和硬件温度/BAT_OV 都由 PMIC 自己完成；软件只做：
+APSD/AICL/ICL、CC/CV、截止、回充和 BAT_OV 由 PMIC 自己完成；电池温度保护是软件
+（protection-battemp 定时 work）。软件只做：
 
 | LG 行为 | 出处 | 0168 对应 |
 |---|---|---|
@@ -45,6 +46,20 @@ CHILLY（0～15°C）：VBAT≥4.0V 时 1000mA，否则 1900mA，与上面取小
 - 睡眠：WillSleep 只确认、不停充（同 LG）；bark 没人喂时 bite 由硬件停充。
   Restart/PowerOff 仍在通知器里同步写 0042=0。
 - 服务停止：`stopRuntime` 写 0042=0。
+
+## 硬件 JEITA 与软件温度表的关系
+
+- LG `qpnp-smb5.c:3309` 在 init 调 `smblib_disable_hw_jeita(chg, true)`（smb5-lib.c:2805），
+  清 0x1090 bit3..0，即关掉硬件软限 FCC/FV 补偿；全树从不写 bit4 `JEITA_EN_HARDLIMIT`。
+- mh2lm 电池档 LGE_BLT42_*.dtsi 没有 `qcom,jeita-*` 阈值，`jeita_update_work` 不写硬件阈值、
+  走 FAILURE 分支，所以 `bat-temp` IRQ 处理函数 `batt_temp_changed_irq_handler` 直接返回。
+- 实测 0120a6/0120a16 日志 `LIMIT CONFIG ... jeita=0/0`：0x1090=0x00，读成功。
+- 0168 与 LG 一致：只读 0x1090，不写；温度降流/停充全由软件 LG 表负责，不会和硬件补偿叠加。
+- 0x100d bit3..0（硬限/AFP 状态）置位时软件也停充；两者都是“停”，方向一致。
+- 【待核实】bit4=0 时 PMIC 硬温停充是否生效、默认硬阈值是多少。在核实前不能把硬件硬限当作
+  已有的保护层；目前唯一确定的温度保护是软件表 + 喂狗失败时的 bite。
+- 可选改进（未实现）：FG RRADC `batt-temp-delta` IRQ（pm8150b.dtsi:428，SID2 0x42 irq2，
+  LG extension-fg-gen4.c:153 有处理）接到电池 workloop，温度变化即触发评估，定时器降为兜底。
 
 ## 不变的部分
 
