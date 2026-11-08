@@ -85,3 +85,23 @@ deps 诊断路径代码不动；runtime3 需要 `sweetbattery=1 sweetbatt=1 swee
 - bite 后再喂狗是否恢复充电，还是需要重新走启充序列。
 - 本移植是否在熄屏时发 WillSleep；若系统真睡眠，bark IRQ 能否唤醒。
 - 实际充电电流：以 FG 电流变负、0x1006 stage 1～3 为准。
+
+## 0120a17 实机结果（sweetlog-0120a17-battery-basic-charge.bin）
+
+日志 SHA256 06412841bb307239d16241653442e3a6893d1e5aa6a985eaf4dd37a8295944ab，v1/4MiB，
+有效 398827 字节/5042 行，无回卷/NUL；文本底稿 scratch/artifact-0120a17/basic-charge-persistent.txt。
+
+- 46～85s：开机时接电脑 USB（APSD SDP），启充 9 条命令全部回读成功，但 0x1006=0x47
+  （stage 7 DISABLE）、FG 0mA；85s 拔出后写 0042=0。用户说明这是电脑口，不作为失败。
+- 162.5～163.5s：插充电器时接触抖动（usb 0x10/0x26/0x12 交替），两次部分快照
+  （valid 缺位、INPUT error -12）按遥测缺失不启充，无误启。
+- 163.5s 启充（enables=3，failures=0）→ 163.6s 0x1006=0x03 FULLON，APSD 后 FLOAT（type5）。
+- 163.6～1047s：FG +1940～1994mA（FCC 2000mA 封顶），间歇约 1420～1464mA；
+  VBAT 3769→4335mV，SOC 56%→71%，温度 21.75→33.25°C 一直 GOOD，未触发温度档变化。
+- bark 喂狗 54 次、pet-errors 0，约每 16.4s 一次；全程未掉充，未见 bite。
+- 1054s 拔出：usb=0x26 → 同一次 IRQ 写 0042=0，回读 0。
+- 无 MUX 读失败/隔离、无 ADC 请求；采样 168 次 IRQ、1 次 protection-timer（145s，未充电时）。
+
+仍未验证：温度档切换（WARM/COOL 实机）、充满/截止/回充、SMB1355 是否参与、熄屏睡眠、
+bite 恢复。ICL settled 0x13 与约 2A 电池电流的输入功率关系未核对【待核实】。
+

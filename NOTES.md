@@ -2,6 +2,14 @@
 
 ## Agent handoff / active work (2026-11-08, latest)
 
+**CURRENT: 0120a17实机充电成功：充电器插上0.1秒内FULLON，FG约+1975mA持续约15分钟，SOC 56→71%，拔出即停。**
+
+证据见docs/BATTERY-BASIC-CHARGE.md末节及scratch/artifact-0120a17/basic-charge-persistent.txt。
+喂狗54次无错，failures=0。开机电脑口SDP不充（用户确认正常）。
+NEXT：可选长时间到充满（截止/回充）、熄屏、温度档；0169 batt-temp-delta IRQ待用户决定。
+
+### Previous 0120a17 artifact handoff (superseded)
+
 **CURRENT: 0120a17（e30cf81/0168）云产物核对通过，runtime3基础充电boot已打包回读，待用户实机测。**
 
 用户给logs/xnu-buildtree-0120a17.gz（SHA256 8ff69927…ba575）、xnu-kernel-0120a17.gz
