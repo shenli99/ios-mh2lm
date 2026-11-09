@@ -2,6 +2,29 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0121a9长测通过；BUG-002已由41a0efa / 0178代码修复，用户要求后续正常使用观察。**
+本轮基线41a0efa。BUG-002仅改drainPending收尾：everAcked/pendingRoutes为局部，ACK过和
+未ACK过的末尾pending均rearm待下一次drain；不增faultCount/不隔离。四遍/ack语义/ACK
+失败disable/隔离调用点保留，无成员/全局变量。源码strict apply/收尾外字节不变、consumer
+suite含timeout及80生命周期竞态通过；ASan/UBSan晚到CC、空遍晚到CC、第五事件在下次
+drain清除且fault0/无隔离，按键健康。底稿scratch/bug002-fix，尚无新内核实机证据。
+用户明确：不再专项测试BUG-002，不安排重复插拔/A-B；后续正常使用，复发反馈后再查。
+已补BUGS与BUG-002-MUX-PENDING修复日志，历史专项关闭清单不再作为显示前置。
+长测sweetlog-0121a9-fb-power-dcs-long.bin SHA256=
+0ae824787b04471ec67b721c78e3ea5434ed924319ad3aff8bd333a9b6228335；有效547519/flush550/
+未回卷/8573行。3472 off rc0/state2/12ms→7958 on rc0/state0/4ms，用户确认画面/亮度/
+触摸都正常。87个息屏段采样首末内核时间跨度4805秒约80min（非精确off-on测量）。
+亮度3460的0→7972的2838恢复初始值；10HID（power8/up2），唤醒后18touch；100电池样本/
+17IRQ refresh，无分级ERROR/WARN/显示fallback/UNKNOWN/mux隔离/panic/USB VERIFY。
+无ACM/USB reset，不补造USB覆盖；长测是原0177镜像不含0178，无隔离不能证明BUG-002
+修复已上机；不算充电能力或系统suspend。底稿scratch/artifact-0121a9-long/analyze.py等。
+F2基础及长时电源键正常使用路径通过，完整5轮×三来源矩阵未补齐，旧隔离后充电唤醒仍
+无效，不宣称全矩阵通过。NEXT：回到显示计划后续推进；F3尚未开始实现，不重开BUG-003，
+不主动插入BUG-002专项测试。本轮仅文档/分析，未push/操作设备/改镜像/内核/CI；CI blob
+仍da0b6c0947a66f03491b3a9023590b49665292df。
+
+**以下为历史交接；当前修复、长测结果及后续观察政策以上段为准。**
+
 **CURRENT：F2长测期间，按用户要求独立定位BUG-002；仅诊断/复现，尚未改驱动。**
 基线e706e4b / 0121a9。已确认mux末尾stillPending即永久隔离的错误判定；该位无需曾被ACK。
 a9未回卷日志4689 work87总hits123，4694/4695 work88总hits125，只有USBIN/CHGR两次成功ACK，

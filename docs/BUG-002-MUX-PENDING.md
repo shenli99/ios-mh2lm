@@ -1,6 +1,7 @@
 # BUG-002：末尾新 pending 被误判为永久故障
 
-2026-11-09；0121a9 F2 长测期间独立排查。本文是诊断，不是修复验收。
+2026-11-09；0121a9 F2 长测期间独立排查。后续0178 / `41a0efa`完成代码修复，本地回归通过；
+用户决定后续随正常使用观察，不安排专项复测。尚无新内核实机修复证据。
 
 ## 结论
 
@@ -100,7 +101,7 @@ python3 tools/tests/repro-mh2lm-mux-pending.py \
 poisoned lane 或锁故障。输出底稿：`work1/scratch/bug002/committed-reproducer-result.txt`。
 它证明了软件会错误隔离可处理的新事件，不模拟真机 CC 电气时序，也不证明硬件没有其他问题。
 
-## 修复边界（尚未实施）
+## 原修复规划（历史；实际范围以下节0178为准）
 
 1. 已注册 route 的末尾 pending 应作为待继续处理的工作；保留有界执行，允许重新排队/
    重新进入中断，不能仅凭该次 pending 就撤销 consumer。不能只把四遍改成更大的数。
@@ -114,5 +115,40 @@ poisoned lane 或锁故障。输出底稿：`work1/scratch/bug002/committed-repr
 5. 修复验收覆盖末尾新边沿、四遍后新事件、真实 ACK 超时/隔离、stop 与续批竞态、按键并行；
    上机验证重复插拔、息屏唤醒和长时组健康。不得把 host 复现视作修复已上机成功。
 
-本次仅补诊断/复现工具和台账；无内核/CI/boot 改动。0121a9 F2 长测继续使用原镜像，
+最初诊断阶段仅补复现工具和台账；当时无内核/CI/boot 改动。0121a9 F2 长测使用原镜像，
 其显示验收与 BUG-002 的修复状态分别记录。
+
+
+## 修复记录：0178 / `41a0efa`
+
+按用户明确限定，仅改`drainPending()`收尾逻辑：
+
+- 局部汇总`drainMasks[0..3]`为`everAcked`，末尾采集`pendingRoutes`（route索引位图，
+  不是PMIC peripheral的bit位图）。
+- `pendingRoutes & everAcked`与`pendingRoutes & ~everAcked`分别表示该批ACK过、未ACK过
+  而收尾仍观察到的route。两类均不能证明不可恢复故障，正常rearm level GIC，留待下一次drain。
+- 错误分支收窄为`!handled && !maintenance && !stillPending`；上述pending不会增加
+  `faultCount`或进入group隔离。原空且未处理/非维护异常保留，隔离调用点保留。
+- 四遍扫描、ACK返回语义、ACK失败`disableHardware()`行为完全不改；无新成员/全局变量，
+  无软件续批/新timer/consumer接口调整，无CI/USB/显示代码变动。
+
+`ACK成功+status置位`仅被视为可以继续处理，不能凭此独立证明物理新边沿。连续活动但
+ACK成功的硬件边界按用户要求本轮暂不单独识别；原有256次/秒风暴保护仍在。
+
+**本地结果：** strict apply及收尾之外字节一致；实际源码consumer suite（包含timeout
+poison/disable）和80次生命周期竞态通过。专门的ASan/UBSan回归结果：
+
+| 情景 | 首次drain后 | 下一次drain后 |
+|---|---|---|
+| USBIN/CHGR处理后CC晚到 | CC ACK0次，保留pending，无隔离 | CC ACK1次，pending清除 |
+| 完全空扫描后CC晚到 | 无ACK，保留pending，无隔离 | CC ACK1次，pending清除 |
+| 四遍各清一次后第五个CC到达 | CC ACK4次，保留pending，无隔离 | CC ACK5次，pending清除 |
+
+这些场景的`faultCount`均0，按键继续运行。host不模拟enable后level信号的硬件递送，
+测试显式发出下一次GIC callback；不把此结果记为已上机。LSan受环境限制关闭。
+底稿`work1/scratch/bug002-fix/{make-patch.py,verify-pending.py,pending-regression.txt,consumers.txt}`；
+仓库旧`repro-mh2lm-mux-pending.py`仍是针对修复前源码的缺陷特征复现，不应用其隔离预期验收0178。
+
+**用户决定：** 不安排BUG-002专项复测，后续随正常使用观察；如复发由用户反馈再排查。
+不再以本文历史专项测试清单阻塞显示路线，不宣称已取得0178的新内核实机修复证据。
+同日0121a9长测无隔离，但该镜像不含0178，不能拿来证明修复部署或有效。
