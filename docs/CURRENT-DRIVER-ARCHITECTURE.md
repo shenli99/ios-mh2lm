@@ -1,5 +1,11 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**F2 / 0177本地实现（未上机）：** selector12经AppleCLCD gate，用consumer持有的typed
+`SweetDisplayBackend::setPanelPower(on)`请求SweetMDSS；provider自己的gate串行28/29、
+亮度及stop admission，consumer不操作MMIO。sweetfbpower默认0，要求service1/mdss1，
+强制保留扫描像素；失败单独降级面板电源实验，UNKNOWN仍允许ON恢复，不影响按键/USB。
+不等同完整系统睡眠/面板断电，当前设备验收基线仍0121a7。详见[F2架构与边界](FRAMEBUFFER-POWER-F2.md)。
+
 **显示0175/0176增量：** F1a资源与背光服务迁移已由0121a5/0121a6正常运行路径实测收口，
 SweetMDSS通过ADT映射并在自己的gate里执行原探针/DCS，背光持有独立registry consumer。
 0176新增可选AppleCLCD registry consumer、用户接口IOExternalMethodDispatch检查，以及

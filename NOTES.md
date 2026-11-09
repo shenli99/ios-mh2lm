@@ -2,6 +2,32 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：用户授权F2；0177面板Display Off/On首轮实现及本地验证完成，待push云编译。**
+基线e17918f / 0121a7正常使用路径验收；新增sweetfbpower默认0，要求service1/mdss1/
+contract0。AppleCLCD selector12经dispatch/state gate，copyBackend调用typed setPanelPower，
+SweetMDSS gate检查admission/inactive/clock，发LP短包80050028/29；无consumer穿透MMIO。
+ON/OFF_PENDING/OFF/ON_PENDING/UNKNOWN；off失败补偿一次29，失败不伪记ON。故障后
+停止新的OFF，保留ON恢复；与亮度失败预算独立。consumer保留旧逻辑成功返回，但硬件rc
+单独ERROR/属性记录，不拿selector成功证明DCS成功。F2强制保留扫描像素/息屏pending。
+F2命令及OFF/UNKNOWN亮度事务用DSI idle条件，不依赖停住的TE；默认旧亮度MMIO轨迹不变。
+同步双gate调用每事务最多约400ms，off补偿最坏约800ms，实机耗时/响应待测，不声称异步。
+仅改kernel四文件SweetDisplayBackend.h/SweetMDSS.cpp/SweetFramebuffer.cpp/SweetFBService.inc；
+patch0177。LG依据及全部边界见docs/FRAMEBUFFER-POWER-F2.md；无10/11/rails/reset/vsync/扫描地址改动。
+strict apply+四文件字节核对、114既有CI源码marker；base/verify两单元arm64对象编译rc0，
+告警类别/数量完全一致（含FB两条旧format）；17项host通过，ASan/UBSan，LSan关闭。
+新增测试执行实际provider/FB，覆盖短包/LP/恢复/UNKNOWN/TE冻结/保留像素/重复ON/stop。
+底稿scratch/framebuffer-0177/{base,edited,verify,implement.py,compile.py,verification.json,
+warning-counts.json,tests.json,test-*.txt,old-kernel-rejection.txt}。bash-n通过，新打包入口
+--framebuffer-power出fb-power-{baseline,dcs}，均mdss1/service1，仅power0/1差异；
+保留IRQ/ACM/runtime3，trace/proof/contract0、probe1/loglevel2；旧a7被缺F2 marker正确拒绝。
+NEXT：用户push最新分支并下载新kernel/buildtree/log→核对四源码/manifest/marker→打包回读。
+先仅测dcs短测：启动等35秒，亮度/触摸/三键、手动off/on及息屏插/拔电各5轮、关机取消；
+有新增异常再baseline。短测通过再同镜像30分钟息屏，不需第二次云编译；持久日志fb-power-dcs。
+没有新云产物/boot，F2未验收，不重开缺时间/充电A/B；BUG-001/002/003/004未关闭。
+本轮未push/操作设备，未改USB/按键/电池/SPMI或CI，CI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+
+**以下为历史交接；当前实现及下一步以上段F2为准。**
+
 **CURRENT：0121a7 gated日志已分析，用户“没注意到新问题”；F1b正常运行路径验收通过。**
 结合0121a6 F1a，F1分层重构正常使用范围收口；真实provider终止/重匹配/stop-free仍未
 上机触发，仅host证据，默认sweetfbservice0/sweetmdss0不变，不声称生命周期全部实测。

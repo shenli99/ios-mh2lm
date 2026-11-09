@@ -1,5 +1,11 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
+**F2当前实现（0177）：** 用户授权进入F2；面板DCS28/29、typed后端电源接口及状态机
+已本地实现，strict apply/arm64单文件编译/17项host检查通过，待push云编译和实测。
+新增sweetfbpower默认0，失败明确日志和UNKNOWN/保留像素降级，后续ON仍可恢复。
+见[F2实施文档](FRAMEBUFFER-POWER-F2.md)。未做10/11或电源轨下电，未改CircleCI；
+尚无0177新boot，F2未验收，独立BUG状态不变。
+
 **0121a7当前进度：** F1b gated实测正常运行路径通过，用户未见新问题；新dispatch/gate及
 后端绑定启用，亮度/4组off-on/三键/触摸/ACM有记录。结合F1a，F1分层重构正常使用范围
 收口，下一步F2真显示电源；真实provider终止/重匹配未上机核验，默认开关仍关闭。

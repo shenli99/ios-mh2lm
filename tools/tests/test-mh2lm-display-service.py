@@ -81,7 +81,7 @@ prelude = r'''
 #define OSSafeReleaseNULL(x) do {if (x) {(x)->release();(x)=nullptr;}} while(0)
 using vm_offset_t=uintptr_t;
 using IOReturn=int;
-constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3;
+constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4;
 constexpr unsigned SWEET_DEV_FB_H=2340,SWEET_DEV_FB_W=1080,SWEET_DEV_FB_PA=0x9d200000,SWEET_DEV_FB_STRIDE=4320;
 static unsigned live=0,liveMaps=0;
 struct OSObject {
@@ -168,10 +168,11 @@ IONotifier*IOService::addMatchingNotification(const char*k,OSDictionary*d,Notify
  auto*n=new IONotifier;n->kind=k;n->dict=d;d->retain();n->cb=cb;n->target=t;subscriptions.push_back(n);return n;
 }
 static void emit(const char*k,IOService*p){for(auto*n:subscriptions)if(n->kind==k)n->cb(n->target,nullptr,p,n);}
-static int enabled=1,probeEnabled=1;
+static int enabled=1,probeEnabled=1,powerEnabled=0;
 static bool PE_parse_boot_argn(const char*k,void*v,size_t){
  if(!strcmp(k,"sweetmdss")){*(int*)v=enabled;return true;}
- if(!strcmp(k,"sweetdispprobe")){*(int*)v=probeEnabled;return true;}return false;
+ if(!strcmp(k,"sweetdispprobe")){*(int*)v=probeEnabled;return true;}
+ if(!strcmp(k,"sweetfbpower")){*(int*)v=powerEnabled;return true;}return false;
 }
 static void quiet(const char*,...){}
 #define IOLog quiet
@@ -196,15 +197,18 @@ static std::map<uintptr_t,uint32_t> regs;
 struct Op {bool write;uintptr_t addr;uint32_t value;bool operator==(const Op&o)const{return write==o.write&&addr==o.addr&&value==o.value;}};
 static std::vector<Op> trace;
 static bool dmaFired=false,dmaDone=true,lateError=false,pauseRead=false,enteredRead=false,releaseRead=false;
+static unsigned failNextDMAs=0;
+static bool activeDMAFails=false;
 static std::mutex pauseLock;
 static std::condition_variable pauseCV;
 static uint32_t readReg(uintptr_t b,uint32_t o){
  if(pauseRead&&b==bases[6]&&o==4){std::unique_lock<std::mutex> l(pauseLock);enteredRead=true;pauseCV.notify_all();pauseCV.wait(l,[]{return releaseRead;});}
- uint32_t v=regs[b+o];if(b==bases[6]&&o==0x110&&dmaFired)v=(dmaDone?1:0)|(lateError?(1u<<24):0);
+ uint32_t v=regs[b+o];if(b==bases[6]&&o==0x110&&dmaFired)v=(dmaDone&&!activeDMAFails?1:0)|(lateError?(1u<<24):0);
  trace.push_back({false,b+o,v});return v;
 }
-static void writeReg(uintptr_t b,uint32_t o,uint32_t v){trace.push_back({true,b+o,v});regs[b+o]=v;if(b==bases[6]&&o==0x90)dmaFired=true;}
+static void writeReg(uintptr_t b,uint32_t o,uint32_t v){trace.push_back({true,b+o,v});regs[b+o]=v;if(b==bases[6]&&o==0x90){dmaFired=true;activeDMAFails=failNextDMAs>0;if(failNextDMAs)--failNextDMAs;}}
 static void resetRegs(){trace.clear();regs.clear();dmaFired=false;dmaDone=true;lateError=false;
+ failNextDMAs=0;activeDMAFails=false;
  regs[bases[0]+0xc]=1;regs[bases[1]+0x2080]=0;regs[bases[6]+4]=5;
  regs[bases[4]+0x288]=0x12345678;regs[bases[4]+0x2b4]=0x3344;
  regs[bases[6]+0x3c]=0x9;regs[bases[6]+0x4c]=0x18;regs[bases[6]+0x84]=0x32;
@@ -294,8 +298,69 @@ int main(){
  d=OSDictionary::withCapacity(1);n=OSNumber::withNumber(5,32);d->setObject("brightness",n);n->release();
  assert(bl->setProperties(d)==0);d->release();AppleARMBacklight::step(bl,bl->fTimer);
  assert(legacyWrites==1&&bl->fLevel==5);bl->stop(nub);bl->release();
+ enabled=1;s=make(nub);resetRegs();
+ assert(s->setPanelPower(false)==kIOReturnUnsupported&&trace.empty());s->stop(nub);s->release();
+ // F2 short packets are independently expected from Qualcomm's packet format.
+ powerEnabled=1;s=make(nub);resetRegs();
+ auto fifo=[](){std::vector<uint32_t> result;for(auto o:trace)if(o.write&&o.addr==bases[6]+0x17c)result.push_back(o.value);return result;};
+ assert(s->setPanelPower(true)==0&&trace.empty()); // splash ON; idempotent
+ regs[bases[4]+0x2b0]=42; // frozen TE line must not prevent wake/control
+ assert(s->setPanelPower(false)==0&&s->fPanelState==SweetMDSS::PanelOff);
+ assert(fifo()==(std::vector<uint32_t>{0x80050028,0}));
+ assert(std::find(trace.begin(),trace.end(),Op{true,bases[6]+0x4c,4})!=trace.end());
+ assert(std::find(trace.begin(),trace.end(),Op{true,bases[6]+0x3c,0x14000009})!=trace.end()); // embedded + LP
+ size_t endPower=trace.size();assert(s->setPanelPower(false)==0&&trace.size()==endPower);
+ trace.clear();assert(s->setBrightness(31)==0); // OFF brightness uses idle, not missing TE
+ trace.clear();assert(s->setPanelPower(true)==0&&s->fPanelState==SweetMDSS::PanelOn);
+ assert(fifo()==(std::vector<uint32_t>{0x80050029,0}));
+ assert(regs[bases[4]+0x288]==0x12345678&&regs[bases[4]+0x2b4]==0x3344);
+ assert(regs[bases[6]+0x3c]==9&&regs[bases[6]+0x4c]==0x18&&regs[bases[6]+0x84]==0x32);
+ // Off timeout can have reached DDIC: one ON compensation, then legacy fallback.
+ resetRegs();failNextDMAs=1;assert(s->setPanelPower(false)==kIOReturnIOError);
+ assert(fifo()==(std::vector<uint32_t>{0x80050028,0,0x80050029,0}));
+ assert(s->fPanelFallback&&s->fPanelState==SweetMDSS::PanelOn);
+ endPower=trace.size();assert(s->setPanelPower(false)==kIOReturnUnsupported&&trace.size()==endPower);
+ assert(s->setPanelPower(true)==0&&trace.size()==endPower);
+ s->stop(nub);s->release();
+ // Recovery also fails: UNKNOWN, never pretend ON. A later ON still retries
+ // even if brightness has exhausted its independent failure budget.
+ s=make(nub);resetRegs();failNextDMAs=2;assert(s->setPanelPower(false)==kIOReturnIOError);
+ assert(s->fPanelState==SweetMDSS::PanelUnknown&&s->fPanelFallback);
+ resetRegs();s->dp_failed=3;assert(s->setPanelPower(true)==0&&s->fPanelState==SweetMDSS::PanelOn);
+ assert(fifo()==(std::vector<uint32_t>{0x80050029,0}));s->dp_failed=0;
+ s->stop(nub);s->release();
+ // ON failure is not an idempotent ON; repeat must reissue the command.
+ s=make(nub);resetRegs();assert(s->setPanelPower(false)==0);
+ resetRegs();failNextDMAs=1;assert(s->setPanelPower(true)==kIOReturnIOError&&s->fPanelState==SweetMDSS::PanelUnknown);
+ resetRegs();assert(s->setPanelPower(true)==0&&fifo()==(std::vector<uint32_t>{0x80050029,0}));
+ s->stop(nub);s->release();
+ // All new panel MMIO still obeys provider clock and stop admission.
+ s=make(nub);resetRegs();regs[bases[0]+0xc]=0;
+ assert(s->setPanelPower(false)==kIOReturnNotReady);
+ for(auto o:trace)assert(!o.write&&o.addr==bases[0]+0xc);
+ s->stop(nub);s->release();
+ // A second OFF while the first is OFF_PENDING waits for the same gate;
+ // after completion it is idempotent and cannot enqueue a second DMA.
+ s=make(nub);resetRegs();pauseRead=true;enteredRead=false;releaseRead=false;
+ std::thread firstOff([&]{assert(s->setPanelPower(false)==0);});
+ {std::unique_lock<std::mutex> l(pauseLock);pauseCV.wait(l,[]{return enteredRead;});}
+ assert(s->fPanelState==SweetMDSS::PanelOffPending);
+ std::atomic<bool> secondStarted=false;std::atomic<int> secondResult=-1;
+ std::thread secondOff([&]{secondStarted=true;secondResult=s->setPanelPower(false);});
+ while(!secondStarted.load())std::this_thread::yield();assert(secondResult.load()==-1);
+ {std::lock_guard<std::mutex> l(pauseLock);releaseRead=true;}pauseCV.notify_all();
+ firstOff.join();secondOff.join();pauseRead=false;
+ assert(secondResult.load()==0&&fifo()==(std::vector<uint32_t>{0x80050028,0}));
+ s->stop(nub);s->release();
+ s=make(nub);resetRegs();pauseRead=true;enteredRead=false;releaseRead=false;stopped=false;
+ std::thread power([&]{assert(s->setPanelPower(false)==0);});
+ {std::unique_lock<std::mutex> l(pauseLock);pauseCV.wait(l,[]{return enteredRead;});}
+ std::thread stopPower([&]{s->stop(nub);stopped=true;});assert(!stopped.load());
+ {std::lock_guard<std::mutex> l(pauseLock);releaseRead=true;}pauseCV.notify_all();
+ power.join();stopPower.join();pauseRead=false;endPower=trace.size();
+ assert(s->setPanelPower(true)==kIOReturnNotReady&&trace.size()==endPower);s->release();
  nub->release();assert(live==0);
- puts("PASS: actual service/client; legacy DCS traces and restores, gates, failure policy, resources, matching/termination, concurrent stop, zero live objects");
+ puts("PASS: actual service/client; legacy DCS traces, F2 short packets/LP, idempotence, frozen TE, recovery/unknown state, independent fault budgets, gates/stop and zero live objects");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-display-service-') as temp:

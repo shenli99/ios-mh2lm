@@ -62,7 +62,7 @@ using IOReturn=uint32_t;using UInt32=uint32_t;using SInt32=int32_t;
 using task_t=uintptr_t;using mach_port_t=uint32_t;using mach_vm_address_t=uint64_t;
 using io_user_reference_t=uint64_t;using OSAsyncReference64=uint64_t[8];
 constexpr IOReturn kIOReturnSuccess=0,kIOReturnBadArgument=0xe00002c2,kIOReturnOffline=0xe00002d7,
- kIOReturnUnsupported=0xe00002c7,kIOReturnNoMemory=0xe00002bd;
+ kIOReturnUnsupported=0xe00002c7,kIOReturnNoMemory=0xe00002bd,kIOReturnNotReady=0xe00002d8;
 constexpr uint32_t kIOUCVariableStructureSize=0xffffffffU,MACH_PORT_NULL=0;
 constexpr unsigned kIOExternalMethodScalarInputCountMax=16,kIOExternalMethodScalarOutputCountMax=16;
 constexpr unsigned kIOUserNotifyOptionCanDrop=1;
@@ -157,7 +157,11 @@ static SweetSurface *testSource=nullptr;
 static SweetSurface*sweet_surface_create_physical(uint64_t,uint32_t,uint32_t,uint32_t,uint32_t){return new SweetSurface;}
 static SweetSurface*sweet_surface_copy(uint32_t id){if(testSource&&id==testSource->id){testSource->retain();return testSource;}return nullptr;}
 static unsigned sweet_surface_port_in_task(SweetSurface*,task_t){return 77;}
-struct SweetDisplayBackend : IOService {};
+static std::vector<bool> panelRequests;
+static IOReturn panelResult=0;
+struct SweetDisplayBackend : IOService {
+ IOReturn setPanelPower(bool on){panelRequests.push_back(on);return panelResult;}
+};
 static SweetDisplayBackend *published=nullptr;
 static bool failWatch=false;
 struct SweetDisplayClient : OSObject {
@@ -170,14 +174,16 @@ struct SweetDisplayClient : OSObject {
 };
 struct PE_Video {uint64_t v_baseAddr;uint32_t v_width,v_height,v_rowBytes;};
 static void PE_current_console(PE_Video*v){*v={0x9d200000,4,4,16};}
-static int serviceArg=1,mdssArg=1,contractArg=0;
+static int serviceArg=1,mdssArg=1,contractArg=0,powerArg=0,preserveArg=1;
 static bool PE_parse_boot_argn(const char*k,void*p,size_t){
  int v=0;
  if(!strcmp(k,"sweetfbservice"))v=serviceArg;
  else if(!strcmp(k,"sweetmdss"))v=mdssArg;
  else if(!strcmp(k,"sweetfbcontract"))v=contractArg;
+ else if(!strcmp(k,"sweetfbpower"))v=powerArg;
  else if(!strcmp(k,"sweetfb_hz"))v=30;
- else if(!strcmp(k,"sweetfb_native")||!strcmp(k,"sweetfbpreserveoff"))v=1;
+ else if(!strcmp(k,"sweetfb_native"))v=1;
+ else if(!strcmp(k,"sweetfbpreserveoff"))v=preserveArg;
  else return false;
  memcpy(p,&v,sizeof(v));return true;
 }
@@ -257,9 +263,35 @@ int main(){
  auto*late=new IOMobileFramebufferUserClient;assert(late->initWithTask(1,nullptr,0)&&!late->start(f));late->release();assert(f->fClients->getCount()==0);
  a=scalar(nullptr,0,out,1);assert(call(d,4,a)==kIOReturnOffline);assert(d->clientClose()==0);d->stop(f);
  f->stop(provider);f->release(); // Client still retains the stopped provider.
- d->release();descriptor->release();testSource->release();testSource=nullptr;provider->release();
+ d->release();descriptor->release();testSource->release();testSource=nullptr;
+ // F2 drives only the retained typed backend after ABI validation. Failure
+ // keeps the legacy logical request, records the error, and never wipes pixels.
+ powerArg=1;preserveArg=0;serviceArg=0;
+ {auto*bad=new AppleCLCD;assert(!bad->start(provider));bad->release();assert(live==1);}
+ serviceArg=1;mdssArg=0;
+ {auto*bad=new AppleCLCD;assert(!bad->start(provider));bad->release();assert(live==1);}
+ mdssArg=1;f=new AppleCLCD;assert(f->start(provider)&&f->fPanelPowerMode&&f->fPreserveOff);
+ c=client(f);std::fill(std::begin(f->fSurface->pixels),std::end(f->fSurface->pixels),0xff887766);
+ auto checkPixels=[&]{for(auto px:f->fSurface->pixels)assert(px==0xff887766);};
+ in[0]=0;a=scalar(in,1,nullptr,0);
+ assert(call(c,12,a)==0&&f->fPowerOff);f->fVsync->fire();checkPixels(); // no backend yet
+ published=new SweetDisplayBackend;f->fDisplayClient->fire();panelRequests.clear();
+ a.scalarInputCount=0;assert(call(c,12,a)==kIOReturnBadArgument&&panelRequests.empty());a.scalarInputCount=1;
+ assert(call(c,12,a)==0&&f->fPowerOff&&panelRequests==std::vector<bool>{false});
+ f->fVsync->fire();f->fVsync->fire();checkPixels();
+ // Swaps while OFF remain pending; resume requests redraw but never copy
+ // synchronously while holding the provider gate.
+ uint8_t blank[SWEET_FB_SWAP_REC_SIZE]{};f->swap(blank);assert(f->fDirty);
+ f->fVsync->fire();assert(f->fDirty);checkPixels();
+ panelResult=kIOReturnNotReady;in[0]=1;assert(call(c,12,a)==0&&!f->fPowerOff);checkPixels();
+ assert(call(c,12,a)==0&&panelRequests.size()==3&&panelRequests.back()); // repeat ON still reaches provider
+ panelResult=0;assert(call(c,12,a)==0);assert(panelRequests.size()==4);
+ f->stop(provider);unsigned endRequests=panelRequests.size();
+ assert(call(c,12,a)==kIOReturnOffline&&panelRequests.size()==endRequests);
+ c->stop(f);c->release();f->release();published->release();published=nullptr;
+ provider->release();
  assert(live==0&&rawBlocks==0&&dispatchCalls>0);
- puts("PASS: real F1b start failures, dispatch bounds, unchanged pixel/power handlers, unknown ABI, gate concurrency, ports, provider stop/close and resource cleanup");
+ puts("PASS: actual F1b/F2 dispatch, gates, typed power requests, pixel preservation/fallback, stop/close and resource cleanup");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-fb-service-') as tmp:
