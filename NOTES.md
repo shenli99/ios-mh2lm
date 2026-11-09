@@ -2,6 +2,25 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：用户暂缓BUG-003，转入F1；0175 / F1a硬件资源与背光服务迁移实现、本地验证完成，待用户push云编译。**
+缺时间异常已写docs/BUGS.md#bug-003，0121a4原始证据保留，F0未闭环、不记全部验收。
+先做F1a：SweetMDSS持有ADT资源和workloop/gate，迁入原探针/DCS；背光通过每consumer的
+匹配通知取得typed backend。sweetmdss默认0，新路径禁止BSD旧映射/写入；失败不静默回退。
+F1b随后做用户客户端分发表/参数校验和状态gate，不与本轮硬件迁移混测；F1整体尚未验收。
+旧的“继续离线查缺时间模式元数据”NEXT已被用户本次决定取代，不重新启动专项ROI测试。
+详见docs/FRAMEBUFFER-SERVICE-F1A.md。0175六文件严格应用/逐字节比对通过，4个源码真实CI
+参数arm64单文件编译rc0；既有文件无新增告警类别（不是零告警）。16项host测试通过，
+ASan/UBSan；LSan仍detect_leaks=0，fixture对象/映射计数归零。底稿scratch/framebuffer-0175。
+新--framebuffer-service出baseline/mdss两档，仅sweetmdss差异，共用派生ADT：原ranges保留，
+追加低PA别名映射GCC0x10b000，9个资源PA/长度验证；INTID115仅metadata、不提前接IRQ。
+两档均preserveoff=1、trace/proof/contract=0、probe=1/loglevel2，原IRQ/充电runtime3保留。
+旧0121a4内核被新marker正确拒绝；bash -n通过。未改CircleCI/未push，暂无新云产物/boot。
+NEXT：用户push本轮提交（git log顶部）→下载kernel/buildtree/log→核对0175六文件/manifest/
+markers→打两档、回读boot；上机等待35秒探针、调亮度、手动息屏/唤醒与输入/充电回归。
+不再安排缺时间专项证明；没有实机证据前不验收F1a/F1。不要按下段历史NEXT要求重测。
+
+**以下为历史交接。**
+
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
 **CURRENT：0121a4 / 0174 两轮持久日志已分析；同ID新源ROI全黑有证据，F0未验收。**

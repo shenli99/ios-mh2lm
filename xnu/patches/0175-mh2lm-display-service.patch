@@ -1,0 +1,809 @@
+diff --git a/bsd/dev/sweet_display_probe.c b/bsd/dev/sweet_display_probe.c
+--- a/bsd/dev/sweet_display_probe.c
++++ b/bsd/dev/sweet_display_probe.c
+@@ -66,10 +66,20 @@
+ static unsigned dp_logged;
+ static vm_offset_t dp_gcc, dp_dispcc, dp_sspp, dp_ctl, dp_intf1, dp_intf2, dp_dsi, dp_smmu;
+ 
++/* Ownership is exclusive for the whole boot, including failure paths. */
++static int
++dp_service_enabled(void)
++{
++ int enabled=0;
++ (void)PE_parse_boot_argn("sweetmdss",&enabled,sizeof(enabled));
++ return enabled!=0;
++}
++
+ /* Caller holds dp_lock. */
+ static int
+ dp_map(void)
+ {
++	if (dp_service_enabled()) { return -1; }
+ 	if (dp_mapped == 0) {
+ 		dp_gcc = ml_io_map(GCC_PA + GCC_DISP_PAGE, 0x1000);
+ 		dp_dispcc = ml_io_map(DISPCC_PA, 0x3000);
+@@ -400,6 +410,10 @@
+ 	int enabled = 1;
+ 	thread_t thread;
+ 
++	if (dp_service_enabled()) {
++		SWEET_LOG_INFO("SWEET DISP: legacy probe disabled; SweetMDSS owns hardware\n");
++		return;
++	}
+ 	if (started) {
+ 		return;
+ 	}
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -1,6 +1,6 @@
+ /*
+  * Built-in IOMobileFramebuffer for SWEET: the ABL's continuous-splash
+- * framebuffer (1080x2400 a8r8g8b8 in RAM, the panel scans it out by
++ * framebuffer (MH2LM: 1080x2340 BGRA in RAM, the panel scans it out by
+  * itself) as the main display, driven by CoreAnimation's CPU renderer.
+  *
+  * IOMobileFramebuffer.framework (iOS 16.7) counts /arm-io children with
+@@ -36,6 +36,9 @@
+  * the first swap on (it still reaches the persistent log; panics draw).
+  */
+ #include "SweetSurface.h"
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include "SweetDisplayBackend.h"
++#endif
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ 
+@@ -246,7 +249,8 @@
+  * Kernel/MiniIOMobileFramebuffer.cpp, APSL 2.0). setProperties never blocks
+  * (newest request wins, as UniXNU-sheng AppleARMBacklight.cpp: a blocking
+  * handoff starved backboardd): the fade runs on a private work loop, one DCS
+- * 0x51 write per step through sweet_display_brightness_set().
++ * 0x51 write per step through the selected display backend. The optional
++ * SweetMDSS client binds through IORegistry notifications, never a singleton.
+  * The range is the panel's 12-bit DCS level. Boot-arg sweetbacklight=0
+  * leaves the service out.
+  */
+@@ -261,6 +265,8 @@
+ class AppleARMBacklight : public IOService {
+ 	OSDeclareDefaultStructors(AppleARMBacklight);
+ 
++	SweetDisplayClient *fBackendClient;
++	bool                fMDSS, fStopping, fTimerAdded, fAwaitingBackend, fWasBound;
+ 	IOWorkLoop         *fWL;
+ 	IOTimerEventSource *fTimer;
+ 	IOSimpleLock       *fReqLock;
+@@ -272,10 +278,13 @@
+ 	unsigned            fLogged;
+ 
+ 	static void step(OSObject *owner, IOTimerEventSource *sender);
++	static void backendChanged(OSObject *owner);
+ 	void publish(void);
+ public:
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleARMBacklight, IOService);
+@@ -315,7 +324,20 @@
+ 		IOLog("SWEET BL: setup failed\n");
+ 		return false;
+ 	}
+-	fLevel = SWEET_BL_MAX + 1;      /* the UEFI level is unknown: always write the first request */
++	fLevel = SWEET_BL_MAX + 1;
++	fTimerAdded=true;
++	int mdss=0;
++	(void)PE_parse_boot_argn("sweetmdss",&mdss,sizeof(mdss));
++	fMDSS=mdss!=0;
++	if (fMDSS) {
++		fBackendClient=SweetDisplayClient::withOwner(this,fWL,backendChanged);
++		if (!fBackendClient || !fBackendClient->watch()) {
++			SWEET_LOG_ERROR("SWEET BL: display backend notification setup failed\n");
++			return false;
++		}
++		setProperty("SweetDisplayBackend", "SweetMDSS");
++	}
++	/* The UEFI brightness is unknown until the first request. */
+ 	publish();
+ 	setProperty("backlight-control", true);
+ 	registerService();
+@@ -323,6 +345,42 @@
+ 	return true;
+ }
+ 
++void
++AppleARMBacklight::backendChanged(OSObject *owner)
++{
++	AppleARMBacklight *bl=(AppleARMBacklight *)owner;
++	SweetDisplayBackend *backend=bl->fBackendClient->copyBackend();
++	bool bound=backend!=NULL;
++	OSSafeReleaseNULL(backend);
++	bl->setProperty("SweetDisplayBackendBound",bound);
++	if (bound && !bl->fWasBound) SWEET_LOG_INFO("SWEET BL: registry backend matched; deferred DCS on workloop\n");
++	if (!bound && bl->fWasBound) SWEET_LOG_WARN("SWEET BL: registry backend terminated\n");
++	bl->fWasBound=bound;
++	if (bound && bl->fAwaitingBackend) bl->fTimer->setTimeoutUS(1);
++}
++
++void
++AppleARMBacklight::stop(IOService *provider)
++{
++	IOSimpleLockLock(fReqLock); fStopping=true; IOSimpleLockUnlock(fReqLock);
++	/* Outside the consumer gate: synchronize notifications before event teardown. */
++	if (fBackendClient) fBackendClient->stop();
++	if (fTimerAdded) {
++		fTimer->cancelTimeout(); fWL->removeEventSource(fTimer); fTimerAdded=false;
++	}
++	IOService::stop(provider);
++}
++
++void
++AppleARMBacklight::free(void)
++{
++	OSSafeReleaseNULL(fBackendClient);
++	if (fTimerAdded) { fTimer->cancelTimeout(); fWL->removeEventSource(fTimer); }
++	OSSafeReleaseNULL(fTimer); OSSafeReleaseNULL(fWL);
++	if (fReqLock) { IOSimpleLockFree(fReqLock); fReqLock=NULL; }
++	IOService::free();
++}
++
+ /* Work loop: take the newest request, then one fade step per SWEET_BL_STEP_MS. */
+ void
+ AppleARMBacklight::step(OSObject *owner, IOTimerEventSource *sender)
+@@ -331,6 +389,7 @@
+ 	uint64_t now = mach_absolute_time();
+ 
+ 	IOSimpleLockLock(bl->fReqLock);
++	if (bl->fStopping) { IOSimpleLockUnlock(bl->fReqLock); return; }
+ 	bool req = bl->fReq;
+ 	uint32_t to = bl->fReqLevel, ms = bl->fReqMs;
+ 	bl->fReq = false;
+@@ -352,9 +411,19 @@
+ 		done = false;
+ 	}
+ 	if (level != bl->fLevel) {
+-		if (sweet_display_brightness_set(level) != 0) {
+-			return;                         /* logged there; the next request retries */
+-		}
++		int rc;
++		if (bl->fMDSS) {
++			SweetDisplayBackend *backend=bl->fBackendClient->copyBackend();
++			if (!backend) {
++				bl->fAwaitingBackend=true;
++				return; /* replay newest target once matching event arrives, no polling */
++			}
++			bl->fAwaitingBackend=false;
++			IOReturn result=backend->setBrightness(level);
++			backend->release();
++			rc=result==kIOReturnSuccess ? 0 : -1;
++		} else rc=sweet_display_brightness_set(level);
++		if (rc != 0) return; /* backend logs hardware failures; next request retries */
+ 		bl->fLevel = level;
+ 		bl->publish();
+ 	}
+@@ -383,15 +452,16 @@
+ 	uint64_t ms = f != NULL ? (f->unsigned64BitValue() * 1000) >> 16 : 0;
+ 	ms = SWEET_BL_MIN(ms, (uint64_t)SWEET_BL_FADE_MAX_MS);
+ 	IOSimpleLockLock(fReqLock);
++	if (fStopping) { IOSimpleLockUnlock(fReqLock); return kIOReturnNotReady; }
+ 	fReq = true;
+ 	fReqLevel = (uint32_t)value;
+ 	fReqMs = (uint32_t)ms;
++	fTimer->setTimeoutUS(1); /* stop closes admission under this same lock */
+ 	IOSimpleLockUnlock(fReqLock);
+ 	if (fLogged < 40) {
+ 		fLogged++;
+ 		IOLog("SWEET BL: CoreBrightness %llu fade %llu ms\n", value, ms);
+ 	}
+-	fTimer->setTimeoutUS(1);
+ 	return kIOReturnSuccess;
+ }
+ #endif /* ARM64_BOARD_CONFIG_MH2LM */
+@@ -489,7 +559,9 @@
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ 	int backlight = 1;
+ 	PE_parse_boot_argn("sweetbacklight", &backlight, sizeof(backlight));
+-	if (backlight && sweet_display_brightness_ready() == 0) {
++	int mdss=0;
++	(void)PE_parse_boot_argn("sweetmdss",&mdss,sizeof(mdss));
++	if (backlight && (mdss || sweet_display_brightness_ready() == 0)) {
+ 		AppleARMBacklight *bl = OSTypeAlloc(AppleARMBacklight);
+ 		if (bl != NULL && bl->init() && bl->attach(this) && !bl->start(this)) {
+ 			bl->detach(this);
+diff --git a/iokit/Kernel/arm/SweetDisplayBackend.h b/iokit/Kernel/arm/SweetDisplayBackend.h
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetDisplayBackend.h
+@@ -0,0 +1,43 @@
++/* Typed per-consumer display backend. No global lookup or BSD MMIO bridge. */
++#ifndef SWEET_DISPLAY_BACKEND_H
++#define SWEET_DISPLAY_BACKEND_H
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include <IOKit/IOService.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOLocks.h>
++
++class SweetDisplayBackend : public IOService {
++ OSDeclareAbstractStructors(SweetDisplayBackend);
++public:
++ virtual IOReturn brightnessReady(void) = 0;
++ virtual IOReturn dcsWrite(const uint32_t *words, unsigned count) = 0;
++ IOReturn setBrightness(uint32_t level);
++};
++
++/* Owner must stop the client outside its workloop gate, before destroying
++ * callback context. Matching callbacks only retain/withdraw and queue an event.
++ * copyBackend returns a retained reference; every operation still checks
++ * provider admission under its gate. Notification != hardware readiness. */
++class SweetDisplayClient : public OSObject {
++ OSDeclareDefaultStructors(SweetDisplayClient);
++ IOLock *fLock;
++ IOWorkLoop *fLoop;
++ IOInterruptEventSource *fEvent;
++ IONotifier *fMatched, *fTerminated;
++ SweetDisplayBackend *fBackend;
++ OSObject *fOwner;                 /* borrowed until stop synchronizes event */
++ void (*fChanged)(OSObject *);
++ bool fStopping, fEventAdded;
++ static bool matched(void *, void *, IOService *, IONotifier *);
++ static bool terminated(void *, void *, IOService *, IONotifier *);
++ static void changed(OSObject *, IOInterruptEventSource *, int);
++public:
++ static SweetDisplayClient *withOwner(OSObject *, IOWorkLoop *, void (*)(OSObject *));
++ bool watch(void); /* call after owner stores the client */
++ SweetDisplayBackend *copyBackend(void);
++ void stop(void);
++ void free(void) APPLE_KEXT_OVERRIDE;
++};
++#endif
++#endif
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -0,0 +1,518 @@
++/*
++ * SM8150 display hardware owner. F1a preserves ABL scanout and DCS order.
++ * Probe/DCS engine moved from bsd/dev/sweet_display_probe.c. Register sequence
++ * follows the HakiOS Redmi K20 Pro port (SM8150, APSL 2.0), raphael_display_*
++ * and hakios.raphael-dsi.h, derived there from LineageOS sm8150
++ * sde_hw_intf.c / dsi_ctrl_hw_cmn.c. MH2LM addresses come from its Android DT.
++ */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include "SweetDisplayBackend.h"
++#include <IOKit/IOLib.h>
++#include <IOKit/IOCommandGate.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/arm64/sweet_dev.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#define SWEET_LOG_SINK IOLog
++#include "../../../bsd/dev/sweet_log_level.h"
++
++OSDefineMetaClassAndAbstractStructors(SweetDisplayBackend, IOService);
++OSDefineMetaClassAndStructors(SweetDisplayClient, OSObject);
++
++IOReturn
++SweetDisplayBackend::setBrightness(uint32_t level)
++{
++ if (!level) level=1;
++ if (level>0xfffu) level=0xfffu;
++ const uint32_t words[2]={0xc0390003u,
++     0xff000051u | ((level >> 8) << 8) | ((level & 0xffu) << 16)};
++ return dcsWrite(words,2);
++}
++
++SweetDisplayClient *
++SweetDisplayClient::withOwner(OSObject *owner, IOWorkLoop *loop, void (*changed)(OSObject *))
++{
++ if (!owner || !loop || !changed) return NULL;
++ SweetDisplayClient *self=OSTypeAlloc(SweetDisplayClient);
++ if (!self) return NULL;
++ if (!self->init()) { self->release(); return NULL; }
++ self->fOwner=owner; self->fChanged=changed; self->fLoop=loop; loop->retain();
++ self->fLock=IOLockAlloc();
++ self->fEvent=IOInterruptEventSource::interruptEventSource(self, SweetDisplayClient::changed);
++ if (!self->fLock || !self->fEvent) { self->release(); return NULL; }
++ self->fEvent->disable();
++ if (loop->addEventSource(self->fEvent)!=kIOReturnSuccess) { self->release(); return NULL; }
++ self->fEventAdded=true;
++ return self;
++}
++
++bool
++SweetDisplayClient::watch(void)
++{
++ OSDictionary *matching=IOService::serviceMatching("SweetMDSS");
++ if (!matching) return false;
++ fTerminated=IOService::addMatchingNotification(gIOTerminatedNotification,matching,terminated,this);
++ if (fTerminated) fMatched=IOService::addMatchingNotification(gIOFirstMatchNotification,matching,matched,this);
++ matching->release(); /* API retains the dictionary */
++ if (!fTerminated || !fMatched) { stop(); return false; }
++ fEvent->enable(); fEvent->interruptOccurred(NULL,NULL,0);
++ return true;
++}
++
++bool
++SweetDisplayClient::matched(void *target, void *, IOService *service, IONotifier *)
++{
++ SweetDisplayClient *self=(SweetDisplayClient *)target;
++ SweetDisplayBackend *backend=OSDynamicCast(SweetDisplayBackend,service);
++ if (!backend) return true;
++ IOLockLock(self->fLock);
++ if (!self->fStopping && !self->fBackend && !backend->isInactive()) {
++  backend->retain(); self->fBackend=backend;
++  self->fEvent->interruptOccurred(NULL,NULL,0);
++ }
++ IOLockUnlock(self->fLock);
++ return true;
++}
++
++bool
++SweetDisplayClient::terminated(void *target, void *, IOService *service, IONotifier *)
++{
++ SweetDisplayClient *self=(SweetDisplayClient *)target;
++ SweetDisplayBackend *old=NULL;
++ IOLockLock(self->fLock);
++ if (self->fBackend==service) {
++  old=self->fBackend; self->fBackend=NULL;
++  if (!self->fStopping) self->fEvent->interruptOccurred(NULL,NULL,0);
++ }
++ IOLockUnlock(self->fLock);
++ /* No provider method or register access in notification context. In-flight
++  * callers hold their own reference; provider checks inactive under its gate. */
++ OSSafeReleaseNULL(old);
++ return true;
++}
++
++void
++SweetDisplayClient::changed(OSObject *owner, IOInterruptEventSource *, int)
++{
++ SweetDisplayClient *self=(SweetDisplayClient *)owner;
++ IOLockLock(self->fLock); bool active=!self->fStopping; IOLockUnlock(self->fLock);
++ if (active) self->fChanged(self->fOwner);
++}
++
++SweetDisplayBackend *
++SweetDisplayClient::copyBackend(void)
++{
++ IOLockLock(fLock);
++ SweetDisplayBackend *backend=!fStopping ? fBackend : NULL;
++ if (backend) backend->retain();
++ IOLockUnlock(fLock);
++ return backend;
++}
++
++void
++SweetDisplayClient::stop(void)
++{
++ if (fLock) { IOLockLock(fLock); fStopping=true; IOLockUnlock(fLock); }
++ /* remove consumes the notifier and synchronizes callbacks. Never hold a
++  * consumer lock/gate here: a replaying notification may be waiting on it. */
++ if (fMatched) { fMatched->remove(); fMatched=NULL; }
++ if (fTerminated) { fTerminated->remove(); fTerminated=NULL; }
++ if (fEventAdded) {
++  fEvent->disable(); fLoop->removeEventSource(fEvent); fEventAdded=false;
++ }
++ if (fLock) {
++  IOLockLock(fLock); SweetDisplayBackend *old=fBackend; fBackend=NULL; IOLockUnlock(fLock);
++  OSSafeReleaseNULL(old);
++ }
++}
++
++void
++SweetDisplayClient::free(void)
++{
++ stop(); OSSafeReleaseNULL(fEvent); OSSafeReleaseNULL(fLoop);
++ if (fLock) { IOLockFree(fLock); fLock=NULL; }
++ OSObject::free();
++}
++
++#define GCC_DISP_AHB 0x00cu
++#define DISPCC_AHB_CBCR 0x2080u
++#define CBCR_ENABLE (1u << 0)
++#define CBCR_OFF (1u << 31)
++#define SMMU_SID 0x0800u
++
++class SweetMDSS : public SweetDisplayBackend {
++ OSDeclareDefaultStructors(SweetMDSS);
++ IOWorkLoop *fLoop;
++ IOCommandGate *fGate;
++ IOTimerEventSource *fProbe;
++ IOMemoryMap *fMaps[9];
++ bool fGateAdded, fProbeAdded, fAccepting;
++ unsigned fPass;
++ int dp_failed;
++ unsigned dp_logged;
++ uint32_t dp_last_frame[2];
++ uint64_t dp_last_ns[2];
++ vm_offset_t dp_gcc,dp_dispcc,dp_sspp,dp_ctl,dp_intf1,dp_intf2,dp_dsi,dp_smmu,dp_smmu_gr1,dp_smmu_cb2;
++ static uint32_t dp_rd(vm_offset_t,uint32_t);
++ static void dp_wr(vm_offset_t,uint32_t,uint32_t);
++ static int dp_poll(vm_offset_t,uint32_t,uint32_t,uint32_t,unsigned);
++ static void dp_dump(const char *,vm_offset_t,uint32_t,uint32_t);
++ void dp_smmu_context(uint32_t,uint32_t,uint32_t);
++ void dp_probe(unsigned,vm_offset_t,vm_offset_t,vm_offset_t,vm_offset_t,
++     vm_offset_t,vm_offset_t,vm_offset_t,vm_offset_t);
++ int dp_dcs_write(vm_offset_t,vm_offset_t,const uint32_t *,unsigned);
++ int dp_clocks_on(void);
++ static IOReturn readyAction(OSObject *,void *,void *,void *,void *);
++ static IOReturn writeAction(OSObject *,void *,void *,void *,void *);
++ static IOReturn stopAction(OSObject *,void *,void *,void *,void *);
++ static void probeAction(OSObject *,IOTimerEventSource *);
++public:
++ bool start(IOService *) APPLE_KEXT_OVERRIDE;
++ void stop(IOService *) APPLE_KEXT_OVERRIDE;
++ void free(void) APPLE_KEXT_OVERRIDE;
++ IOReturn brightnessReady(void) APPLE_KEXT_OVERRIDE;
++ IOReturn dcsWrite(const uint32_t *,unsigned) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(SweetMDSS,SweetDisplayBackend);
++
++bool
++SweetMDSS::start(IOService *provider)
++{
++ int enabled=0;
++ (void)PE_parse_boot_argn("sweetmdss",&enabled,sizeof(enabled));
++ if (!enabled || !SweetDisplayBackend::start(provider)) return false;
++ /* Ordering is the ADT reg ABI. Validate the resolved physical windows so a
++  * bad ranges translation fails visibly before the first register read. */
++ const uint64_t pa[9]={0x0010b000,0x0af00000,0x0ae05000,0x0ae02000,
++     0x0ae6b800,0x0ae6c000,0x0ae94000,0x15000000,0x15082000};
++ const uint64_t size[9]={0x1000,0x3000,0x1000,0x1000,0x800,0x800,0x400,0x2000,0x1000};
++ if (provider->getResources()!=kIOReturnSuccess) return false;
++ for (unsigned i=0;i<9;++i) {
++  fMaps[i]=provider->mapDeviceMemoryWithIndex(i);
++  if (fMaps[i] && (fMaps[i]->getPhysicalAddress()!=pa[i] || fMaps[i]->getLength()<size[i])) {
++   SWEET_LOG_ERROR("SWEET MDSS: resource %u address/length mismatch\n",i);
++   return false;
++  }
++  if (!fMaps[i] && i<7) {
++   SWEET_LOG_ERROR("SWEET MDSS: required resource %u unavailable\n",i);
++   return false;
++  }
++  SWEET_LOG_INFO("SWEET MDSS: resource %u pa=%#llx length=%#llx mapped=%u\n",i,pa[i],size[i],fMaps[i]!=NULL);
++ }
++ dp_gcc=fMaps[0]->getVirtualAddress(); dp_dispcc=fMaps[1]->getVirtualAddress();
++ dp_sspp=fMaps[2]->getVirtualAddress(); dp_ctl=fMaps[3]->getVirtualAddress();
++ dp_intf1=fMaps[4]->getVirtualAddress(); dp_intf2=fMaps[5]->getVirtualAddress();
++ dp_dsi=fMaps[6]->getVirtualAddress();
++ dp_smmu=fMaps[7] ? fMaps[7]->getVirtualAddress() : 0;
++ dp_smmu_gr1=dp_smmu ? dp_smmu+0x1000u : 0;
++ dp_smmu_cb2=fMaps[8] ? fMaps[8]->getVirtualAddress() : 0;
++ fLoop=IOWorkLoop::workLoop(); fGate=IOCommandGate::commandGate(this);
++ fProbe=IOTimerEventSource::timerEventSource(this,probeAction);
++ if (!fLoop || !fGate || !fProbe) return false;
++ if (fLoop->addEventSource(fGate)!=kIOReturnSuccess) return false;
++ fGateAdded=true;
++ if (fLoop->addEventSource(fProbe)!=kIOReturnSuccess) return false;
++ fProbeAdded=true; fAccepting=true;
++ int probe=1; (void)PE_parse_boot_argn("sweetdispprobe",&probe,sizeof(probe));
++ if (probe) fProbe->setTimeoutMS(30000);
++ setProperty("SweetDisplayBackendVersion",1ULL,32);
++ setProperty("SweetDisplayInterruptEnabled",false);
++ SWEET_LOG_INFO("SWEET MDSS: F1a v1 IOService backend; ABL scanout unchanged\n");
++ registerService();
++ return true;
++}
++
++IOReturn
++SweetMDSS::readyAction(OSObject *owner,void *,void *,void *,void *)
++{
++ SweetMDSS *self=(SweetMDSS *)owner;
++ if (!self->fAccepting || self->isInactive()) return kIOReturnNotReady;
++ return self->dp_failed<3 && self->dp_clocks_on() ? kIOReturnSuccess : kIOReturnNotReady;
++}
++IOReturn
++SweetMDSS::brightnessReady(void)
++{
++ return fGate ? fGate->runAction(readyAction) : kIOReturnNotReady;
++}
++IOReturn
++SweetMDSS::writeAction(OSObject *owner,void *words,void *n,void *,void *)
++{
++ SweetMDSS *self=(SweetMDSS *)owner;
++ if (!self->fAccepting || self->isInactive() || self->dp_failed>=3) return kIOReturnNotReady;
++ if (!self->dp_clocks_on()) {
++  SWEET_LOG_WARN("SWEET MDSS: dcs skipped: MDSS clock gate not met\n");
++  return kIOReturnNotReady;
++ }
++ int rc=self->dp_dcs_write(self->dp_intf1,self->dp_dsi,(const uint32_t *)words,(unsigned)(uintptr_t)n);
++ self->dp_logged++;
++ if (rc && ++self->dp_failed>=3) {
++  SWEET_LOG_ERROR("SWEET MDSS: dcs failed %d times: writes disabled\n",self->dp_failed);
++ } else if (!rc) self->dp_failed=0;
++ return rc ? kIOReturnIOError : kIOReturnSuccess;
++}
++IOReturn
++SweetMDSS::dcsWrite(const uint32_t *words,unsigned count)
++{
++ if (!words || !count || count>16) return kIOReturnBadArgument;
++ /* Synchronous call: words remain owned by the retained caller throughout
++  * runAction. No callback to a consumer while the provider gate is held. */
++ return fGate ? fGate->runAction(writeAction,(void *)words,(void *)(uintptr_t)count) : kIOReturnNotReady;
++}
++void
++SweetMDSS::probeAction(OSObject *owner,IOTimerEventSource *sender)
++{
++ SweetMDSS *self=(SweetMDSS *)owner;
++ if (!self->fAccepting || self->isInactive()) return;
++ self->dp_probe(self->fPass,self->dp_gcc,self->dp_dispcc,self->dp_sspp,self->dp_ctl,
++     self->dp_intf1,self->dp_intf2,self->dp_dsi,self->dp_smmu);
++ if (++self->fPass<3) sender->setTimeoutMS(1000);
++}
++IOReturn
++SweetMDSS::stopAction(OSObject *owner,void *,void *,void *,void *)
++{
++ SweetMDSS *self=(SweetMDSS *)owner;
++ self->fAccepting=false;
++ if (self->fProbe) self->fProbe->cancelTimeout();
++ return kIOReturnSuccess;
++}
++void
++SweetMDSS::stop(IOService *provider)
++{
++ if (fGateAdded) (void)fGate->runAction(stopAction);
++ if (fProbeAdded) { fLoop->removeEventSource(fProbe); fProbeAdded=false; }
++ /* Gate/maps stay valid through free, including retained pre-stop callers.
++  * Admission is closed; no MMIO may run after stopAction. */
++ SWEET_LOG_INFO("SWEET MDSS: backend stopped; hardware admission closed\n");
++ SweetDisplayBackend::stop(provider);
++}
++void
++SweetMDSS::free(void)
++{
++ if (fGateAdded) (void)fGate->runAction(stopAction);
++ if (fProbeAdded) fLoop->removeEventSource(fProbe);
++ if (fGateAdded) fLoop->removeEventSource(fGate);
++ OSSafeReleaseNULL(fProbe); OSSafeReleaseNULL(fGate); OSSafeReleaseNULL(fLoop);
++ for (unsigned i=0;i<9;++i) OSSafeReleaseNULL(fMaps[i]);
++ SweetDisplayBackend::free();
++}
++
++uint32_t
++SweetMDSS::dp_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++void
++SweetMDSS::dp_dump(const char *what, vm_offset_t base, uint32_t from, uint32_t to)
++{
++	for (uint32_t o = from; o < to; o += 0x20) {
++		SWEET_LOG_INFO("SWEET MDSS: %s +%03x: %08x %08x %08x %08x %08x %08x %08x %08x\n", what, o,
++		    dp_rd(base, o), dp_rd(base, o + 4), dp_rd(base, o + 8), dp_rd(base, o + 12),
++		    dp_rd(base, o + 16), dp_rd(base, o + 20), dp_rd(base, o + 24), dp_rd(base, o + 28));
++	}
++}
++
++void
++SweetMDSS::dp_smmu_context(uint32_t id0, uint32_t id1, uint32_t s2cr)
++{
++	int trace = 0;
++	(void)PE_parse_boot_argn("sweetfbtrace", &trace, sizeof(trace));
++	if (trace < 2 || !sweet_log_level_enabled(2u)) { return; }
++	if (id0 != 0x4c017e5eu || id1 != 0x60000038u ||
++	    ((s2cr >> 16) & 3u) != 0 || (s2cr & 0xffu) != 2) {
++		SWEET_LOG_WARN("SWEET MDSS: F0 v2 unknown SMMU layout/route, skip CB config\n");
++		return;
++	}
++	/* dp_smmu already maps both GR0 and GR1 pages. */
++	dp_smmu_gr1 = dp_smmu + 0x1000u;
++	/* Optional CB2 resource was mapped by the provider; never map behind its back. */
++	if (!dp_smmu_gr1 || !dp_smmu_cb2) {
++		SWEET_LOG_WARN("SWEET MDSS: F0 v2 optional CB2 mapping unavailable\n");
++		return;
++	}
++	vm_offset_t cb = dp_smmu_cb2;
++	SWEET_LOG_INFO("SWEET MDSS: F0 v2 cb2 pa=0x15082000 cbar=%#x cba2r=%#x sctlr=%#x actlr=%#x ttbcr2=%#x ttbcr=%#x ttbr0=%08x:%08x ttbr1=%08x:%08x mair=%08x:%08x\n",
++	    dp_rd(dp_smmu_gr1, 2u * 4u), dp_rd(dp_smmu_gr1, 0x800u + 2u * 4u),
++	    dp_rd(cb, 0x00), dp_rd(cb, 0x04), dp_rd(cb, 0x10), dp_rd(cb, 0x30),
++	    dp_rd(cb, 0x24), dp_rd(cb, 0x20), dp_rd(cb, 0x2c), dp_rd(cb, 0x28),
++	    dp_rd(cb, 0x3c), dp_rd(cb, 0x38));
++}
++
++void
++SweetMDSS::dp_probe(unsigned pass, vm_offset_t gcc, vm_offset_t dispcc, vm_offset_t sspp, vm_offset_t ctl,
++    vm_offset_t intf1, vm_offset_t intf2, vm_offset_t dsi, vm_offset_t smmu)
++{
++	/*
++	 * Same gate as the K20 Pro code (raphael_display_init), without its enable
++	 * writes: gcc_disp_ahb only needs CLK_ENABLE (it is hardware-gated, so
++	 * CLK_OFF reads 1 while the bus is idle: 0x80000003 on mh2lm, 0108 run 1),
++	 * and dispcc +0x2080 must report CLK_OFF clear.
++	 */
++	uint32_t ahb = dp_rd(gcc, GCC_DISP_AHB);
++	SWEET_LOG_INFO("SWEET MDSS: pass %u gcc disp_ahb %#x\n", pass, ahb);
++	if (!(ahb & CBCR_ENABLE)) {
++		SWEET_LOG_INFO("SWEET MDSS: gcc disp_ahb not enabled: no DISPCC/MDSS read\n");
++		return;
++	}
++	uint32_t mahb = dp_rd(dispcc, DISPCC_AHB_CBCR);
++	SWEET_LOG_INFO("SWEET MDSS: dispcc +0x2080 %#x\n", mahb);
++	if (mahb & CBCR_OFF) {
++		SWEET_LOG_INFO("SWEET MDSS: dispcc +0x2080 clock off: no MDSS read\n");
++		return;
++	}
++	/* VIG0 source: read-only geometry, format and address latch. */
++	SWEET_LOG_INFO("SWEET MDSS: vig0 size %#x xy %#x out %#x addr %#x stride %#x fmt %#x unpack %#x op %#x addr-status %#x\n",
++	    dp_rd(sspp, 0x00), dp_rd(sspp, 0x08), dp_rd(sspp, 0x0c), dp_rd(sspp, 0x14),
++	    dp_rd(sspp, 0x24), dp_rd(sspp, 0x30), dp_rd(sspp, 0x34), dp_rd(sspp, 0x38),
++	    dp_rd(sspp, 0x70));
++	SWEET_LOG_INFO("SWEET MDSS: vig0 expect size %#x addr %#x stride %#x\n",
++	    (uint32_t)(SWEET_DEV_FB_H << 16 | SWEET_DEV_FB_W), (uint32_t)SWEET_DEV_FB_PA,
++	    (uint32_t)SWEET_DEV_FB_STRIDE);
++	SWEET_LOG_INFO("SWEET MDSS: ctl0 flush %#x start %#x\n", dp_rd(ctl, 0x18), dp_rd(ctl, 0x1c));
++	vm_offset_t intf[2] = {intf1, intf2};
++	for (unsigned i = 0; i < 2; i++) {
++		vm_offset_t p = intf[i];
++		SWEET_LOG_INFO("SWEET MDSS: intf%u te-en %#x cfg %#x height %#x init %#x count %#x line %#x auto %#x frame %#x\n",
++		    i + 1, dp_rd(p, 0x284), dp_rd(p, 0x288), dp_rd(p, 0x28c), dp_rd(p, 0x294),
++		    dp_rd(p, 0x298), dp_rd(p, 0x2b0), dp_rd(p, 0x2b4), dp_rd(p, 0xac));
++		uint32_t frame = dp_rd(p, 0xac), line = dp_rd(p, 0x2b0);
++		uint64_t ns;
++		absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++		if (dp_last_ns[i] != 0) {
++			SWEET_LOG_INFO("SWEET MDSS: F0 v2 intf%u elapsed-ns=%llu frame-delta=%u tear-line-phase=%#x frame-en=%#x raster-line=%#x command-mode-not-TE-rate\n",
++			    i + 1, ns - dp_last_ns[i], frame - dp_last_frame[i], line, dp_rd(p, 0xa8), dp_rd(p, 0xb0));
++		}
++		dp_last_frame[i] = frame; dp_last_ns[i] = ns;
++	}
++	/* Read-only ARM SMMU v2 stream matching. Never write or probe a gated status FIFO. */
++	if (smmu != 0) {
++		uint32_t id0 = dp_rd(smmu, 0x20), id1 = dp_rd(smmu, 0x24);
++		uint32_t nsmr = id0 & 0xffu;
++		SWEET_LOG_INFO("SWEET MDSS: smmu id0 %#x id1 %#x num-smr=%u sid=%#x\n", id0, id1, nsmr, SMMU_SID);
++		for (uint32_t i = 0; i < nsmr && i < 256; i++) {
++			uint32_t smr = dp_rd(smmu, 0x800u + i * 4u);
++			uint32_t smask = (smr >> 16) & 0x7fffu;
++			if ((smr & 0x80000000u) && ((smr & 0x7fffu & ~smask) == (SMMU_SID & ~smask))) {
++				uint32_t s2cr = dp_rd(smmu, 0xc00u + i * 4u);
++				SWEET_LOG_INFO("SWEET MDSS: smmu match idx=%u smr=%#x s2cr=%#x type=%u cb=%u\n",
++				    i, smr, s2cr, (s2cr >> 16) & 3u, s2cr & 0xffu);
++				if (pass == 0) { dp_smmu_context(id0, id1, s2cr); }
++			}
++		}
++	} else {
++		SWEET_LOG_INFO("SWEET MDSS: smmu mapping unavailable\n");
++	}
++	/* DSI0: +0x004 ctrl (mode bits), +0x008 status, +0x03c cmd DMA ctrl, +0x04c length,
++	 * +0x084 trigger, +0x15c embedded cmd FIFO ctrl (the K20 Pro code reads these). */
++	SWEET_LOG_INFO("SWEET MDSS: dsi0 hw %#x ctrl %#x status %#x dma %#x len %#x trig %#x fifo %#x\n",
++	    dp_rd(dsi, 0x000), dp_rd(dsi, 0x004), dp_rd(dsi, 0x008), dp_rd(dsi, 0x03c),
++	    dp_rd(dsi, 0x04c), dp_rd(dsi, 0x084), dp_rd(dsi, 0x15c));
++	if (pass == 0) {
++		dp_dump("dsi0", dsi, 0x000, 0x0a0);
++		dp_dump("intf1", intf1, 0x280, 0x2b8);
++		dp_dump("intf2", intf2, 0x280, 0x2b8);
++	}
++}
++
++void
++SweetMDSS::dp_wr(vm_offset_t base, uint32_t off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = v;
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++int
++SweetMDSS::dp_poll(vm_offset_t base, uint32_t off, uint32_t mask, uint32_t want, unsigned ms)
++{
++	for (unsigned us = 0; us < ms * 1000u; us += 50) {
++		if ((dp_rd(base, off) & mask) == want) {
++			return 0;
++		}
++		delay(50);
++	}
++	return -1;
++}
++
++int
++SweetMDSS::dp_dcs_write(vm_offset_t intf, vm_offset_t dsi, const uint32_t *words, unsigned count)
++{
++	if ((dp_rd(dsi, 0x004) & 7u) != 5u || dp_rd(dsi, 0x15c) != 0 || (dp_rd(dsi, 0x110) & (1u << 24))) {
++		SWEET_LOG_ERROR("SWEET MDSS: dcs: DSI not in the expected state (ctrl %#x fifo %#x irq %#x)\n",
++		    dp_rd(dsi, 0x004), dp_rd(dsi, 0x15c), dp_rd(dsi, 0x110));
++		return -1;
++	}
++	uint32_t sync = dp_rd(intf, 0x288), refresh = dp_rd(intf, 0x2b4);
++	dp_wr(intf, 0x288, sync & ~(1u << 20));         /* no new TE kickoff */
++	dp_wr(intf, 0x2b4, 0);                          /* autorefresh off */
++	int rc = 0;
++	uint32_t dma=0,length=0,trigger=0,irq=0,status=0,ack=0;
++	const uint32_t statuses=0x51115501u;
++	/* Let the frame in flight finish: line counter back at 0 or past the last line. */
++	unsigned us;
++	for (us = 0; us < 100000u; us += 50) {
++		uint32_t line = dp_rd(intf, 0x2b0) & 0xffffu;
++		if (!line || line >= SWEET_DEV_FB_H) {
++			break;
++		}
++		delay(50);
++	}
++	if (us >= 100000u || dp_poll(dsi, 0x008, (1u << 2) | (1u << 1), 0, 200)) {
++		SWEET_LOG_ERROR("SWEET MDSS: dcs: DSI did not go idle (status %#x line %#x)\n",
++		    dp_rd(dsi, 0x008), dp_rd(intf, 0x2b0));
++		rc = -2;
++		goto restore;
++	}
++	dma = dp_rd(dsi, 0x03c); length = dp_rd(dsi, 0x04c); trigger = dp_rd(dsi, 0x084);
++	/* W1C only the DMA/BTA status bits. */
++	dp_wr(dsi, 0x110, (dp_rd(dsi, 0x110) & ~statuses) | 1u | (1u << 20));
++	dp_wr(dsi, 0x084, (trigger & ~7u) | 4u);        /* software DMA trigger */
++	dp_wr(dsi, 0x15c, (1u << 1) | (1u << 2) | (3u << 16));
++	for (unsigned i = 0; i < count; i++) {
++		dp_wr(dsi, 0x17c, words[i]);
++	}
++	if (count & 1u) {
++		dp_wr(dsi, 0x17c, 0);
++	}
++	dp_wr(dsi, 0x03c, (dma & ~((1u << 31) | (1u << 30))) | (1u << 28) | (1u << 26));
++	dp_wr(dsi, 0x04c, count * 4u);
++	dp_wr(dsi, 0x090, 1);                           /* CMD_DMA trigger */
++	if (dp_poll(dsi, 0x110, 1u, 1u, 200)) {
++		rc = -3;
++	} else if (dp_rd(dsi, 0x110) & (1u << 24)) {
++		rc = -4;
++	}
++	irq = dp_rd(dsi, 0x110); status = dp_rd(dsi, 0x008); ack = dp_rd(dsi, 0x068);
++	dp_wr(dsi, 0x110, (dp_rd(dsi, 0x110) & ~statuses) | 1u | (1u << 20));
++	dp_wr(dsi, 0x15c, 0);
++	dp_wr(dsi, 0x1ec, 1);                           /* FIFO reset, as the native timeout path */
++	delay(1);
++	dp_wr(dsi, 0x1ec, 0);
++	dp_wr(dsi, 0x04c, length);
++	dp_wr(dsi, 0x03c, dma);
++	dp_wr(dsi, 0x084, trigger);
++	if (rc != 0 || dp_logged < 8) {
++		if (rc) {
++            SWEET_LOG_ERROR("SWEET MDSS: dcs: rc %d irq %#x status %#x ack %#x\n", rc, irq, status, ack);
++        } else {
++            SWEET_LOG_INFO("SWEET MDSS: dcs: rc %d irq %#x status %#x ack %#x\n", rc, irq, status, ack);
++        }
++	}
++restore:
++	dp_wr(intf, 0x288, sync);
++	dp_wr(intf, 0x2b4, refresh);
++	return rc;
++}
++
++int
++SweetMDSS::dp_clocks_on(void)
++{
++	return (dp_rd(dp_gcc, GCC_DISP_AHB) & CBCR_ENABLE) &&
++	       !(dp_rd(dp_dispcc, DISPCC_AHB_CBCR) & CBCR_OFF);
++}
++
++#endif
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -36,6 +36,11 @@
+     "("
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
++    "   {"
++    "     'IOClass'         = SweetMDSS;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'sweet,mdss';"
++    "   },"
+     "   {"
+     "     'IOClass'         = SweetSpmiInterruptMux;"
+     "     'IOProviderClass' = SweetSpmiMuxDevice;"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -27,3 +27,5 @@
+ 
+ iokit/Kernel/arm/SweetAdc5Client.cpp                               optional iokitcpp
+ iokit/Kernel/arm/SweetPmicAdc5.cpp                                optional iokitcpp
++
++iokit/Kernel/arm/SweetMDSS.cpp                                    optional iokitcpp

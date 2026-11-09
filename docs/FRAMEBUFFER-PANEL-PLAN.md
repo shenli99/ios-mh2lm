@@ -1,12 +1,13 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**状态（2026-11-09，第二版）：0121a4同一swap取证已捕获新源ROI全黑、CPU写屏一致的连续证据；继续模式/颜色时序元数据核对，F0尚未验收。** 本文是 `IRQ-FRAMEBUFFER-PLAN.md`
+**状态（2026-11-09，第三版顺序调整）：按用户决定暂缓插电后锁屏缺时间（BUG-003），结束本轮F0专项排查，进入F1 IOKit分层重构；F0保留未闭环项，不伪记全部验收。** 本文是 `IRQ-FRAMEBUFFER-PLAN.md`
 “大目标二”的实施文档。第二版目标从“修好接手的 ABL framebuffer”提升为：**驱动自己
 分配和管理扫描缓冲（simplefb 式），硬件双缓冲翻页，CoreAnimation 渲染的 surface
 直接被 MDP 扫描，消除每帧 CPU 拷贝。**
 
-agent 按 F0→F7 顺序做。每步通过验收后，在本文 §7“进度记录”和 `NOTES.md` 写结果，
-再进入下一步。不跳步；每步的新行为都由 boot-arg 打开，默认路径在该步验收前不变。
+通常按F0→F7顺序做；用户2026-11-09授权的例外是将BUG-003暂缓，使用已取得的硬件/接口
+证据进入F1。F0的正常iPhone UI、模式ABI因果及半透明根因未闭环，不能标记修复或全部验收。
+后续仍逐步验收、记录进度；每步新行为由boot-arg打开，默认路径在该步验收前不变。
 
 0121 结论与证据见 [F0 实测报告](FRAMEBUFFER-F0-0121.md)：普通档电池/按键 group 先后被 mux
 隔离，解释两条唤醒来源失效；该独立问题转入 [BUG-002](BUGS.md)，不自动增加显示步骤或验收前置。
@@ -191,11 +192,17 @@ host 测试）；patch 对上一结果树 strict apply；CI 加 `require_marker`
    不用无效行差填充频率结论。F4 前仍必须明确新扫描地址的映射可行性。
 5. 原始日志 SHA 记入 §7。
 
-### F1：IOKit 分层重构，行为不变
+### F1：IOKit 分层重构，行为不变（当前）
+
+0121a4为当前代码/画面基线。BUG-003和半透明颜色异常可保留，只验收是否引入新显示/亮度/
+输入/充电回归。停止为缺时间增加取证轮次；模式元数据修复暂不混入F1。
+
+**实施分段**：F1a先迁移硬件资源/探针/DCS与背光consumer（[0175实现与验证](FRAMEBUFFER-SERVICE-F1A.md)，当前）；F1b随后迁移
+用户客户端分发表/参数校验和状态gate。两段分别验收，F1a通过不等于整个F1完成。
 
 **做什么**
 - ADT 新增 `/arm-io/mdss`（`compatible "sweet,mdss"`，`reg` 列 MDP、DSI0、DISPCC、GCC disp 页，
-  `interrupts` 115）。
+  `sweet,mdss-intid` 115仅记录候选；标准中断属性在F3核对后接入）。
 - 新 `SweetMDSS : IOService`：`mapDeviceMemoryWithIndex`；迁入探针与 DCS 写（寄存器序列逐字保留）；
   实现 `SweetDisplayBackend`。
 - `AppleCLCD` 经匹配通知取得后端（无全局指针）；用户客户端改 `IOExternalMethodDispatch`，
@@ -207,7 +214,7 @@ host 测试）；patch 对上一结果树 strict apply；CI 加 `require_marker`
 1. `sweetmdss=1` 探针输出与 0120a17 `SWEET DISP` 逐项一致。
 2. 亮度 0→最大→最小，DCS rc 全 0。
 3. UI/锁屏/息屏表现与 `sweetmdss=0` 相同。
-4. 显示代码无 `ml_io_map`；`ioreg` 可见 `SweetMDSS`、`AppleCLCD`。
+4. 新服务路径无 `ml_io_map`，旧BSD路径仅sweetmdss=0使用；`ioreg` 可见 `SweetMDSS`、`AppleCLCD`。
 5. host 测试：分发表参数校验、gate 序列化。
 
 ### F2：真显示电源（修 P1/P6）
