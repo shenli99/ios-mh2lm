@@ -2,6 +2,30 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0121a9日志已分析；用户确认息屏/唤醒正常无新增显示问题，基础DCS28/29通过。**
+日志sweetlog-0121a9-fb-power-dcs.bin SHA256=
+f02beab6ad0b0d9fbf2882ba0d73ae3a8205fbd49c22c1910ba120a7df4810ca；有效372499字节/
+flush51/未回卷/4993行。76启用/357参数power1；94FB后端match，95背光match。
+MDSS实际off/on三组4738→4774(9/11ms)、4896→4908(4/3ms)、4923→4937(9/0ms)，
+均rc0及OFF2/ON0，无电源ERROR/fallback/UNKNOWN。2270初始幂等ON仅前端日志，不算实际29。
+35亮度请求768～2374、8条预算DCS rc0、24键（power18/down6）、21触摸、1ACM配置；
+无volume-up记录，不补造三键/5轮覆盖。耗时是毫秒取整、gate内测量，不是端到端延迟。
+用户报告旧充电bug：主要BUG-002，4690 Type-C CC APID271 bit2/status4持续pending→
+4692隔离group1；在途id43后4722–4727撤回电池连接/disable0/输入失效，停在93%，之后无
+refresh。group0未隔离，随后电源键/面板仍工作；无SPMI timeout/panic，不称全内核死锁。
+该故障在第一笔实际28之前，不能归因该事务，也不能完全排除负载间接影响。隔离后充电
+事件来源失效，插拔无反应不能定面板失败，相关测试段不纳入有效充电唤醒验收。
+另有4USB VERIFY(-12)，3次遥测停充后恢复，补BUG-004；6启充/3次reason2停充，源类型未知。
+已更新BUGS及docs/FRAMEBUFFER-POWER-F2.md，含四类测试目的和证据边界。旧bug不在本轮修。
+底稿scratch/artifact-0121a9/{fb-power-dcs.txt,power-log-analysis.json,analyze-power.py,
+power-and-battery.timeline.txt}。基础路径成功不等于F2全部验收，30分钟/有效插拔覆盖仍缺。
+NEXT：同一个DCS镜像保持线缆状态不变，手动息屏30min后按电源键唤醒，检查显示/亮度/
+触摸，导出sweetlog-0121a9-fb-power-dcs-long.bin；不重做全套短测/不需新编译。不能将该
+长测当作充电30min成功；旧BUG独立，不为其自动增加显示前置，不重开BUG-003，不进F3。
+本轮只分析/文档，无驱动/CI修改、未push；CI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+
+**以下为历史交接；当前实测结论及下一步以上段为准。**
+
 **CURRENT：0121a9 / 0177云产物核对及F2两档boot打包回读完成，待用户短测。**
 预期实现decebe3；44个已跟踪源码逐字节匹配（0177四文件），114个既有CI源码marker/
 F2内核marker及状态属性名通过，归档manifest通过。无完整build log/CI run ID，未查全量告警。

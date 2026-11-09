@@ -1,6 +1,6 @@
-# F2：面板 Display Off/On（0177，0121a9待实测）
+# F2：面板 Display Off/On（0177，0121a9基础开关屏已验证）
 
-2026-11-09。接续0121a7已验收的F1b正常使用路径。0177本地实现/验证及0121a9云产物/boot回读核对完成，待实测，不记F2验收通过。新增`sweetfbpower=1`，默认0，要求
+2026-11-09。接续0121a7已验收的F1b正常使用路径。0177的0121a9基础开关屏已验证，用户确认无新增显示问题；长期息屏及有效插拔唤醒覆盖未完成，不记F2整体验收通过。新增`sweetfbpower=1`，默认0，要求
 `sweetfbservice=1 sweetmdss=1 sweetfbcontract=0`，配置冲突明确ERROR并拒绝启动。
 
 ## 首轮范围与参考依据
@@ -144,7 +144,7 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 BUG-001/002/003/004未关闭；发生mux隔离后的按键/充电段不能误归为显示电源故障。
 
 
-## 0121a9 云产物与boot核对（待实测）
+## 0121a9 云产物与boot核对（实测结果见下节）
 
 预期实现提交`decebe3`。44个已跟踪源码文件逐字节匹配，包含0177四文件；114个既有
 CI源码marker及F2内核marker/状态属性名通过，kernel归档manifest核验通过。
@@ -167,3 +167,52 @@ verify-artifacts.py,verify-boots.py,packaging.txt,mdss.adt}`。
 `sweetlog-0121a9-fb-power-dcs.bin`。有新增问题才测baseline；日志确认无电源错误/
 fallback/UNKNOWN后再用同镜像做30分钟手动息屏测试，不必重编译。
 本轮只核对/打包/文档，未改内核或CI、未push或操作设备，F2尚未验收。
+
+
+## 0121a9 实测：基础DCS开关屏通过，长期及充电唤醒保留边界
+
+用户反馈：“息屏和唤醒正常，未见新增显示问题”，另报告旧充电bug复现。
+日志`sweetlog-0121a9-fb-power-dcs.bin`，SHA256
+`f02beab6ad0b0d9fbf2882ba0d73ae3a8205fbd49c22c1910ba120a7df4810ca`。
+文件4,198,400字节，ring4,194,304字节，有效372,499字节，flush51，未回卷，4,993行。
+底稿`work1/scratch/artifact-0121a9/{fb-power-dcs.txt,power-log-analysis.json,
+analyze-power.py,power-and-battery.timeline.txt}`。
+
+| 核对项 | 解码行号及观察 | 边界 |
+|---|---|---|
+| 实际路径 | 76 F2启用；357参数power1/mdss1/service1；94 FB后端match，95背光match | 新电源路径确实启用 |
+| 第1组实际事务 | 4738 off rc0/state2/9ms →4774 on rc0/state0/11ms | 前端4739/4775同样成功 |
+| 第2组实际事务 | 4896 off rc0/state2/4ms →4908 on rc0/state0/3ms | 前端4897/4909同样成功 |
+| 第3组实际事务 | 4923 off rc0/state2/9ms →4937 on rc0/state0/0ms | 0是毫秒取整，不代表零开销 |
+| 启动ON | 2270前端on rc0/0ms，provider无事务 | splash初始ON幂等处理，不能额外算一次29 |
+| 电源异常 | 无FB/MDSS POWER错误、fallback或UNKNOWN，无显示DCS失败、SPMI timeout/panic | 整份日志有电池/mux ERROR，不宣称零错误 |
+| 回归观察 | 35条亮度请求768～2374、8条预算内DCS成功；24条键记录（power18、volume-down6）、21触摸、1次ACM配置 | 未捕获volume-up，不声称日志覆盖三键全验收；5次USB reset/5条endpoint WARN不单独定BUG-001 |
+
+6次实际电源事务耗时取整为0～11ms；这不是端到端唤醒延迟测量，也不包括调用进入
+framebuffer gate前的排队时间。结合用户视觉确认，可记录基础28/29开关屏成功，无新
+显示异常。没有5×3轮完整覆盖或30分钟时间证据，不补造次数或标F2整体验收。
+
+**充电旧bug与证据有效范围：** 4690行Type-C CC/APID271/bit2/status0x4持续pending，
+4692隔离电池group1；4722–4727电池consumer退出、disable0、撤回输入，保留93%。
+在途id43完成后没有新refresh；按键group0未隔离。该事件早于第一条实际28，之后
+三组28/29成功；属于BUG-002复现，不是面板电源报错。4份USB VERIFY(-12)/3次遥测
+停充/恢复链另补BUG-004；本轮源端类型未知，不假设仍电脑USB。
+
+电池隔离后的插/拔电唤醒不能用于F2验收：上游已不发布有效电池事件；此时无反应不能
+判为29失败，继续重复插拔也不会补足证据。电源键直接触发的panel off/on仍有效。
+旧bug独立排期，不为F2改mux/充电、不新增完整充电对照或重做整套短测。
+
+### 四类操作分别验证什么
+
+| 操作 | 对F2的目的 |
+|---|---|
+| 调亮度、按键与连续触摸 | 小范围回归：电源调用共享硬件gate，检查亮度和输入响应未退化；不是新增外设适配任务 |
+| 电源键息屏/唤醒 | 核心验证：selector12请求→typed backend→28/29→panel黑屏/恢复 |
+| 息屏插电/拔电 | 验证电池事件这一不同唤醒来源也能触发开屏；不在此重测真实充电能力，group1隔离后此项证据无效 |
+| 关机界面与取消 | 检查UI切换/返回锁屏和部分重绘无新异常；属于回归，不宣称每次取消都会发送28/29，也不重开BUG-003专项 |
+
+**下一步只补独立的长期显示检查：** 同一个DCS镜像，保持USB连接状态不变，手动
+息屏30分钟，再用电源键唤醒，确认显示/亮度/触摸恢复，导出
+`sweetlog-0121a9-fb-power-dcs-long.bin`。不需要重编译或重复整套短测；只把它计为
+长期显示检查，不能称有效充电30分钟。充电唤醒未覆盖项保留，不由旧bug自动扩大显示
+工作范围。F2整体尚未验收，默认开关保持0，暂不进入F3。

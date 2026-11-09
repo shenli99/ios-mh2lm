@@ -117,6 +117,24 @@ bit0/2/4/5、status=0x35；第5314–5319行consumer失败、禁充、撤回输�
 与组隔离边界一致，不认定全内核死锁。
 第二轮无同类ERROR/WARN，不能当修复效果。详见[0121a4报告](FRAMEBUFFER-PROOF-0121A4.md)。
 
+**0121a9 / F2再次复现（2026-11-09）**
+
+用户报告旧充电bug再次出现。`work1/logs/sweetlog-0121a9-fb-power-dcs.bin`，SHA256
+`f02beab6ad0b0d9fbf2882ba0d73ae3a8205fbd49c22c1910ba120a7df4810ca`，未回卷。
+解码4690行`battery-typec-cc group1 APID271 bit2 status0x4`在drain后仍pending；
+4691–4693行触发group1隔离。已有在途采样id43在其后完成；4722行电池连接撤回，
+4723行disable命令回读actual0，4724–4727行consumer失败、撤回external/charging并
+保留93%。之后无新电池refresh。不能把在途id43误记为隔离后已恢复电池事件。
+
+按键group0未隔离，之后仍有power/volume-down HID和触摸；4738/4774、4896/4908、
+4923/4937三组MDSS off/on均成功。该故障发生在第一条实际DCS关屏之前；启动2270行
+只有幂等ON前端日志，没有对应硬件事务。不能归因于该关屏命令，也不据此完全排除负载/
+配置的间接影响；无SPMI timeout或panic证据，不称全内核死锁。隔离后的插拔唤醒结果
+无有效电池事件来源，不能拿来判定面板电源成功或失败。F2电源键路径证据仍有效。
+
+此处只更新旧bug记录，不在F2里更改mux/充电策略；源码细节和显示结果见
+[F2实测](FRAMEBUFFER-POWER-F2.md)。持续pending的根因未定，BUG-002保持未修复。
+
 **待查方向与关闭条件**
 
 独立安排修复时补逐遍 pending/PMIC 状态和 ACK 时序，区分瞬态与真正 stuck，核对有界
@@ -177,6 +195,12 @@ error均0，无mux隔离/SPMI timeout/panic。样本22（3585–3594行）无效
 step2/reasons0x2；352次UV路由命中。解码4000行id10 usb0x14/-12→4009停充→4051恢复
 启充。无mux隔离/SPMI timeout/panic；用户未察觉新问题，不能据此关闭本bug。
 本轮F1b正常使用验收不包含充电完全正常的承诺；具体证据见[F1b实测](FRAMEBUFFER-SERVICE-F1B.md)。
+
+**0121a9采样波动补充：** 同份F2日志（SHA见上方BUG-002记录）还捕获4份USB
+VERIFY(-12)，其中3次在已启充时引发step2/reasons0x1，分别3890→3899、4025→4034、
+4178→4187行；之后3936/4074/4225恢复启充，符合已有BUG-004链。整份日志6次启充，
+另有3次step2/reasons0x2，不能把所有停充都归因于VERIFY。末段电池完全停止更新是
+BUG-002组隔离，与此处反复停/启充分别记录。本轮USB源类型未确认，不假定仍为电脑口。
 
 **未确认：** 输入UV最初原因、共用配置/负载是否参与触发、最终源端/限流/一致性策略修复。
 七个电池/SPMI/mux核心文件与0121a4逐字节一致，但不能据此排除负载或时序影响。
