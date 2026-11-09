@@ -167,5 +167,6 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 完整证据见[实验结果](FRAMEBUFFER-CONTRACT-0121A3.md)。实验启用/等待/换帧及7轮息亮屏有
 实际日志，未记录helper错误；用户确认两档表现相同，未见新异常，缺时间和半透明异常未消除。
 本轮源像素取证关闭，不能据日志宣称具体ROI内容已正常；不将CPU拷贝当硬件显示完成。
-保留独立开关、不默认启用；下一步离线核对模式/颜色时序元数据及用户态fallback分支。
+保留独立开关、不默认启用；用户随后要求优先补同一swap像素证据，见
+[0174取证](FRAMEBUFFER-SAME-SWAP-PROOF.md)，之后继续模式/颜色时序元数据及用户态fallback分支。
 对照末段复现APID271电池group隔离，已补BUG-002，不据实验档单次未复现认定其已修复。

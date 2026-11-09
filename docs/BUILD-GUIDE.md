@@ -90,6 +90,8 @@ tools/mk-mh2lm-event-matrix.sh W/logs/xnu-kernel-<LABEL>.gz <LABEL> --battery-ba
 - 常用 profile：`--battery-basic-charge`（runtime3 充电，0169 内核额外出 `-tempirq`）、`--irq-only`
   （三键/触摸/USB 基线）。`--framebuffer-contract` 需要0173，输出 baseline/owned 两档，
   只差 `sweetfbcontract=0/1`；测试与限制见[自有快照实验](FRAMEBUFFER-OWNED-CONTRACT.md)。
+  `--framebuffer-proof` 需要0174，仅输出 `fb-contract-proof`（contract=1、proof=1），
+  用于关联同一 swap 的自有像素、组帧和扫描内存回读，见[同ID取证](FRAMEBUFFER-SAME-SWAP-PROOF.md)。
   完整列表看脚本 usage。
 
 用户测试：`fastboot boot W/out-bs/boot-16k-<LABEL>-<profile>.img`，测完导出日志（第 6 节）。

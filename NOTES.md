@@ -4,6 +4,28 @@
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
+**CURRENT：0174 同一swap像素取证实现及本地验证完成，待用户push后云编译；尚无新镜像。**
+用户追问是否能证明原始提交缺时间，随后授权继续；因此先补同ID取证，顺序优先于下段旧NEXT的
+模式/颜色时序元数据核对。见docs/FRAMEBUFFER-SAME-SWAP-PROOF.md。新sweetfbproof=1默认关闭，
+依赖0173 contract；仅修改SweetFBContract.inc并新增SweetFBProof.h。源复制→自有layer→组帧→
+写扫描内存后的ROI回读，不重读CA source；记录请求/scene/layer的ID和64位seq、surface、
+update/disable、rect、background、源复制时间与观察时间/耗时/最终rc，区分新layer、缓存、blank。
+1080x2340时完整检查时钟ROI(180,195,720,585)的421200像素，RGB/alpha统计及逐像素diff。
+回读借用空闲scratch，无新增分配；gate外采样但active作业仍背压，Finish后只输出冻结job数据。
+每次off→on/首次on请求开30秒窗口，通常1Hz，重放/首swap可立即采；最多32/窗口、256总计、12窗口。
+无新timer/轮询；无提交就无新样本。CPU回读不是硬件显示fence；非黑不识别文字，全黑不定位到CA/SB。
+真实CI参数基线/修改后arm64单文件编译rc0，无新增告警类别；0174严格应用及两文件逐字节比对通过。
+14项host回归全过，ASan/UBSan通过；LSan仍受ptrace限制，detect_leaks=0且fixture对象/分配计数归零。
+底稿scratch/framebuffer-0174/{verification.json,tests.json,*.compile.txt,test-*.txt}。
+打包新增--framebuffer-proof，仅出fb-contract-proof，contract=1/proof=1/preserveoff=1/trace和probe=0/
+loglevel=2及原IRQ/电池runtime3；bash -n通过，旧0121a3内核缺proof marker被正确拒绝。
+NEXT：用户push本轮提交（git log顶部），下载新kernel/buildtree→核对源码/marker/manifest→打单档并回读。
+测试手动息屏插/拔电各2–3次，大logo后停5–10秒；最后唤醒30秒内关机界面/取消，观察时间和
+滑条区域半透明颜色，留sweetlog-编号-fb-contract-proof.bin。无需重复旧对照、不测auto-lock。
+这轮是补证而非视觉修复；F0未验收，不宣称F1/F3/F4完成，BUG-001/002独立；未改CI、未push。
+
+**以下为历史交接；当前下一步以上段0174为准。**
+
 **CURRENT：0121a3 / 0173 两档日志已分析，用户确认两档一样、未见新异常。F0未验收。**
 见docs/FRAMEBUFFER-CONTRACT-0121A3.md。对照/实验ring均未回卷，451944/460493有效字节；
 SHA与行号见报告，底稿scratch/artifact-0121a3/{fb-contract-*.txt,*.timeline.txt,log-analysis.json}。

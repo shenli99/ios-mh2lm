@@ -21,6 +21,8 @@ prelude=r'''
 #include <functional>
 #include <chrono>
 #include <vector>
+#include <string>
+#include <cstdarg>
 using IOReturn=uint32_t;
 static constexpr uint32_t kIOReturnSuccess=0,kIOReturnError=0xe00002bcU,kIOReturnBadArgument=0xe00002c2U,
  kIOReturnBusy=0xe00002d5U,kIOReturnAborted=0xe00002ebU,kIOReturnOffline=0xe00002d7U,
@@ -33,10 +35,16 @@ static constexpr int THREAD_UNINT=0,THREAD_AWAKENED=0,THREAD_TIMED_OUT=1,kMillis
 #define OSSafeReleaseNULL(x) do {if(x){(x)->release();(x)=nullptr;}} while(0)
 static std::atomic<unsigned> errorLogs{0};
 #define SWEET_LOG_ERROR(...) do {++errorLogs;}while(0)
-#define SWEET_LOG_INFO(...) do {}while(0)
+static std::mutex logMutex;static std::vector<std::string> infoLogs;
+static void hostInfo(const char *fmt,...){char b[4096];va_list ap;va_start(ap,fmt);vsnprintf(b,sizeof(b),fmt,ap);va_end(ap);std::lock_guard<std::mutex> lock(logMutex);infoLogs.emplace_back(b);}
+static std::vector<std::string> proofLogs(){std::lock_guard<std::mutex> lock(logMutex);std::vector<std::string> result;for(auto &s:infoLogs)if(s.find("SWEET FB PROOF: sample=")!=std::string::npos)result.push_back(s);return result;}
+static void clearInfo(){std::lock_guard<std::mutex> lock(logMutex);infoLogs.clear();}
+#define SWEET_LOG_INFO(...) hostInfo(__VA_ARGS__)
 static int sweet_console_muted;
-static bool PE_parse_boot_argn(const char *,void *,size_t){return false;}
+static bool proofBootArg=false;
+static bool PE_parse_boot_argn(const char *key,void *value,size_t n){if(!strcmp(key,"sweetfbproof")&&n==sizeof(int)){int p=proofBootArg;memcpy(value,&p,n);return true;}return false;}
 static uint64_t mach_absolute_time(){return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
+static uint64_t sweet_fb_trace_now(){return mach_absolute_time();}
 static void clock_interval_to_deadline(uint32_t n,int scale,uint64_t *d){*d=mach_absolute_time()+uint64_t(n)*scale;}
 static int allocationFailure=-1;static unsigned rawBlocks;
 static void *IOMallocZeroData(size_t n){if(allocationFailure==0)return nullptr;if(allocationFailure>0)--allocationFailure;void *p=calloc(1,n);if(p)++rawBlocks;return p;}
@@ -96,6 +104,9 @@ struct IOExternalMethodArguments {
 };
 #define SWEET_FB_SWAP_REC_SIZE 0x46c
 #define SWEET_FB_FORMAT_BGRA 0x42475241
+static const void *proofReadAddress=nullptr;static std::function<void()> proofReadHook;
+static void *hostMemcpy(void *dst,const void *src,size_t n){if(src==proofReadAddress&&proofReadHook)proofReadHook();return std::memcpy(dst,src,n);}
+#define memcpy hostMemcpy
 #include "SweetFBContract.inc"
 struct Barrier {
  std::mutex m;std::condition_variable cv;bool entered=false,go=false;
@@ -106,16 +117,16 @@ struct Barrier {
 struct Fixture {
  AppleCLCD fb;std::vector<uint32_t> panel;IOWorkLoop *loop;SweetFBContract *driver;
  IOMobileFramebufferUserClient client;SweetSurface *surface;
- Fixture():panel(18,0xdeadbeefU){fb.fPixels=(uintptr_t)panel.data();loop=new IOWorkLoop;driver=new SweetFBContract;surface=new SweetSurface;surfaces[1]=surface;assert(driver->init()&&driver->setup(&fb,loop));fill(0xff334455);}
- ~Fixture(){driver->shutdown();driver->release();surfaces.erase(1);surface->release();loop->release();}
+ Fixture(bool proof=false):panel(18,0xdeadbeefU){proofBootArg=proof;fb.fPixels=(uintptr_t)panel.data();loop=new IOWorkLoop;driver=new SweetFBContract;surface=new SweetSurface;surfaces[1]=surface;assert(driver->init()&&driver->setup(&fb,loop));fill(0xff334455);proofBootArg=false;}
+ ~Fixture(){proofReadHook={};proofReadAddress=nullptr;driver->shutdown();driver->release();surfaces.erase(1);surface->release();loop->release();}
  void fill(uint32_t v){for(unsigned y=0;y<3;++y)for(unsigned x=0;x<4;++x)memcpy(surface->memory->bytes.data()+8+y*20+x*4,&v,4);}
  uint32_t begin(){uint64_t out=0;IOExternalMethodArguments a;a.scalarOutputCount=1;a.scalarOutput=&out;assert(driver->invoke(&client,4,&a)==0);return (uint32_t)out;}
  IOReturn wait(uint32_t id,uint32_t flags,uint64_t ms=0){uint64_t in[]={id,flags,ms};IOExternalMethodArguments a;a.scalarInputCount=3;a.scalarInput=in;return driver->invoke(&client,6,&a);}
  IOReturn scalar(uint32_t sel,std::initializer_list<uint64_t> values){std::vector<uint64_t> in(values);IOExternalMethodArguments a;a.scalarInputCount=(uint32_t)in.size();a.scalarInput=in.data();return driver->invoke(&client,sel,&a);}
  uint64_t time(){uint64_t out=0;IOExternalMethodArguments a;a.scalarOutputCount=1;a.scalarOutput=&out;assert(driver->invoke(&client,77,&a)==0);return out;}
- IOReturn submit(uint32_t id,uint32_t updated=1,uint32_t disabled=0,uint32_t bg=0){
+ IOReturn submit(uint32_t id,uint32_t updated=1,uint32_t disabled=0,uint32_t bg=0,unsigned dx=0,unsigned width=4){
   unsigned char rec[0x46c]={};auto put=[&](unsigned off,uint32_t v){memcpy(rec+off,&v,4);};
-  put(0x50,id);put(0x54,1);put(0x104,updated);put(0x108,disabled);put(0x10c,bg);put(0x6c,4);put(0x70,3);put(0xcc,4);put(0xd0,3);
+  put(0x50,id);put(0x54,1);put(0x104,updated);put(0x108,disabled);put(0x10c,bg);put(0xc4,dx);put(0x6c,width);put(0x70,3);put(0xcc,width);put(0xd0,3);
   IOExternalMethodArguments a;a.structureInput=rec;a.structureInputSize=sizeof(rec);return driver->invoke(&client,5,&a);
  }
  void expect(uint32_t pixel){for(unsigned y=0;y<3;++y){for(unsigned x=0;x<4;++x)assert(panel[y*6+x]==pixel);assert(panel[y*6+4]==0xdeadbeef&&panel[y*6+5]==0xdeadbeef);}}
@@ -169,6 +180,50 @@ int main(){
   std::thread producer([&]{result=f.submit(id);});barrier.wait();auto before=sleepCount();std::atomic<bool> stopped{false};
   std::thread stopper([&]{f.driver->shutdown();stopped=true;});waitSleeps(before+1);assert(!stopped);barrier.release();producer.join();stopper.join();
   assert(stopped&&result==kIOReturnAborted&&f.surface->refs==1&&f.panel[0]==0xdeadbeef);
+ }
+ {SFPBudget b={};assert(sfp_open(&b,100));assert(sfp_take(&b,100,false));assert(sfp_take(&b,100,true));
+  assert(!sfp_take(&b,101,true));assert(sfp_take(&b,100+SFP_INTERVAL_NS,true));assert(!sfp_take(&b,100+SFP_WINDOW_NS,true));
+  SFPBudget caps={};for(unsigned window=0;window<8;++window){assert(sfp_open(&caps,window));for(unsigned i=0;i<SFP_MAX_PER_WINDOW;++i)assert(sfp_take(&caps,window,false));assert(!sfp_take(&caps,window,false));}
+  assert(caps.total==SFP_MAX_TOTAL&&!sfp_open(&caps,20));
+  SFPBudget windows={};for(unsigned i=0;i<SFP_MAX_WINDOWS;++i)assert(sfp_open(&windows,i));assert(!sfp_open(&windows,20));
+  assert(sfp_add(UINT64_MAX-3,4)==UINT64_MAX);}
+ {uint32_t layer[144],scene[144],panel[24];for(auto &v:layer)v=0xff000000;for(auto &v:scene)v=0xff000000;for(auto &v:panel)v=0xff000000;
+  SFCRect full={0,0,0,0,12,12};SFPResult result;assert(sfp_measure(12,12,&full,layer,scene,panel,&result));
+  assert(result.scene.pixels==24&&result.layer.pixels==24&&result.layer.rgb==0&&result.layer.a255==24&&!result.differentRGB);
+  // A single pixel away from an 8-pixel sample grid must be observed.
+  scene[2*12+3]=0x7f000001;panel[1*8+1]=0x7f000001;
+  assert(sfp_measure(12,12,&full,layer,scene,panel,&result));assert(result.scene.rgb==1&&result.scene.amid==1&&!result.differentRGB&&!result.differentAlpha);
+  panel[1*8+1]=0xff000000;assert(sfp_measure(12,12,&full,layer,scene,panel,&result));assert(result.differentRGB==1&&result.differentAlpha==1);
+  SFCRect partial={0,0,3,2,1,1};assert(sfp_measure(12,12,&partial,layer,scene,panel,&result)&&result.layer.pixels==1);
+  assert(sfp_measure(12,12,nullptr,nullptr,scene,panel,&result)&&result.layer.pixels==0);
+  partial.dx=12;assert(!sfp_measure(12,12,&partial,layer,scene,panel,&result));assert(!sfp_measure(UINT32_MAX,12,nullptr,nullptr,scene,panel,&result));}
+ {clearInfo();Fixture f(true);assert(!f.scalar(12,{1}));f.fill(0xff000000);
+  proofReadAddress=f.panel.data();proofReadHook=[&]{f.fill(0xffabcdef);};
+  auto id=f.begin();assert(!f.submit(id));
+  auto logs=proofLogs();assert(logs.size()==3&&logs[0].find("kind=swap id=1 seq=1 scene=1/1 layer=1/1")!=std::string::npos);
+  assert(logs[1].find("layer pixels=2 rgb=0 a=0/0/2")!=std::string::npos&&logs[2].find("diff=0/0")!=std::string::npos);
+  f.fill(0xffabcdef);auto reads=f.surface->reads.load();assert(!f.scalar(12,{0}));assert(!f.scalar(12,{1}));f.expect(0xff000000);
+  logs=proofLogs();assert(logs.size()==6&&logs[3].find("kind=replay id=0 seq=0 scene=1/1 layer=1/1")!=std::string::npos);
+  assert(logs[4].find("layer pixels=2 rgb=0")!=std::string::npos&&f.surface->reads==reads);
+  auto next=f.begin();assert(!f.submit(next));f.expect(0xffabcdef);logs=proofLogs();assert(logs.size()==9&&logs[7].find("layer pixels=2 rgb=2")!=std::string::npos);
+  // Readback reused scratch; a scene-only update and replay must preserve layer pixels.
+  auto background=f.begin();assert(!f.submit(background,0x80000000,0x80000000,0xff123456));assert(!f.scalar(12,{0}));assert(!f.scalar(12,{1}));f.expect(0xffabcdef);
+  logs=proofLogs();assert(logs.back().find("diff=0/0")!=std::string::npos&&logs[logs.size()-3].find("scene=3/3 layer=2/2")!=std::string::npos);
+  auto blank=f.begin();assert(!f.submit(blank,0x80000007,0x80000007,0xff000000));f.expect(0xff000000);logs=proofLogs();
+  assert(logs[logs.size()-2].find("layer pixels=0 rgb=0")!=std::string::npos&&logs.back().find("scene pixels=2 rgb=0")!=std::string::npos);
+ }
+ {clearInfo();Fixture f(true);assert(!f.scalar(12,{1}));auto id=f.begin();assert(!f.submit(id,1,0,0,1,1));
+  auto logs=proofLogs();assert(logs.size()==3&&logs[1].find("layer pixels=1 rgb=1")!=std::string::npos);
+  assert(logs[2].find("scene pixels=2 rgb=1")!=std::string::npos&&logs[2].find("diff=0/0")!=std::string::npos);
+ }
+ {clearInfo();Fixture f(true);assert(!f.scalar(12,{1}));proofReadAddress=f.panel.data();bool changed=false;
+  proofReadHook=[&]{if(!changed){f.panel[0]^=0xff000001;changed=true;}};auto errors=errorLogs.load();auto id=f.begin();assert(!f.submit(id));
+  auto logs=proofLogs();assert(changed&&errorLogs==errors+1&&logs.back().find("diff=1/1")!=std::string::npos);
+ }
+ {clearInfo();Fixture f(true);assert(!f.scalar(12,{1}));Barrier barrier;proofReadAddress=f.panel.data();proofReadHook=[&]{barrier.pause();};
+  auto id=f.begin();std::atomic<uint32_t> result{123};std::thread producer([&]{result=f.submit(id);});barrier.wait();assert(f.surface->refs==1);
+  auto before=sleepCount();std::thread stopper([&]{f.driver->shutdown();});waitSleeps(before+1);barrier.release();producer.join();stopper.join();
+  auto logs=proofLogs();assert(result==kIOReturnAborted&&logs.size()==3&&logs[0].find("rc=0xe00002eb")!=std::string::npos&&logs[2].find("diff=0/0")!=std::string::npos);
  }
  {for(int failure=0;failure<3;++failure){AppleCLCD fb;uint32_t pixels[18]={};fb.fPixels=(uintptr_t)pixels;
    auto *loop=new IOWorkLoop;auto *driver=new SweetFBContract;assert(driver->init());allocationFailure=failure;

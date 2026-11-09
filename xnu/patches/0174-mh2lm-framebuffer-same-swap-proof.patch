@@ -1,0 +1,230 @@
+diff --git a/iokit/Kernel/arm/SweetFBContract.inc b/iokit/Kernel/arm/SweetFBContract.inc
+--- a/iokit/Kernel/arm/SweetFBContract.inc
++++ b/iokit/Kernel/arm/SweetFBContract.inc
+@@ -1,14 +1,25 @@
+ /* Included once after AppleCLCD/UserClient declarations. No MMIO or real-vsync claims. */
+ #include <IOKit/IOCommandGate.h>
+ #include "SweetFBContractState.h"
++#include "SweetFBProof.h"
+ 
+ class SweetFBContract : public OSObject {
+     OSDeclareDefaultStructors(SweetFBContract);
++    struct Proof {
++        SFPResult pixels;
++        SFCRect layerRect;
++        uint32_t background;
++        uint64_t sequence,sceneSequence,layerSequence,readStart,readEnd,reserved,start,end;
++        uint32_t sample,window,id,sceneID,layerID,surfaceID,update,disable;
++        bool selected,valid,swap,updated;
++    };
+     struct Job {
+         SFCEntry *entry;
+         SweetSurface *surface;
+         SFCRect rect;
+-        uint32_t background;
++        uint32_t background,sourceID,update,disable;
++        uint64_t readStart,readEnd;
++        Proof proof;
+         bool layer, updateLayer, off, cancel, power, committed;
+     };
+     AppleCLCD *fFB; /* provider keeps this object until shutdown joins all invocations */
+@@ -20,7 +31,10 @@
+     size_t fBytes;
+     SFCRect fRect;
+     uint32_t fBackground, fSceneID, fCalls, fLogs, fTransitionLogs;
+-    bool fLayerEnabled, fOff, fValid, fGateAttached;
++    bool fLayerEnabled, fOff, fValid, fGateAttached, fProofEnabled;
++    SFPBudget fProofBudget;
++    uint32_t fLayerID,fLayerSurfaceID;
++    uint64_t fLayerSequence,fSceneSequence,fLayerReadStart,fLayerReadEnd;
+ 
+     enum { Enter, Leave, Begin, Wait, Acquire, Commit, Finish, Cancel, Close, Shutdown, Reject };
+     struct Request {
+@@ -95,13 +109,14 @@
+         if (((updated|disabled)&~0x8000000fU) || (disabled&~updated)) return kIOReturnUnsupported;
+         /* One complete CPU-composited layer only. Never pretend memcpy is multi-layer blending. */
+         if ((updated&~disabled)&0xeU) return kIOReturnUnsupported;
++        j->update=updated;j->disable=disabled;
+         if (updated&0x80000000U) j->background=word(rec,0x10c);
+         if ((j->background>>24)!=255) return kIOReturnUnsupported;
+         if (updated&1) {
+             j->updateLayer=true;j->layer=!(disabled&1);
+             if (j->layer) {
+                 uint32_t sid=word(rec,0x54);
+-                j->surface=sweet_surface_copy(sid);
++                j->sourceID=sid;j->surface=sweet_surface_copy(sid);
+                 SweetSurface *s=j->surface;
+                 if (!s || s==fFB->fSurface || s->pixelFormat!=SWEET_FB_FORMAT_BGRA ||
+                     s->bytesPerElement!=4 || s->elementWidth!=1 || s->elementHeight!=1 || !s->memory || s->planeCount>1)
+@@ -152,8 +167,31 @@
+                 SFCEntry *old=sfc_find(&fState,fSceneID);
+                 if (old && old!=j->entry && old->phase==SFC_CACHED) old->phase=SFC_RETIRED;
+                 fLayerEnabled=j->layer;fRect=j->rect;fBackground=j->background;fSceneID=j->entry->id;fValid=true;
++                fSceneSequence=j->entry->sequence;
++                if (j->updateLayer) {
++                    fLayerID=j->layer?j->entry->id:0;fLayerSequence=j->layer?j->entry->sequence:0;
++                    fLayerSurfaceID=j->layer?j->sourceID:0;
++                    fLayerReadStart=j->layer?j->readStart:0;fLayerReadEnd=j->layer?j->readEnd:0;
++                }
++            }
++            if (fProofEnabled && j->power && !j->off && (fOff || !fProofBudget.window)) {
++                uint64_t now=sweet_fb_trace_now();
++                bool opened=sfp_open(&fProofBudget,now);
++                SWEET_LOG_INFO("SWEET FB PROOF: window=%u open=%u ns=%llu until=%llu total=%u\n",
++                    fProofBudget.window,(unsigned)opened,now,fProofBudget.until,fProofBudget.total);
+             }
+             fOff=j->off;j->committed=true;
++            if (fProofEnabled && !fOff && fValid) {
++                uint64_t now=sweet_fb_trace_now();
++                if (sfp_take(&fProofBudget,now,!j->power)) {
++                    Proof *p=&j->proof;p->selected=true;p->sample=fProofBudget.total;p->window=fProofBudget.window;
++                    p->swap=!j->power;p->id=j->entry?j->entry->id:0;p->sequence=j->entry?j->entry->sequence:0;
++                    p->background=fBackground;p->layerRect=fRect;
++                    p->sceneID=fSceneID;p->sceneSequence=fSceneSequence;p->layerID=fLayerID;p->layerSequence=fLayerSequence;
++                    p->surfaceID=fLayerSurfaceID;p->updated=j->updateLayer;p->update=j->update;p->disable=j->disable;
++                    p->readStart=fLayerReadStart;p->readEnd=fLayerReadEnd;p->reserved=now;
++                }
++            }
+             IOLockLock(fFB->fLock);fFB->fPowerOff=fOff;IOLockUnlock(fFB->fLock);
+             return kIOReturnSuccess;
+         }
+@@ -215,11 +253,13 @@
+     IOReturn execute(Job *j) {
+         /* Called by the external caller, after runAction has opened the command gate. */
+         if (j->surface) {
++            if (fProofEnabled) j->readStart=sweet_fb_trace_now();
+             SweetSurface *s=j->surface;uintptr_t src=s->kernelAddress();
+             if (!sfc_bounds(src,s->memory->getLength(),s->offset,s->width,s->height,s->bytesPerRow)) return kIOReturnBadArgument;
+             for (uint32_t y=0;y<j->rect.h;++y)
+                 memcpy(fScratch+(uint64_t)(j->rect.dy+y)*fFB->fWidth+j->rect.dx,
+                     (const void *)(src+s->offset+(uint64_t)(j->rect.sy+y)*s->bytesPerRow+(uint64_t)j->rect.sx*4),j->rect.w*4);
++            if (fProofEnabled) j->readEnd=sweet_fb_trace_now();
+         }
+         return kIOReturnSuccess;
+     }
+@@ -236,6 +276,35 @@
+             else memcpy(dst,fFrame+(uint64_t)y*fFB->fWidth,fFB->fWidth*4);
+         }
+     }
++    void gatherProof(Job *j) {
++        Proof *p=&j->proof;if (!p->selected) return;
++        p->start=sweet_fb_trace_now();
++        SFPRect roi=sfp_clock(fFB->fWidth,fFB->fHeight);
++        /* Reuse the idle scratch buffer. The current layer lives in fLayer and
++         * every replacement rect is fully overwritten before the next Commit. */
++        for (uint32_t y=0;y<roi.h;++y)
++            memcpy(fScratch+(uint64_t)y*roi.w,(const void *)(fFB->fPixels+
++                (uint64_t)(roi.y+y)*fFB->fRowBytes+(uint64_t)roi.x*4),roi.w*4);
++        p->valid=sfp_measure(fFB->fWidth,fFB->fHeight,fLayerEnabled?&fRect:NULL,fLayer,fFrame,fScratch,&p->pixels);
++        p->end=sweet_fb_trace_now();
++    }
++    void emitProof(const Proof *p,IOReturn result) {
++        if (!p->selected) return;
++        if (!p->valid) {SWEET_LOG_ERROR("SWEET FB PROOF: invalid sample=%u\n",p->sample);return;}
++        const SFPResult *v=&p->pixels;
++        if (v->differentRGB || v->differentAlpha) SWEET_LOG_ERROR("SWEET FB PROOF: copy mismatch sample=%u diff=%u/%u\n",p->sample,v->differentRGB,v->differentAlpha);
++        SWEET_LOG_INFO("SWEET FB PROOF: sample=%u window=%u kind=%s id=%u seq=%llu scene=%u/%llu layer=%u/%llu surface=%u update=%#x disable=%#x fresh-layer=%u read-ns=%llu/%llu reserved-ns=%llu observed-ns=%llu/%llu cost-us=%llu rc=%#x\n",
++            p->sample,p->window,p->swap?"swap":"replay",p->id,p->sequence,p->sceneID,p->sceneSequence,
++            p->layerID,p->layerSequence,p->surfaceID,p->update,p->disable,(unsigned)p->updated,
++            p->readStart,p->readEnd,p->reserved,p->start,p->end,(p->end-p->start)/1000,(unsigned)result);
++        SWEET_LOG_INFO("SWEET FB PROOF: sample=%u roi=%u,%u,%u,%u rect=%u,%u/%u,%u/%u,%u background=%#x layer pixels=%u rgb=%u a=%u/%u/%u hash=%llx\n",
++            p->sample,v->roi.x,v->roi.y,v->roi.w,v->roi.h,p->layerRect.sx,p->layerRect.sy,
++            p->layerRect.dx,p->layerRect.dy,p->layerRect.w,p->layerRect.h,p->background,v->layer.pixels,v->layer.rgb,v->layer.a0,v->layer.amid,v->layer.a255,v->layer.hash);
++        SWEET_LOG_INFO("SWEET FB PROOF: sample=%u scene pixels=%u rgb=%u a=%u/%u/%u hash=%llx panel rgb=%u a=%u/%u/%u hash=%llx diff=%u/%u\n",
++            p->sample,v->scene.pixels,v->scene.rgb,v->scene.a0,v->scene.amid,v->scene.a255,v->scene.hash,
++            v->panel.rgb,v->panel.a0,v->panel.amid,v->panel.a255,v->panel.hash,v->differentRGB,v->differentAlpha);
++    }
++
+ public:
+     bool init() APPLE_KEXT_OVERRIDE { return OSObject::init(); }
+     bool setup(AppleCLCD *fb,IOWorkLoop *loop) {
+@@ -248,6 +317,8 @@
+         if (!fLayer || !fScratch || !fFrame || !fGate) return false;
+         if (loop->addEventSource(fGate)!=kIOReturnSuccess) {OSSafeReleaseNULL(fGate);return false;}
+         fGateAttached=true;
++        int proof=0;(void)PE_parse_boot_argn("sweetfbproof",&proof,sizeof(proof));fProofEnabled=proof==1;
++        if (fProofEnabled) SWEET_LOG_INFO("SWEET FB PROOF: v1 enabled; dense clock ROI after owned output; 30s windows, 1Hz plus replay/first swap, max 32/window 256 total; no hardware fence\n");
+         /* Fixed boot canvas is configured independently of RequestPowerChange/backlight. */
+         fState.ready=true;
+         SWEET_LOG_INFO("SWEET FB CONTRACT: v1 enabled; synchronous owned snapshots bytes=%lu; no hardware fence\n",(unsigned long)(fBytes*3));
+@@ -273,8 +344,9 @@
+                 if (!result) result=run(&r,Commit);
+                 /* No source access after releasing this reference. Output uses only owned bytes. */
+                 OSSafeReleaseNULL(job.surface);
+-                if (!result) output();
++                if (!result) {output();gatherProof(&job);}
+                 r.result=result;result=run(&r,Finish);
++                emitProof(&job.proof,result);
+             }
+             else {
+                 /* Validation failed before a reader was published. Persist that failure under the gate. */
+diff --git a/iokit/Kernel/arm/SweetFBProof.h b/iokit/Kernel/arm/SweetFBProof.h
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetFBProof.h
+@@ -0,0 +1,65 @@
++/* Bounded observations of owned CPU pixels; never a hardware display fence. */
++#ifndef SWEET_FB_PROOF_H
++#define SWEET_FB_PROOF_H
++#include "SweetFBContractState.h"
++#define SFP_WINDOW_NS 30000000000ULL
++#define SFP_INTERVAL_NS 1000000000ULL
++#define SFP_MAX_WINDOWS 12U
++#define SFP_MAX_PER_WINDOW 32U
++#define SFP_MAX_TOTAL 256U
++struct SFPBudget {
++    uint64_t until, next;
++    uint32_t window, used, total;
++    bool firstSwap, active;
++};
++static inline uint64_t sfp_add(uint64_t a,uint64_t b) { return a>UINT64_MAX-b?UINT64_MAX:a+b; }
++static inline bool sfp_open(SFPBudget *s,uint64_t now) {
++    s->active=false;
++    if (s->window>=SFP_MAX_WINDOWS || s->total>=SFP_MAX_TOTAL) return false;
++    ++s->window;s->used=0;s->until=sfp_add(now,SFP_WINDOW_NS);s->next=now;s->firstSwap=true;s->active=true;
++    return true;
++}
++static inline bool sfp_take(SFPBudget *s,uint64_t now,bool swap) {
++    if (!s->active || now>=s->until || s->used>=SFP_MAX_PER_WINDOW || s->total>=SFP_MAX_TOTAL) return false;
++    if (swap && !s->firstSwap && now<s->next) return false;
++    ++s->used;++s->total;s->next=sfp_add(now,SFP_INTERVAL_NS);
++    if (swap) s->firstSwap=false;
++    return true;
++}
++struct SFPRect { uint32_t x,y,w,h; };
++static inline SFPRect sfp_clock(uint32_t w,uint32_t h) {
++    SFPRect r={w/6,h/12,w*2/3,h/4};
++    if (!r.w && w) r.w=1;if (!r.h && h) r.h=1;
++    return r;
++}
++struct SFPStats { uint64_t hash;uint32_t pixels,rgb,a0,amid,a255; };
++struct SFPResult {
++    SFPRect roi;
++    SFPStats layer,scene,panel;
++    uint32_t differentRGB,differentAlpha;
++};
++static inline void sfp_pixel(SFPStats *s,uint32_t p) {
++    s->hash=(s->hash^p)*1099511628211ULL;++s->pixels;s->rgb+=(p&0xffffffU)!=0;
++    uint32_t a=p>>24;s->a0+=a==0;s->amid+=a!=0 && a!=255;s->a255+=a==255;
++}
++/* Panel is an exact packed memcpy readback of this ROI. Layer/scene remain owned
++ * and stable until Finish. Pixels outside layerRect are absent, not stale data. */
++static inline bool sfp_measure(uint32_t width,uint32_t height,const SFCRect *layerRect,
++    const uint32_t *layer,const uint32_t *scene,const uint32_t *panel,SFPResult *out) {
++    *out={};out->roi=sfp_clock(width,height);SFPRect r=out->roi;
++    if (!width || !height || width>4096 || height>4096 || !scene || !panel || !r.w || !r.h ||
++        r.x+r.w>width || r.y+r.h>height) return false;
++    if (layerRect && (!layer || layerRect->dx>width || layerRect->dy>height ||
++        layerRect->w>width-layerRect->dx || layerRect->h>height-layerRect->dy)) return false;
++    out->layer.hash=out->scene.hash=out->panel.hash=1469598103934665603ULL;
++    for (uint32_t y=0;y<r.h;++y) for (uint32_t x=0;x<r.w;++x) {
++        uint64_t at=(uint64_t)(r.y+y)*width+r.x+x;
++        uint32_t a=scene[at],b=panel[(uint64_t)y*r.w+x];
++        sfp_pixel(&out->scene,a);sfp_pixel(&out->panel,b);
++        out->differentRGB+=((a^b)&0xffffffU)!=0;out->differentAlpha+=((a^b)>>24)!=0;
++        if (layerRect && r.x+x>=layerRect->dx && r.x+x-layerRect->dx<layerRect->w &&
++            r.y+y>=layerRect->dy && r.y+y-layerRect->dy<layerRect->h) sfp_pixel(&out->layer,layer[at]);
++    }
++    return true;
++}
++#endif
