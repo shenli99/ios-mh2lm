@@ -117,3 +117,31 @@ IOInterruptEventSource/IOWorkLoop：上半部屏蔽/时间戳，worker 清所选
 显式 timer watchdog 回退，不能在 provider gate 中反调 framebuffer gate 形成锁环。
 最终以 60 秒 60±1 Hz、间隔 p50/p99、OFF 计数停止、输入/USB/电池并行健康验收。
 这些尚未实现，不将本轮三次寄存器快照当作替代验收。
+
+## 6. 0121a10 云产物与测试镜像（待实机）
+
+已核对 kernel/buildtree：44 个已跟踪源码与本地 0179 验证树逐字节匹配，包含 0178 mux 修复与
+0179 SweetMDSS；114 个既有 CI 源码 marker 和新增 F3 内核 marker 通过，内核归档 manifest
+通过。未收到完整 build log/CI run ID，因此不声称完成全量云编译告警审阅。
+
+内核 SHA256：`b6a0732a419f28276b6b6f8fba7c15f711d66394e66ee200043066a0aeda397e`，与 0121a9 不同。
+
+三档均为 35,667,968 字节：
+
+| 镜像（work1/out-bs/） | 预检模式 | SHA256 |
+|---|---|---|
+| `boot-16k-0121a10-fb-irq-preflight.img` | 2 | `641c1b0aefc1be781b71e146c176e060976e425bd339638b69fd5fd74511c9dd` |
+| `boot-16k-0121a10-fb-irq-gic.img` | 1 | `0e9dd9ef014e7fad818f28e9777f112d00615cf8aba3bd38fc28d10740a12060` |
+| `boot-16k-0121a10-fb-irq-baseline.img` | 0 | `9b79a1ad447470b30b374aef79eb7587cd78ab4e0c2609cbeb05dc15aed72614` |
+
+最终 boot 回读 Android header、UEFI kernel blob、FAT ramdisk 内的 XNU/ADT/TOML 全部通过；
+三档仅 sweetmdssirqprobe=2/1/0 不同，无重复参数；扩展 ADT 一致，原基础 ADT 保持不变。
+ACM/原有 IRQ/runtime3/F2 power1 保留。打包环境缺少 `file` 命令，本轮用本地 Python
+Android header 检测替代该条显示信息，随后独立完整回读核验，未修改项目打包脚本。
+底稿：`work1/scratch/artifact-0121a10/{verification.json,source-compare.json,
+boot-verification.json,verify-artifacts.py,verify-boots.py,packaging.txt,mdss.adt}`。
+
+**下一步先仅 fastboot boot 完整 fb-irq-preflight 档**：进入系统保持亮屏至少 35 秒，
+再简测亮度/触摸/按键和手动息屏唤醒；导出 `sweetlog-0121a10-fb-irq-preflight.bin`。
+有新增启动问题才用 GIC/关闭档定位。不要求重复插拔压力测试或专项 BUG-002 测试。
+本轮只完成产物和镜像核对，尚无 MDSS 寄存器实机快照或真实 vsync IRQ 证据。

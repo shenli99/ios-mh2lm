@@ -2,6 +2,27 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0121a10云源码/内核核对通过，同核三档boot已打包并回读，待只读预检实测。**
+实现d73cbc8（最新交接dc7442a）；44源码与0179验证树逐字节一致，含0178/0179，114原CI
+源码marker/F3内核marker及归档manifest通过。无完整build log/CI run ID，未审全量告警。
+kernel SHA256=b6a0732a419f28276b6b6f8fba7c15f711d66394e66ee200043066a0aeda397e，与a9不同。
+out-bs/boot-16k-0121a10-fb-irq-{preflight,gic,baseline}.img各35,667,968字节；mode2/1/0，
+SHA256依次641c1b0aefc1be781b71e146c176e060976e425bd339638b69fd5fd74511c9dd、
+0e9dd9ef014e7fad818f28e9777f112d00615cf8aba3bd38fc28d10740a12060、
+9b79a1ad447470b30b374aef79eb7587cd78ab4e0c2609cbeb05dc15aed72614。
+最终boot回读header/UEFI blob/FAT ramdisk/XNU/ADT/TOML通过；参数无重复，仅
+sweetmdssirqprobe不同；同一扩展ADT，基础ADT未改，原IRQ/ACM/runtime3/F2 power1保留。
+本地缺file命令，用Python header检测替代该信息展示步骤，未改打包脚本；独立完整回读
+通过。底稿scratch/artifact-0121a10/{verification.json,source-compare.json,boot-verification.json,
+verify-artifacts.py,verify-boots.py,packaging.txt,mdss.adt}；详见FRAMEBUFFER-VSYNC-F3末节。
+NEXT：用户fastboot boot完整preflight档，进入系统保持亮屏至少35s取三次快照，随后简测
+亮度/触摸/按键/手动息屏唤醒；导出sweetlog-0121a10-fb-irq-preflight.bin，持久日志即可。
+有新增启动异常才GIC/关闭档定位，不默认重跑三档。不专项测BUG-002、不重开BUG-003。
+当前仅只读预检，未注册MDSS handler/开IRQ/替换软件vsync，无实机成功结论。
+本轮无驱动/CI修改、未push/操作设备；CI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+
+**以下为历史交接；当前产物和下一步以上段0121a10为准。**
+
 **CURRENT：F3第一步0179只读预检已实现并完成本地验证，待用户push/云编译。**
 实现提交d73cbc8，基线3458ccf；0121a9实际0177云源码+0178严格重放后，仅改SweetMDSS.cpp。核对LG
 sm8150-sde.dtsi SPI83→INTID115；SDE5.x command mode选INTF1 TE RD_PTR，TE IRQ块
