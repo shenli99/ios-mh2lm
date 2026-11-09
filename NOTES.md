@@ -31,7 +31,7 @@ NEXT：用户push后下载新kernel/buildtree/buildlog，先核对0180完整源�
 不默认重测baseline、不专项BUG-002、不重开BUG-003、不扩大整机PM。F3尚未实机验收。
 文档FRAMEBUFFER-VSYNC-F3第8节含接口架构/生命周期/测试步骤，路线及架构文档已同步。
 本轮无USB/电池/按键/mux源码修改、无push/设备操作；CircleCI blob仍
- da0b6c0947a66f03491b3a9023590b49665292df。实现commit见本轮git log。
+da0b6c0947a66f03491b3a9023590b49665292df。实现提交7329197（基线2e5383b），未push。
 
 **以下为历史交接；当前待编译代码与下一步以上段0180为准。**
 
