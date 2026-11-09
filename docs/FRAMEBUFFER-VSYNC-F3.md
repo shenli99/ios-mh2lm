@@ -1,6 +1,6 @@
 # F3：硬件 vsync 接入记录
 
-2026-11-09。**0180 实际 MDSS IRQ / typed 硬件 vsync 已实现并完成本地验证，待云编译和实机验收。**
+2026-11-09。**0121a11 / 0180 云产物核对及四档 boot 回读通过，待实机验收。**
 0121a10 / 0179 只读预检已实测通过；0180 新行为默认关闭，尚无实际 IRQ 投递/频率的实机结果。
 F3 整体尚未验收。最新实现、分档与下一步见第8节；第2–7节保留0179阶段记录。
 本步接续已验证正常使用路径的 F2，不重开 BUG-003；BUG-002 随日常使用观察。
@@ -349,3 +349,38 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 关键验收仍是60秒60±1Hz、p50/p99、OFF不增长、无watchdog/风暴/新增功能异常。
 若失败先停在对应档分析日志，不把显式fallback后画面正常记为硬件vsync成功。
 通过后再进入F4自有扫描缓冲/翻页；本轮不改GPU、扫描地址或整机休眠。
+
+
+## 9. 0121a11：云产物与四档boot核对通过（待实机）
+
+实现提交7329197、交接0907868。kernel/buildtree已下载；48个已跟踪源码与0180验证树
+逐字节一致，含7个新改文件；原CI114条源码marker及F3v2内核marker通过，归档SHA256SUMS
+通过。无完整build log/CI run ID，本轮不声称完成全量云编译告警审阅。
+
+内核SHA256：`5c7a21c1b077ccfae427547d9cb350b070749c1f0a5a8208485503bbf1d9dd5a`；
+17,523,360字节，与0121a10不同。
+
+四档均35,667,968字节，位于`work1/out-bs/`：
+
+| 镜像 | IRQ/vsync | SHA256 |
+|---|---|---|
+| `boot-16k-0121a11-fb-vsync-baseline.img` | 0/0 | `d32c5cb335beaa278b2ad6f8e149f28a680a440b53678a0f3fc689306f98f947` |
+| `boot-16k-0121a11-fb-vsync-gic.img` | 1/0 | `61037c52b5198a475129ecf73d73a0538bb84242a3d7bd24614f2ad275f097ac` |
+| `boot-16k-0121a11-fb-vsync-rdptr.img` | 2/0 | `166364ecb7f1d284ac3b6d5ecdd2b046686829bfe631b65feb2a4a1050e852d0` |
+| `boot-16k-0121a11-fb-vsync-hardware.img` | 2/1 | `fb9795a630b82b4b388fc32f83de747c8592bdc986770f4b06900f58102c6286` |
+
+最终boot回读Android header v1、UEFI blob、FAT ramdisk中的XNU/ADT/TOML均通过。
+四档扩展ADT一致，基础ADT与0121a10保持逐字节一致，参数无重复，仅sweetmdssirq/
+sweetfbvsync不同；按键/触摸/USB/电池IRQ、ACM、runtime3、F2 power1保留。
+打包环境仍无file(1)，只在本地用Python header检测替代信息展示，未改项目打包脚本；
+独立boot完整回读随后通过。
+
+**本次先测fb-vsync-gic**：fastboot boot后进入系统，保持亮屏至少40秒，确保覆盖
+服务启动约35秒的软件pending注入及50ms后验证；简测亮度/按键/触摸，导出
+`sweetlog-0121a11-fb-vsync-gic.bin`。此档验证GIC115实际投递，只开父线作短probe，
+不使能TE RD_PTR，不切硬件vsync。通过后再测rdptr与hardware，步骤见第8节。
+baseline仅备选定位，不默认重跑。持久日志即可，无须专项插拔/BUG-002压力测。
+
+底稿`work1/scratch/artifact-0121a11/{verify-artifacts.py,verification.json,source-compare.json,
+package.sh,packaging.txt,verify-boots.py,boot-verification.json,mdss.adt}`。
+本轮仅核对产物/打包/文档，无驱动或CircleCI改动、无push/设备操作，F3尚无实机成功结论。

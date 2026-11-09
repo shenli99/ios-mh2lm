@@ -2,6 +2,32 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0121a11 / 0180云产物与同核四档boot已核对，待真实GIC投递档实测。**
+实现7329197/交接0907868；48源码与0180验证树逐字节一致，含7个改动文件/0178 mux修复；
+114原CI源码marker及F3v2内核marker、kernel归档manifest通过。无完整build log/CI run ID，
+未审全量云编译告警。kernel SHA256=5c7a21c1b077ccfae427547d9cb350b070749c1f0a5a8208485503bbf1d9dd5a，
+17,523,360字节，与0121a10不同。四档out-bs/boot-16k-0121a11-fb-vsync-
+{baseline,gic,rdptr,hardware}.img各35,667,968字节，IRQ/vsync依次0/0、1/0、2/0、2/1。
+boot SHA256按以上顺序：
+d32c5cb335beaa278b2ad6f8e149f28a680a440b53678a0f3fc689306f98f947
+61037c52b5198a475129ecf73d73a0538bb84242a3d7bd24614f2ad275f097ac
+166364ecb7f1d284ac3b6d5ecdd2b046686829bfe631b65feb2a4a1050e852d0
+fb9795a630b82b4b388fc32f83de747c8592bdc986770f4b06900f58102c6286
+最终boot header/UEFI blob/FAT ramdisk内核/ADT/TOML完整回读通过；参数无重复，仅irq/vsync不同；
+原IRQ/ACM/runtime3/F2 power1保留，同一扩展ADT，基础ADT与上一轮一致。环境仍缺file(1)，仅本地
+package.sh用Python header检测代信息输出，未改项目打包脚本；随后独立完整回读通过。
+底稿scratch/artifact-0121a11/{verify-artifacts.py,verification.json,source-compare.json,package.sh,
+packaging.txt,verify-boots.py,boot-verification.json,mdss.adt}。文档FRAMEBUFFER-VSYNC-F3第9节。
+NEXT：先仅fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a11-fb-vsync-gic.img。
+进入系统保持亮屏至少40秒（35s配置/软件pending注入+50ms后判断一次命中），简测亮度/按键/
+触摸，导出sweetlog-0121a11-fb-vsync-gic.bin。此档不是0179只读GIC：实际验证父线投递，
+但不使能外围TE、不切硬件vsync。通过后RD_PTR档亮屏110秒取得完整统计再OFF20–30秒/ON，
+最后完整硬件档同样验证。baseline仅故障定位备用；持久日志即可，不专项BUG-002、不重开
+BUG-003或整机PM。F3整体尚未实机验收。用户负责fastboot，本轮无设备操作/驱动修改/push；
+CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+
+**以下为历史交接；当前产物与测试步骤以上段0121a11为准。**
+
 **CURRENT：0180 F3真实MDSS IRQ/硬件vsync完成本地验证，待用户push/云编译；尚无新boot/实测。**
 基线2e5383b及0121a10实际源码；新补丁xnu/patches/0180-mh2lm-mdss-hardware-vsync.patch。
 SweetMDSS拥有验证后的ADT资源9–11、GIC115物理callback、软件IES/workloop、35秒延迟GIC
