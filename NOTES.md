@@ -2,6 +2,27 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0121a7 gated日志已分析，用户“没注意到新问题”；F1b正常运行路径验收通过。**
+结合0121a6 F1a，F1分层重构正常使用范围收口；真实provider终止/重匹配/stop-free仍未
+上机触发，仅host证据，默认sweetfbservice0/sweetmdss0不变，不声称生命周期全部实测。
+日志sweetlog-0121a7-fb-state-gated.bin SHA256=
+6cb1c9f504fb4c67543e565dbcaec0d079e7add1b168941873b388ff83b3a449；有效713446字节/
+flush14/未回卷/8607行。75新dispatch/gate、93后端match，365参数service1/mdss1/contract0。
+9资源/3探针；观察到sel3/4/5/6/8/12/28成功（有界去重，非全调用记录），SwapEnd1132字节。
+30亮度请求973～2632、8条预算内DCS rc0；4组off/on：3754→3781、4817→4955、
+6527→6555、6733→6762；32三键HID配对、73触摸、2ACM配置、6USB WARN/6reset。
+无分级ERROR/显示失败/mux隔离/SPMI timeout/kernel panic；用户态既有错误不记“全日志无错”。
+BUG-004复现：146电池样本、30USB VERIFY(-12)、30遥测停充/32启充、1次reason2停充，
+352UV route；4000行id10无效→4009停充→4051启充。已补BUGS，不视作电池完全无异常，
+不把F1b定为必要原因，也不排除负载影响。独立BUG-001/002/003/004未关闭。
+底稿scratch/artifact-0121a7/{fb-state-gated.txt,gated-log-analysis.json,analyze-gated.py,
+gated-selected.txt}；详见docs/FRAMEBUFFER-SERVICE-F1B.md末节。无需重复baseline。
+NEXT：按FRAMEBUFFER-PANEL-PLAN进入F2真显示电源；先查LG面板28/29时序/状态与typed
+backend电源接口，consumer不穿透寄存器；F3/vsync、F4扫描缓冲不混入，不重开缺时间专项。
+本轮仅分析/文档，未改驱动/CI、未push，无需新云编译。CI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+
+**以下为历史交接；当前验收结论及下一步以上段为准。**
+
 **CURRENT：0121a7 / 0176云产物核对及F1b两档boot打包回读完成，待用户实测。**
 预期实现b1c7969；44个已跟踪源码逐字节匹配（0176两文件），114个既有CI源码marker及
 新增F1b内核marker通过，归档manifest通过。未收到全量build log/CI run ID，未核对全量告警。

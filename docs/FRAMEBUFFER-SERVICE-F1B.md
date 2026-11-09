@@ -1,6 +1,6 @@
 # F1b：AppleCLCD 后端绑定、分发表与状态 gate（0176）
 
-2026-11-09。接续已通过正常运行路径功能验收的F1a。状态：实现、本地验证及0121a7云产物/boot回读核对完成，待实机验证；F1整体未验收。
+2026-11-09。接续已通过正常运行路径功能验收的F1a。状态：0121a7正常运行路径实测验收通过，F1a/F1b分层重构正常使用范围收口；真实provider终止/重匹配仍未上机验证。
 
 ## 本轮架构
 
@@ -101,10 +101,10 @@ BUG-004充电A/B已结束，不重新专项；BUG-001/002/003/004及半透明基
 
 底稿`work1/scratch/framebuffer-0176/{base,edited,verify,implement.py,make-patch.py,compile.py,
 verification.json,warning-counts.json,tests.json,test-*.txt,old-kernel-rejection.txt}`。
-本轮未push，未执行设备boot/刷写。真实服务终止和本段设备运行尚未验收。
+本地验证时未push或执行设备boot/刷写；后续设备运行证据见下方0121a7实测。真实服务终止未上机验收。
 
 
-## 0121a7 云产物及测试 boot（待实测）
+## 0121a7 云产物及测试 boot（实测结果见下节）
 
 预期实现提交`b1c7969`。44个已跟踪源码文件逐字节匹配，其中0176两文件匹配；
 114个既有CI源码marker及新增F1b内核marker通过，kernel归档manifest核验通过。
@@ -126,3 +126,36 @@ verify-artifacts.py,verify-boots.py,packaging.txt,mdss.adt}`。
 低→高→低、手动息屏/唤醒3轮，确认USB ACM可用；记录新增冻结、明显迟缓或亮度/唤醒失败。
 导出`sweetlog-0121a7-fb-state-gated.bin`。仅有新增异常时再用baseline定位。
 本轮未改内核/CI、未push、未操作设备，无需为打包重新编译；不重开充电A/B或BUG-003专项。
+
+
+## 0121a7 实测：F1b正常运行路径验收通过
+
+用户完成测试并反馈“没注意到新问题”。持久日志
+`work1/logs/sweetlog-0121a7-fb-state-gated.bin`，SHA256
+`6cb1c9f504fb4c67543e565dbcaec0d079e7add1b168941873b388ff83b3a449`。
+文件4,198,400字节，ring容量4,194,304字节，有效713,446字节，flush14，未回卷，
+解码8,607行。底稿`work1/scratch/artifact-0121a7/{fb-state-gated.txt,
+gated-log-analysis.json,analyze-gated.py,gated-selected.txt}`。
+
+| 核对项 | 日志证据（解码行号） | 结论及边界 |
+|---|---|---|
+| 新路径启用 | 75 F1b dispatch/state gate启用；93 AppleCLCD后端match；365参数service1/mdss1/contract0 | 确认实际运行新路径 |
+| 资源和后端 | 79–87九资源；88 SweetMDSS启动；94背光match；227旧探针关闭；176/385/587三次探针 | 硬件资源仍由服务管理 |
+| 接口调用 | 2352 sel12、2355 sel6、2394 sel4、2395 sel5（inline1132字节=0x46c）、2396 sel3均rc0；8/28也成功 | 已记录调用兼容本版ABI；有界去重日志不代表记录了所有调用，未知selector的rc0不代表其功能完整 |
+| 亮度 | 30条CoreBrightness请求973～2632；2425及3481～3494共8条DCS rc0 | 成功日志预算8，非总写次数；不声称覆盖硬件0/4095端点 |
+| 息屏/亮屏 | off3754→on3781、off4817→on4955、off6527→on6555、off6733→on6762 | 4组完整记录；用户未察觉新增问题；这仍是旧像素/背光策略，不是真DCS关屏 |
+| 输入/USB | 32条三键HID记录，三键down/up配对；73条触摸；1320/2312两次ACM配置 | 正常路径持续活动；6条既有USB endpoint WARN/6次reset不单独证明枚举失败 |
+| 异常筛查 | 无分级ERROR、显示失败、mux隔离、SPMI timeout或kernel panic | 启动/用户态仍有既有非分级错误消息，不宣称整份日志零错误 |
+
+**独立BUG-004再次出现：** 146份电池样本，30份USB字段VERIFY(-12)，30次
+step2/reasons0x1遥测失效停充、32次step1启充，另有1次step2/reasons0x2；UV路由命中352次。
+4000行id10 usb0x14/-12→4009行停充→4051行恢复启充，符合已登记故障链。
+用户未察觉新问题不等于没有充电状态波动；不能把本轮充电记为完全无异常，也不能仅凭
+本轮日志断定F1b负载对其完全无影响。此前legacy baseline已同链复现，继续独立跟踪。
+
+验收限定：F1b正常使用路径，以及结合0121a6的F1a/F1b分层重构正常使用范围通过。
+未上机触发provider真实终止/重匹配/stop-free，相关并发及引用清理目前只有host证据；
+也未测量延迟分布或证明gate不影响性能。无需没有新增显示异常时再重复baseline。
+新开关保持默认0；F0遗留BUG-003/半透明颜色、F2真显示电源、F3硬件vsync、F4扫描
+缓冲及F5零拷贝均未完成。下一步按计划进入F2，先核对LG面板DCS28/29时序及provider
+电源接口，由AppleCLCD通过typed backend请求，避免consumer直接写寄存器。

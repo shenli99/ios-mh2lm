@@ -15,8 +15,8 @@
 BUG-004在0121a5两档同链复现，独立跟踪；0121a6未复现不视为修复，不安排重复充电A/B。
 
 **F1b实现补充（0176）：** AppleCLCD registry consumer、标准用户接口dispatch校验、状态
-command gate及停止清理已实现，新增sweetfbservice默认0；0121a7云产物及两档boot核对通过，待上机。
-详见[F1b架构与验证](FRAMEBUFFER-SERVICE-F1B.md)。本地通过不等于F1整体验收；CI配置未改。
+command gate及停止清理已实现；0121a7 gated日志及用户反馈确认正常使用路径验收通过，sweetfbservice默认仍0。
+详见[F1b架构与验证](FRAMEBUFFER-SERVICE-F1B.md)。F1a/F1b正常使用范围收口，真实provider终止/重匹配仍未上机核验；下一步F2。CI配置未改。
 
 0121 结论与证据见 [F0 实测报告](FRAMEBUFFER-F0-0121.md)：普通档电池/按键 group 先后被 mux
 隔离，解释两条唤醒来源失效；该独立问题转入 [BUG-002](BUGS.md)，不自动增加显示步骤或验收前置。
@@ -202,13 +202,14 @@ host 测试）；patch 对上一结果树 strict apply；CI 加 `require_marker`
    不用无效行差填充频率结论。F4 前仍必须明确新扫描地址的映射可行性。
 5. 原始日志 SHA 记入 §7。
 
-### F1：IOKit 分层重构，行为不变（当前）
+### F1：IOKit 分层重构，行为不变（正常运行路径验收通过）
 
 0121a4为当前代码/画面基线。BUG-003和半透明颜色异常可保留，只验收是否引入新显示/亮度/
 输入/充电回归。停止为缺时间增加取证轮次；模式元数据修复暂不混入F1。
 
-**实施分段**：F1a先迁移硬件资源/探针/DCS与背光consumer（[0175实现与验证](FRAMEBUFFER-SERVICE-F1A.md)，0121a6正常运行路径功能验收通过）；当前下一步F1b迁移
-AppleCLCD后端绑定、用户客户端分发表/参数校验和状态gate。两段分别验收，F1a通过不等于整个F1完成。
+**实施分段**：F1a先迁移硬件资源/探针/DCS与背光consumer（[0175实现与验证](FRAMEBUFFER-SERVICE-F1A.md)，0121a6正常运行路径功能验收通过）；F1b迁移
+AppleCLCD后端绑定、用户客户端分发表/参数校验和状态gate，0121a7正常运行路径通过。
+两段正常使用范围已验收；生命周期真实终止保留未上机边界，详见[F1b实测](FRAMEBUFFER-SERVICE-F1B.md)。
 
 **做什么**
 - ADT 新增 `/arm-io/mdss`（`compatible "sweet,mdss"`，`reg` 列 MDP、DSI0、DISPCC、GCC disp 页，
@@ -227,7 +228,7 @@ AppleCLCD后端绑定、用户客户端分发表/参数校验和状态gate。两
 4. 新服务路径无 `ml_io_map`，旧BSD路径仅sweetmdss=0使用；`ioreg` 可见 `SweetMDSS`、`AppleCLCD`。
 5. host 测试：分发表参数校验、gate 序列化。
 
-### F2：真显示电源（修 P1/P6）
+### F2：真显示电源（修 P1/P6，下一步）
 
 **做什么**
 - 电源状态机 `ON→OFF_PENDING→OFF→ON_PENDING→ON`，失败回退到旧行为。
@@ -392,7 +393,7 @@ SSPP 格式/裁剪/地址状态、INTF 计数差值和 apps SMMU SID 0x800 匹�
 | F0 | 0170 / d58e7fc | 0121 两档持久日志；SHA 见实测报告 §1 | 已分析；mux 双组隔离独立记 BUG-002，0170 取证不足，未验收 |
 | F0 v2 | 0171+0172 / 2bc0251 | 0121a2 两档持久日志；SHA 见新报告 §1 | 两档异常相同；source/扫描时钟同黑，模式/帧语义待核对；CB2.M0，frame计数关闭，未验收 |
 | F1a | 0175 / a22e1b3 | 0121a5两档对照、0121a6 mdss日志及用户亮度/唤醒反馈 | 资源/背光迁移正常运行路径功能验收通过；BUG-004独立；下一步F1b，F1整体未完成 |
-| F1b | 0176 / b1c7969 | 本地strict apply、arm64编译、17项host检查；0121a7云产物及两档boot回读通过 | sweetfbservice默认关闭；优先测gated，待实机验收 |
+| F1b | 0176 / b1c7969 | 本地/云产物/boot核对；0121a7 gated持久日志及用户未见新问题 | 正常运行路径验收通过；真实provider终止未上机；BUG-004复现独立跟踪，下一步F2 |
 
 ### 0171 / F0 补充实现（历史记录，0121a2 已完成实测）
 

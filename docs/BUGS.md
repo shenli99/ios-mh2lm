@@ -171,6 +171,13 @@ error均0，无mux隔离/SPMI timeout/panic。样本22（3585–3594行）无效
 样本23（3614–3631行）有效→重新启充，与mdss故障链一致。
 因此新SweetMDSS后端不是触发故障的必要条件，不归为该后端专属回归；不证明旧内核已复现。
 
+**0121a7复现补充：** `sweetlog-0121a7-fb-state-gated.bin`，SHA256
+`6cb1c9f504fb4c67543e565dbcaec0d079e7add1b168941873b388ff83b3a449`。
+未回卷，146份样本，30份USB VERIFY(-12)，30次step2/reasons0x1、32次step1，另1次
+step2/reasons0x2；352次UV路由命中。解码4000行id10 usb0x14/-12→4009停充→4051恢复
+启充。无mux隔离/SPMI timeout/panic；用户未察觉新问题，不能据此关闭本bug。
+本轮F1b正常使用验收不包含充电完全正常的承诺；具体证据见[F1b实测](FRAMEBUFFER-SERVICE-F1B.md)。
+
 **未确认：** 输入UV最初原因、共用配置/负载是否参与触发、最终源端/限流/一致性策略修复。
 七个电池/SPMI/mux核心文件与0121a4逐字节一致，但不能据此排除负载或时序影响。
 没有mux隔离或SPMI超时，不合并BUG-002；不归因于单条USB endpoint WARN。

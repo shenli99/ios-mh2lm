@@ -3,8 +3,8 @@
 **显示0175/0176增量：** F1a资源与背光服务迁移已由0121a5/0121a6正常运行路径实测收口，
 SweetMDSS通过ADT映射并在自己的gate里执行原探针/DCS，背光持有独立registry consumer。
 0176新增可选AppleCLCD registry consumer、用户接口IOExternalMethodDispatch检查，以及
-共享状态的IOWorkLoop/IOCommandGate管理；本地验证完成，sweetfbservice默认0，待云编译/
-设备验证。架构和停止边界见[F1b](FRAMEBUFFER-SERVICE-F1B.md)，F1整体仍未验收。
+共享状态的IOWorkLoop/IOCommandGate管理；0121a7正常运行路径实测验收通过，sweetfbservice
+默认仍0。F1分层正常使用范围收口；真实provider终止/重匹配仍未上机核验。架构和边界见[F1b](FRAMEBUFFER-SERVICE-F1B.md)。
 像素/软件vsync/关屏策略沿用原行为；USB/电池/按键未改，已知bug独立跟踪。
 
 **0168当前充电路径（0120a17实机通过）：** `sweetbattruntime=3`时SweetBattery在自己的

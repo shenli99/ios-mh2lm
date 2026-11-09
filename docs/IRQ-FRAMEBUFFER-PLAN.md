@@ -1,5 +1,11 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
+**0121a7当前进度：** F1b gated实测正常运行路径通过，用户未见新问题；新dispatch/gate及
+后端绑定启用，亮度/4组off-on/三键/触摸/ACM有记录。结合F1a，F1分层重构正常使用范围
+收口，下一步F2真显示电源；真实provider终止/重匹配未上机核验，默认开关仍关闭。
+日志再次捕获BUG-004停充/启充链，独立跟踪，不视作充电完全无异常。
+详见[F1b实测与边界](FRAMEBUFFER-SERVICE-F1B.md)。下方旧F1b待编译状态为历史。
+
 **0176 / F1b本地实现：** AppleCLCD后端consumer、用户接口dispatch和状态gate已完成本地
 编译/host验证，待push及新云产物实测。详见[F1b](FRAMEBUFFER-SERVICE-F1B.md)；默认关闭，
 没有改变USB/电池/按键代码或CircleCI配置，F1整体仍未验收。
