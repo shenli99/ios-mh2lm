@@ -3,7 +3,7 @@
 ## Agent handoff / active work (2026-11-09, latest)
 
 **CURRENT：F3第一步0179只读预检已实现并完成本地验证，待用户push/云编译。**
-基线3458ccf；0121a9实际0177云源码+0178严格重放后，仅改SweetMDSS.cpp。核对LG
+实现提交d73cbc8，基线3458ccf；0121a9实际0177云源码+0178严格重放后，仅改SweetMDSS.cpp。核对LG
 sm8150-sde.dtsi SPI83→INTID115；SDE5.x command mode选INTF1 TE RD_PTR，TE IRQ块
 0ae6e800 EN0/STATUS4/CLEAR8 bit2，与配置窗口0ae6b800分开；INTF2 IRQ0ae6e900。
 新增sweetmdssirqprobe默认0，mode1只读GIC，2读GIC+MDSS/MDP/TE/INTF1；不注册handler、
