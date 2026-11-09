@@ -1,6 +1,6 @@
 # F3：硬件 vsync 接入记录
 
-2026-11-09。当前完成 **0179 只读预检实现及本地验证，待云编译和实机日志**。
+2026-11-09。当前 **0121a10 / 0179 只读预检实测通过**，用户确认画面、亮度、触摸、按键和手动息屏唤醒均正常、未见新增问题。
 尚未注册 MDSS IRQ handler、使能 RD_PTR 或替换软件 vsync，不能称 F3 验收通过。
 本步接续已验证正常使用路径的 F2，不重开 BUG-003；BUG-002 随日常使用观察。
 完整系统/设备低功耗已排到大目标四，当前只推进既定显示路线。
@@ -89,7 +89,7 @@ STATUS 是锁存位，三次相同值不能解释成“中断卡死”，也无�
 底稿：`work1/scratch/framebuffer-0179/{base,edited,verify,verification.json,warning-counts.json,
 tests.json,test-*.txt,packaging-checks.json,old-kernel-rejection.txt}`。
 CircleCI 配置未改，blob 仍 `da0b6c0947a66f03491b3a9023590b49665292df`。
-无云编译或实机成功结论。
+以上为本地验证阶段记录；云产物及只读预检实测见第6、7节。
 
 ## 4. 下一轮编译与测试
 
@@ -107,7 +107,7 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 确保取得三次快照；随后简测亮度、触摸、按键和手动息屏/唤醒，记录新增显示问题。
 持久日志即可，建议 `sweetlog-编号-fb-irq-preflight.bin`，不要求实时 USB 日志或重复插拔压力测。
 只有完整档出现新启动问题才用 GIC 档分离地址访问阶段；仍异常再用关闭档，不默认重跑三档。
-尚无本轮云内核，**当前没有新 boot 可交付**，实际绝对路径在产物下载及回读核验后给出。
+0121a10云内核和三档boot已核对，路径见第6节；完整只读档已取得实测日志，见第7节。
 
 ## 5. 预检后的 F3 剩余工作
 
@@ -118,7 +118,7 @@ IOInterruptEventSource/IOWorkLoop：上半部屏蔽/时间戳，worker 清所选
 最终以 60 秒 60±1 Hz、间隔 p50/p99、OFF 计数停止、输入/USB/电池并行健康验收。
 这些尚未实现，不将本轮三次寄存器快照当作替代验收。
 
-## 6. 0121a10 云产物与测试镜像（待实机）
+## 6. 0121a10 云产物与测试镜像
 
 已核对 kernel/buildtree：44 个已跟踪源码与本地 0179 验证树逐字节匹配，包含 0178 mux 修复与
 0179 SweetMDSS；114 个既有 CI 源码 marker 和新增 F3 内核 marker 通过，内核归档 manifest
@@ -145,3 +145,59 @@ boot-verification.json,verify-artifacts.py,verify-boots.py,packaging.txt,mdss.ad
 再简测亮度/触摸/按键和手动息屏唤醒；导出 `sweetlog-0121a10-fb-irq-preflight.bin`。
 有新增启动问题才用 GIC/关闭档定位。不要求重复插拔压力测试或专项 BUG-002 测试。
 本轮只完成产物和镜像核对，尚无 MDSS 寄存器实机快照或真实 vsync IRQ 证据。
+
+## 7. 0121a10 完整只读档实测：预检通过
+
+日志：`work1/logs/sweetlog-0121a10-fb-irq-preflight.bin`，SHA256
+`504d8167c635b24fbc8bea4385ba1fda9eb0c0692bf2805b58d12325bcba46b3`。
+SWEETLOG v1，4194304字节ring，有效318413字节、flush22、未回卷，解码4240行。
+第89行确认mode2/INTID115；370行boot args确认mdss1/service1/power1/irqprobe2。
+用户回复“都正常，未见新增问题”，包括画面、亮度、触摸、按键及手动息屏唤醒。
+
+### 中断寄存器实值
+
+三次pass0/1/2均取得完整GIC、MDSS及INTF1快照（197–199、402–404、606–608行），
+无资源缺失/错位、时钟门禁跳过或预检失败。启动日志能证明新增窗口已通过provider校验，
+不能将原九条resource日志误说成新增窗口没有映射。
+
+| 项目 | 三次观察 | 结论/边界 |
+|---|---|---|
+| GICD | CTLR=0x12，TYPER=0x7b041d，IIDR=0x201143b，PIDR2=0x3b | PIDR2架构字段=3；TYPER数量字段覆盖960个INTID，包含115 |
+| GIC115 | enable=0、pending=0、active=0，cfg=0，priority=0x80，route=0:00000000 | 当前禁用、配置为level；尚无CPU投递证据；route是读取值，不证明将来目标CPU正确 |
+| GROUP/GROUPMOD | 原字均0 | 保留NS视图RAZ边界，不能仅凭零值认定secure或不可用 |
+| MDSS revision | 0x50000001 | 与LG SDE5.x INTF TE布局匹配 |
+| 顶层/MDP | sources=0；MDP EN=0、STATUS=0x100，EN2=0、STATUS2=0x200 | 有原始锁存状态、未使能所读两组；不将其自动当作故障 |
+| INTF1 TE IRQ | EN=0、STATUS=0xf | RD_PTR bit2已锁存但未使能；其余AUTOREFRESH_DONE/WR_PTR/TE_DETECTED也有锁存 |
+| INTF2 TE IRQ | EN=0、STATUS=0 | 本轮无相同锁存证据，不选择INTF2 |
+| INTF1配置 | TE=1、CFG=0x180088、RD_PTR阈值=0x925、AUTO=0x80000001 | 符合既有command-mode autorefresh候选链 |
+| INTF1 LINE | 0x924 → 0x99 → 0x23a | 读取时计数有变化，仅辅助证明配置在运行；不能推算频率 |
+
+父GIC和TE两端均未使能，因此顶层sources=0、GIC pending=0与原始RD_PTR锁存不矛盾。
+STATUS三次相同是只读不清锁存的预期，不是“连续三轮ACK失败”。本轮不做ACK，无法证明
+每个采样间新增多少事件；不宣称60Hz、中断送达或IRQ ACK/rearm已经成功。
+
+### 其他功能和证据边界
+
+- FB及背光后端95/96行匹配；唯一CoreBrightness请求2838，2408行DCS rc0。
+  三键12条HID：power2、volume-up6、volume-down4；触摸48条事件。
+- 本日志仅有初始FB on（2332/2333行），**没有实际MDSS POWER off/on事务**。
+  用户确认唤醒表现正常，仍不能给本轮补造28/29事务或五轮开关屏覆盖；本步是只读预检验收。
+- 电池29份样本、28次IRQ refresh全部healthy=1；无mux隔离/SPMI timeout/驱动级ERROR或
+  kernel panic。0178已在本轮内核中，未见复发仅作正常使用记录，不作为专项BUG-002验收。
+- USB两次ACM配置、10次bus reset及10条端点命令WARN（9条ep0、1条ep5）。
+  不能仅凭这些条目判定Windows枚举失败或把旧USB问题归因预检。
+- id10/17两份USBIN VERIFY(-12)仍出现（3188/3471行），当时先前已分别有
+  step2/reasons0x2停充，随后step0/reasons0x1保持禁用，再于3238/3521行启充。
+  不算两次“从启充态被遥测主动停充”，用户未报告图标闪烁。旧采样问题保留独立记录，
+  不要求重复插拔或回到电池阶段。
+
+底稿：`work1/scratch/artifact-0121a10/{analyze-preflight.py,preflight-log-analysis.json,
+analysis-summary.json,preflight-selected.txt,fb-irq-preflight.txt}`。
+
+**下一步：** 只读预检收口，无需再测GIC/关闭预检档。实现实际MDSS IRQ接管和typed
+vsync订阅/撤回，既定GIC callback上半部屏蔽/记时、MDSS worker精确ACK bit2/统计/排队
+通知/再使能，并加入OFF禁用及唤醒恢复、风暴停用、显式看门狗回退。
+父线开始使能前必须确认当前其他enabled source不会无人处理；原始非目标锁存位不应
+一律清除。跨provider/FB gate只排队，不反向同步调用。下一批实现后同核分档验证投递、
+RD_PTR频率与完整vsync路径；当前尚无这些代码或新boot，F3整体尚未验收。
+本轮仅分析及文档，无驱动/CI改动或push。

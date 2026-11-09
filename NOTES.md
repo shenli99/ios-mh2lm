@@ -2,6 +2,32 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0121a10 / 0179完整只读预检实测通过；下一步接真实MDSS IRQ/vsync。**
+日志sweetlog-0121a10-fb-irq-preflight.bin SHA256=
+504d8167c635b24fbc8bea4385ba1fda9eb0c0692bf2805b58d12325bcba46b3；有效318413/flush22/
+未回卷/4240行。用户确认画面/亮度/触摸/按键/手动息屏唤醒都正常、未见新增问题。
+89mode2，370boot args正确；197–199/402–404/606–608三组GIC/MDSS/INTF1均完整。
+GIC PIDR2=3b→v3，TYPER=7b041d覆盖960INTIDs；115 en/pending/active/cfg均0（level），
+priority80/route0，group/groupmod0保留NS RAZ边界，不证secure或投递。MDSSrev50000001，
+sources0，MDP en0/status100 en2=0/status2=200；TE1 en0/statusf，TE2 en0/status0。
+INTF1 TE1/cfg180088/rdptr925/auto80000001，line924→99→23a。两端未使能，RD_PTR锁存
+不等于已投递；三次相同锁存不是ACK失败，不能算Hz。追加映射已通过provider校验。
+95/96后端匹配，CoreBrightness2838/DCS rc0；三键12条（power2/up6/down4）、触摸48条。
+本日志无实际MDSS off/on，只有初始FB on，不补造28/29或F2五轮覆盖；用户反馈单独记。
+29电池样本/28IRQ refresh healthy1；无驱动ERROR/mux隔离/SPMI timeout/panic。新内核含0178，
+本次无隔离仅正常使用记录，不专项验收BUG-002。USB10WARN（ep0九/ep5一）、10reset/
+2ACM配置；不定主机枚举失败。USBIN id10/17 VERIFY-12发生在此前reason2停充之后，
+后step0/reason1，再3238/3521启充；不算两次遥测从启充态主动停充，不称UI闪烁复现。
+独立BUGS已补，不扩当前目标。底稿scratch/artifact-0121a10/analyze-preflight.py及
+preflight-log-analysis.json/analysis-summary.json/preflight-selected.txt/fb-irq-preflight.txt。
+NEXT：无需测GIC/关闭档，实施实际MDSS IRQ（GIC callback+software IES/workloop）及
+provider typed vsync订阅/撤回、OFF禁用/恢复、风暴停用/显式watchdog回退。父线使能前
+检查非目标enabled source，ACK精确bit2；provider→FB仅排队，避免双gate反调死锁。
+当前尚无该后续代码/新boot，软件vsync仍在，F3整体未验收。BUG-003暂缓、整机PM末尾占位。
+本轮仅分析/文档，无驱动/CI/boot修改或push；CI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+
+**以下为历史交接；当前结果与下一步以上段0121a10实测为准。**
+
 **CURRENT：0121a10云源码/内核核对通过，同核三档boot已打包并回读，待只读预检实测。**
 实现d73cbc8（最新交接dc7442a）；44源码与0179验证树逐字节一致，含0178/0179，114原CI
 源码marker/F3内核marker及归档manifest通过。无完整build log/CI run ID，未审全量告警。
