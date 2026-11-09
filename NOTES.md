@@ -2,6 +2,31 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：按用户要求核对0121a9息屏掉电/各驱动低功耗；仅分析与文档，未实施PM。**
+基线8b7cd5d。长测原日志SHA仍0ae824787b04471ec67b721c78e3ea5434ed924319ad3aff8bd333a9b6228335。
+整份93→78%，息屏前最后91%；息屏id14–100共87样本，时间跨度4805.156s约80min，
+电流-393～-289mA，中位-294，加权-311；离散梯形积分约415mAh/1.70Wh、平均1.28W，
+并非精确累计库仑/功率计。电压4159→4048mV，温度35～36.25℃，数据有效，有真实放电依据。
+不将未验证3510mAh profile容量反推百分比。待机耗电偏高，但符合低功耗未适配的开发状态，
+不是已证实0177新回归或电池故障；显示唤醒通过不等于功耗验收。
+新增docs/POWER-MANAGEMENT-AUDIT-0121A9.md表格+源码行号：CPU通用WFE/WFI框架存在但
+quiesceCPU/haltCPU仍panic，无本板suspend恢复；不要称8核全程满载/完全没WFI。
+显示仅28/29、无10/11/rails/clock关断；FB OFF仍16667us软件timer，先通知clients再判OFF；
+sweetfb_hz30只降拷贝频率。USB IRQ线程等待但RUN_STOP/override保持、未接USBIN runtime
+suspend；触摸IRQ线程等待但无TCM深睡/gesture wake/resume；UFS无自有runtime PM且日志
+每10s按新增数据写盘。按键/mux保持IRQ、尚无整机深睡wake配置恢复。电池priorityWillSleep
+仅ack保留充电，本轮无will-sleep日志，60s温控采样继续；不把该采样未经测量定主耗电源。
+息屏段2290exec，其中fairplayd.H2=481/bluetoothd=480/xpcproxy=1145，未知退出原因和CPU占比，
+不能仅凭exec认定崩溃原因或全部耗电。底稿scratch/artifact-0121a9-long/power-usage.py/json，
+另从同云归档提取CPU源码到该目录pm-source/xnu，SweetCPU SHA见审计文档。
+NEXT：回到显示路线，后续明确OFF通知/定时器及MDSS电源，再分层推进设备PM/系统睡眠；
+本轮不改大计划顺序，不自动启动新云编译/长测，不强行开启未实现的system sleep。
+BUG-002继续正常使用观察、不专项测试；F2基础/长时正常路径保持通过，F3尚未实现。
+已同步当前架构/F2/IRQ路线摘要。无驱动/CI/boot改动，未push；CI blob仍
+da0b6c0947a66f03491b3a9023590b49665292df。
+
+**以下为历史交接；当前耗电核对以上段为准，既有修复和显示结果仍保留。**
+
 **CURRENT：0121a9长测通过；BUG-002已由41a0efa / 0178代码修复，用户要求后续正常使用观察。**
 本轮基线41a0efa。BUG-002仅改drainPending收尾：everAcked/pendingRoutes为局部，ACK过和
 未ACK过的末尾pending均rearm待下一次drain；不增faultCount/不隔离。四遍/ack语义/ACK

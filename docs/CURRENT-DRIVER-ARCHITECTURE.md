@@ -4,8 +4,15 @@
 `SweetDisplayBackend::setPanelPower(on)`请求SweetMDSS；provider自己的gate串行28/29、
 亮度及stop admission，consumer不操作MMIO。sweetfbpower默认0，要求service1/mdss1，
 强制保留扫描像素；失败单独降级面板电源实验，UNKNOWN仍允许ON恢复，不影响按键/USB。
-不等同完整系统睡眠/面板断电；0121a9三组实际off/on成功，用户确认显示正常。长期息屏
-仍待补，电池组隔离后的充电唤醒段无效；详见[F2架构与实测边界](FRAMEBUFFER-POWER-F2.md)。
+不等同完整系统睡眠/面板断电；0121a9基础与长时电源键唤醒均通过，用户确认显示/亮度/
+触摸正常。完整插拔次数覆盖未补齐，电池组隔离后的充电唤醒段无效；详见[F2架构与实测边界](FRAMEBUFFER-POWER-F2.md)。
+
+**低功耗核对（0121a9长测）：** 息屏前91%→最后78%，息屏段采样跨度约80分钟，平均
+净放电约311mA/1.28W（离散采样积分估算）。CPU quiesce/halt-suspend接口仍panic；显示仅
+28/29、未做面板sleep/电源域管理，framebuffer OFF仍60Hz定时通知；USB/触摸/UFS尚无
+完整设备suspend/resume。按键/触摸/USB线程IRQ等待不是硬件休眠；电池有WillSleep通知
+但不能使系统进入睡眠。符合当前低功耗缺失的开发状态，未达到手机待机水平。
+源码、数据、后台重复启动及待核实项见[低功耗核对](POWER-MANAGEMENT-AUDIT-0121A9.md)。
 
 **显示0175/0176增量：** F1a资源与背光服务迁移已由0121a5/0121a6正常运行路径实测收口，
 SweetMDSS通过ADT映射并在自己的gate里执行原探针/DCS，背光持有独立registry consumer。
