@@ -1,6 +1,6 @@
 # 同一 swap 的 CPU 像素取证（0174）
 
-2026-11-09。状态：实现及本地验证完成，尚未云编译或上机；**不是视觉修复，F0 未验收**。
+2026-11-09。状态：0121a4产物核对及单档boot打包完成，等待上机；**不是视觉修复，F0 未验收**。
 接续 [0121a3 实测](FRAMEBUFFER-CONTRACT-0121A3.md) 与
 [自有快照实验](FRAMEBUFFER-OWNED-CONTRACT.md)。用户追问能否证明提交内容本来没有时间，
 因此优先补同 ID 的像素证据，随后继续模式/颜色时序元数据和用户态 fallback 核对。
@@ -76,7 +76,7 @@ layer 仅统计有效 rect 交集，未覆盖区域不读旧数据；`layer pixe
 底稿：`scratch/framebuffer-0174/{verification.json,tests.json,*.compile.txt,test-*.txt}`。
 这些检查不能替代完整云编译和实机验证。
 
-## 下一次上机：一个取证档
+## 上机：一个取证档
 
 新 kernel/buildtree 下载后先核对补丁、marker及manifest，再由 agent 打包：
 
@@ -85,13 +85,34 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 ```
 
 仅生成 `fb-contract-proof`：保留既有IRQ/电池runtime3参数、preserveoff=1、trace/probe=0、
-loglevel=2，附加 `sweetfbcontract=1 sweetfbproof=1`。**目前没有本轮可刷镜像**。
+loglevel=2，附加 `sweetfbcontract=1 sweetfbproof=1`。0121a4镜像已生成，记录见下一节。
 无需重测0121a3的对照档。
 
-1. 正常进入后，手动息屏→插电；大电池图标消失后停5–10秒，观察时间。
+1. 开机正常锁屏先停5–10秒，记录是否显示时间，保留正常场景参照；随后手动息屏→插电，
+   大电池图标消失后停5–10秒，观察时间。
 2. 接电时手动息屏→拔电，停5–10秒，观察时间。插/拔各2–3次即可。
 3. 最后一次唤醒30秒内唤出关机界面，观察滑条区域半透明颜色，取消后观察时间。
 4. 导出 `sweetlog-编号-fb-contract-proof.bin`，同时反馈视觉表现与冻结/明显延迟。
 
 本机无自动息屏，不测 auto-lock。BUG-001 USB重连和BUG-002 mux隔离继续独立记录。
 若该窗口内无提交，日志缺样本本身不能证明用户态没有渲染，需结合调用链再判断。
+
+## 0121a4 产物与镜像记录
+
+预期实现提交 `d0f9555`。41个源码文件逐字节匹配，包含0174两文件；114个CI源码marker和
+新内核proof marker通过，kernel manifest核验通过。kernel SHA256为
+`692153135ed2286b9e39cddcbce7f2079cb323afadb069e767a255f0f20b71ca`，与0121a3不同。
+本地没有本轮构建日志/CI run ID，不声明已查全量编译警告。
+
+镜像 `/home/shenli/work1/out-bs/boot-16k-0121a4-fb-contract-proof.img`，35,667,968字节；
+SHA256：`854a82bfc8f942f20f8145fc3e4f21b6a2adb38e94ec5644539c45b8cb48bc06`。
+从最终boot回读Android v1 header/FAT，kernel blob、XNU、ADT、TOML逐字节匹配；启动参数
+无重复，contract=1/proof=1及上节公共参数符合预期。底稿在
+`scratch/artifact-0121a4/{verification.json,source-compare.json,boot-verification.json,verify-*.py}`。
+
+测试日志名为 `sweetlog-0121a4-fb-contract-proof.bin`，尚未刷机或验收。
+
+用户追问正常时间是否捕获：0121a2首次off前普通118.052s/preserveoff145.307s已有ROI非黑样本
+949/1007点，拔电249.168s为1044点，均源/扫描差异0；但没有像素图或逐秒视觉对应，不能认定
+这些就是时间字形。ROI依据上方中央位置作几何估计，未实证确定实际时间控件边界；本轮正常
+锁屏对照也只能增强关联，单凭非黑数量不能证明时间完整处于ROI。

@@ -4,6 +4,26 @@
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
+**CURRENT：0121a4 / 0174 产物核对与单档boot打包完成，等待用户实测。**
+预期实现提交d0f9555，用户已下载xnu-buildtree-0121a4.gz及xnu-kernel-0121a4.gz。
+41个源码文件（含0174两文件）逐字节匹配，114个CI源码marker和新proof内核marker通过；
+manifest匹配，kernel SHA256=692153135ed2286b9e39cddcbce7f2079cb323afadb069e767a255f0f20b71ca，
+与0121a3不同。未收到本轮构建日志/CI run ID，未检查全量编译警告。
+已生成out-bs/boot-16k-0121a4-fb-contract-proof.img，35,667,968字节，SHA256=
+854a82bfc8f942f20f8145fc3e4f21b6a2adb38e94ec5644539c45b8cb48bc06。
+最终boot回读header/FAT，kernel blob/payload/ADT/TOML逐字节匹配，参数无重复；contract=1/proof=1/
+preserveoff=1、trace/probe=0、loglevel=2及既有IRQ/电池runtime3。底稿scratch/artifact-0121a4/
+{verification.json,source-compare.json,boot-verification.json,verify-*.py}。
+NEXT：用户fastboot boot单档；启动正常锁屏先停5–10秒并记时间是否显示，再手动息屏插/拔电各
+2–3次，大logo消失后停5–10秒；最后一次唤醒30秒内关机界面/取消，观察时间及滑条区域半透明颜色。
+导出sweetlog-0121a4-fb-contract-proof.bin，注明视觉表现/冻结/明显延迟；不重复旧对照、不测auto-lock。
+旧0121a2首次off前也有ROI非黑样本（普通118.052s/949，保留145.307s/1007，均6660点/diff0），
+拔电249.168s有1044点，但无截图/逐秒动作对应，不能确认这些像素就是时间数字或完整覆盖时间。
+本轮仍只做几何ROI统计，同ID不能替代画面身份识别；硬件完成和视觉修复尚未验收，F0未验收。
+本轮仅核对打包/文档，未改驱动或CI、未push；BUG-001/002仍独立。
+
+**以下为历史交接；当前上机步骤以上段0121a4为准。**
+
 **CURRENT：0174 同一swap像素取证实现及本地验证完成，待用户push后云编译；尚无新镜像。**
 用户追问是否能证明原始提交缺时间，随后授权继续；因此先补同ID取证，顺序优先于下段旧NEXT的
 模式/颜色时序元数据核对。见docs/FRAMEBUFFER-SAME-SWAP-PROOF.md。新sweetfbproof=1默认关闭，
