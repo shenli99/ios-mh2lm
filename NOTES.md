@@ -2,6 +2,24 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：F2长测期间，按用户要求独立定位BUG-002；仅诊断/复现，尚未改驱动。**
+基线e706e4b / 0121a9。已确认mux末尾stillPending即永久隔离的错误判定；该位无需曾被ACK。
+a9未回卷日志4689 work87总hits123，4694/4695 work88总hits125，只有USBIN/CHGR两次成功ACK，
+无CC hit；电池日志不受按键budget限制。4690末尾CC APID271 bit2/status4即隔离group1，
+不是CC清四次仍失败。LG ACK同为arb CLEAR→PMIC LATCHED_CLR，CC极性也匹配DTS。
+新增docs/BUG-002-MUX-PENDING.md及tools/tests/repro-mh2lm-mux-pending.py：实际mux host
+ASan/UBSan三场景完成；5CC分批正常；空遍扫描完新到1CC，0次CC ACK即隔离；四遍成功ACK
+后第5CC到达也被隔离。缺陷场景各1次GIC dispatch，无timeout/poison模拟，按键继续工作。
+这是已知缺陷特征复现（REPRODUCED不等于健康验收），未来修复后应改健康/恢复断言。
+底稿scratch/bug002/committed-reproducer-result.txt；更新BUGS。硬件晚到究竟新边沿/传播延迟
+仍未知，不自动把历史所有实例定为同一触发，不宣称已排除全部硬件问题。软件永久失效
+原因已定位。建议后续有界续批/公平调度/逐组过载预算，与真正ACK错误及未知位分开处理，
+不可仅增大4遍、不可加轮询回退。用户本轮只要求排查，尚未实现或要求新云测。
+NEXT：等待原0121a9 F2手动息屏30min长测日志，继续显示验收；不重开BUG-003，不进F3。
+本轮无内核/CI/boot改动、未push；CI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+
+**以下为历史交接；当前独立诊断以上段为准，F2长测任务仍保留。**
+
 **CURRENT：0121a9日志已分析；用户确认息屏/唤醒正常无新增显示问题，基础DCS28/29通过。**
 日志sweetlog-0121a9-fb-power-dcs.bin SHA256=
 f02beab6ad0b0d9fbf2882ba0d73ae3a8205fbd49c22c1910ba120a7df4810ca；有效372499字节/
