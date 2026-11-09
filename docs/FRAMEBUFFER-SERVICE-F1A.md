@@ -1,6 +1,6 @@
 # F1a：显示资源与背光服务迁移（0175）
 
-2026-11-09。状态：实现提交`a22e1b3`，本地验证及0121a5云产物核对完成；两档均复现BUG-004同一充电启停链，新MDSS后端非必要条件。F1a完整验收仍待收口。
+2026-11-09。状态：实现提交`a22e1b3`；结合0121a5对照及0121a6日志和用户观察，F1a资源/背光迁移正常运行路径功能验收通过，进入F1b。F1整体未完成；真实服务终止路径仍未上机验证。
 用户决定暂缓[BUG-003](BUGS.md)，进入[显示F1](FRAMEBUFFER-PANEL-PLAN.md)。
 F0保留未闭环项；本轮不再安排缺时间专项取证。滑条区域半透明颜色异常也保留，
 不是“几何重叠”，不认定与缺时间同因。
@@ -177,3 +177,36 @@ packaging.txt,mdss.adt}`。IRQ按键/触摸/USB ACM及电池runtime3参数均保
 导出`sweetlog-0121a6-fb-service-mdss.bin`并记录肉眼亮度/唤醒表现。
 baseline已生成供保留，不安排重复刷测；已知BUG-004仍未修复，不拿图标闪烁单独判显示退化。
 本轮仅核对/打包/文档，无驱动或CI改动、未push、未执行设备boot/刷写；F1a仍待上机验收。
+
+## 0121a6 实测：F1a正常运行路径功能验收通过
+
+用户明确反馈“亮度跟随正常，息屏亮屏也正常”。持久日志
+`work1/logs/sweetlog-0121a6-fb-service-mdss.bin`，SHA256：
+`2b67f0b4facc4067c5ad1756dd74414571612aa662a1f70f543f9dc4a9f41095`。
+4,198,400字节；ring4,194,304，有效321,588字节，flush22，未回卷、有效区无NUL，解码4,641行。
+第363行boot-args确认sweetmdss=1、probe1、trace/proof/contract0、runtime3、IRQ4。
+底稿`scratch/artifact-0121a6/{fb-service-mdss.txt,mdss-log-analysis.json,analyze-mdss.py}`。
+
+| 核对项 | 日志证据（解码行号） | 结果 |
+|---|---|---|
+| 新服务资源及绑定 | 78–86行9个窗口mapped1，87行启动，92行背光registry match | 新后端实际工作 |
+| 旧路径禁用 | 226行legacy probe disabled | 无BSD探针并行写入 |
+| 三次探针 | 174/383/447行；GCC0x80000003、DISPCC0x1、VIG0地址0x9d200000/stride4320 | 与已验证配置一致 |
+| 亮度请求与DCS | 29条CoreBrightness请求，日志值406～2770；2418及3395–3408行8条DCS rc0 | 用户确认实际亮度跟随正常；无显示WARN/ERROR或已记录DCS失败 |
+| 手动息屏/唤醒 | off3576→on3609、off3724→on3758、off3960→on3991；另有启动on2342 | 3轮完成，用户确认正常 |
+| 输入并行 | 30条HID键事件覆盖电源/音量增减，61条HID触摸事件 | 事件路径保持工作 |
+| USB ACM | 1302/2301行两次配置，2次reset，3条ep0/ep5命令WARN | 保留既有告警，不据此认定主机枚举故障或已修复 |
+| 电池/mux | 13份采样、1次启充，无USB VERIFY(-12)、遥测停充、mux隔离/SPMI timeout/panic | 本轮未见BUG-002/004故障链，不宣称修复 |
+
+**验收边界：** F1a的资源归属、服务匹配、DCS背光和正常息屏/唤醒功能迁移可收口。
+8条DCS成功日志是打印预算，不是总写次数；用户观察不能替代逐写硬件trace。
+本轮亮度日志未覆盖精确0/4095端点，不虚报全寄存器数值范围硬件验收；真实provider终止/
+重新匹配、stop/free仍只有本地fixture证据，不用正常息屏冒充IOService生命周期测试。
+无需再为这些边界重复当前测试或重编译，后续相关行为修改时有针对性覆盖。
+BUG-001/002/003/004状态不变，半透明颜色异常保留；F1整体、F2真面板电源、F3硬件vsync、
+F4自有扫描缓冲均未因此验收。sweetmdss默认仍0，后续实验显式打开。
+
+**下一步F1b：** AppleCLCD直接以匹配通知取得typed backend，用户客户端改为
+IOExternalMethodDispatch并按本版ABI校验参数，状态统一由workloop/IOCommandGate串行化。
+保持当前画面/亮度硬件行为，不把模式语义、真关屏或硬件vsync提前混入；新增行为默认关闭。
+本轮仅分析/文档，没有新增内核补丁、CI修改或push。

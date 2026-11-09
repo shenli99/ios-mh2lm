@@ -2,6 +2,26 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0121a6日志已分析，用户确认亮度/息屏唤醒正常；F1a正常运行路径功能验收通过。**
+日志sweetlog-0121a6-fb-service-mdss.bin，SHA256=
+2b67f0b4facc4067c5ad1756dd74414571612aa662a1f70f543f9dc4a9f41095；有效321588字节/
+flush22/未回卷/4641行。363行参数sweetmdss1；78–86九资源，87服务启动，92背光match，
+226旧探针禁用，174/383/447三次探针正常，VIG0仍0x9d200000/stride4320。
+29条亮度请求406～2770，8条DCS rc0（成功日志预算8，非总写次数），无显示WARN/ERROR。
+off3576→on3609、off3724→on3758、off3960→on3991；用户确认实际亮度跟随/息屏亮屏正常。
+30条三键HID、61条触摸，2次ACM配置、2reset、3条USB endpoint WARN；不据此定BUG-001。
+13份电池快照、1次启充，无USB VERIFY(-12)/遥测停充/隔离/SPMI timeout/panic，未复现
+BUG-004不等于已修复。详见docs/FRAMEBUFFER-SERVICE-F1A.md末节；底稿scratch/artifact-0121a6/
+{fb-service-mdss.txt,mdss-log-analysis.json,analyze-mdss.py}。
+验收仅F1a资源/背光迁移正常路径；真实provider terminate/重匹配/stop-free未上机测，
+精确亮度0/4095端点无日志证明，保留边界，不无限重复同轮测试。F1整体/F2/F3/F4未完成。
+NEXT：进入F1b，AppleCLCD以匹配通知持有typed backend；用户客户端分发表和本版ABI参数
+校验、状态统一workloop/IOCommandGate。保持硬件行为，新增开关默认关闭；不混入真关屏/
+vsync/模式修复，不重开BUG-003，不重复0121a5充电A/B；独立BUG状态不变。
+本轮仅分析/文档，无新驱动补丁、未改CI、未push；用户不需要为本次记录重新编译。
+
+**以下为历史交接，当前验收结论及下一步以上段为准。**
+
 **CURRENT：0121a6产物核对、boot打包与回读完成；同0121a5源码，待补充F1a亮度/唤醒验收。**
 用户提供kernel/buildtree，无完整build-log或CI run ID，未查全量编译告警。43源码逐字节
 匹配（含0175六文件），114个CI marker及内核marker/manifest通过。两个buildtree的全部
