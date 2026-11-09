@@ -2,7 +2,7 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
-**CURRENT：用户授权F2；0177面板Display Off/On首轮实现及本地验证完成，待push云编译。**
+**CURRENT：用户授权F2；0177实现提交decebe3，本地验证完成，待push云编译。**
 基线e17918f / 0121a7正常使用路径验收；新增sweetfbpower默认0，要求service1/mdss1/
 contract0。AppleCLCD selector12经dispatch/state gate，copyBackend调用typed setPanelPower，
 SweetMDSS gate检查admission/inactive/clock，发LP短包80050028/29；无consumer穿透MMIO。
