@@ -2,6 +2,24 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0121a5 baseline也复现充电启停，A/B结束；BUG-004独立跟踪。**
+用户确认成功复现，日志sweetlog-0121a5-fb-service-baseline.bin，SHA256=
+05b5ae79eaa5e41b32e18e3a8b9b23bc65158d89dbe84d7666a0589191296e09；有效1079001字节/
+flush15/未回卷/11885行。第332行sweetmdss=0，旧探针三遍、旧DCS rc0，无新backend启动。
+301快照/179.87秒，61次USB VERIFY(-12)、59次遥测失效停充、64次启充、4次无输入停充；
+698次UV、772次CHGR route；639条BASIC命令error0，无mux隔离/SPMI timeout/panic。
+样本22第3585–3594行USB0x15/-12→ENABLE0；样本23第3614–3631行USB0x10/0→九步启充，
+两样本开始差约103ms；故障链与mdss一致。新后端不是必要触发条件，不证明旧0121a4已复现，
+不排除共用配置/负载；UV最初原因仍待查，不直接归因电脑供电或USB endpoint WARN。
+详见docs/FRAMEBUFFER-SERVICE-0121A5.md、BUGS.md#bug-004；底稿scratch/artifact-0121a5/
+{fb-service-baseline.txt,fb-service-baseline.timeline.txt,baseline-log-analysis.json,
+baseline-summary.txt,analyze-baseline.py}。本轮仅分析/文档，无驱动或CI改动、无push。
+NEXT：不重测该A/B、不为其重编译；BUG-004独立排期，核对ICL/AICL和USB动态状态/协议
+一致性校验边界，修复必须走charger provider并保留保护。显示继续原F1a收口/F1b路线，
+完整亮度/生命周期仍未验收，不凭此次对照验收F1，不重开BUG-003。
+
+**以下为历史交接；当前结论和下一步以上段为准。**
+
 **CURRENT：0121a5 mdss日志已分析，电脑USB充电闪烁确认是runtime3反复启停；待同核baseline。**
 用户直接测mdss，确认电脑USB口，尚无baseline。见docs/FRAMEBUFFER-SERVICE-0121A5.md。
 日志sweetlog-0121a5-fb-service-mdss.bin，SHA256=770a8164c2d66ad75053919c4191da80344aff7df8735c23d4fd0bdf18e80b16；

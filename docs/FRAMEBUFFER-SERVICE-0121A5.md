@@ -1,7 +1,8 @@
 # 0121a5 SweetMDSS 实测：充电状态闪烁
 
-2026-11-09。用户直接测试mdss档，未测试baseline；插入电脑USB后充电状态反复闪烁。
-F1a已有部分正向证据，但暂不验收，先用同内核baseline判断关联；无需新云编译。
+2026-11-09。用户先测mdss档，插入电脑USB后充电状态反复闪烁；随后同核baseline也复现
+同一启停故障链。新SweetMDSS后端不是触发故障的必要条件，充电输入稳定性独立跟踪。
+F1a仍只有部分正向证据，不据本次对照宣布完整验收；本组A/B结束，无需新云编译。
 
 ## 日志与证据
 
@@ -43,14 +44,14 @@ mdss-log-analysis.json,analyze-mdss.py,battery-source-comparison.json}`。
 
 `SweetPmicPower.cpp:119–138`前后读取完整USB/Type-C/APSD状态字节。USB字节变化时
 清SB_USB valid并写VERIFY(-12)；后端charger read本身不做该字节一致性判断。
-`sweet_charge_basic.h:92–96`将缺SB_USB视为SCB_R_TELEMETRY；`:151–160`停充；
-下一次完整有效且无其它禁止原因时`:183`后的启充序列重新执行。
+`sweet_charge_basic.h:85–89`将缺SB_USB视为SCB_R_TELEMETRY；`:157–164`停充；
+下一次完整有效且无其它禁止原因时`:189–205`的启充序列重新执行。
 `SweetBattery.cpp:1815–1828`根据相同SB_USB有效性发布external和charging。
 这已解释软件为何反复启停，**尚未证明输入UV最初因何产生**。
 
 0121a4→0121a5对比，SweetBattery、SweetPmicPower、sweet_charge_basic、battery_runtime、
 sweet_charger、sweet_spmi、SweetSpmiInterruptMux七文件逐字节相同。
-但代码没改不能证明负载/时序变化无关；只有mdss档，不能将故障直接归因或排除于SweetMDSS。
+当时只有mdss档，代码没改不能证明负载/时序变化无关；后续baseline结果见下节。
 电脑口能力、线缆/接触、继承的AICL/ICL模式、全字节校验与runtime3耦合都是待区分项。
 
 已查LG参考：smb5-reg.h:244–253有上述RT位；qpnp-smb5.c:367–385的PM8150B分支
@@ -70,13 +71,43 @@ sweet_charger、sweet_spmi、SweetSpmiInterruptMux七文件逐字节相同。
 USB仅两次ACM配置、10次reset及10条endpoint命令WARN；本轮用户未报告主机识别结果，
 不能单靠WARN将BUG-001认定为本轮已复现或把它当充电闪烁的根因。
 
-## 下一步：同内核短对照
+## 同内核baseline对照：同一故障链已复现
 
-已登记[BUG-004](BUGS.md)。先不改驱动、不新编译、不扩查BUG-003。
-直接fastboot boot现有`out-bs/boot-16k-0121a5-fb-service-baseline.img`，保持同电脑口/线缆，
-亮度固定，启动等35秒；拔线5秒再插，保持60秒，观察闪烁并导出
-`sweetlog-0121a5-fb-service-baseline.bin`。无需重复全部输入/显示专项操作。
+用户导出`sweetlog-0121a5-fb-service-baseline.bin`并确认成功复现。SHA256：
+`05b5ae79eaa5e41b32e18e3a8b9b23bc65158d89dbe84d7666a0589191296e09`。
+4,198,400字节；有效1,079,001字节，flush15，未回卷且有效区无NUL；解码11,885行。
+第332行boot-args确认sweetmdss=0、runtime3、IRQ4、probe1；没有SweetMDSS资源/启动日志，
+第2127/2158/2180行旧BSD探针三遍完成，第2406行旧DCS路径rc0。
+底稿`scratch/artifact-0121a5/{fb-service-baseline.txt,fb-service-baseline.timeline.txt,
+baseline-log-analysis.json,baseline-summary.txt,analyze-baseline.py}`。
 
-若baseline也有相同UV→校验失败→启停循环，将其作为独立电池输入稳定性bug排期；
-若只有mdss出现，则继续收窄新后端调用/亮度负载/时序，不能跳过这个差异验收F1a。
-这次证据足以确认启停循环，baseline是判断迁移是否引入回归所缺的对照。
+| 指标 | baseline / sweetmdss=0 | mdss / sweetmdss=1 |
+|---|---:|---:|
+| runtime样本数 | 301 | 349 |
+| 首末样本跨度（秒） | 179.87 | 335.73 |
+| USB VERIFY(-12)样本 | 61 | 62 |
+| 因遥测无效停充 | 59 | 61 |
+| 累计启充 | 64 | 67 |
+| 另因无输入停充 | 4 | 6 |
+| USBIN UV route命中 | 698 | 771 |
+| CHGR route命中 | 772 | 843 |
+| BASIC命令日志 / error非0 | 639 / 0 | 670 / 0 |
+| mux隔离 / SPMI timeout / panic | 0 / 0 / 无 | 0 / 0 / 无 |
+
+两轮时长和操作不同，不按累计次数判断哪个档更严重。baseline的61份USB失效中，60份仅
+缺SB_USB，另1份多缺一个输入字段；停充间隔中位0.716657秒。温度36.50～37.25°C，
+策略没有温度或高压停充原因。输入UV源头仍未确定，不能因此断言电脑口供电不足。
+
+直接证据：baseline样本22，第3585行usb=0x15/-12、3591行ENABLE1且缺SB_USB；
+第3593–3594行成功写ENABLE0、reasons0x1。样本23约103ms后开始，第3614行usb=0x10/0、
+3620行ENABLE0且valid完整；3622–3631行完整九步重新启充，enables3→4。
+第3646行原始CHGR=0x03、charging1，随后继续发生同类循环。不是仅有相似的肉眼现象。
+
+**结论边界：** 关闭新后端仍复现同一故障链，不能将其定为SweetMDSS专属回归。
+此对照不证明旧0121a4镜像已复现，不排除两档共用配置或显示负载参与触发，也不能仅凭它
+宣布F1a完整验收。BUG-001主机识别问题仍独立；baseline有18条USB WARN/reset、2次ACM
+配置，不能单凭计数认定枚举失败。
+
+**后续：** 本组A/B结束，不要求重复或重新编译。BUG-004独立排期，核对输入限流/AICL及
+USB动态状态与协议一致性校验的边界，修复走charger provider接口，保留拔线/OV/温度保护。
+显示继续原F1a收口/F1b计划，不恢复BUG-003专项；亮度全范围与完整生命周期尚无充分验收证据。

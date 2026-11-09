@@ -1,6 +1,6 @@
 # F1a：显示资源与背光服务迁移（0175）
 
-2026-11-09。状态：实现提交`a22e1b3`，本地验证及0121a5云产物核对完成；mdss已测并发现充电闪烁，待baseline对照，尚未验收。
+2026-11-09。状态：实现提交`a22e1b3`，本地验证及0121a5云产物核对完成；两档均复现BUG-004同一充电启停链，新MDSS后端非必要条件。F1a完整验收仍待收口。
 用户决定暂缓[BUG-003](BUGS.md)，进入[显示F1](FRAMEBUFFER-PANEL-PLAN.md)。
 F0保留未闭环项；本轮不再安排缺时间专项取证。滑条区域半透明颜色异常也保留，
 不是“几何重叠”，不认定与缺时间同因。
@@ -143,6 +143,7 @@ verify-artifacts.py,verify-boots.py,packaging.txt,mdss.adt}`。
 `sweetlog-0121a5-fb-service-baseline.bin`、`sweetlog-0121a5-fb-service-mdss.bin`。
 本轮未改内核或CI、未push、未执行设备boot/刷写；无需新云编译即可开始测试。
 
-0121a5 mdss持久日志已分析：显示资源/绑定/探针和8次记录的DCS写入成功；电脑USB时
-电池反复启停，登记BUG-004，暂不验收F1a。只需同电脑/线缆短测现有baseline并留持久日志，
-无需新云编译或重复缺时间专项。详见[实测诊断](FRAMEBUFFER-SERVICE-0121A5.md)。
+0121a5两档持久日志已分析：mdss资源/绑定/探针和8次记录的DCS写入成功；baseline确认
+旧路径探针/DCS。两档均复现相同UV→USB校验失效→停充/启充链，BUG-004独立跟踪；
+新MDSS后端非必要触发条件。本组对照结束，不重复或为此新编译；完整亮度/生命周期验收
+仍未收口，显示继续原F1a/F1b计划，不重开缺时间专项。详见[实测诊断](FRAMEBUFFER-SERVICE-0121A5.md)。
