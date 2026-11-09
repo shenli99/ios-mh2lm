@@ -1,5 +1,12 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**显示0175/0176增量：** F1a资源与背光服务迁移已由0121a5/0121a6正常运行路径实测收口，
+SweetMDSS通过ADT映射并在自己的gate里执行原探针/DCS，背光持有独立registry consumer。
+0176新增可选AppleCLCD registry consumer、用户接口IOExternalMethodDispatch检查，以及
+共享状态的IOWorkLoop/IOCommandGate管理；本地验证完成，sweetfbservice默认0，待云编译/
+设备验证。架构和停止边界见[F1b](FRAMEBUFFER-SERVICE-F1B.md)，F1整体仍未验收。
+像素/软件vsync/关屏策略沿用原行为；USB/电池/按键未改，已知bug独立跟踪。
+
 **0168当前充电路径（0120a17实机通过）：** `sweetbattruntime=3`时SweetBattery在自己的
 workloop上，由mux电池IRQ（USB/CHG/MSOC/READY/SOURCE/FAULT/TYPEC/INPUT_FAULT/WDOG）
 或LG battemp周期定时器（60/30/10s，每次IRQ重置）触发：快照→`sweet_charge_basic.h`

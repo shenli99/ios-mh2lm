@@ -1,5 +1,9 @@
 # MH2LM IRQ、Framebuffer 与日志体系路线图
 
+**0176 / F1b本地实现：** AppleCLCD后端consumer、用户接口dispatch和状态gate已完成本地
+编译/host验证，待push及新云产物实测。详见[F1b](FRAMEBUFFER-SERVICE-F1B.md)；默认关闭，
+没有改变USB/电池/按键代码或CircleCI配置，F1整体仍未验收。
+
 **0121a6最新进度：** F1a显示资源/背光服务迁移正常运行路径功能验收通过，亮度跟随及
 3轮手动息屏唤醒正常；下一步F1b（AppleCLCD后端绑定、参数分发表/校验、状态gate）。
 F1整体尚未完成；真实服务终止未上机验证，独立BUG状态不变。见[F1a实测](FRAMEBUFFER-SERVICE-F1A.md)。

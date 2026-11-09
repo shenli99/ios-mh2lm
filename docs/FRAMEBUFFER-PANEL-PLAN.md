@@ -14,6 +14,10 @@
 真实服务终止路径及精确亮度端点未上机核验，范围见[F1a实测](FRAMEBUFFER-SERVICE-F1A.md#0121a6-实测f1a正常运行路径功能验收通过)。
 BUG-004在0121a5两档同链复现，独立跟踪；0121a6未复现不视为修复，不安排重复充电A/B。
 
+**F1b实现补充（0176）：** AppleCLCD registry consumer、标准用户接口dispatch校验、状态
+command gate及停止清理已本地实现并验证，新增sweetfbservice默认0，待push/云编译/上机。
+详见[F1b架构与验证](FRAMEBUFFER-SERVICE-F1B.md)。本地通过不等于F1整体验收；CI配置未改。
+
 0121 结论与证据见 [F0 实测报告](FRAMEBUFFER-F0-0121.md)：普通档电池/按键 group 先后被 mux
 隔离，解释两条唤醒来源失效；该独立问题转入 [BUG-002](BUGS.md)，不自动增加显示步骤或验收前置。
 preserveoff 实际保留像素，但未解决全部缺时间现象。
@@ -160,6 +164,7 @@ RD_PTR(vsync) ── pending 存在 ──► clean cache ─► 写 SRC0_ADDR(+
 |---|---|---|
 | `sweetfbtrace=1/2` | F0 | v2 显示诊断；2 额外读取已知布局 CB2 配置 |
 | `sweetmdss=1` | F1 | 使用 SweetMDSS IOService 后端（行为不变） |
+| `sweetfbservice=1` | F1b | AppleCLCD后端绑定、用户接口dispatch和状态gate；要求mdss1/contract0，默认0 |
 | `sweetfbpower=1` | F2 | DCS 真关屏，不擦像素 |
 | `sweetfbvsync=1` | F3 | MDSS RD_PTR 中断做 vsync |
 | `sweetfbown=1` | F4 | 自有扫描缓冲 + 硬件裁剪 + 双缓冲翻页（L1） |
@@ -387,6 +392,7 @@ SSPP 格式/裁剪/地址状态、INTF 计数差值和 apps SMMU SID 0x800 匹�
 | F0 | 0170 / d58e7fc | 0121 两档持久日志；SHA 见实测报告 §1 | 已分析；mux 双组隔离独立记 BUG-002，0170 取证不足，未验收 |
 | F0 v2 | 0171+0172 / 2bc0251 | 0121a2 两档持久日志；SHA 见新报告 §1 | 两档异常相同；source/扫描时钟同黑，模式/帧语义待核对；CB2.M0，frame计数关闭，未验收 |
 | F1a | 0175 / a22e1b3 | 0121a5两档对照、0121a6 mdss日志及用户亮度/唤醒反馈 | 资源/背光迁移正常运行路径功能验收通过；BUG-004独立；下一步F1b，F1整体未完成 |
+| F1b | 0176 | 本地strict apply、arm64编译、17项host检查 | 实现完成，sweetfbservice默认关闭，待云编译/实机；尚无本补丁新boot |
 
 ### 0171 / F0 补充实现（历史记录，0121a2 已完成实测）
 

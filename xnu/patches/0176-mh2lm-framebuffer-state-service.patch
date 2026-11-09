@@ -1,0 +1,657 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -49,6 +49,7 @@
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOLocks.h>
+ #include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOCommandGate.h>
+ #include <IOKit/IOTimerEventSource.h>
+ #include <IOKit/system.h>
+ #include <pexpert/pexpert.h>
+@@ -115,6 +116,7 @@
+ 
+ class IOMobileFramebufferUserClient;
+ class SweetFBContract;
++class SweetDisplayClient;
+ 
+ class AppleCLCD : public IOMobileFramebuffer {
+ 	OSDeclareDefaultStructors(AppleCLCD);
+@@ -126,6 +128,30 @@
+ 	static void vsyncFired(OSObject *owner, IOTimerEventSource *sender);
+ 
+ public:
++	/* F1b is opt-in. The gate remains attached until free so retained user
++	 * clients can reject calls after stop without touching torn-down state. */
++	bool fServiceMode, fServiceStopped, fStateGateAdded, fVsyncAdded;
++	IOCommandGate *fStateGate;
++	SweetDisplayClient *fDisplayClient;
++	bool fBackendBound;
++	enum { StateCall, StateAddClient, StateCloseClient, StatePort, StateStop };
++	struct StateRequest {
++		unsigned operation;
++		IOMobileFramebufferUserClient *client;
++		IOExternalMethodArguments *args;
++		uint32_t selector;
++		mach_port_t port;
++	};
++	static IOReturn stateAction(OSObject *, void *, void *, void *, void *);
++	static void backendChanged(OSObject *);
++	IOReturn stateControl(unsigned, IOMobileFramebufferUserClient * = NULL,
++	    IOExternalMethodArguments * = NULL, uint32_t = 0, mach_port_t = MACH_PORT_NULL);
++	bool setupServiceState(void);
++	void free(void) APPLE_KEXT_OVERRIDE;
++	/* Legacy/contract paths retain their existing lock. All F1b callers,
++	 * including timer/present/trace, already hold the workloop gate. */
++	void stateLock(void) { if (!fServiceMode) IOLockLock(fLock); }
++	void stateUnlock(void) { if (!fServiceMode) IOLockUnlock(fLock); }
+ 	SweetFBContract *fContract;
+ 	bool fContractMode;
+ 	IOReturn contractCall(IOMobileFramebufferUserClient *, uint32_t, IOExternalMethodArguments *);
+@@ -178,6 +204,14 @@
+ public:
+ 	AppleCLCD          *fFB;
+ 	bool fContractClosed; /* only read/written under the contract command gate */
++	bool fServiceClosed, fServiceProviderRetained;
++	uint32_t fServiceSelectors[32], fServiceSelectorCount;
++	IOReturn legacyMethod(uint32_t, IOExternalMethodArguments *);
++	IOReturn serviceMethod(uint32_t, IOExternalMethodArguments *);
++	static IOReturn serviceDispatch(OSObject *, void *, IOExternalMethodArguments *);
++	void serviceClose(void); /* only under the framebuffer state gate */
++	void stop(IOService *) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
+ 	task_t              fTask;
+ 	mach_port_t         fPort;
+ 	io_user_reference_t fFunc[SWEET_FB_NOTIFY_TYPES];
+@@ -197,14 +231,15 @@
+ OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
+ 
+ #include "SweetFBContract.inc"
++#include "SweetFBService.inc"
+ 
+ IOReturn
+ AppleCLCD::contractCall(IOMobileFramebufferUserClient *client,uint32_t selector,IOExternalMethodArguments *args)
+ {
+-	IOLockLock(fLock);
++	stateLock();
+ 	SweetFBContract *contract=fContract;
+ 	if (contract) contract->retain();
+-	IOLockUnlock(fLock);
++	stateUnlock();
+ 	if (!contract) return kIOReturnOffline;
+ 	IOReturn result=contract->invoke(client,selector,args);
+ 	contract->release();
+@@ -214,23 +249,35 @@
+ void
+ AppleCLCD::contractClose(IOMobileFramebufferUserClient *client)
+ {
+-	IOLockLock(fLock);
++	stateLock();
+ 	SweetFBContract *contract=fContract;
+ 	if (contract) contract->retain();
+-	IOLockUnlock(fLock);
++	stateUnlock();
+ 	if (contract) {contract->close(client);contract->release();}
+ }
+ 
+ void
+ AppleCLCD::stop(IOService *provider)
+ {
++	if (fServiceMode) {
++		(void)stateControl(StateStop);
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++		/* Notification removal synchronizes callbacks; never hold our gate. */
++		if (fDisplayClient) fDisplayClient->stop();
++#endif
++		if (fVsyncAdded) {
++			fVsync->cancelTimeout(); fWorkLoop->removeEventSource(fVsync); fVsyncAdded=false;
++		}
++		IOMobileFramebuffer::stop(provider);
++		return;
++	}
+ 	if (fContractMode) {
+ 		if (fVsync) {
+ 			fVsync->cancelTimeout();
+ 			fWorkLoop->removeEventSource(fVsync);
+ 			OSSafeReleaseNULL(fVsync);
+ 		}
+-		IOLockLock(fLock);SweetFBContract *contract=fContract;fContract=NULL;IOLockUnlock(fLock);
++		stateLock();SweetFBContract *contract=fContract;fContract=NULL;stateUnlock();
+ 		if (contract) {contract->shutdown();contract->release();}
+ 	}
+ 	/* Legacy resource lifetime is unchanged; client nubs still refer to the provider. */
+@@ -474,6 +521,17 @@
+ 	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
++	int service=0, mdssService=0, contractService=0;
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++	(void)PE_parse_boot_argn("sweetfbservice",&service,sizeof(service));
++	(void)PE_parse_boot_argn("sweetmdss",&mdssService,sizeof(mdssService));
++	(void)PE_parse_boot_argn("sweetfbcontract",&contractService,sizeof(contractService));
++#endif
++	fServiceMode=service!=0;
++	if (fServiceMode && (!mdssService || contractService)) {
++		SWEET_LOG_ERROR("SWEET FB SERVICE: requires sweetmdss=1 and sweetfbcontract=0; refusing fallback\n");
++		return false;
++	}
+ 	PE_current_console(&video);
+ 	fPhys = video.v_baseAddr;
+ 	fWidth = (uint32_t)video.v_width;
+@@ -516,6 +574,7 @@
+ 		IOLog("SWEET FB: no vsync timer\n");
+ 		return false;
+ 	}
++	fVsyncAdded=true;
+ 	uint32_t hz = 10;
+ 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
+@@ -545,6 +604,10 @@
+ 		if (fTrace) SWEET_LOG_WARN("SWEET FB CONTRACT: disabling live source trace after source release\n");
+ 		fTrace=false;
+ 	}
++	if (fServiceMode && !setupServiceState()) {
++		SWEET_LOG_ERROR("SWEET FB SERVICE: setup failed; refusing legacy fallback\n");
++		return false;
++	}
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+@@ -578,6 +641,7 @@
+ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ {
+ 	AppleCLCD *fb = (AppleCLCD *)owner;
++	if (fb->fServiceMode && fb->fServiceStopped) return;
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t count = ++fb->fVsyncCount;
+ 	uint64_t values[6] = {
+@@ -586,14 +650,14 @@
+ 		0, 0,
+ 	};
+ 
+-	IOLockLock(fb->fLock);
++	fb->stateLock();
+ 	for (unsigned int i = 0; i < fb->fClients->getCount(); i++) {
+ 		IOMobileFramebufferUserClient *client =
+ 		    (IOMobileFramebufferUserClient *)fb->fClients->getObject(i);
+ 		client->notify(SWEET_FB_NOTIFY_VSYNC, values, 6);
+ 	}
+ 	if (fb->fContractMode) {
+-		IOLockUnlock(fb->fLock);
++		fb->stateUnlock();
+ 		/* All contract pixels are written by external callers outside the command gate. */
+ 		sender->setTimeoutUS(SWEET_FB_VSYNC_US);return;
+ 	}
+@@ -610,7 +674,7 @@
+ 		if (traceOff) {
+ 			fb->fTraceOffAfter = false;
+ 		}
+-		IOLockUnlock(fb->fLock);
++		fb->stateUnlock();
+ 		if (!preserve && step <= 6) {
+ 			for (uint32_t y = 0; y < fb->fHeight; y++) {
+ 				volatile uint32_t *row = (volatile uint32_t *)(fb->fPixels + (uint64_t)y * fb->fRowBytes);
+@@ -643,15 +707,15 @@
+ 			fb->fDirty = false;
+ 		}
+ 	}
+-	IOLockUnlock(fb->fLock);
++	fb->stateUnlock();
+ 	if (rec != NULL) {
+ 		fb->present(rec);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+ 		bool traceOn = false;
+-		IOLockLock(fb->fLock);
++		fb->stateLock();
+ 		traceOn = fb->fTracePowerAfter;
+ 		fb->fTracePowerAfter = false;
+-		IOLockUnlock(fb->fLock);
++		fb->stateUnlock();
+ 		if (traceOn) {
+ 			fb->traceFrame("on-after");
+ 		}
+@@ -665,20 +729,22 @@
+ void
+ AppleCLCD::addClient(IOMobileFramebufferUserClient *client)
+ {
+-	IOLockLock(fLock);
++	if (fServiceMode) { (void)stateControl(StateAddClient,client); return; }
++	stateLock();
+ 	fClients->setObject(client);
+-	IOLockUnlock(fLock);
++	stateUnlock();
+ }
+ 
+ void
+ AppleCLCD::removeClient(IOMobileFramebufferUserClient *client)
+ {
+-	IOLockLock(fLock);
++	if (fServiceMode) { (void)stateControl(StateCloseClient,client); return; }
++	stateLock();
+ 	unsigned int i = fClients->getNextIndexOfObject(client, 0);
+ 	if (i != (unsigned int)-1) {
+ 		fClients->removeObject(i);
+ 	}
+-	IOLockUnlock(fLock);
++	stateUnlock();
+ }
+ 
+ static uint32_t
+@@ -702,7 +768,7 @@
+ void
+ AppleCLCD::swap(const uint8_t *rec)
+ {
+-	IOLockLock(fLock);
++	stateLock();
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+ 	fDirty = true;
+ 	if (fTrace) {
+@@ -721,7 +787,7 @@
+ 			}
+ 		}
+ 	}
+-	IOLockUnlock(fLock);
++	stateUnlock();
+ 	if ((++sweet_fb_swap_count % 1000) == 0) {
+ 		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
+ 	}
+@@ -734,14 +800,14 @@
+     int32_t dx, int32_t dy, int32_t w, int32_t h)
+ {
+ 	if (!fTrace) { return; }
+-	IOLockLock(fLock);
++	stateLock();
+ 	fTraceSourceID = source->id;
+ 	fTraceCopiedSwap = get32(rec, 0x50);
+ 	fTraceCopiedNs = sweet_fb_trace_now();
+ 	fTraceCopy[0] = sx; fTraceCopy[1] = sy;
+ 	fTraceCopy[2] = dx; fTraceCopy[3] = dy;
+ 	fTraceCopy[4] = w; fTraceCopy[5] = h;
+-	IOLockUnlock(fLock);
++	stateUnlock();
+ }
+ 
+ void
+@@ -752,14 +818,14 @@
+ 	uint32_t next, attempted, attempts, copied;
+ 	uint64_t copiedNs, selectors[2];
+ 	int32_t box[6];
+-	IOLockLock(fLock);
++	stateLock();
+ 	memcpy(recent, fTraceSwaps, sizeof(recent));
+ 	next = fTraceSwapNext; attempted = fTraceAttemptSwap; attempts = fTraceAttempts;
+ 	copied = fTraceCopiedSwap; copiedNs = fTraceCopiedNs;
+ 	memcpy(box, fTraceCopy, sizeof(box));
+ 	memcpy(selectors, fTraceSelectorMask, sizeof(selectors));
+ 	uint32_t sourceID = fTraceSourceID;
+-	IOLockUnlock(fLock);
++	stateUnlock();
+ 	SweetSurface *source = sourceID ? sweet_surface_copy(sourceID) : NULL;
+ 	uint64_t ns = sweet_fb_trace_now();
+ 	SWEET_LOG_INFO("SWEET FB TRACE: v2 phase=%s ns=%llu attempt=%u attempts=%u copied=%u copy-ns=%llu source=%u alive=%u selectors=%llx/%llx\n",
+@@ -821,9 +887,9 @@
+ 			SWEET_LOG_WARN("SWEET FB TRACE: v2 source bounds rejected id=%u\n", source->id);
+ 		}
+ 	}
+-	IOLockLock(fLock);
++	stateLock();
+ 	bool changed = copiedNs != fTraceCopiedNs;
+-	IOLockUnlock(fLock);
++	stateUnlock();
+ 	SWEET_LOG_INFO("SWEET FB TRACE: v2 %s sample-us=%llu copy-changed=%u live-sample=1\n",
+ 	    phase, (sweet_fb_trace_now()-ns)/1000, changed);
+ 
+@@ -835,10 +901,10 @@
+ {
+ 	uint32_t mask = get32(rec, 0x104);
+ 	if (fTrace) {
+-		IOLockLock(fLock);
++		stateLock();
+ 		fTraceAttemptSwap = get32(rec, 0x50);
+ 		++fTraceAttempts;
+-		IOLockUnlock(fLock);
++		stateUnlock();
+ 	}
+ 
+ 	if (!fConsolePaused) {
+@@ -953,6 +1019,13 @@
+ 		setProperty(kIOUserClientDefaultLockingSetPropertiesKey,kOSBooleanFalse);
+ 		setProperty(kIOUserClientDefaultLockingSingleThreadExternalMethodKey,kOSBooleanFalse);
+ 	}
++	if (fFB->fServiceMode) {
++		/* Keep the provider and its stopped gate valid until this client frees. */
++		fFB->retain(); fServiceProviderRetained=true;
++		setProperty(kIOUserClientDefaultLockingKey,kOSBooleanTrue);
++		setProperty(kIOUserClientDefaultLockingSingleThreadExternalMethodKey,kOSBooleanFalse);
++		return fFB->stateControl(AppleCLCD::StateAddClient,this)==kIOReturnSuccess;
++	}
+ 	fFB->addClient(this);
+ 	return true;
+ }
+@@ -960,13 +1033,17 @@
+ IOReturn
+ IOMobileFramebufferUserClient::clientClose(void)
+ {
++	if (fFB && fFB->fServiceMode) {
++		(void)fFB->stateControl(AppleCLCD::StateCloseClient,this);
++		terminate(); return kIOReturnSuccess;
++	}
+ 	if (fFB != NULL) {
+ 		if (fFB->fContractMode) fFB->contractClose(this);
+ 		fFB->removeClient(this);
+-		IOLockLock(fFB->fLock);
++		fFB->stateLock();
+ 		mach_port_t old = fPort;
+ 		fPort = MACH_PORT_NULL;
+-		IOLockUnlock(fFB->fLock);
++		fFB->stateUnlock();
+ 		if (old != MACH_PORT_NULL) {
+ 			releaseNotificationPort(old);
+ 		}
+@@ -979,11 +1056,16 @@
+ IOMobileFramebufferUserClient::registerNotificationPort(mach_port_t port, __unused UInt32 type,
+     __unused io_user_reference_t refCon)
+ {
++	if (fFB && fFB->fServiceMode) {
++		IOReturn rc=fFB->stateControl(AppleCLCD::StatePort,this,NULL,0,port);
++		if (rc!=kIOReturnSuccess && port!=MACH_PORT_NULL) releaseNotificationPort(port);
++		return rc;
++	}
+ 	mach_port_t old;
+-	IOLockLock(fFB->fLock);
++	fFB->stateLock();
+ 	old = fPort;
+ 	fPort = port;
+-	IOLockUnlock(fFB->fLock);
++	fFB->stateUnlock();
+ 	if (old != MACH_PORT_NULL) {
+ 		releaseNotificationPort(old);
+ 	}
+@@ -1011,6 +1093,14 @@
+ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
+     __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target,
+     __unused void *reference)
++{
++	if (!fFB) return kIOReturnOffline;
++	if (fFB->fServiceMode) return serviceMethod(selector,args);
++	return legacyMethod(selector,args);
++}
++
++IOReturn
++IOMobileFramebufferUserClient::legacyMethod(uint32_t selector, IOExternalMethodArguments *args)
+ {
+ 	if (fFB->fContractMode) {
+ 		if (!args) return kIOReturnBadArgument;
+@@ -1033,9 +1123,9 @@
+ 		outCount = 1;
+ 		break;
+ 	case kSweetFBSwapBegin:
+-		IOLockLock(fFB->fLock);
++		fFB->stateLock();
+ 		out[0] = ++fFB->fSwapID;
+-		IOLockUnlock(fFB->fLock);
++		fFB->stateUnlock();
+ 		outCount = 1;
+ 		break;
+ 	case kSweetFBSwapEnd: {
+@@ -1069,10 +1159,10 @@
+ 	case kSweetFBNotifications:
+ 		if (args->scalarInputCount >= 3 && args->scalarInput[2] < SWEET_FB_NOTIFY_TYPES) {
+ 			uint32_t type = (uint32_t)args->scalarInput[2];
+-			IOLockLock(fFB->fLock);
++			fFB->stateLock();
+ 			fFunc[type] = args->scalarInput[0];
+ 			fRefcon[type] = args->scalarInput[1];
+-			IOLockUnlock(fFB->fLock);
++			fFB->stateUnlock();
+ 			char name[32];
+ 			proc_selfname(name, sizeof(name));
+ 			IOLog("SWEET FB: %s notifications type %u %s\n", name, type,
+@@ -1085,7 +1175,7 @@
+ 			if (off && fFB->fTrace) {
+ 				fFB->traceFrame("off-before");
+ 			}
+-			IOLockLock(fFB->fLock);
++			fFB->stateLock();
+ 			if (off != fFB->fPowerOff) {
+ 				fFB->fPowerOff = off;
+ 				fFB->fFadeStep = 0;
+@@ -1095,7 +1185,7 @@
+ 					else fFB->fTracePowerAfter = true;
+ 				}
+ 			}
+-			IOLockUnlock(fFB->fLock);
++			fFB->stateUnlock();
+ 			IOLog("SWEET FB: display %s\n", off ? "off" : "on");
+ 		}
+ 		break;
+@@ -1110,7 +1200,7 @@
+ 	if (args->structureOutputDescriptor == NULL && args->structureOutput != NULL) {
+ 		bzero(args->structureOutput, args->structureOutputSize);
+ 	}
+-	if (selector >= 64 || !(sweet_fb_logged & (1ULL << selector))) {
++	if (!fFB->fServiceMode && (selector >= 64 || !(sweet_fb_logged & (1ULL << selector)))) {
+ 		if (selector < 64) {
+ 			sweet_fb_logged |= 1ULL << selector;
+ 		}
+@@ -1122,9 +1212,9 @@
+ 	}
+ 	if (fFB->fTrace && selector < 128) {
+ 		uint32_t n = OSIncrementAtomic((volatile SInt32 *)&sweet_fb_selector_trace[selector]);
+-		IOLockLock(fFB->fLock);
++		fFB->stateLock();
+ 		fFB->fTraceSelectorMask[selector / 64] |= 1ULL << (selector % 64);
+-		IOLockUnlock(fFB->fLock);
++		fFB->stateUnlock();
+ 		if (n < SWEET_FB_TRACE_MAX_SELECTOR) {
+ 			char name[32];
+ 			proc_selfname(name, sizeof(name));
+diff --git a/iokit/Kernel/arm/SweetFBService.inc b/iokit/Kernel/arm/SweetFBService.inc
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetFBService.inc
+@@ -0,0 +1,204 @@
++/* F1b: shared legacy handlers, standard dispatch validation and one state gate.
++ * No new register writes, wait protocol, frame lifetime, or panel power policy. */
++
++bool
++AppleCLCD::setupServiceState(void)
++{
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ fStateGate=IOCommandGate::commandGate(this);
++ if (!fStateGate || fWorkLoop->addEventSource(fStateGate)!=kIOReturnSuccess) return false;
++ fStateGateAdded=true;
++ fDisplayClient=SweetDisplayClient::withOwner(this,fWorkLoop,backendChanged);
++ if (!fDisplayClient || !fDisplayClient->watch()) return false;
++ setProperty("SweetFramebufferService",true);
++ setProperty("SweetDisplayBackend","SweetMDSS");
++ SWEET_LOG_INFO("SWEET FB SERVICE: F1b v1 dispatch and state gate enabled; pixel policy unchanged\n");
++ return true;
++#else
++ return false;
++#endif
++}
++
++void
++AppleCLCD::backendChanged(OSObject *owner)
++{
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ AppleCLCD *fb=(AppleCLCD *)owner;
++ if (fb->fServiceStopped) return;
++ SweetDisplayBackend *backend=fb->fDisplayClient->copyBackend();
++ bool bound=backend!=NULL;
++ OSSafeReleaseNULL(backend);
++ fb->setProperty("SweetDisplayBackendBound",bound);
++ if (bound && !fb->fBackendBound)
++  SWEET_LOG_INFO("SWEET FB SERVICE: registry backend matched on framebuffer workloop\n");
++ if (!bound && fb->fBackendBound)
++  SWEET_LOG_WARN("SWEET FB SERVICE: registry backend withdrawn; ABL scanout retained\n");
++ fb->fBackendBound=bound;
++ /* Matching is not hardware readiness. No provider calls, waits, or MMIO.
++  * F1b still uses inherited ABL scanout and does not need MDSS to copy pixels.
++  * Future F2 hardware calls must copyBackend and use provider admission. */
++#else
++ (void)owner;
++#endif
++}
++
++IOReturn
++AppleCLCD::stateControl(unsigned operation,IOMobileFramebufferUserClient *client,
++ IOExternalMethodArguments *args,uint32_t selector,mach_port_t port)
++{
++ if (!fStateGateAdded) return kIOReturnOffline;
++ StateRequest request={operation,client,args,selector,port};
++ return fStateGate->runAction(stateAction,&request);
++}
++
++IOReturn
++AppleCLCD::stateAction(OSObject *owner,void *arg0,void *,void *,void *)
++{
++ AppleCLCD *fb=(AppleCLCD *)owner;
++ StateRequest *r=(StateRequest *)arg0;
++ IOMobileFramebufferUserClient *client=r->client;
++ if (r->operation==StateCloseClient) {
++  if (client) client->serviceClose();
++  return kIOReturnSuccess;
++ }
++ if (r->operation==StateStop) {
++  if (fb->fServiceStopped) return kIOReturnSuccess;
++  fb->fServiceStopped=true;
++  if (fb->fVsync) fb->fVsync->cancelTimeout();
++  while (fb->fClients && fb->fClients->getCount()) {
++   IOMobileFramebufferUserClient *c=(IOMobileFramebufferUserClient *)fb->fClients->getObject(0);
++   c->retain(); c->serviceClose(); c->release();
++  }
++  fb->fDirty=false; fb->fBackendBound=false;
++  fb->setProperty("SweetDisplayBackendBound",false);
++  SWEET_LOG_INFO("SWEET FB SERVICE: state admission closed; clients and ports withdrawn\n");
++  return kIOReturnSuccess;
++ }
++ if (fb->fServiceStopped || fb->isInactive() || !client || client->fServiceClosed)
++  return kIOReturnOffline;
++ switch (r->operation) {
++ case StateAddClient:
++  if (fb->fClients->getNextIndexOfObject(client,0)!=(unsigned)-1) return kIOReturnSuccess;
++  return fb->fClients->setObject(client)?kIOReturnSuccess:kIOReturnNoMemory;
++ case StatePort: {
++  mach_port_t old=client->fPort;
++  client->fPort=r->port;
++  if (old!=MACH_PORT_NULL) client->releaseNotificationPort(old);
++  return kIOReturnSuccess;
++ }
++ case StateCall: {
++  IOReturn result=client->legacyMethod(r->selector,r->args);
++  /* One line per distinct selector, with bounded per-client storage/budget.
++   * Unknown selectors retain legacy success/zero-inline-output behaviour. */
++  unsigned i;
++  for (i=0;i<client->fServiceSelectorCount;++i)
++   if (client->fServiceSelectors[i]==r->selector) break;
++  if (i==client->fServiceSelectorCount && i<32) {
++   client->fServiceSelectors[client->fServiceSelectorCount++]=r->selector;
++   SWEET_LOG_INFO("SWEET FB SERVICE: sel=%u in=%u/%u out=%u/%u rc=%#x\n",
++    r->selector,r->args->scalarInputCount,r->args->structureInputSize,
++    r->args->scalarOutputCount,r->args->structureOutputSize,(uint32_t)result);
++  }
++  return result;
++ }
++ default: return kIOReturnBadArgument;
++ }
++}
++
++void
++IOMobileFramebufferUserClient::serviceClose(void)
++{
++ if (fServiceClosed) return;
++ fServiceClosed=true;
++ mach_port_t old=fPort; fPort=MACH_PORT_NULL;
++ bzero(fFunc,sizeof(fFunc)); bzero(fRefcon,sizeof(fRefcon));
++ unsigned index=fFB->fClients->getNextIndexOfObject(this,0);
++ if (index!=(unsigned)-1) fFB->fClients->removeObject(index);
++ if (old!=MACH_PORT_NULL) releaseNotificationPort(old);
++}
++
++void
++IOMobileFramebufferUserClient::stop(IOService *provider)
++{
++ if (fServiceProviderRetained) (void)fFB->stateControl(AppleCLCD::StateCloseClient,this);
++ IOUserClient::stop(provider);
++}
++
++void
++IOMobileFramebufferUserClient::free(void)
++{
++ if (fServiceProviderRetained) {
++  /* stop/clientClose or provider stop already removed us from its array. */
++  fFB->release(); fServiceProviderRetained=false;
++ }
++ IOUserClient::free();
++}
++
++void
++AppleCLCD::free(void)
++{
++ if (fServiceMode) {
++  /* Also covers partially failed start, before any client can attach. */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++  if (fDisplayClient) fDisplayClient->stop();
++  OSSafeReleaseNULL(fDisplayClient);
++#endif
++  if (fVsyncAdded) { fVsync->cancelTimeout(); fWorkLoop->removeEventSource(fVsync); }
++  OSSafeReleaseNULL(fVsync);
++  if (fStateGateAdded) fWorkLoop->removeEventSource(fStateGate);
++  OSSafeReleaseNULL(fStateGate);
++  OSSafeReleaseNULL(fWorkLoop);
++  OSSafeReleaseNULL(fClients);
++  OSSafeReleaseNULL(fSurface);
++  OSSafeReleaseNULL(fMap);
++  if (fLock) { IOLockFree(fLock); fLock=NULL; }
++ }
++ IOMobileFramebuffer::free();
++}
++
++IOReturn
++IOMobileFramebufferUserClient::serviceDispatch(OSObject *target,void *reference,
++ IOExternalMethodArguments *args)
++{
++ IOMobileFramebufferUserClient *client=(IOMobileFramebufferUserClient *)target;
++ uint32_t selector=*(const uint32_t *)reference;
++ return client->fFB->stateControl(AppleCLCD::StateCall,client,args,selector);
++}
++
++IOReturn
++IOMobileFramebufferUserClient::serviceMethod(uint32_t selector,IOExternalMethodArguments *args)
++{
++ if (!args || args->scalarInputCount>kIOExternalMethodScalarInputCountMax ||
++     args->scalarOutputCount>kIOExternalMethodScalarOutputCountMax ||
++     (args->scalarInputCount && !args->scalarInput) ||
++     (args->scalarOutputCount && !args->scalarOutput) ||
++     (args->structureInputSize && !args->structureInput && !args->structureInputDescriptor) ||
++     (args->structureOutputSize && !args->structureOutput && !args->structureOutputDescriptor))
++  return kIOReturnBadArgument;
++ struct Entry { uint32_t selector; IOExternalMethodDispatch dispatch; };
++ static const Entry entries[]={
++  {3,{serviceDispatch,2,0,1,0}},
++  {4,{serviceDispatch,0,0,1,0}},
++  {5,{serviceDispatch,0,SWEET_FB_SWAP_REC_SIZE,0,0}},
++  {6,{serviceDispatch,3,0,0,0}},
++  /* 7/18 have no input dereference; keep unobserved input shapes permissive. */
++  {7,{serviceDispatch,kIOUCVariableStructureSize,0,1,0}},
++  {8,{serviceDispatch,0,0,2,0}},
++  {12,{serviceDispatch,1,0,0,0}},
++  {18,{serviceDispatch,kIOUCVariableStructureSize,0,1,0}},
++  {28,{serviceDispatch,0,0,1,0}},
++  {72,{serviceDispatch,kIOUCVariableStructureSize,0,0,0}},
++ };
++ IOExternalMethodDispatch dispatch={serviceDispatch,kIOUCVariableStructureSize,
++  kIOUCVariableStructureSize,kIOUCVariableStructureSize,kIOUCVariableStructureSize};
++ bool known=false;
++ for (unsigned i=0;i<sizeof(entries)/sizeof(entries[0]);++i) {
++  if (entries[i].selector==selector) {dispatch=entries[i].dispatch;known=true;break;}
++ }
++ if (known && (args->structureInputDescriptor || args->structureOutputDescriptor))
++  return kIOReturnBadArgument; /* Existing implemented ABI is inline/scalar only. */
++ if (selector==72 && ((args->scalarInputCount!=3 && args->scalarInputCount!=4) ||
++     args->scalarInput[2]>=SWEET_FB_NOTIFY_TYPES)) return kIOReturnBadArgument;
++ /* Use IOUserClient's real count/size checks before the gate/handler. */
++ return IOUserClient::externalMethod(selector,args,&dispatch,this,&selector);
++}

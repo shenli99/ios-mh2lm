@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service|--framebuffer-state]\n' "$0" >&2
 	exit 2
 fi
 
@@ -13,6 +13,7 @@ ARTIFACT=$1
 LABEL=$2
 KEY_IRQ_PROFILE=${3:-}
 DEPENDENCY_MATRIX=0
+FRAMEBUFFER_STATE=0
 case "$KEY_IRQ_PROFILE" in
 	'')
 		;;
@@ -37,6 +38,10 @@ case "$KEY_IRQ_PROFILE" in
 		KEY_IRQ_PROFILE='--battery-evidence'
 		;;
 	--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-basic-charge|--board-startup)
+		;;
+	--framebuffer-state)
+		FRAMEBUFFER_STATE=1
+		KEY_IRQ_PROFILE='--framebuffer-service'
 		;;
 	--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service)
 		;;
@@ -289,6 +294,16 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
    exit 1
   fi
  done
+ if [ "$FRAMEBUFFER_STATE" = '1' ]; then
+  for marker in 'SWEET FB SERVICE: F1b v1 dispatch and state gate enabled' \
+      'SWEET FB SERVICE: registry backend matched on framebuffer workloop' \
+      'SWEET FB SERVICE: state admission closed; clients and ports withdrawn'; do
+   if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+    printf 'kernel lacks F1b framebuffer state marker: %s\n' "$marker" >&2
+    exit 1
+   fi
+  done
+ fi
  python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" "$ADT" "$TMPDIR/mdss.adt"
  ADT="$TMPDIR/mdss.adt"
 fi
@@ -333,6 +348,12 @@ make_profile() {
 
 if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
  FB_ARGS='ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1 sweetbattirq=4 sweetbattruntime=3 sweetfbpreserveoff=1 sweetfbtrace=0 sweetdispprobe=1 sweetloglevel=2 sweetfbcontract=0 sweetfbproof=0'
+ if [ "$FRAMEBUFFER_STATE" = '1' ]; then
+  make_profile fb-state-baseline "LG G8X - XNU F1a state legacy (${LABEL})" "$FB_ARGS sweetmdss=1 sweetfbservice=0"
+  make_profile fb-state-gated "LG G8X - XNU F1b state gate (${LABEL})" "$FB_ARGS sweetmdss=1 sweetfbservice=1"
+  printf 'kernel SHA256: %s\ncreated F1b state baseline and gated profiles for %s\n' "$KERNEL_SHA256" "$LABEL"
+  exit 0
+ fi
  make_profile fb-service-baseline "LG G8X - XNU display legacy (${LABEL})" "$FB_ARGS sweetmdss=0"
  make_profile fb-service-mdss "LG G8X - XNU SweetMDSS F1a (${LABEL})" "$FB_ARGS sweetmdss=1"
  printf 'kernel SHA256: %s\ncreated F1a legacy and SweetMDSS profiles for %s\n' "$KERNEL_SHA256" "$LABEL"
