@@ -1,6 +1,6 @@
 # CPU framebuffer 自有快照契约实验（0173）
 
-2026-11-08。状态：0121a3产物核对、两档boot打包完成，**尚未上机或验收视觉效果**。
+2026-11-08。状态：0121a3两档已实测并分析；用户确认表现相同，未见新异常，**视觉问题未解决、F0未验收**。
 接续[原版帧契约核对](FRAMEBUFFER-SWAP-CONTRACT.md)和[0121a2 实测](FRAMEBUFFER-F0-0121A2.md)。
 F0 尚未验收；这是独立行为实验，不代表 F1/F3/F4 已完成。
 
@@ -161,3 +161,11 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 `scratch/artifact-0121a3/{verification.json,source-compare.json,boot-verification.json}`。
 依上节顺序测baseline再owned，各留`sweetlog-0121a3-fb-contract-baseline.bin`、
 `sweetlog-0121a3-fb-contract-owned.bin`。尚未上机，不将打包完成记为视觉修复验收。
+
+## 0121a3 实测结果（2026-11-09）
+
+完整证据见[实验结果](FRAMEBUFFER-CONTRACT-0121A3.md)。实验启用/等待/换帧及7轮息亮屏有
+实际日志，未记录helper错误；用户确认两档表现相同，未见新异常，缺时间和半透明异常未消除。
+本轮源像素取证关闭，不能据日志宣称具体ROI内容已正常；不将CPU拷贝当硬件显示完成。
+保留独立开关、不默认启用；下一步离线核对模式/颜色时序元数据及用户态fallback分支。
+对照末段复现APID271电池group隔离，已补BUG-002，不据实验档单次未复现认定其已修复。

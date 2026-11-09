@@ -1,8 +1,24 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-11-08, latest)
+## Agent handoff / active work (2026-11-09, latest)
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
+
+**CURRENT：0121a3 / 0173 两档日志已分析，用户确认两档一样、未见新异常。F0未验收。**
+见docs/FRAMEBUFFER-CONTRACT-0121A3.md。对照/实验ring均未回卷，451944/460493有效字节；
+SHA与行号见报告，底稿scratch/artifact-0121a3/{fb-contract-*.txt,*.timeline.txt,log-analysis.json}。
+实验启用标记在75行，30326400字节；49个wait中26成功、23 Busy，Busy均为0x80000000且
+id==display；ID1在display1时Busy，切display2后成功，options1在仍显示时成功，确实走新分支。
+无helper ERROR/reject/timeout，初期96条常规预算耗尽不能误读成ID24后停止；15条blank，
+7次off/8次on（含启动），最后blankID695后仍正常on。没有像素重采样，不能声称时钟ROI已正常。
+用户肉眼无改善，因此源快照/等待/blank补全不是当前视觉异常的充分解释，保持0173独立开关，
+不默认启用、不重复同类A/B；F1/F3/F4仍未完成。本轮取消/停止未触发的并发分支不算实机验收。
+对照末段5281起Type-C APID271 bit0/2/4/5 status0x35导致电池group1隔离、consumer失败禁充，
+保留97%；按键group0未隔离，后续仍有亮屏/触摸活动。已补BUG-002，不扩显示线；实验未复现
+不能当修复（两档时长/操作次数不同）。实验三条USB命令WARN不能单独认定枚举失败。
+NEXT：先离线核对显示模式/颜色时序注册属性、sel79/block0x40及本版无匹配mode的fallback；
+完整恢复分支后才做独立修复，不直接填ID1。半透明合成能力另查，不按无GPU或transform-only
+警告定因。不需用户重复本次测试。本轮仅分析/文档，未改驱动/CI，未push，无新镜像待编译。
 
 **CURRENT：0121a3 / 0173 产物核对与两档boot打包完成，等待用户实测。**
 用户已下载xnu-buildtree-0121a3.gz、xnu-kernel-0121a3.gz，对应预期实现提交6c2e77d。

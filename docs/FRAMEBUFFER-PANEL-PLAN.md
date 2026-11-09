@@ -1,6 +1,6 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**状态（2026-11-08，第二版）：0121a2 / F0 v2 两档已分析，像素和硬件证据已补；帧接口解释未闭环，F0 尚未验收。** 本文是 `IRQ-FRAMEBUFFER-PLAN.md`
+**状态（2026-11-09，第二版）：0121a3 CPU帧契约实验已运行，两档视觉表现相同；下一步核对模式/颜色时序元数据及用户态分支，F0尚未验收。** 本文是 `IRQ-FRAMEBUFFER-PLAN.md`
 “大目标二”的实施文档。第二版目标从“修好接手的 ABL framebuffer”提升为：**驱动自己
 分配和管理扫描缓冲（simplefb 式），硬件双缓冲翻页，CoreAnimation 渲染的 surface
 直接被 MDP 扫描，消除每帧 CPU 拷贝。**
@@ -426,3 +426,11 @@ F0未验收，另列[自有快照实验](FRAMEBUFFER-OWNED-CONTRACT.md)，不宣
 取消/close/stop。没有切换MDP扫描地址，没有真实vsync fence，也不认定半透明异常已定因。
 三文件strict apply/arm64编译、14项host回归通过，LSan受ptrace限制未验收。
 NEXT：用户push并下载产物→核对打包→对照/实验档手动息屏插拔与关机界面半透明/取消测试。
+
+### 0121a3 / 0173 两档实测已分析（2026-11-09）
+
+见[实验结果](FRAMEBUFFER-CONTRACT-0121A3.md)。新路径启用，options0当前显示Busy、替换后
+成功，options1可在仍显示时成功；blank与7轮off/on均有记录，未记录helper错误。
+用户确认两档视觉一致、未见新异常，缺时间/滑条区域半透明效果未消除，不验收F0。
+保留独立开关、不默认切换，不重复相同A/B；下一步离线核对模式/颜色时序属性及无匹配mode
+分支，再设计独立修复。对照末段Type-C电池group隔离补入BUG-002，不扩当前显示范围。
