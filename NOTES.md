@@ -2,6 +2,28 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0121a5 mdss日志已分析，电脑USB充电闪烁确认是runtime3反复启停；待同核baseline。**
+用户直接测mdss，确认电脑USB口，尚无baseline。见docs/FRAMEBUFFER-SERVICE-0121A5.md。
+日志sweetlog-0121a5-fb-service-mdss.bin，SHA256=770a8164c2d66ad75053919c4191da80344aff7df8735c23d4fd0bdf18e80b16；
+未回卷，有效1259276字节/flush32/14095行，349样本；771次USBIN UV、843次CHGR route命中。
+62份USB VERIFY(-12)，61次遥测失效停充、整份日志67次启充、命令日志670条error0。
+id28第4238–4247行USB0x15/-12→ENABLE0；id29第4267–4284行USB0x10/0→9步重新启充。
+原因链：完整USB字节双读变化→SB_USB无效→SCB_R_TELEMETRY停充，下一次有效立即启充；
+遥测原因不走scb_fail退避。原始CHGR也1/0变化，不是仅显示闪烁；输入UV最初原因未定。
+电池/charger/SPMI/mux七核心文件对0121a4逐字节不变，不足以排除显示负载/时序影响。
+已登记BUG-004，与BUG-002隔离/BUG-003缺时间分开；无ERROR、mux隔离、SPMI timeout或panic。
+MDSS9资源/registry绑定/旧探针禁用/3次探针成功，8次DCS日志rc0（预算8，非总写次数）；
+16个键、65个触摸、4次off/5次on。USB10条WARN/10reset/2次ACM，不能单独认定枚举失败。
+LG WEAK_ADAPTER_WA只在PMI632分支，不能未经核对搬给PM8150B。未来修复须走charger API。
+NEXT：无需push或新编译，用现有out-bs/boot-16k-0121a5-fb-service-baseline.img，保持同电脑口/
+线缆、亮度固定，启动等35秒→拔5秒→插保持60秒，观察闪烁并导出
+sweetlog-0121a5-fb-service-baseline.bin；不重做全套显示/输入专项，不重开缺时间取证。
+若baseline同现则独立排期输入稳定性bug；仅mdss有则收窄迁移回归。F1a/F1暂不验收。
+底稿scratch/artifact-0121a5/{mdss-log-analysis.json,fb-service-mdss.txt,fb-service-mdss.timeline.txt,
+analyze-mdss.py,battery-source-comparison.json}；本轮只分析/文档，未改驱动/CI、未push。
+
+**以下为历史交接；下一步以上段短对照为准。**
+
 **CURRENT：0121a5 / 0175 云产物核对及F1a两档boot打包回读完成，待用户实测。**
 实现提交a22e1b3（交接610b69b）；43个源码文件逐字节匹配，包含0175六文件；114个原CI源码
 marker及新SweetMDSS/consumer/旧路径关闭内核marker通过，manifest核验通过。
