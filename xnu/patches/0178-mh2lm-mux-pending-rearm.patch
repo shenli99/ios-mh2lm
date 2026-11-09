@@ -1,0 +1,34 @@
+--- a/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
++++ b/iokit/Kernel/arm/SweetSpmiInterruptMux.cpp
+@@ -615,15 +615,26 @@
+ 			break;
+ 		}
+ 	}
+-	bool stillPending = false;
++	unsigned everAcked = 0;
++	for (unsigned pass = 0; pass < 4; ++pass) {
++		everAcked |= drainMasks[pass];
++	}
++	unsigned pendingRoutes = 0;
+ 	for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
+ 		const MuxRoute &route = routes[i];
+ 		if (route.active &&
+ 		    (read32(route.channel, 0x104u) & (1u << route.bit))) {
+-			stillPending = true;
+-		}
+-	}
+-	if ((!handled && !maintenance) || stillPending) {
++			pendingRoutes |= 1u << i;
++		}
++	}
++	/* An ACKed route may have reasserted; an unACKed route may have arrived
++	 * after its last scan. Neither proves a stuck source. Rearm the level
++	 * IRQ below and let the next drain handle either case. ACK failures
++	 * already return through disableHardware() above. */
++	const bool reassertedPending = (pendingRoutes & everAcked) != 0;
++	const bool newlyPending = (pendingRoutes & ~everAcked) != 0;
++	const bool stillPending = reassertedPending || newlyPending;
++	if (!handled && !maintenance && !stillPending) {
+ 		++faultCount;
+ 		unsigned pendingGroups = 0;
+ 		for (unsigned i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
