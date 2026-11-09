@@ -2,6 +2,39 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0180 F3真实MDSS IRQ/硬件vsync完成本地验证，待用户push/云编译；尚无新boot/实测。**
+基线2e5383b及0121a10实际源码；新补丁xnu/patches/0180-mh2lm-mdss-hardware-vsync.patch。
+SweetMDSS拥有验证后的ADT资源9–11、GIC115物理callback、软件IES/workloop、35秒延迟GIC
+软件pending投递probe（50ms后判一次命中），mode2通过后才开INTF1 TE RD_PTR bit2。
+顶半部只mask/原子状态计数/记时/排队；worker精确W1C bit2/计帧/开父线/发布mailbox，
+不把ACK后新pending判故障。fFrameTicks单独保存已处理帧时间戳，订阅不误拿下一顶半部ticks。
+默认sweetmdssirq0/sweetfbvsync0保持旧路径；mode1只GIC投递不使能外围；mode2实际RD_PTR。
+FB硬件档要求service1/mdss1/power1/contract0/mdssirq2；typed attachVsync/detachVsync单channel，
+provider发布只排队consumer IES，不反调FB gate。首真实帧后60Hz软件通知timer降100ms看门狗；
+250ms无帧显式ERROR/fallback，consumer非阻塞排队请求provider停IRQ。OFF停通知/提交/本地IRQ，
+ON成功后重开；终止关闭admission/停源/撤channel/锁下摘物理入口，maps/events到free才释放。
+每60秒统计frames/milli-Hz/p50/p99，运行期16KiB缓冲4096间隔，有界heapsort、dropped可见；
+OFF摘要partial1，>200帧/一秒统计窗停用。无自有扫描缓冲/翻页，CPU拷贝30Hz留给F4。
+本地：严格git apply零offset/fuzz、逐字节一致、114原CI源码marker；SweetMDSS/FB/sleh基线及
+验证树arm64-apple-darwin对象编译通过。FB/sleh告警不变；MDSS新增4条元类宏既有类别告警及
+29条有界数组unsafe-buffer-usage已审阅。实际provider及FB/channel ASan/UBSan通过，覆盖默认
+DCS/F2/0179、probe/ACK、新pending、时间戳竞态、60s样本、OFF/ON、watchdog/storm、RWP失败、
+withdraw/rebind、stop/迟到IRQ、close/publish并发、部分启动失败、资源归零。LSan受ptrace限制关闭。
+打包新增--framebuffer-vsync，同核fb-vsync-{baseline,gic,rdptr,hardware}四档，只有IRQ/vsync参数
+不同，保留原IRQ/ACM/runtime3/F2。真实ADT及参数检查通过，旧0121a10缺F3v2 marker会拒绝；
+未用旧内核生成新测试boot。底稿scratch/framebuffer-0180/{base,edited,verify,verification.json,
+strict-apply.txt,warning-counts.json,test-display.txt,test-framebuffer.txt,test-adt.txt,packaging-checks.json}。
+NEXT：用户push后下载新kernel/buildtree/buildlog，先核对0180完整源码及新marker再打包。
+先测真实GIC投递档（不是0179只读GIC档），进系统亮屏约40秒取日志；通过后RD_PTR档进入系统
+亮屏至少110秒（或armed后70秒）取得partial0统计，再手动OFF20–30秒/ON；最后完整硬件vsync档
+同样测试。只fastboot boot，持久日志即可；目标60±1Hz/p50/p99/OFF计数停止及输入/USB/电池健康。
+不默认重测baseline、不专项BUG-002、不重开BUG-003、不扩大整机PM。F3尚未实机验收。
+文档FRAMEBUFFER-VSYNC-F3第8节含接口架构/生命周期/测试步骤，路线及架构文档已同步。
+本轮无USB/电池/按键/mux源码修改、无push/设备操作；CircleCI blob仍
+ da0b6c0947a66f03491b3a9023590b49665292df。实现commit见本轮git log。
+
+**以下为历史交接；当前待编译代码与下一步以上段0180为准。**
+
 **CURRENT：0121a10 / 0179完整只读预检实测通过；下一步接真实MDSS IRQ/vsync。**
 日志sweetlog-0121a10-fb-irq-preflight.bin SHA256=
 504d8167c635b24fbc8bea4385ba1fda9eb0c0692bf2805b58d12325bcba46b3；有效318413/flush22/

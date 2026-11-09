@@ -1,7 +1,8 @@
 # F3：硬件 vsync 接入记录
 
-2026-11-09。当前 **0121a10 / 0179 只读预检实测通过**，用户确认画面、亮度、触摸、按键和手动息屏唤醒均正常、未见新增问题。
-尚未注册 MDSS IRQ handler、使能 RD_PTR 或替换软件 vsync，不能称 F3 验收通过。
+2026-11-09。**0180 实际 MDSS IRQ / typed 硬件 vsync 已实现并完成本地验证，待云编译和实机验收。**
+0121a10 / 0179 只读预检已实测通过；0180 新行为默认关闭，尚无实际 IRQ 投递/频率的实机结果。
+F3 整体尚未验收。最新实现、分档与下一步见第8节；第2–7节保留0179阶段记录。
 本步接续已验证正常使用路径的 F2，不重开 BUG-003；BUG-002 随日常使用观察。
 完整系统/设备低功耗已排到大目标四，当前只推进既定显示路线。
 
@@ -91,7 +92,7 @@ tests.json,test-*.txt,packaging-checks.json,old-kernel-rejection.txt}`。
 CircleCI 配置未改，blob 仍 `da0b6c0947a66f03491b3a9023590b49665292df`。
 以上为本地验证阶段记录；云产物及只读预检实测见第6、7节。
 
-## 4. 下一轮编译与测试
+## 4. 0179 阶段的编译与测试（已完成）
 
 用户 push 后下载同轮 kernel/buildtree/build-log；先核对 0178/0179 源码及 marker，再打包：
 
@@ -109,7 +110,7 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 只有完整档出现新启动问题才用 GIC 档分离地址访问阶段；仍异常再用关闭档，不默认重跑三档。
 0121a10云内核和三档boot已核对，路径见第6节；完整只读档已取得实测日志，见第7节。
 
-## 5. 预检后的 F3 剩余工作
+## 5. 0179 阶段登记的后续工作（0180实现见第8节）
 
 结合实机 revision、GIC 及来源状态确认资源/路线，随后接既定 GIC callback → software
 IOInterruptEventSource/IOWorkLoop：上半部屏蔽/时间戳，worker 清所选 RD_PTR/计帧/排队通知/再使能。
@@ -201,3 +202,150 @@ vsync订阅/撤回，既定GIC callback上半部屏蔽/记时、MDSS worker精�
 一律清除。跨provider/FB gate只排队，不反向同步调用。下一批实现后同核分档验证投递、
 RD_PTR频率与完整vsync路径；当前尚无这些代码或新boot，F3整体尚未验收。
 本轮仅分析及文档，无驱动/CI改动或push。
+
+
+## 8. 0180：真实 IRQ 和硬件 vsync（本地验证，待实机）
+
+补丁 `xnu/patches/0180-mh2lm-mdss-hardware-vsync.patch` 接在0179之后，基线取自
+0121a10实际云源码。修改SweetDisplayBackend.h、SweetMDSS.cpp、SweetFramebuffer.cpp、
+SweetFBService.inc和sleh.c，新增SweetMDSSIRQ.inc、SweetFBVsync.inc；无USB、按键、
+电池、SPMI/mux或CircleCI修改。新增inc由既有翻译单元包含，无需改编译文件列表。
+
+### 服务结构与接口
+
+```mermaid
+classDiagram
+ class SweetDisplayBackend {
+  <<IOService abstract>>
+  setPanelPower(on)
+  attachVsync(channel)
+  detachVsync(channel)
+  requestVsyncFallback()
+ }
+ class SweetMDSS {
+  IOWorkLoop + IOCommandGate
+  software IOInterruptEventSource
+  staged probe / watchdog timer
+  validated ADT MMIO resources
+  GIC115 physical callback slot
+ }
+ class AppleCLCD {
+  framebuffer IOWorkLoop + state gate
+  software frame IOInterruptEventSource
+  software vsync / watchdog timer
+  retained backend + channel
+ }
+ class SweetVsyncChannel {
+  <<OSObject mailbox>>
+  IOSimpleLock
+  retained software event source
+  latest sequence / frame / ticks / state
+  copySample()
+  close()
+ }
+ SweetDisplayBackend <|-- SweetMDSS
+ AppleCLCD --> SweetDisplayBackend : typed retained subscription
+ SweetMDSS --> SweetVsyncChannel : retained publication
+ AppleCLCD --> SweetVsyncChannel : owned mailbox
+```
+
+已有SweetDisplayClient负责IORegistry匹配/撤回，回调仍只保留引用和排队；AppleCLCD
+在自己的workloop完成typed attach/detach。一个pipeline只允许一个channel，第二个订阅返回Busy。
+后端持gate时，publish只在channel短自旋锁内更新数据并排队软件IES；不执行消费者代码，
+不获取framebuffer gate。消费者在自己workloop读快照并检查当前匹配仍为该后端。
+允许FB gate→provider gate同步调用；禁止provider gate→FB gate同步反调。
+
+物理入口沿用本项目的GIC callback，不引入Linux irq_domain或新IOInterruptController。
+唯一全局服务指针只用于GIC115物理投递，受永久dispatch短自旋锁保护；消费者不通过全局
+指针寻找后端。顶半部持该锁，只屏蔽自己的父线、原子状态迁移/计数/记时、排队worker。
+不读取TE、不做DSI/SPMI、不等待RWP、不直接通知FB。
+
+### 分阶段硬件接管
+
+- `sweetmdssirq=0`为默认，无新IRQ映射/配置/注入；原软件vsync保持不变。
+- `sweetmdssirq=1`：启动约35秒配置并软件pending注入**自己的INTID115**，约50ms后
+  检查恰好一次投递、pending/active清零，成功后父线保持masked；不使能外围TE。
+- `sweetmdssirq=2`：先做同样投递验证，通过后只开启INTF1 TE RD_PTR bit2。
+- `sweetfbvsync=1`须同时有service1/mdss1/power1/contract0及mdssirq2；配置不完整时
+  framebuffer明确拒绝启动，避免把未实际开启的实验误当成功。
+- 新profile复用0179追加资源9–11，provider校验物理地址/长度。配置前核对GICv3、INTID范围、
+  父线原先disabled/nonpending/nonactive、已知MDSSrevision/INTF1配置，且其他已知IRQ使能组
+  均关闭。条件不符报ERROR并停用新IRQ，不重置继承的显示配置。
+- GIC只修改115的group/config/priority/route，保存并在停止时恢复自己的字段，父线保持禁用。
+  NS group可能RAZ，投递证明以软件probe实际命中为准。worker内RWP等待上限1ms
+  （delay(1)×1000），不在自旋锁或中断上下文等待。
+- RD_PTR worker精确W1C bit2，保留ABL锁存的其他raw位，检查非目标enabled来源，记帧并
+  重新开父线。ACK后status再次置位不视为失败，新帧交给后续IRQ。
+- IRQ时间戳原子交给worker，worker另存**已处理帧时间戳**；发布不会误用下一次顶半部
+  覆盖的新时间戳。channel含累积帧数，消费者合并事件时推进相应计数、记录coalesced，
+  不把最新一份样本伪装成每一帧均单独送达。
+
+### 定时器、OFF与退出
+
+完整档收到第一份真实Frame前仍用软件vsync；收到后取消60Hz通知timer，切成100ms检查。
+正常通知来自RD_PTR的真实mach ticks。CPU拷贝限频sweetfb_hz=30仍保留，扫描缓冲/翻页属F4。
+provider每100ms检查已处理帧年龄；超过250ms报ERROR、mask父线/停本地bit2并发布Failed。
+consumer也检查最新channel时间戳；超时明确回软件vsync，并通过非阻塞接口只排队请求
+provider停用。该回退为F3计划既定机制，ERROR不受日志过滤隐藏，属性公开状态，
+不会静默恢复到硬件；新provider重新匹配才重置失败订阅。首次等待期间的软件通知有INFO说明。
+
+OFF先停止FB timer/通知/提交，再由provider屏蔽IRQ、禁用并清除自己的bit2、取消看门狗，
+之后执行F2 DCS28。即使28失败并补偿29，逻辑OFF仍不恢复vsync。ON成功后才重开IRQ；
+FB暂用软件ticks，下一真实帧转硬件。OFF期间无软件60Hz通知/复制。
+初始软件GIC probe不依赖面板状态，若OFF恰逢该短probe，仅完成probe，不开RD_PTR。
+在途顶半部可能在OFF边界结束，不能将这一条尾部投递当成持续OFF风暴；处理后的帧数须停止。
+
+provider的willTerminate/stop在gate下关admission、屏蔽父/本地源、停事件、发布Stopped、
+撤回channel并在dispatch锁下摘掉物理指针，映射及事件保留到free；迟到GIC115只走EOI。
+consumer在自己gate内detach、release backend、close channel、禁用/移除软件IES，
+再清理客户端；通知remove仍在gate外执行。close与publish用同一个短锁同步，
+事件移除与owner销毁前不再有新的有效通知。部分start失败也覆盖此清理路径。
+
+统计每完整亮屏60秒输出frames、milli-hz、间隔p50/p99(us)、samples/dropped、total/entries。
+每窗最多4096个间隔，使用运行期分配16KiB缓冲及有界heapsort；超过容量显式dropped。
+OFF输出partial=1摘要，不能将其作为60秒验收。>200帧/一秒统计窗会停用并报ERROR，
+这是有界计数保护，不是任意滑动一秒的严格限流器。常态不逐帧打日志。
+
+### 本地验证及限制
+
+- 对0121a10基线严格git apply，零offset/fuzz，所有输出逐字节一致；原CI114条源码marker通过。
+- SweetMDSS、SweetFramebuffer、sleh基线与补丁树均通过arm64-apple-darwin对象编译。
+  FB及sleh告警类别/数量不变；SweetMDSS新增channel元类宏相关的4条既有类别告警及
+  29条unsafe-buffer-usage（校验后常量映射下标、有界4096采样/heapsort索引），已逐项审阅。
+  本地clang19与云Xcode环境不同，不宣称全量云构建已经通过。
+- 实际provider/背光/client的ASan/UBSan：原DCS逐操作轨迹、F2、0179预检回归通过；新增
+  GIC-only、实际顶/底半部隔离、bit2精确ACK、新pending不误判、60秒样本统计、
+  订阅遇到下一帧顶半部仍保留已处理时间戳、OFF/ON、watchdog、风暴、未知使能源、
+  RWP超时、终止后迟到IRQ无MMIO、非阻塞回退请求和对象/映射归零通过。
+- 实际framebuffer/channel的ASan/UBSan：保留F1b/F2；新增首次帧切换、timer不造硬件通知、
+  合并计数、OFF零通知、ON恢复、明确一次回退、provider撤回/重匹配、排队中stop、
+  close与publish并发及部分start失败清理通过。LSan受本地ptrace限制关闭，资源计数仍检查。
+- ADT扩展及真实基础ADT CLI通过；四档参数无重复且只在irq/vsync不同，
+  保留原IRQ/ACM/runtime3/F2；旧0121a10内核缺F3v2 marker会在生成boot前被拒绝。
+  本地仅验证打包逻辑，没有用旧内核制造新功能测试boot。
+
+底稿在`work1/scratch/framebuffer-0180/`：verification.json、strict-apply.txt、warning-counts.json、
+各native编译日志、test-display.txt/test-framebuffer.txt/test-adt.txt、packaging-checks.json。
+CircleCI配置blob仍`da0b6c0947a66f03491b3a9023590b49665292df`。
+
+### 云编译后同核分档测试
+
+```bash
+tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编号 --framebuffer-vsync
+```
+
+| profile后缀 | sweetmdssirq | sweetfbvsync | 用途 |
+|---|---|---|---|
+| fb-vsync-baseline | 0 | 0 | 仅出新问题时回退定位 |
+| fb-vsync-gic | 1 | 0 | 首先证明真实GIC投递，外围IRQ仍关闭 |
+| fb-vsync-rdptr | 2 | 0 | 计数/ACK/OFF，前端保持软件vsync |
+| fb-vsync-hardware | 2 | 1 | 完整硬件vsync及消费者生命周期 |
+
+三档实验顺次验证，同一次编译即可；无需默认重跑baseline。先GIC档进入系统亮屏等约40秒取日志；
+通过后RD_PTR档进入系统后亮屏至少110秒（若看实时日志，则RD_PTR armed后再计70秒），
+取得partial=0完整统计，再手动息屏20–30秒并电源键唤醒，
+检查画面/亮度/触摸/三键及正常USB/电池状态。最后完整档同样验证统计和手动OFF/ON。
+只用fastboot boot，持久日志即可；不要求自动锁屏、USB重复插拔压力测试或专项BUG-002复测。
+关键验收仍是60秒60±1Hz、p50/p99、OFF不增长、无watchdog/风暴/新增功能异常。
+若失败先停在对应档分析日志，不把显式fallback后画面正常记为硬件vsync成功。
+通过后再进入F4自有扫描缓冲/翻页；本轮不改GPU、扫描地址或整机休眠。

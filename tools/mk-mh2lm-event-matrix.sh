@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service|--framebuffer-state|--framebuffer-power|--framebuffer-irq-preflight]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service|--framebuffer-state|--framebuffer-power|--framebuffer-irq-preflight|--framebuffer-vsync]\n' "$0" >&2
 	exit 2
 fi
 
@@ -16,6 +16,7 @@ DEPENDENCY_MATRIX=0
 FRAMEBUFFER_STATE=0
 FRAMEBUFFER_POWER=0
 FRAMEBUFFER_IRQ_PREFLIGHT=0
+FRAMEBUFFER_VSYNC=0
 case "$KEY_IRQ_PROFILE" in
 	'')
 		;;
@@ -48,6 +49,12 @@ case "$KEY_IRQ_PROFILE" in
 	--framebuffer-power)
 		FRAMEBUFFER_STATE=1
 		FRAMEBUFFER_POWER=1
+		KEY_IRQ_PROFILE='--framebuffer-service'
+		;;
+	--framebuffer-vsync)
+		FRAMEBUFFER_STATE=1
+		FRAMEBUFFER_POWER=1
+		FRAMEBUFFER_VSYNC=1
 		KEY_IRQ_PROFILE='--framebuffer-service'
 		;;
 	--framebuffer-irq-preflight)
@@ -327,6 +334,18 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
    fi
   done
  fi
+ if [ "$FRAMEBUFFER_VSYNC" = '1' ]; then
+  for marker in 'SWEET MDSS IRQ: F3 v2 staged mode=' \
+      'SWEET MDSS IRQ: GIC probe passed hits=' 'SWEET MDSS IRQ: RD_PTR armed' \
+      'SWEET MDSS IRQ: stats partial=' 'SWEET MDSS IRQ: FAILED' \
+      'SWEET FB VSYNC: F3 v2 mailbox consumer' 'SWEET FB VSYNC: hardware active' \
+      'SWEET FB VSYNC: FAILED'; do
+   if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+    printf 'kernel lacks F3 hardware vsync marker: %s\n' "$marker" >&2
+    exit 1
+   fi
+  done
+ fi
  if [ "$FRAMEBUFFER_IRQ_PREFLIGHT" = '1' ]; then
   for marker in 'SWEET MDSS IRQ PREFLIGHT: F3 v1 read-only' \
       'SWEET MDSS IRQ PREFLIGHT: v1 pass=%u GIC intid=115' \
@@ -337,6 +356,8 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
     exit 1
    fi
   done
+  python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --irq-preflight "$ADT" "$TMPDIR/mdss.adt"
+ elif [ "$FRAMEBUFFER_VSYNC" = '1' ]; then
   python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --irq-preflight "$ADT" "$TMPDIR/mdss.adt"
  else
   python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" "$ADT" "$TMPDIR/mdss.adt"
@@ -384,6 +405,15 @@ make_profile() {
 
 if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
  FB_ARGS='ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1 sweetbattirq=4 sweetbattruntime=3 sweetfbpreserveoff=1 sweetfbtrace=0 sweetdispprobe=1 sweetloglevel=2 sweetfbcontract=0 sweetfbproof=0'
+ if [ "$FRAMEBUFFER_VSYNC" = '1' ]; then
+  FB_ARGS="$FB_ARGS sweetmdss=1 sweetfbservice=1 sweetfbpower=1 sweetmdssirqprobe=0"
+  make_profile fb-vsync-baseline "LG G8X - XNU F3 IRQ disabled (${LABEL})" "$FB_ARGS sweetmdssirq=0 sweetfbvsync=0"
+  make_profile fb-vsync-gic "LG G8X - XNU F3 GIC delivery (${LABEL})" "$FB_ARGS sweetmdssirq=1 sweetfbvsync=0"
+  make_profile fb-vsync-rdptr "LG G8X - XNU F3 RD_PTR counting (${LABEL})" "$FB_ARGS sweetmdssirq=2 sweetfbvsync=0"
+  make_profile fb-vsync-hardware "LG G8X - XNU F3 hardware vsync (${LABEL})" "$FB_ARGS sweetmdssirq=2 sweetfbvsync=1"
+  printf 'kernel SHA256: %s\ncreated F3 IRQ baseline/GIC/RD_PTR/hardware-vsync profiles for %s\n' "$KERNEL_SHA256" "$LABEL"
+  exit 0
+ fi
  if [ "$FRAMEBUFFER_IRQ_PREFLIGHT" = '1' ]; then
   FB_ARGS="$FB_ARGS sweetmdss=1 sweetfbservice=1 sweetfbpower=1"
   make_profile fb-irq-baseline "LG G8X - XNU F3 preflight disabled (${LABEL})" "$FB_ARGS sweetmdssirqprobe=0"

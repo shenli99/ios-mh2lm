@@ -1,5 +1,11 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0180最新进度（2026-11-09）：** 实际MDSS GIC115/RD_PTR IRQ及typed硬件vsync已实现、
+通过本地arm64对象编译与ASan/UBSan验证，待云编译及实机验收。新行为默认关闭；完整档首次
+真实帧后切硬件vsync、OFF停通知、失败明确回退软件。一次编译可分GIC/RD_PTR/完整档测试，
+见[F3实现与测试](FRAMEBUFFER-VSYNC-F3.md#8-0180真实-irq-和硬件-vsync本地验证待实机)。
+以下0179及更早描述保留对应阶段边界；不表示0180尚未实现，也不提前认定F3验收通过。
+
 **0121a10实测补充：** 0179只读预检通过，GICv3/INTID115当前禁用且level，INTF1 TE RD_PTR锁存但未使能；用户确认无新增问题。实际MDSS IRQ handler/typed vsync订阅尚未实现，软件timer仍为现行路径；下一步接入真实IRQ。见[F3实测](FRAMEBUFFER-VSYNC-F3.md#7-0121a10-完整只读档实测预检通过)。
 
 **2026-11-09 / 0179补充：** F3新增默认关闭的SweetMDSS IRQ只读预检：provider追加ADT资源，独立timer在30/31/32秒取样，与亮度/电源共享workloop gate；缺资源仅停预检。软件vsync仍为现行路径，尚无MDSS IRQ handler或订阅。见[F3记录](FRAMEBUFFER-VSYNC-F3.md)。

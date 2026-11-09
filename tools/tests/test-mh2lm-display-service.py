@@ -17,6 +17,7 @@ arm = root/'iokit/Kernel/arm'
 header = (arm/'SweetDisplayBackend.h').read_text()
 source = (arm/'SweetMDSS.cpp').read_text()
 legacy = (root/'bsd/dev/sweet_display_probe.c').read_text()
+source = source.replace('#include "SweetMDSSIRQ.inc"', (arm/'SweetMDSSIRQ.inc').read_text())
 fb = (arm/'SweetFramebuffer.cpp').read_text()
 backlight = fb[fb.index('#define SWEET_BL_MAX'):fb.index('#endif /* ARM64_BOARD_CONFIG_MH2LM */', fb.index('#define SWEET_BL_MAX'))]
 backlight = backlight.replace('class AppleARMBacklight :', 'struct AppleARMBacklight :')
@@ -35,7 +36,8 @@ def function(text, name):
 
 # CPU barriers and actual MMIO are the only replaced engine functions.
 for name, body in [('dp_rd', 'return readReg(base,off);'),
-                   ('dp_wr', 'writeReg(base,off,v);')]:
+                   ('dp_wr', 'writeReg(base,off,v);'),
+                   ('dp_wr64', 'writeReg(base,off,(uint32_t)value);writeReg(base,off+4,(uint32_t)(value>>32));')]:
     original = function(source, name)
     source = source.replace(original, original[:original.index('{')+1]+body+'}')
 source = source.replace('class SweetMDSS :', 'struct SweetMDSS :')
@@ -81,9 +83,12 @@ prelude = r'''
 #define OSSafeReleaseNULL(x) do {if (x) {(x)->release();(x)=nullptr;}} while(0)
 using vm_offset_t=uintptr_t;
 using IOReturn=int;
-constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4;
+constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4,kIOReturnBusy=5;
+using IOOptionBits=unsigned;using IOInterruptState=unsigned;
 constexpr unsigned SWEET_DEV_FB_H=2340,SWEET_DEV_FB_W=1080,SWEET_DEV_FB_PA=0x9d200000,SWEET_DEV_FB_STRIDE=4320;
-static unsigned live=0,liveMaps=0;
+static unsigned live=0,liveMaps=0,rawBlocks=0;
+static void*IOMallocData(size_t n){void*p=malloc(n);if(p)++rawBlocks;return p;}
+static void IOFreeData(void*p,size_t){assert(rawBlocks);--rawBlocks;free(p);}
 struct OSObject {
  std::atomic<unsigned> refs{1};
  OSObject(){++live;} virtual ~OSObject(){--live;}
@@ -153,6 +158,7 @@ struct IOService : OSObject {
  bool inactive=false;
  using Notify=bool(*)(void*,void*,IOService*,IONotifier*);
  virtual bool start(IOService*){return true;}virtual void stop(IOService*){}
+ virtual bool willTerminate(IOService*,IOOptionBits){inactive=true;return true;}
  virtual IOReturn setProperties(OSObject*){return 0;}
  bool isInactive(){return inactive;}
  int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){mapCalls.push_back(i);assert(i<12);return i==missingMap?nullptr:new IOMemoryMap(i);}
@@ -170,10 +176,11 @@ IONotifier*IOService::addMatchingNotification(const char*k,OSDictionary*d,Notify
  auto*n=new IONotifier;n->kind=k;n->dict=d;d->retain();n->cb=cb;n->target=t;subscriptions.push_back(n);return n;
 }
 static void emit(const char*k,IOService*p){for(auto*n:subscriptions)if(n->kind==k)n->cb(n->target,nullptr,p,n);}
-static int enabled=1,probeEnabled=1,powerEnabled=0,irqProbeMode=0;
+static int enabled=1,probeEnabled=1,powerEnabled=0,irqProbeMode=0,irqMode=0;
 static bool PE_parse_boot_argn(const char*k,void*v,size_t){
  if(!strcmp(k,"sweetmdss")){*(int*)v=enabled;return true;}
  if(!strcmp(k,"sweetdispprobe")){*(int*)v=probeEnabled;return true;}
+ if(!strcmp(k,"sweetmdssirq")){*(int*)v=irqMode;return true;}
  if(!strcmp(k,"sweetmdssirqprobe")){*(int*)v=irqProbeMode;return true;}
  if(!strcmp(k,"sweetfbpower")){*(int*)v=powerEnabled;return true;}return false;
 }
@@ -184,7 +191,8 @@ static void quiet(const char*fmt,...){char text[2048];va_list a;va_start(a,fmt);
 #define SWEET_LOG_WARN quiet
 #define SWEET_LOG_ERROR quiet
 static bool sweet_log_level_enabled(unsigned){return true;}
-static uint64_t mach_absolute_time(){return 42;}
+static uint64_t fakeTicks=42;
+static uint64_t mach_absolute_time(){return fakeTicks;}
 static void absolutetime_to_nanoseconds(uint64_t t,uint64_t*n){*n=t;}
 static void delay(unsigned){}
 static constexpr uint64_t NSEC_PER_MSEC=1000000;
@@ -194,6 +202,8 @@ static IOSimpleLock*IOSimpleLockAlloc(){return IOLockAlloc();}
 static void IOSimpleLockFree(IOSimpleLock*p){IOLockFree(p);}
 static void IOSimpleLockLock(IOSimpleLock*p){p->lock();}
 static void IOSimpleLockUnlock(IOSimpleLock*p){p->unlock();}
+static IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock*p){p->lock();return 0;}
+static void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock*p,IOInterruptState){p->unlock();}
 static int legacyWrites;
 static int sweet_display_brightness_set(uint32_t){++legacyWrites;return 0;}
 
@@ -211,7 +221,14 @@ static uint32_t readReg(uintptr_t b,uint32_t o){
  uint32_t v=regs[b+o];if(b==bases[6]&&o==0x110&&dmaFired)v=(dmaDone&&!activeDMAFails?1:0)|(lateError?(1u<<24):0);
  trace.push_back({false,b+o,v});return v;
 }
-static void writeReg(uintptr_t b,uint32_t o,uint32_t v){trace.push_back({true,b+o,v});regs[b+o]=v;if(b==bases[6]&&o==0x90){dmaFired=true;activeDMAFails=failNextDMAs>0;if(failNextDMAs)--failNextDMAs;}}
+static bool irqMMIO=false,injectLateFrame=false;
+static void writeReg(uintptr_t b,uint32_t o,uint32_t v){trace.push_back({true,b+o,v});
+ if(irqMMIO&&b==0x17a00000&&o==0x18c){regs[b+0x10c]&=~v;return;}
+ if(irqMMIO&&b==0x17a00000&&o==0x10c){regs[b+o]|=v;return;}
+ if(irqMMIO&&b==0x17a00000&&o==0x28c){regs[b+0x20c]&=~v;return;}
+ if(irqMMIO&&b==0x17a00000&&o==0x20c){regs[b+o]|=v;return;}
+ if(irqMMIO&&b==0x0ae6e800&&o==8){regs[b+4]&=~v;if(injectLateFrame){regs[b+4]|=4;injectLateFrame=false;}return;}
+ regs[b+o]=v;if(b==bases[6]&&o==0x90){dmaFired=true;activeDMAFails=failNextDMAs>0;if(failNextDMAs)--failNextDMAs;}}
 static void resetRegs(){trace.clear();regs.clear();dmaFired=false;dmaDone=true;lateError=false;
  failNextDMAs=0;activeDMAFails=false;
  regs[bases[0]+0xc]=1;regs[bases[1]+0x2080]=0;regs[bases[6]+4]=5;
@@ -436,9 +453,99 @@ int main(){
  s->stop(nub);fire(s);assert(trace.empty());s->release();
  for(int mode:{-1,3}){irqProbeMode=mode;mapCalls.clear();s=make(nub);
   assert(mapCalls.size()==9&&!s->fIrqProbe);s->stop(nub);s->release();}
- irqProbeMode=0;
+
+ irqProbeMode=0;irqMode=2;powerEnabled=1;probeEnabled=0;irqMMIO=true;
+ auto irqRegs=[](){resetRegs();fakeTicks=1000000000;
+  regs[0x17a00000]=0x12;regs[0x17a00004]=0x7b041d;regs[0x17a0ffe8]=0x3b;
+  regs[0x17a00470]=0x80123456;regs[0x0ae00000]=0x50000001;
+  regs[bases[4]+0x284]=1;regs[bases[4]+0x288]=0x180088;
+  regs[bases[4]+0x2a4]=0x925;regs[bases[4]+0x2b4]=0x80000001;
+  regs[0x0ae6e804]=0xf;
+ };
+ auto timer=[](SweetMDSS*p){std::lock_guard<std::recursive_mutex> l(p->fLoop->gate);
+  p->fIrqTimer->timeout=0;SweetMDSS::irqTimerAction(p,p->fIrqTimer);};
+ auto startProbe=[&](SweetMDSS*p){assert(p->fIrqTimer->timeout==35000);timer(p);
+  assert(p->fIrqPhase==1&&p->fIrqState==SweetMDSS::IrqProbe);
+  assert(regs[0x0ae6e800]==0); // GIC probe cannot enable a peripheral
+  assert(sweet_mdss_irq(115));assert(p->fProbeHits==1);fakeTicks+=50000000;timer(p);
+ };
+ auto frame=[&](SweetMDSS*p,uint64_t delta){fakeTicks+=delta;
+  regs[0x0ae6e804]|=4;regs[0x0ae00010]=1;
+  auto beforeFrame=p->fFrameCount;assert(sweet_mdss_irq(115));
+  assert(p->fFrameCount==beforeFrame&&!(regs[0x17a0010c]&(1u<<19))); // top half never drains or notifies
+  pump();
+ };
+ assert(!sweet_mdss_irq(116));assert(sweet_mdss_irq(115));
+ // GIC-only mode proves delivery and leaves TE disabled, with no interval buffer.
+ irqMode=1;irqRegs();s=make(nub);startProbe(s);
+ assert(s->fIrqPhase==2&&s->fIrqState==SweetMDSS::IrqIdle&&!s->fIntervals);
+ assert(regs[0x0ae6e800]==0&&!(regs[0x17a0010c]&(1u<<19)));
+ s->stop(nub);assert(regs[0x17a00470]==0x80123456);s->release();assert(!liveMaps);queued.clear();
+ // Real hardware path; mailbox publications queue, never call consumer actions inline.
+ irqMode=2;irqRegs();s=make(nub);loop=IOWorkLoop::workLoop();
+ unsigned received=0;
+ auto*event=IOInterruptEventSource::interruptEventSource(nub,[](OSObject*,IOInterruptEventSource*,int){++changes;});
+ assert(loop->addEventSource(event)==0);auto*channel=SweetVsyncChannel::withEvent(event);assert(channel);
+ assert(s->attachVsync(channel)==0);pump();SweetVsyncSample sample{};assert(channel->copySample(&sample)&&sample.state==SweetVsyncWaiting);
+ auto*second=SweetVsyncChannel::withEvent(event);assert(s->attachVsync(second)==kIOReturnBusy);second->release();
+ startProbe(s);pump();assert(s->fIrqState==SweetMDSS::IrqArmed&&regs[0x0ae6e800]==4);
+ assert(regs[0x0ae6e804]==0xb); // only RD_PTR was cleared, the other ABL raw bits survive
+ received=changes;frame(s,16666667);assert(s->fFrameCount==1&&changes==received);
+ pump();assert(changes==received+1&&channel->copySample(&sample)&&sample.frame==1&&sample.state==SweetVsyncFrame&&sample.ticks==fakeTicks);
+ assert(regs[0x17a0010c]&(1u<<19));
+ // A new RD_PTR arriving after ACK is delivered by the next IRQ, not quarantined.
+ injectLateFrame=true;frame(s,16666667);assert(s->fFrameCount==2&&s->fIrqState==SweetMDSS::IrqArmed&&(regs[0x0ae6e804]&4));
+ frame(s,16666667);assert(s->fFrameCount==3);
+ // Subscription while a newer IRQ awaits worker processing reports the last
+ // completed frame timestamp, never the unprocessed next top-half timestamp.
+ auto processedTicks=s->fFrameTicks;fakeTicks+=16666667;regs[0x0ae6e804]|=4;sweet_mdss_irq(115);
+ s->detachVsync(channel);assert(s->attachVsync(channel)==0);
+ assert(channel->copySample(&sample)&&sample.frame==3&&sample.ticks==processedTicks);
+ pump();assert(s->fFrameCount==4);
+ uint32_t mixed[]={50,1,100,2,90,3,80};mdss_interval_sort(mixed,7);
+ for(unsigned i=1;i<7;++i)assert(mixed[i-1]<=mixed[i]);
+ // 60 seconds worth of events, p50/p99 from actual top-half timestamps.
+ for(unsigned i=0;i<3600;++i)frame(s,16666667);
+ messages.clear();timer(s);assert(hasMessage("stats partial=0")&&hasMessage("p50-us=16666 p99-us=16666"));
+ assert(s->fIrqState==SweetMDSS::IrqArmed);
+ // OFF masks parent/local gate; queued frame before OFF cannot publish afterward.
+ fakeTicks+=16666667;regs[0x0ae6e804]|=4;sweet_mdss_irq(115);
+ assert(s->setPanelPower(false)==0);auto offFrames=s->fFrameCount;pump();
+ assert(s->fFrameCount==offFrames&&s->fIrqState==SweetMDSS::IrqIdle&&regs[0x0ae6e800]==0&&s->fIrqTimer->timeout==0);
+ assert(channel->copySample(&sample)&&sample.state==SweetVsyncOff);
+ fakeTicks+=60000000000ULL;timer(s);assert(s->fIrqState==SweetMDSS::IrqIdle&&s->fFrameCount==offFrames);
+ assert(s->setPanelPower(true)==0&&s->fIrqState==SweetMDSS::IrqArmed);
+ frame(s,16666667);assert(s->fFrameCount==offFrames+1);
+ // Detach synchronizes future publications; close synchronizes queued event ownership.
+ s->detachVsync(channel);assert(!s->fVsyncChannel);channel->close();assert(!channel->copySample(&sample));
+ loop->removeEventSource(event);event->release();channel->release();loop->release();queued.clear();
+ // Missing RD_PTR watchdog is explicit and permanent until a new provider instance.
+ fakeTicks+=300000000;messages.clear();timer(s);
+ assert(s->fIrqState==SweetMDSS::IrqFailed&&hasMessage("watchdog >250ms"));
+ assert(!(regs[0x17a0010c]&(1u<<19))&&regs[0x0ae6e800]==0);
+ s->stop(nub);s->release();assert(!liveMaps&&!rawBlocks);queued.clear();
+ // Software probe failure, non-target owner, and RWP timeout fail closed.
+ for(unsigned kind=0;kind<3;++kind){irqRegs();s=make(nub);
+  if(kind==1)regs[0x0ae01010]=1;
+  if(kind==2)regs[0x17a00000]|=1u<<31;
+  timer(s);if(!kind){fakeTicks+=50000000;timer(s);}
+  assert(s->fIrqState==SweetMDSS::IrqFailed&&regs[0x0ae6e800]==0);
+  s->stop(nub);s->release();assert(!liveMaps&&!rawBlocks);queued.clear();
+ }
+ // Storm cannot create unbounded work/notifications; disable only the owned pipeline.
+ irqRegs();s=make(nub);startProbe(s);
+ for(unsigned i=0;i<201;++i)frame(s,1000000);
+ assert(s->fIrqState==SweetMDSS::IrqFailed&&s->fFrameCount==200&&regs[0x0ae6e800]==0);
+ s->stop(nub);s->release();queued.clear();
+ // willTerminate disconnects the physical callback before maps/events can die.
+ irqRegs();s=make(nub);startProbe(s);assert(s->willTerminate(nub,0));
+ trace.clear();assert(sweet_mdss_irq(115));assert(trace.empty());s->stop(nub);s->release();queued.clear();
+ // A consumer watchdog requests shutdown by queuing, with no inline MMIO/gate call.
+ irqRegs();s=make(nub);startProbe(s);trace.clear();s->requestVsyncFallback();assert(trace.empty());pump();assert(s->fIrqState==SweetMDSS::IrqFailed);
+ s->stop(nub);s->release();queued.clear();
+ assert(!rawBlocks&&!liveMaps);irqMode=0;irqMMIO=false;
  nub->release();assert(live==0);
- puts("PASS: actual service/client; legacy DCS traces, F2 short packets/LP, idempotence, frozen TE, recovery/unknown state, independent fault budgets, gates/stop F3 read-only snapshots/decoding/bounds/clock admission/default compatibility and zero live objects");
+ puts("PASS: actual service/client; legacy DCS traces, F2 short packets/LP, idempotence, frozen TE, recovery/unknown state, independent fault budgets, gates/stop, F3 IRQ/probe/ACK/mailbox/storm/watchdog/OFF/termination, F3 read-only snapshots/decoding/bounds/clock admission/default compatibility and zero live objects");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-display-service-') as temp:
@@ -448,4 +555,6 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-display-service-') as temp:
     binary = Path(temp)/'test'
     subprocess.run([compiler, '-std=c++17', '-g', '-pthread', '-fsanitize=address,undefined',
                     '-fno-omit-frame-pointer', str(cpp), '-o', str(binary)], check=True)
-    subprocess.run([str(binary)], check=True)
+    env=dict(os.environ)
+    env['ASAN_OPTIONS']=env.get('ASAN_OPTIONS','')+':detect_leaks=0'
+    subprocess.run([str(binary)], check=True,env=env,timeout=45)

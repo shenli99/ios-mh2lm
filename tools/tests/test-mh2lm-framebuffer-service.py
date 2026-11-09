@@ -31,6 +31,16 @@ struct SweetFBContract : OSObject {
  IOReturn invoke(IOMobileFramebufferUserClient *,uint32_t,IOExternalMethodArguments *){return kIOReturnUnsupported;}
 };''')
 source = source.replace('#include "SweetFBService.inc"', service)
+source = source.replace('#include "SweetFBVsync.inc"', (arm/'SweetFBVsync.inc').read_text())
+source = source.replace('class SweetDisplayBackend;', 'struct SweetDisplayBackend;')
+source = source.replace('class SweetVsyncChannel;', 'struct SweetVsyncChannel;')
+# Exercise the real retained mailbox, including its close/publication lock.
+header=(arm/'SweetDisplayBackend.h').read_text()
+channel=header[header.index('class SweetMDSS;'):header.index('class SweetDisplayBackend :')]
+channel=channel.replace('class SweetVsyncChannel :', 'struct SweetVsyncChannel :')
+channel=channel.replace('public:', '').replace('private:', '')
+channel+=(arm/'SweetMDSSIRQ.inc').read_text().split('static IOSimpleLock *mdssIRQDispatch;')[0]
+
 source = re.sub(r'^#include.*\n', '', source, flags=re.M)
 
 prelude = r'''
@@ -62,7 +72,7 @@ using IOReturn=uint32_t;using UInt32=uint32_t;using SInt32=int32_t;
 using task_t=uintptr_t;using mach_port_t=uint32_t;using mach_vm_address_t=uint64_t;
 using io_user_reference_t=uint64_t;using OSAsyncReference64=uint64_t[8];
 constexpr IOReturn kIOReturnSuccess=0,kIOReturnBadArgument=0xe00002c2,kIOReturnOffline=0xe00002d7,
- kIOReturnUnsupported=0xe00002c7,kIOReturnNoMemory=0xe00002bd,kIOReturnNotReady=0xe00002d8;
+ kIOReturnUnsupported=0xe00002c7,kIOReturnNoMemory=0xe00002bd,kIOReturnNotReady=0xe00002d8,kIOReturnBusy=0xe00002d5;
 constexpr uint32_t kIOUCVariableStructureSize=0xffffffffU,MACH_PORT_NULL=0;
 constexpr unsigned kIOExternalMethodScalarInputCountMax=16,kIOExternalMethodScalarOutputCountMax=16;
 constexpr unsigned kIOUserNotifyOptionCanDrop=1;
@@ -77,7 +87,11 @@ struct OSObject {
  OSObject(){++live;}virtual ~OSObject(){--live;}virtual bool init(){return true;}virtual void free(){}
  void retain(){assert(refs.fetch_add(1)>0);}void release(){if(refs.fetch_sub(1)==1){free();delete this;}}
 };
-using IOLock=std::mutex;
+using IOLock=std::mutex;using IOSimpleLock=std::mutex;using IOInterruptState=unsigned;
+static IOSimpleLock*IOSimpleLockAlloc(){return new IOSimpleLock;}
+static void IOSimpleLockFree(IOSimpleLock*p){delete p;}
+static IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock*p){p->lock();return 0;}
+static void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock*p,IOInterruptState){p->unlock();}
 static IOLock *IOLockAlloc(){return new IOLock;}
 static void IOLockFree(IOLock*p){delete p;}
 static void IOLockLock(IOLock*p){++lockCalls;p->lock();}static void IOLockUnlock(IOLock*p){p->unlock();}
@@ -112,14 +126,24 @@ struct IOWorkLoop : OSObject {
 struct IOCommandGate : Event {
  using Action=IOReturn(*)(OSObject*,void*,void*,void*,void*);
  static IOCommandGate*commandGate(OSObject*o){auto*p=new IOCommandGate;p->owner=o;return p;}
- IOReturn runAction(Action a,void*x){std::lock_guard<std::recursive_mutex> l(loop->gate);return a(owner,x,nullptr,nullptr,nullptr);}
+ IOReturn runAction(Action a,void*x=nullptr){std::lock_guard<std::recursive_mutex> l(loop->gate);return a(owner,x,nullptr,nullptr,nullptr);}
 };
 struct IOTimerEventSource : Event {
  using Action=void(*)(OSObject*,IOTimerEventSource*);Action action;unsigned timeout=0;
  static IOTimerEventSource*timerEventSource(OSObject*o,Action a){auto*p=new IOTimerEventSource;p->owner=o;p->action=a;return p;}
- void setTimeoutUS(unsigned n){timeout=n;}void cancelTimeout(){timeout=0;}
+ void setTimeoutUS(unsigned n){timeout=n;}void setTimeoutMS(unsigned n){timeout=n*1000;}void cancelTimeout(){timeout=0;}
  void fire(){std::lock_guard<std::recursive_mutex> l(loop->gate);if(timeout)action(owner,this);}
 };
+// Software IES queues only; callback executes later under its own workloop.
+struct IOInterruptEventSource : Event {
+ using Action=void(*)(OSObject*,IOInterruptEventSource*,int);
+ Action action;std::atomic<bool> enabled{true},pending{false};
+ static IOInterruptEventSource*interruptEventSource(OSObject*o,Action a){auto*p=new IOInterruptEventSource;p->owner=o;p->action=a;return p;}
+ void interruptOccurred(void*,void*,int){if(enabled)pending=true;}
+ void disable(){enabled=false;pending=false;}
+ void pump(){assert(loop);std::lock_guard<std::recursive_mutex> l(loop->gate);if(enabled&&pending.exchange(false))action(owner,this,1);}
+};
+CHANNEL_IMPLEMENTATION
 struct IOMemoryDescriptor : OSObject {size_t length=0;size_t getLength(){return length;}};
 struct IOMemoryMap : OSObject {};
 struct IOExternalMethodArguments {
@@ -160,7 +184,13 @@ static unsigned sweet_surface_port_in_task(SweetSurface*,task_t){return 77;}
 static std::vector<bool> panelRequests;
 static IOReturn panelResult=0;
 struct SweetDisplayBackend : IOService {
- IOReturn setPanelPower(bool on){panelRequests.push_back(on);return panelResult;}
+ SweetVsyncChannel*channel=nullptr;unsigned fallbackRequests=0;uint64_t frame=0;
+ IOReturn setPanelPower(bool on){panelRequests.push_back(on);if(channel)channel->publish(frame,0,on?SweetVsyncWaiting:SweetVsyncOff);return panelResult;}
+ IOReturn attachVsync(SweetVsyncChannel*c){if(channel&&channel!=c)return kIOReturnBusy;if(!channel){channel=c;c->retain();}c->publish(frame,0,SweetVsyncWaiting);return 0;}
+ void detachVsync(SweetVsyncChannel*c){if(channel==c)OSSafeReleaseNULL(channel);}
+ void requestVsyncFallback(){++fallbackRequests;}
+ void sample(uint64_t ticks,unsigned state=SweetVsyncFrame){assert(channel);if(state==SweetVsyncFrame)++frame;channel->publish(frame,ticks,state);}
+ void free()override{OSSafeReleaseNULL(channel);}
 };
 static SweetDisplayBackend *published=nullptr;
 static bool failWatch=false;
@@ -174,7 +204,7 @@ struct SweetDisplayClient : OSObject {
 };
 struct PE_Video {uint64_t v_baseAddr;uint32_t v_width,v_height,v_rowBytes;};
 static void PE_current_console(PE_Video*v){*v={0x9d200000,4,4,16};}
-static int serviceArg=1,mdssArg=1,contractArg=0,powerArg=0,preserveArg=1;
+static int serviceArg=1,mdssArg=1,contractArg=0,powerArg=0,preserveArg=1,vsyncArg=0,irqArg=0;
 static bool PE_parse_boot_argn(const char*k,void*p,size_t){
  int v=0;
  if(!strcmp(k,"sweetfbservice"))v=serviceArg;
@@ -183,11 +213,14 @@ static bool PE_parse_boot_argn(const char*k,void*p,size_t){
  else if(!strcmp(k,"sweetfbpower"))v=powerArg;
  else if(!strcmp(k,"sweetfb_hz"))v=30;
  else if(!strcmp(k,"sweetfb_native"))v=1;
+ else if(!strcmp(k,"sweetfbvsync"))v=vsyncArg;
+ else if(!strcmp(k,"sweetmdssirq"))v=irqArg;
  else if(!strcmp(k,"sweetfbpreserveoff"))v=preserveArg;
  else return false;
  memcpy(p,&v,sizeof(v));return true;
 }
-static uint64_t mach_absolute_time(){return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
+static uint64_t fakeTicks=0;
+static uint64_t mach_absolute_time(){if(fakeTicks)return fakeTicks;return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
 static void absolutetime_to_nanoseconds(uint64_t a,uint64_t*b){*b=a;}
 static SInt32 OSIncrementAtomic(volatile SInt32*p){return __atomic_add_fetch(p,1,__ATOMIC_RELAXED);}
 static void proc_selfname(char*p,size_t n){snprintf(p,n,"fixture");}
@@ -200,6 +233,8 @@ static void quiet(const char*,...){}
 #define SWEET_LOG_ERROR(...) do{++errors;}while(0)
 static bool sweet_log_level_enabled(unsigned){return false;}
 '''
+
+prelude=prelude.replace('CHANNEL_IMPLEMENTATION',channel)
 
 tests = r'''
 static IOReturn call(IOMobileFramebufferUserClient*c,uint32_t s,IOExternalMethodArguments&a){return c->externalMethod(s,&a,nullptr,nullptr,nullptr);}
@@ -289,9 +324,49 @@ int main(){
  f->stop(provider);unsigned endRequests=panelRequests.size();
  assert(call(c,12,a)==kIOReturnOffline&&panelRequests.size()==endRequests);
  c->stop(f);c->release();f->release();published->release();published=nullptr;
+ // F3 opt-in requires power/provider IRQ configuration; failures reclaim all resources.
+ vsyncArg=1;
+ {auto*x=new AppleCLCD;assert(!x->start(provider));x->release();assert(live==1);}
+ powerArg=1;irqArg=2;
+ for(int fail: {0,1,2}){failEvent=fail;auto*x=new AppleCLCD;assert(!x->start(provider));x->release();assert(live==1);}failEvent=-1;
+ failWatch=true;{auto*x=new AppleCLCD;assert(!x->start(provider));x->release();assert(live==1);}failWatch=false;
+ fakeTicks=1000000000;published=new SweetDisplayBackend;
+ f=new AppleCLCD;assert(f->start(provider));f->fDisplayClient->fire();assert(f->fVsyncBackend==published&&!f->fHardwareVsyncActive);
+ c=client(f);assert(c->registerNotificationPort(20,0,0)==0);
+ in[0]=123;in[1]=456;in[2]=5;in[3]=0;a=scalar(in,4,nullptr,0);assert(call(c,72,a)==0);
+ f->fHardwareEvent->pump(); // initial Waiting keeps software ticks
+ unsigned beforeNotify=notified;f->fVsync->fire();assert(notified==beforeNotify+1);
+ auto tick=[&](unsigned frames){for(unsigned i=0;i<frames;++i){fakeTicks+=16666667;published->sample(fakeTicks);}f->fHardwareEvent->pump();};
+ beforeNotify=notified;tick(1);assert(notified==beforeNotify+1&&f->fHardwareVsyncActive&&f->fHardwareTicks==fakeTicks);
+ assert(f->fVsync->timeout==100000);beforeNotify=notified;auto count=f->fVsyncCount;
+ fakeTicks+=50000000;f->fVsync->fire();assert(notified==beforeNotify&&f->fVsyncCount==count); // watchdog is not synthetic vsync
+ tick(3);assert(notified==beforeNotify+1&&f->fVsyncCount==count+3&&f->fHardwareCoalesced==2);
+ // OFF cancels timer and publishes no notification/present even for queued frames.
+ fakeTicks+=16666667;published->sample(fakeTicks);beforeNotify=notified;count=f->fVsyncCount;
+ in[0]=0;a=scalar(in,1,nullptr,0);assert(call(c,12,a)==0&&f->fPowerOff&&f->fVsync->timeout==0);
+ f->fHardwareEvent->pump();tick(2);f->fVsync->fire();assert(notified==beforeNotify&&f->fVsyncCount==count&&!f->fHardwareVsyncActive);
+ in[0]=1;assert(call(c,12,a)==0&&!f->fPowerOff&&f->fVsync->timeout==SWEET_FB_VSYNC_US);
+ f->fHardwareEvent->pump();tick(1);assert(f->fHardwareVsyncActive);
+ // Consumer watchdog does not synchronously call provider hardware; request once.
+ beforeNotify=notified;fakeTicks+=300000000;f->fVsync->fire();assert(!f->fHardwareVsyncActive&&f->fVsyncFallback&&published->fallbackRequests==1&&notified==beforeNotify+1);
+ tick(1);assert(!f->fHardwareVsyncActive);f->fallbackHardwareVsync("repeat");assert(published->fallbackRequests==1);
+ // Provider withdrawal/rebind resets failed subscription, never uses stale mailbox.
+ auto*old=published;published=nullptr;f->fDisplayClient->fire();assert(!old->channel&&!f->fVsyncBackend);old->release();
+ published=new SweetDisplayBackend;f->fDisplayClient->fire();f->fHardwareEvent->pump();tick(1);assert(f->fHardwareVsyncActive&&!f->fVsyncFallback);
+ beforeNotify=notified;published->sample(fakeTicks,SweetVsyncFailed);f->fHardwareEvent->pump();assert(f->fVsyncFallback&&published->fallbackRequests==1&&notified==beforeNotify);
+ // Stop races queued publication: detach + close prevent callbacks after client cleanup.
+ auto*mailbox=f->fVsyncChannel;mailbox->retain();auto*ev=f->fHardwareEvent;ev->retain();
+ published->sample(fakeTicks);f->stop(provider);assert(!published->channel&&!f->fVsyncChannel&&!ev->enabled);
+ mailbox->publish(999,fakeTicks,SweetVsyncFrame);SweetVsyncSample sample{};assert(!mailbox->copySample(&sample)&&!ev->pending);
+ mailbox->release();ev->release();c->stop(f);c->release();f->release();published->release();published=nullptr;
+ // Synchronize a publication already inside close's lock, without acquiring any consumer gate.
+ auto*loop=IOWorkLoop::workLoop();ev=IOInterruptEventSource::interruptEventSource(provider,[](OSObject*,IOInterruptEventSource*,int){});
+ assert(loop->addEventSource(ev)==0);mailbox=SweetVsyncChannel::withEvent(ev);
+ std::thread writer([&]{for(unsigned i=0;i<10000;++i)mailbox->publish(i,42,SweetVsyncFrame);});
+ mailbox->close();writer.join();assert(!mailbox->copySample(&sample));mailbox->release();ev->disable();loop->removeEventSource(ev);ev->release();loop->release();
  provider->release();
  assert(live==0&&rawBlocks==0&&dispatchCalls>0);
- puts("PASS: actual F1b/F2 dispatch, gates, typed power requests, pixel preservation/fallback, stop/close and resource cleanup");
+ puts("PASS: actual F1b/F2 dispatch, gates, typed power requests, pixel preservation/fallback, stop/close, real F3 mailbox/vsync/coalescing/OFF/watchdog/rebind and resource cleanup");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-fb-service-') as tmp:
