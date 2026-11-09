@@ -1,7 +1,6 @@
 # F1b：AppleCLCD 后端绑定、分发表与状态 gate（0176）
 
-2026-11-09。接续已通过正常运行路径功能验收的F1a。状态：实现及本地验证完成，待用户
-push、云编译及实机验证；尚无本补丁的云产物或boot，F1整体未验收。
+2026-11-09。接续已通过正常运行路径功能验收的F1a。状态：实现、本地验证及0121a7云产物/boot回读核对完成，待实机验证；F1整体未验收。
 
 ## 本轮架构
 
@@ -103,3 +102,27 @@ BUG-004充电A/B已结束，不重新专项；BUG-001/002/003/004及半透明基
 底稿`work1/scratch/framebuffer-0176/{base,edited,verify,implement.py,make-patch.py,compile.py,
 verification.json,warning-counts.json,tests.json,test-*.txt,old-kernel-rejection.txt}`。
 本轮未push，未执行设备boot/刷写。真实服务终止和本段设备运行尚未验收。
+
+
+## 0121a7 云产物及测试 boot（待实测）
+
+预期实现提交`b1c7969`。44个已跟踪源码文件逐字节匹配，其中0176两文件匹配；
+114个既有CI源码marker及新增F1b内核marker通过，kernel归档manifest核验通过。
+未收到本轮全量构建日志或CI run ID，未检查全量编译告警。
+
+- kernel SHA256：`92cb3d7df535f692ba5d5fc220068da8f50d4e3a1ca9ce974fc084dadac55c8b`，与0121a6不同。
+- `out-bs/boot-16k-0121a7-fb-state-baseline.img`：35,667,968字节，SHA256
+  `ac15b4a0dedfb247167c6df1bf4bb19c391c7ece4eacf6c9a882be53170ee080`。
+- `out-bs/boot-16k-0121a7-fb-state-gated.img`：35,667,968字节，SHA256
+  `3cf98432131b221478c8031e28b80ae8d2678df0f90e3887ae8c2bea96e1fbc2`。
+
+从最终Android boot回读header/FAT，kernel blob、ramdisk、XNU、派生ADT和TOML均匹配；
+参数无重复，两档仅sweetfbservice0/1不同，均sweetmdss1，原ADT字节未改。
+IRQ/ACM/runtime3及preserveoff1保留，trace/proof/contract0、probe1/loglevel2。
+底稿`work1/scratch/artifact-0121a7/{verification.json,source-compare.json,boot-verification.json,
+verify-artifacts.py,verify-boots.py,packaging.txt,mdss.adt}`。
+
+优先只测gated：启动等35秒，桌面连续触摸/滑动、三个实体键、关机界面/取消、亮度
+低→高→低、手动息屏/唤醒3轮，确认USB ACM可用；记录新增冻结、明显迟缓或亮度/唤醒失败。
+导出`sweetlog-0121a7-fb-state-gated.bin`。仅有新增异常时再用baseline定位。
+本轮未改内核/CI、未push、未操作设备，无需为打包重新编译；不重开充电A/B或BUG-003专项。

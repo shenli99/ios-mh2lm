@@ -2,6 +2,26 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0121a7 / 0176云产物核对及F1b两档boot打包回读完成，待用户实测。**
+预期实现b1c7969；44个已跟踪源码逐字节匹配（0176两文件），114个既有CI源码marker及
+新增F1b内核marker通过，归档manifest通过。未收到全量build log/CI run ID，未核对全量告警。
+kernel SHA256=92cb3d7df535f692ba5d5fc220068da8f50d4e3a1ca9ce974fc084dadac55c8b，与a6不同。
+out-bs/boot-16k-0121a7-fb-state-{baseline,gated}.img均35,667,968字节；SHA256分别
+ac15b4a0dedfb247167c6df1bf4bb19c391c7ece4eacf6c9a882be53170ee080、
+3cf98432131b221478c8031e28b80ae8d2678df0f90e3887ae8c2bea96e1fbc2。
+最终boot回读header/FAT/kernel blob/ramdisk/XNU/ADT/TOML通过，参数无重复，仅service0/1
+不同，均mdss1；原ADT未改。IRQ/ACM/runtime3/preserveoff1保留，trace/proof/contract0，
+probe1/loglevel2。底稿scratch/artifact-0121a7/{verification.json,source-compare.json,
+boot-verification.json,verify-artifacts.py,verify-boots.py,packaging.txt,mdss.adt}。
+NEXT：优先fastboot boot gated，启动等35秒；桌面连续触摸/滑动、三键、关机界面/取消、
+亮度低高低、手动息屏/唤醒3轮、USB ACM；记录新增卡死/迟缓/亮度或唤醒异常，导出
+sweetlog-0121a7-fb-state-gated.bin。有新增问题再测同核baseline，不默认重测两档。
+BUG-001/002/003/004继续独立跟踪，不重开充电A/B或缺时间专项；F1b/F1未上机验收。
+本轮只核对/打包/文档，未改内核或CI、未push/操作设备，无需重新编译。
+CI blob仍da0b6c0947a66f03491b3a9023590b49665292df。详见docs/FRAMEBUFFER-SERVICE-F1B.md。
+
+**以下为历史交接，当前产物及下一步以上段0121a7为准。**
+
 **CURRENT：F1b / 0176实现提交b1c7969，本地验证完成，待用户push云编译；尚无新云产物/boot。**
 接续F1a正常运行路径验收；新增sweetfbservice默认0，开启要求sweetmdss1/contract0。
 AppleCLCD独立SweetDisplayClient registry consumer，匹配回调只更新属性，无MMIO/硬件调用；
