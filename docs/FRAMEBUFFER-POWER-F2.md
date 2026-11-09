@@ -1,7 +1,6 @@
-# F2：面板 Display Off/On（0177，待云编译及实测）
+# F2：面板 Display Off/On（0177，0121a9待实测）
 
-2026-11-09。接续0121a7已验收的F1b正常使用路径。0177本地实现/验证完成，尚无本补丁
-云产物或boot，不记F2验收通过。新增`sweetfbpower=1`，默认0，要求
+2026-11-09。接续0121a7已验收的F1b正常使用路径。0177本地实现/验证及0121a9云产物/boot回读核对完成，待实测，不记F2验收通过。新增`sweetfbpower=1`，默认0，要求
 `sweetfbservice=1 sweetmdss=1 sweetfbcontract=0`，配置冲突明确ERROR并拒绝启动。
 
 ## 首轮范围与参考依据
@@ -129,7 +128,7 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 
 生成`fb-power-baseline`和`fb-power-dcs`；均mdss1/service1，只差sweetfbpower0/1。
 保留IRQ/ACM/runtime3及preserveoff1，trace/proof/contract0，probe1/loglevel2。
-回读最终boot后再提供确切`fastboot boot`命令；目前没有0177新boot。
+0121a9两档boot已回读通过，确切镜像及校验值见下节。
 
 优先测DCS档，启动等35秒：
 
@@ -143,3 +142,28 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 
 没有自动息屏，auto-lock/未实现通知不是测试前置。不重开缺时间专项或充电A/B。
 BUG-001/002/003/004未关闭；发生mux隔离后的按键/充电段不能误归为显示电源故障。
+
+
+## 0121a9 云产物与boot核对（待实测）
+
+预期实现提交`decebe3`。44个已跟踪源码文件逐字节匹配，包含0177四文件；114个既有
+CI源码marker及F2内核marker/状态属性名通过，kernel归档manifest核验通过。
+未收到本轮完整build log/CI run ID，未核对全量编译告警。
+
+- kernel SHA256：`50d9fc40ebb98ca23d424ba743513a8cb00f873b8a330032f95583769acd7e55`，与0121a7不同。
+- `out-bs/boot-16k-0121a9-fb-power-baseline.img`：35,667,968字节，SHA256
+  `5277895a1708cec2a2943bdfcd442f7db2be6144db3bd0b4bcc73f8212720826`。
+- `out-bs/boot-16k-0121a9-fb-power-dcs.img`：35,667,968字节，SHA256
+  `afc416c3e3b5c8a60b0290ff843cde9fff6c09f3d310266cd11221997e70c44c`。
+
+最终Android boot回读header/FAT，kernel blob/ramdisk/XNU/派生ADT/TOML逐字节匹配；
+参数无重复，两档仅sweetfbpower0/1不同，均mdss1/service1，原ADT字节未改。
+IRQ/ACM/runtime3、preserveoff1保留，trace/proof/contract0、probe1/loglevel2。
+底稿`work1/scratch/artifact-0121a9/{verification.json,source-compare.json,boot-verification.json,
+verify-artifacts.py,verify-boots.py,packaging.txt,mdss.adt}`。
+
+优先`fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a9-fb-power-dcs.img`；启动等35秒，
+按上节短测步骤做亮度/输入、手动off-on、息屏插/拔各5轮及关机界面/取消，导出
+`sweetlog-0121a9-fb-power-dcs.bin`。有新增问题才测baseline；日志确认无电源错误/
+fallback/UNKNOWN后再用同镜像做30分钟手动息屏测试，不必重编译。
+本轮只核对/打包/文档，未改内核或CI、未push或操作设备，F2尚未验收。

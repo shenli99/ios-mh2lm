@@ -2,6 +2,27 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0121a9 / 0177云产物核对及F2两档boot打包回读完成，待用户短测。**
+预期实现decebe3；44个已跟踪源码逐字节匹配（0177四文件），114个既有CI源码marker/
+F2内核marker及状态属性名通过，归档manifest通过。无完整build log/CI run ID，未查全量告警。
+kernel SHA256=50d9fc40ebb98ca23d424ba743513a8cb00f873b8a330032f95583769acd7e55，与a7不同。
+out-bs/boot-16k-0121a9-fb-power-{baseline,dcs}.img均35,667,968字节，SHA256分别
+5277895a1708cec2a2943bdfcd442f7db2be6144db3bd0b4bcc73f8212720826、
+afc416c3e3b5c8a60b0290ff843cde9fff6c09f3d310266cd11221997e70c44c。
+最终boot回读header/FAT/kernel blob/ramdisk/XNU/ADT/TOML通过，参数无重复，仅power0/1
+不同，均mdss1/service1；原ADT未改。IRQ/ACM/runtime3/preserveoff1保留，trace/proof/
+contract0、probe1/loglevel2。底稿scratch/artifact-0121a9/{verification.json,source-compare.json,
+boot-verification.json,verify-artifacts.py,verify-boots.py,packaging.txt,mdss.adt}。
+NEXT：用户fastboot boot DCS档，等35秒；亮度低高低/三键/连续触摸，手动off-on（间隔3秒）
+5轮、息屏插/拔电各5轮、关机界面/取消；记录新不亮/局部黑屏/冻结/明显迟缓，导出
+sweetlog-0121a9-fb-power-dcs.bin。有新增问题才用同核baseline，不默认重复两档。
+先核对短测实际DCS28/29成功、无fallback/UNKNOWN，再同镜像30分钟手动息屏，无需重编译。
+没有自动息屏；BUG-003缺时间/半透明继续基线对比不重开专项，充电BUG-004独立。
+F2尚未实机验收，不进入F3；本轮只核对/打包/文档，无驱动/CI改动、未push或操作设备。
+CI blob仍da0b6c0947a66f03491b3a9023590b49665292df。详见docs/FRAMEBUFFER-POWER-F2.md末节。
+
+**以下为历史交接；当前产物及下一步以上段0121a9为准。**
+
 **CURRENT：用户授权F2；0177实现提交decebe3，本地验证完成，待push云编译。**
 基线e17918f / 0121a7正常使用路径验收；新增sweetfbpower默认0，要求service1/mdss1/
 contract0。AppleCLCD selector12经dispatch/state gate，copyBackend调用typed setPanelPower，
