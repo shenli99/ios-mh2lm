@@ -147,3 +147,33 @@ verify-artifacts.py,verify-boots.py,packaging.txt,mdss.adt}`。
 旧路径探针/DCS。两档均复现相同UV→USB校验失效→停充/启充链，BUG-004独立跟踪；
 新MDSS后端非必要触发条件。本组对照结束，不重复或为此新编译；完整亮度/生命周期验收
 仍未收口，显示继续原F1a/F1b计划，不重开缺时间专项。详见[实测诊断](FRAMEBUFFER-SERVICE-0121A5.md)。
+
+## 0121a6 重新构建与F1a补充验收镜像
+
+2026-11-09收到`xnu-kernel-0121a6.gz`、`xnu-buildtree-0121a6.gz`，无本轮完整编译日志或
+CI run ID。不能据产物推断零编译告警。43个预期源码文件（含0175六文件）逐字节匹配，
+114个CI源码marker及已有内核marker通过，kernel manifest匹配。
+kernel SHA256：`91ef77c4b7ce7b1c36f754ea4b26f6b52fc28a5940709f6c877229eed2dbc918`。
+
+额外逐文件比较两个buildtree中的全部`xnu/`普通文件：0121a5与0121a6均5,261个文件，
+无新增、删除或内容变化。这是同一源码的重新构建，二进制SHA不同不代表新增行为；没有
+新增BUG-004修复或F1b实现，不要求再次做已完成的充电A/B对照。
+
+两档均35,667,968字节，最终boot回读header/FAT、kernel blob、ramdisk、XNU、派生ADT、
+TOML均匹配；参数无重复、两档仅sweetmdss=0/1差异，原ADT保持不变。
+
+| 镜像（work1/out-bs） | SHA256 |
+|---|---|
+| `boot-16k-0121a6-fb-service-baseline.img` | `db5658bad52c40dae92c5d52a712f86c9da036f5ac29570f30cc9d4e69f52cc7` |
+| `boot-16k-0121a6-fb-service-mdss.img` | `f14370a039e7a371a4bfef33b69650df47f4558cfa2578507255ea7b5a080d66` |
+
+底稿`scratch/artifact-0121a6/{verification.json,source-compare.json,
+full-xnu-source-comparison.json,boot-verification.json,verify-artifacts.py,verify-boots.py,
+packaging.txt,mdss.adt}`。IRQ按键/触摸/USB ACM及电池runtime3参数均保留。
+
+本次只需MDSS档补查尚未充分记录的F1a功能：启动等待35秒，亮度低→中→高→低，确认
+实际屏幕亮度跟随且无卡顿/闪屏；手动电源键息屏→等待3秒→唤醒，连续3次，确认亮度
+能够恢复且触摸/按键可用。不要求自动息屏，也不重开缺时间或充电闪烁专项。
+导出`sweetlog-0121a6-fb-service-mdss.bin`并记录肉眼亮度/唤醒表现。
+baseline已生成供保留，不安排重复刷测；已知BUG-004仍未修复，不拿图标闪烁单独判显示退化。
+本轮仅核对/打包/文档，无驱动或CI改动、未push、未执行设备boot/刷写；F1a仍待上机验收。

@@ -2,6 +2,25 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0121a6产物核对、boot打包与回读完成；同0121a5源码，待补充F1a亮度/唤醒验收。**
+用户提供kernel/buildtree，无完整build-log或CI run ID，未查全量编译告警。43源码逐字节
+匹配（含0175六文件），114个CI marker及内核marker/manifest通过。两个buildtree的全部
+xnu/普通文件5261个内容完全一致；没有新BUG-004修复/F1b实现，二进制SHA不同不等于新行为。
+0121a6 kernel SHA256=91ef77c4b7ce7b1c36f754ea4b26f6b52fc28a5940709f6c877229eed2dbc918。
+out-bs/boot-16k-0121a6-fb-service-{baseline,mdss}.img均35667968字节，SHA分别为
+db5658bad52c40dae92c5d52a712f86c9da036f5ac29570f30cc9d4e69f52cc7、
+f14370a039e7a371a4bfef33b69650df47f4558cfa2578507255ea7b5a080d66。
+最终boot回读header/FAT/kernel blob/ramdisk/XNU/ADT/TOML通过，两档只差sweetmdss，参数
+无重复；IRQ/USB ACM/电池runtime3均保留。底稿scratch/artifact-0121a6/
+{verification.json,source-compare.json,full-xnu-source-comparison.json,boot-verification.json,
+verify-artifacts.py,verify-boots.py,packaging.txt,mdss.adt}。详见docs/FRAMEBUFFER-SERVICE-F1A.md末节。
+NEXT：只用mdss档，启动等35秒，调亮度低→中→高→低，手动电源键息屏/等3秒/唤醒3次，
+检查实际亮度及触摸/按键，导出sweetlog-0121a6-fb-service-mdss.bin并说明肉眼结果。
+不重测baseline/充电A/B，不重开BUG-003；BUG-004独立，尚无修复。F1a完整验收仍未完成。
+本轮仅核对/打包/文档，未改内核或CI、未push、未操作设备，无需再编译即可测试。
+
+**以下为历史交接，当前镜像及下一步以上段0121a6为准。**
+
 **CI补充：用户贴出的新失败发生在KDK安装前置阶段，不是XNU编译报错。**
 KDK13.5/22G74下载100%后hdiutil attach报image not recognized；尚无完整失败日志/CI run ID
 或下载文件，错误页面/文件损坏等待区分。旧logs/xnu-build-log-0121a1.txt同版安装成功。
