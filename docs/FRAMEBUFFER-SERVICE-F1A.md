@@ -1,6 +1,6 @@
 # F1a：显示资源与背光服务迁移（0175）
 
-2026-11-09。状态：实现提交`a22e1b3`，本地验证完成，待云编译/上机，尚未验收。
+2026-11-09。状态：实现提交`a22e1b3`，本地验证及0121a5云产物核对完成，两档boot已打包回读，待上机，尚未验收。
 用户决定暂缓[BUG-003](BUGS.md)，进入[显示F1](FRAMEBUFFER-PANEL-PLAN.md)。
 F0保留未闭环项；本轮不再安排缺时间专项取证。滑条区域半透明颜色异常也保留，
 不是“几何重叠”，不认定与缺时间同因。
@@ -117,3 +117,28 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
    若发生BUG-002隔离，标明其后的电池/按键测试无效，不混判为显示迁移失败。
 
 F1a收口后进入F1b，再进入F2；不把本地编译成功记作设备验收。
+
+## 0121a5 产物与镜像记录
+
+预期实现提交`a22e1b3`。43个源码文件逐字节匹配（含0175六文件）、114个原CI源码marker、
+新SweetMDSS/背光匹配/旧探针关闭内核marker及kernel manifest核验通过。
+kernel SHA256：`9cc2e35f4eb0f7b8c742557a9c2f4c69e5e4c0d7adb4e35787420e955cfbc9c3`。
+本地无本轮构建日志或CI run ID，未检查全量编译告警；尚无实机验收证据。
+
+两档均在`/home/shenli/work1/out-bs/`，35,667,968字节：
+
+| 镜像 | SHA256 |
+|---|---|
+| `boot-16k-0121a5-fb-service-baseline.img` | `0b62ea58d19d86172ac3846e277ce31825bc0c59def06ab1b1af921ef1e6baf5` |
+| `boot-16k-0121a5-fb-service-mdss.img` | `216c11874f17febeb1763f447f1c8bcd4dc1d384b9e14924821022985f4856c0` |
+
+从最终boot回读Android v1 header/FAT，kernel blob/ramdisk/XNU/ADT/TOML逐字节核验通过，
+参数无重复、两档只差sweetmdss=0/1，公共参数符合上节。派生ADT SHA256：
+`590ce846d0c6526165748f40f0e5770a08cec7df74973a75c2da67025e36e014`；原始ADT未覆盖，SHA256仍为
+`f2fddbdac483347011deb64ff75e77d23a34a700d264e0505e765df1ffeea2e9`。
+底稿在`scratch/artifact-0121a5/{verification.json,source-compare.json,boot-verification.json,
+verify-artifacts.py,verify-boots.py,packaging.txt,mdss.adt}`。
+
+先用baseline，再用mdss，各按上节等待35秒并测亮度/输入/手动息屏唤醒/充电，分别导出
+`sweetlog-0121a5-fb-service-baseline.bin`、`sweetlog-0121a5-fb-service-mdss.bin`。
+本轮未改内核或CI、未push、未执行设备boot/刷写；无需新云编译即可开始测试。

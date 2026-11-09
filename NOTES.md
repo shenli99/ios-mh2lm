@@ -2,6 +2,28 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：0121a5 / 0175 云产物核对及F1a两档boot打包回读完成，待用户实测。**
+实现提交a22e1b3（交接610b69b）；43个源码文件逐字节匹配，包含0175六文件；114个原CI源码
+marker及新SweetMDSS/consumer/旧路径关闭内核marker通过，manifest核验通过。
+kernel SHA256=9cc2e35f4eb0f7b8c742557a9c2f4c69e5e4c0d7adb4e35787420e955cfbc9c3，与0121a4不同。
+未收到本轮构建日志/CI run ID，未检查全量编译告警，不据产物反推零告警。
+已生成out-bs/boot-16k-0121a5-fb-service-{baseline,mdss}.img，均35,667,968字节。
+baseline SHA256=0b62ea58d19d86172ac3846e277ce31825bc0c59def06ab1b1af921ef1e6baf5；
+mdss SHA256=216c11874f17febeb1763f447f1c8bcd4dc1d384b9e14924821022985f4856c0。
+最终boot回读header/FAT，kernel blob/ramdisk/XNU/ADT/TOML逐字节匹配，参数无重复，
+两档仅sweetmdss=0/1不同；共用派生ADT，原adt-16k-3g.adt字节未改，9个硬件资源由派生工具
+追加。preserveoff=1、trace/proof/contract=0、probe=1/loglevel2，既有IRQ及充电runtime3保留。
+底稿scratch/artifact-0121a5/{verification.json,source-compare.json,boot-verification.json,
+verify-artifacts.py,verify-boots.py,packaging.txt,mdss.adt}。
+NEXT：先baseline后mdss，各启动等待至少35秒覆盖探针；亮度低→高→低、三键/触摸/USB ACM、
+手动息屏/按键唤醒、息屏插拔各2–3次，导出sweetlog-0121a5-fb-service-{baseline,mdss}.bin。
+目的验证F1a硬件资源/背光迁移不退化；BUG-003缺时间和半透明颜色问题保留，不再专项取证。
+BUG-001/002独立；发生mux隔离后的电池/按键段须标无效。无自动息屏测试；F0/F1未验收。
+本轮仅核对/打包/文档，未改内核或CI、未push，未执行设备boot/刷写。无需为这次打包重新编译。
+详见docs/FRAMEBUFFER-SERVICE-F1A.md末节。
+
+**以下为历史交接；上机步骤以上段0121a5为准。**
+
 **CURRENT：用户暂缓BUG-003，转入F1；0175 / F1a硬件资源与背光服务迁移实现、本地验证完成，待用户push云编译。**
 缺时间异常已写docs/BUGS.md#bug-003，0121a4原始证据保留，F0未闭环、不记全部验收。
 先做F1a：SweetMDSS持有ADT资源和workloop/gate，迁入原探针/DCS；背光通过每consumer的
