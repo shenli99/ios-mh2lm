@@ -8,7 +8,7 @@
 匹配通知取得typed backend。sweetmdss默认0，新路径禁止BSD旧映射/写入；失败不静默回退。
 F1b随后做用户客户端分发表/参数校验和状态gate，不与本轮硬件迁移混测；F1整体尚未验收。
 旧的“继续离线查缺时间模式元数据”NEXT已被用户本次决定取代，不重新启动专项ROI测试。
-详见docs/FRAMEBUFFER-SERVICE-F1A.md。0175六文件严格应用/逐字节比对通过，4个源码真实CI
+实现提交a22e1b3；详见docs/FRAMEBUFFER-SERVICE-F1A.md。0175六文件严格应用/逐字节比对通过，4个源码真实CI
 参数arm64单文件编译rc0；既有文件无新增告警类别（不是零告警）。16项host测试通过，
 ASan/UBSan；LSan仍detect_leaks=0，fixture对象/映射计数归零。底稿scratch/framebuffer-0175。
 新--framebuffer-service出baseline/mdss两档，仅sweetmdss差异，共用派生ADT：原ranges保留，
