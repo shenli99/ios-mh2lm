@@ -4,6 +4,30 @@
 
 编译/打包/刷写/取日志的完整流程见 docs/BUILD-GUIDE.md（2026-11-08 新增）。scripts/build-mh2-uefi.sh 默认 FD_BASE 已改为 0xA0000000。
 
+**CURRENT：0121a4 / 0174 两轮持久日志已分析；同ID新源ROI全黑有证据，F0未验收。**
+详见docs/FRAMEBUFFER-PROOF-0121A4.md。proof1/2均未回卷，279765/420254有效字节，SHA与
+行号见报告；底稿scratch/artifact-0121a4/{fb-contract-proof*.txt,*.timeline.txt,log-analysis.json,
+analyze-logs.py}。用户反馈第一轮插电/UI无反应但电源能唤醒；第二轮插电大logo后缺时间，
+原本亮屏插电也同样缺时间，息屏拔电正常，取消关机后的锁屏正常（更新旧描述，不据此宣称修复）。
+proof1第3165–3210行Type-C RID/APID271/bit0 status1持续pending→隔离电池group1→consumer
+退出/禁充/撤回输入，最后保留96%。之后按键group0/显示仍活动，已补BUG-002，非全内核死锁。
+proof2无ERROR/WARN/隔离或已记录helper失败；6次off/7次on含启动，61样本(55swap/6replay)。
+18份新layer/同请求ID及64位seq/完整ROI/rc0的全黑样本，2份启动、16份后续插电窗口（含过渡，
+不把每份都称为独立故障）；关键samples20–27、ID151→370、164.031–171.363s连续约7.33秒
+源layer/scene/panel同黑，421200像素完整检查、逐像素diff0。之后拔电样本31–38等ROI恢复非黑。
+这补上旧live-source会复用的限制：只能证明复制进驱动的该几何ROI全黑，非硬件fence/整屏/时间
+字形识别，也不能把CA本身定为根因。启动窗口有非黑候选sample3/4，但无截图识别时间。
+全部61份panel比较diff0；6份空layer的replay按合法blank分开，不拿来证明新源内容。
+第一条长日志有255字符截断(1轮22份/2轮12份rc缺失)，按sample拆分，缺rc不补0；18份关键
+全黑样本均完整rc0。可用observed时间对28/56份，采样中位38.644/45.568ms，有明显开销；
+部分cost尾部被截断不能解释成4ms。以后保留日志时拆短/结果前置，不单为此重编译重测。
+第二轮组合键在4702行后，最后sample61在4691，关机/取消未捕获对应像素，不能解释半透明。
+NEXT：不重复本轮或旧A/B，继续离线核对模式/颜色/时序注册属性、sel79/block0x40及本版无匹配
+mode fallback，明确实际分支后设计独立修复；不任意填ID1、不强行重放旧时间、不直接写MDP定因。
+F0仍未验收、不提前验收F1/F3/F4；BUG-001/002独立。本轮只分析/文档，未改驱动/CI、未push。
+
+**以下为历史交接；下一步以上段实测结果为准。**
+
 **CURRENT：0121a4 / 0174 产物核对与单档boot打包完成，等待用户实测。**
 预期实现提交d0f9555，用户已下载xnu-buildtree-0121a4.gz及xnu-kernel-0121a4.gz。
 41个源码文件（含0174两文件）逐字节匹配，114个CI源码marker和新proof内核marker通过；

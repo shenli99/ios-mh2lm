@@ -104,6 +104,16 @@ bit0/2/4/5、status=0x35；第5314–5319行consumer失败、禁充、撤回输�
 实验档未复现，但两档时长/操作次数不同，不能把这项差异当0173的修复效果。
 详见[0121a3显示实验报告](FRAMEBUFFER-CONTRACT-0121A3.md)。继续独立排期，不扩入显示修复。
 
+**0121a4 第一轮再次复现（2026-11-09）**
+
+`work1/logs/sweetlog-0121a4-fb-contract-proof1.bin`，SHA256
+`d6f3989e8511b282ca546fdfe5cdf71a4bfdc2076d38a6fb0d4dbd9638f3d9ff`。
+第3165行Type-C RID/group1/APID271/bit0 status=0x1仍pending，第3166–3168行隔离电池组；
+第3205–3210行consumer退出、禁充并撤回输入，保留96%。之后无新电池refresh，按键group0
+未隔离，后面仍有power IRQ/HID和显示提交。用户确认“插电/UI无反应，电源能唤醒”，
+与组隔离边界一致，不认定全内核死锁。
+第二轮无同类ERROR/WARN，不能当修复效果。详见[0121a4报告](FRAMEBUFFER-PROOF-0121A4.md)。
+
 **待查方向与关闭条件**
 
 独立安排修复时补逐遍 pending/PMIC 状态和 ACK 时序，区分瞬态与真正 stuck，核对有界

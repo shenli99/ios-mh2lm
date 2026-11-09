@@ -1,6 +1,7 @@
 # 同一 swap 的 CPU 像素取证（0174）
 
-2026-11-09。状态：0121a4产物核对及单档boot打包完成，等待上机；**不是视觉修复，F0 未验收**。
+2026-11-09。状态：0121a4两轮实测已分析，见[结果](FRAMEBUFFER-PROOF-0121A4.md)；
+已捕获新源ROI全黑的同ID证据，**不是视觉修复，F0 未验收**。
 接续 [0121a3 实测](FRAMEBUFFER-CONTRACT-0121A3.md) 与
 [自有快照实验](FRAMEBUFFER-OWNED-CONTRACT.md)。用户追问能否证明提交内容本来没有时间，
 因此优先补同 ID 的像素证据，随后继续模式/颜色时序元数据和用户态 fallback 核对。
@@ -110,9 +111,15 @@ SHA256：`854a82bfc8f942f20f8145fc3e4f21b6a2adb38e94ec5644539c45b8cb48bc06`。
 无重复，contract=1/proof=1及上节公共参数符合预期。底稿在
 `scratch/artifact-0121a4/{verification.json,source-compare.json,boot-verification.json,verify-*.py}`。
 
-测试日志名为 `sweetlog-0121a4-fb-contract-proof.bin`，尚未刷机或验收。
+实际收到 `sweetlog-0121a4-fb-contract-proof1.bin`、`sweetlog-0121a4-fb-contract-proof2.bin`，
+已分析，见[实测报告](FRAMEBUFFER-PROOF-0121A4.md)。第二轮关键连续样本满足同ID/新layer/
+完整覆盖/rc0且layer/scene/panel同黑、diff0；F0仍未验收。第一轮电池组隔离已补BUG-002。
 
 用户追问正常时间是否捕获：0121a2首次off前普通118.052s/preserveoff145.307s已有ROI非黑样本
 949/1007点，拔电249.168s为1044点，均源/扫描差异0；但没有像素图或逐秒视觉对应，不能认定
 这些就是时间字形。ROI依据上方中央位置作几何估计，未实证确定实际时间控件边界；本轮正常
 锁屏对照也只能增强关联，单凭非黑数量不能证明时间完整处于ROI。
+
+实测限制：部分第一条长日志在255字符截断，缺rc不能补0；后续保留该取证时拆短并前置结果，
+不单为此重编译重测。第二轮可用时间对采样中位45.568ms，不能把截断cost解读成4ms；
+关机组合键发生在最后像素样本之后，本轮没有对应半透明/取消后的独立像素证据。
