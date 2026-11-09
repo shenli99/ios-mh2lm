@@ -2,6 +2,34 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：F1b / 0176实现提交b1c7969，本地验证完成，待用户push云编译；尚无新云产物/boot。**
+接续F1a正常运行路径验收；新增sweetfbservice默认0，开启要求sweetmdss1/contract0。
+AppleCLCD独立SweetDisplayClient registry consumer，匹配回调只更新属性，无MMIO/硬件调用；
+用户接口经真正IOExternalMethodDispatch验证数量/大小再进入state gate，共享legacy handler
+以保持像素/电源/软件vsync行为。未知selector继续成功/清零inline输出，每client32种日志预算。
+前端校验scalar上限/空指针/已知inline ABI；7/18未观察的输入保持可变，72接受3/4项且type<8。
+client数组、swap ID/pending/power、端口和close都走AppleCLCD workloop/IOCommandGate；
+gate同步执行不等于调用一律切到后台线程。新路径不重复拿legacy fLock。
+stop先gate内关入口/取消timer/撤回client端口，再gate外stop通知helper/移除timer；gate/
+资源留到free，user client显式retain FB到free，晚到调用返回Offline。真实终止仍未上机测。
+修改文件仅SweetFramebuffer.cpp与新增SweetFBService.inc，补丁0176；USB/电池/按键/
+SweetMDSS引擎及circleci.yml未改，CI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+strict apply+两文件逐字节匹配、114既有源码marker通过；base/edited/verify FB arm64编译rc0，
+无新增告警类别，format仍2条旧告警，unsafe-buffer87→92（有界数组/表/索引）。17项host
+最终通过，初次3项LSan/ptrace失败用detect_leaks0重跑，ASan/UBSan保留。新fixture运行真实
+FB/UserClient，覆盖800并发ID分配、timer/端口/close/stop并行、拒绝无副作用及引用清理。
+本地底稿scratch/framebuffer-0176/{base,edited,verify,verification.json,warning-counts.json,
+tests.json,compile.py,implement.py,make-patch.py,test-*.txt,old-kernel-rejection.txt}。
+tools/mk-mh2lm-event-matrix.sh新增--framebuffer-state，生成fb-state-{baseline,gated}，
+两档mdss1，只差sweetfbservice0/1；保留IRQ/ACM/runtime3及preserveoff1，trace/proof/contract0。
+旧0121a6被新marker正确拒绝，bash -n通过。详见docs/FRAMEBUFFER-SERVICE-F1B.md。
+NEXT：用户push当前分支→下载新kernel/buildtree/log；逐文件核对0176两文件、kernel marker/
+manifest，再打两档并回读boot。优先只测gated：桌面/连续触摸/三键/关机取消/亮度/手动
+息屏唤醒/USB ACM，出现新增异常再用baseline定位。不重测充电A/B、不重开BUG-003，
+独立BUG状态不变。F1b/F1整体未上机验收；F2/F3/F4不提前混入。本轮未push/未操作设备。
+
+**以下为历史交接，当前实现及下一步以上段F1b为准。**
+
 **CURRENT：0121a6日志已分析，用户确认亮度/息屏唤醒正常；F1a正常运行路径功能验收通过。**
 日志sweetlog-0121a6-fb-service-mdss.bin，SHA256=
 2b67f0b4facc4067c5ad1756dd74414571612aa662a1f70f543f9dc4a9f41095；有效321588字节/
