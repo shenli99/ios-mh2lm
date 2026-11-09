@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Derive an F1a ADT without regenerating chosen/memory/identity properties."""
+"""Derive a display-service ADT, optionally adding F3 read-only IRQ resources."""
 from pathlib import Path
 import struct
 import sys
+import argparse
 import adt
 
 SOC_BASE = 0x01000000
@@ -11,9 +12,10 @@ WINDOWS = ((0x0010b000, 0x1000), (0x0af00000, 0x3000),
            (0x0ae05000, 0x1000), (0x0ae02000, 0x1000),
            (0x0ae6b800, 0x800), (0x0ae6c000, 0x800),
            (0x0ae94000, 0x400), (0x15000000, 0x2000), (0x15082000, 0x1000))
+IRQ_WINDOWS = ((0x0ae00000, 0x2000), (0x0ae6e800, 0x200), (0x17a00000, 0x10000))
 
 
-def derive(blob):
+def derive(blob, irq_preflight=False):
     root, end = adt.parse(blob)
     if end != len(blob) or b'lge,mh2lm\0' not in (root.prop('compatible') or b''):
         raise ValueError('expected a complete MH2LM ADT')
@@ -28,7 +30,7 @@ def derive(blob):
     arm.props = [(k, f, v + struct.pack('<QQQ', LOW_ALIAS, 0, SOC_BASE)
                   if k == 'ranges' else v) for k, f, v in arm.props]
     regs = b''.join(struct.pack('<QQ', pa-SOC_BASE if pa >= SOC_BASE else LOW_ALIAS+pa, size)
-                    for pa, size in WINDOWS)
+                    for pa, size in WINDOWS + (IRQ_WINDOWS if irq_preflight else ()))
     mdss = adt.Node()
     mdss.props = [('name', 0, b'mdss\0'), ('compatible', 0, b'sweet,mdss\0'),
                   ('reg', 0, regs),
@@ -40,9 +42,12 @@ def derive(blob):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 3:
-        sys.exit(f'usage: {sys.argv[0]} BASE.adt OUT.adt')
-    source, destination = map(Path, sys.argv[1:])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--irq-preflight', action='store_true', help='append optional F3 read-only IRQ resources')
+    parser.add_argument('source', type=Path)
+    parser.add_argument('destination', type=Path)
+    args = parser.parse_args()
+    source, destination = args.source, args.destination
     if source.resolve() == destination.resolve():
         sys.exit('output must differ from the baseline ADT')
-    destination.write_bytes(derive(source.read_bytes()))
+    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight))

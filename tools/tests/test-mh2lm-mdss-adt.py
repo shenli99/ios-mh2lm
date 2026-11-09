@@ -31,6 +31,7 @@ r, end = adt.parse(result)
 assert end == len(result)
 arm = r.children[1]
 mdss = arm.children.pop()
+baseline_regs = mdss.prop('reg')
 assert mdss.name == 'mdss' and mdss.prop('device_type') is None
 assert mdss.prop('interrupts') is None and mdss.prop('sweet,mdss-intid') == struct.pack('<I', 115)
 assert arm.prop('ranges')[:len(ranges)] == ranges
@@ -49,3 +50,21 @@ for bad in [result, blob+b'bad', blob.replace(b'lge,mh2lm', b'bad,mh2lm')]:
     else:
         raise AssertionError('accepted incompatible or already extended input')
 print('PASS: all nine physical windows, disjoint low GCC alias, unchanged existing tree, no premature IRQ/display child, invalid input rejection')
+
+# The F3 extension appends resources without changing the old nine or identity.
+extended = m.derive(blob, irq_preflight=True)
+r, end = adt.parse(extended)
+assert end == len(extended)
+arm = r.children[1]
+mdss = arm.children[-1]
+assert mdss.prop('reg')[:9*16] == baseline_regs
+windows = list(struct.iter_unpack('<QQ', mdss.prop('reg')))
+assert len(windows) == 12
+translations = list(struct.iter_unpack('<QQQ', arm.prop('ranges')))
+for (addr, size), (expected, length) in zip(windows, m.WINDOWS+m.IRQ_WINDOWS):
+    hits = [parent+addr-child for child, parent, n in translations if child <= addr and addr+size <= child+n]
+    assert hits == [expected] and size == length
+assert mdss.prop('interrupts') is None and mdss.prop('interrupt-parent') is None
+mdss.props = [(k, f, v[:9*16] if k == 'reg' else v) for k, f, v in mdss.props]
+assert adt.serialize(r) == result
+print('PASS: optional IRQ resources append-only, all twelve translations, unchanged default ADT, no IRQ registration')

@@ -2,6 +2,34 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CURRENT：F3第一步0179只读预检已实现并完成本地验证，待用户push/云编译。**
+基线3458ccf；0121a9实际0177云源码+0178严格重放后，仅改SweetMDSS.cpp。核对LG
+sm8150-sde.dtsi SPI83→INTID115；SDE5.x command mode选INTF1 TE RD_PTR，TE IRQ块
+0ae6e800 EN0/STATUS4/CLEAR8 bit2，与配置窗口0ae6b800分开；INTF2 IRQ0ae6e900。
+新增sweetmdssirqprobe默认0，mode1只读GIC，2读GIC+MDSS/MDP/TE/INTF1；不注册handler、
+不ACK/使能/注入pending、不替换FB软件timer。ADT reg追加9(top0ae00000/2000)、
+10(tear0ae6e800/200)、11(GICD17a00000/10000)，provider校验PA/长度；原九窗口不变。
+独立MDSS timer约30/31/32s各一次后停止，同gate串行；MDSS先过原AHB时钟条件，GIC
+独立采样。缺失/错位/过短资源或timer失败ERROR并仅停预检；stop关闭admission/取消
+移除timer，maps到free再释放。Ready表示资源，Samples含时钟跳过的尝试，不是IRQ计数。
+只读STATUS锁存位、group可能NS RAZ，不能定stuck/频率/secure投递；真实IRQ接入仍待做。
+patch strict apply/零fuzz与offset/字节匹配、114既有CI marker通过；SweetMDSS base/new
+arm64对象编译rc0。clang19 unsafe-buffer-usage新增15条（新常量下标/有界循环已审），
+其他告警类别/数量不变，不宣称无新增告警。实际provider/client/backlight ASan/UBSan、
+FB service、ADT三套通过；覆盖只读/默认零新增访问/GIC解码/三次停止/资源与timer故障/
+clock门禁/inactive/stop并发/映射对象归零。LSan ptrace不支持，关闭。打包bash-n/三档参数/
+真实ADT CLI及旧a9缺marker拒绝通过。底稿scratch/framebuffer-0179。
+新增打包--framebuffer-irq-preflight，出fb-irq-{preflight,gic,baseline} mode2/1/0，均F2
+power1/service1/mdss1，ACM/所有原IRQ/runtime3保留，proof/contract0；共用扩展ADT。
+旧--framebuffer-power不变。NEXT：用户push后下载kernel/buildtree/log，核对0178/0179
+源码/marker→打包回读→先只测完整preflight，亮屏等35s后简测输入/亮度/手动息屏唤醒，
+持久日志sweetlog-编号-fb-irq-preflight.bin即可；有新增启动问题才gic/关闭档定位，不默认
+全矩阵。暂无新boot，无硬件成功证据。BUG-002不专项复测；BUG-003暂缓；整机PM仍末尾
+占位，当前不扩入system sleep。详见docs/FRAMEBUFFER-VSYNC-F3.md。
+未push/操作设备，CI未改，blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+
+**以下为历史交接；当前实现与下一步以上段0179为准。**
+
 **CURRENT：用户确定完整电源管理排到大计划最后；当前继续显示，下一步F3硬件vsync。**
 基线7d65026。已在docs/IRQ-FRAMEBUFFER-PLAN.md总体顺序及末尾追加大目标四“完整电源管理
 与低功耗适配”，位于大目标三日志优化之后，仅登记目标，无子目标/实施顺序/验收方案；

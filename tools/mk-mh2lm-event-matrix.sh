@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service|--framebuffer-state|--framebuffer-power]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service|--framebuffer-state|--framebuffer-power|--framebuffer-irq-preflight]\n' "$0" >&2
 	exit 2
 fi
 
@@ -15,6 +15,7 @@ KEY_IRQ_PROFILE=${3:-}
 DEPENDENCY_MATRIX=0
 FRAMEBUFFER_STATE=0
 FRAMEBUFFER_POWER=0
+FRAMEBUFFER_IRQ_PREFLIGHT=0
 case "$KEY_IRQ_PROFILE" in
 	'')
 		;;
@@ -47,6 +48,12 @@ case "$KEY_IRQ_PROFILE" in
 	--framebuffer-power)
 		FRAMEBUFFER_STATE=1
 		FRAMEBUFFER_POWER=1
+		KEY_IRQ_PROFILE='--framebuffer-service'
+		;;
+	--framebuffer-irq-preflight)
+		FRAMEBUFFER_STATE=1
+		FRAMEBUFFER_POWER=1
+		FRAMEBUFFER_IRQ_PREFLIGHT=1
 		KEY_IRQ_PROFILE='--framebuffer-service'
 		;;
 	--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service)
@@ -320,7 +327,20 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
    fi
   done
  fi
- python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" "$ADT" "$TMPDIR/mdss.adt"
+ if [ "$FRAMEBUFFER_IRQ_PREFLIGHT" = '1' ]; then
+  for marker in 'SWEET MDSS IRQ PREFLIGHT: F3 v1 read-only' \
+      'SWEET MDSS IRQ PREFLIGHT: v1 pass=%u GIC intid=115' \
+      'SWEET MDSS IRQ PREFLIGHT: v1 pass=%u MDSS rev=' \
+      'SweetDisplayIRQPreflightSamples'; do
+   if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+    printf 'kernel lacks F3 read-only preflight marker: %s\n' "$marker" >&2
+    exit 1
+   fi
+  done
+  python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --irq-preflight "$ADT" "$TMPDIR/mdss.adt"
+ else
+  python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" "$ADT" "$TMPDIR/mdss.adt"
+ fi
  ADT="$TMPDIR/mdss.adt"
 fi
 
@@ -364,6 +384,14 @@ make_profile() {
 
 if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
  FB_ARGS='ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1 sweetbattirq=4 sweetbattruntime=3 sweetfbpreserveoff=1 sweetfbtrace=0 sweetdispprobe=1 sweetloglevel=2 sweetfbcontract=0 sweetfbproof=0'
+ if [ "$FRAMEBUFFER_IRQ_PREFLIGHT" = '1' ]; then
+  FB_ARGS="$FB_ARGS sweetmdss=1 sweetfbservice=1 sweetfbpower=1"
+  make_profile fb-irq-baseline "LG G8X - XNU F3 preflight disabled (${LABEL})" "$FB_ARGS sweetmdssirqprobe=0"
+  make_profile fb-irq-gic "LG G8X - XNU F3 GIC read-only (${LABEL})" "$FB_ARGS sweetmdssirqprobe=1"
+  make_profile fb-irq-preflight "LG G8X - XNU F3 MDSS IRQ read-only (${LABEL})" "$FB_ARGS sweetmdssirqprobe=2"
+  printf 'kernel SHA256: %s\ncreated F3 read-only IRQ baseline/GIC/MDSS profiles for %s\n' "$KERNEL_SHA256" "$LABEL"
+  exit 0
+ fi
  if [ "$FRAMEBUFFER_POWER" = '1' ]; then
   make_profile fb-power-baseline "LG G8X - XNU F1b panel power legacy (${LABEL})" "$FB_ARGS sweetmdss=1 sweetfbservice=1 sweetfbpower=0"
   make_profile fb-power-dcs "LG G8X - XNU F2 DCS display power (${LABEL})" "$FB_ARGS sweetmdss=1 sweetfbservice=1 sweetfbpower=1"

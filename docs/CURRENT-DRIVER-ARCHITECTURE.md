@@ -1,5 +1,7 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**2026-11-09 / 0179补充：** F3新增默认关闭的SweetMDSS IRQ只读预检：provider追加ADT资源，独立timer在30/31/32秒取样，与亮度/电源共享workloop gate；缺资源仅停预检。软件vsync仍为现行路径，尚无MDSS IRQ handler或订阅。见[F3记录](FRAMEBUFFER-VSYNC-F3.md)。
+
 **F2 / 0177（0121a9基础开关屏已验证）：** selector12经AppleCLCD gate，用consumer持有的typed
 `SweetDisplayBackend::setPanelPower(on)`请求SweetMDSS；provider自己的gate串行28/29、
 亮度及stop admission，consumer不操作MMIO。sweetfbpower默认0，要求service1/mdss1，

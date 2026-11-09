@@ -1,0 +1,149 @@
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -146,10 +146,10 @@
+  OSDeclareDefaultStructors(SweetMDSS);
+  IOWorkLoop *fLoop;
+  IOCommandGate *fGate;
+- IOTimerEventSource *fProbe;
+- IOMemoryMap *fMaps[9];
+- bool fGateAdded, fProbeAdded, fAccepting;
+- unsigned fPass;
++ IOTimerEventSource *fProbe, *fIrqProbe;
++ IOMemoryMap *fMaps[12];
++ bool fGateAdded, fProbeAdded, fIrqProbeAdded, fAccepting;
++ unsigned fPass, fIrqProbePass, fIrqProbeMode;
+  enum PanelState { PanelOn, PanelOffPending, PanelOff, PanelOnPending, PanelUnknown };
+  PanelState fPanelState;
+  bool fPanelPowerEnabled, fPanelFallback;
+@@ -174,6 +174,8 @@
+  static IOReturn writeAction(OSObject *,void *,void *,void *,void *);
+  static IOReturn stopAction(OSObject *,void *,void *,void *,void *);
+  static void probeAction(OSObject *,IOTimerEventSource *);
++ void setupIrqProbe(IOService *);
++ static void irqProbeAction(OSObject *,IOTimerEventSource *);
+ public:
+  bool start(IOService *) APPLE_KEXT_OVERRIDE;
+  void stop(IOService *) APPLE_KEXT_OVERRIDE;
+@@ -231,9 +233,91 @@
+  if (probe) fProbe->setTimeoutMS(30000);
+  setProperty("SweetDisplayBackendVersion",1ULL,32);
+  setProperty("SweetDisplayInterruptEnabled",false);
++ setupIrqProbe(provider);
+  SWEET_LOG_INFO("SWEET MDSS: F1a v1 IOService backend; ABL scanout unchanged\n");
+  registerService();
+  return true;
++}
++
++void
++SweetMDSS::setupIrqProbe(IOService *provider)
++{
++ int mode=0;
++ (void)PE_parse_boot_argn("sweetmdssirqprobe",&mode,sizeof(mode));
++ setProperty("SweetDisplayIRQPreflightReady",false);
++ if (!mode) return; /* Default: neither map nor read the additional windows. */
++ if (mode<1 || mode>2) {
++  SWEET_LOG_ERROR("SWEET MDSS IRQ PREFLIGHT: invalid mode=%d; probe disabled\n",mode);
++  return;
++ }
++ /* Append-only ADT ABI: 9=MDSS/MDP top, 10=INTF1/2 TE IRQ, 11=GICD.
++  * All are provider resources, never consumer-side physical mappings.
++  * A diagnostic failure must not take down the working display service. */
++ const uint64_t pa[3]={0x0ae00000,0x0ae6e800,0x17a00000};
++ const uint64_t size[3]={0x2000,0x200,0x10000};
++ for (unsigned i=(mode==1 ? 11u : 9u);i<12;++i) {
++  fMaps[i]=provider->mapDeviceMemoryWithIndex(i);
++  if (!fMaps[i] || fMaps[i]->getPhysicalAddress()!=pa[i-9] || fMaps[i]->getLength()<size[i-9]) {
++   SWEET_LOG_ERROR("SWEET MDSS IRQ PREFLIGHT: resource %u missing/mismatch; probe disabled, display retained\n",i);
++   for (unsigned j=9;j<12;++j) OSSafeReleaseNULL(fMaps[j]);
++   return;
++  }
++ }
++ fIrqProbe=IOTimerEventSource::timerEventSource(this,irqProbeAction);
++ if (!fIrqProbe || fLoop->addEventSource(fIrqProbe)!=kIOReturnSuccess) {
++  SWEET_LOG_ERROR("SWEET MDSS IRQ PREFLIGHT: timer unavailable; probe disabled, display retained\n");
++  OSSafeReleaseNULL(fIrqProbe);
++  for (unsigned i=9;i<12;++i) OSSafeReleaseNULL(fMaps[i]);
++  return;
++ }
++ fIrqProbeAdded=true; fIrqProbeMode=(unsigned)mode;
++ setProperty("SweetDisplayIRQPreflightMode",(unsigned long long)mode,32);
++ setProperty("SweetDisplayIRQPreflightReady",true);
++ SWEET_LOG_INFO("SWEET MDSS IRQ PREFLIGHT: F3 v1 read-only mode=%u intid=115; no handler/enable/clear, software vsync retained\n",fIrqProbeMode);
++ fIrqProbe->setTimeoutMS(30000);
++}
++
++void
++SweetMDSS::irqProbeAction(OSObject *owner,IOTimerEventSource *sender)
++{
++ SweetMDSS *self=(SweetMDSS *)owner;
++ /* Timer actions share the provider gate with power/brightness/stop. */
++ if (!self->fAccepting || self->isInactive() || !self->fIrqProbeMode || self->fIrqProbePass>=3) return;
++ const unsigned pass=self->fIrqProbePass++;
++ const vm_offset_t gic=self->fMaps[11]->getVirtualAddress();
++ const uint32_t ctl=dp_rd(gic,0x000), typer=dp_rd(gic,0x004), iid=dp_rd(gic,0x008);
++ const uint32_t pidr2=dp_rd(gic,0xffe8);
++ /* INTID115: word3 bit19; ICFGR7 bits7:6; IROUTER115 at0x6398.
++  * Nonsecure group/groupmod reads may RAZ: log observations, no ownership claim. */
++ const uint32_t group=dp_rd(gic,0x08c), groupmod=dp_rd(gic,0xd0c);
++ const uint32_t en=dp_rd(gic,0x10c), pending=dp_rd(gic,0x20c), active=dp_rd(gic,0x30c);
++ const uint32_t cfg=dp_rd(gic,0xc1c), priority=dp_rd(gic,0x470);
++ const uint32_t routeLo=dp_rd(gic,0x6398), routeHi=dp_rd(gic,0x639c);
++ SWEET_LOG_INFO("SWEET MDSS IRQ PREFLIGHT: v1 pass=%u GIC intid=115 ctl=%#x typer=%#x iid=%#x pidr2=%#x group-word=%#x groupmod-word=%#x en=%u pending=%u active=%u cfg=%u priority=%#x route=%#x:%08x\n",
++     pass,ctl,typer,iid,pidr2,group,groupmod,(en>>19)&1u,(pending>>19)&1u,(active>>19)&1u,
++     (cfg>>6)&3u,(priority>>24)&0xffu,routeHi,routeLo);
++ if (self->fIrqProbeMode==2) {
++  if (self->dp_clocks_on()) {
++   const vm_offset_t top=self->fMaps[9]->getVirtualAddress();
++   const vm_offset_t tear=self->fMaps[10]->getVirtualAddress();
++   const uint32_t rev=dp_rd(top,0), sources=dp_rd(top,0x10);
++   const uint32_t mdpEn=dp_rd(top,0x1010), mdpStatus=dp_rd(top,0x1014);
++   const uint32_t mdpEn2=dp_rd(top,0x1008), mdpStatus2=dp_rd(top,0x100c);
++   const uint32_t en1=dp_rd(tear,0), status1=dp_rd(tear,4);
++   const uint32_t en2=dp_rd(tear,0x100), status2=dp_rd(tear,0x104);
++   const uint32_t te=dp_rd(self->dp_intf1,0x284), cfg1=dp_rd(self->dp_intf1,0x288);
++   const uint32_t rdptr=dp_rd(self->dp_intf1,0x2a4), line=dp_rd(self->dp_intf1,0x2b0);
++   const uint32_t autorefresh=dp_rd(self->dp_intf1,0x2b4);
++   SWEET_LOG_INFO("SWEET MDSS IRQ PREFLIGHT: v1 pass=%u MDSS rev=%#x sources=%#x mdp-en=%#x mdp-status=%#x mdp-en2=%#x mdp-status2=%#x tear1-en=%#x tear1-status=%#x tear2-en=%#x tear2-status=%#x panel=%u\n",
++       pass,rev,sources,mdpEn,mdpStatus,mdpEn2,mdpStatus2,en1,status1,en2,status2,(unsigned)self->fPanelState);
++   SWEET_LOG_INFO("SWEET MDSS IRQ PREFLIGHT: v1 pass=%u INTF1 te=%#x cfg=%#x rdptr=%#x line=%#x auto=%#x rdptr-enabled=%u rdptr-latched=%u\n",
++       pass,te,cfg1,rdptr,line,autorefresh,(en1>>2)&1u,(status1>>2)&1u);
++  } else {
++   SWEET_LOG_WARN("SWEET MDSS IRQ PREFLIGHT: pass=%u MDSS clocks unavailable; display registers not read\n",pass);
++  }
++ }
++ self->setProperty("SweetDisplayIRQPreflightSamples",(unsigned long long)self->fIrqProbePass,32);
++ if (self->fIrqProbePass<3) sender->setTimeoutMS(1000);
+ }
+ 
+ void
+@@ -349,7 +433,9 @@
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  self->fAccepting=false;
++ self->setProperty("SweetDisplayIRQPreflightReady",false);
+  if (self->fProbe) self->fProbe->cancelTimeout();
++ if (self->fIrqProbe) self->fIrqProbe->cancelTimeout();
+  return kIOReturnSuccess;
+ }
+ void
+@@ -357,6 +443,7 @@
+ {
+  if (fGateAdded) (void)fGate->runAction(stopAction);
+  if (fProbeAdded) { fLoop->removeEventSource(fProbe); fProbeAdded=false; }
++ if (fIrqProbeAdded) { fLoop->removeEventSource(fIrqProbe); fIrqProbeAdded=false; }
+  /* Gate/maps stay valid through free, including retained pre-stop callers.
+   * Admission is closed; no MMIO may run after stopAction. */
+  SWEET_LOG_INFO("SWEET MDSS: backend stopped; hardware admission closed\n");
+@@ -367,9 +454,10 @@
+ {
+  if (fGateAdded) (void)fGate->runAction(stopAction);
+  if (fProbeAdded) fLoop->removeEventSource(fProbe);
++ if (fIrqProbeAdded) fLoop->removeEventSource(fIrqProbe);
+  if (fGateAdded) fLoop->removeEventSource(fGate);
+- OSSafeReleaseNULL(fProbe); OSSafeReleaseNULL(fGate); OSSafeReleaseNULL(fLoop);
+- for (unsigned i=0;i<9;++i) OSSafeReleaseNULL(fMaps[i]);
++ OSSafeReleaseNULL(fIrqProbe); OSSafeReleaseNULL(fProbe); OSSafeReleaseNULL(fGate); OSSafeReleaseNULL(fLoop);
++ for (unsigned i=0;i<12;++i) OSSafeReleaseNULL(fMaps[i]);
+  SweetDisplayBackend::free();
+ }
+ 

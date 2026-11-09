@@ -99,10 +99,11 @@ static void IOLockUnlock(IOLock*p){p->unlock();}
 struct IOWorkLoop;
 struct IOEvent : OSObject {IOWorkLoop *loop=nullptr; bool enabled=true; OSObject *owner=nullptr;
  void enable(){enabled=true;} void disable(){enabled=false;}};
+static unsigned eventAdds=0,failEventAdd=0,timerCreates=0,failTimerCreate=0;
 struct IOWorkLoop : OSObject {
  std::recursive_mutex gate;
  static IOWorkLoop *workLoop(){return new IOWorkLoop;}
- int addEventSource(IOEvent *e){e->loop=this;e->retain();return 0;}
+ int addEventSource(IOEvent *e){if(++eventAdds==failEventAdd)return kIOReturnIOError;e->loop=this;e->retain();return 0;}
  void removeEventSource(IOEvent *e){std::lock_guard<std::recursive_mutex> l(gate);e->loop=nullptr;e->release();}
 };
 struct IOCommandGate : IOEvent {
@@ -119,18 +120,19 @@ struct IOInterruptEventSource : IOEvent {
 static void pump(){auto list=queued;queued.clear();for(auto*e:list)if(e->loop&&e->enabled){std::lock_guard<std::recursive_mutex> l(e->loop->gate);e->action(e->owner,e,1);}}
 struct IOTimerEventSource : IOEvent {
  using Action=void(*)(OSObject*,IOTimerEventSource*);Action action;unsigned timeout=0;
- static IOTimerEventSource*timerEventSource(OSObject*o,Action a){auto*p=new IOTimerEventSource;p->owner=o;p->action=a;return p;}
+ static IOTimerEventSource*timerEventSource(OSObject*o,Action a){if(++timerCreates==failTimerCreate)return nullptr;auto*p=new IOTimerEventSource;p->owner=o;p->action=a;return p;}
  void setTimeoutMS(unsigned t){timeout=t;} void setTimeoutUS(unsigned t){timeout=t;} void cancelTimeout(){timeout=0;}
 };
-static constexpr uintptr_t bases[9]={0x0010b000,0x0af00000,0x0ae05000,0x0ae02000,0x0ae6b800,0x0ae6c000,0x0ae94000,0x15000000,0x15082000};
-static constexpr size_t lengths[9]={0x1000,0x3000,0x1000,0x1000,0x800,0x800,0x400,0x2000,0x1000};
-static unsigned badMap=99,missingMap=99;
+static constexpr uintptr_t bases[12]={0x0010b000,0x0af00000,0x0ae05000,0x0ae02000,0x0ae6b800,0x0ae6c000,0x0ae94000,0x15000000,0x15082000,0x0ae00000,0x0ae6e800,0x17a00000};
+static constexpr size_t lengths[12]={0x1000,0x3000,0x1000,0x1000,0x800,0x800,0x400,0x2000,0x1000,0x2000,0x200,0x10000};
+static unsigned badMap=99,missingMap=99,shortMap=99;
+static std::vector<unsigned> mapCalls;
 struct IOMemoryMap : OSObject {
  unsigned index;
  IOMemoryMap(unsigned i):index(i){++liveMaps;}~IOMemoryMap(){--liveMaps;}
  uintptr_t getPhysicalAddress(){return bases[index]+(index==badMap?4:0);}
  uintptr_t getVirtualAddress(){return bases[index];}
- size_t getLength(){return lengths[index];}
+ size_t getLength(){return lengths[index]-(index==shortMap?1:0);}
 };
 struct OSNumber : OSObject {
  uint64_t value;static OSNumber*withNumber(unsigned long long n,unsigned){auto*p=new OSNumber;p->value=n;return p;}
@@ -153,7 +155,7 @@ struct IOService : OSObject {
  virtual bool start(IOService*){return true;}virtual void stop(IOService*){}
  virtual IOReturn setProperties(OSObject*){return 0;}
  bool isInactive(){return inactive;}
- int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){return i==missingMap?nullptr:new IOMemoryMap(i);}
+ int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){mapCalls.push_back(i);assert(i<12);return i==missingMap?nullptr:new IOMemoryMap(i);}
  void setProperty(const char*,unsigned long long,unsigned){}void setProperty(const char*,bool){}
  void setProperty(const char*,const char*){} void setProperty(const char*,OSObject*){}
  void registerService(){}
@@ -168,13 +170,15 @@ IONotifier*IOService::addMatchingNotification(const char*k,OSDictionary*d,Notify
  auto*n=new IONotifier;n->kind=k;n->dict=d;d->retain();n->cb=cb;n->target=t;subscriptions.push_back(n);return n;
 }
 static void emit(const char*k,IOService*p){for(auto*n:subscriptions)if(n->kind==k)n->cb(n->target,nullptr,p,n);}
-static int enabled=1,probeEnabled=1,powerEnabled=0;
+static int enabled=1,probeEnabled=1,powerEnabled=0,irqProbeMode=0;
 static bool PE_parse_boot_argn(const char*k,void*v,size_t){
  if(!strcmp(k,"sweetmdss")){*(int*)v=enabled;return true;}
  if(!strcmp(k,"sweetdispprobe")){*(int*)v=probeEnabled;return true;}
+ if(!strcmp(k,"sweetmdssirqprobe")){*(int*)v=irqProbeMode;return true;}
  if(!strcmp(k,"sweetfbpower")){*(int*)v=powerEnabled;return true;}return false;
 }
-static void quiet(const char*,...){}
+static std::vector<std::string> messages;
+static void quiet(const char*fmt,...){char text[2048];va_list a;va_start(a,fmt);vsnprintf(text,sizeof(text),fmt,a);va_end(a);messages.push_back(text);}
 #define IOLog quiet
 #define SWEET_LOG_INFO quiet
 #define SWEET_LOG_WARN quiet
@@ -197,12 +201,13 @@ static std::map<uintptr_t,uint32_t> regs;
 struct Op {bool write;uintptr_t addr;uint32_t value;bool operator==(const Op&o)const{return write==o.write&&addr==o.addr&&value==o.value;}};
 static std::vector<Op> trace;
 static bool dmaFired=false,dmaDone=true,lateError=false,pauseRead=false,enteredRead=false,releaseRead=false;
+static uintptr_t pauseAddress=0;
 static unsigned failNextDMAs=0;
 static bool activeDMAFails=false;
 static std::mutex pauseLock;
 static std::condition_variable pauseCV;
 static uint32_t readReg(uintptr_t b,uint32_t o){
- if(pauseRead&&b==bases[6]&&o==4){std::unique_lock<std::mutex> l(pauseLock);enteredRead=true;pauseCV.notify_all();pauseCV.wait(l,[]{return releaseRead;});}
+ if(pauseRead&&((b==bases[6]&&o==4)||(pauseAddress&&b+o==pauseAddress))){std::unique_lock<std::mutex> l(pauseLock);enteredRead=true;pauseCV.notify_all();pauseCV.wait(l,[]{return releaseRead;});}
  uint32_t v=regs[b+o];if(b==bases[6]&&o==0x110&&dmaFired)v=(dmaDone&&!activeDMAFails?1:0)|(lateError?(1u<<24):0);
  trace.push_back({false,b+o,v});return v;
 }
@@ -359,8 +364,81 @@ int main(){
  {std::lock_guard<std::mutex> l(pauseLock);releaseRead=true;}pauseCV.notify_all();
  power.join();stopPower.join();pauseRead=false;endPower=trace.size();
  assert(s->setPanelPower(true)==kIOReturnNotReady&&trace.size()==endPower);s->release();
+
+ // F3 defaults do not map/read any new resource; old ADTs remain valid.
+ powerEnabled=0;probeEnabled=0;mapCalls.clear();resetRegs();s=make(nub);
+ assert(mapCalls==(std::vector<unsigned>{0,1,2,3,4,5,6,7,8}));
+ assert(!s->fIrqProbe&&trace.empty());s->stop(nub);s->release();
+ auto fire=[](SweetMDSS*p){std::lock_guard<std::recursive_mutex> l(p->fLoop->gate);
+   p->fIrqProbe->timeout=0;SweetMDSS::irqProbeAction(p,p->fIrqProbe);};
+ auto hasMessage=[](const char*part){for(auto&m:messages)if(m.find(part)!=std::string::npos)return true;return false;};
+ // Only documented read-only GIC registers allowed, never a write.
+ const std::vector<uintptr_t> gicReads={0x17a00000,0x17a00004,0x17a00008,0x17a0ffe8,
+   0x17a0008c,0x17a00d0c,0x17a0010c,0x17a0020c,0x17a0030c,0x17a00c1c,
+   0x17a00470,0x17a06398,0x17a0639c};
+ irqProbeMode=1;mapCalls.clear();resetRegs();s=make(nub);
+ assert(mapCalls==(std::vector<unsigned>{0,1,2,3,4,5,6,7,8,11}));
+ assert(trace.empty()&&s->fIrqProbe->timeout==30000&&s->fProbe->timeout==0);
+ // Nontrivial values catch word/lane/INTID mistakes independent of constants.
+ regs[0x17a0010c]=1u<<19;regs[0x17a0020c]=1u<<19;regs[0x17a0030c]=1u<<20;
+ regs[0x17a00c1c]=2u<<6;regs[0x17a00470]=0xa5123456;regs[0x17a06398]=0x80000001;regs[0x17a0639c]=2;
+ messages.clear();fire(s);
+ assert(hasMessage("en=1 pending=1 active=0 cfg=2 priority=0xa5 route=0x2:80000001"));
+ assert(s->fIrqProbePass==1&&s->fIrqProbe->timeout==1000);
+ assert(trace.size()==gicReads.size());
+ for(auto o:trace)assert(!o.write&&std::find(gicReads.begin(),gicReads.end(),o.addr)!=gicReads.end());
+ fire(s);fire(s);assert(s->fIrqProbePass==3&&s->fIrqProbe->timeout==0);
+ end=trace.size();fire(s);assert(trace.size()==end);s->stop(nub);s->release();assert(!liveMaps);
+ // Full snapshot includes both TE blocks. Sticky RD_PTR is logged, never ACKed.
+ irqProbeMode=2;resetRegs();s=make(nub);assert(trace.empty()&&liveMaps==12);
+ regs[0x0ae6e800]=4;regs[0x0ae6e804]=0x14;regs[0x0ae6e900]=8;regs[0x0ae6e904]=0x18;
+ messages.clear();auto before=regs;fire(s);
+ assert(hasMessage("tear1-en=0x4 tear1-status=0x14 tear2-en=0x8 tear2-status=0x18"));
+ assert(hasMessage("rdptr-enabled=1 rdptr-latched=1"));
+ for(auto o:trace)assert(!o.write);
+ for(auto pair:before)assert(regs[pair.first]==pair.second);
+ assert(std::none_of(trace.begin(),trace.end(),[](auto o){return o.addr==0x0ae6e808||o.addr==0x0ae6e908||o.addr==0x0ae01018;}));
+ s->stop(nub);assert(s->fIrqProbe->timeout==0);end=trace.size();fire(s);assert(trace.size()==end);
+ s->release();assert(!liveMaps);
+ // Missing, mistranslated or too-short diagnostic resources only disable the probe.
+ for(unsigned kind=0;kind<3;++kind)for(unsigned i=9;i<12;++i){
+  if(kind==0)missingMap=i;if(kind==1)badMap=i;if(kind==2)shortMap=i;
+  resetRegs();s=make(nub);assert(!s->fIrqProbeMode&&!s->fIrqProbe&&liveMaps==9);
+  assert(trace.empty());assert(s->brightnessReady()==0); // display remains usable
+  s->stop(nub);s->release();assert(!liveMaps);missingMap=badMap=shortMap=99;
+ }
+
+ // Diagnostic event allocation/add failures also retain the display service.
+ for(unsigned kind=0;kind<2;++kind){
+  if(!kind)failTimerCreate=timerCreates+2;else failEventAdd=eventAdds+3;
+  resetRegs();s=make(nub);assert(!s->fIrqProbe&&!s->fIrqProbeMode&&liveMaps==9&&trace.empty());
+  assert(s->brightnessReady()==0);s->stop(nub);s->release();assert(!liveMaps);
+  failTimerCreate=failEventAdd=0;
+ }
+ // stop waits for a running preflight before closing admission and removing its timer.
+ resetRegs();s=make(nub);pauseRead=true;pauseAddress=0x17a00000;enteredRead=false;releaseRead=false;stopped=false;
+ std::thread snapshot([&]{fire(s);});
+ {std::unique_lock<std::mutex> l(pauseLock);pauseCV.wait(l,[]{return enteredRead;});}
+ std::thread stopSnapshot([&]{s->stop(nub);stopped=true;});assert(!stopped.load());
+ {std::lock_guard<std::mutex> l(pauseLock);releaseRead=true;}pauseCV.notify_all();
+ snapshot.join();stopSnapshot.join();pauseRead=false;pauseAddress=0;
+ end=trace.size();fire(s);assert(trace.size()==end&&s->fIrqProbe->timeout==0&&liveMaps==12);
+ s->release();assert(!liveMaps);
+ // Never read MDSS/TE with their AHB clock gates shut; GIC snapshot is independent.
+ for(unsigned which=0;which<2;++which){resetRegs();s=make(nub);
+  if(!which)regs[0x0010b00c]=0;else regs[0x0af02080]=1u<<31;
+  messages.clear();fire(s);assert(hasMessage("MDSS clocks unavailable"));
+  for(auto o:trace)assert(!o.write&&(o.addr<0x0ae00000||o.addr>=0x0ae70000));
+  s->stop(nub);s->release();assert(!liveMaps);
+ }
+ // Inactive provider and queued post-stop callbacks cannot touch any register.
+ resetRegs();s=make(nub);s->inactive=true;fire(s);assert(trace.empty());
+ s->stop(nub);fire(s);assert(trace.empty());s->release();
+ for(int mode:{-1,3}){irqProbeMode=mode;mapCalls.clear();s=make(nub);
+  assert(mapCalls.size()==9&&!s->fIrqProbe);s->stop(nub);s->release();}
+ irqProbeMode=0;
  nub->release();assert(live==0);
- puts("PASS: actual service/client; legacy DCS traces, F2 short packets/LP, idempotence, frozen TE, recovery/unknown state, independent fault budgets, gates/stop and zero live objects");
+ puts("PASS: actual service/client; legacy DCS traces, F2 short packets/LP, idempotence, frozen TE, recovery/unknown state, independent fault budgets, gates/stop F3 read-only snapshots/decoding/bounds/clock admission/default compatibility and zero live objects");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-display-service-') as temp:
