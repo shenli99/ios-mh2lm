@@ -2,6 +2,14 @@
 
 ## Agent handoff / active work (2026-11-09, latest)
 
+**CI补充：用户贴出的新失败发生在KDK安装前置阶段，不是XNU编译报错。**
+KDK13.5/22G74下载100%后hdiutil attach报image not recognized；尚无完整失败日志/CI run ID
+或下载文件，错误页面/文件损坏等待区分。旧logs/xnu-build-log-0121a1.txt同版安装成功。
+circleci.yml当前blob=da0b6c0947a66f03491b3a9023590b49665292df，与显示改造前相同；
+本轮仅补充文档，未改CI/驱动、未push。本地联网复查下载源未成功，不声称已检查远端URL。
+NEXT：用户可先重跑现有job重新下载，无需push；若仍失败，保留实际下载文件/URL/响应及
+类型/大小/hdiutil检查结果再定位。主线仍是下段F1a收口/F1b，BUG-004独立跟踪。
+
 **CURRENT：0121a5 baseline也复现充电启停，A/B结束；BUG-004独立跟踪。**
 用户确认成功复现，日志sweetlog-0121a5-fb-service-baseline.bin，SHA256=
 05b5ae79eaa5e41b32e18e3a8b9b23bc65158d89dbe84d7666a0589191296e09；有效1079001字节/

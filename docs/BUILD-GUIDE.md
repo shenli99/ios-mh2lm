@@ -154,9 +154,15 @@ boot 分区 96 MiB（0x6000000）。失败时 fastboot 仍可用，刷回上一�
 |---|---|
 | CI 绿了但功能没变 | 补丁被 dxb 拒绝；加 require_marker，核对 buildtree 源码 |
 | CircleCI 配置报错 | require_marker 字符串含 `<<` |
+| Installing KDK 后 `hdiutil: attach failed - image not recognized` | KDK下载文件无法识别，尚未进入XNU编译；100%不代表文件有效。先重跑现有job重新下载，重复失败时保留文件，核对实际URL、HTTP状态/重定向、大小、file类型及hdiutil校验。可能是错误页面或损坏/截断，未核实前不定因、不改内核或CI配置 |
 | 新镜像行为和上次一样 | 下载了旧产物；比 SHA 和新字符串 |
 | UEFI 不启动 | FD_BASE 错（要 0xA0000000）或 FD 尺寸不是 0x300000 |
 | iOS 内核静默挂起 | ADT 缺 `/chosen/darwinboot-memory-size`（要 3 GiB），用 `adt-16k-3g.adt` |
 | 手机进了 Android | userdata 上的 iOS 根卷会被清；持久镜像默认项必须是 Mass Storage |
 | 新根卷首启 SpringBoard 不出图 | lsd 重建数据库 10+ 分钟，等 30 分钟再判断 |
 | 本地交叉编译找不到头文件 | 用 buildtree 里的 `sdk-kernel-platform`，路径替换见 compile.py |
+
+2026-11-09用户贴出的失败片段为KDK 13.5 / 22G74下载100%后挂载不可识别，尚无完整失败
+日志文件或CI run ID。旧`W/logs/xnu-build-log-0121a1.txt`第5–34行同版KDK下载、挂载校验、
+安装均成功，故不是该版本从未可用。近期显示/日志诊断提交未改circleci.yml；失败下载文件
+未取得，不能区分下载错误内容与传输损坏。本地无法联网复查源端，不能声称已验证下载URL。
