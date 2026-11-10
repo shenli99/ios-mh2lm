@@ -142,3 +142,13 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 扫描仍0x9d200000、secure字段含义正确、SMMU/故障视图完整，F3硬件激活/输入/唤醒未新增退化。
 如果pool setup failed或inspect失败，即使画面正常也不能验收本首段；按明确日志继续定位。
 首段通过后结合live数据设计单缓冲接管与真实完成事件，不无意义重复同类只读测试。
+
+## 7. 本次重复编号0121a10产物核对：不是0181
+
+2026-11-10用户报编译完成，logs中两归档修改时间确为当日，但解包kernel仍与历史0121a10
+一致：SHA256 `b6a0732a419f28276b6b6f8fba7c15f711d66394e66ee200043066a0aeda397e`，
+17503376bytes；历史44份源码SHA也全部相同。归档字节不同不能证明其中驱动已更新。
+新包没有0180硬件vsync的两个inc或0181扫描池/预检四文件，内核也无F3v2及F4 marker。
+本次未打包boot，不能拿它验收0181；原历史预检测试证据不被覆盖。
+原因须由正确任务产物/本次build log区分，本地尚无这份新构建日志，不据此判CircleCI损坏。
+核对底稿：`work1/scratch/framebuffer-0181/incoming-0121a10-verification.json`。

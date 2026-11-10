@@ -2,6 +2,20 @@
 
 ## Agent handoff / active work (2026-11-10, latest)
 
+**CURRENT：用户报新产物0121a10，核对发现仍是历史0179内容，不能用于0181/F4；待正确产物/本次构建日志。**
+logs/xnu-{kernel,buildtree}-0121a10.gz修改时间为本日18:39，压缩包SHA与历史不同，
+但解包MH2LM kernel SHA仍b6a0732a419f28276b6b6f8fba7c15f711d66394e66ee200043066a0aeda397e
+（17503376bytes），与此前0121a10完全相同。历史核对的44份源码SHA全部相同，无缺失/变化。
+新包缺0180的SweetMDSSIRQ.inc/SweetFBVsync.inc和0181四个扫描池/预检文件；内核无F3v2/
+SweetScanoutPool/SweetScanoutPreflight/sweetfbown。不能只按文件名或mtime认定新代码存在。
+未打包新boot，未覆盖旧artifact-0121a10证据；本轮核对底稿为
+scratch/framebuffer-0181/incoming-0121a10-verification.json（含本次两归档SHA/缺失文件）。
+logs没有另一个更新kernel/buildtree，亦无本次build log；下载旧任务、构建旧提交或补丁未入
+等原因尚未区分，不擅判云端故障。NEXT用户核对正确任务产物；若确是最新任务需本次构建
+日志进一步定位。PD0完成/F4待测状态不变，无驱动/参数/CI变更，无push/设备操作。
+
+**以下为PD0设计交接；0181预检须先取得正确新产物。**
+
 **CURRENT：PD0静态资源核对/接口设计已交付；下一步0181新云产物扫描池预检，之后F4/PD1。**
 基于1872425，新增docs/PANEL-RESOURCES-PD0.md，同步PD总计划/主面板/总路线/F4/架构。
 直接核对LG d4f335e13d73c4aa2af85581a6ec11b670ee5b94实际DTS/DRM/dsi-staging/LG override。
