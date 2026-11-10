@@ -1,8 +1,8 @@
 # F4：自有扫描缓冲、硬件裁剪与双缓冲翻页
 
 2026-11-10。F3正常使用路径已由0121a11验收，用户授权开始F4。
-**当前0181完成首段本地实现及检查，待用户push/云编译/实测；尚未切换扫描地址或完成翻页。**
-本轮不改CircleCI，不push，不生成基于旧内核的新实验boot，不操作设备。
+**当前0181首段已完成本地验证；替换后的0121a11云产物核对通过，预检boot已打包，待实机。**
+尚未切换扫描地址或完成翻页。本轮不改CircleCI，不push，不操作设备。
 
 **2026-11-10新增目标：** F4是[完整面板驱动PD1](PANEL-FULL-DRIVER-PLAN.md)的主体，
 但不等于完整硬件接管；还须补无ABL像素的首帧及自有控制台/故障缓冲，再推进PD2–PD5
@@ -152,3 +152,45 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 本次未打包boot，不能拿它验收0181；原历史预检测试证据不被覆盖。
 原因须由正确任务产物/本次build log区分，本地尚无这份新构建日志，不据此判CircleCI损坏。
 核对底稿：`work1/scratch/framebuffer-0181/incoming-0121a10-verification.json`。
+
+## 8. 更正编号0121a11：0181产物核对及预检镜像
+
+2026-11-10用户更正编号；本日18:53替换的0121a11归档确已包含0181。
+**与历史同编号F3内核不同**：本次kernel为17525432bytes，SHA256
+`b605b12db6e6f8a5edaae1182560b50589f099bb9d4f10fce1fcf5a5e5469234`；
+历史F3内核为17523360bytes、SHA256
+`5c7a21c1b077ccfae427547d9cb350b070749c1f0a5a8208485503bbf1d9dd5a`。
+本次52份源码逐字节匹配0181验证树，包含9份补丁变化文件；归档manifest、114条原CI源码
+marker及F3/F4内核marker均通过，对应实现42047d3。未取得本次完整build log/CI run ID，
+不据产物核对宣称审完云端告警；也不把历史F3实测套用为0181实测。
+
+两份归档SHA256：
+
+- kernel：`afd78ed2eddebd2f12e64742ba2641557146c211d42062d014117625095f365d`
+- buildtree：`65cb7ab5d97e8bd6f3d7087b22cbf77ba157c5573fa1c8bdd20e85a42b9de6a7`
+
+已打包两个新后缀镜像，各35667968bytes，不覆盖历史F3镜像：
+
+| 路径（相对work1） | SHA256 |
+|---|---|
+| `out-bs/boot-16k-0121a11-fb-scanout-baseline.img` | `9ed8681e1fe29bfaa9048ee9bb89ceeda976546eb3b0ee652ef70786d86bfba4` |
+| `out-bs/boot-16k-0121a11-fb-scanout-preflight.img` | `5823bdbc9917292f578239b032ec25558b17c0e0c9a07aa1c1b62551414864d2` |
+
+独立重解析最终Android boot v1和FAT内容，核对UEFI、ramdisk、实际内核、TOML和扩展ADT。
+两档内核一致、参数只差sweetfbown=0/1；irq2/vsync1/F2/ACM/按键/触摸/电池runtime3保持，
+无重复参数。打包时本机缺file(1)，只在scratch包装脚本用Python检查boot头，未改仓库打包器。
+
+先执行：
+
+```sh
+fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a11-fb-scanout-preflight.img
+```
+
+按第6节亮屏45–60秒/简测输入与亮度/手动OFF20–30秒/ON后10–20秒，导出
+`sweetlog-0121a11-fb-scanout-preflight.bin`。baseline留作故障对照，无需先刷。
+当前尚无本次实机证据；仍只分配池、准备复制样本并读live快照，实际扫描保持ABL，
+不能计作PD1已接管或承诺画面改善。通过后再依据快照推进受控接管与完成关联。
+
+本次底稿：`work1/scratch/artifact-0121a11-f4/`的`verification.json`、`source-compare.json`、
+`boot-verification.json`、两个verify脚本及`packaging.txt`；历史`artifact-0121a11/`不覆盖。
+CircleCI blob仍`da0b6c0947a66f03491b3a9023590b49665292df`，无驱动改动、push或设备操作。

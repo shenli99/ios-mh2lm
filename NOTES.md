@@ -2,7 +2,30 @@
 
 ## Agent handoff / active work (2026-11-10, latest)
 
-**CURRENT：用户报新产物0121a10，核对发现仍是历史0179内容，不能用于0181/F4；待正确产物/本次构建日志。**
+**CURRENT：用户更正为0121a11；替换后的产物已确认包含0181，扫描池预检boot已打包并独立校验，待实机。**
+本次logs/xnu-{kernel,buildtree}-0121a11.gz为本日18:53替换包，须区别历史同编号F3产物。
+kernel归档SHA256=afd78ed2eddebd2f12e64742ba2641557146c211d42062d014117625095f365d；
+buildtree归档SHA256=65cb7ab5d97e8bd6f3d7087b22cbf77ba157c5573fa1c8bdd20e85a42b9de6a7。
+解包MH2LM kernel为17525432bytes，SHA256=b605b12db6e6f8a5edaae1182560b50589f099bb9d4f10fce1fcf5a5e5469234；
+归档manifest通过，52份源码逐字节匹配0181验证树（含9份变化文件），114原CI源码marker及F3/F4
+内核marker通过，对应实现42047d3。无本次build log/CI run ID，未宣称审完全部云端告警。
+已生成out-bs/boot-16k-0121a11-fb-scanout-{baseline,preflight}.img，各35667968bytes。
+baseline SHA256=9ed8681e1fe29bfaa9048ee9bb89ceeda976546eb3b0ee652ef70786d86bfba4；
+preflight SHA256=5823bdbc9917292f578239b032ec25558b17c0e0c9a07aa1c1b62551414864d2。
+从最终boot重新解析Android v1头及FAT内容，kernel/ramdisk/UEFI/扩展ADT/TOML匹配；两档参数
+只差sweetfbown=0/1，保留irq2/vsync1/F2/ACM/按键/触摸/电池runtime3，无重复参数。
+底稿scratch/artifact-0121a11-f4/{verification.json,source-compare.json,boot-verification.json,
+verify-artifacts.py,verify-boots.py,packaging.txt}；历史scratch/artifact-0121a11/及旧F3 boot不覆盖。
+NEXT：只先fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a11-fb-scanout-preflight.img；
+亮屏45–60秒，简测亮度/三键/触摸，手动OFF20–30秒/ON后10–20秒，导出
+sweetlog-0121a11-fb-scanout-preflight.bin。baseline仅故障对照，不重测F3矩阵/半小时/旧BUG专项。
+0181仍是池分配/seed/只读live快照，尚未切扫描地址，画面改善不属本轮预期；F4/PD1尚未验收。
+路线PD0 → F4/PD1 → PD2–PD5 → F5不变。本轮无驱动/CI改动，无push/设备操作；CircleCI
+blob仍da0b6c0947a66f03491b3a9023590b49665292df。详情FRAMEBUFFER-SCANOUT-F4.md第8节。
+
+**以下为此前误报0121a10的核对；正确产物已由上段更正。**
+
+**历史：用户报新产物0121a10，核对发现仍是历史0179内容，不能用于0181/F4。**
 logs/xnu-{kernel,buildtree}-0121a10.gz修改时间为本日18:39，压缩包SHA与历史不同，
 但解包MH2LM kernel SHA仍b6a0732a419f28276b6b6f8fba7c15f711d66394e66ee200043066a0aeda397e
 （17503376bytes），与此前0121a10完全相同。历史核对的44份源码SHA全部相同，无缺失/变化。
