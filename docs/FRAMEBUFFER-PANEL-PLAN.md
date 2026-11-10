@@ -1,6 +1,12 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**当前状态（2026-11-10）：0121a11完整硬件vsync档通过，F3正常使用路径验收通过；下一步F4。**
+**F4已开始（0181，本地实现，待云编译/实测）：** 首段新增`SweetScanoutPool`、有界ABL画面
+复制和typed只读扫描快照，默认`sweetfbown=0`；own1申请两个缓冲并预检，仍由ABL扫描。
+核对LG DRM/SDE后纠正原计划：`SSPP_SRC_ADDR_SW_STATUS(+0x70)`是安全属性，不是生效地址；
+单独下一次RD_PTR也不能充当旧缓冲释放fence。首段不写扫描地址，不提前实现或验收翻页。
+实施顺序/源码依据/同核两档与后续完成事件设计见[F4实施记录](FRAMEBUFFER-SCANOUT-F4.md)。
+
+**F3验收基线（2026-11-10）：0121a11完整硬件vsync档通过，F3正常使用路径验收通过；已开始上段F4首段。**
 FB首真实帧及唤醒后均进入hardware active，无显式回退；十个完整窗59.874–59.915Hz，
 其中唤醒后三窗稳定，OFF帧/IRQ计数不增长。用户未发现异常，见[F3第12节](FRAMEBUFFER-VSYNC-F3.md#12-0121a11完整硬件档f3正常使用路径验收通过)。
 默认参数仍关闭，CPU拷贝30Hz仍保留。F4先核对新扫描内存的live SMMU/缓存/可达性，
@@ -57,7 +63,7 @@ update/disable/background已由原始框架核对；原版内核的等待参数�
 | ABL 交接 | VIG0 SSPP：`SRC_SIZE`(+0x00)=0x0924_0438、`SRC0_ADDR`(+0x14)=0x9d200000、`YSTRIDE0`(+0x24)=0x10e0；INTF1 tear-check 开、**autorefresh=0x80000001**；CTL0 FLUSH/START=0；DSI0 cmd 模式 | 0120a17 日志 `SWEET DISP: pass 0..2` |
 | 含义 | MDP 每个 TE 自动从 SSPP 源地址取整帧发给面板。**改 `SRC0_ADDR` 并 flush 即可换扫描缓冲**，这是硬件翻页和零拷贝的基础 | 同上；`sde_hw_sspp.c:25-37` |
 | ABL 缓冲 | 当前 0120a17 运行探针看到 VIG0 `SRC0_ADDR=0x9d200000`，计划暂按其后 0x1200000（18 MiB）处理；Mu-Silicium 标 `Display Reserved`、WRITE_THROUGH | `MemoryMapLib.c:25`；0120a17 `SWEET DISP` 日志 |
-| SSPP 寄存器 | `SRC_SIZE`0x00、`SRC_XY`0x08（源裁剪起点）、`OUT_SIZE`0x0c、`SRC0_ADDR`0x14、`YSTRIDE0`0x24、`SRC_FORMAT`0x30、`UNPACK`0x34、`OP_MODE`0x38、`ADDR_SW_STATUS`0x70 | `sde_hw_sspp.c:25-82` |
+| SSPP 寄存器 | `SRC_SIZE`0x00、`SRC_XY`0x08（源裁剪起点）、`OUT_SIZE`0x0c、`SRC0_ADDR`0x14、`YSTRIDE0`0x24、`SRC_FORMAT`0x30、`UNPACK`0x34、`OP_MODE`0x38、`ADDR_SW_STATUS`0x70（安全属性，非生效地址） | `sde_hw_sspp.c:25-82,431-463` |
 | CTL | `FLUSH`0x018、`START`0x01c，VIG0 的 flush 位 BIT(0) | `sde_hw_ctl.c:29-30,167` |
 | MDSS 中断 | `interrupts=<0 83 0>` → INTID 115【待核实】；INTF1 tear 中断块 MDP+0x6E800（EN/STATUS/CLEAR=+0/+4/+8），bit2 RD_PTR、bit0 AUTOREFRESH_DONE；顶层 HW_INTR_STATUS=MDP+0x10 | `sm8150-sde.dtsi:44`；`sde_hw_interrupts.c:25,37-41,194-198` |
 | SMMU | MDSS SID=0x800、匹配 mask=0x420。0121a2 SMR3=0x84200800、S2CR=0x2（TRANS/CB2），但 CB2 SCTLR=0xe0/M0、TTBR/TTBCR/MAIR0，本次 stage1 转换未使能；新物理页可达性仍需核实 | `sm8150-sde.dtsi:47`；0121a2 报告 §6 |
@@ -151,8 +157,8 @@ L2 的关键：IOSurface 创建时识别“可能被 IOMFB 扫描”的 surface�
 
 ```
 SwapEnd(rec) ── 校验/retain surface ──► pending
-RD_PTR(vsync) ── pending 存在 ──► clean cache ─► 写 SRC0_ADDR(+XY) ─► CTL FLUSH
-下一次 RD_PTR ── 读 ADDR_SW_STATUS/确认新地址生效 ──► 旧前台 surface 释放 + swap 完成通知
+准备后台缓冲（F4拷贝，F5可直扫时clean） ──► typed提交 SRC0_ADDR(+XY) / CTL FLUSH
+与提交对应的生效/传输完成确认 ──► 旧扫描缓冲退役 + 更新display/pending + 唤醒等待者
 ```
 
 - 一个 surface 在被扫描期间不得交还给 CA 继续绘制：必须核对并实现本版用户态实际使用的
@@ -163,6 +169,10 @@ RD_PTR(vsync) ── pending 存在 ──► clean cache ─► 写 SRC0_ADDR(+
   无读者后归还源。不能把reading、displayCurrent和被丢弃的queued统一算“完成”。
   当前显示ID、pending集合、源读取权和配置ready分别维护；ID0的意义由options决定。
   options0/1/2/3/4及副作用边界以[原版内核核对与设计](FRAMEBUFFER-SWAP-CONTRACT.md)为准。
+- 2026-11-10纠正：`ADDR_SW_STATUS`由LG的`setup_secure()`修改，不能拿来确认翻页；
+  `SRC0_ADDR`读回仅证明配置寄存器值。LG分别处理CTL_START、RD_PTR和PP_TX_DONE的fence，
+  F4接线前必须明确本机autorefresh下的提交对应关系。F4源surface在CPU读完后可归还，
+  驱动自己的扫描缓冲仍须等硬件读者退出；两个节点不能合并为一个“完成”。
 
 ### 2.5 IOKit 原则
 
@@ -186,7 +196,7 @@ RD_PTR(vsync) ── pending 存在 ──► clean cache ─► 写 SRC0_ADDR(+
 | `sweetfbservice=1` | F1b | AppleCLCD后端绑定、用户接口dispatch和状态gate；要求mdss1/contract0，默认0 |
 | `sweetfbpower=1` | F2 | 0177 DCS28/29，不擦像素；要求service1/mdss1/contract0，默认0 |
 | `sweetfbvsync=1` | F3 | MDSS RD_PTR 中断做 vsync |
-| `sweetfbown=1` | F4 | 自有扫描缓冲 + 硬件裁剪 + 双缓冲翻页（L1） |
+| `sweetfbown=1` | F4首段（0181） | 申请扫描池、ABL画面复制准备、typed只读预检；尚不切扫描地址 |
 | `sweetfbdirect=1` | F5 | surface 直接扫描（L2，含 L3 回退） |
 | `sweetfbkickoff=1` | F6 | 关 autorefresh，按帧 kickoff（可选） |
 
@@ -292,13 +302,19 @@ AppleCLCD后端绑定、用户客户端分发表/参数校验和状态gate，012
 
 ### F4：自有扫描缓冲 + 硬件裁剪 + 双缓冲翻页（修 P3/P5，L1）
 
+**当前首段0181：** 已实现扫描池和只读预检，待新云内核实测；不将“分配成功/寄存器读回”
+当作DMA可达性或翻页成功。后续分为单缓冲接管、真实完成事件关联及双缓冲、帧等待与性能
+收口，详见[F4实施记录](FRAMEBUFFER-SCANOUT-F4.md)。此阶段`own1`固定为只读预检，后续切换
+扫描行为须另设明确档位，不能让同一参数在未核对新镜像时悄悄改变含义。
+
 **做什么**
 - `SweetScanoutPool` 分配 2 个物理连续缓冲（1125×2436×4，行距 4608，写合并），记录物理地址。
 - 交接：一次性复制 ABL 当前画面到缓冲 A；配置 SSPP：`SRC_FORMAT/UNPACK` 显式写 BGRA、
   `YSTRIDE0=4608`、`SRC_XY=(22,48)`、`SRC_SIZE=OUT_SIZE=1080×2340`、`SRC0_ADDR=A`，CTL FLUSH VIG0；
-  下一 RD_PTR 读 `ADDR_SW_STATUS` 确认生效。
+  核对目标硬件的提交生效与传输完成事件后确认切换；`ADDR_SW_STATUS`仅保留安全属性语义。
 - 呈现：swap 的 layer 0 surface → 拷到后台缓冲（不裁剪，整画布行拷贝）→ RD_PTR 时翻页
-  （写 `SRC0_ADDR`+FLUSH）→ 下一 RD_PTR 确认后释放上一帧 surface、发完成通知。
+  （写 `SRC0_ADDR`+FLUSH）→ 通过与提交对应的完成事件确认后，才复用旧扫描缓冲并更新帧状态。
+  CPU读完源surface与硬件停止读取扫描池是两个独立的所有权节点。
 - 实现 `SwapWait`；废弃 `sweetfb_hz`（保留解析并告警）。
 - 失败（分配失败、翻页未生效）→ 回到旧 ABL 缓冲路径并显式记录。
 
@@ -358,7 +374,7 @@ autorefresh 且画面不冻结。
 
 | 风险 | 预案 |
 |---|---|
-| 新缓冲不可达，MDP 花屏/总线错误 | 同时核对 SMR/S2CR 与 CBAR/SCTLR，不能只按 TRANS route 判断。0121a2 的 CB2.M=0，不据此强加 F4a。F4 首次写新地址前重查 live 配置、内存归属与可达性，用 `ADDR_SW_STATUS` 和肉眼验证。ABL 暂按18 MiB，放不下两个1080×2340缓冲，不能作为双缓冲退路；只有确认需要地址转换时才另设计 F4a（仅扫描池映射），单独验收 |
+| 新缓冲不可达，MDP 花屏/总线错误 | 同时核对 SMR/S2CR 与 CBAR/SCTLR，不能只按 TRANS route 判断。0121a2 的 CB2.M=0，不据此强加 F4a。写新地址前重查live配置、内存归属与可达性，后续结合真实提交/传输完成及画面核验，不能用安全寄存器`ADDR_SW_STATUS`确认地址。ABL暂按18MiB，不够双缓冲；只有确认需要转换时才另设计扫描池映射子步骤 |
 | 物理连续 10.7 MiB 分配失败 | 启动早期分配；失败回退旧路径并记录；考虑使用 ADT 预留区 |
 | 写 SSPP 格式寄存器出错导致花屏 | 先写回与 ABL 相同的值验证读写；再改裁剪；每次改动后读回比对 |
 | cache clean 不足导致残影 | F5 验收 3 专门检查；回退方案 B |
@@ -426,6 +442,7 @@ SSPP 格式/裁剪/地址状态、INTF 计数差值和 apps SMMU SID 0x800 匹�
 | F1b | 0176 / b1c7969 | 本地/云产物/boot核对；0121a7 gated持久日志及用户未见新问题 | 正常运行路径验收通过；真实provider终止未上机；BUG-004复现独立跟踪，下一步F2 |
 | F2 | 0177 / decebe3 | 0121a9 DCS日志及用户确认显示正常；3组实际off/on均rc0 | 基础开关屏及长时电源键唤醒通过；长测日志与视觉确认见F2报告；完整插拔次数未补齐，旧bug独立跟踪 |
 | F3 | 0179+0180 / 7329197 | 0121a10预检、0121a11 GIC/RD_PTR/完整档；SHA见F3报告 | 正常使用路径验收通过；完整档59.874–59.915Hz、OFF停计数/ON恢复硬件消费、无回退；下一步F4 |
+| F4首段 | 0181 | 本地strict apply/arm64/实际驱动host检查；待新云内核 | 扫描池/ABL复制准备/typed只读预检；扫描仍ABL，尚未接管或翻页 |
 
 ### 0171 / F0 补充实现（历史记录，0121a2 已完成实测）
 

@@ -1,6 +1,12 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
-**当前进度（2026-11-10）：0121a11完整硬件vsync档通过，F3正常使用路径验收通过；下一步F4。**
+**当前进度（2026-11-10）：已开始F4首段，0181扫描池和typed只读预检本地通过，待云编译/实测。**
+默认own0；own1申请双缓冲、准备ABL画面副本并获取有界快照，扫描仍ABL，无新扫描地址写入。
+核对LG后纠正旧计划的`ADDR_SW_STATUS`语义：它是安全属性，不能用于翻页确认；先补完成事件
+依据，再做接管/双缓冲/等待与性能收口。见[F4实施记录](FRAMEBUFFER-SCANOUT-F4.md)。
+本轮不改CircleCI、不push；同核baseline/preflight档只差own参数，原驱动及F3行为保留。
+
+**F3验收基线（2026-11-10）：0121a11完整硬件vsync档通过，F3正常使用路径验收通过。**
 首真实帧及唤醒后FB进入hardware active，十个完整窗59.874–59.915Hz，OFF计数停止，
 ON后三个完整窗稳定，无显式软件回退，用户未发现异常。见[F3第12节](FRAMEBUFFER-VSYNC-F3.md#12-0121a11完整硬件档f3正常使用路径验收通过)。
 F4推进自有扫描缓冲、硬件裁剪和双缓冲翻页，写新地址前核对live SMMU/缓存/可达性。
@@ -515,7 +521,7 @@ agent 实施时以该文档为准，按步骤顺序推进，每步通过验收�
 | F1 | 分层为 `SweetMDSS : IOService`（ADT reg/中断、mapDeviceMemory）+ `AppleCLCD` workloop/命令门/分发表 | 符合 IOKit 常规 |
 | F2 | 真显示电源：DCS 28/29（后续 10/11），不再擦像素 | 息屏唤醒局部黑屏 |
 | F3（0121a11正常使用验收通过） | MDSS INTF1 RD_PTR 中断做 vsync，定时器降为看门狗 | 假 vsync |
-| F4 | 驱动自有扫描缓冲（simplefb 式）+ SSPP 硬件裁剪 + 双缓冲翻页 | 撕裂、依赖 ABL 缓冲 |
+| F4（0181首段本地通过，待实测） | 自有扫描缓冲+SSPP裁剪+双缓冲翻页；当前仅池/复制准备/只读预检，尚不接管 | 撕裂、依赖 ABL 缓冲 |
 | F5 | CA surface 由扫描池分配、MDP 直接扫描（cache clean），不兼容时回退拷贝 | 每帧 CPU 拷贝 |
 | F6 | （可选）关 autorefresh，按帧 kickoff | 功耗/残余撕裂 |
 | F7 | IOPM 生命周期、关机/重启交还面板、panic 显示、删除旧路径 | 收尾 |

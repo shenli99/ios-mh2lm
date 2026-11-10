@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise actual F1b framebuffer, dispatch and lifecycle with OS-only fixtures.
+"""Exercise actual F1b/F2/F3/F4 framebuffer, dispatch and lifecycle with OS-only fixtures.
 Usage: test-mh2lm-framebuffer-service.py EXTRACTED_XNU
 The unchanged DCS/registry helper has its own test-mh2lm-display-service.py.
 """
@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from mh2lm_scanout_fixtures import BUFFER_FIXTURE
 
 if len(sys.argv) != 2:
     sys.exit(__doc__)
@@ -32,6 +33,8 @@ struct SweetFBContract : OSObject {
 };''')
 source = source.replace('#include "SweetFBService.inc"', service)
 source = source.replace('#include "SweetFBVsync.inc"', (arm/'SweetFBVsync.inc').read_text())
+for name in ['SweetScanoutPool.h', 'SweetScanoutPool.inc', 'SweetFBScanout.inc']:
+    source = source.replace('#include "'+name+'"', (arm/name).read_text())
 source = source.replace('class SweetDisplayBackend;', 'struct SweetDisplayBackend;')
 source = source.replace('class SweetVsyncChannel;', 'struct SweetVsyncChannel;')
 # Exercise the real retained mailbox, including its close/publication lock.
@@ -145,6 +148,7 @@ struct IOInterruptEventSource : Event {
 };
 CHANNEL_IMPLEMENTATION
 struct IOMemoryDescriptor : OSObject {size_t length=0;size_t getLength(){return length;}};
+BUFFER_IMPLEMENTATION
 struct IOMemoryMap : OSObject {};
 struct IOExternalMethodArguments {
  const uint64_t*scalarInput=nullptr;uint32_t scalarInputCount=0;uint64_t*scalarOutput=nullptr;uint32_t scalarOutputCount=0;
@@ -173,18 +177,24 @@ struct IOUserClient : IOService {
 };
 struct SweetSurface : OSObject {
  uint32_t id=1,width=4,height=4,bytesPerRow=16,pixelFormat=0x42475241,bytesPerElement=4,elementWidth=1,elementHeight=1,planeCount=0;
- uint64_t offset=0,allocSize=64;IOMemoryDescriptor*memory=nullptr;uint32_t pixels[16]{};
+ uint64_t offset=0,allocSize=64;IOMemoryDescriptor*memory=nullptr;uint32_t pixels[16]{};std::vector<uint8_t> bootPixels;
  SweetSurface(){memory=new IOMemoryDescriptor;memory->length=64;}
- uintptr_t kernelAddress(){return (uintptr_t)pixels;}void free()override{memory->release();}
+ uintptr_t kernelAddress(){return bootPixels.empty()?(uintptr_t)pixels:(uintptr_t)bootPixels.data();}void free()override{memory->release();}
 };
 static SweetSurface *testSource=nullptr;
-static SweetSurface*sweet_surface_create_physical(uint64_t,uint32_t,uint32_t,uint32_t,uint32_t){return new SweetSurface;}
+static SweetSurface*sweet_surface_create_physical(uint64_t,uint32_t w,uint32_t h,uint32_t stride,uint32_t){auto*p=new SweetSurface;
+ if(w!=4){p->width=w;p->height=h;p->bytesPerRow=stride;p->allocSize=p->memory->length=uint64_t(stride)*h;p->bootPixels.resize(p->allocSize,0x67);}return p;}
 static SweetSurface*sweet_surface_copy(uint32_t id){if(testSource&&id==testSource->id){testSource->retain();return testSource;}return nullptr;}
 static unsigned sweet_surface_port_in_task(SweetSurface*,task_t){return 77;}
 static std::vector<bool> panelRequests;
 static IOReturn panelResult=0;
 struct SweetDisplayBackend : IOService {
- SweetVsyncChannel*channel=nullptr;unsigned fallbackRequests=0;uint64_t frame=0;
+ SweetVsyncChannel*channel=nullptr;unsigned fallbackRequests=0,inspectCalls=0;uint64_t frame=0;
+ IOReturn inspectResult=0;
+ IOReturn inspectScanout(SweetScanoutSnapshot*v){++inspectCalls;*v={};v->frame=frame;
+  v->address=0x9d200000;v->size=v->out=0x9240438;v->stride=4320;
+  v->format=0x237ff;v->unpack=0x03020001;v->op=0x80000000;
+  v->knownSmmu=true;v->matches=1;v->cb2Observed=true;return inspectResult;}
  IOReturn setPanelPower(bool on){panelRequests.push_back(on);if(channel)channel->publish(frame,0,on?SweetVsyncWaiting:SweetVsyncOff);return panelResult;}
  IOReturn attachVsync(SweetVsyncChannel*c){if(channel&&channel!=c)return kIOReturnBusy;if(!channel){channel=c;c->retain();}c->publish(frame,0,SweetVsyncWaiting);return 0;}
  void detachVsync(SweetVsyncChannel*c){if(channel==c)OSSafeReleaseNULL(channel);}
@@ -203,8 +213,9 @@ struct SweetDisplayClient : OSObject {
  void free()override{loop->release();}
 };
 struct PE_Video {uint64_t v_baseAddr;uint32_t v_width,v_height,v_rowBytes;};
-static void PE_current_console(PE_Video*v){*v={0x9d200000,4,4,16};}
-static int serviceArg=1,mdssArg=1,contractArg=0,powerArg=0,preserveArg=1,vsyncArg=0,irqArg=0;
+static bool realGeometry=false;
+static void PE_current_console(PE_Video*v){*v=realGeometry?PE_Video{0x9d200000,1080,2340,4320}:PE_Video{0x9d200000,4,4,16};}
+static int serviceArg=1,mdssArg=1,contractArg=0,powerArg=0,preserveArg=1,vsyncArg=0,irqArg=0,ownArg=0;
 static bool PE_parse_boot_argn(const char*k,void*p,size_t){
  int v=0;
  if(!strcmp(k,"sweetfbservice"))v=serviceArg;
@@ -212,7 +223,8 @@ static bool PE_parse_boot_argn(const char*k,void*p,size_t){
  else if(!strcmp(k,"sweetfbcontract"))v=contractArg;
  else if(!strcmp(k,"sweetfbpower"))v=powerArg;
  else if(!strcmp(k,"sweetfb_hz"))v=30;
- else if(!strcmp(k,"sweetfb_native"))v=1;
+ else if(!strcmp(k,"sweetfb_native"))v=!realGeometry;
+ else if(!strcmp(k,"sweetfbown"))v=ownArg;
  else if(!strcmp(k,"sweetfbvsync"))v=vsyncArg;
  else if(!strcmp(k,"sweetmdssirq"))v=irqArg;
  else if(!strcmp(k,"sweetfbpreserveoff"))v=preserveArg;
@@ -234,7 +246,7 @@ static void quiet(const char*,...){}
 static bool sweet_log_level_enabled(unsigned){return false;}
 '''
 
-prelude=prelude.replace('CHANNEL_IMPLEMENTATION',channel)
+prelude=prelude.replace('CHANNEL_IMPLEMENTATION',channel).replace('BUFFER_IMPLEMENTATION',BUFFER_FIXTURE)
 
 tests = r'''
 static IOReturn call(IOMobileFramebufferUserClient*c,uint32_t s,IOExternalMethodArguments&a){return c->externalMethod(s,&a,nullptr,nullptr,nullptr);}
@@ -364,9 +376,42 @@ int main(){
  assert(loop->addEventSource(ev)==0);mailbox=SweetVsyncChannel::withEvent(ev);
  std::thread writer([&]{for(unsigned i=0;i<10000;++i)mailbox->publish(i,42,SweetVsyncFrame);});
  mailbox->close();writer.join();assert(!mailbox->copySample(&sample));mailbox->release();ev->disable();loop->removeEventSource(ev);ev->release();loop->release();
+
+ // F4 is opt-in and validates the full F3 prerequisites and own mode.
+ scanoutReset();ownArg=2;
+ {auto*x=new AppleCLCD;assert(!x->start(provider));x->release();assert(live==1&&!scanoutAllocCalls);}
+ ownArg=1;vsyncArg=0;
+ {auto*x=new AppleCLCD;assert(!x->start(provider));x->release();assert(live==1&&!scanoutAllocCalls);}
+ vsyncArg=1;realGeometry=true;
+ for(unsigned fault: {1u,2u,3u,4u,7u,8u,9u,10u,11u,12u,13u,14u}){
+  scanoutReset(fault);auto*x=new AppleCLCD;assert(x->start(provider));
+  assert(!x->fOwnScanoutPreflight&&!x->fScanoutPool&&scanoutBuffers.empty());x->stop(provider);x->release();assert(live==1);
+ }
+ scanoutReset();failWatch=true;
+ {auto*x=new AppleCLCD;assert(!x->start(provider));x->release();assert(live==1&&scanoutBuffers.empty());}failWatch=false;
+ published=new SweetDisplayBackend;f=new AppleCLCD;assert(f->start(provider)&&f->fScanoutPool);
+ assert(scanoutBuffers.size()==2&&f->fOwnScanoutPreflight&&f->fFlushTicks==2); // F3 copy rate intentionally retained
+ assert(f->fPhys==0x9d200000&&f->fRowBytes==4320);f->fDisplayClient->fire();
+ auto*boot=(uint8_t*)f->fPixels;for(unsigned i=0;i<4320*2340;++i)assert(boot[i]==0x67);
+ auto*owned=(uint8_t*)scanoutBuffers[0]->getBytesNoCopy();assert(owned[48*4608+88]==0x67&&owned[0]==0);
+ // Three startup snapshots then a lifetime-capped fourth on first ON; no
+ // heap allocation or full-frame copy is scheduled by these hardware events.
+ auto ownTick=[&](unsigned n){for(unsigned i=0;i<n;++i){fakeTicks+=16666667;published->sample(fakeTicks);}f->fHardwareEvent->pump();};
+ ownTick(1);assert(f->fScanoutAuditCount==1&&published->inspectCalls==1);
+ ownTick(60);ownTick(60);ownTick(60);assert(f->fScanoutAuditCount==3&&published->inspectCalls==3);
+ c=client(f);in[0]=0;a=scalar(in,1,nullptr,0);assert(call(c,12,a)==0);ownTick(60);assert(published->inspectCalls==3);
+ in[0]=1;assert(call(c,12,a)==0);ownTick(1);assert(f->fScanoutAuditCount==4&&published->inspectCalls==4);
+ in[0]=0;assert(call(c,12,a)==0);in[0]=1;assert(call(c,12,a)==0);ownTick(60);f->auditScanout();assert(published->inspectCalls==4);
+ f->stop(provider);assert(!f->fScanoutPool&&scanoutBuffers.empty());c->stop(f);c->release();f->release();published->release();published=nullptr;
+ // A failed typed snapshot consumes its budget and cannot disable F3.
+ scanoutReset();published=new SweetDisplayBackend;published->inspectResult=kIOReturnNotReady;
+ f=new AppleCLCD;assert(f->start(provider));f->fDisplayClient->fire();ownTick(1);
+ assert(f->fScanoutAuditCount==1&&f->fHardwareVsyncActive&&!f->fVsyncFallback);
+ f->stop(provider);f->release();published->release();published=nullptr;scanoutReset();
+ ownArg=0;realGeometry=false;
  provider->release();
  assert(live==0&&rawBlocks==0&&dispatchCalls>0);
- puts("PASS: actual F1b/F2 dispatch, gates, typed power requests, pixel preservation/fallback, stop/close, real F3 mailbox/vsync/coalescing/OFF/watchdog/rebind and resource cleanup");
+ puts("PASS: actual F1b/F2 dispatch, gates, typed power requests, pixel preservation/fallback, stop/close, real F3 mailbox/vsync/coalescing/OFF/watchdog/rebind and resource cleanup; F4 opt-in pool/seed/typed inspection/budgets/ON/failure cleanup");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-fb-service-') as tmp:

@@ -1,5 +1,13 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**F4首段0181（本地实现，待云编译/实测）：** AppleCLCD可选持有`SweetScanoutPool`，通过
+标准IOBufferMemoryDescriptor申请两个连续低32位缓冲；显式像素写入前排除与整个ABL保留区
+重叠，随后初始化并复制已有面板矩形。新增typed `inspectScanout()`由SweetMDSS在自己的gate
+只读已有ADT资源，帧事件最多触发四份快照，无新timer/单例/consumer MMIO。own0默认关闭。
+own1仍扫描ABL、CPU30Hz；此阶段未实现地址接管、双缓冲翻页或新SwapWait。原计划误把
+`ADDR_SW_STATUS`当作地址生效状态，现已按LG `setup_secure()`纠正为安全属性，不能作fence。
+详见[F4实施记录](FRAMEBUFFER-SCANOUT-F4.md)。不涉及USB/按键/电池/触摸源码改动。
+
 **当前显示架构实测（2026-11-10）：** 0121a11完整硬件档验证了
 GIC115 → SweetMDSS软件IES/workloop → typed SweetVsyncChannel mailbox → AppleCLCD自己的IES/gate。
 FB首真实帧后切硬件vsync，60Hz软件通知timer降为100ms watchdog；OFF停IRQ/通知，ON恢复硬件消费。

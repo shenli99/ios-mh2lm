@@ -18,6 +18,7 @@ header = (arm/'SweetDisplayBackend.h').read_text()
 source = (arm/'SweetMDSS.cpp').read_text()
 legacy = (root/'bsd/dev/sweet_display_probe.c').read_text()
 source = source.replace('#include "SweetMDSSIRQ.inc"', (arm/'SweetMDSSIRQ.inc').read_text())
+source = source.replace('#include "SweetMDSSScanout.inc"', (arm/'SweetMDSSScanout.inc').read_text())
 fb = (arm/'SweetFramebuffer.cpp').read_text()
 backlight = fb[fb.index('#define SWEET_BL_MAX'):fb.index('#endif /* ARM64_BOARD_CONFIG_MH2LM */', fb.index('#define SWEET_BL_MAX'))]
 backlight = backlight.replace('class AppleARMBacklight :', 'struct AppleARMBacklight :')
@@ -543,9 +544,43 @@ int main(){
  // A consumer watchdog requests shutdown by queuing, with no inline MMIO/gate call.
  irqRegs();s=make(nub);startProbe(s);trace.clear();s->requestVsyncFallback();assert(trace.empty());pump();assert(s->fIrqState==SweetMDSS::IrqFailed);
  s->stop(nub);s->release();queued.clear();
+
+ // F4 inspection is an actual typed provider method: read-only under its
+ // gate, no security-bit or source-address readback masquerading as a fence.
+ irqRegs();s=make(nub);
+ regs[bases[2]+0]=0x9240438;regs[bases[2]+0x14]=0x9d200000;regs[bases[2]+0x24]=4320;
+ regs[bases[2]+0x30]=0x237ff;regs[bases[2]+0x34]=0x03020001;regs[bases[2]+0x70]=5;
+ regs[bases[7]+0x20]=0x4c017e5e;regs[bases[7]+0x24]=0x60000038;
+ regs[bases[7]+0x800+12]=0x84200800;regs[bases[7]+0xc00+12]=2;
+ regs[bases[7]+0x1000+8]=0x1f000;regs[bases[7]+0x1808]=1;
+ regs[bases[8]+0]=0;regs[bases[8]+0x58]=0x12;regs[bases[8]+0x60]=0xabcdef00;
+ auto readOnly=[&]{for(auto op:trace)assert(!op.write);};
+ SweetScanoutSnapshot snap{};trace.clear();assert(s->inspectScanout(&snap)==0);readOnly();
+ assert(snap.address==0x9d200000&&snap.stride==4320&&snap.secure==5&&snap.format==0x237ff);
+ assert(snap.knownSmmu&&snap.matches==1&&snap.streamIndex==3&&snap.smr==0x84200800&&snap.s2cr==2);
+ assert(snap.cb2Observed&&snap.cbar==0x1f000&&snap.sctlr==0&&snap.cbFault==0x12&&snap.farLo==0xabcdef00);
+ assert(s->inspectScanout(nullptr)==kIOReturnBadArgument);
+ // Unknown IDs must not lead to speculative stream/context access.
+ regs[bases[7]+0x20]=0;trace.clear();assert(s->inspectScanout(&snap)==0);readOnly();
+ assert(!snap.knownSmmu&&!snap.cb2Observed&&!snap.matches&&!snap.cbFault);
+ for(auto op:trace)assert(op.addr<bases[7]+0x800||op.addr>=bases[8]+0x1000);
+ regs[bases[7]+0x20]=0x4c017e5e;
+ // Ambiguous stream match / route to another CB is never followed.
+ regs[bases[7]+0x800+16]=0x80000800;trace.clear();assert(s->inspectScanout(&snap)==0);readOnly();
+ assert(snap.matches==2&&!snap.cb2Observed);
+ regs[bases[7]+0x800+16]=0;regs[bases[7]+0xc00+12]=3;
+ trace.clear();assert(s->inspectScanout(&snap)==0);readOnly();assert(snap.matches==1&&!snap.cb2Observed);
+ // Closed admission or gated clocks do not touch MDSS/SMMU registers.
+ regs[bases[0]+0xc]=0;trace.clear();assert(s->inspectScanout(&snap)==kIOReturnNotReady);
+ assert(trace.size()==1&&trace[0].addr==bases[0]+0xc);
+ s->stop(nub);trace.clear();memset(&snap,0xab,sizeof(snap));assert(s->inspectScanout(&snap)==kIOReturnNotReady&&trace.empty());
+ SweetScanoutSnapshot zero{};assert(!memcmp(&snap,&zero,sizeof(snap)));s->release();queued.clear();
+ // Missing optional CB2 mapping is an explicit failure; no consumer raw map.
+ irqRegs();missingMap=8;s=make(nub);assert(s->inspectScanout(&snap)==kIOReturnNotReady);
+ s->stop(nub);s->release();missingMap=99;queued.clear();
  assert(!rawBlocks&&!liveMaps);irqMode=0;irqMMIO=false;
  nub->release();assert(live==0);
- puts("PASS: actual service/client; legacy DCS traces, F2 short packets/LP, idempotence, frozen TE, recovery/unknown state, independent fault budgets, gates/stop, F3 IRQ/probe/ACK/mailbox/storm/watchdog/OFF/termination, F3 read-only snapshots/decoding/bounds/clock admission/default compatibility and zero live objects");
+ puts("PASS: actual service/client; legacy DCS traces, F2 short packets/LP, idempotence, frozen TE, recovery/unknown state, independent fault budgets, gates/stop, F3 IRQ/probe/ACK/mailbox/storm/watchdog/OFF/termination, F3 read-only snapshots/decoding/bounds/clock admission/default compatibility, F4 typed read-only scanout/security/SMMU inspection, unknown/ambiguous layout rejection and zero live objects");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-display-service-') as temp:
