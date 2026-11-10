@@ -2,6 +2,42 @@
 
 ## Agent handoff / active work (2026-11-10, latest)
 
+
+**CURRENT：已按用户要求优先完整面板驱动；0183完成D1命令基础及合并性能计时，本地验证通过。**
+优先级修订提交91d85bf；本提交提供0183-mh2lm-dsi-command-sequencer.patch，SHA256=
+3bf924da1b0101024922343e21438eafcfb201f399f06eac7988146e0be6815f，9份变化源码。
+用户确认0121a12 single滑动卡顿明显，仍是A单缓冲/B未提交，不能写双缓冲已启用或体验通过。
+0183新增SweetDSICommand.h/SweetMDSSDSI.inc，现有IOService/gate下typed begin/status/cancel，
+复制并整表校验OSData、token隔离、LP/VC0/05/15/39；FIFO64、内存embedded DMA256分开，
+最长252payload，PV149整包不拆；生产没有自动选择/发送未确认的PV表（仅离线fixture）。
+默认sweetdsi=0；=1只开放内部请求，本身不发包。timer推进idle/DONE/90或150ms延时，
+无gate内长等；先清并确认旧DONE，新的DONE+DMA/MDP idle才复用/解pin。内存命令独立
+4KiB低32位连续WC/prepare descriptor，写地址前retain；超时/在途取消保留独立引用至重启。
+错误/时钟丢失/部分已执行表取消明确unknown/阻止DCS，不翻回ABL；最终abort/recovery未补。
+完整表可能超过RD_PTR250ms watchdog，要求生命周期模块先暂停frame/IRQ，当前非IrqIdle
+则Busy；执行器不偷偷改看门狗/重启帧，也不推断不透明表执行后的面板电源状态。
+复核0121a12既有日志DSI0 HW_VERSION=20030000（191/402/603行），0183写前复核；PHY/PLL
+尚不知。LG DSI使用unsecure aspace，DTS801是secure domain，不能当DSI独立SID。
+新DMA检查共享unsecure800/SMR3/CB2已知无转换/故障条件，不新映射路由；仍待实机新传输证明。
+sweetfbperf=1在serialized FB可选统计，默认关闭；每15秒汇总copy+barrier字节/耗时、CPU
+present/间隔、provider query、pending first/latest年龄、coalesced，p50/p99桶上界/max/预算。
+不改30Hz、memcpy或屏障；尚无实机计时，未定因/未修复卡顿，不把IRQ频率当UI呈现。
+验证：0183对verified0182严格apply，无offset/fuzz，字节比较一致，114原CI marker保留；
+基线/最终重放树MDSS和FB真实XNU/KDK arm64-apple-darwin对象均编译通过，新增16/19条
+有界数组/指针警告已审。实际代码ASan/UBSan：PV17/4整表/149长包、等待/冻结TE、不可变
+请求、独立freshDONE+idle、staleDONE、20类admission/资源失败、token、取消/timeout/error/
+clock/stop/直接free与pin、部分表取消通过；FB计时/合并/两种pending/OFF/清窗/默认不读clock
+通过，原显示服务/F2/F3/F4测试通过。LSan受ptrace环境限制关闭，另有对象/prepare/complete断言。
+底稿scratch/framebuffer-0183/{verification.json,tests.json,warning-counts.json,test-*.txt,*compile.txt}。
+实现与范围见docs/PANEL-COMMAND-D1.md；主计划/PD0/架构同步。PD2–PD5完整硬件初始化
+尚未完成；D1资源ABI、统一RPMh原TCS writer/lease、clock-GDSC尚缺，不能把设计图当已存在服务。
+**NEXT继续D1剩余资源/时钟及PD2 link，再接PD3完整profile；不回到拷贝双缓冲前置。**
+这一段不单独占云编译/刷机轮次，暂不要求push；待可运行批次再通知用户。不补F3矩阵/半小时/
+BUG-002/旧充电专项。未push/触发CI/操作设备，没有0183云产物/boot或CI run ID；未改USB/
+按键/电池/触摸/mux/GIC callback策略，CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+
+**以下为优先级调整时的记录，当前实现进度以上段0183为准。**
+
 **CURRENT：用户要求完整面板驱动提速；撤销“先把拷贝双缓冲/F4性能全部做完”的前置，下一代码交付转PD2/PD3基础。**
 用户明确反馈0121a12 single“比较明显，滑动比较明显”，是本轮体验性能回归，不能再写成
 未反馈或正常验收。已实测的是A单缓冲接管/OFFON，B未提交，30Hz CPU复制仍在；不能归因

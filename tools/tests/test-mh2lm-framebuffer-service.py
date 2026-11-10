@@ -35,6 +35,8 @@ source = source.replace('#include "SweetFBService.inc"', service)
 source = source.replace('#include "SweetFBVsync.inc"', (arm/'SweetFBVsync.inc').read_text())
 for name in ['SweetScanoutPool.h', 'SweetScanoutPool.inc', 'SweetFBScanout.inc']:
     source = source.replace('#include "'+name+'"', (arm/name).read_text())
+for name in ['SweetFBPerf.h', 'SweetFBPerf.inc']:
+    source = source.replace('#include "'+name+'"', (arm/name).read_text())
 source = source.replace('class SweetDisplayBackend;', 'struct SweetDisplayBackend;')
 source = source.replace('class SweetVsyncChannel;', 'struct SweetVsyncChannel;')
 # Exercise the real retained mailbox, including its close/publication lock.

@@ -9,16 +9,20 @@ import re
 import subprocess
 import sys
 import tempfile
+from mh2lm_dsi_fixtures import DSI_MEMORY_FIXTURE
 
 if len(sys.argv) != 2:
     sys.exit(__doc__)
 root = Path(sys.argv[1]).resolve()
 arm = root/'iokit/Kernel/arm'
 header = (arm/'SweetDisplayBackend.h').read_text()
+header = header.replace('#include "SweetDSICommand.h"', (arm/'SweetDSICommand.h').read_text())
 source = (arm/'SweetMDSS.cpp').read_text()
 legacy = (root/'bsd/dev/sweet_display_probe.c').read_text()
 source = source.replace('#include "SweetMDSSIRQ.inc"', (arm/'SweetMDSSIRQ.inc').read_text())
 source = source.replace('#include "SweetMDSSScanout.inc"', (arm/'SweetMDSSScanout.inc').read_text())
+source = source.replace('#include "SweetMDSSDSI.inc"', (arm/'SweetMDSSDSI.inc').read_text())
+source = source.replace('__asm__ volatile("dsb oshst" ::: "memory");', '(void)0;')
 fb = (arm/'SweetFramebuffer.cpp').read_text()
 backlight = fb[fb.index('#define SWEET_BL_MAX'):fb.index('#endif /* ARM64_BOARD_CONFIG_MH2LM */', fb.index('#define SWEET_BL_MAX'))]
 backlight = backlight.replace('class AppleARMBacklight :', 'struct AppleARMBacklight :')
@@ -84,7 +88,7 @@ prelude = r'''
 #define OSSafeReleaseNULL(x) do {if (x) {(x)->release();(x)=nullptr;}} while(0)
 using vm_offset_t=uintptr_t;
 using IOReturn=int;
-constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4,kIOReturnBusy=5,kIOReturnNoMemory=6;
+constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4,kIOReturnBusy=5,kIOReturnNoMemory=6,kIOReturnAborted=7,kIOReturnNoResources=8,kIOReturnTimeout=9;
 using IOOptionBits=unsigned;using IOInterruptState=unsigned;
 constexpr unsigned SWEET_DEV_FB_H=2340,SWEET_DEV_FB_W=1080,SWEET_DEV_FB_PA=0x9d200000,SWEET_DEV_FB_STRIDE=4320;
 static unsigned live=0,liveMaps=0,rawBlocks=0;
@@ -693,7 +697,7 @@ int main(){
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-display-service-') as temp:
     cpp = Path(temp)/'test.cpp'
-    cpp.write_text(prelude+pool_fixture+header+source+backlight+'\nstatic unsigned dp_logged;\n'+old+tests)
+    cpp.write_text(prelude+DSI_MEMORY_FIXTURE+pool_fixture+header+source+backlight+'\nstatic unsigned dp_logged;\n'+old+tests)
     compiler = os.environ.get('CXX', 'clang++-19')
     binary = Path(temp)/'test'
     subprocess.run([compiler, '-std=c++17', '-g', '-pthread', '-fsanitize=address,undefined',

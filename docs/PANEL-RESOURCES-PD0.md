@@ -186,7 +186,7 @@ timeout当完成，也不能关闭其他consumer电源或翻回ABL来伪装成�
 | E1 | 实际panel/revision及对应vendor表 | PD3完整命令写入 | 优先从已有ABL/UEFI传递的选择标识或保存的原机日志取证；当前限定搜索95份logs/evidence文本未找到`msm_drm.dsi_display0`。不要求重启Android，不主动试发未知DDIC读命令 |
 | E2 | 池/live配置及A首次新DMA传输已留证；画面与B传输仍缺 | F4/PD1 | 0121a11双池/四快照及基本回归通过，CB2.M0/raw FSR0x400保留；0121a12 single已取得A新源提交/新传输及首次ON地址证据，用户已报告滑动卡顿加重，其它视觉项未单独确认，不泛化为任意DMA范围均可达。见F4第9节与接管记录；不依赖E1确认 |
 | E3 | autorefresh下提交、锁存与旧读者退出的对应事件 | F4后续翻页 | 0182有界暂停TE/auto，两次空闲采样，清旧PP0 DONE后提交；0121a12 frame130→131已观察新DONE/flush0/RD_PTR推进。不授予旧buffer释放权，提交池保留到重启；通用完成/撤销与A/B复用协议仍缺 |
-| E4 | 本机PHY/PLL版本、lane及频率/ready状态 | PD2写link配置 | 增加受时钟/映射保护的typed只读档；先核对资源ABI，当前0181没有这些映射，不越界读取 |
+| E4 | 本机PHY/PLL版本、lane及频率/ready状态（DSI host版本已知） | PD2写link配置 | 0121a12已有DSI0 HW_VERSION=20030000；0183发送前复核。PHY/PLL仍需资源ABI和映射保护，当前没有这些映射，不越界读取 |
 | E5 | RPMh资源存在/权限、TCS所有权、实际投票/撤销结果 | PD2/PD3 | 先核对command DB/ACTIVE TCS并完成统一provider；继承请求不覆盖，ACK不当实际掉电证明 |
 | E6 | clock/GDSC/NoC最小依赖及恢复状态 | PD2/PD4 | 显式资源申请和ready/超时检查；未核清共享范围前不reset整个MDSS电源域 |
 | E7 | 面板/触摸共享供电与reset后的触摸需求 | PD3 reset/PD4 | 校对生效DTS和已有板级资料，设计quiesce/resume并用分档验证；引脚不重合不等于无共享 |
@@ -217,3 +217,6 @@ ON/OFF逐包长度/type/等待、表SHA；另有从0121a11真实buildtree提取�
 核对了0181验证树的`SweetDisplayBackend.h`、`SweetMDSS.cpp`、`sweet_spmi.h`、
 `sweet_spmi_mux.h`、`sweet_touch_tcm.c`及当前`tools/mk-mh2lm-mdss-adt.py`。
 源码分析不构成新实机测试；未读取或输出设备唯一标识，未修改参考仓库及设备备份。
+
+0183已实现D1的[命令基础/可撤销执行/性能计时](PANEL-COMMAND-D1.md)并本地验证；
+资源ABI、RPMh统一所有者/lease、clock-GDSC及PHY/PLL仍未实现，不将原设计图当作现有服务。
