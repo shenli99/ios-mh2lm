@@ -2,6 +2,36 @@
 
 ## Agent handoff / active work (2026-11-10, latest)
 
+**CURRENT：0121a12 single接管/首次ON自有源/6组OFFON日志通过，画面反馈待补；F4/PD1未整体验收。**
+日志sweetlog-0121a12-fb-scanout-single.bin，SHA256=
+915f877f08464d5cfe069498e589adfaac949835f0ecc5dabc657b42edeed70c；364415有效bytes/
+flush69/未回卷/4990行，371行确认own2/irq2/vsync1。171–172池A/B同0181，seed167014us。
+1088–1093 quiescing→accepted→submitted(frame130/A=c3b30000/stride4608/crop22,48/
+idle-line2340)→transfer observed(frame131/flush0/newPP0DONE100)→FB active。首次ON后
+3821–3825快照frame27980，实际A/stride1200/XY300016，owned resume verified。不是仅分配
+或寄存器读回证据，但画面内容/位置/持续更新仍待用户确认；已async询问，不伪造反馈。
+四份SMMU/CB2相同globalfault0、CB2.M0，FSR仍raw400不命中LG faultmask，无新已知fault位；
+FAR本轮0001fdfe:ba6e8cff不解释为有效故障地址。3条预检WARN仍来自raw400，接管按显式条件通过。
+8个完整IRQ窗480.283s/28775帧，59.879–59.931Hz，加权59.913；OFF前7/首次ON后1，
+dropped全0。6组DCS off/on全rc0：off1/14/2/9/4/11ms，on10/4/8/10/6/6ms；每次暂停帧/
+entry与重启一致，ON首帧+1。首次OFF内4份电池完成样本跨度49.139s，OFF无MDSS帧统计。
+8份FB active快照coalesced首次0，幂等ON8，6次后续ON均8，无FAILED/显式软件回退。
+32键事件配对power13/up1/down2对，42touch；亮度2775→0→2775。无驱动ERROR/mux隔离/
+poison/SPMI timeout/panic。6WARN=3rawFSR+3USB端点；2reset均ACM成功，BUG-001不关闭。
+driverkitd791–795仍sig9/ns1/code7（BUG-005）。10条hfs_clonefile cluster_write failed34
+(ERANGE)，更早0121a10预检5条/0121a6 MDSS3条同签名，且本轮966/998行在切源前已出现；
+仅保留既有文件克隆异常观察，原因/影响未查，不据时间邻近归因接管。40电池样本/39refresh
+healthy1，全gauge charging0/ma-132..0；启动ENABLE一次，无VERIFY-12，不当充电成功。
+底稿scratch/artifact-0121a12/{analyze-single.py,single-log-analysis.json,single-analysis-summary.json,
+single-selected.txt,fb-scanout-single.txt}；接管文档第6节/主计划/PD/PD0/架构同步。
+NEXT补用户画面反馈；若无新增异常，不重刷own0/1，不重测F3/半小时/旧bug专项。后续按
+安全DMA停止/撤销和真实提交完成关联→双缓冲→SwapWait/性能→PD1无ABL首帧/console/panic
+推进；当前仍单缓冲30Hz/提交池pin至重启，不能验收安全回收/资源平衡/完整PD1。
+本轮只日志分析/文档，无新驱动/参数/CI改动或编译/push/设备操作；CircleCI blob仍
+ da0b6c0947a66f03491b3a9023590b49665292df。旧BUG边界及整机PM大目标四不变。
+
+**以下为0121a12打包交接；待实机状态由上段日志结果更新，画面反馈仍待补。**
+
 **CURRENT：0121a12云产物已核对包含0182，三档boot已打包并回读验证；NEXT先实测single。**
 对应实现f78abc8；52份源码与0182验证树逐字节一致（含8份变化），114条原CI源码marker及
 继承/新增内核marker通过，kernel归档manifest正确，Mach-O为17526608bytes。

@@ -1,4 +1,4 @@
-# F4 第二段：受控单缓冲接管（0182，0121a12已打包待实机）
+# F4 第二段：受控单缓冲接管（0182，0121a12接管日志通过，待画面确认）
 
 2026-11-10。基于已实测的0181/0121a11，新增
 `xnu/patches/0182-mh2lm-controlled-scanout-handoff.patch`。
@@ -144,3 +144,64 @@ fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a12-fb-scanout-single.img
 产物归档SHA、52份源码比较和完整boot参数/回读证据保存在
 `work1/scratch/artifact-0121a12/{verification.json,source-compare.json,boot-verification.json}`。
 本轮未改驱动或CircleCI，无push或设备操作。
+
+## 6. 0121a12 single 实测日志（接管链通过，画面反馈待补）
+
+日志`work1/logs/sweetlog-0121a12-fb-scanout-single.bin`，SHA256：
+`915f877f08464d5cfe069498e589adfaac949835f0ecc5dabc657b42edeed70c`。
+有效364415bytes，flush69，未回卷，共4990行。371行boot-args确认own2/irq2/vsync1。
+用户仅告知已导出日志，尚未反馈画面位置/持续更新/亮度等结果；已另行询问，不替用户填写。
+
+### 6.1 本轮已取得的接管证据
+
+| 解码行号 | 观察 | 含义 |
+|---|---|---|
+| 171–172 | A=`0xc3b30000`、B=`0xc4668000`，每个11225088bytes，seed167014us | 与0181相同几何/范围；启动seed耗时不作逐帧性能 |
+| 881/987/1074 | 前三快照frame1/61/121，地址`0x9d200000`、stride4320、XY0 | 切换前仍扫描ABL |
+| 1088–1089 | quiescing/accepted | 暂停TE/autorefresh后进入有界状态机，FB已刷新交接图像 |
+| 1090 | submitted A、stride4608/crop22,48、idle-line2340、frame130 | 在空闲判据通过后提交自有池 |
+| 1092–1093 | frame131、flush0、fresh PP0 DONE0x100，FB active A | 首次新传输观察通过，CPU呈现目标已切A；非仅寄存器读回 |
+| 3821–3825 | 首次唤醒frame27980，地址A、stride0x1200、XY0x300016，owned resume verified | 手动OFF/ON后仍保留自有扫描配置，不翻回ABL |
+
+四份SMMU/CB2记录一致：唯一SMR3/TRANS CB2、CBAR0x1f000、SCTLR0xe0/M0、
+TTBR/TTBCR/MAIR0、global fault0。FSR仍为原始0x400，不命中LG `FSR_FAULT=0xc00001fe`，
+未出现新已知fault位，也未清原值。FAR本轮为`0001fdfe:ba6e8cff`；在未确立故障有效性时
+不将它解释成有效fault地址。前三份WARN来自预检对原始非零FSR的提示，不是接管失败；
+own2的显式验证按本段既定允许条件执行。
+
+这比0181增加了真实自有源提交/新传输及唤醒配置证据；画面内容/位置仍需用户确认。
+没有逐帧CPU复制计数，不报告60Hz UI呈现或无撕裂；不授予A/B复用和释放权。
+
+### 6.2 中断、开关屏及输入
+
+- 8个完整IRQ窗口共480.283秒/28775帧，59.879–59.931Hz，加权59.913Hz；
+  首次OFF前7窗，首次ON后1窗。所有统计窗dropped0；这是硬件IRQ频率。
+- 6组实际DCS OFF/ON全rc0：OFF耗时1/14/2/9/4/11ms，ON10/4/8/10/6/6ms；
+  每次OFF暂停帧/entry与ON重启值一致，首个ON帧均恰好加1。OFF区间没有新增MDSS
+  统计/帧日志；首次OFF内4份电池完成样本跨度49.139秒，说明其它线程仍活动。
+- 8份FB hardware-active快照：首次coalesced0，幂等ON时为8，后续6次ON均为8；
+  是mailbox消费合并计数，不是丢中断/失败日志，不能补造最后一帧累计值。
+  无显式软件回退、watchdog失败、HANDOFF FAILED或像素冻结错误。
+- 32键事件配对：power13对、volume-up1对、volume-down2对；42触摸down/up事件。
+  亮度记录包含2775→0→2775，多次恢复。输入/亮度日志健康不替代画面与手感确认。
+
+### 6.3 其它观察与范围
+
+- 无驱动`[ERROR]`、mux隔离/poison/SPMI timeout或kernel panic。6条WARN由3条原始
+  FSR提示和3条既有USB端点命令警告组成；两次USB reset后均成功配置ACM，不关闭BUG-001。
+- driverkitd在791–795行仍sig9/ns1/code7，与BUG-005一致；不描述为全日志无错误。
+- 本轮出现10条`hfs_clonefile: cluster_write failed - 34`；XNU errno34为ERANGE。
+  0121a11预检未出现，但更早0121a10预检有5条、0121a6 MDSS档有3条同签名，且本轮
+  966/998行已发生在接管前。保留为既有文件克隆异常观察；未核实调用文件、影响和原因，
+  不据时间邻近归因扫描地址切换，不扩入本次显示修复。
+- 40电池样本/39refresh，healthy全1；全部gauge charging0，电流-132..0mA。启动有一次
+  ENABLE，后续没有VERIFY(-12)或反复启停日志；采样健康不代表真实充电，BUG-004不关闭。
+
+**结论与下一步：** 本轮日志确认受控单缓冲接管及正常OFF/ON链路通过；画面反馈待补，
+暂不将F4第二段整体或PD1标为验收完成。若视觉无新增异常，无需补刷own0/1或重复F3矩阵，
+下一工作为安全DMA停止/撤销与真实提交完成关联，再推进双缓冲和SwapWait；
+保留无ABL首帧/console/panic、独立初始化等既定后续目标。提交池仍有意保留至重启。
+
+底稿`work1/scratch/artifact-0121a12/{analyze-single.py,single-log-analysis.json,
+single-analysis-summary.json,single-selected.txt,fb-scanout-single.txt}`。本轮仅分析和文档，
+无驱动/参数/CI修改，无编译、push或设备操作。

@@ -100,6 +100,6 @@ CB2.M0，FSR原始0x400不命中LG已知故障位，保留解释；新DMA可达�
 详见[F4实测记录](FRAMEBUFFER-SCANOUT-F4.md#9-0121a11扫描池预检实测首段运行通过新dma尚未验证)。
 0182受控单缓冲接管已本地实现和验证，新增own2及typed begin/status/abandon接口；
 一次有界暂停/提交/新传输观察后切CPU目标，30Hz仍在，提交池保留至重启。
-0121a12新kernel/buildtree及三档boot已核对；下一步先实测single档的画面/裁剪与OFF/ON，
+0121a12 single已取得新传输、源地址A/裁剪及首次ON配置证据，6组OFF/ON成功；画面反馈待补，
 见[接管记录](FRAMEBUFFER-HANDOFF-F4.md)。不重测F3矩阵、半小时或旧bug专项。
 PD0仍是资料/接口设计交付；安全回收/双缓冲、PD1首帧/console/panic及PD2–PD5完整初始化未完成。
