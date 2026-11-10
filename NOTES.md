@@ -3,6 +3,35 @@
 ## Agent handoff / active work (2026-11-10, latest)
 
 
+**CURRENT：用户提供0121a13；已核对含0183/0184并打包两档boot，待主档短测。**
+源码实现提交d644866；60相关源码逐字节匹配0184 verify（含其6份变化），114原CI源码marker通过。
+归档manifest/arm64 Mach-O正确，kernel17567368bytes，SHA256=
+20b2526037e9470f00cdf763d6a277a77a56d94d1bfca5e905606ab109c5be47；内核marker含命令/perf/RPMh。
+归档buildtree SHA256=67ac2504974bb3f5381aebd358a4657c519007652ebaec4cd76929dfa1604375，
+kernel归档=1a6dc8d51b14202dd5eb58645ed91b12adeff1b3f35d4e44ecb292fe8df38098。
+没有build-log/CI run ID，不声称全量编译告警审阅。本轮新增打包档--panel-resources，无新内核补丁。
+用户主动编好本批，因此复用其做资源绑定+合并性能采样，不新请求元数据云编译，不变更驱动优先级。
+已生成out-bs/boot-16k-0121a13-panel-resources.img及同目录panel-resources-control.img，
+均35667968bytes；主档SHA256=66aea9eaac31f76fb3f92cddacaa6de9954c643e92d12e38e2feafbc75d114f6；
+control=f85c5dd3565005746c1c384f83315c20473a843e4857feab95ddd6ac529cbf56。
+独立回读Android v1/2048 header、原UEFI blob、FAT内kernel/ADT/TOML均一致，原baseline ADT未改。
+两档共用v1完整资源ADT/own2/irq2/vsync1/service1/power1/30Hz/runtime3/ACM，sweetfbperf=1、
+sweetdsi=0；只差sweetdisplayresources=1/0。主档只映射/DB/metadata绑定，拒绝电源写，无自动票、
+clock/GDSC/PHY/reset/vendor表操作。control仅故障时用，不重刷own0/1/F3矩阵/半小时/充电专项。
+环境file(1)仍缺，仅scratch shell函数替换信息展示，正式打包步骤不变，最终另用Python/mcopy回读。
+底稿scratch/artifact-0121a13/{verify-artifacts.py,verification.json,source-compare.json,actual/,
+package.sh,packaging.txt,verify-boots.py,boot-verification.json}；步骤见docs/PANEL-D1-0121A13.md。
+**NEXT用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a13-panel-resources.img；**
+UI亮屏30s→连续滑动20–30s→静止15s→简测亮度/三键/触摸→手动OFF20s/ON15s，导出
+sweetlog-0121a13-panel-resources.bin；USB live可选，持久日志够。看RPMh四路available/pre-v3/
+matched consumer元数据，原hand-off active/resume及FB PERF copy/query/pending数据，不能提前验收。
+0121a12滑动卡顿仍未修复，A单缓冲B未提交；D1整体未完成，技术下一段仍clock/GDSC、MMCX/NoC、
+PHY/PLL/host与确认profile生命周期。不要求为本次打包脚本重编内核；未push/触发CI/设备操作。
+CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df；旧USB/充电bug观察边界不变。
+
+**以下为0184实现阶段交接，云产物状态已由上段更新。**
+
+
 **CURRENT：0184资源ABI/RPMh provider与显示绑定已实现并完成本地验证；D1整体仍未完成。**
 父提交87ba5bb（0183命令/计时）。新增0184-mh2lm-display-resource-leases.patch，SHA256=
 202251a9eeebca4c43539ec84307f0d20dc7f9d7cfe1a8286858a73d7cbcd5b1，6份变化源码。

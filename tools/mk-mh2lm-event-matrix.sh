@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service|--framebuffer-state|--framebuffer-power|--framebuffer-irq-preflight|--framebuffer-vsync|--framebuffer-scanout|--framebuffer-handoff]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service|--framebuffer-state|--framebuffer-power|--framebuffer-irq-preflight|--framebuffer-vsync|--framebuffer-scanout|--framebuffer-handoff|--panel-resources]\n' "$0" >&2
 	exit 2
 fi
 
@@ -19,6 +19,7 @@ FRAMEBUFFER_IRQ_PREFLIGHT=0
 FRAMEBUFFER_VSYNC=0
 FRAMEBUFFER_SCANOUT=0
 FRAMEBUFFER_HANDOFF=0
+PANEL_RESOURCES=0
 case "$KEY_IRQ_PROFILE" in
 	'')
 		;;
@@ -59,8 +60,12 @@ case "$KEY_IRQ_PROFILE" in
 		FRAMEBUFFER_VSYNC=1
 		KEY_IRQ_PROFILE='--framebuffer-service'
 		;;
-	--framebuffer-scanout|--framebuffer-handoff)
+	--framebuffer-scanout|--framebuffer-handoff|--panel-resources)
 		if [ "$KEY_IRQ_PROFILE" = '--framebuffer-handoff' ]; then FRAMEBUFFER_HANDOFF=1; fi
+		if [ "$KEY_IRQ_PROFILE" = '--panel-resources' ]; then
+			PANEL_RESOURCES=1
+			FRAMEBUFFER_HANDOFF=1
+		fi
 		FRAMEBUFFER_STATE=1
 		FRAMEBUFFER_POWER=1
 		FRAMEBUFFER_VSYNC=1
@@ -376,7 +381,17 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
    fi
   done
  fi
- if [ "$FRAMEBUFFER_IRQ_PREFLIGHT" = '1' ]; then
+ if [ "$PANEL_RESOURCES" = '1' ]; then
+  for marker in 'SweetRPMhABI' 'SweetRPMhWritesAllowed' 'SweetDisplayRPMhBound' \
+      'SWEET MDSS: matched RPMh consumer=' 'SWEET RPMH: pre-v3 RSC id=' \
+      'SWEET FB PERF:' 'sweetfbperf' 'sweetdisplayresources'; do
+   if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+    printf 'kernel lacks D1 resource/performance marker: %s\n' "$marker" >&2
+    exit 1
+   fi
+  done
+  python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --display-resources "$ADT" "$TMPDIR/mdss.adt"
+ elif [ "$FRAMEBUFFER_IRQ_PREFLIGHT" = '1' ]; then
   for marker in 'SWEET MDSS IRQ PREFLIGHT: F3 v1 read-only' \
       'SWEET MDSS IRQ PREFLIGHT: v1 pass=%u GIC intid=115' \
       'SWEET MDSS IRQ PREFLIGHT: v1 pass=%u MDSS rev=' \
@@ -435,6 +450,16 @@ make_profile() {
 
 if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
  FB_ARGS='ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1 sweetbattirq=4 sweetbattruntime=3 sweetfbpreserveoff=1 sweetfbtrace=0 sweetdispprobe=1 sweetloglevel=2 sweetfbcontract=0 sweetfbproof=0'
+ if [ "$PANEL_RESOURCES" = '1' ]; then
+  # Reuse the already tested single-buffer path. Both profiles have the same
+  # v1 ADT, kernel and optional performance accounting; only resource admission
+  # differs. Mode1 performs metadata/binding only and cannot send RPMh votes.
+  FB_ARGS="$FB_ARGS sweetmdss=1 sweetfbservice=1 sweetfbpower=1 sweetmdssirqprobe=0 sweetmdssirq=2 sweetfbvsync=1 sweetfbown=2 sweetfbperf=1 sweetdsi=0"
+  make_profile panel-resources "LG G8X - XNU D1 resources and FB performance (${LABEL})" "$FB_ARGS sweetdisplayresources=1"
+  make_profile panel-resources-control "LG G8X - XNU D1 resources disabled control (${LABEL})" "$FB_ARGS sweetdisplayresources=0"
+  printf 'kernel SHA256: %s\ncreated D1 metadata binding and optional control for %s; no RPMh votes or vendor DSI sequences\n' "$KERNEL_SHA256" "$LABEL"
+  exit 0
+ fi
  if [ "${FRAMEBUFFER_SCANOUT:-0}" = '1' ]; then
   FB_ARGS="$FB_ARGS sweetmdss=1 sweetfbservice=1 sweetfbpower=1 sweetmdssirqprobe=0 sweetmdssirq=2 sweetfbvsync=1"
   make_profile fb-scanout-baseline "LG G8X - XNU F4 prerequisite disabled (${LABEL})" "$FB_ARGS sweetfbown=0"
