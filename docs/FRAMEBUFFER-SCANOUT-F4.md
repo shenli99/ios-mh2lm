@@ -87,7 +87,7 @@ autorefresh/行位置，MDP/TE的enable及原始锁存状态。SMMU ID匹配已�
 **整次启动最多四次，包括失败调用**；OFF不采样，幂等ON不追加，停止后不调用；无逐帧日志。
 快照内各寄存器为顺序读取，非原子硬件快照；原始完成status可能是旧锁存，不能计算完成频率。
 
-- INFO：pool ready/物理范围/字节数、一次复制耗时、各份硬件快照。
+- INFO：pool ready/物理范围/字节数、一次seed耗时（含两缓冲清零和面板矩形复制）、各份硬件快照。
 - WARN：配置、路由、安全/fault值需要复核；不自动改硬件或批准接管。
 - ERROR：申请/准备/预检失败，不受等级过滤隐藏。沿用现有`sweetloglevel`，本轮不重构日志系统。
 - registry：`SweetScanoutPreflight`、`SweetScanoutActive=false`、A/B/Bytes、Samples和失败属性。

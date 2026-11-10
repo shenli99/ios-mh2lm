@@ -2,6 +2,43 @@
 
 ## Agent handoff / active work (2026-11-10, latest)
 
+**CURRENT：用户授权开始F4；首段0181已完成本地验证，提交42047d3，待用户push/云编译。**
+前置基线89e57b9，F3实测0121a11通过。新补丁0181-mh2lm-scanout-pool-preflight.patch，
+SHA256=6218d61838cc92a87ab97c680d8ce7a14d690405d1ea27ce3d17b7597d29ef41；9个源码文件变化。
+重要纠正：LG实际DRM/SDE的SSPP +0x70 ADDR_SW_STATUS由setup_secure修改，是安全属性，
+不是active address或完成状态；SRC0_ADDR读回/下一RD_PTR也不能直接充当release fence。
+面板计划已纠正，F4分为池与live预检→单缓冲接管→真实完成关联/双缓冲→SwapWait/性能收口。
+本首段默认own0不分配/不预检；own1要求service1/mdss1/power1/irq2/vsync1/contract0。
+AppleCLCD持有SweetScanoutPool，经标准IOBufferMemoryDescriptor申请两个1125x2436/stride4608
+连续/WC/低32位缓冲，每个11225088字节，prepare+物理segment/边界/重叠检查；在任何显式
+清零/复制前排除与整块18MiB ABL保留区重叠，再只读1080x2340/stride4320面板矩形，复制到
+A的22,48，B/边缘/padding清零。启动样本不用于未来最终接管，内核页取整不算作逻辑字节。
+typed inspectScanout(stack)经SweetMDSS自己的gate和已有ADT映射只读SSPP/CTL/INTF/MDP/TE/
+SMMU/CB2。未知ID、多重match、非CB2不猜布局；fault不清除；快照非原子，不拿锁存估完成Hz。
+从F3真实帧触发前三份约隔60帧，加首次后续ON一份；整启动最多4次含失败，OFF不读，无新timer。
+本首段不写新扫描地址、ABL仍扫描、CPU仍30Hz、SwapWait未变；没有DMA可达/翻页成功结论。
+分配/prepare/物理范围/alias失败明确ERROR、失败属性并关闭首段保留F3；预检错误消耗预算，
+不停止F3。stop关admission/订阅后释放尚未给硬件的池，free覆盖部分启动失败。
+实际pool/provider/FB的ASan/UBSan通过：12类pool失败及真实几何/guard/边界/配对释放；
+FB另测覆盖可见ABL和其后保留区的alias，确认不先写像素；typed MMIO全只读、未知/多重route/
+关时钟/stop拒绝，原DCS/F2/F3/dispatch/close仍通过。LSan仍因ptrace关，另有对象/资源断言。
+0181严格应用零offset/fuzz、逐字节一致、114原CI正向源码marker通过。两个cpp基线/验证树
+均arm64-apple-darwin对象编译通过；MDSS新增6/FB新增23条有界数组/指针诊断已审，FB另4条
+OS元类宏既有类别告警，其他计数不变。底稿work1/scratch/framebuffer-0181/{base,edited,verify,
+verification.json,tests.json,test-*.txt,warning-counts.json,*compile.txt,strict-apply.txt}。
+打包新增--framebuffer-scanout：fb-scanout-{baseline,preflight}两档只差own0/1，其余F3硬件/
+IRQ/ACM/runtime3/F2不变；实测旧0121a11 kernel被F4 marker门拒绝，未造旧核新实验boot。
+NEXT：用户push后下载新kernel/buildtree/build-log，先核对0181完整源码/marker/manifest再打包。
+先fastboot boot ...-fb-scanout-preflight.img；进系统亮屏45–60秒，简测亮度/三键/触摸，手动
+OFF20–30秒/ON后10–20秒，导出sweetlog-编号-fb-scanout-preflight.bin。看pool ready/seed/
+4份live快照、地址仍9d200000、输入和唤醒健康。baseline仅故障对照；不重测F3矩阵/半小时/
+旧充电和BUG-002专项。首段通过再做接管与完成事件，own1语义不悄悄改成切地址。
+详见FRAMEBUFFER-SCANOUT-F4.md。F4未实机验收，无新云kernel/boot/CI run ID，无设备操作/
+push。CircleCI未改，blob仍da0b6c0947a66f03491b3a9023590b49665292df；原USB/按键/触摸/
+电池/mux源码未变，BUG-001/003/004/005状态保持、BUG-002只常态观察，整机PM仍目标四占位。
+
+**以下为历史交接；当前实现与下一步以上段0181首段为准。**
+
 **CURRENT：0121a11完整硬件vsync实测通过，F3正常使用路径验收通过；NEXT F4。**
 sweetlog-0121a11-fb-vsync-hardware.bin SHA256=
 9839ade3d47d58ee5ca2396ad73f77729c4d66302a5013b127e77f0dcae06145；有效365908/flush84/
