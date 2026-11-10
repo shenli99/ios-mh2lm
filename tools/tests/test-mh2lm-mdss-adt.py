@@ -68,3 +68,41 @@ assert mdss.prop('interrupts') is None and mdss.prop('interrupt-parent') is None
 mdss.props = [(k, f, v[:9*16] if k == 'reg' else v) for k, f, v in mdss.props]
 assert adt.serialize(r) == result
 print('PASS: optional IRQ resources append-only, all twelve translations, unchanged default ADT, no IRQ registration')
+
+# v1 resource ABI preserves all indices; expands the sole DISPCC map and
+# appends a single PHY window containing PLL. RPMh is a distinct real nub.
+full = m.derive(blob, display_resources=True)
+assert full == m.derive(blob, irq_preflight=True, display_resources=True)
+r, end = adt.parse(full)
+assert end == len(full)
+arm = r.children[1]
+mdss, rpmh = arm.children[-2:]
+assert mdss.prop('sweet,display-resource-abi') == struct.pack('<I', 1)
+assert rpmh.name == 'display-rpmh' and rpmh.prop('compatible') == b'sweet,rpmh\0'
+assert rpmh.prop('sweet,rpmh-abi') == struct.pack('<I', 1)
+expected = list(m.WINDOWS)+list(m.IRQ_WINDOWS)+[m.PHY_WINDOW]
+expected[1] = (0x0af00000, 0x20000)
+translations = list(struct.iter_unpack('<QQQ', arm.prop('ranges')))
+for child, wanted in [(mdss, expected), (rpmh, m.RPMH_WINDOWS)]:
+    windows = list(struct.iter_unpack('<QQ', child.prop('reg')))
+    assert len(windows) == len(wanted)
+    for (address, size), (pa, length) in zip(windows, wanted):
+        hits = [parent+address-base for base, parent, n in translations
+                if base <= address and address+size <= base+n]
+        assert hits == [pa] and size == length
+    physical = list(wanted)
+    for i, (pa, size) in enumerate(physical):
+        assert all(pa+size <= q or q+n <= pa for q, n in physical[i+1:])
+    assert child.prop('interrupts') is None
+# Regenerate the old IRQ node by undoing only v1's documented changes.
+arm.children.pop()
+mdss.props = [(k, f, (v[:16]+struct.pack('<QQ', 0x0af00000-m.SOC_BASE, 0x3000)+v[32:12*16])
+              if k == 'reg' else v) for k, f, v in mdss.props if k != 'sweet,display-resource-abi']
+assert adt.serialize(r) == extended
+try:
+    m.derive(full, display_resources=True)
+except ValueError:
+    pass
+else:
+    raise AssertionError('accepted duplicate full resources')
+print('PASS: v1 thirteen MDSS windows, disjoint PHY/PLL ownership, separate RPMh ABI/nub, default and IRQ byte preservation')

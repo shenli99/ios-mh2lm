@@ -46,6 +46,13 @@ for name, body in [('dp_rd', 'return readReg(base,off);'),
     original = function(source, name)
     source = source.replace(original, original[:original.index('{')+1]+body+'}')
 source = source.replace('class SweetMDSS :', 'struct SweetMDSS :')
+rpmh_header = (arm/'SweetRPMh.h').read_text().replace('class SweetRPMh :', 'struct SweetRPMh :').replace('class SweetRPMhClient :', 'struct SweetRPMhClient :') if (arm/'SweetRPMh.h').exists() else ''
+rpmh_source = (arm/'SweetRPMh.cpp').read_text() if rpmh_header else ''
+# Same actual RPMh code in all display regression fixtures. Only MMIO/OS
+# primitives are substituted; its new resource path has dedicated cases too.
+rpmh_source = re.sub(r'uint32_t SweetRPMh::read\([^\n]*\)\n\{.*?\n\}', 'uint32_t SweetRPMh::read(vm_offset_t b,uint32_t o) { return readReg(b,o); }', rpmh_source, flags=re.S)
+rpmh_source = re.sub(r'void SweetRPMh::write\([^\n]*\)\n\{.*?\n\}', 'void SweetRPMh::write(vm_offset_t b,uint32_t o,uint32_t v) { writeReg(b,o,v); }', rpmh_source, flags=re.S)
+source = re.sub(r'^#include.*\n', '', rpmh_header+rpmh_source, flags=re.M)+source
 header = header.replace('class SweetDisplayClient :', 'struct SweetDisplayClient :')
 header = re.sub(r'^#include.*\n', '', header, flags=re.M)
 source = re.sub(r'^#include.*\n', '', source, flags=re.M)
@@ -88,7 +95,7 @@ prelude = r'''
 #define OSSafeReleaseNULL(x) do {if (x) {(x)->release();(x)=nullptr;}} while(0)
 using vm_offset_t=uintptr_t;
 using IOReturn=int;
-constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4,kIOReturnBusy=5,kIOReturnNoMemory=6,kIOReturnAborted=7,kIOReturnNoResources=8,kIOReturnTimeout=9;
+constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4,kIOReturnBusy=5,kIOReturnNoMemory=6,kIOReturnAborted=7,kIOReturnNoResources=8,kIOReturnTimeout=9,kIOReturnNotFound=10,kIOReturnNotPermitted=11;
 using IOOptionBits=unsigned;using IOInterruptState=unsigned;
 constexpr unsigned SWEET_DEV_FB_H=2340,SWEET_DEV_FB_W=1080,SWEET_DEV_FB_PA=0x9d200000,SWEET_DEV_FB_STRIDE=4320;
 static unsigned live=0,liveMaps=0,rawBlocks=0;
@@ -133,16 +140,17 @@ struct IOTimerEventSource : IOEvent {
  static IOTimerEventSource*timerEventSource(OSObject*o,Action a){if(++timerCreates==failTimerCreate)return nullptr;auto*p=new IOTimerEventSource;p->owner=o;p->action=a;return p;}
  void setTimeoutMS(unsigned t){timeout=t;} void setTimeoutUS(unsigned t){timeout=t;} void cancelTimeout(){timeout=0;}
 };
-static constexpr uintptr_t bases[12]={0x0010b000,0x0af00000,0x0ae05000,0x0ae02000,0x0ae6b800,0x0ae6c000,0x0ae94000,0x15000000,0x15082000,0x0ae00000,0x0ae6e800,0x17a00000};
-static constexpr size_t lengths[12]={0x1000,0x3000,0x1000,0x1000,0x800,0x800,0x400,0x2000,0x1000,0x2000,0x200,0x10000};
+static constexpr uintptr_t bases[13]={0x0010b000,0x0af00000,0x0ae05000,0x0ae02000,0x0ae6b800,0x0ae6c000,0x0ae94000,0x15000000,0x15082000,0x0ae00000,0x0ae6e800,0x17a00000,0x0ae94400};
+static constexpr size_t lengths[13]={0x1000,0x3000,0x1000,0x1000,0x800,0x800,0x400,0x2000,0x1000,0x2000,0x200,0x10000,0x760};
+static int resourceMode=0;
 static unsigned badMap=99,missingMap=99,shortMap=99;
 static std::vector<unsigned> mapCalls;
 struct IOMemoryMap : OSObject {
- unsigned index;
+ unsigned index;uintptr_t customPA=0;size_t customSize=0;
  IOMemoryMap(unsigned i):index(i){++liveMaps;}~IOMemoryMap(){--liveMaps;}
- uintptr_t getPhysicalAddress(){return bases[index]+(index==badMap?4:0);}
- uintptr_t getVirtualAddress(){return bases[index];}
- size_t getLength(){return lengths[index]-(index==shortMap?1:0);}
+ uintptr_t getPhysicalAddress(){return (customPA?customPA:bases[index])+(index==badMap?4:0);}
+ uintptr_t getVirtualAddress(){return customPA?customPA:bases[index];}
+ size_t getLength(){return (customPA?customSize:(index==1&&resourceMode?0x20000:lengths[index]))-(index==shortMap?1:0);}
 };
 struct OSNumber : OSObject {
  uint64_t value;static OSNumber*withNumber(unsigned long long n,unsigned){auto*p=new OSNumber;p->value=n;return p;}
@@ -160,13 +168,15 @@ struct IONotifier;
 static std::vector<IONotifier*> subscriptions;
 static constexpr const char *gIOTerminatedNotification="term",*gIOFirstMatchNotification="match";
 struct IOService : OSObject {
- bool inactive=false;
+ bool inactive=false,rpmhNub=false;std::map<std::string,OSObject*>properties;
  using Notify=bool(*)(void*,void*,IOService*,IONotifier*);
  virtual bool start(IOService*){return true;}virtual void stop(IOService*){}
  virtual bool willTerminate(IOService*,IOOptionBits){inactive=true;return true;}
  virtual IOReturn setProperties(OSObject*){return 0;}
+ virtual IOWorkLoop*getWorkLoop()const{return nullptr;}
+ OSObject*getProperty(const char*k){return properties.count(k)?properties[k]:nullptr;}
  bool isInactive(){return inactive;}
- int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){mapCalls.push_back(i);assert(i<12);return i==missingMap?nullptr:new IOMemoryMap(i);}
+ int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){mapCalls.push_back(i);assert(i<13);if(i==missingMap)return nullptr;auto*m=new IOMemoryMap(i);if(rpmhNub){assert(i<3);static const uintptr_t pa[]={0x18220000,0x18220d00,0x0c3f000c};static const size_t n[]={0x100,0x3000,8};m->customPA=pa[i];m->customSize=n[i];}return m;}
  void setProperty(const char*,unsigned long long,unsigned){}void setProperty(const char*,bool){}
  void setProperty(const char*,const char*){} void setProperty(const char*,OSObject*){}
  void registerService(){}
@@ -183,6 +193,7 @@ IONotifier*IOService::addMatchingNotification(const char*k,OSDictionary*d,Notify
 static void emit(const char*k,IOService*p){for(auto*n:subscriptions)if(n->kind==k)n->cb(n->target,nullptr,p,n);}
 static int enabled=1,probeEnabled=1,powerEnabled=0,irqProbeMode=0,irqMode=0,ownMode=0;
 static bool PE_parse_boot_argn(const char*k,void*v,size_t){
+ if(!strcmp(k,"sweetdisplayresources")){*(int*)v=resourceMode;return true;}
  if(!strcmp(k,"sweetfbown")){*(int*)v=ownMode;return true;}
  if(!strcmp(k,"sweetmdss")){*(int*)v=enabled;return true;}
  if(!strcmp(k,"sweetdispprobe")){*(int*)v=probeEnabled;return true;}
@@ -228,7 +239,9 @@ static uint32_t readReg(uintptr_t b,uint32_t o){
  trace.push_back({false,b+o,v});return v;
 }
 static bool irqMMIO=false,injectLateFrame=false,dropSourceWrite=false,keepPPDone=false;
+static uint32_t rpmhDrop=~0u;static bool rpmhKeepIRQ=false;
 static void writeReg(uintptr_t b,uint32_t o,uint32_t v){trace.push_back({true,b+o,v});
+ if(b==0x18220d00){if(o==rpmhDrop)return;if(o==8){if(!rpmhKeepIRQ)regs[b+4]&=~v;return;}}
  if(irqMMIO&&b==0x0ae00000&&o==0x1018){if(!keepPPDone)regs[b+0x1014]&=~v;return;}
  if(dropSourceWrite&&b==bases[2]&&o==0x14)return;
  if(irqMMIO&&b==0x17a00000&&o==0x18c){regs[b+0x10c]&=~v;return;}
@@ -245,6 +258,12 @@ static void resetRegs(){trace.clear();regs.clear();dmaFired=false;dmaDone=true;l
 }
 '''
 pool_fixture = r'''
+struct IOMemoryDescriptor : OSObject {
+ uintptr_t pa;size_t length;
+ static IOMemoryDescriptor*withPhysicalAddress(uintptr_t p,size_t n,unsigned){auto*d=new IOMemoryDescriptor;d->pa=p;d->length=n;return d;}
+ IOMemoryMap*map(){auto*m=new IOMemoryMap(3);m->customPA=pa;m->customSize=length;return m;}
+};
+constexpr unsigned kIODirectionInOut=3;
 struct SweetScanoutPool : OSObject {
  bool pinned=false;uint64_t pa=0x10000000;
  unsigned width(){return 1125;}unsigned height(){return 2436;}unsigned stride(){return 4608;}

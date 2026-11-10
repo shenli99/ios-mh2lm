@@ -3,6 +3,45 @@
 ## Agent handoff / active work (2026-11-10, latest)
 
 
+**CURRENT：0184资源ABI/RPMh provider与显示绑定已实现并完成本地验证；D1整体仍未完成。**
+父提交87ba5bb（0183命令/计时）。新增0184-mh2lm-display-resource-leases.patch，SHA256=
+202251a9eeebca4c43539ec84307f0d20dc7f9d7cfe1a8286858a73d7cbcd5b1，6份变化源码。
+真实SweetRPMh IOService由ADT sweet,rpmh nub匹配；拥有RSC/TCS/commandDB、workloop/gate/timer。
+迁移原sweet_rpmh.c的pre-v3/DRV2/ACTIVE2布局与继承保护，旧C仅在MH2LM排除，未另建竞争writer。
+核对0121a12实际所有C/C++ caller：MH2LM TouchComm没有RPMh调用，旧touch/sec在MH2LM关闭，
+GPU调用在GUACAMOLE guard；没有改当前触摸供电。没有通过充电SPMI API写面板电源。
+attach/detach独立ID、4个typed rail（ldoa14/17/c3/a5）、最多8consumer、约束/load聚合、token/status；
+最后撤票由调用者先停DMA/link，未拥有的继承电源不自动disable；有活动票detach=Busy。
+timer推进写回<=1ms/总请求<=100ms，无gate内delay/长忙等；freshIRQ/执行转换+issued/complete+idle
+后清trigger/mode/enable/wait，只W1C自己槽并保留他槽IRQ位；Busy不隐式重试，故障不reset。
+仅全局原子所有权状态字，无实例指针/单例桥；任何写后实例free即本boot retired，拒绝丢票账本重建。
+纯元数据实例可重匹配；不宣称动态故障恢复/睡眠投票或ACK即物理掉电证明。
+MDSS通过SweetRPMhClient实际匹配通知+自己的IES/workloop attach/查询，terminated只撤回/release，
+stop在owner gate外remove同步通知/事件再detach；无反向同步consumer回调，绑定不发任何电源票。
+mk-mh2lm-mdss-adt.py新增--display-resources：v1、完整DISPCC0x20000、IRQ9..11、PHY0/PLL0
+单窗口资源12(0x0ae94400/0x760)，另加RPMh三段窗口nub；默认/IRQ原ADT逐字节不变。
+sweetdisplayresources默认0，1只绑定/metadata且拒写，2只允许typed请求，开启参数本身仍不发票。
+新mode资源不全显式拒绝；不读取尚未获clock的PHY/GDSC。尚无独立测试boot，不要求本段上机。
+PD0独立clock/GDSC provider设计明确修订为MDSS内部typed资源模块，沿现有唯一MMIO所有者，
+不另映射第二writer；当前只有窗口/所有权，acquire、父源/频率/GDSC控制并未写好。
+严格apply至verified0183无offset/fuzz、6源码字节一致、114原CI marker保留；真实XNU/KDK
+arm64-apple-darwin RPMh/MDSS/FB/旧C/KernelConfigTables五对象编译通过，旧C nm无RPMh符号。
+ASan/UBSan实际代码：元数据不写、8ID/旧ID-token、并发票gate、聚合撤票/电压冲突/负载溢出、
+独立fresh完成、继承冲突、6类fault/stop/晚事件、真实MMIO action与stop同步、retire重建拒绝、
+11坏资源、actual matched→MDSS attach→terminated通过。原显示/F2/F3/F4、FB、DSI、perf、ADT
+6套通过；LSan因原ptrace限制关闭，显式对象/映射/通知计数归零。编译有既有宏/有界数组警告，
+两个新IOReturn格式警告已修；不宣称零warning或硬件通过。
+底稿scratch/framebuffer-0184/{base,edited,verify,verification.json,tests.json,warning-counts.json,
+test-*.txt,*compile.txt}。实施与边界见docs/PANEL-POWER-D1.md；主计划/PD0/架构/总路线已同步。
+**NEXT补clock/GDSC获取、MMCX/NoC依赖与PHY/PLL/host，再接确认profile/reset/完整ON/OFF；**
+0183命令表/性能统计已可复用，不回拷贝双缓冲/单项版本探针轮次，不改已有USB/按键/触摸/电池。
+0121a12滑动卡顿仍未定因/修复，A单缓冲B未提交；不要把本地资源层通过写成完整PD2/PD3完成。
+暂不要求push，合并实际可运行驱动批次再通知；未push/启动CI/操作设备，无新云产物/run ID/boot。
+CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。旧F3矩阵/半小时/BUG-002不专项重测。
+
+**以下0183记录按当时状态保留；其资源层缺口现由上段0184部分更新。**
+
+
 **CURRENT：已按用户要求优先完整面板驱动；0183完成D1命令基础及合并性能计时，本地验证通过。**
 优先级修订提交91d85bf；本提交提供0183-mh2lm-dsi-command-sequencer.patch，SHA256=
 3bf924da1b0101024922343e21438eafcfb201f399f06eac7988146e0be6815f，9份变化源码。

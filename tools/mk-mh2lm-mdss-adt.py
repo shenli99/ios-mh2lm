@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Derive a display-service ADT, optionally adding F3 read-only IRQ resources."""
+"""Derive a display ADT; opt-in v1 resources add PHY/PLL and RPMh service."""
 from pathlib import Path
 import struct
 import sys
@@ -13,9 +13,11 @@ WINDOWS = ((0x0010b000, 0x1000), (0x0af00000, 0x3000),
            (0x0ae6b800, 0x800), (0x0ae6c000, 0x800),
            (0x0ae94000, 0x400), (0x15000000, 0x2000), (0x15082000, 0x1000))
 IRQ_WINDOWS = ((0x0ae00000, 0x2000), (0x0ae6e800, 0x200), (0x17a00000, 0x10000))
+PHY_WINDOW = (0x0ae94400, 0x760)  # includes PLL0 +0x500; one owner/map
+RPMH_WINDOWS = ((0x18220000, 0x100), (0x18220d00, 0x3000), (0x0c3f000c, 8))
 
 
-def derive(blob, irq_preflight=False):
+def derive(blob, irq_preflight=False, display_resources=False):
     root, end = adt.parse(blob)
     if end != len(blob) or b'lge,mh2lm\0' not in (root.prop('compatible') or b''):
         raise ValueError('expected a complete MH2LM ADT')
@@ -23,14 +25,23 @@ def derive(blob, irq_preflight=False):
     expected = struct.pack('<QQQ', 0, SOC_BASE, 0x100000000 - SOC_BASE)
     if arm.prop('ranges') != expected:
         raise ValueError('unexpected arm-io ranges; refusing to replace translations')
-    if any(n.name == 'mdss' for n in arm.children):
-        raise ValueError('mdss already exists')
+    if any(n.name in ('mdss', 'display-rpmh') for n in arm.children):
+        raise ValueError('display resource node already exists')
     # GCC's 0x10b000 page is below SOC_BASE. Add a disjoint low-PA alias;
     # never underflow an unsigned reg address or change the original range.
     arm.props = [(k, f, v + struct.pack('<QQQ', LOW_ALIAS, 0, SOC_BASE)
                   if k == 'ranges' else v) for k, f, v in arm.props]
-    regs = b''.join(struct.pack('<QQ', pa-SOC_BASE if pa >= SOC_BASE else LOW_ALIAS+pa, size)
-                    for pa, size in WINDOWS + (IRQ_WINDOWS if irq_preflight else ()))
+    def encode(windows):
+        return b''.join(struct.pack('<QQ', pa-SOC_BASE if pa >= SOC_BASE else LOW_ALIAS+pa, size)
+                        for pa, size in windows)
+    windows = list(WINDOWS)
+    if display_resources:
+        windows[1] = (windows[1][0], 0x20000)  # includes GDSC/clamp, never a second writer
+    if irq_preflight or display_resources:
+        windows.extend(IRQ_WINDOWS)
+    if display_resources:
+        windows.append(PHY_WINDOW)
+    regs = encode(windows)
     mdss = adt.Node()
     mdss.props = [('name', 0, b'mdss\0'), ('compatible', 0, b'sweet,mdss\0'),
                   ('reg', 0, regs),
@@ -38,16 +49,24 @@ def derive(blob, irq_preflight=False):
                   # controller before publishing standard interrupt properties.
                   ('sweet,mdss-intid', 0, struct.pack('<I', 115))]
     arm.children.append(mdss)
+    if display_resources:
+        mdss.props.append(('sweet,display-resource-abi', 0, struct.pack('<I', 1)))
+        rpmh = adt.Node()
+        rpmh.props = [('name', 0, b'display-rpmh\0'), ('compatible', 0, b'sweet,rpmh\0'),
+                      ('reg', 0, encode(RPMH_WINDOWS)),
+                      ('sweet,rpmh-abi', 0, struct.pack('<I', 1))]
+        arm.children.append(rpmh)
     return adt.serialize(root)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--irq-preflight', action='store_true', help='append optional F3 read-only IRQ resources')
+    parser.add_argument('--display-resources', action='store_true', help='v1 expanded DISPCC, PHY/PLL and typed RPMh service (implies IRQ resources)')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
     source, destination = args.source, args.destination
     if source.resolve() == destination.resolve():
         sys.exit('output must differ from the baseline ADT')
-    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight))
+    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources))
