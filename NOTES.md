@@ -2,6 +2,33 @@
 
 ## Agent handoff / active work (2026-11-10, latest)
 
+**CURRENT：0121a12云产物已核对包含0182，三档boot已打包并回读验证；NEXT先实测single。**
+对应实现f78abc8；52份源码与0182验证树逐字节一致（含8份变化），114条原CI源码marker及
+继承/新增内核marker通过，kernel归档manifest正确，Mach-O为17526608bytes。
+kernel SHA256=95ee2dec7b39c73d471d4430798b0568af047bce26bb2a15c86a63807c521c33，
+与上一0181内核不同；归档kernel SHA256=
+104554f72f0e1f34e60a76dfb86b51df13e3d7ab328709c6912aa9d9079b5dc0，buildtree SHA256=
+fd5626f1f2c968977a9a6636c704f5278259700fbb7a1cdf3aaa9d946b68869d。
+没有本次build-log/CI run ID，不声称全量云告警已审。底稿scratch/artifact-0121a12/
+{verify-artifacts.py,verification.json,source-compare.json,actual/,package.sh,packaging.txt,
+verify-boots.py,boot-verification.json}。
+已生成out-bs/boot-16k-0121a12-fb-scanout-{baseline,preflight,single}.img，各35667968bytes；
+独立回读Android v1/2048header、原UEFI blob、FAT内kernel/ADT/TOML全部一致，三档只差
+sweetfbown=0/1/2，原ADT未改，IRQ/ACM/runtime3/F2/F3参数保留。single SHA256=
+9683dd4adb3dc90ced254128dc216b6c1c3eebf4ff445dbfbf5d45d289f2129d；baseline/preflight SHA
+及完整参数见boot-verification.json。环境没有file(1)，仅用shell函数替换其信息展示，真正
+打包脚本未改，最终另用Python和mcopy回读核验，未掩盖打包步骤失败。
+NEXT用户只需fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a12-fb-scanout-single.img。
+进UI亮屏约60s，简测画面持续更新/位置/亮度/三键/触摸，手动OFF20–30s/ON再亮屏20–30s，
+导出sweetlog-0121a12-fb-scanout-single.bin。分析quiescing→submitted→transfer observed→
+FB active，源地址A/stride4608/crop22,48及owned resume verified；不能单凭能进桌面验收。
+若冻结/不亮，保留持久日志；baseline/preflight只需故障时对照，不重测F3/半小时/旧bug专项。
+仍是单缓冲30Hz，提交池有意pin至重启，非最终回收/双缓冲/PD1首帧console验收。
+本轮只核对/打包/文档，无新驱动或参数设计、CI变更/push/设备操作；CircleCI blob仍
+ da0b6c0947a66f03491b3a9023590b49665292df。F4/PD1待实机，BUG与整机PM边界保持。
+
+**以下为0182实现交接；待云产物状态已由上段0121a12核对结果更新。**
+
 **CURRENT：0182受控单缓冲接管已本地实现/验证，待用户push、新云产物及实机；F4/PD1未验收。**
 基于d0c075a和已实测的0181/0121a11；新补丁0182-mh2lm-controlled-scanout-handoff.patch，
 SHA256=97295c1e6973e006d98300070005a652c8c7ae1245c37939dd245d898ee6fbfa，8份源码变化。

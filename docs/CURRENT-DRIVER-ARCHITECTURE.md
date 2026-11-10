@@ -6,7 +6,7 @@
 PD0[静态清单](PANEL-RESOURCES-PD0.md)已核对现有DCS接口仅支持64-byte编码数据、
 旧RPMh helper不具备面板lease及多consumer投票；不能把现有接口视为完整初始化能力。
 
-**F4第二段0182（本地实现/验证通过，待云构建/实机）：** AppleCLCD通过typed
+**F4第二段0182（本地验证通过，0121a12产物/boot已核对待实机）：** AppleCLCD通过typed
 `beginScanout/scanoutStatus/abandonScanout`请求SweetMDSS执行一次own2受控接管。
 provider在已有workloop/gate中用有时限timer暂停TE/auto、确认空闲、提交A并观察新传输；
 consumer查询成功后CPU目标切A，MMIO仍归provider，无反向同步回调。

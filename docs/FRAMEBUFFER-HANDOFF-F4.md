@@ -1,4 +1,4 @@
-# F4 第二段：受控单缓冲接管（0182，待云构建及实机）
+# F4 第二段：受控单缓冲接管（0182，0121a12已打包待实机）
 
 2026-11-10。基于已实测的0181/0121a11，新增
 `xnu/patches/0182-mh2lm-controlled-scanout-handoff.patch`。
@@ -117,3 +117,30 @@ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-编号.gz 编�
 重点看quiescing→submitted→transfer observed→FB active、源地址A/crop22,48/stride4608、
 owned resume verified及画面更新。不追加电池插拔、BUG-002、半小时或60Hz呈现专项。
 若未进入active或画面冻结，保留持久日志；不把“能进桌面”单独当作接管通过。
+
+## 5. 0121a12 云产物与测试镜像（已核对，待实机）
+
+对应实现`f78abc8`。buildtree中52份源码与0182验证树逐字节一致，含本补丁8份变化；
+114条原CI源码marker和继承/新增内核marker通过。MH2LM内核17526608bytes，SHA256为
+`95ee2dec7b39c73d471d4430798b0568af047bce26bb2a15c86a63807c521c33`，归档manifest通过，
+与0181不同。没有本次build-log或CI run ID，未审全量云告警，不提前给出实机结论。
+
+已生成`out-bs/boot-16k-0121a12-fb-scanout-{baseline,preflight,single}.img`，各35667968bytes。
+独立回读header v1/page2048、UEFI blob、FAT内kernel/ADT/TOML全部一致；三档仅own0/1/2
+不同，原ADT及IRQ/ACM/runtime3/F2/F3参数保持。先测single，另两档只作故障对照。
+
+| 档位 | boot SHA256 |
+|---|---|
+| `fb-scanout-baseline` | `4d407e175e74b56098e44c137715a5ad781606655166f4c3e14aef038ea4f45e` |
+| `fb-scanout-preflight` | `3b3e65db5b9f90d409065797923b134ec3a99135ec89bde6320c3258a54e7cad` |
+| `fb-scanout-single` | `9683dd4adb3dc90ced254128dc216b6c1c3eebf4ff445dbfbf5d45d289f2129d` |
+
+```sh
+fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a12-fb-scanout-single.img
+```
+
+按第4节亮屏约60秒及手动OFF/ON短测，导出`sweetlog-0121a12-fb-scanout-single.bin`；
+若冻结或不亮，同样保留持久日志。不重复F3/半小时/电池专项。
+产物归档SHA、52份源码比较和完整boot参数/回读证据保存在
+`work1/scratch/artifact-0121a12/{verification.json,source-compare.json,boot-verification.json}`。
+本轮未改驱动或CircleCI，无push或设备操作。
