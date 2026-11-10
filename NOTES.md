@@ -2,6 +2,31 @@
 
 ## Agent handoff / active work (2026-11-10, latest)
 
+**CURRENT：0121a11 RD_PTR计帧档实测通过；下一步同核完整硬件vsync档。**
+日志sweetlog-0121a11-fb-vsync-rdptr.bin SHA256=6b1727bbe355831f7355658ef41a9da2191f2854985da98992aee6a87baf5a5f；
+有效381403/flush98/未回卷/5121行。用户确认画面/亮度/触摸/按键/手动唤醒正常，无新增问题。
+367参数irq2/vsync0；431GIC probe hits1，432armed。十个partial0窗共600.819秒/35988帧，
+59.863–59.913Hz，加权59.898；p50 16689–16709us，p99 16698–16715us，dropped全0；
+entries始终total+1（GIC probe额外一次）。无IRQ FAILED/风暴/watchdog回退，证明连续硬件
+投递/ACK/rearm。FB消费仍软件，不提前称完整硬件vsync成功。
+4010 paused frames38147/entries38148，4471 ON armed仍同数；OFF内部电池样本43–60完成时刻
+713.924–992.364s，至少278.440s其它线程活动但MDSS计数不增长。4012/4472 DCS28/29 rc0，
+13/2ms。ON后rearmed无watchdog错误；无ON后的整分钟统计，下一完整档留70s补，不补造最终计数。
+35亮度请求/9预算DCS rc0；44键事件power3/up8/down11对、36touch。无驱动ERROR/mux隔离/
+SPMI timeout/kernel panic；61电池样本/60refresh healthy1，包括OFF18份。BUG-002仅常态观察。
+USB2reset/2ACM/3WARN（ep0二ep5一），本轮VERIFY0不关闭旧bug。driverkitd787–790仍sig9/
+ns1/code7，BUG-005未修。另61份gauge全charging0、电流-132..0mA，启动ENABLE成功不能当真实
+充电证据；用户已确认接电脑USB。原因未知，不判MDSS因果、不擅自改充电，BUGS/F3第11节已记。
+底稿scratch/artifact-0121a11/{analyze-rdptr.py,fb-vsync-rdptr.txt,rdptr-log-analysis.json,
+rdptr-analysis-summary.json}。
+NEXT：fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a11-fb-vsync-hardware.img。
+进系统亮屏110s，手动OFF20–30s/ON，唤醒后亮屏70s（补ON后完整统计），简测画面/亮度/
+三键/触摸；导出sweetlog-0121a11-fb-vsync-hardware.bin。检查FB首次/ON后hardware active、
+无回退及MDSS频率/计数。无需新编译/push/打包，不额外插拔/电池/BUG-002专项测试。
+本轮仅分析/文档，无驱动/CI/boot修改或设备操作，F3整体尚未验收。
+
+**以下为历史交接；当前结果与下一步以上段RD_PTR实测为准。**
+
 **CURRENT：0121a11 fb-vsync-gic实际投递通过；下一步同核RD_PTR计帧档。**
 日志sweetlog-0121a11-fb-vsync-gic.bin SHA256=2ecff7f99fdcdba61676b16be307c97307327daf8c50d77ad22746d9a3b6adcc；
 有效337146/flush36/未回卷/4500行。用户明确未察觉异常，只要求复核隐藏问题。

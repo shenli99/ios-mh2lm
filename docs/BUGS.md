@@ -298,3 +298,13 @@ id10/18 USBIN VERIFY(-12)（3202/3737行）仍出现；3109/3643先因reasons0x2
 3210/3745为step0/reasons0x1保持禁用，3252/3790重新启充；不是两次-12直接从启充态主动
 停充，不称完整BUG-004图标闪烁复现或已修复。用户明确未察觉异常；37样本/36refresh均
 healthy1，无mux隔离/poison/SPMI timeout/panic，不增BUG-002专项测试。
+
+
+**0121a11 / RD_PTR计帧档伴随记录（2026-11-10）：**
+`sweetlog-0121a11-fb-vsync-rdptr.bin`，SHA256
+`6b1727bbe355831f7355658ef41a9da2191f2854985da98992aee6a87baf5a5f`。
+无mux隔离/poison/SPMI timeout/panic；61样本/60refresh healthy1，用户确认无新增问题。
+USB两次reset均配置ACM，3端点WARN，VERIFY(-12)本轮0；不能据此关闭BUG-001/004。
+787–790行driverkitd仍sig9/ns1/code7，BUG-005未修复。另61份gauge均charging0，电流-132..0mA；
+只见启动一次ENABLE成功，用户确认接电脑USB；不据healthy1/百分比81→82宣称真实充电。
+这条观察与VERIFY导致反复停/启充有区别，当前不合并定因或判MDSS引入；记录后继续显示F3。

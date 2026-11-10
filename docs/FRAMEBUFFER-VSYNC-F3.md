@@ -1,6 +1,6 @@
 # F3：硬件 vsync 接入记录
 
-2026-11-09。**0121a11 / 0180 GIC115实际投递档实测通过；下一步RD_PTR计帧，F3整体验收未完成。**
+2026-11-09。**0121a11 / 0180 GIC与RD_PTR计帧档实测通过；下一步完整硬件vsync档，F3整体验收未完成。**
 0121a10 / 0179 只读预检已实测通过；0180 新行为默认关闭，尚无实际 IRQ 投递/频率的实机结果。
 F3 整体尚未验收。最新实现、分档与下一步见第8节；第2–7节保留0179阶段记录。
 本步接续已验证正常使用路径的 F2，不重开 BUG-003；BUG-002 随日常使用观察。
@@ -427,3 +427,64 @@ gic-analysis-summary.json,gic-selected.txt}`；用户态退出reason定义已从
 取得60秒partial0频率/间隔统计，再电源键手动息屏20–30秒/唤醒、简测输入与亮度。
 导出`sweetlog-0121a11-fb-vsync-rdptr.bin`；前端仍为软件vsync，先验收实际TE投递/ACK计帧。
 本轮只分析及记录，无新驱动/CI改动、无需新编译；完整hardware档留待该档结果核对后。
+
+
+## 11. 0121a11 RD_PTR档：频率、精确ACK及OFF停计数通过
+
+2026-11-10。日志`work1/logs/sweetlog-0121a11-fb-vsync-rdptr.bin`，SHA256
+`6b1727bbe355831f7355658ef41a9da2191f2854985da98992aee6a87baf5a5f`；有效381403字节、flush98、未回卷、5121行。
+用户确认画面、亮度、触摸、按键和手动息屏唤醒都正常，未见新增问题。
+367行参数mdssirq2/fbvsync0，431行GIC probe hits1通过，432行RD_PTR armed。
+本档实际开启TE RD_PTR、经GIC115/worker ACK并计帧，framebuffer仍为软件vsync。
+
+### 亮屏连续十个完整统计窗
+
+2536、3242、3342、3440、3498、3622、3699、3788、3857、3955行均partial0：
+
+| 指标 | 观察 |
+|---|---|
+| 总统计时长/帧数 | 600.819秒 / 35988帧 |
+| 各窗频率 | 59.863–59.913Hz；加权59.898Hz，满足60±1Hz |
+| 各窗间隔p50 | 16689–16709us |
+| 各窗间隔p99 | 16698–16715us |
+| 样本溢出 | 每窗dropped0 |
+| IRQ与处理帧记账 | 每窗entries=total+1；额外1次是初始GIC软件probe |
+| 故障保护 | 无MDSS IRQ FAILED、风暴或watchdog回退 |
+
+这些统计证明硬件事件能持续通过ACK/rearm链交付worker，而非仅继承一次原始锁存状态。
+不等于GPU/翻页完成fence，也不证明framebuffer消费者已使用硬件vsync；后者本档关闭。
+
+### OFF / ON
+
+4009行为partial1摘要（不与完整60秒统计混用）；4010行paused frames38147/entries38148。
+4012行DCS28成功，13ms。4471行ON重开时仍为frames38147/entries38148，4472行DCS29成功2ms。
+因此OFF跨段累计帧数和父线投递次数均未增加。OFF内部电池样本43–60的完成时间
+713.924–992.364秒，证明至少278.440秒仍有其它线程活动且MDSS停计数；不是全机停止运行。
+不将这两个时间戳误称OFF/ON精确发生时刻。
+
+ON后已重新armed，输入/亮度继续，未见250ms watchdog错误；**没有唤醒后第二段完整60秒
+MDSS统计**，不补造ON后的频率或最终帧数。下一完整档在唤醒后留70秒，顺便补这段证据。
+亮度35次请求（含2838→0→2838及滑动调节），9条预算内DCS日志均rc0。
+44条按键HID（power3对、up8对、down11对），触摸36条，用户视觉确认正常。
+
+### 其它驱动/后台观察
+
+无驱动[ERROR]、kernel panic、mux隔离/SPMI timeout；61份电池样本、60次refresh均healthy1，
+包括OFF期间18份样本。这里healthy指consumer采样/事件路径，**不是实际充电成功的保证**。
+本轮USB VERIFY(-12)为0，不能据单轮没出现关闭BUG-004；两次USB reset均有ACM配置，
+仍有3条端点WARN（ep0两/ep5一），本轮无后段反复reset记录，不据此关闭BUG-001。
+787–790行driverkitd同样sig9/ns1/code7，沿用BUG-005；启动期兼容错误与前轮同类。
+
+另需保留供电证据边界：61份gauge均charging0、遥测电流-132..0mA，控制仅启动时记录一次
+ENABLE成功，不能用该命令或SOC81→82证明这轮真实充电。用户补充确认本轮接电脑USB；
+这份日志未观测到进入Charging，具体原因未知，没有直接证据将其归因MDSS IRQ，
+也不临时改充电策略或扩大F3测试。
+
+底稿`work1/scratch/artifact-0121a11/{analyze-rdptr.py,fb-vsync-rdptr.txt,rdptr-log-analysis.json,
+rdptr-analysis-summary.json}`。本轮无代码/boot/CI变更，无push或设备操作。
+
+**下一步同核完整档**：`boot-16k-0121a11-fb-vsync-hardware.img`。
+进入系统亮屏至少110秒，再手动OFF20–30秒/ON，唤醒后继续亮屏70秒；期间简测画面、
+亮度、三键、触摸。导出`sweetlog-0121a11-fb-vsync-hardware.bin`。
+同时看首真实帧后的FB hardware active、无显式回退、ON后第二次hardware active及provider
+完整统计。无需重新编译或额外充电/插拔压力测试；完整档结果核对前F3整体仍未验收。
