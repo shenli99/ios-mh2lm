@@ -2,6 +2,35 @@
 
 ## Agent handoff / active work (2026-11-10, latest)
 
+**CURRENT：0121a11完整硬件vsync实测通过，F3正常使用路径验收通过；NEXT F4。**
+sweetlog-0121a11-fb-vsync-hardware.bin SHA256=
+9839ade3d47d58ee5ca2396ad73f77729c4d66302a5013b127e77f0dcae06145；有效365908/flush84/
+未回卷/4900行。用户“我未发现异常”。369参数irq2/vsync1；853probe hits1，854armed，
+855 FB hardware active frame1；2361幂等ON后active2413，非fallback。十个partial0窗共
+600.386秒/35961帧，59.874–59.915Hz（加权59.896），p50 16694–16708us/p99 16698–16718us，
+dropped0；无IRQ/FB FAILED、风暴/watchdog/显式回退。三次active快照coalesced0，不补造全程计数。
+3905paused frames28538/entries28539，4146ON armed同数；3907/4147 DCS28/29 rc0，14/2ms。
+OFF内10个电池样本完成时刻552.710–700.083s，至少147.372s其它线程活跃但MDSS不计数。
+4150首个ON后帧active28539；4538/4607/4741三整窗180.010s/10782帧，59.893–59.898Hz，
+补齐RD_PTR档ON后整窗缺口。末整窗total39320/entries39322；两窗差2因top half可在统计
+快照时已入下一IRQ，其余差1软件probe，不误判丢帧或声称计数原子。无client逐帧通知计数。
+33亮度请求/10预算DCS rc0，24键事件power3/up3/down6对、touch20；52电池样本/51refresh
+healthy1，末样本864.498s；无驱动ERROR/mux隔离/poison/SPMI timeout/panic，BUG-002只常态观察。
+USB2reset/2ACM/3WARN/VERIFY0，不关闭BUG-001/004；driverkitd785–788仍sig9/ns1/code7，
+BUG-005未修。52gauge全charging0、电流-132..0mA，仅启动ENABLE一次；本完整档供电来源
+未另确认，不套用前档电脑USB、不据healthy1证明充电、不擅改充电。BUG-003仍暂缓。
+底稿work1/scratch/artifact-0121a11/{analyze-hardware.py,fb-vsync-hardware.txt,
+hardware-log-analysis.json,hardware-analysis-summary.json,hardware-selected.txt}。
+NEXT：按FRAMEBUFFER-PANEL-PLAN的F4准备自有扫描池/硬件裁剪/双缓冲翻页；首次写新地址前
+重查live SMMU/缓存/DMA可达性，CB2.M0不强加完整IOMMU驱动。ABL约18MiB不够双缓冲，
+交接只读已知1080×2340现图，不能越界按1125×2436读。无需重测F3/新boot/push。
+F3范围为正常使用+手动OFF/ON；真实终止/重匹配未全部上机，默认irq0/vsync0及CPU拷贝30Hz
+保留，F7再收口默认/旧路径，不把硬件通知等同翻页fence。整机PM仍大目标四占位。
+本轮仅分析/文档，无驱动/boot/CI改动、无设备操作/推送；CircleCI blob仍
+da0b6c0947a66f03491b3a9023590b49665292df。当前实现7329197，实测详细记录F3第12节。
+
+**以下为历史交接；当前结果与下一步以上段完整硬件档实测为准。**
+
 **CURRENT：0121a11 RD_PTR计帧档实测通过；下一步同核完整硬件vsync档。**
 日志sweetlog-0121a11-fb-vsync-rdptr.bin SHA256=6b1727bbe355831f7355658ef41a9da2191f2854985da98992aee6a87baf5a5f；
 有效381403/flush98/未回卷/5121行。用户确认画面/亮度/触摸/按键/手动唤醒正常，无新增问题。

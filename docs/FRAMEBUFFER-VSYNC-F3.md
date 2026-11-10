@@ -1,8 +1,10 @@
 # F3：硬件 vsync 接入记录
 
-2026-11-09。**0121a11 / 0180 GIC与RD_PTR计帧档实测通过；下一步完整硬件vsync档，F3整体验收未完成。**
-0121a10 / 0179 只读预检已实测通过；0180 新行为默认关闭，尚无实际 IRQ 投递/频率的实机结果。
-F3 整体尚未验收。最新实现、分档与下一步见第8节；第2–7节保留0179阶段记录。
+2026-11-10。**0121a11 / 0180完整硬件vsync档实测通过，F3正常使用路径验收通过；下一步F4。**
+GIC投递、RD_PTR持续计帧及FB硬件消费均已有实机证据；OFF停计数、ON恢复硬件模式，
+十个完整窗59.874–59.915Hz，无显式软件回退，用户未发现异常。详见第12节。
+新行为仍默认关闭，CPU拷贝限频30Hz仍保留；真实provider终止/重匹配等生命周期未全部上机覆盖。
+第2–11节保留各阶段当时的实现、测试安排及结论，以第12节为最新状态。
 本步接续已验证正常使用路径的 F2，不重开 BUG-003；BUG-002 随日常使用观察。
 完整系统/设备低功耗已排到大目标四，当前只推进既定显示路线。
 
@@ -488,3 +490,67 @@ rdptr-analysis-summary.json}`。本轮无代码/boot/CI变更，无push或设备
 亮度、三键、触摸。导出`sweetlog-0121a11-fb-vsync-hardware.bin`。
 同时看首真实帧后的FB hardware active、无显式回退、ON后第二次hardware active及provider
 完整统计。无需重新编译或额外充电/插拔压力测试；完整档结果核对前F3整体仍未验收。
+
+## 12. 0121a11完整硬件档：F3正常使用路径验收通过
+
+2026-11-10。日志`work1/logs/sweetlog-0121a11-fb-vsync-hardware.bin`，SHA256
+`9839ade3d47d58ee5ca2396ad73f77729c4d66302a5013b127e77f0dcae06145`；有效365908字节、flush84、未回卷、4900行。
+用户反馈“我未发现异常”。结合此前GIC/RD_PTR分档，本次确认FB消费端实际使用硬件vsync，
+**F3正常使用路径验收通过，下一步F4**。本轮只分析/文档，无驱动、boot、CI修改或设备操作，未push。
+
+### 硬件消费与持续频率
+
+369行参数`sweetmdssirq=2 sweetfbvsync=1`；75/96行consumer启用并通过typed后端订阅。
+853行GIC probe hits1通过，854行RD_PTR armed，855行首次`hardware active frame=1`。
+2346行初始/幂等ON成功后，2361行再次active frame2413，属于ON重置前端状态后的重新接收，
+不是软件回退。没有MDSS IRQ FAILED、FB VSYNC FAILED、风暴或watchdog回退日志。
+
+| 指标 | 实测 |
+|---|---|
+| 完整窗数 | 10个partial0：OFF前7个，ON后3个 |
+| 总完整窗时长/帧数 | 600.386秒 / 35961帧 |
+| 各窗频率 | 59.874–59.915Hz；加权59.896Hz，满足60±1Hz |
+| 间隔p50 / p99 | 16694–16708us / 16698–16718us |
+| 样本溢出 | 各窗dropped0 |
+| ON后三个完整窗 | 180.010秒 / 10782帧；59.893–59.898Hz |
+
+3904行为partial1的56062ms/3359帧，不混入完整窗统计。最后完整窗4741行累计
+total39320/entries39322。两份统计entries=total+2，其余+1：+1来自初始软件GIC probe；
+top half在provider gate之外更新entries，取统计时可已有下一IRQ在途，因此统计不是原子快照，
+额外1不能独立证明丢帧/多帧故障。三次active快照coalesced均0；没有末尾消费者累计计数，
+不据此声称全程无任何合并，也不将RD_PTR等同翻页完成fence。
+
+### OFF停计数、ON恢复硬件消费
+
+3905行paused frames28538/entries28539；3907行DCS28成功，14ms。
+4146行重新armed仍为frames28538/entries28539，4147行DCS29成功，2ms。
+4150行首个唤醒后真实帧进入`hardware active frame=28539`；4538/4607/4741行三个完整
+统计窗补齐上一RD_PTR档缺少的ON后持续频率证据。
+
+OFF内部电池样本33–42的完成时刻552.710–700.083秒，跨度至少147.372秒；其它线程继续活动，
+而MDSS累计帧数及父线投递数未增长。样本端点不是OFF/ON精确发生时刻。
+停止FB通知由代码/host检查和provider无进展共同支持；本次没有单独的设备端client通知计数器。
+
+### 伴随观察、验收边界与下一步
+
+无驱动[ERROR]、kernel panic、mux隔离/poison/SPMI timeout；33次亮度请求含2713→0→2713，
+10条预算DCS日志全rc0。24条HID键事件（power3对、up3对、down6对），触摸20条。
+52份电池样本/51次IRQ refresh均healthy1，末样本864.498秒，采样/事件路径继续运行。
+
+USB两次reset、两次ACM配置，3条端点WARN（ep0两/ep5一），本轮USBIN VERIFY(-12)为0；
+不据此关闭BUG-001/004。785–788行driverkitd仍sig9/ns1/code7，BUG-005未修复。
+52份gauge均charging0、电流-132..0mA，仅启动时有一次ENABLE成功；healthy1及命令成功
+不能证明真实充电。本完整档供电来源未单独确认，不沿用上一档“接电脑USB”作为本档事实，
+不据此判断MDSS因果或临时修改充电。BUG-002仅正常使用观察，不追加专项测试；BUG-003仍暂缓。
+
+本次通过范围为正常使用及手动OFF/ON，不扩展为真实provider终止/重匹配、所有故障注入
+和完整插拔唤醒矩阵已上机通过。默认参数仍irq0/vsync0；CPU拷贝30Hz及ABL扫描缓冲仍在，
+不把硬件通知60Hz当作已完成60Hz双缓冲呈现。默认路径清理留F7。
+
+下一步按[F4计划](FRAMEBUFFER-PANEL-PLAN.md#f4自有扫描缓冲--硬件裁剪--双缓冲翻页修-p3p5l1)
+推进自有扫描缓冲、硬件裁剪和双缓冲翻页。写新扫描地址前先核对live SMMU配置、缓存和
+DMA可达性；0121a2的CB2.M0不构成必须新增完整IOMMU驱动的证据。ABL约18MiB放不下双缓冲，
+也不能按1125×2436直接读取现有1080×2340画面。当前无需再刷F3镜像或重新编译。
+
+可复核底稿：`work1/scratch/artifact-0121a11/{analyze-hardware.py,fb-vsync-hardware.txt,
+hardware-log-analysis.json,hardware-analysis-summary.json,hardware-selected.txt}`。

@@ -308,3 +308,13 @@ USB两次reset均配置ACM，3端点WARN，VERIFY(-12)本轮0；不能据此关�
 787–790行driverkitd仍sig9/ns1/code7，BUG-005未修复。另61份gauge均charging0，电流-132..0mA；
 只见启动一次ENABLE成功，用户确认接电脑USB；不据healthy1/百分比81→82宣称真实充电。
 这条观察与VERIFY导致反复停/启充有区别，当前不合并定因或判MDSS引入；记录后继续显示F3。
+
+**0121a11 / 完整硬件vsync档伴随记录（2026-11-10）：**
+`sweetlog-0121a11-fb-vsync-hardware.bin`，SHA256
+`9839ade3d47d58ee5ca2396ad73f77729c4d66302a5013b127e77f0dcae06145`。
+用户未发现异常，F3正常使用路径通过；无mux隔离/poison/SPMI timeout/panic，不追加BUG-002专项测试。
+USB两次reset/两次ACM配置、3端点WARN、USBIN VERIFY(-12)为0，BUG-001/004仍未关闭。
+785–788行driverkitd仍sig9/ns1/code7，BUG-005未修。52样本/51refresh healthy1，但全部gauge
+charging0、电流-132..0mA，只见启动ENABLE一次；本档供电来源未单独确认，不据healthy1
+宣称充电成功，不沿用上一档供电来源或判MDSS因果。采样健康与实际充电状态分别记录。
+详见[F3完整档](FRAMEBUFFER-VSYNC-F3.md#12-0121a11完整硬件档f3正常使用路径验收通过)。

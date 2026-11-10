@@ -1,6 +1,16 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
-**0180最新进度（2026-11-09）：** 实际MDSS GIC115/RD_PTR IRQ及typed硬件vsync已实现、
+**当前显示架构实测（2026-11-10）：** 0121a11完整硬件档验证了
+GIC115 → SweetMDSS软件IES/workloop → typed SweetVsyncChannel mailbox → AppleCLCD自己的IES/gate。
+FB首真实帧后切硬件vsync，60Hz软件通知timer降为100ms watchdog；OFF停IRQ/通知，ON恢复硬件消费。
+十个完整窗59.874–59.915Hz，无显式回退，用户未发现异常，F3正常使用路径验收通过。
+仅`sweetmdssirq=2 sweetfbvsync=1`等完整档参数启用此链；默认irq0/vsync0仍走软件通知。
+CPU拷贝仍限30Hz、扫描仍用ABL缓冲，无自有双缓冲/硬件翻页；这些留给下一步F4。
+真实provider终止/重匹配未全部上机覆盖，详见[F3第12节](FRAMEBUFFER-VSYNC-F3.md#12-0121a11完整硬件档f3正常使用路径验收通过)。
+
+以下0179及更早架构描述按当时状态保留，当前显示增量以上段为准。
+
+**0180实现时进度（2026-11-09）：** 实际MDSS GIC115/RD_PTR IRQ及typed硬件vsync已实现、
 通过本地arm64对象编译与ASan/UBSan验证，待云编译及实机验收。新行为默认关闭；完整档首次
 真实帧后切硬件vsync、OFF停通知、失败明确回退软件。一次编译可分GIC/RD_PTR/完整档测试，
 见[F3实现与测试](FRAMEBUFFER-VSYNC-F3.md#8-0180真实-irq-和硬件-vsync本地验证待实机)。

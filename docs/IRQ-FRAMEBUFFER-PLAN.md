@@ -1,6 +1,14 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
-**0180最新进度（2026-11-09）：** 实际MDSS GIC115/RD_PTR IRQ及typed硬件vsync已实现、
+**当前进度（2026-11-10）：0121a11完整硬件vsync档通过，F3正常使用路径验收通过；下一步F4。**
+首真实帧及唤醒后FB进入hardware active，十个完整窗59.874–59.915Hz，OFF计数停止，
+ON后三个完整窗稳定，无显式软件回退，用户未发现异常。见[F3第12节](FRAMEBUFFER-VSYNC-F3.md#12-0121a11完整硬件档f3正常使用路径验收通过)。
+F4推进自有扫描缓冲、硬件裁剪和双缓冲翻页，写新地址前核对live SMMU/缓存/可达性。
+默认参数/CPU拷贝30Hz尚未改变；旧bug及特殊生命周期覆盖边界保留，整机电源管理仍为大目标四。
+
+以下为历史阶段记录，当前状态以上段及NOTES顶部为准。
+
+**0180实现时进度（2026-11-09）：** 实际MDSS GIC115/RD_PTR IRQ及typed硬件vsync已实现、
 通过本地arm64对象编译与ASan/UBSan验证，待云编译及实机验收。新行为默认关闭；完整档首次
 真实帧后切硬件vsync、OFF停通知、失败明确回退软件。一次编译可分GIC/RD_PTR/完整档测试，
 见[F3实现与测试](FRAMEBUFFER-VSYNC-F3.md#8-0180真实-irq-和硬件-vsync本地验证待实机)。
@@ -506,7 +514,7 @@ agent 实施时以该文档为准，按步骤顺序推进，每步通过验收�
 | F0 | 取证不改行为：选择子/surface 创建属性/off-on 校验和、preserveoff A/B、SSPP/TE/SMMU 状态 | 定位黑块根因，确认零拷贝前提 |
 | F1 | 分层为 `SweetMDSS : IOService`（ADT reg/中断、mapDeviceMemory）+ `AppleCLCD` workloop/命令门/分发表 | 符合 IOKit 常规 |
 | F2 | 真显示电源：DCS 28/29（后续 10/11），不再擦像素 | 息屏唤醒局部黑屏 |
-| F3 | MDSS INTF1 RD_PTR 中断做 vsync，定时器降为看门狗 | 假 vsync |
+| F3（0121a11正常使用验收通过） | MDSS INTF1 RD_PTR 中断做 vsync，定时器降为看门狗 | 假 vsync |
 | F4 | 驱动自有扫描缓冲（simplefb 式）+ SSPP 硬件裁剪 + 双缓冲翻页 | 撕裂、依赖 ABL 缓冲 |
 | F5 | CA surface 由扫描池分配、MDP 直接扫描（cache clean），不兼容时回退拷贝 | 每帧 CPU 拷贝 |
 | F6 | （可选）关 autorefresh，按帧 kickoff | 功耗/残余撕裂 |
