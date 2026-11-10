@@ -2,6 +2,36 @@
 
 ## Agent handoff / active work (2026-11-10, latest)
 
+**CURRENT：PD0静态资源核对/接口设计已交付；下一步0181新云产物扫描池预检，之后F4/PD1。**
+基于1872425，新增docs/PANEL-RESOURCES-PD0.md，同步PD总计划/主面板/总路线/F4/架构。
+直接核对LG d4f335e13d73c4aa2af85581a6ec11b670ee5b94实际DTS/DRM/dsi-staging/LG override。
+确认参考路径为DSI ctrl v2.3、PHY v4.0、PLL7nm系列（v2 overlay改7nm_v2），不能按旧PHY
+v3.0/10nm头文件名选实现；本机版本仍待核验。面板vddi/vpnl=ldoa14/ldoa17，host/PHY另需
+ldoc3/ldoa5，属RPMh投票，不经充电SPMI白名单。use-labibb分支实际启用panel power_info
+里的vddi/vpnl，LCDB在LG common-pm禁用、基础AMOLED节点disabled、PV PMI8998块为注释；
+不据名字猜额外偏压寄存器。现有RPMh有DB/TCS/完成及poison，但仅触摸vreg helper/ARC直投，
+无面板lease/撤销/多consumer聚合；新provider必须统一原TCS writer，不能两套锁争同一DRV。
+0121a11真实buildtree提取sweet_rpmh.c SHA256=be347e987f70ec41831f61e4012a83980d254a45390a3e1c4280c9cab352c6e8。
+PV严格解析ON17包/694bytes，最大D3 payload149bytes；CE67/E2135/DF92也超64bytes；OFF4包/
+35bytes，等待/29→11次序有核对。现有SweetMDSS dcsWrite最多16words=64编码bytes，不可
+只扩大上限/切碎vendor长命令；需typed message与受支持DMA/完成生命周期。当前ADT缺完整
+PHY/PLL/GDSC/clamp/mixer/PP/VBIF资源，不能越界访问；两个clock位检查不是初始化/使能。
+设计确定：面板序列先为SweetMDSS同gate内部模块，link模块统一host/PHY/PLL；资源经独立
+provider/lease，不做互相等待的Panel↔MDSS服务。长等待timer推进，不持gate/TCS/SPMI锁
+跨150ms延时；完成带generation，停止先关admission，再同步在途操作和DMA后释放。
+文档含完整资源表、LG上/下电依赖、partial-failure回滚及E1–E8验证门槛。PD0静态设计完成，
+实际panel/revision、live资源/写权限未实证，不宣称PD1/完整驱动完成。触摸引脚与GPIO6/8
+不重合，但共享供电/reset后协调仍需核对。限定logs/evidence95文本未找到panel选择参数，
+不重启Android取证。旧android-mh2lm.dts含v2 PLL但本轮未重验来源，不当当前硬件读数。
+底稿work1/scratch/panel-pd0/{reference-audit.json,sweet_rpmh.c}，含19参考源码SHA/命令逐包
+元数据与表SHA。文档链接/差异和源表边界校验通过；本轮无内核补丁/参数/CI/boot/设备变化。
+NEXT：0181仍42047d3、own1仅预检，待用户push/新云kernel+buildtree（F4尚未实测）。核对
+后打同核baseline/preflight两档，只先测preflight；E1/E4–E8不阻塞扫描池预检，E2/E3仍是
+扫描接管/释放旧buffer门槛。不重测F3矩阵/半小时/旧BUG专项；不为本轮文档单独编译。
+未push，工作流blob仍da0b6c0947a66f03491b3a9023590b49665292df，BUG及整机PM边界不变。
+
+**以下为PD计划制定交接；当前执行点以上段PD0交付为准。**
+
 **CURRENT：用户要求完整接管面板，已新增PD0–PD5分步计划；下一执行点为PD0资源/接口核对。**
 新增docs/PANEL-FULL-DRIVER-PLAN.md，已同步主面板计划、总路线、F4记录和架构边界。
 最低先解除ABL缓冲依赖（含首帧/控制台/panic）；最终要具备控制器/DSI/PHY/PLL、面板

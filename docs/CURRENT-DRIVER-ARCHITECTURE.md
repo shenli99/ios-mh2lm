@@ -3,6 +3,8 @@
 **2026-11-10计划边界更新：** 用户要求最终完整接管面板，新增
 [PD0–PD5子计划](PANEL-FULL-DRIVER-PLAN.md)，先脱离ABL缓冲，再完成独立初始化/断电恢复。
 这是后续设计要求，不表示下述当前驱动已具备这些能力。
+PD0[静态清单](PANEL-RESOURCES-PD0.md)已核对现有DCS接口仅支持64-byte编码数据、
+旧RPMh helper不具备面板lease及多consumer投票；不能把现有接口视为完整初始化能力。
 
 **F4首段0181（本地实现，待云编译/实测）：** AppleCLCD可选持有`SweetScanoutPool`，通过
 标准IOBufferMemoryDescriptor申请两个连续低32位缓冲；显式像素写入前排除与整个ABL保留区

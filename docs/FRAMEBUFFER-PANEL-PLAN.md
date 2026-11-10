@@ -6,6 +6,10 @@
 顺序改为 PD0 → F4/PD1 → PD2–PD5 → F5 → F6（按需）→ F7；最终扫描、恢复和
 控制台/panic 都不能依赖 ABL 缓冲。原 F0–F3 证据及下述 0181 待测状态不变。
 
+**PD0静态设计已交付：** [资源与接口清单](PANEL-RESOURCES-PD0.md)明确DSI/PHY/PLL版本、
+RPMh电源与现有长命令传输缺口、资源所有者、初始化/回滚和E1–E8证据门槛。
+本机panel版本等仍待确认，下一步先利用0181实测F4扫描池，不据静态分析宣称完整接管。
+
 **F4已开始（0181，本地实现，待云编译/实测）：** 首段新增`SweetScanoutPool`、有界ABL画面
 复制和typed只读扫描快照，默认`sweetfbown=0`；own1申请两个缓冲并预检，仍由ABL扫描。
 核对LG DRM/SDE后纠正原计划：`SSPP_SRC_ADDR_SW_STATUS(+0x70)`是安全属性，不是生效地址；

@@ -1,0 +1,213 @@
+# PD0：完整显示/面板驱动的资源、接口与实施依赖
+
+2026-11-10。基线为项目 `1872425`，驱动实现为 `42047d3` / 0181；LG 主源 HEAD 为
+`d4f335e13d73c4aa2af85581a6ec11b670ee5b94`。
+
+**本轮完成静态资源核对和接口/恢复设计；实际面板版本、硬件资源状态与写入权限仍待证实。**
+这是 PD0 的设计交付，不是 PD1 接管成功，也不是已完成冷启动。当前可以继续 F4 预检；
+后文按阶段列出未关闭证据项，不要求先解决所有冷启动资料才能测试扫描池。
+
+证据分三类：**源码**为 LG DTS/实现明确描述；**已有实测**仅指先前 XNU 日志已确认；
+**待证实**为本机版本、资源状态或新增行为。源码值不直接等于本机测量结果。
+工作区 `docs/panel.md` 是资料入口，以下补充不能仅按面板节点名称推断的依赖。
+
+## 1. 影响实现方式的核对结果
+
+1. **DSI controller v2.3、PHY v4.0、DSI PLL 7nm。** `sm8150-sde.dtsi` 的
+   `mdss_dsi0`/`mdss_dsi_phy0` 和 `dsi_catalog.c` 决定真正的 ops；不是直接选旧
+   `dsi_phy_hw_v3_0.c`。`sm8150-sde-pll.dtsi` 为 7nm，`sm8150-v2.dtsi` 改为
+   `7nm_v2`；不能因头文件名 `mdss-10nm-pll-clk.h` 而选用 10nm PLL 初始化。
+   已有 `scratch/mh2lm-dt/android-mh2lm.dts` 也描述 v2.3/v4.0/7nm_v2，但本轮未重新
+   核验该旧解码文件的提取来源，不能据此代替当前硬件版本确认。
+2. **完整 ON 表不能由现有短 DCS 接口直接发送。** `SweetMDSS::dcsWrite()` 限制
+   `count<=16`，即最多 64 字节的已编码数据。PV ON 表包含 149 字节的单条 payload；
+   不应只放大上限，也不能把一条厂商长命令拆成多条短命令。
+3. **面板主供电走 RPMh，而非任意 SPMI 写。** `vddi/vpnl` 对应 `ldoa14/ldoa17`；
+   PHY/host 另需 `ldoa5/ldoc3`。需补资源投票 provider；现有 mux 的充电寄存器白名单
+   不授权这些电源写入，不得为面板而扩充充电 API 的任意写权限。
+4. **`use-labibb` 是 LG 流程分支，不是某 PMIC peripheral 的地址证明。** 对此候选面板，
+   该分支调用 `dsi_pwr_enable_regulator(&panel->power_info, ...)`，所选供电表只有
+   `vddi/vpnl`。LG common-pm 将 `pm8150l_lcdb` 置为 disabled；PM8150L 基础 AMOLED
+   regulator 节点也是 disabled。PV 文件尾部提到 PMI8998/LABIBB 的块在注释内。
+   这些都不能成为主动配置某 LAB/IBB 电压的依据；如本机另有外部偏压控制，仍须补证据。
+5. **现有 ADT 只足以支持交接显示。** 未覆盖完整 PHY/PLL、DISPCC GDSC/clamp、
+   mixer/pingpong/VBIF 等冷初始化资源。补地址前要明确 provider 所有权及重叠窗口，
+   不能把现有 `dp_clocks_on()` 的两个状态位检查误写成“已使能显示时钟”。
+
+## 2. 面板身份、模式与命令表
+
+| 项目 | 源码候选配置 | 当前证据/限制 |
+|---|---|---|
+| 面板版本 | Tianma MD，R66456 系列；PP1/DV1/DV2/PV 均有独立节点 | PV 候选为 R66456A；分辨率相同不能区分 revision |
+| 模式 | 1080×2340@60，RGB888，command mode，VC0，4 data lanes | 现有显示正常，F3 实测约59.9Hz；完整模式/厂商表仍需绑定实际版本 |
+| 逻辑画布 | XNU 1125×2436，stride4608；面板矩形偏移22,48 | 来自本项目实测；不能用逻辑尺寸替代 DSI panel timing |
+| lane/PHY | `lane_map_0123`；PV 14-byte timing `00 21 08 08 25 22 09 08 06 03 04 00 1b 18` | v4 timing parser 明确要求14项；lane swap、PN swap按实际解析规则和版本核验 |
+| 时钟 | PV `panel-clockrate=1056619200` | 是配置目标，非本轮实测；byte/pixel/escape及PLL分频须按LG公式/版本计算，不能直接把它当pixel clock |
+| reset | GPIO6，高10ms→低2ms→高10ms | 源码；本轮未切换GPIO |
+| 亮度 | DCS51，大端12bit；panel1..4095、framework max365 | 当前DCS亮度已有实测，PD恢复须在完整初始化后重放期望亮度 |
+
+PV 表严格按每包7-byte头解析：`type,last,vc,ack,wait_ms,len_hi,len_lo`，之后为payload。
+本轮检查了所有包的长度边界，结果：
+
+| 表 | 包数 | 编码总字节 | 最大单包payload | 已核对的尾部/等待 |
+|---|---:|---:|---:|---|
+| ON | 17 | 694 | 149（D3） | `35 00`、2A、2B、29、11，11后150ms |
+| OFF | 4 | 35 | 3 | B0 03、51 00 00后90ms、28、10后150ms |
+
+其他超64字节payload有 CE67、E2135、DF92。以上长度含 command byte，不含7-byte头。
+这是 PV 源表核对，不是允许把该表直接发给尚未确认版本的设备。
+编码表 SHA256：ON `902b3fd5b869e6304df3c9459a55b6c6da0afdc8162126cc2d4e6086b6c24a5f`，
+OFF `8b0def2d5a08f9534d8c9efdbbdbbba584387d1cfaecf9bdff50a3c0d71a5b95`。
+
+## 3. 电源资源与传输边界
+
+| 用途 | 源码资源/consumer要求 | 访问与依赖设计 | 现有实现 |
+|---|---|---|---|
+| 面板 VDDI | PM8150 L14 / `ldoa14`，1.8V、enable load62000µA、post-on20ms | RPMh regulator lease；共享资源按consumer合并投票 | 无面板lease |
+| 面板 VPNL | PM8150 L17 / `ldoa17`，3.0V、enable load857000µA | 与VDDI按供电表顺序启用，反序释放；provider校验可表示电压 | 无面板lease |
+| DSI host analog | PM8150L L3 / `ldoc3`，1.2V、21800µA | host/core资源阶段申请，不与面板vddi混为同一状态 | 无显示lease |
+| PHY analog | PM8150 L5 / `ldoa5`，0.88V、36000µA | 先有供电/接口时钟，才可复位/配置PHY | 无显示lease |
+| 核心电压级别 | `mmcx.lvl` / `VDD_MMCX_LEVEL`及相关父依赖 | 通过command DB取得等级表；选择与实际频率相容的corner，并保留其他consumer投票 | 有底层ARC helper，无显示频率/lease管理 |
+| MDSS电源域 | `mdss_core_gdsc`，0x0af03000 | 时钟/电源域provider拥有MMIO；按ready/超时执行，不由AppleCLCD写 | 当前不控制 |
+| AHB/AXI/MDP/DSI clocks | GCC DISP AHB/HF/SF AXI；DISPCC AHB/MDP/VSYNC/DSI0 byte、byte-intf、pixel、escape等 | provider显式设置父源、频率、分支和引用；实际需要的LUT/其他分支按pipeline确定 | 当前只检查部分门控位 |
+| 互连/带宽 | LG `sde_power_handle.c` 的reg/data bus vote及RSC路径 | 不将“时钟开”当作DDR/NoC就绪；PD2列明最小带宽/请求与撤销方法 | 无显示资源管理接口 |
+
+电源数值来自 consumer table；例如 L17 provider 的初始化电压为2.856V，不等于面板
+consumer申请的3.0V，不能照搬provider默认值替代面板要求。load是投票参数，不是实测电流。
+有其他consumer或固件投票时，释放本驱动lease不等于电源物理关闭；PD4必须另有状态证据。
+
+当前 `sweet_rpmh.c` 已有command DB、ACTIVE TCS、完成检查和poison处理，可参考/迁移，
+不是完全没有RPMh。核对0121a11真实云源码：SHA256
+`be347e987f70ec41831f61e4012a83980d254a45390a3e1c4280c9cab352c6e8`。
+但其vreg helper仅接受板级touch资源和2950..3400mV，固定HPM/enable；ARC helper直接写
+corner，没有多consumer聚合、lease/disable或sleep/wake管理。不能把参数换成ldoa14就复用。
+新增provider必须接管/协调原TCS writer，不能另建一套互不知情的锁争用同一apps-DRV。
+RPMh不经过SPMI mux；只有真正走SPMI的新增功能才使用现有共享事务锁与限定接口。
+
+## 4. MMIO、引脚与中断所有权
+
+| 资源 | 源码物理窗口/用途 | 当前ADT/迁移要求 |
+|---|---|---|
+| MDP整体 | 0x0ae00000/0x84208；包含mixer/pingpong等子块 | 目前仅局部SSPP/CTL/INTF/TE/MDP窗口；PD2按catalog核对最小完整pipeline，勿盲目映射整块 |
+| VBIF / regdma | 0x0aeb0000/0x2008，0x0aeac000/0x214 | 未描述；确认是否使用，再由MDSS拥有，不能默认为沿用ABL即可 |
+| DSI0 host | 0x0ae94000/0x400 | 当前MDSS资源6已映射；保留单一所有者 |
+| PHY0 | 0x0ae94400/0x760，PLL参考另描述此处/0x800 | 当前缺失；PHY/PLL的重叠映射由同一link模块管理，不能两个独立writer |
+| PLL0 | 0x0ae94900/0x260 | 在PHY范围内，属于7nm/v2布局；实际版本确认后配置 |
+| DISPCC | 0x0af00000/0x20000 | 当前仅0x3000；GDSC位于+0x3000、DSI wrapper在+0x8000，均不能从现有映射越界读写 |
+| GDSC / DSI wrapper | 0x0af03000/4，0x0af08000/4；PLL还描述GDSC/8 | 统一由相应资源provider拥有；clamp/clock操作通过typed方法，不能重复无协调映射 |
+| TLMM reset | GPIO6；common active组同时列GPIO6/7，8mA无pull；suspend2mA/pulldown | 只申请已确认需要的引脚；不因通用组就接管GPIO7。tile/功能选择由TLMM provider核对 |
+| TLMM TE | GPIO8，active/suspend均mdp_vsync、2mA、pulldown | 使用已验证MDSS RD_PTR链，不额外把GPIO8注册成另一个vsync中断来源 |
+| MDSS父中断 | DTS SPI83 → GIC INTID115 | F3已有实际投递；需在现有dispatcher内扩充完成/错误路由，不重复注册父线 |
+| DSI0子中断 | `interrupt-parent=mdss_mdp; interrupts=<4 0>` | 是MDSS域内子编号，**不是GIC INTID4或36**；PD2按硬件status扩充分发 |
+| SMMU | SID/mask/CB2、DMA范围与缓存 | 使用0181只读证据；buffer物理连续不替代live可达性和传输完成 |
+
+`mdss_core_gdsc`基础DTS为disabled，旧本机解码DTS为ok。此处说明需要解析生效配置，
+不能仅复制基础DTS的status；同样不能把旧解码文件当本次实时硬件状态。
+
+触摸当前用GPIO54/59/152、IRQ122及I2C55/56；与panel reset6/TE8没有直接引脚重合。
+但这不证明供电/内部状态完全独立：LG touch有panel RESET/BLANK notifier，现有XNU
+触摸没有完整的面板断电协调接口。PD3 reset/断电前需明确quiesce、恢复和触摸有效性验证，
+不顺带改变触摸IRQ策略，也不从Android其他触摸型号的reset脚替换现有实测配置。
+
+## 5. 冻结的分层与接口方向（尚未实现）
+
+面板序列先作为 **SweetMDSS 内部独立模块**，由同一workloop/gate驱动。避免“MDSS等待
+Panel IOService，而Panel又反向同步等待MDSS DSI”的循环依赖。硬件资源另由匹配到的
+RPMh、clock/power-domain、TLMM provider管理；后续需要独立面板服务时仍沿typed接口拆分。
+
+```text
+AppleCLCD : IOMobileFramebuffer
+  ├─ 自有扫描池 / surface与完成状态 / 用户接口
+  └─ SweetDisplayBackend typed接口
+       └─ SweetMDSS : IOService（显示状态唯一协调者）
+            ├─ MDP pipeline / 提交与完成 / 现有父IRQ分发
+            ├─ DSI0 link模块（host + PHY0/PLL0）
+            ├─ 面板模块（已确认的profile、命令表、生命周期）
+            └─ 持有的资源lease
+                 ├─ RPMh provider（command DB / 唯一TCS所有者 / 投票聚合）
+                 ├─ clock和power-domain provider（GCC/DISPCC）
+                 └─ TLMM provider（GPIO6/8及pinctrl）
+AppleARMBacklight ── typed亮度请求 ── SweetMDSS
+```
+
+后续接口按以下语义实现，名称和C++签名随相应补丁审查；不先加入无人使用的空壳类：
+
+- **资源lease**：consumer申请具体resource和目标约束，返回持有对象/完成结果；释放仅撤回
+  该consumer的投票；provider处理冲突/生效值/失败，不接受任意寄存器地址。
+- **模式/电源请求**：AppleCLCD表达期望模式/状态；MDSS区分handoff、ready、transition、
+  off、fault。现有`setPanelPower(bool)`保持F2语义，完整上下电另建明确接口/档位，不偷偷
+  让当前28/29调用突然执行断电。
+- **DSI message**：typed的data-type/VC/LP/payload/长度/完成结果；新传输支持至少本表的
+  149-byte单包及编码开销。按v2.3实现选择受支持FIFO/DMA路径；DMA内存由descriptor准备、
+  核对可达性并持有至真正完成，不能只扩大`count`或任意拆分payload。
+- **提交/完成**：token关联的buffer/address请求与硬件传输完成通知，分清已提交、已生效、
+  旧读者退出；RD_PTR只提供vsync。扫描buffer与DCS命令DMA的生命周期独立。
+- **通知**：匹配回调只retain/撤回和排队；IRQ上半部只屏蔽、记账、排队。provider通知
+  consumer仅发布mailbox/software IES，不同步进入consumer gate。
+
+锁顺序：consumer不持AppleCLCD gate等待长电源转换；MDSS在自己的loop推进状态，资源
+provider不得回调获取MDSS gate。150ms等阶段等待通过timer/完成继续，不在gate内忙等，
+也不持SPMI/TCS事务锁跨等待。每次排队操作携带generation；stop先关闭admission/失效旧
+generation，撤销源并等待正在执行的操作退出，再释放资源，避免旧完成误推进新状态。
+
+## 6. 冷初始化与停止的依赖顺序
+
+以已确认的非splash普通command-mode为目标；以下提炼LG主路径，具体硬件写序列在PD2
+各补丁内实现，不当作可直接运行的寄存器脚本：
+
+1. 持有provider/lease，准备自有buffer，确认SMMU及DMA条件；建立中断/完成接收入口。
+2. LG `dsi_panel_pre_prepare()`：选active pinctrl；条件GPIO序列；固定5ms；此候选
+   `reset_after_ddvd`分支按vddi→vpnl申请regulator（含vddi20ms），再等5ms。
+3. core clock/host及PHY供电依赖就绪；PHY reset/配置、PLL源/频率、controller配置、
+   host enable及link clocks按`dsi_display_prepare()`及clock manager依赖完成。
+4. PV的`lp11-init`使panel reset推迟到host/link准备后的`dsi_panel_prepare()`；GPIO6
+   reset表后LG另等5ms。不能提前把panel reset塞进matched回调或照搬无LP11分支。
+5. panel enable发送选定版本完整ON表；再按LGcommand-engine和MDP配置流程准备自有首帧。
+   通过真实传输完成/TE证据进入ready，随后恢复期望亮度和上报可用状态。
+
+正常停止先关闭新提交，保留完成事件与所需时钟，等待已发MDP/DSI/DMA退出；DCS OFF表
+仍需host/link可用。LG disable关command engine并发OFF，unprepare执行post-off及相应
+reset-off，再关闭host/link/PHY/core，最后panel post-unprepare释放电源。LG支持ULPS保留
+PHY的普通suspend；PD4的全断电诊断必须显式选择完整关闭，不能从普通suspend推断状态丢失。
+不用简单“关时钟→发10/28”或假定所有函数严格反序。
+
+失败回滚记录本次实际获得的lease/已完成阶段；只释放本consumer资源。命令或DMA超时
+先认定硬件状态不确定，保留可能被读取的buffer；有界停止/恢复失败则进入fault，不能把
+timeout当完成，也不能关闭其他consumer电源或翻回ABL来伪装成功。
+
+## 7. 未关闭证据与下一步
+
+| 编号 | 尚缺证据 | 影响阶段 | 获取方式/当前决定 |
+|---|---|---|---|
+| E1 | 实际panel/revision及对应vendor表 | PD3完整命令写入 | 优先从已有ABL/UEFI传递的选择标识或保存的原机日志取证；当前限定搜索95份logs/evidence文本未找到`msm_drm.dsi_display0`。不要求重启Android，不主动试发未知DDIC读命令 |
+| E2 | 当前扫描池地址、实时SMMU/CB2与基本健壮性 | F4/PD1 | 0181预检已实现待新云产物/实机；此证据不依赖E1确认 |
+| E3 | autorefresh下提交、锁存与旧读者退出的对应事件 | F4后续翻页 | 按LG RD_PTR/CTL_START/PP_TX_DONE/autorefresh_done实现有界取证；不能用安全寄存器或单次RD_PTR释放buffer |
+| E4 | 本机PHY/PLL版本、lane及频率/ready状态 | PD2写link配置 | 增加受时钟/映射保护的typed只读档；先核对资源ABI，当前0181没有这些映射，不越界读取 |
+| E5 | RPMh资源存在/权限、TCS所有权、实际投票/撤销结果 | PD2/PD3 | 先核对command DB/ACTIVE TCS并完成统一provider；继承请求不覆盖，ACK不当实际掉电证明 |
+| E6 | clock/GDSC/NoC最小依赖及恢复状态 | PD2/PD4 | 显式资源申请和ready/超时检查；未核清共享范围前不reset整个MDSS电源域 |
+| E7 | 面板/触摸共享供电与reset后的触摸需求 | PD3 reset/PD4 | 校对生效DTS和已有板级资料，设计quiesce/resume并用分档验证；引脚不重合不等于无共享 |
+| E8 | 是否存在额外偏压电源控制、完整off后的物理状态 | PD3/PD4 | 先沿实际选定panel供电表/生效DT和板级证据核对；不得仅因use-labibb而扫描/写PMIC偏压寄存器 |
+
+PD0静态设计已具备继续条件，E1/E4–E8保留为对应写入阶段的门槛；不标记完整硬件资料
+已全部实证。**下一执行点为已有0181扫描池预检，再推进F4/PD1的受控扫描接管。**
+新云内核先核对0181补丁/源码/marker，再打同核`fb-scanout-{baseline,preflight}`；主测
+preflight，baseline仅故障对照。原F3频率矩阵、半小时息屏和BUG-002不额外重测。
+本轮没有驱动/参数/CI改动，无新镜像或设备操作。
+
+## 8. 可追溯资料
+
+LG根目录为工作区`ref/android_kernel_lge_sm8150`。本轮直接核对：
+
+- `arch/arm64/boot/dts/qcom/{sm8150-sde,sm8150-sde-pll,sm8150-v2,sm8150-regulator,sm8150-gdsc,sm8150-pinctrl,pm8150l}.dtsi`。
+- `arch/arm64/boot/dts/lge/sm8150_common/{sm8150_common-panel,sm8150_common-pm}.dtsi`及
+  `settings_panel/dsi-panel-r66456-pv-tianmamd-fhd-cmd.dtsi`。
+- `drivers/gpu/drm/msm/dsi-staging/{dsi_catalog,dsi_display,dsi_pwr,dsi_phy,dsi_phy_hw_v4_0}.c`，
+  `drivers/gpu/drm/msm/lge/lge_dsi_panel.c`和`drivers/gpu/drm/msm/sde_power_handle.c`。
+- `drivers/regulator/rpmh-regulator.c`、`drivers/clk/qcom/{dispcc-sm8150,mdss/mdss-dsi-pll-7nm}.c`、
+  `drivers/input/touchscreen/lge/touch_core.c`。
+
+本地证据保存在`work1/scratch/panel-pd0/reference-audit.json`：19份主要参考源码SHA256、
+ON/OFF逐包长度/type/等待、表SHA；另有从0121a11真实buildtree提取的`sweet_rpmh.c`。
+核对了0181验证树的`SweetDisplayBackend.h`、`SweetMDSS.cpp`、`sweet_spmi.h`、
+`sweet_spmi_mux.h`、`sweet_touch_tcm.c`及当前`tools/mk-mh2lm-mdss-adt.py`。
+源码分析不构成新实机测试；未读取或输出设备唯一标识，未修改参考仓库及设备备份。
