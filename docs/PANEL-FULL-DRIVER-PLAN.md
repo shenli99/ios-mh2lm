@@ -57,7 +57,9 @@ PD3 的“实现完成”不代替 PD4 的实际断电重建证明。
 ## 4. 当前证据与缺口
 
 - 0181 只分配扫描池、复制有界 ABL 画面并做只读预检，实际仍扫描 ABL，PD1 未完成。
-  `sweetfbown=1` 的预检语义不变；新的接管、无 ABL、reset/断电档另行定义，不先预占参数。
+  `sweetfbown=1`的预检语义不变；0182新增`own2`受控单缓冲档，已本地验证、待实机。
+  own2仍用ABL作一次交接图像，console/panic及默认surface仍依赖ABL，不能算PD1完成。
+  无ABL、reset/断电档后续另定义。
 - F2 仅验证 ABL 已初始化/供电前提下的 DCS `28/29`；没有 `10/11`、reset、电源轨
   关闭以及 host/PHY/PLL 的重新初始化。F3 硬件 vsync 成功不证明上述能力。
 - 主要资料是工作区 `docs/panel.md` 及 `ref/android_kernel_lge_sm8150` 的实际 DRM/SDE、
@@ -96,5 +98,8 @@ PV最大149-byte payload；实际panel版本/电源状态不提前认定已实�
 0181已由替换后的0121a11实测：双池/seed/四快照、输入及OFF/ON基本回归通过；用户未见新异常。
 CB2.M0，FSR原始0x400不命中LG已知故障位，保留解释；新DMA可达性与完成关联未证明。
 详见[F4实测记录](FRAMEBUFFER-SCANOUT-F4.md#9-0121a11扫描池预检实测首段运行通过新dma尚未验证)。
-下一步结合实测设计受控单缓冲接管与完成/内存生命周期，再推进F4/PD1；不重测F3矩阵。
-PD0仍是资料/接口设计交付，尚无完整面板初始化驱动，不为本轮分析/记录单独编译。
+0182受控单缓冲接管已本地实现和验证，新增own2及typed begin/status/abandon接口；
+一次有界暂停/提交/新传输观察后切CPU目标，30Hz仍在，提交池保留至重启。
+下一步用户push并下载新kernel/buildtree，核对后先测single档的画面/裁剪与OFF/ON，
+见[接管记录](FRAMEBUFFER-HANDOFF-F4.md)。不重测F3矩阵、半小时或旧bug专项。
+PD0仍是资料/接口设计交付；安全回收/双缓冲、PD1首帧/console/panic及PD2–PD5完整初始化未完成。

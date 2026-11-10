@@ -84,7 +84,7 @@ prelude = r'''
 #define OSSafeReleaseNULL(x) do {if (x) {(x)->release();(x)=nullptr;}} while(0)
 using vm_offset_t=uintptr_t;
 using IOReturn=int;
-constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4,kIOReturnBusy=5;
+constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4,kIOReturnBusy=5,kIOReturnNoMemory=6;
 using IOOptionBits=unsigned;using IOInterruptState=unsigned;
 constexpr unsigned SWEET_DEV_FB_H=2340,SWEET_DEV_FB_W=1080,SWEET_DEV_FB_PA=0x9d200000,SWEET_DEV_FB_STRIDE=4320;
 static unsigned live=0,liveMaps=0,rawBlocks=0;
@@ -177,8 +177,9 @@ IONotifier*IOService::addMatchingNotification(const char*k,OSDictionary*d,Notify
  auto*n=new IONotifier;n->kind=k;n->dict=d;d->retain();n->cb=cb;n->target=t;subscriptions.push_back(n);return n;
 }
 static void emit(const char*k,IOService*p){for(auto*n:subscriptions)if(n->kind==k)n->cb(n->target,nullptr,p,n);}
-static int enabled=1,probeEnabled=1,powerEnabled=0,irqProbeMode=0,irqMode=0;
+static int enabled=1,probeEnabled=1,powerEnabled=0,irqProbeMode=0,irqMode=0,ownMode=0;
 static bool PE_parse_boot_argn(const char*k,void*v,size_t){
+ if(!strcmp(k,"sweetfbown")){*(int*)v=ownMode;return true;}
  if(!strcmp(k,"sweetmdss")){*(int*)v=enabled;return true;}
  if(!strcmp(k,"sweetdispprobe")){*(int*)v=probeEnabled;return true;}
  if(!strcmp(k,"sweetmdssirq")){*(int*)v=irqMode;return true;}
@@ -222,8 +223,10 @@ static uint32_t readReg(uintptr_t b,uint32_t o){
  uint32_t v=regs[b+o];if(b==bases[6]&&o==0x110&&dmaFired)v=(dmaDone&&!activeDMAFails?1:0)|(lateError?(1u<<24):0);
  trace.push_back({false,b+o,v});return v;
 }
-static bool irqMMIO=false,injectLateFrame=false;
+static bool irqMMIO=false,injectLateFrame=false,dropSourceWrite=false,keepPPDone=false;
 static void writeReg(uintptr_t b,uint32_t o,uint32_t v){trace.push_back({true,b+o,v});
+ if(irqMMIO&&b==0x0ae00000&&o==0x1018){if(!keepPPDone)regs[b+0x1014]&=~v;return;}
+ if(dropSourceWrite&&b==bases[2]&&o==0x14)return;
  if(irqMMIO&&b==0x17a00000&&o==0x18c){regs[b+0x10c]&=~v;return;}
  if(irqMMIO&&b==0x17a00000&&o==0x10c){regs[b+o]|=v;return;}
  if(irqMMIO&&b==0x17a00000&&o==0x28c){regs[b+0x20c]&=~v;return;}
@@ -236,6 +239,15 @@ static void resetRegs(){trace.clear();regs.clear();dmaFired=false;dmaDone=true;l
  regs[bases[4]+0x288]=0x12345678;regs[bases[4]+0x2b4]=0x3344;
  regs[bases[6]+0x3c]=0x9;regs[bases[6]+0x4c]=0x18;regs[bases[6]+0x84]=0x32;
 }
+'''
+pool_fixture = r'''
+struct SweetScanoutPool : OSObject {
+ bool pinned=false;uint64_t pa=0x10000000;
+ unsigned width(){return 1125;}unsigned height(){return 2436;}unsigned stride(){return 4608;}
+ size_t bytes(){return 11225088;}void*address(unsigned){return this;}
+ uint64_t physical(unsigned n){return pa+n*0x4000000ULL;}
+ bool hardwarePinned(){return pinned;}void pinHardware(){assert(!pinned);pinned=true;retain();}
+};
 '''
 tests = r'''
 static unsigned changes=0;
@@ -578,6 +590,102 @@ int main(){
  // Missing optional CB2 mapping is an explicit failure; no consumer raw map.
  irqRegs();missingMap=8;s=make(nub);assert(s->inspectScanout(&snap)==kIOReturnNotReady);
  s->stop(nub);s->release();missingMap=99;queued.clear();
+
+ // Stage2: actual timer-driven quiesce/submit/status code, independent inputs
+ // for in-flight line, source readback, flush, PP done, IRQ progress and faults.
+ ownMode=2;
+ auto handoffRegs=[&](){
+  regs[bases[2]+0]=regs[bases[2]+0xc]=0x9240438;
+  regs[bases[2]+0x14]=0x9d200000;regs[bases[2]+0x24]=4320;
+  regs[bases[2]+0x30]=0x237ff;regs[bases[2]+0x34]=0x03020001;
+  regs[bases[2]+0x38]=0x80000000;regs[bases[3]+0x14]=0x20000;
+  regs[bases[7]+0x20]=0x4c017e5e;regs[bases[7]+0x24]=0x60000038;
+  regs[bases[7]]=0x2b0406;
+  regs[bases[7]+0x80c]=0x84200800;regs[bases[7]+0xc0c]=2;
+  regs[bases[7]+0x1008]=0x1f000;regs[bases[7]+0x1808]=1;
+  regs[bases[8]]=0xe0;regs[bases[8]+0x58]=0x400;
+  regs[0x0ae01014]=0x100; // stale PP0 done MUST be cleared before the new attempt
+ };
+ auto pollHandoff=[&](){fakeTicks+=1000000;std::lock_guard<std::recursive_mutex> l(s->fLoop->gate);
+  SweetMDSS::scanoutTimerAction(s,s->fScanoutTimer);};
+ for(unsigned scenario=0;scenario<20;++scenario){
+  irqRegs();s=make(nub);startProbe(s);handoffRegs();
+  auto*wl=IOWorkLoop::workLoop();auto*e=IOInterruptEventSource::interruptEventSource(nub,[](OSObject*,IOInterruptEventSource*,int){});
+  assert(wl->addEventSource(e)==0);auto*ch=SweetVsyncChannel::withEvent(e);
+  assert(s->attachVsync(ch)==0);frame(s,16666667);
+  auto*pool=new SweetScanoutPool;SweetScanoutStatus st{};
+  if(scenario>=6&&scenario<=12){
+   if(scenario==6)regs[bases[8]+0x58]=2; // a REAL translation fault
+   if(scenario==7)regs[bases[8]+0x58]=0x800; // unclassified new raw bit
+   if(scenario==8)regs[bases[8]]=0xe1; // stage1 translation on
+   if(scenario==9)regs[bases[7]+0x1008]=0x3f000; // stage2 translation on
+   if(scenario==10)regs[bases[7]+0x48]=1;
+   if(scenario==11)regs[bases[2]+0x30]^=1;
+   if(scenario==12)pool->pa=0x9d210000;
+   trace.clear();assert(s->beginScanout(pool,ch)!=0&&!pool->pinned&&!s->fScanoutUsed);
+   for(auto op:trace)assert(!op.write);
+  }else{
+   trace.clear();assert(s->beginScanout(pool,ch)==0&&!pool->pinned);
+   assert(s->beginScanout(pool,ch)==kIOReturnBusy); // exactly one attempt
+   auto countBefore=trace.size();assert(s->scanoutStatus(pool,&st)==0&&st.state==SweetScanoutQuiescing);
+   assert(trace.size()==countBefore); // status is PURE retained state, no MMIO
+   assert(s->dcsWrite(words,2)==kIOReturnBusy); // DCS cannot forge completion mid-transfer
+   regs[bases[4]+0x2b0]=1000;pollHandoff();pollHandoff();
+   assert(!pool->pinned&&regs[bases[2]+0x14]==0x9d200000); // never program while busy
+   if(scenario==1){fakeTicks+=50000000;pollHandoff();assert(s->fScanoutState==SweetScanoutFailed&&!pool->pinned);
+    assert(regs[bases[4]+0x288]==0x180088&&regs[bases[4]+0x2b4]==0x80000001);
+   }else if(scenario==2){s->abandonScanout(pool);assert(!pool->pinned&&s->fScanoutState==SweetScanoutFailed);
+   }else if(scenario==13){s->stop(nub);assert(!pool->pinned&&s->fScanoutState==SweetScanoutFailed);
+   }else if(scenario==15){s->failIRQ("fixture delivery loss");pollHandoff();assert(!pool->pinned&&s->fScanoutState==SweetScanoutFailed);
+   }else if(scenario==18){ /* exercise free without stop while still quiescing */
+   }else if(scenario==16){regs[bases[4]+0x2b0]=0;pollHandoff();keepPPDone=true;pollHandoff();keepPPDone=false;
+    assert(!pool->pinned&&s->fScanoutState==SweetScanoutFailed&&regs[bases[2]+0x14]==0x9d200000);
+   }else{
+    regs[bases[4]+0x2b0]=2340;pollHandoff();assert(!pool->pinned);
+    if(scenario==5)dropSourceWrite=true;
+    pollHandoff();dropSourceWrite=false;assert(pool->pinned&&s->fScanoutTouched);
+    if(scenario==5)assert(s->fScanoutState==SweetScanoutFailed);
+    else{
+     assert(s->fScanoutState==SweetScanoutSubmitted&&regs[bases[2]+0x14]==pool->pa);
+     assert(regs[bases[2]+0x24]==4608&&regs[bases[2]+8]==0x300016&&!regs[0x0ae01014]);
+     assert(regs[bases[4]+0x288]==0x180088&&regs[bases[4]+0x2b4]==0x80000001);
+     pollHandoff();assert(s->fScanoutState==SweetScanoutSubmitted);
+     if(scenario==3){fakeTicks+=100000000;pollHandoff();assert(s->fScanoutState==SweetScanoutFailed);}
+     else if(scenario==4){s->stop(nub);assert(s->fScanoutState==SweetScanoutFailed);}
+     else if(scenario==14){assert(s->setPanelPower(false)==0&&s->fScanoutState==SweetScanoutFailed);}
+     else if(scenario==19){ /* exercise free without stop after source submission */ }
+     else{
+      regs[0x0ae01014]=0x100;pollHandoff();assert(s->fScanoutState==SweetScanoutSubmitted);
+      frame(s,16666667);pollHandoff();assert(s->fScanoutState==SweetScanoutSubmitted); // flush still pending
+      regs[bases[3]+0x18]=0;pollHandoff();assert(s->fScanoutState==SweetScanoutActive);
+      assert(s->scanoutStatus(pool,&st)==0&&st.state==SweetScanoutActive&&st.hardwareReachable&&st.address==pool->pa);
+      if(scenario==17){s->failIRQ("fixture active IRQ loss");trace.clear();
+       assert(s->scanoutStatus(pool,&st)==0&&st.state==SweetScanoutFailed&&trace.empty());}
+     }
+    }
+    // Every source-register write follows auto disable and the independent pin.
+    bool disabled=false;for(auto op:trace)if(op.write){
+     if(op.addr==bases[4]+0x2b4&&!op.value)disabled=true;
+     if(op.addr==bases[2]+0x14||op.addr==bases[2]+8||op.addr==bases[2]+0x24)assert(disabled&&pool->pinned);
+     assert(op.addr!=bases[3]+0x1c); // no software CTL_START under autorefresh
+    }
+   }
+  }
+  IOTimerEventSource*retainedTimer=nullptr;
+  if(scenario>=18){retainedTimer=s->fScanoutTimer;retainedTimer->retain();}
+  else{
+   s->stop(nub);trace.clear();pollHandoff();assert(trace.empty());
+   if(s->fScanoutUsed){assert(s->scanoutStatus(pool,&st)==0&&trace.empty());}
+  }
+  s->detachVsync(ch);ch->close();ch->release();wl->removeEventSource(e);e->release();wl->release();
+  s->release();queued.clear();assert(pool->refs==(pool->pinned?2u:1u));
+  if(retainedTimer){assert(!retainedTimer->loop&&!retainedTimer->timeout);retainedTimer->release();}
+  bool pinned=pool->pinned;pool->release();
+  if(pinned){assert(pool->refs==1);pool->release();} // simulated reboot: fake hardware can no longer DMA
+  assert(!liveMaps&&!rawBlocks);
+ }
+ puts("PASS: stage2 actual provider, 20 quiesce/busy/stale-done/fresh-done/flush/IRQ/readback/fault/stop/free cases; submitted pools remain pinned through service free until simulated reboot");
+ ownMode=0;
  assert(!rawBlocks&&!liveMaps);irqMode=0;irqMMIO=false;
  nub->release();assert(live==0);
  puts("PASS: actual service/client; legacy DCS traces, F2 short packets/LP, idempotence, frozen TE, recovery/unknown state, independent fault budgets, gates/stop, F3 IRQ/probe/ACK/mailbox/storm/watchdog/OFF/termination, F3 read-only snapshots/decoding/bounds/clock admission/default compatibility, F4 typed read-only scanout/security/SMMU inspection, unknown/ambiguous layout rejection and zero live objects");
@@ -585,7 +693,7 @@ int main(){
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-display-service-') as temp:
     cpp = Path(temp)/'test.cpp'
-    cpp.write_text(prelude+header+source+backlight+'\nstatic unsigned dp_logged;\n'+old+tests)
+    cpp.write_text(prelude+pool_fixture+header+source+backlight+'\nstatic unsigned dp_logged;\n'+old+tests)
     compiler = os.environ.get('CXX', 'clang++-19')
     binary = Path(temp)/'test'
     subprocess.run([compiler, '-std=c++17', '-g', '-pthread', '-fsanitize=address,undefined',

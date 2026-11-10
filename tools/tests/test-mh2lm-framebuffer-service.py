@@ -44,6 +44,7 @@ channel=channel.replace('class SweetVsyncChannel :', 'struct SweetVsyncChannel :
 channel=channel.replace('public:', '').replace('private:', '')
 channel+=(arm/'SweetMDSSIRQ.inc').read_text().split('static IOSimpleLock *mdssIRQDispatch;')[0]
 
+source = source.replace('__asm__ volatile("dsb oshst" ::: "memory");', '++barriers;')
 source = re.sub(r'^#include.*\n', '', source, flags=re.M)
 
 prelude = r'''
@@ -186,15 +187,21 @@ static SweetSurface*sweet_surface_create_physical(uint64_t,uint32_t w,uint32_t h
  if(w!=4){p->width=w;p->height=h;p->bytesPerRow=stride;p->allocSize=p->memory->length=uint64_t(stride)*h;p->bootPixels.resize(p->allocSize,0x67);}return p;}
 static SweetSurface*sweet_surface_copy(uint32_t id){if(testSource&&id==testSource->id){testSource->retain();return testSource;}return nullptr;}
 static unsigned sweet_surface_port_in_task(SweetSurface*,task_t){return 77;}
+static unsigned barriers=0;
 static std::vector<bool> panelRequests;
 static IOReturn panelResult=0;
 struct SweetDisplayBackend : IOService {
  SweetVsyncChannel*channel=nullptr;unsigned fallbackRequests=0,inspectCalls=0;uint64_t frame=0;
- IOReturn inspectResult=0;
+ IOReturn inspectResult=0,beginResult=0;unsigned handoffState=SweetScanoutQuiescing,beginCalls=0,abandons=0;
+ IOReturn beginScanout(SweetScanoutPool*,SweetVsyncChannel*){++beginCalls;return beginResult;}
+ IOReturn scanoutStatus(SweetScanoutPool*,SweetScanoutStatus*v){*v={};v->state=handoffState;v->address=0x10000000;v->frame=frame;v->done=0x100;return 0;}
+ void abandonScanout(SweetScanoutPool*){++abandons;handoffState=SweetScanoutFailed;}
  IOReturn inspectScanout(SweetScanoutSnapshot*v){++inspectCalls;*v={};v->frame=frame;
   v->address=0x9d200000;v->size=v->out=0x9240438;v->stride=4320;
   v->format=0x237ff;v->unpack=0x03020001;v->op=0x80000000;
-  v->knownSmmu=true;v->matches=1;v->cb2Observed=true;return inspectResult;}
+  v->knownSmmu=true;v->matches=1;v->cb2Observed=true;v->sctlr=0xe0;v->cbar=0x1f000;v->cba2r=1;
+  if(beginCalls&&handoffState==SweetScanoutActive){v->address=0x10000000;v->stride=4608;v->xy=0x300016;}
+  return inspectResult;}
  IOReturn setPanelPower(bool on){panelRequests.push_back(on);if(channel)channel->publish(frame,0,on?SweetVsyncWaiting:SweetVsyncOff);return panelResult;}
  IOReturn attachVsync(SweetVsyncChannel*c){if(channel&&channel!=c)return kIOReturnBusy;if(!channel){channel=c;c->retain();}c->publish(frame,0,SweetVsyncWaiting);return 0;}
  void detachVsync(SweetVsyncChannel*c){if(channel==c)OSSafeReleaseNULL(channel);}
@@ -378,7 +385,7 @@ int main(){
  mailbox->close();writer.join();assert(!mailbox->copySample(&sample));mailbox->release();ev->disable();loop->removeEventSource(ev);ev->release();loop->release();
 
  // F4 is opt-in and validates the full F3 prerequisites and own mode.
- scanoutReset();ownArg=2;
+ scanoutReset();ownArg=3;
  {auto*x=new AppleCLCD;assert(!x->start(provider));x->release();assert(live==1&&!scanoutAllocCalls);}
  ownArg=1;vsyncArg=0;
  {auto*x=new AppleCLCD;assert(!x->start(provider));x->release();assert(live==1&&!scanoutAllocCalls);}
@@ -408,7 +415,46 @@ int main(){
  f=new AppleCLCD;assert(f->start(provider));f->fDisplayClient->fire();ownTick(1);
  assert(f->fScanoutAuditCount==1&&f->fHardwareVsyncActive&&!f->fVsyncFallback);
  f->stop(provider);f->release();published->release();published=nullptr;scanoutReset();
+
+ // Stage2 CPU target changes ONLY after the provider's independent status.
+ ownArg=2;
+ for(unsigned scenario=0;scenario<4;++scenario){
+  scanoutReset();published=new SweetDisplayBackend;
+  if(scenario==1)published->beginResult=kIOReturnNotReady;
+  f=new AppleCLCD;assert(f->start(provider));f->fDisplayClient->fire();
+  ownTick(1);ownTick(60);ownTick(60);
+  assert(f->fOwnScanoutStarted&&published->beginCalls==1&&!f->fOwnScanoutActive);
+  auto*boot=(uint8_t*)f->fPixels;auto*dst=(uint8_t*)f->fScanoutPool->address(0);
+  std::vector<uint8_t> oldBoot(boot,boot+4320*2340);
+  testSource=new SweetSurface;testSource->id=2;
+  std::fill(std::begin(testSource->pixels),std::end(testSource->pixels),0xff112233);
+  uint8_t next[SWEET_FB_SWAP_REC_SIZE]{};
+  auto put=[&](unsigned o,uint32_t n){memcpy(next+o,&n,4);};
+  put(0x104,1);put(0x54,2);put(0xc4,22);put(0xc8,48);put(0xcc,4);put(0xd0,4);
+  f->present(next);assert(dst[48*4608+88]==0x67&&!memcmp(boot,oldBoot.data(),oldBoot.size()));
+  if(!scenario||scenario==3){published->handoffState=SweetScanoutActive;ownTick(1);
+   assert(f->fOwnScanoutActive&&!f->fOwnScanoutFailed);f->present(next);
+   assert(*(uint32_t*)(dst+48*4608+88)==0xff112233&&barriers>=2);
+   assert(!memcmp(boot,oldBoot.data(),oldBoot.size()));
+   // First real frame after OFF/ON must inspect the OWNED address/crop.
+   c=client(f);in[0]=0;a=scalar(in,1,nullptr,0);assert(call(c,12,a)==0);
+   in[0]=1;assert(call(c,12,a)==0);
+   if(scenario==3)published->inspectResult=kIOReturnNotReady;
+   ownTick(1);assert(f->fScanoutAuditCount==4);
+   assert(f->fOwnScanoutFailed==(scenario==3));
+   c->stop(f);c->release();
+   // Losing an active provider freezes pixels; it cannot quietly resume ABL.
+   published->handoffState=SweetScanoutFailed;ownTick(1);assert(f->fOwnScanoutFailed);
+  }else if(scenario==1)assert(f->fOwnScanoutFailed);
+  else{published->handoffState=SweetScanoutFailed;ownTick(1);assert(f->fOwnScanoutFailed);}
+  auto sampleByte=dst[48*4608+88];f->present(next);assert(dst[48*4608+88]==sampleByte);
+  assert(!memcmp(boot,oldBoot.data(),oldBoot.size()));
+  testSource->release();testSource=nullptr;
+  f->stop(provider);assert(!f->fScanoutPool&&published->abandons==(scenario==3?2u:1u));
+  f->release();published->release();published=nullptr;assert(scanoutBuffers.empty());
+ }
  ownArg=0;realGeometry=false;
+ puts("PASS: stage2 actual framebuffer, owned crop/stride CPU target, ABL remains unchanged, begin/transfer/resume/withdrawal faults freeze pixels, OFF/ON verification and stop detach");
  provider->release();
  assert(live==0&&rawBlocks==0&&dispatchCalls>0);
  puts("PASS: actual F1b/F2 dispatch, gates, typed power requests, pixel preservation/fallback, stop/close, real F3 mailbox/vsync/coalescing/OFF/watchdog/rebind and resource cleanup; F4 opt-in pool/seed/typed inspection/budgets/ON/failure cleanup");

@@ -45,6 +45,11 @@ assert f4['fb-scanout-preflight'].pop('sweetfbown') == '1'
 assert f4['fb-scanout-baseline'] == f4['fb-scanout-preflight']
 assert f4['fb-scanout-baseline']['sweetmdssirq'] == '2'
 assert f4['fb-scanout-baseline']['sweetfbvsync'] == '1'
+handoff = profiles('--framebuffer-handoff')
+assert set(handoff) == {'fb-scanout-baseline','fb-scanout-preflight','fb-scanout-single'}
+for name, own in [('fb-scanout-baseline','0'),('fb-scanout-preflight','1'),('fb-scanout-single','2')]:
+    assert handoff[name].pop('sweetfbown') == own
+    assert handoff[name] == f4['fb-scanout-baseline']
 f3 = profiles('--framebuffer-vsync')
 assert set(f3) == {'fb-vsync-baseline','fb-vsync-gic','fb-vsync-rdptr','fb-vsync-hardware'}
 for name, irq, vsync in [('fb-vsync-baseline','0','0'), ('fb-vsync-gic','1','0'),
@@ -57,4 +62,9 @@ if len(sys.argv) > 1:
                        cwd=repo, capture_output=True, text=True)
     assert r.returncode != 0 and 'kernel lacks F4 scanout prerequisite marker' in r.stderr, r
     print('PASS: actual pre-F4 kernel rejected before make_profile; no test boot created')
-print('PASS: real F4 baseline/preflight branches differ only own0/1; F3 hardware baseline and IRQ/ACM/runtime3/F2 arguments preserved; shell syntax valid')
+if len(sys.argv) > 2:
+    r = subprocess.run(['bash', str(script), sys.argv[2], 'f4-reject-no-handoff', '--framebuffer-handoff'],
+                       cwd=repo, capture_output=True, text=True)
+    assert r.returncode != 0 and 'kernel lacks F4 controlled handoff marker' in r.stderr, r
+    print('PASS: actual 0181 kernel rejected for own2 before make_profile; no test boot created')
+print('PASS: real F4 scanout own0/1 and handoff own0/1/2 branches differ only own; F3 hardware baseline and IRQ/ACM/runtime3/F2 arguments preserved; shell syntax valid')

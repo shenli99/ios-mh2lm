@@ -2,6 +2,49 @@
 
 ## Agent handoff / active work (2026-11-10, latest)
 
+**CURRENT：0182受控单缓冲接管已本地实现/验证，待用户push、新云产物及实机；F4/PD1未验收。**
+基于d0c075a和已实测的0181/0121a11；新补丁0182-mh2lm-controlled-scanout-handoff.patch，
+SHA256=97295c1e6973e006d98300070005a652c8c7ae1245c37939dd245d898ee6fbfa，8份源码变化。
+新增sweetfbown=2；own0默认/own1只读预检保持。AppleCLCD仍持有池，经typed
+beginScanout/scanoutStatus/abandonScanout调用保留的SweetDisplayBackend；SweetMDSS拥有
+MMIO及自身workloop/gate，没有consumer MMIO或provider反向同步回调。第三份快照后在FB
+workloop重新复制当前ABL面板矩形至A(22,48)，WC屏障；一次约10MiB复制可造成启动延迟。
+provider只允许一次尝试：核对已知SMMU/TRANS CB2、S1/S2 bypass、继承布局和IRQ真帧；
+允许原raw FSR0或400，真实fault/新未知位拒绝，不清FSR/RESUME/页表。断TE/关auto后用
+1ms timer、最多50ms等待两次write-line空闲；清且确认旧PP0 DONE，先加硬件pin再写XY/
+stride4608/地址A/VIG0 FLUSH；不发CTL_START。恢复auto/TE后100ms内要求新PP0 DONE+
+flush0+RD_PTR推进；不是通用flip/reuse fence。FB查询Active后CPU目标才切A；仍单缓冲、
+30Hz、原CPU裁剪/原地更新，可能仍撕裂。首次OFF/ON第4快照复核自有地址/裁剪/route，
+失败明确ERROR/属性并冻结呈现。DCS在接管中返回Busy不记硬件故障预算；电源请求取消
+接管后仍执行原路径。stop/free关admission、cancel并移除timer后释放引用，含未调用stop清理。
+重要实验边界：首个可能生效的源写入前pool取独立retain；一旦提交，整个A+B约21.41MiB
+有意保留至重启，跨provider/consumer终止也不释放。不推断DMA退出，不自动翻回ABL；
+提交前取消可恢复TE/auto并正常释放CPU-only池。最终可卸载/回收协议尚缺；不能将此当作
+资源平衡完成。安全停止/撤销、提交代号和完成关联、A/B复用、SwapWait/60Hz后续补齐；
+PD1还缺无ABL首帧/default surface/console/panic，PD2–PD5完整初始化亦未开始。
+严格apply零offset/fuzz、应用后逐字节一致、114条原CI marker通过；MDSS/FB基线和验证树
+arm64-apple-darwin对象编译均rc0。MDSS新增5有界数组+17 SDK命名诊断，FB新增2数组/5指针
+诊断已审。实际provider ASan/UBSan 20类接管/故障/stop/free场景通过，含busy/staleDONE/
+freshDONE/flush/IRQ分离、SMMU/fault/readback/超时/电源打断和无stop直接free两态；FB真实
+代码验证目标/crop/stride、ABL不写/失败冻结/ON检查/stop detach；pool验证refresh边界/
+pin幂等及跨服务free保留，模拟reset才回收。旧F1/F2/F3测试仍通过。LSan仍因ptrace环境关，
+另有引用/prepare和guard断言，不声称硬件DMA已停止。底稿scratch/framebuffer-0182/
+{base,edited,verify,verification.json,tests.json,test-*.txt,*compile.txt,warning-counts.json}。
+打包器原--framebuffer-scanout仍两档own0/1，新--framebuffer-handoff生成同核baseline/
+preflight/single三档，只差own0/1/2。真旧F3核及0181核被对应marker门拒绝，在make_profile
+前退出，未用旧核造新实验boot。当前无0182云kernel/buildtree/build-log或CI run ID。
+NEXT：用户push本轮提交并下载新kernel+buildtree（有build-log一并核对），确认0182源码/
+manifest/marker后打包；先fastboot boot ...-fb-scanout-single.img。进UI亮屏约60s简测
+位置/亮度/三键/触摸，OFF20–30s/ON亮屏20–30s，导出sweetlog-编号-fb-scanout-single.bin。
+看quiescing→submitted→transfer observed→FB active、地址A/stride4608/crop22,48、owned
+resume verified与画面持续更新。own0/1只故障对照，不重测F3/半小时/旧电池/BUG-002专项。
+详见docs/FRAMEBUFFER-HANDOFF-F4.md；主计划/PD/PD0/架构同步，路线不变。
+未改USB/按键/电池/触摸/mux/GIC callback或ADT；BUG-001/003/004/005状态保持、BUG-002
+仅常态观察，整机PM仍大目标四。未push/启动CI/操作设备；CircleCI blob保持
+ da0b6c0947a66f03491b3a9023590b49665292df。
+
+**以下为0181预检实测交接；当前执行点以上段0182待云构建/实机为准。**
+
 **CURRENT：0181/0121a11扫描池预检实测已分析；双池/seed/四快照及基本回归通过，NEXT受控单缓冲接管设计。**
 基于8f6c5b8，日志sweetlog-0121a11-fb-scanout-preflight.bin，SHA256=
 8cc34d8a15178179031ef8f155e348ce84d3d06649a08d63cb5bb5675ddd20cc；有效343538bytes/

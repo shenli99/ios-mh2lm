@@ -1,0 +1,572 @@
+diff --git a/iokit/Kernel/arm/SweetDisplayBackend.h b/iokit/Kernel/arm/SweetDisplayBackend.h
+--- a/iokit/Kernel/arm/SweetDisplayBackend.h
++++ b/iokit/Kernel/arm/SweetDisplayBackend.h
+@@ -8,6 +8,15 @@
+ #include <IOKit/IOLocks.h>
+ 
+ class SweetMDSS;
++class SweetScanoutPool;
++enum SweetScanoutState { SweetScanoutIdle, SweetScanoutQuiescing,
++ SweetScanoutSubmitted, SweetScanoutActive, SweetScanoutFailed };
++struct SweetScanoutStatus {
++ unsigned state;
++ bool hardwareReachable;
++ uint64_t address, frame;
++ uint32_t flush, done, fsr;
++};
+ 
+ /* F4 entry: a gate-serialized, read-only hardware observation. No DMA address
+  * authorization or completion fence is inferred from these register values. */
+@@ -57,6 +66,12 @@
+  /* Caller supplies stack output and holds a retained provider. Thread context,
+   * provider gate only; no MMIO mapping, callback or wait in the consumer. */
+  virtual IOReturn inspectScanout(SweetScanoutSnapshot *) = 0;
++ /* One opt-in handoff per provider. No callback/wait across consumer gates.
++  * Pool is retained before admission; hardware gets a separate lifetime pin
++  * before the first source write. Status is an observation, NOT a flip fence. */
++ virtual IOReturn beginScanout(SweetScanoutPool *,SweetVsyncChannel *) { return kIOReturnUnsupported; }
++ virtual IOReturn scanoutStatus(SweetScanoutPool *,SweetScanoutStatus *) { return kIOReturnUnsupported; }
++ virtual void abandonScanout(SweetScanoutPool *) {}
+  virtual IOReturn brightnessReady(void) = 0;
+  virtual IOReturn dcsWrite(const uint32_t *words, unsigned count) = 0;
+  IOReturn setBrightness(uint32_t level);
+diff --git a/iokit/Kernel/arm/SweetFBScanout.inc b/iokit/Kernel/arm/SweetFBScanout.inc
+--- a/iokit/Kernel/arm/SweetFBScanout.inc
++++ b/iokit/Kernel/arm/SweetFBScanout.inc
+@@ -45,13 +45,18 @@
+ void
+ AppleCLCD::auditScanout(void)
+ {
+- if (!fOwnScanoutPreflight || fServiceStopped || fPowerOff || !fVsyncBackend || fScanoutAuditCount>=4) return;
++ if ((fOwnScanoutStarted && !fOwnScanoutActive) || !fOwnScanoutPreflight || fServiceStopped || fPowerOff || !fVsyncBackend || fScanoutAuditCount>=4) return;
+  ++fScanoutAuditCount; /* absolute lifetime budget, including failed snapshots */
+  SweetScanoutSnapshot v={};
+  IOReturn rc=fVsyncBackend->inspectScanout(&v);
+  if (rc!=kIOReturnSuccess) {
+   SWEET_LOG_ERROR("SWEET FB SCANOUT: inspect pass=%u rc=%#x; scan address untouched\n",fScanoutAuditCount,(unsigned)rc);
+-  setProperty("SweetScanoutPreflightFailed",true); return;
++  setProperty("SweetScanoutPreflightFailed",true);
++  if (fOwnScanoutActive) {
++   fOwnScanoutFailed=true; setProperty("SweetScanoutHandoffFailed",true); setProperty("SweetScanoutActive",false);
++   if (fScanoutBackend) fScanoutBackend->abandonScanout(fScanoutPool);
++  }
++  return;
+  }
+  setProperty("SweetScanoutPreflightSamples",(unsigned long long)fScanoutAuditCount,32);
+  SWEET_LOG_INFO("SWEET FB SCANOUT: inspect pass=%u frame=%llu ticks=%llu size=%#x xy=%#x out=%#x outxy=%#x addr=%#x stride=%#x fmt=%#x unpack=%#x op=%#x secure=%#x\n",
+@@ -64,10 +69,71 @@
+  if (v.cb2Observed)
+   SWEET_LOG_INFO("SWEET FB SCANOUT: cb2 cbar=%#x cba2r=%#x sctlr=%#x ttbcr=%#x ttbr=%08x:%08x mair=%08x:%08x fsr=%#x far=%08x:%08x\n",
+       v.cbar,v.cba2r,v.sctlr,v.ttbcr,v.ttbrHi,v.ttbrLo,v.mairHi,v.mairLo,v.cbFault,v.farHi,v.farLo);
+- if (!v.knownSmmu || v.matches!=1 || !v.cb2Observed || v.cbFault || v.smmuFault || v.secure ||
+-     v.address!=fPhys || v.size!=0x09240438u || v.out!=0x09240438u || v.stride!=fRowBytes ||
+-     v.xy || v.outXY || v.format!=0x237ffu || v.unpack!=0x03020001u || v.op!=0x80000000u)
++ bool layoutOK=v.address==(fOwnScanoutActive ? fScanoutPool->physical(0) : fPhys) &&
++     v.stride==(fOwnScanoutActive ? 4608u : fRowBytes) && v.xy==(fOwnScanoutActive ? 0x00300016u : 0u) &&
++     v.size==0x09240438u && v.out==0x09240438u && !v.outXY && v.format==0x237ffu &&
++     v.unpack==0x03020001u && v.op==0x80000000u && !v.secure;
++ bool routeOK=v.knownSmmu && v.matches==1 && v.cb2Observed && !v.smmuFault &&
++     !(v.cbFault&~0x400u) && v.sctlr==0xe0u && v.cbar==0x1f000u && v.cba2r==1u;
++ if (fOwnScanoutActive) {
++  if (!layoutOK || !routeOK) {
++   fOwnScanoutFailed=true; setProperty("SweetScanoutHandoffFailed",true); setProperty("SweetScanoutActive",false);
++   if (fScanoutBackend) fScanoutBackend->abandonScanout(fScanoutPool);
++   SWEET_LOG_ERROR("SWEET FB HANDOFF: FAILED owned resume layout=%u route=%u; pool retained, pixels frozen\n",layoutOK,routeOK);
++  } else SWEET_LOG_INFO("SWEET FB HANDOFF: owned resume verified A=%#llx frame=%llu crop=22,48 raw-fsr=%#x\n",
++      (uint64_t)v.address,v.frame,v.cbFault);
++ } else if (!layoutOK || !routeOK || v.cbFault)
+   SWEET_LOG_WARN("SWEET FB SCANOUT: live configuration needs review; no handoff authorized\n");
+  /* Even known CB2.M=0 and clean status do not prove a new DMA range reachable.
+   * +0x70 is security metadata. RD_PTR/ADDR reads are not a release fence. */
+ }
++
++/* Existing framebuffer workloop/gate, never a matching callback. The one-time
++ * refresh replaces the boot seed with CURRENT panel pixels while presentation
++ * is serialized; subsequent swaps remain pending until handoff resolves. */
++void
++AppleCLCD::scanoutStep(void)
++{
++ if (!fOwnScanoutRequested || fServiceStopped || fOwnScanoutFailed) return;
++ if (!fOwnScanoutStarted) {
++  if (!fScanoutPool || fScanoutAuditCount<3 || !fHardwareVsyncActive || fPowerOff || !fVsyncBackend) return;
++  fOwnScanoutStarted=true; /* one attempt; every rejection is explicit */
++  sweet_console_muted=1;
++  if (!fScanoutPool->refreshPanel((const void *)fPixels,(size_t)fRowBytes*fHeight)) {
++   fOwnScanoutFailed=true; setProperty("SweetScanoutHandoffFailed",true);
++   SWEET_LOG_ERROR("SWEET FB HANDOFF: FAILED current-frame refresh\n"); return;
++  }
++  __asm__ volatile("dsb oshst" ::: "memory");
++  fTrace=false; /* old trace compares against ABL; do not manufacture proof */
++  fVsyncBackend->retain(); fScanoutBackend=fVsyncBackend;
++  IOReturn rc=fScanoutBackend->beginScanout(fScanoutPool,fVsyncChannel);
++  if (rc!=kIOReturnSuccess) {
++   fOwnScanoutFailed=true; setProperty("SweetScanoutHandoffFailed",true);
++   SWEET_LOG_ERROR("SWEET FB HANDOFF: FAILED begin rc=%#x; no silent ABL presentation\n",(unsigned)rc); return;
++  }
++  SWEET_LOG_INFO("SWEET FB HANDOFF: F4 v2 accepted; current frame refreshed; awaiting provider transfer; single-buffer/30Hz\n");
++ }
++ SweetScanoutStatus v={};
++ IOReturn rc=fScanoutBackend->scanoutStatus(fScanoutPool,&v);
++ if (rc!=kIOReturnSuccess || v.state==SweetScanoutFailed) {
++  fOwnScanoutFailed=true; setProperty("SweetScanoutHandoffFailed",true);
++  setProperty("SweetScanoutActive",false);
++  SWEET_LOG_ERROR("SWEET FB HANDOFF: FAILED provider rc=%#x state=%u hardware-reachable=%u; pixels frozen, pool retained\n",
++      (unsigned)rc,v.state,v.hardwareReachable); return;
++ }
++ if (v.state==SweetScanoutActive && !fOwnScanoutActive) {
++  fOwnScanoutActive=true; fDirty=true;
++  setProperty("SweetScanoutActive",true);
++  setProperty("SweetScanoutAddress",(unsigned long long)v.address,64);
++  SWEET_LOG_INFO("SWEET FB HANDOFF: active A=%#llx frame=%llu fresh-pp-done=%#x; CPU copies now target owned A; 30Hz/in-place, no flip fence\n",
++      v.address,v.frame,v.done);
++ }
++}
++void
++AppleCLCD::shutdownScanout(void)
++{
++ if (fScanoutBackend) fScanoutBackend->abandonScanout(fScanoutPool);
++ OSSafeReleaseNULL(fScanoutBackend);
++ fOwnScanoutActive=false;
++ setProperty("SweetScanoutActive",false);
++}
+diff --git a/iokit/Kernel/arm/SweetFBService.inc b/iokit/Kernel/arm/SweetFBService.inc
+--- a/iokit/Kernel/arm/SweetFBService.inc
++++ b/iokit/Kernel/arm/SweetFBService.inc
+@@ -68,8 +68,9 @@
+   fb->fServiceStopped=true;
+   if (fb->fVsync) fb->fVsync->cancelTimeout();
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
++  fb->shutdownScanout();
+   if (fb->fHardwareVsyncRequested) fb->shutdownHardwareVsync();
+-  OSSafeReleaseNULL(fb->fScanoutPool); /* never handed to MDP in stage1 */
++  OSSafeReleaseNULL(fb->fScanoutPool); /* submitted pools carry an independent hardware pin */
+ #endif
+   while (fb->fClients && fb->fClients->getCount()) {
+    IOMobileFramebufferUserClient *c=(IOMobileFramebufferUserClient *)fb->fClients->getObject(0);
+@@ -151,9 +152,9 @@
+   if (fHardwareVsyncRequested) {
+    if (fStateGateAdded) fStateGate->runAction([](OSObject *owner,void *,void *,void *,void *) -> IOReturn {
+     AppleCLCD *fb=(AppleCLCD *)owner;
+-    fb->fServiceStopped=true; fb->shutdownHardwareVsync(); return kIOReturnSuccess;
++    fb->fServiceStopped=true; fb->shutdownScanout(); fb->shutdownHardwareVsync(); return kIOReturnSuccess;
+    });
+-   else shutdownHardwareVsync();
++   else { shutdownScanout(); shutdownHardwareVsync(); }
+   }
+ #endif
+   if (fVsyncAdded) { fVsync->cancelTimeout(); fWorkLoop->removeEventSource(fVsync); }
+@@ -162,7 +163,7 @@
+   OSSafeReleaseNULL(fStateGate);
+   OSSafeReleaseNULL(fWorkLoop);
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+-  OSSafeReleaseNULL(fScanoutPool); /* never submitted to hardware in this stage */
++  OSSafeReleaseNULL(fScanoutPool); /* hardware pin, if any, survives service teardown */
+ #endif
+   OSSafeReleaseNULL(fClients);
+   OSSafeReleaseNULL(fSurface);
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -144,7 +144,10 @@
+  SweetVsyncChannel *fVsyncChannel;
+  SweetDisplayBackend *fVsyncBackend;
+  uint64_t fVsyncSequence, fHardwareSeenFrame, fHardwareTicks, fHardwareAdvance, fHardwareCoalesced;
+- bool fOwnScanoutPreflight;
++ bool fOwnScanoutPreflight, fOwnScanoutRequested, fOwnScanoutStarted, fOwnScanoutActive, fOwnScanoutFailed;
++ SweetDisplayBackend *fScanoutBackend;
++ void scanoutStep(void);
++ void shutdownScanout(void);
+  SweetScanoutPool *fScanoutPool;
+  unsigned fScanoutAuditCount;
+  bool fScanoutAuditResume;
+@@ -563,12 +566,13 @@
+ 	fPanelPowerMode=panelPower!=0;
+  fHardwareVsyncRequested=hardwareVsync!=0;
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+- if (ownScanout && (ownScanout!=1 || !fHardwareVsyncRequested || !fServiceMode ||
++ if (ownScanout && ((ownScanout!=1 && ownScanout!=2) || !fHardwareVsyncRequested || !fServiceMode ||
+      !fPanelPowerMode || !mdssService || mdssIRQ!=2 || contractService)) {
+-  SWEET_LOG_ERROR("SWEET FB SCANOUT: requires own1/service1/mdss1/power1/irq2/vsync1/contract0; refusing invalid configuration\n");
++  SWEET_LOG_ERROR("SWEET FB SCANOUT: requires own1-or-2/service1/mdss1/power1/irq2/vsync1/contract0; refusing invalid configuration\n");
+   return false;
+  }
+- fOwnScanoutPreflight=ownScanout==1;
++ fOwnScanoutPreflight=ownScanout!=0;
++ fOwnScanoutRequested=ownScanout==2;
+ #endif
+  if (fHardwareVsyncRequested && (!fServiceMode || !fPanelPowerMode || mdssIRQ!=2)) {
+   SWEET_LOG_ERROR("SWEET FB VSYNC: requires service1/power1/mdssirq2; refusing invalid configuration\n");
+@@ -658,6 +662,7 @@
+  if (fOwnScanoutPreflight && !setupScanoutPool()) {
+   SWEET_LOG_ERROR("SWEET FB SCANOUT: pool setup failed; experimental stage disabled, F3 retained\n");
+   fOwnScanoutPreflight=false;
++  if (fOwnScanoutRequested) return false; /* No silent own2 -> ABL fallback. */
+   setProperty("SweetScanoutPreflightFailed",true);
+  }
+ #endif
+@@ -705,6 +710,7 @@
+ 	if (fb->fServiceMode && fb->fServiceStopped) return;
+ 	uint64_t now = mach_absolute_time();
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
++ if (fb->fOwnScanoutRequested) fb->scanoutStep();
+  if (fb->fHardwareVsyncRequested) {
+   if (fb->fPowerOff) return; /* no OFF timer, notifications or presentation */
+   if (sender && fb->fHardwareVsyncActive) {
+@@ -981,6 +987,15 @@
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++ /* Quiescing/submitted/faulted stage2 never continues writing the ABL path. */
++ if (fOwnScanoutStarted && (!fOwnScanoutActive || fOwnScanoutFailed)) return;
++ uintptr_t target=fOwnScanoutActive ? (uintptr_t)fScanoutPool->address(0)+48u*4608u+88u : fPixels;
++ uint32_t targetStride=fOwnScanoutActive ? 4608u : fRowBytes;
++#else
++ uintptr_t target=fPixels;
++ uint32_t targetStride=fRowBytes;
++#endif
+ 	uint32_t mask = get32(rec, 0x104);
+ 	if (fTrace) {
+ 		stateLock();
+@@ -1067,10 +1082,13 @@
+ 		}
+ 		if (src != 0 && bpe == 4) {
+ 			for (int32_t y = 0; y < h; y++) {
+-				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
++				memcpy((void *)(target + (uint64_t)(dy + y) * targetStride + (uint64_t)dx * 4),
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+ 				    (size_t)w * 4);
+ 			}
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++   if (fOwnScanoutActive) { __asm__ volatile("dsb oshst" ::: "memory"); }
++#endif
+ 			traceCopy(rec, s, sx, sy, dx, dy, w, h);
+ 		}
+ 		s->release();
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -7,6 +7,7 @@
+  */
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ #include "SweetDisplayBackend.h"
++#include "SweetScanoutPool.h"
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOCommandGate.h>
+ #include <IOKit/IOTimerEventSource.h>
+@@ -173,6 +174,19 @@
+  static void irqTimerAction(OSObject *,IOTimerEventSource *);
+  static IOReturn vsyncBindingAction(OSObject *,void *,void *,void *,void *);
+  static void dp_wr64(vm_offset_t,uint32_t,uint64_t);
++ IOTimerEventSource *fScanoutTimer;
++ bool fScanoutTimerAdded, fScanoutTouched, fScanoutUsed;
++ unsigned fScanoutState, fScanoutIdleSamples;
++ uint64_t fScanoutDeadline, fScanoutSubmitFrame;
++ uint32_t fScanoutTE, fScanoutAuto;
++ SweetScanoutPool *fHardwarePool;
++ SweetScanoutStatus fScanoutStatus;
++ static IOReturn scanoutBeginAction(OSObject *,void *,void *,void *,void *);
++ static IOReturn scanoutStatusAction(OSObject *,void *,void *,void *,void *);
++ static IOReturn scanoutAbandonAction(OSObject *,void *,void *,void *,void *);
++ static void scanoutTimerAction(OSObject *,IOTimerEventSource *);
++ bool scanoutConfiguration(bool);
++ void cancelScanout(const char *);
+  IOMemoryMap *fMaps[12];
+  bool fGateAdded, fProbeAdded, fIrqProbeAdded, fAccepting;
+  unsigned fPass, fIrqProbePass, fIrqProbeMode;
+@@ -214,6 +228,9 @@
+  void free(void) APPLE_KEXT_OVERRIDE;
+  IOReturn setPanelPower(bool) APPLE_KEXT_OVERRIDE;
+  IOReturn inspectScanout(SweetScanoutSnapshot *) APPLE_KEXT_OVERRIDE;
++ IOReturn beginScanout(SweetScanoutPool *,SweetVsyncChannel *) APPLE_KEXT_OVERRIDE;
++ IOReturn scanoutStatus(SweetScanoutPool *,SweetScanoutStatus *) APPLE_KEXT_OVERRIDE;
++ void abandonScanout(SweetScanoutPool *) APPLE_KEXT_OVERRIDE;
+  IOReturn brightnessReady(void) APPLE_KEXT_OVERRIDE;
+  IOReturn dcsWrite(const uint32_t *,unsigned) APPLE_KEXT_OVERRIDE;
+ };
+@@ -388,6 +405,8 @@
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  bool on=(uintptr_t)arg!=0;
++ if (self->fScanoutState==SweetScanoutQuiescing || self->fScanoutState==SweetScanoutSubmitted)
++  self->cancelScanout("panel transition interrupted handoff");
+  if (!self->fAccepting || self->isInactive()) return kIOReturnNotReady;
+  if (!self->fPanelPowerEnabled) return kIOReturnUnsupported;
+  /* A failed transaction may have reached the DDIC. Stop sending new OFFs
+@@ -458,6 +477,7 @@
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  if (!self->fAccepting || self->isInactive() || self->dp_failed>=3) return kIOReturnNotReady;
++ if (self->fScanoutState==SweetScanoutQuiescing || self->fScanoutState==SweetScanoutSubmitted) return kIOReturnBusy;
+  if (!self->dp_clocks_on()) {
+   SWEET_LOG_WARN("SWEET MDSS: dcs skipped: MDSS clock gate not met\n");
+   return kIOReturnNotReady;
+@@ -492,6 +512,7 @@
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  self->fAccepting=false;
++ self->cancelScanout("provider stopped");
+  self->stopIRQ();
+  self->setProperty("SweetDisplayIRQPreflightReady",false);
+  if (self->fProbe) self->fProbe->cancelTimeout();
+@@ -508,6 +529,7 @@
+ SweetMDSS::stop(IOService *provider)
+ {
+  if (fGateAdded) (void)fGate->runAction(stopAction);
++ if (fScanoutTimerAdded) { fLoop->removeEventSource(fScanoutTimer); fScanoutTimerAdded=false; }
+  if (fProbeAdded) { fLoop->removeEventSource(fProbe); fProbeAdded=false; }
+  if (fIrqProbeAdded) { fLoop->removeEventSource(fIrqProbe); fIrqProbeAdded=false; }
+  if (fIrqEventAdded) { fLoop->removeEventSource(fIrqEvent); fIrqEventAdded=false; }
+@@ -520,7 +542,11 @@
+ void
+ SweetMDSS::free(void)
+ {
++ /* Covers partial start too; any hardware-reachable pool has its own pin. */
+  if (fGateAdded) (void)fGate->runAction(stopAction);
++ if (fScanoutTimerAdded) { fLoop->removeEventSource(fScanoutTimer); fScanoutTimerAdded=false; }
++ OSSafeReleaseNULL(fScanoutTimer);
++ OSSafeReleaseNULL(fHardwarePool);
+  if (fProbeAdded) fLoop->removeEventSource(fProbe);
+  if (fIrqProbeAdded) fLoop->removeEventSource(fIrqProbe);
+  if (fIrqEventAdded) fLoop->removeEventSource(fIrqEvent);
+diff --git a/iokit/Kernel/arm/SweetMDSSScanout.inc b/iokit/Kernel/arm/SweetMDSSScanout.inc
+--- a/iokit/Kernel/arm/SweetMDSSScanout.inc
++++ b/iokit/Kernel/arm/SweetMDSSScanout.inc
+@@ -55,3 +55,185 @@
+  v->cbFault=dp_rd(p,0x58); v->farLo=dp_rd(p,0x60); v->farHi=dp_rd(p,0x64);
+  return kIOReturnSuccess;
+ }
++
++/* Stage2 is one controlled transfer, not a per-frame fence implementation.
++ * LG prepare_commit: disconnect external TE, disable autorefresh, wait until
++ * INTF_TEAR_LINE_COUNT is outside (0,vdisplay), then program the source.
++ * Polls are timer actions: never spin/sleep waiting under either service gate.
++ */
++#define SWEET_SMMU_KNOWN_FSR 0xc00001feu
++static uint64_t
++scanout_now(void)
++{
++ uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time(),&ns); return ns;
++}
++bool
++SweetMDSS::scanoutConfiguration(bool inherited)
++{
++ SweetScanoutSnapshot v={};
++ if (scanoutInspectAction(this,&v,NULL,NULL,NULL)!=kIOReturnSuccess) return false;
++ if (!v.knownSmmu || v.matches!=1 || !v.cb2Observed || v.smmuFault ||
++     v.smmuCR0!=0x2b0406u || v.smr!=0x84200800u || v.s2cr!=2u || v.streamIndex!=3 ||
++     (v.cbFault&SWEET_SMMU_KNOWN_FSR) || (v.cbFault&~0x400u) ||
++     v.sctlr!=0xe0u || v.cbar!=0x1f000u || v.cba2r!=1u ||
++     v.ttbcr || v.ttbrLo || v.ttbrHi || v.mairLo || v.mairHi ||
++     v.secure || v.size!=0x09240438u || v.out!=0x09240438u || v.outXY ||
++     v.format!=0x237ffu || v.unpack!=0x03020001u || v.op!=0x80000000u ||
++     v.ctlTop!=0x20000u || v.start || v.te!=1u) return false;
++ fScanoutStatus.fsr=v.cbFault; /* raw bit10 is retained, never silently cleared */
++ if (inherited) return v.address==0x9d200000u && v.stride==4320u && !v.xy && !v.flush;
++ return fHardwarePool && v.address==fHardwarePool->physical(0) && v.stride==4608u && v.xy==0x00300016u;
++}
++IOReturn
++SweetMDSS::beginScanout(SweetScanoutPool *pool,SweetVsyncChannel *channel)
++{
++ return fGate ? fGate->runAction(scanoutBeginAction,pool,channel) : kIOReturnNotReady;
++}
++IOReturn
++SweetMDSS::scanoutBeginAction(OSObject *owner,void *arg0,void *arg1,void *,void *)
++{
++ SweetMDSS *s=(SweetMDSS *)owner;
++ SweetScanoutPool *pool=(SweetScanoutPool *)arg0;
++ int mode=0; (void)PE_parse_boot_argn("sweetfbown",&mode,sizeof(mode));
++ if (mode!=2) return kIOReturnUnsupported;
++ if (!s->fAccepting || s->isInactive() || !s->fIrqDisplayOn || s->fPanelState!=PanelOn ||
++     s->fIrqMode!=2 || s->fIrqPhase!=2 || !s->fEpochFrames || !arg1 || arg1!=s->fVsyncChannel)
++  return kIOReturnNotReady;
++ unsigned irq=__atomic_load_n(&s->fIrqState,__ATOMIC_ACQUIRE);
++ if (irq!=IrqArmed && irq!=IrqPending) return kIOReturnNotReady;
++ if (s->fScanoutUsed) return kIOReturnBusy;
++ if (!pool || pool->hardwarePinned() || pool->width()!=1125 || pool->height()!=2436 ||
++     pool->stride()!=4608 || pool->bytes()!=11225088 || !pool->address(0)) return kIOReturnBadArgument;
++ for (unsigned n=0;n<2;++n) {
++  uint64_t pa=pool->physical(n),bytes=pool->bytes();
++  if (!pa || (pa&4095u) || pa>=0x100000000ULL || bytes>0x100000000ULL-pa ||
++      (pa<0x9e400000ULL && 0x9d200000ULL<pa+bytes)) return kIOReturnBadArgument;
++ }
++ if (!s->scanoutConfiguration(true) || dp_rd(s->dp_intf1,0x288)!=0x180088u ||
++     dp_rd(s->dp_intf1,0x2b4)!=0x80000001u || dp_rd(s->fMaps[9]->getVirtualAddress(),0x1010))
++  return kIOReturnNotReady;
++ s->fScanoutTimer=IOTimerEventSource::timerEventSource(s,scanoutTimerAction);
++ if (!s->fScanoutTimer) return kIOReturnNoMemory;
++ if (s->fLoop->addEventSource(s->fScanoutTimer)!=kIOReturnSuccess) {
++  OSSafeReleaseNULL(s->fScanoutTimer); return kIOReturnNoMemory;
++ }
++ s->fScanoutTimerAdded=true;
++ pool->retain(); s->fHardwarePool=pool; s->fScanoutUsed=true;
++ s->fScanoutState=SweetScanoutQuiescing;
++ s->fScanoutTE=dp_rd(s->dp_intf1,0x288); s->fScanoutAuto=dp_rd(s->dp_intf1,0x2b4);
++ s->fScanoutDeadline=scanout_now()+50000000ULL;
++ dp_wr(s->dp_intf1,0x288,s->fScanoutTE&~(1u<<20));
++ dp_wr(s->dp_intf1,0x2b4,0);
++ s->setProperty("SweetScanoutHandoffState",(unsigned long long)s->fScanoutState,32);
++ SWEET_LOG_INFO("SWEET MDSS SCANOUT: F4 v2 quiescing; TE disconnected/autorefresh disabled; raw-fsr=%#x timer-only wait\n",s->fScanoutStatus.fsr);
++ s->fScanoutTimer->setTimeoutMS(1);
++ return kIOReturnSuccess;
++}
++void
++SweetMDSS::cancelScanout(const char *reason)
++{
++ if (!fScanoutUsed || fScanoutState==SweetScanoutFailed) return;
++ if (fScanoutTimer) fScanoutTimer->cancelTimeout();
++ /* Before any source register write the pool is CPU-only: restore inherited
++  * TE/auto if accessible. After a write, never roll back/free on readback alone. */
++ if (!fScanoutTouched && dp_clocks_on()) {
++  dp_wr(dp_intf1,0x2b4,fScanoutAuto);
++  dp_wr(dp_intf1,0x288,fScanoutTE);
++ }
++ fScanoutState=SweetScanoutFailed;
++ fScanoutStatus.state=fScanoutState;
++ fScanoutStatus.hardwareReachable=fScanoutTouched;
++ setProperty("SweetScanoutHandoffState",(unsigned long long)fScanoutState,32);
++ setProperty("SweetScanoutHardwarePinned",fScanoutTouched);
++ SWEET_LOG_ERROR("SWEET MDSS SCANOUT: FAILED %s touched=%u; %s\n",reason,fScanoutTouched,
++     fScanoutTouched ? "hardware pin retained until reboot; no inferred DMA release" : "no new DMA address submitted");
++}
++void
++SweetMDSS::scanoutTimerAction(OSObject *owner,IOTimerEventSource *sender)
++{
++ SweetMDSS *s=(SweetMDSS *)owner;
++ if (s->fScanoutState!=SweetScanoutQuiescing && s->fScanoutState!=SweetScanoutSubmitted) return;
++ unsigned irq=__atomic_load_n(&s->fIrqState,__ATOMIC_ACQUIRE);
++ if (!s->fAccepting || s->isInactive() || !s->fIrqDisplayOn || s->fPanelState!=PanelOn ||
++     (irq!=IrqArmed && irq!=IrqPending) || !s->dp_clocks_on()) {
++  s->cancelScanout("handoff admission/power lost"); return;
++ }
++ uint64_t now=scanout_now();
++ if (now>=s->fScanoutDeadline) { s->cancelScanout("bounded quiesce/transfer timeout"); return; }
++ const vm_offset_t top=s->fMaps[9]->getVirtualAddress();
++ if (s->fScanoutState==SweetScanoutQuiescing) {
++  if (dp_rd(s->dp_intf1,0x2b4) || (dp_rd(s->dp_intf1,0x288)&(1u<<20)) ||
++      !s->scanoutConfiguration(true)) { s->cancelScanout("quiesce configuration changed"); return; }
++  uint32_t line=dp_rd(s->dp_intf1,0x2b0)&0xffffu;
++  if (line>0 && line<2340) s->fScanoutIdleSamples=0;
++  else ++s->fScanoutIdleSamples;
++  if (s->fScanoutIdleSamples<2) { sender->setTimeoutMS(1); return; }
++  /* Separate hardware lifetime pin precedes the FIRST possibly effective
++   * source write. Stop/timeout/free can never return this pool to the VM. */
++  dp_wr(top,0x1018,1u<<8); /* PP0 DONE W1C only; no completion IRQ enabled */
++  if (dp_rd(top,0x1014)&(1u<<8)) { s->cancelScanout("inherited PP done did not clear"); return; }
++  s->fHardwarePool->pinHardware(); s->fScanoutTouched=true;
++  s->fScanoutStatus.hardwareReachable=true;
++  s->setProperty("SweetScanoutHardwarePinned",true);
++  dp_wr(s->dp_sspp,0x8,0x00300016u);
++  dp_wr(s->dp_sspp,0x24,4608);
++  dp_wr(s->dp_sspp,0x14,(uint32_t)s->fHardwarePool->physical(0));
++  s->fScanoutSubmitFrame=s->fFrameCount;
++  dp_wr(s->dp_ctl,0x18,1u); /* VIG0 only; no CTL_START in autorefresh mode */
++  s->fScanoutState=SweetScanoutSubmitted;
++  s->fScanoutStatus.address=s->fHardwarePool->physical(0);
++  if (!s->scanoutConfiguration(false)) { s->cancelScanout("source readback/SMMU validation"); return; }
++  /* No old transfer was ongoing at the programming point. Restore inherited
++   * auto/TE, then require a NEW PP done, cleared flush and advancing RD_PTR.
++   * This is evidence for this one attempt, never a general buffer reuse fence. */
++  dp_wr(s->dp_intf1,0x2b4,s->fScanoutAuto);
++  dp_wr(s->dp_intf1,0x288,s->fScanoutTE);
++  s->fScanoutDeadline=now+100000000ULL;
++  s->setProperty("SweetScanoutHandoffState",(unsigned long long)s->fScanoutState,32);
++  SWEET_LOG_INFO("SWEET MDSS SCANOUT: submitted A=%#llx stride=4608 crop=22,48 idle-line=%u frame=%llu; pool pinned; readback is not completion\n",
++      s->fScanoutStatus.address,line,s->fScanoutSubmitFrame);
++  sender->setTimeoutMS(1); return;
++ }
++ if (!s->scanoutConfiguration(false) || dp_rd(s->dp_intf1,0x288)!=s->fScanoutTE ||
++     dp_rd(s->dp_intf1,0x2b4)!=s->fScanoutAuto) { s->cancelScanout("submitted configuration changed"); return; }
++ s->fScanoutStatus.flush=dp_rd(s->dp_ctl,0x18);
++ s->fScanoutStatus.done=dp_rd(top,0x1014)&(1u<<8);
++ s->fScanoutStatus.frame=s->fFrameCount;
++ if (!s->fScanoutStatus.flush && s->fScanoutStatus.done && s->fFrameCount>s->fScanoutSubmitFrame) {
++  s->fScanoutState=SweetScanoutActive;
++  s->setProperty("SweetScanoutHandoffState",(unsigned long long)s->fScanoutState,32);
++  SWEET_LOG_INFO("SWEET MDSS SCANOUT: transfer observed A=%#llx frame=%llu flush=%#x fresh-pp-done=%#x raw-fsr=%#x; lifetime pin remains\n",
++      s->fScanoutStatus.address,s->fFrameCount,s->fScanoutStatus.flush,s->fScanoutStatus.done,s->fScanoutStatus.fsr);
++  return;
++ }
++ sender->setTimeoutMS(1);
++}
++IOReturn
++SweetMDSS::scanoutStatus(SweetScanoutPool *pool,SweetScanoutStatus *status)
++{
++ return fGate ? fGate->runAction(scanoutStatusAction,pool,status) : kIOReturnNotReady;
++}
++IOReturn
++SweetMDSS::scanoutStatusAction(OSObject *owner,void *arg0,void *arg1,void *,void *)
++{
++ SweetMDSS *s=(SweetMDSS *)owner;
++ if (!arg0 || arg0!=s->fHardwarePool || !arg1) return kIOReturnBadArgument;
++ unsigned irq=__atomic_load_n(&s->fIrqState,__ATOMIC_ACQUIRE);
++ if (s->fScanoutState==SweetScanoutActive && (irq==IrqFailed || irq==IrqStopped))
++  s->cancelScanout("owned scanout IRQ unavailable"); /* touched=true: no MMIO */
++ s->fScanoutStatus.state=s->fScanoutState;
++ *(SweetScanoutStatus *)arg1=s->fScanoutStatus;
++ return kIOReturnSuccess; /* legal after stop: pure retained state, no MMIO */
++}
++void
++SweetMDSS::abandonScanout(SweetScanoutPool *pool)
++{
++ if (fGate) (void)fGate->runAction(scanoutAbandonAction,pool);
++}
++IOReturn
++SweetMDSS::scanoutAbandonAction(OSObject *owner,void *arg0,void *,void *,void *)
++{
++ SweetMDSS *s=(SweetMDSS *)owner;
++ if (arg0 && arg0==s->fHardwarePool) s->cancelScanout("consumer detached");
++ return kIOReturnSuccess;
++}
+diff --git a/iokit/Kernel/arm/SweetScanoutPool.h b/iokit/Kernel/arm/SweetScanoutPool.h
+--- a/iokit/Kernel/arm/SweetScanoutPool.h
++++ b/iokit/Kernel/arm/SweetScanoutPool.h
+@@ -10,11 +10,22 @@
+  uint64_t fPhysical[2];
+  uint32_t fWidth, fHeight, fStride;
+  size_t fBytes;
++ bool fHardwarePinned;
+ public:
+  static SweetScanoutPool *withGeometry(uint32_t,uint32_t,uint32_t);
+  bool seedABL(const void *,size_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t);
+  uint64_t physical(unsigned n) const { return n<2 ? fPhysical[n] : 0; }
+  size_t bytes(void) const { return fBytes; }
++ uint32_t width(void) const { return fWidth; }
++ uint32_t height(void) const { return fHeight; }
++ uint32_t stride(void) const { return fStride; }
++ void *address(unsigned n) const { return n<2 && fBuffers[n] ? fBuffers[n]->getBytesNoCopy() : NULL; }
++ bool refreshPanel(const void *,size_t);
++ /* Experimental stage2 never releases this pin: no proven hardware detach
++  * protocol yet. At most one pool can reach hardware per boot. This explicit
++  * quarantine survives both provider and framebuffer termination. */
++ void pinHardware(void) { if (!fHardwarePinned) { retain(); fHardwarePinned=true; } }
++ bool hardwarePinned(void) const { return fHardwarePinned; }
+  void free(void) APPLE_KEXT_OVERRIDE;
+ };
+ #endif
+diff --git a/iokit/Kernel/arm/SweetScanoutPool.inc b/iokit/Kernel/arm/SweetScanoutPool.inc
+--- a/iokit/Kernel/arm/SweetScanoutPool.inc
++++ b/iokit/Kernel/arm/SweetScanoutPool.inc
+@@ -62,11 +62,20 @@
+   memcpy(dst+(size_t)(y+row)*fStride+(size_t)x*4u,src+(size_t)row*stride,(size_t)width*4u);
+  return true;
+ }
++bool
++SweetScanoutPool::refreshPanel(const void *source,size_t length)
++{
++ if (fHardwarePinned || !source || fWidth!=1125 || fHeight!=2436 || fStride!=4608 || length<4320u*2340u) return false;
++ uint8_t *dst=(uint8_t *)address(0);
++ for (unsigned y=0;y<2340;++y)
++  memcpy(dst+(size_t)(y+48)*4608+88,(const uint8_t *)source+(size_t)y*4320,4320);
++ return true;
++}
+ void
+ SweetScanoutPool::free(void)
+ {
+- /* This first stage never submits a buffer to MDP. Later ownership transfer
+-  * must keep the pool retained until hardware is proven to have stopped. */
++ /* own1 is never submitted; own2's independent hardware pin prevents free
++  * even when both services terminate. Do not remove that pin on a timeout. */
+  for (unsigned n=0;n<2;++n) {
+   if (fPrepared[n]) { (void)fBuffers[n]->complete(kIODirectionInOut); fPrepared[n]=false; }
+   OSSafeReleaseNULL(fBuffers[n]);

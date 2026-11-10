@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service|--framebuffer-state|--framebuffer-power|--framebuffer-irq-preflight|--framebuffer-vsync|--framebuffer-scanout]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service|--framebuffer-state|--framebuffer-power|--framebuffer-irq-preflight|--framebuffer-vsync|--framebuffer-scanout|--framebuffer-handoff]\n' "$0" >&2
 	exit 2
 fi
 
@@ -18,6 +18,7 @@ FRAMEBUFFER_POWER=0
 FRAMEBUFFER_IRQ_PREFLIGHT=0
 FRAMEBUFFER_VSYNC=0
 FRAMEBUFFER_SCANOUT=0
+FRAMEBUFFER_HANDOFF=0
 case "$KEY_IRQ_PROFILE" in
 	'')
 		;;
@@ -58,7 +59,8 @@ case "$KEY_IRQ_PROFILE" in
 		FRAMEBUFFER_VSYNC=1
 		KEY_IRQ_PROFILE='--framebuffer-service'
 		;;
-	--framebuffer-scanout)
+	--framebuffer-scanout|--framebuffer-handoff)
+		if [ "$KEY_IRQ_PROFILE" = '--framebuffer-handoff' ]; then FRAMEBUFFER_HANDOFF=1; fi
 		FRAMEBUFFER_STATE=1
 		FRAMEBUFFER_POWER=1
 		FRAMEBUFFER_VSYNC=1
@@ -354,6 +356,16 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
    fi
   done
  fi
+ if [ "${FRAMEBUFFER_HANDOFF:-0}" = '1' ]; then
+  for marker in 'SWEET MDSS SCANOUT: F4 v2 quiescing' \
+      'SWEET MDSS SCANOUT: transfer observed' 'SWEET FB HANDOFF: active' \
+      'SweetScanoutHardwarePinned'; do
+   if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+    printf 'kernel lacks F4 controlled handoff marker: %s\n' "$marker" >&2
+    exit 1
+   fi
+  done
+ fi
  if [ "$FRAMEBUFFER_SCANOUT" = '1' ]; then
   for marker in 'SWEET FB SCANOUT: F4 v1 pool ready' \
       'SWEET FB SCANOUT: seeded A from ABL' 'SWEET FB SCANOUT: inspect pass=' \
@@ -427,7 +439,12 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
   FB_ARGS="$FB_ARGS sweetmdss=1 sweetfbservice=1 sweetfbpower=1 sweetmdssirqprobe=0 sweetmdssirq=2 sweetfbvsync=1"
   make_profile fb-scanout-baseline "LG G8X - XNU F4 prerequisite disabled (${LABEL})" "$FB_ARGS sweetfbown=0"
   make_profile fb-scanout-preflight "LG G8X - XNU F4 pool and read-only inspection (${LABEL})" "$FB_ARGS sweetfbown=1"
-  printf 'kernel SHA256: %s\ncreated F4 scanout prerequisite baseline/preflight profiles for %s; no scan-address writes\n' "$KERNEL_SHA256" "$LABEL"
+  if [ "${FRAMEBUFFER_HANDOFF:-0}" = '1' ]; then
+   make_profile fb-scanout-single "LG G8X - XNU F4 controlled single-buffer handoff (${LABEL})" "$FB_ARGS sweetfbown=2"
+   printf 'kernel SHA256: %s\ncreated F4 baseline/preflight/single-buffer profiles for %s; own2 may submit DMA, lifetime pin survives until reboot\n' "$KERNEL_SHA256" "$LABEL"
+  else
+   printf 'kernel SHA256: %s\ncreated F4 scanout prerequisite baseline/preflight profiles for %s; no scan-address writes\n' "$KERNEL_SHA256" "$LABEL"
+  fi
   exit 0
  fi
  if [ "$FRAMEBUFFER_VSYNC" = '1' ]; then

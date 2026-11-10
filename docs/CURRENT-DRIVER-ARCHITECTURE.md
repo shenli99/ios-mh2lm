@@ -6,7 +6,15 @@
 PD0[静态清单](PANEL-RESOURCES-PD0.md)已核对现有DCS接口仅支持64-byte编码数据、
 旧RPMh helper不具备面板lease及多consumer投票；不能把现有接口视为完整初始化能力。
 
-**F4首段0181（本地实现，待云编译/实测）：** AppleCLCD可选持有`SweetScanoutPool`，通过
+**F4第二段0182（本地实现/验证通过，待云构建/实机）：** AppleCLCD通过typed
+`beginScanout/scanoutStatus/abandonScanout`请求SweetMDSS执行一次own2受控接管。
+provider在已有workloop/gate中用有时限timer暂停TE/auto、确认空闲、提交A并观察新传输；
+consumer查询成功后CPU目标切A，MMIO仍归provider，无反向同步回调。
+默认own0和own1语义不变，仍30Hz原地更新；独立硬件引用令提交池跨服务终止保留至重启。
+安全回收、双缓冲、SwapWait及无ABL首帧/console/panic待后续补齐；详见
+[架构、生命周期及测试](FRAMEBUFFER-HANDOFF-F4.md)。本段未改USB/按键/电池/触摸/mux或CI。
+
+**F4首段0181（0121a11已实测通过）：** AppleCLCD可选持有`SweetScanoutPool`，通过
 标准IOBufferMemoryDescriptor申请两个连续低32位缓冲；显式像素写入前排除与整个ABL保留区
 重叠，随后初始化并复制已有面板矩形。新增typed `inspectScanout()`由SweetMDSS在自己的gate
 只读已有ADT资源，帧事件最多触发四份快照，无新timer/单例/consumer MMIO。own0默认关闭。

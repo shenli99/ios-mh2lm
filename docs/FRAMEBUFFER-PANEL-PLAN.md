@@ -12,7 +12,9 @@ RPMh电源与现有长命令传输缺口、资源所有者、初始化/回滚和
 
 **F4首段实测（0181，0121a11）：** 两缓冲分配/一次seed/四快照及输入、OFF/ON回归通过，
 用户未见新增问题。CB2.M0；FSR原始0x400不命中LG的FSR_FAULT位，保留复核，不当新DMA故障
-或可达性证明。下一步设计受控单缓冲接管及完成/内存生命周期，详见[F4第9节](FRAMEBUFFER-SCANOUT-F4.md#9-0121a11扫描池预检实测首段运行通过新dma尚未验证)。
+或可达性证明。0182受控单缓冲接管已完成本地实现及验证，待用户push/云产物/实机；
+新`own2`经typed后端有界暂停/提交/观察，成功后CPU改写A，30Hz仍在，提交池保留到重启。
+详见[接管记录与本轮测试](FRAMEBUFFER-HANDOFF-F4.md)及[F4第9节](FRAMEBUFFER-SCANOUT-F4.md#9-0121a11扫描池预检实测首段运行通过新dma尚未验证)。
 首段新增`SweetScanoutPool`、有界ABL画面
 复制和typed只读扫描快照，默认`sweetfbown=0`；own1申请两个缓冲并预检，仍由ABL扫描。
 核对LG DRM/SDE后纠正原计划：`SSPP_SRC_ADDR_SW_STATUS(+0x70)`是安全属性，不是生效地址；
@@ -211,6 +213,7 @@ SwapEnd(rec) ── 校验/retain surface ──► pending
 | `sweetfbpower=1` | F2 | 0177 DCS28/29，不擦像素；要求service1/mdss1/contract0，默认0 |
 | `sweetfbvsync=1` | F3 | MDSS RD_PTR 中断做 vsync |
 | `sweetfbown=1` | F4首段（0181） | 申请扫描池、ABL画面复制准备、typed只读预检；尚不切扫描地址 |
+| `sweetfbown=2` | F4受控单缓冲（0182，待实机） | 独立实验档；有界暂停/提交/新传输观察后CPU目标切A；30Hz、原地更新，提交池保留到重启 |
 | `sweetfbdirect=1` | F5 | surface 直接扫描（L2，含 L3 回退） |
 | `sweetfbkickoff=1` | F6 | 关 autorefresh，按帧 kickoff（可选） |
 
@@ -320,6 +323,8 @@ AppleCLCD后端绑定、用户客户端分发表/参数校验和状态gate，012
 当作DMA可达性或翻页成功。后续分为单缓冲接管、真实完成事件关联及双缓冲、帧等待与性能
 收口，详见[F4实施记录](FRAMEBUFFER-SCANOUT-F4.md)。此阶段`own1`固定为只读预检，后续切换
 扫描行为须另设明确档位，不能让同一参数在未核对新镜像时悄悄改变含义。
+0182新增`own2`仅实现一次受控单缓冲接管，待云构建和实机；安全回收、A/B翻页及
+SwapWait尚未完成，不能提前计入以下整体验收。详见[第二段实现](FRAMEBUFFER-HANDOFF-F4.md)。
 
 **做什么**
 - `SweetScanoutPool` 分配 2 个物理连续缓冲（1125×2436×4，行距 4608，写合并），记录物理地址。
@@ -469,6 +474,7 @@ SSPP 格式/裁剪/地址状态、INTF 计数差值和 apps SMMU SID 0x800 匹�
 | F2 | 0177 / decebe3 | 0121a9 DCS日志及用户确认显示正常；3组实际off/on均rc0 | 基础开关屏及长时电源键唤醒通过；长测日志与视觉确认见F2报告；完整插拔次数未补齐，旧bug独立跟踪 |
 | F3 | 0179+0180 / 7329197 | 0121a10预检、0121a11 GIC/RD_PTR/完整档；SHA见F3报告 | 正常使用路径验收通过；完整档59.874–59.915Hz、OFF停计数/ON恢复硬件消费、无回退；下一步F4 |
 | F4首段 | 0181 / 42047d3 | 替换后0121a11的scanout-preflight日志；SHA见F4第9节 | 双池/seed/四快照及基本回归通过；FSR原始0x400保留，新DMA/接管/翻页未测 |
+| F4受控单缓冲 | 0182，本地验证通过 | 尚无新云kernel/boot/实机日志；见接管记录 | 待用户push及新产物；own2提交后保留池至重启，双缓冲/回收未完成 |
 
 ### 0171 / F0 补充实现（历史记录，0121a2 已完成实测）
 

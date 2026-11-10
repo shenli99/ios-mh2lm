@@ -39,6 +39,7 @@ struct OSObject {
  static void*operator new(size_t n){auto*p=calloc(1,n);if(!p)throw std::bad_alloc();return p;}
  static void operator delete(void*p){::free(p);}
  OSObject(){++live;}virtual ~OSObject(){--live;}virtual bool init(){return true;}virtual void free(){}
+ void retain(){assert(refs);++refs;}
  void release(){assert(refs);if(!--refs){free();delete this;}}
 };
 struct IOMemoryDescriptor : OSObject {uint64_t length=0;uint64_t getLength(){return length;}};
@@ -82,7 +83,16 @@ int main(){
   bool visible=y>=48&&y<2388&&x>=88&&x<4408;
   assert(a[y*4608+x]==(visible?0x67:0));assert(b[y*4608+x]==0);
  }
- p->release();assert(live==0&&scanoutBuffers.empty()&&scanoutPrepares==scanoutCompletes);
+ // Refresh uses the current panel snapshot without clearing B/margins, and
+ // cannot modify a buffer once hardware may reach it.
+ std::fill(panel.begin(),panel.end(),0x45);
+ assert(p->refreshPanel(panel.data(),panel.size()));assert(a[48*4608+88]==0x45&&a[0]==0);
+ assert(!p->refreshPanel(panel.data(),panel.size()-1));
+ p->pinHardware();p->pinHardware();assert(p->hardwarePinned()&&p->refs==2);
+ assert(!p->refreshPanel(panel.data(),panel.size()));
+ p->release();assert(live==3&&scanoutBuffers.size()==2&&p->refs==1);
+ p->release(); // simulated hardware reset; production never drops the own2 pin
+ assert(live==0&&scanoutBuffers.empty()&&scanoutPrepares==scanoutCompletes);
  puts("PASS: actual F4 pool, 12 allocation/prepare/physical-range failure paths, balanced cleanup, bounded ABL seeding, real geometry/crop, zero padding and guarded source/destination memory");
 }
 '''
