@@ -1,8 +1,14 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
+**2026-11-10优先级调整：用户要求完整面板驱动优先，随后零拷贝。** 不再以拷贝双缓冲、
+60Hz CPU拷贝或完整F4性能收口作为PD2/PD3前置。共用DMA停止/完成与生命周期保护仍保留，
+随资源、DSI/PHY/PLL和面板初始化实现一起推进；F4拷贝双缓冲改为兼容路径按需。
+0121a12已被用户明确反馈滑动卡顿明显加重，只有接管/唤醒日志通过，不作体验验收。
+具体D1–D4批次和合并计时项见[更新后的驱动交付顺序](PANEL-FULL-DRIVER-PLAN.md#7-加速后的交付批次与性能回归)。
+
 **2026-11-10路线修订：大目标二增加完整面板驱动子计划PD0–PD5。**
 用户要求完整接管，最低先脱离ABL缓冲，最终由驱动独立重建控制器/DSI/PHY/PLL与面板。
-顺序PD0 → F4/PD1 → PD2–PD5 → F5 → F6（按需）→ F7；详见
+顺序改为已有PD0/0182 → PD2/PD3 → PD4 → PD1剩余项/PD5 → F5 → F7；详见
 [完整面板驱动分步计划](PANEL-FULL-DRIVER-PLAN.md)。0181首段最新实测见下段。
 
 **PD0推进：** [静态资源核对和接口设计](PANEL-RESOURCES-PD0.md)已完成；实际panel身份、
@@ -536,13 +542,13 @@ agent 实施时以该文档为准，按步骤顺序推进，每步通过验收�
 | F1 | 分层为 `SweetMDSS : IOService`（ADT reg/中断、mapDeviceMemory）+ `AppleCLCD` workloop/命令门/分发表 | 符合 IOKit 常规 |
 | F2 | 真显示电源：DCS 28/29（后续 10/11），不再擦像素 | 息屏唤醒局部黑屏 |
 | F3（0121a11正常使用验收通过） | MDSS INTF1 RD_PTR 中断做 vsync，定时器降为看门狗 | 假 vsync |
-| F4（0181已实测，0182待实机） | 自有扫描缓冲+SSPP裁剪+双缓冲翻页；首段通过，受控单缓冲接管已本地验证；实际DMA、双缓冲/回收/等待待验收 | 撕裂、依赖 ABL 缓冲 |
+| F4（0182接管日志通过，有滑动性能回归） | 自有扫描池/裁剪及A接管已有证据；拷贝双缓冲按需延期，不阻塞PD2/PD3；DMA保护仍为共用必需项 | ABL缓冲依赖；体验未验收 |
 | PD0–PD5（PD0静态设计完成，硬件证据待补） | PD0资料/接口先行；PD1复用F4补无ABL首帧和控制台；PD2链路配置；PD3面板生命周期；PD4断电独立重建；PD5 IOPM/故障收口 | 完整接管面板，不依赖ABL配置 |
 | F5 | CA surface 由扫描池分配、MDP 直接扫描（cache clean），不兼容时回退拷贝 | 每帧 CPU 拷贝 |
 | F6 | （可选）关 autorefresh，按帧 kickoff | 功耗/残余撕裂 |
 | F7 | 复核PD生命周期、关机/重启、使用自有缓冲的panic显示，切默认并删除旧路径 | 收尾 |
 
-PD0在当前F4预检阶段开展，F4完成后继续PD1–PD5，再进入F5；各段结束条件以
+PD0已交付，利用0182证据先推进PD2/PD3；PD1余项和PD5按依赖补齐，再进入F5；各段结束条件以
 [PD计划](PANEL-FULL-DRIVER-PLAN.md)为准。完整驱动不能仅凭缓冲分配、28/29或vsync成功验收。
 
 新行为全部 opt-in（`sweetfbtrace/sweetmdss/sweetfbpower/sweetfbvsync/sweetfbown/

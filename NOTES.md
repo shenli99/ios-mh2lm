@@ -2,7 +2,30 @@
 
 ## Agent handoff / active work (2026-11-10, latest)
 
-**CURRENT：0121a12 single接管/首次ON自有源/6组OFFON日志通过，画面反馈待补；F4/PD1未整体验收。**
+**CURRENT：用户要求完整面板驱动提速；撤销“先把拷贝双缓冲/F4性能全部做完”的前置，下一代码交付转PD2/PD3基础。**
+用户明确反馈0121a12 single“比较明显，滑动比较明显”，是本轮体验性能回归，不能再写成
+未反馈或正常验收。已实测的是A单缓冲接管/OFFON，B未提交，30Hz CPU复制仍在；不能归因
+尚未接入的双缓冲，也不能用约59.91Hz IRQ反驳主观卡顿。位置/花屏等其它视觉项仍未单独确认。
+本轮核对真实0182代码：refresh只启动一次；Active后scanoutStatus每次vsync跨provider gate，
+逐层WC目标memcpy后dsb。无逐帧copy耗时，暂不定因WC/屏障/gate，也不删屏障或强开60Hz。
+新顺序：已有PD0/0182→PD2/PD3安全停止/资源/链路/面板实现→PD4独立重建→PD1余ABL依赖/
+PD5必要生命周期→F5直扫/共用完成SwapWait→F7；拷贝双缓冲改兼容路径按需，不再独立占
+云编译轮次。DMA停止/真实完成/token与持有规则仍为硬件重配/直扫必要基础，不维护两套。
+D1下一代码交付：资源ABI/版本保护、统一RPMh原TCS writer/显示lease/clock-GDSC所有权，
+typed DSI消息与支持完整vendor长包的传输/可撤销序列；D2整合PD2 link与PD3 panel动作，
+D3独立重建/无ABL首帧console/生命周期，D4零拷贝，详细门槛见PANEL-FULL-DRIVER-PLAN第7节。
+未确认panel profile/E1或link/E4时只拒绝对应写入，不把整个资料表变成前置测试清单；
+LG FIFO_STORE在dsi_ctrl.h仍限64bytes，dsi_ctrl_hw.h另处提256，不能据后者直接扩大当前FIFO。
+下一驱动批次合并低频呈现/copy bytes+耗时/pending年龄/合并/provider查询计时，无独立计时
+云编译/只读探针轮次。现有0121a12 own0/1可作对照，但本轮不要求用户重刷，不补旧长测。
+主面板/总路线/F4/PD/PD0/架构/接管记录已同步优先级和性能反馈。当前回归属于显示任务，
+不误记为旧已完工功能的独立BUG。本轮只有路线/证据修订，没有新内核补丁或驱动实现，
+不用push重编；未push/启动CI/设备操作。CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+NEXT直接按D1实现，不再从拷贝双缓冲或单项预检开始；不需用户重复授权改顺序。
+
+**以下为0121a12日志交接；“画面反馈待补”已由滑动性能回归反馈部分更新。**
+
+**历史日志交接：0121a12接管/OFFON日志通过；最新滑动回归与新执行顺序以上段为准。**
 日志sweetlog-0121a12-fb-scanout-single.bin，SHA256=
 915f877f08464d5cfe069498e589adfaac949835f0ecc5dabc657b42edeed70c；364415有效bytes/
 flush69/未回卷/4990行，371行确认own2/irq2/vsync1。171–172池A/B同0181，seed167014us。
@@ -24,9 +47,8 @@ driverkitd791–795仍sig9/ns1/code7（BUG-005）。10条hfs_clonefile cluster_w
 healthy1，全gauge charging0/ma-132..0；启动ENABLE一次，无VERIFY-12，不当充电成功。
 底稿scratch/artifact-0121a12/{analyze-single.py,single-log-analysis.json,single-analysis-summary.json,
 single-selected.txt,fb-scanout-single.txt}；接管文档第6节/主计划/PD/PD0/架构同步。
-NEXT补用户画面反馈；若无新增异常，不重刷own0/1，不重测F3/半小时/旧bug专项。后续按
-安全DMA停止/撤销和真实提交完成关联→双缓冲→SwapWait/性能→PD1无ABL首帧/console/panic
-推进；当前仍单缓冲30Hz/提交池pin至重启，不能验收安全回收/资源平衡/完整PD1。
+历史NEXT已被上段加速后的D1–D4顺序覆盖，不重刷own0/1/F3/半小时/旧bug专项。
+当前仍单缓冲30Hz/提交池pin至重启，不能验收安全回收/资源平衡/完整PD1。
 本轮只日志分析/文档，无新驱动/参数/CI改动或编译/push/设备操作；CircleCI blob仍
  da0b6c0947a66f03491b3a9023590b49665292df。旧BUG边界及整机PM大目标四不变。
 

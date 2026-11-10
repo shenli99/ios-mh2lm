@@ -1,12 +1,18 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**2026-11-10优先级调整：用户要求完整面板驱动优先，随后零拷贝。** 不再以拷贝双缓冲、
+60Hz CPU拷贝或完整F4性能收口作为PD2/PD3前置。共用DMA停止/完成与生命周期保护仍保留，
+随资源、DSI/PHY/PLL和面板初始化实现一起推进；F4拷贝双缓冲改为兼容路径按需。
+0121a12已被用户明确反馈滑动卡顿明显加重，只有接管/唤醒日志通过，不作体验验收。
+具体D1–D4批次和合并计时项见[更新后的驱动交付顺序](PANEL-FULL-DRIVER-PLAN.md#7-加速后的交付批次与性能回归)。
+
 **2026-11-10计划边界更新：** 用户要求最终完整接管面板，新增
 [PD0–PD5子计划](PANEL-FULL-DRIVER-PLAN.md)，先脱离ABL缓冲，再完成独立初始化/断电恢复。
 这是后续设计要求，不表示下述当前驱动已具备这些能力。
 PD0[静态清单](PANEL-RESOURCES-PD0.md)已核对现有DCS接口仅支持64-byte编码数据、
 旧RPMh helper不具备面板lease及多consumer投票；不能把现有接口视为完整初始化能力。
 
-**F4第二段0182（0121a12接管及OFF/ON日志通过，待画面确认）：** AppleCLCD通过typed
+**F4第二段0182（0121a12接管及OFF/ON日志通过，用户已报告滑动卡顿加重，其它视觉项未单独确认）：** AppleCLCD通过typed
 `beginScanout/scanoutStatus/abandonScanout`请求SweetMDSS执行一次own2受控接管。
 provider在已有workloop/gate中用有时限timer暂停TE/auto、确认空闲、提交A并观察新传输；
 consumer查询成功后CPU目标切A，MMIO仍归provider，无反向同步回调。
