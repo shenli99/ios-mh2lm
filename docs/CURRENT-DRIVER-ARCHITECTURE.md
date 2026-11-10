@@ -1,5 +1,9 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**2026-11-10计划边界更新：** 用户要求最终完整接管面板，新增
+[PD0–PD5子计划](PANEL-FULL-DRIVER-PLAN.md)，先脱离ABL缓冲，再完成独立初始化/断电恢复。
+这是后续设计要求，不表示下述当前驱动已具备这些能力。
+
 **F4首段0181（本地实现，待云编译/实测）：** AppleCLCD可选持有`SweetScanoutPool`，通过
 标准IOBufferMemoryDescriptor申请两个连续低32位缓冲；显式像素写入前排除与整个ABL保留区
 重叠，随后初始化并复制已有面板矩形。新增typed `inspectScanout()`由SweetMDSS在自己的gate
