@@ -1,10 +1,11 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
-**0184资源层增量（本地通过，未上机）：** 已新增真实匹配的SweetRPMh IOService、唯一
+**0184资源层增量（本地通过，0121a13实机元数据/绑定通过，未测投票）：** 已新增真实匹配的SweetRPMh IOService、唯一
 MH2LM apps-DRV writer、有界timer完成与typed consumer投票；MDSS自己的workloop绑定/查询，
 没有匹配回调初始化、全局C实例桥或自动电源写入。v1 ADT扩完整DISPCC并追加单一PHY/PLL窗口，
 所有权归MDSS；实际clock/GDSC获取、MMCX/NoC、PHY/PLL/host与面板完整初始化仍缺。
-见[资源层实现、释放规则与验证](PANEL-POWER-D1.md)。D1未整体完成，继续合并下一驱动段，暂不要求push/刷机。
+见[资源层实现、释放规则与验证](PANEL-POWER-D1.md)及[0121a13实测](PANEL-D1-0121A13.md)。
+本轮自有A接管/息屏唤醒通过，用户反馈滑动改善、无新增异常；D1未整体完成，继续下一驱动段。
 
 **2026-11-10优先级调整：用户要求完整面板驱动优先，随后零拷贝。** 不再以拷贝双缓冲、
 60Hz CPU拷贝或完整F4性能收口作为PD2/PD3前置。共用DMA停止/完成与生命周期保护仍保留，

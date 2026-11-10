@@ -2,6 +2,8 @@
 
 **0184实现更新：** 下文原静态清单/设计按PD0保留。实际已有RPMh provider、唯一TCS入口、
 typed投票与MDSS匹配绑定，以及v1资源ABI，详见[资源层实现](PANEL-POWER-D1.md)。
+0121a13已实测四路command DB/pre-v3 RSC及MDSS consumer绑定，尚未实测投票；
+自有A接管/唤醒通过，用户反馈滑动有所改善、无新增异常，见[本批记录](PANEL-D1-0121A13.md)。
 第5节的独立clock/GDSC provider修订为MDSS内部typed资源模块（硬件独占映射不拆出第二writer）；
 当前仅所有权/窗口落地，时钟获取/频率/GDSC控制仍待实现，不将映射当电源就绪。
 
@@ -189,10 +191,10 @@ timeout当完成，也不能关闭其他consumer电源或翻回ABL来伪装成�
 | 编号 | 尚缺证据 | 影响阶段 | 获取方式/当前决定 |
 |---|---|---|---|
 | E1 | 实际panel/revision及对应vendor表 | PD3完整命令写入 | 优先从已有ABL/UEFI传递的选择标识或保存的原机日志取证；当前限定搜索95份logs/evidence文本未找到`msm_drm.dsi_display0`。不要求重启Android，不主动试发未知DDIC读命令 |
-| E2 | 池/live配置及A首次新DMA传输已留证；画面与B传输仍缺 | F4/PD1 | 0121a11双池/四快照及基本回归通过，CB2.M0/raw FSR0x400保留；0121a12 single已取得A新源提交/新传输及首次ON地址证据，用户已报告滑动卡顿加重，其它视觉项未单独确认，不泛化为任意DMA范围均可达。见F4第9节与接管记录；不依赖E1确认 |
+| E2 | A新DMA传输、画面及唤醒已留证；B传输仍缺 | F4/PD1 | 0121a12已取得A接管/新传输/ON地址证据；0121a13再验证，用户反馈滑动改善、常用操作无新增异常。B未提交，CB2.M0/raw FSR0x400保留，不泛化为任意DMA范围可达；不依赖E1确认 |
 | E3 | autorefresh下提交、锁存与旧读者退出的对应事件 | F4后续翻页 | 0182有界暂停TE/auto，两次空闲采样，清旧PP0 DONE后提交；0121a12 frame130→131已观察新DONE/flush0/RD_PTR推进。不授予旧buffer释放权，提交池保留到重启；通用完成/撤销与A/B复用协议仍缺 |
-| E4 | 本机PHY/PLL版本、lane及频率/ready状态（DSI host版本已知） | PD2写link配置 | 0121a12已有DSI0 HW_VERSION=20030000；0183发送前复核。PHY/PLL仍需资源ABI和映射保护，当前没有这些映射，不越界读取 |
-| E5 | RPMh资源存在/权限、TCS所有权、实际投票/撤销结果 | PD2/PD3 | 先核对command DB/ACTIVE TCS并完成统一provider；继承请求不覆盖，ACK不当实际掉电证明 |
+| E4 | 本机PHY/PLL版本、lane及频率/ready状态（DSI host版本已知） | PD2写link配置 | 0121a12已有DSI0 HW_VERSION=20030000；0183发送前复核。0184 v1 ABI已加入PHY/PLL单一受保护窗口，尚未取得clock，不读取版本或越界访问 |
+| E5 | RPMh写权限、实际投票/撤销及物理结果仍缺 | PD2/PD3 | 0184统一provider已实现；0121a13实测ldoa14/17/c3/a5地址0x42100/0x41300/0x41e00/0x40b00，pre-v3 RSC id0x10700/config0x800c8104/ncpt16/ACTIVE2、consumer1绑定通过。mode1无投票；继承请求不覆盖，ACK不当实际掉电证明 |
 | E6 | clock/GDSC/NoC最小依赖及恢复状态 | PD2/PD4 | 显式资源申请和ready/超时检查；未核清共享范围前不reset整个MDSS电源域 |
 | E7 | 面板/触摸共享供电与reset后的触摸需求 | PD3 reset/PD4 | 校对生效DTS和已有板级资料，设计quiesce/resume并用分档验证；引脚不重合不等于无共享 |
 | E8 | 是否存在额外偏压电源控制、完整off后的物理状态 | PD3/PD4 | 先沿实际选定panel供电表/生效DT和板级证据核对；不得仅因use-labibb而扫描/写PMIC偏压寄存器 |
@@ -224,4 +226,5 @@ ON/OFF逐包长度/type/等待、表SHA；另有从0121a11真实buildtree提取�
 源码分析不构成新实机测试；未读取或输出设备唯一标识，未修改参考仓库及设备备份。
 
 0183已实现D1的[命令基础/可撤销执行/性能计时](PANEL-COMMAND-D1.md)并本地验证；
-资源ABI、RPMh统一所有者/lease、clock-GDSC及PHY/PLL仍未实现，不将原设计图当作现有服务。
+0184已实现资源ABI、RPMh统一所有者/typed投票及绑定；0121a13元数据/绑定实测通过。
+clock-GDSC获取及PHY/PLL初始化仍未实现，不能将窗口映射当就绪或将本轮当实机投票验证。

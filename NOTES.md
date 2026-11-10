@@ -3,6 +3,34 @@
 ## Agent handoff / active work (2026-11-10, latest)
 
 
+**CURRENT：0121a13主档资源绑定、既有扫描接管/OFFON实测通过；用户反馈滑动有所改善，全部常用操作无新增异常。**
+主档打包提交37c78a3，驱动d644866/0184。日志sweetlog-0121a13-panel-resources.bin，SHA256=
+461a537553b33b12f8740035985eaa45d7442ed62820c397085e70c48fd6e236；440091有效bytes/flush77/
+未回卷/5840行，resources1/perf1/own2/dsi0。86–95行四路DB地址ldoa14=42100/17=41300/
+c3=41e00/a5=40b00，pre-v3 RSC id10700/config800c8104/ncpt16/ACTIVE2，consumer1真实绑定。
+无ACTIVE vote，符合mode1，不证明写权限/电压/撤票掉电；D1整体仍未完成。
+798–803行A=c3bb8000提交frame130→131/freshPPDONE100/flush0/active，B=c4670000未提交。
+10完整IRQ窗600436ms/35963帧，加权59.895Hz/dropped0；不是UI帧率。OFF3ms/ON11ms，
+frame37780→37781，owned resume verified；OFF内样本覆盖>=65.504s，无帧统计。
+用户确认画面/亮度/触摸/三键/息屏唤醒全部正常；无需control/旧矩阵/半小时/充电专项。
+47个perf窗1237次CPU呈现，copy+barrier均2400.732us/max4786us，无16.667ms超预算；
+CPU present均2407.146us/max4792us。provider-query45973次均2.379us/max11966us，
+4次>1ms集中唤醒相邻窗；通常最大4–52us。不支持复制普遍超预算，但尚未定因/修复旧滑动退化，
+不把用户改善归因metadata或双缓冲。pending最大90.749s含OFF保留，不是亮屏卡死。
+发现统计缺口：lastPresentNS只在vsyncFired看到OFF时清零，requestPanelPower实际取消timer/
+暂停帧，可能绕过清零；本日志cpu-interval106.409s跨OFF。尚未改代码，下个有意义驱动批次
+在实际电源转换处修，测试OFF无vsync回调；保留first/latest pending，不单独占编译轮次。
+无ERROR/panic/mux隔离/显示失败；6WARN=3既有rawFSR/3USB端点，BUG-005 driverkitd仍在。
+48电池样本全charging0，不验收充电；未关闭USB旧bug。详细见docs/PANEL-D1-0121A13.md。
+底稿scratch/artifact-0121a13/{analyze-resources.py,panel-resources.txt,resources-log-analysis.json,
+resources-analysis-summary.json,resources-selected.txt}。无新内核补丁，本轮仅分析/文档。
+**NEXT继续D1 clock/GDSC获取、MMCX/NoC与PHY/PLL/host，再接确认profile/reset/完整ON/OFF；**
+不重回CPU双缓冲前置，后续独立重建/ABL退出/零拷贝。无待答问题，不需要补刷本轮control。
+未push/触发CI/操作设备；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+
+**以下为0121a13打包阶段记录，待测状态已由上段实测更新。**
+
+
 **CURRENT：用户提供0121a13；已核对含0183/0184并打包两档boot，待主档短测。**
 源码实现提交d644866；60相关源码逐字节匹配0184 verify（含其6份变化），114原CI源码marker通过。
 归档manifest/arm64 Mach-O正确，kernel17567368bytes，SHA256=
