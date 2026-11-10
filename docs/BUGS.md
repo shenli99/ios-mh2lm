@@ -318,3 +318,13 @@ USB两次reset/两次ACM配置、3端点WARN、USBIN VERIFY(-12)为0，BUG-001/0
 charging0、电流-132..0mA，只见启动ENABLE一次；本档供电来源未单独确认，不据healthy1
 宣称充电成功，不沿用上一档供电来源或判MDSS因果。采样健康与实际充电状态分别记录。
 详见[F3完整档](FRAMEBUFFER-VSYNC-F3.md#12-0121a11完整硬件档f3正常使用路径验收通过)。
+
+**0121a11 / F4扫描池预检伴随记录（2026-11-10）：**
+`sweetlog-0121a11-fb-scanout-preflight.bin`，SHA256
+`8cc34d8a15178179031ef8f155e348ce84d3d06649a08d63cb5bb5675ddd20cc`。
+用户确认画面/亮度/输入及手动唤醒无新增问题。无mux隔离/poison/SPMI timeout/panic，
+不追加BUG-002专项测试。USB两次reset均配置ACM、三条端点WARN、VERIFY(-12)为0；
+BUG-001/004未关闭。780–783行driverkitd仍sig9/ns1/code7，BUG-005仍存在。
+47份gauge均charging0、电流-132..0mA、一次启动ENABLE；46次refresh全healthy1，
+供电来源本轮未单独确认，不证明真实充电或归因显示。CB2原始FSR0x400不命中LG已知故障位，
+作为F4配置解释项保留，不据此新增已定因DMA故障。详见[F4实测](FRAMEBUFFER-SCANOUT-F4.md#9-0121a11扫描池预检实测首段运行通过新dma尚未验证)。

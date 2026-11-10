@@ -2,7 +2,38 @@
 
 ## Agent handoff / active work (2026-11-10, latest)
 
-**CURRENT：用户更正为0121a11；替换后的产物已确认包含0181，扫描池预检boot已打包并独立校验，待实机。**
+**CURRENT：0181/0121a11扫描池预检实测已分析；双池/seed/四快照及基本回归通过，NEXT受控单缓冲接管设计。**
+基于8f6c5b8，日志sweetlog-0121a11-fb-scanout-preflight.bin，SHA256=
+8cc34d8a15178179031ef8f155e348ce84d3d06649a08d63cb5bb5675ddd20cc；有效343538bytes/
+flush76/未回卷/4561行。用户确认画面、亮度、三键、触摸和手动OFF/ON“都正常，未见新增问题”。
+171–172行pool ready、seed成功：A0xc3b30000..0xc45e4800/B0xc4668000..0xc511c800
+（末端不含，逻辑字节范围）；各11225088bytes/stride4608/crop22,48，16KiB对齐、低32位、
+不相交/不覆盖ABL18MiB。seed167265us为启动清零/复制耗时，不当逐帧性能或新池显示验证。
+866/972/1079/3853四快照来自frame1/61/121/17929；地址全9d200000/secure0，扫描仍ABL。
+四份SMMU记录一致：SID800唯一SMR3/TRANS/CB2，SCTLR e0/M0、TTBCR/TTBR/MAIR0、globalfault0。
+CB2原始FSR400/FAR0001fdfe:ba6e8cf7引发四WARN；LG arm-smmu-regs.h的FSR_FAULT=c00001fe，
+bit10未定义，400&mask=0，context handler亦按mask判fault。不能说已证明DMA故障，也不能
+称raw全零/清掉旧故障/新DMA可达；不将FAR当有效故障地址。保留原值/复核，未改代码或清状态。
+GIC hits1，FB首次/幂等ON/唤醒均hardware active；九整窗540.191s/32358帧，59.871–59.916Hz
+加权59.901，dropped0，OFF前4/ON后5。OFF暂停17928/17929，ON armed同数/首帧17929；
+OFF内7个电池样本跨度至少98.294s。DCS OFF/ON rc0，backend9/7ms、FB10/7ms。无FAILED/
+显式回退/驱动ERROR/mux隔离/poison/SPMI timeout/panic。16键事件power3/up1/down4对、12touch，
+亮度2775→0→2775。47样本/46refresh全healthy1，末796.659s；全gauge charging0/电流-132..0mA，
+仅启动ENABLE一次，供电来源未另确认，不当真实充电成功。USB两reset/两ACM/三WARN，VERIFY0；
+driverkitd780–783仍sig9/ns1/code7，BUG-001/004/005不关闭，BUG-002只常态观察、BUG-003暂缓。
+底稿scratch/artifact-0121a11-f4/{analyze-preflight.py,preflight-log-analysis.json,
+preflight-analysis-summary.json,preflight-selected.txt,fb-scanout-preflight.txt}。
+F4第9节/主面板/总路线/PD/PD0/BUGS已同步：首段运行通过，E2取得池/live部分；新DMA/接管/
+完成/双缓冲/SwapWait及PD1无ABL首帧/控制台尚未完成。无需刷own0或重测F3/半小时/旧BUG。
+NEXT据本轮证据设计受控单缓冲接管，先核对缓存/格式/裁剪/autorefresh提交与完成关系，明确
+硬件持有buffer的生命周期与失败保留/停机策略；区分已知fault位与未解释raw值，另设接管档，
+不改变own1只读预检语义。路线PD0→F4/PD1→PD2–PD5→F5不变，不宣称完整面板接管。
+本轮仅分析/文档，无驱动/boot参数/CI变更，无编译/push/设备操作；CircleCI blob仍
+da0b6c0947a66f03491b3a9023590b49665292df，整机PM仍目标四占位。
+
+**以下为本次产物及打包交接；待实测状态已由上段更新。**
+
+**历史：用户更正为0121a11；替换后的产物已确认包含0181，扫描池预检boot已打包并独立校验。**
 本次logs/xnu-{kernel,buildtree}-0121a11.gz为本日18:53替换包，须区别历史同编号F3产物。
 kernel归档SHA256=afd78ed2eddebd2f12e64742ba2641557146c211d42062d014117625095f365d；
 buildtree归档SHA256=65cb7ab5d97e8bd6f3d7087b22cbf77ba157c5573fa1c8bdd20e85a42b9de6a7。

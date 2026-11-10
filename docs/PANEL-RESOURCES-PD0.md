@@ -180,7 +180,7 @@ timeout当完成，也不能关闭其他consumer电源或翻回ABL来伪装成�
 | 编号 | 尚缺证据 | 影响阶段 | 获取方式/当前决定 |
 |---|---|---|---|
 | E1 | 实际panel/revision及对应vendor表 | PD3完整命令写入 | 优先从已有ABL/UEFI传递的选择标识或保存的原机日志取证；当前限定搜索95份logs/evidence文本未找到`msm_drm.dsi_display0`。不要求重启Android，不主动试发未知DDIC读命令 |
-| E2 | 当前扫描池地址、实时SMMU/CB2与基本健壮性 | F4/PD1 | 0181预检已实现待新云产物/实机；此证据不依赖E1确认 |
+| E2 | 当前扫描池地址、实时SMMU/CB2与基本健壮性；新DMA可达性仍缺 | F4/PD1 | 0121a11已取得双池/四快照及基本回归：CB2.M0，FSR原始0x400不命中LG故障位但保留复核；扫描仍ABL，未让硬件读取新池。见F4第9节；不依赖E1确认 |
 | E3 | autorefresh下提交、锁存与旧读者退出的对应事件 | F4后续翻页 | 按LG RD_PTR/CTL_START/PP_TX_DONE/autorefresh_done实现有界取证；不能用安全寄存器或单次RD_PTR释放buffer |
 | E4 | 本机PHY/PLL版本、lane及频率/ready状态 | PD2写link配置 | 增加受时钟/映射保护的typed只读档；先核对资源ABI，当前0181没有这些映射，不越界读取 |
 | E5 | RPMh资源存在/权限、TCS所有权、实际投票/撤销结果 | PD2/PD3 | 先核对command DB/ACTIVE TCS并完成统一provider；继承请求不覆盖，ACK不当实际掉电证明 |
@@ -189,10 +189,11 @@ timeout当完成，也不能关闭其他consumer电源或翻回ABL来伪装成�
 | E8 | 是否存在额外偏压电源控制、完整off后的物理状态 | PD3/PD4 | 先沿实际选定panel供电表/生效DT和板级证据核对；不得仅因use-labibb而扫描/写PMIC偏压寄存器 |
 
 PD0静态设计已具备继续条件，E1/E4–E8保留为对应写入阶段的门槛；不标记完整硬件资料
-已全部实证。**下一执行点为已有0181扫描池预检，再推进F4/PD1的受控扫描接管。**
-新云内核先核对0181补丁/源码/marker，再打同核`fb-scanout-{baseline,preflight}`；主测
-preflight，baseline仅故障对照。原F3频率矩阵、半小时息屏和BUG-002不额外重测。
-本轮没有驱动/参数/CI改动，无新镜像或设备操作。
+已全部实证。**0181首段已实测取得E2的池/live配置部分；下一步F4/PD1受控接管设计。**
+0121a11产物/boot已核对，preflight运行通过，无需补刷baseline；接管前仍须明确新DMA范围、
+缓存/格式及提交与完成关联，不能用本轮原始状态值代替。原F3频率矩阵、半小时息屏和BUG-002
+不额外重测。实测与FSR边界见[记录](FRAMEBUFFER-SCANOUT-F4.md#9-0121a11扫描池预检实测首段运行通过新dma尚未验证)。
+本轮日志分析没有驱动/参数/CI改动或新设备操作。
 
 ## 8. 可追溯资料
 

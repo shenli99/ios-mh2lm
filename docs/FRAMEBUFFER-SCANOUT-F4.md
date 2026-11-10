@@ -1,12 +1,12 @@
 # F4：自有扫描缓冲、硬件裁剪与双缓冲翻页
 
 2026-11-10。F3正常使用路径已由0121a11验收，用户授权开始F4。
-**当前0181首段已完成本地验证；替换后的0121a11云产物核对通过，预检boot已打包，待实机。**
+**当前0181首段已由替换后的0121a11实测：池分配、四份快照及基本回归通过；SMMU原始值需保留解释，尚未验证新缓冲DMA。**
 尚未切换扫描地址或完成翻页。本轮不改CircleCI，不push，不操作设备。
 
 **2026-11-10新增目标：** F4是[完整面板驱动PD1](PANEL-FULL-DRIVER-PLAN.md)的主体，
 但不等于完整硬件接管；还须补无ABL像素的首帧及自有控制台/故障缓冲，再推进PD2–PD5
-独立初始化和断电恢复，之后才进入F5。0181仍只是预检，own1语义及待实测状态不变。
+独立初始化和断电恢复，之后才进入F5。0181仍只是预检，own1语义不变；首段实测见第9节。
 PD0[资源核对](PANEL-RESOURCES-PD0.md)已区分F4预检所需E2与后续冷初始化门槛；不要求
 先确认全部厂商表和电源权限才能测试当前扫描池，但不能越过DMA可达性/完成关联接管扫描。
 
@@ -32,7 +32,7 @@ F3实测约60Hz和下一次RD_PTR都不能独立证明某一次新地址提交�
 
 | 分段 | 内容 | 结束条件/当前进度 |
 |---|---|---|
-| 首段：池和live预检 | 两个自有缓冲、ABL有界复制准备、typed只读快照 | 0181本地通过，待实测分配/启动/快照/输入与唤醒；扫描仍ABL |
+| 首段：池和live预检 | 两个自有缓冲、ABL有界复制准备、typed只读快照 | 0121a11分配/启动/四快照/输入与唤醒通过；CB2原始FSR保留复核，新DMA未测；扫描仍ABL |
 | 单缓冲接管 | 核对内存可达性、缓存和格式；保留缓冲，受控切入一个自有扫描地址，定义恢复/退出 | 真实画面、裁剪位置和扫描接管成立；没有完成证据时不得释放可能在扫描的内存 |
 | 完成事件和双缓冲 | 确认本机autorefresh下的提交关联；typed提交/事件反馈；前台、后台、待确认独立管理 | A/B正常轮换，旧读者退出后才复用；超时不伪装完成；OFF/ON/停止不踩空 |
 | 等待和性能收口 | 完整SwapWait/pending/display语义，CPU复制独立执行，移除新路径30Hz限制 | 原F4验收矩阵通过，复制耗时/呈现频率有实测，压力及资源平衡通过 |
@@ -115,7 +115,7 @@ autorefresh/行位置，MDP/TE的enable及原始锁存状态。SMMU ID匹配已�
   预算、OFF不读/ON补样本、预检错误不停止F3；原dispatch/端口/客户端/硬件vsync回归通过。
   LSan仍受本机ptrace限制关闭，fixture对象计数/prepare平衡和guard另外断言。
 - 打包shell语法、两档仅own差异、F3原四档参数保持；旧0121a11 kernel被F4 marker门拒绝，
-  尚未生成新实验boot。底稿`work1/scratch/framebuffer-0181/`含源码、编译和检查结果。
+  实现时尚未生成新实验boot；后续打包和实测分别见第8/9节。底稿`work1/scratch/framebuffer-0181/`含源码、编译和检查结果。
 
 这不替代整内核云构建或真机分配/缓存/SMMU及显示验证。
 
@@ -188,9 +188,79 @@ fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a11-fb-scanout-preflight.im
 
 按第6节亮屏45–60秒/简测输入与亮度/手动OFF20–30秒/ON后10–20秒，导出
 `sweetlog-0121a11-fb-scanout-preflight.bin`。baseline留作故障对照，无需先刷。
-当前尚无本次实机证据；仍只分配池、准备复制样本并读live快照，实际扫描保持ABL，
+打包时尚无本次实机证据（后续实测见第9节）；仍只分配池、准备复制样本并读live快照，实际扫描保持ABL，
 不能计作PD1已接管或承诺画面改善。通过后再依据快照推进受控接管与完成关联。
 
 本次底稿：`work1/scratch/artifact-0121a11-f4/`的`verification.json`、`source-compare.json`、
 `boot-verification.json`、两个verify脚本及`packaging.txt`；历史`artifact-0121a11/`不覆盖。
 CircleCI blob仍`da0b6c0947a66f03491b3a9023590b49665292df`，无驱动改动、push或设备操作。
+
+## 9. 0121a11扫描池预检实测：首段运行通过，新DMA尚未验证
+
+日志`work1/logs/sweetlog-0121a11-fb-scanout-preflight.bin`，SHA256
+`8cc34d8a15178179031ef8f155e348ce84d3d06649a08d63cb5bb5675ddd20cc`。
+有效343538bytes、flush76、未回卷、4561行；371行确认own1/irq2/vsync1。
+用户确认画面、亮度、三键、触摸、手动息屏唤醒“都正常，未见新增问题”。
+
+### 9.1 池及快照
+
+171–172行pool ready和seed成功。两缓冲逻辑范围如下，均16KiB对齐、低于4GiB、互不重叠，
+且不覆盖ABL保留区`[0x9d200000,0x9e400000)`；末地址是逻辑字节范围，不代表页取整后的分配末端。
+
+| 缓冲 | 起始物理地址 | 逻辑末端（不含） | 逻辑字节数 |
+|---|---|---|---|
+| A | `0xc3b30000` | `0xc45e4800` | 11225088 |
+| B | `0xc4668000` | `0xc511c800` | 11225088 |
+
+行距4608、画布1125×2436、crop22,48；合计22450176bytes，约21.41MiB。
+一次清零/复制准备耗时167265us（167.265ms），发生在启动阶段，不能当逐帧复制耗时。
+日志证明seed函数成功返回，不是对新缓冲显示质量的肉眼验证。
+
+866/972/1079/3853行四份快照分别来自frame1/61/121/17929；最后一份在OFF→ON首帧。
+四次地址均`0x9d200000`、stride4320、xy/outxy0、size/out1080×2340、secure0；
+format/unpack/op仍为0x237ff/0x03020001/0x80000000。符合本轮不切扫描的设计。
+INTF1 autorefresh仍`0x80000001`，MDP status0x100/tear status0xb为原始锁存视图，
+不能据这些值证明新提交完成或计算传输完成频率。
+
+### 9.2 SMMU原始非零值的含义
+
+四份SMMU/CB2记录一致：已知ID，SID0x800唯一匹配SMR3=0x84200800，S2CR=0x2，
+TRANS/CB2；CR0=0x2b0406、全局fault0。CBAR=0x1f000、CBA2R=1、SCTLR=0xe0/M0，
+TTBCR/TTBR/MAIR均0。本轮stage1转换未使能，不据TRANS路由名直接要求建立页表。
+
+**CB2 FSR原始值为0x400，FAR为0x0001fdfe:ba6e8cf7。** 0181当前按`cbFault != 0`
+提示WARN，因此有四条`live configuration needs review; no handoff authorized`，不是
+pool/inspect失败。复核LG `drivers/iommu/arm-smmu-regs.h:237–251`：其`FSR_FAULT`
+为0xc00001fe，不含bit10，`0x400 & FSR_FAULT == 0`；`arm-smmu.c`的context handler
+也先按此mask判定是否有fault。故不能将0x400描述为已证实的translation/permission/
+external/stall故障，或把此FAR当有效故障地址；bit10具体含义仍未确认，不能反向声称
+raw状态全零、已清故障或新DMA可达。没有写FSR/RESUME/页表，也没有硬件访问A/B。
+后续接管实现须区分已知fault位和未解释原始位，并明确接管条件；本轮保留WARN和原值，
+不通过悄悄清状态/忽略真实fault来推进。
+
+### 9.3 基本回归与范围
+
+- GIC probe hits1，FB首帧及ON后均hardware active，无FAILED/显式软件回退。
+  九个完整窗口共540.191秒/32358帧，59.871–59.916Hz，加权59.901Hz，dropped全0；
+  OFF前四个、ON后五个完整窗口。这是IRQ/vsync频率，不是新缓冲呈现频率。
+- 3627行OFF暂停frames17928/entries17929，3848行ON重启计数相同；3852行恢复frame17929。
+  OFF内七份电池完成记录跨度至少98.294秒，期间无MDSS计数日志；DCS OFF/ON均rc0，
+  backend分别9/7ms，FB分别10/7ms。无息屏期间新增快照，整启动限四份符合预期。
+- 16条按键事件完整配对：power3/up1/down4对；12条触摸事件，亮度请求含2775→0→2775。
+  用户已确认亮度和输入正常；没有更多亮度档位的日志证据，不补造压力/终止测试结论。
+- 无驱动ERROR、mux隔离、poison、SPMI timeout或kernel panic。47份电池样本、46次refresh
+  全healthy1；末完成796.659秒。全部gauge charging0、电流-132..0mA，启动一次ENABLE；
+  供电来源本轮未另确认，不将采样健康当真实充电，不重开电池任务。
+- USB两次reset均见ACM配置，三条端点WARN，VERIFY(-12)为0；不关闭BUG-001/004。
+  780–783行driverkitd仍sig9/ns1/code7，BUG-005仍存在。用户态既有BindFS缺目录等信息
+  与驱动ERROR分别统计，不能写成整份日志没有error。
+
+**决定：** 首段池分配/四快照采集及正常输入与OFF/ON回归通过，无需补刷own0或重测F3。
+E2已获得实机物理范围与live配置；新缓冲DMA可达性、真实提交/完成、旧读者退出仍未验证。
+下一步以本次证据设计受控单缓冲接管，先核对缓存/格式/裁剪及autorefresh提交与完成关系，
+明确硬件持有内存的生命周期、失败时的停机/保留策略；另设接管档，不改变own1语义。
+随后才实现双缓冲/SwapWait和PD1无ABL首帧/控制台，不能把本次预检视为PD1完成。
+
+底稿`work1/scratch/artifact-0121a11-f4/`新增`analyze-preflight.py`、
+`preflight-log-analysis.json`、`preflight-analysis-summary.json`、`preflight-selected.txt`及解码文本。
+本轮仅分析和记录，无内核/boot参数/CI修改，无新编译、push或设备操作。
