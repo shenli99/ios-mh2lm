@@ -1,6 +1,6 @@
 # F3：硬件 vsync 接入记录
 
-2026-11-09。**0121a11 / 0180 云产物核对及四档 boot 回读通过，待实机验收。**
+2026-11-09。**0121a11 / 0180 GIC115实际投递档实测通过；下一步RD_PTR计帧，F3整体验收未完成。**
 0121a10 / 0179 只读预检已实测通过；0180 新行为默认关闭，尚无实际 IRQ 投递/频率的实机结果。
 F3 整体尚未验收。最新实现、分档与下一步见第8节；第2–7节保留0179阶段记录。
 本步接续已验证正常使用路径的 F2，不重开 BUG-003；BUG-002 随日常使用观察。
@@ -384,3 +384,46 @@ baseline仅备选定位，不默认重跑。持久日志即可，无须专项插
 底稿`work1/scratch/artifact-0121a11/{verify-artifacts.py,verification.json,source-compare.json,
 package.sh,packaging.txt,verify-boots.py,boot-verification.json,mdss.adt}`。
 本轮仅核对产物/打包/文档，无驱动或CircleCI改动、无push/设备操作，F3尚无实机成功结论。
+
+
+## 10. 0121a11 GIC档实测：父线投递通过，伴随旧异常另记
+
+2026-11-10，日志`work1/logs/sweetlog-0121a11-fb-vsync-gic.bin`，SHA256
+`2ecff7f99fdcdba61676b16be307c97307327daf8c50d77ad22746d9a3b6adcc`。
+SWEETLOG v1，有效337146字节，flush36，未回卷，4500行；用户确认没有察觉异常，
+本次要求同时检查日志中不易从界面发现的问题。
+
+367行参数确认mdssirq1/fbvsync0，89行staged mode1；851行
+`GIC probe passed hits=1 mode=1; peripheral untouched`。这证明软件pending经GIC115
+实际送达CPU并被既定callback接收，50ms后的次数/pending/active检查通过；不是只读状态推断。
+未开启外围RD_PTR、未切硬件vsync，不能据此提前验收真实帧率/TE ACK/显示OFF停帧。
+
+显示：3546/3567行DCS28/29分别rc0、14/2ms；亮度2838→0→2838，9条预算内DCS记录均rc0。
+三键共18条（各3对down/up），触摸14条，无驱动[ERROR]、mux隔离/SPMI timeout或kernel panic。
+电池37份样本/36次refresh均healthy1，末样本完成415.454s，事件未永久停止，未观察到BUG-002隔离。
+这仅为正常使用观察，不作BUG-002专项验收。用户无可见异常不等于没有后台问题。
+
+### 同时发现/复核的后台问题
+
+1. **driverkitd被Jetsam终止**：769–772行sig9、reason ns1/code7。实际云源码reason.h:88
+   定义OS_REASON_JETSAM=1；kern_memorystatus.h:290定义PERPROCESSLIMIT=7，确认记录原因是
+   单进程内存上限。上一轮0121a10的792–795行已存在同签名终止，不归为0180新增回归。
+   具体上限/内存增长原因及影响未知，登记[BUG-005](BUGS.md#bug-005driverkitd启动时因单进程内存上限被jetsam终止)。
+2. **USB旧告警/重连风险**：7条WARN（ep0六、ep5一）、7次bus reset。1549/2471行两次
+   ACM配置成功，3215行起后续5次reset未再见ACM配置；可疑但无主机枚举结果，不能仅此
+   确认Windows无法识别。补入BUG-001正常使用记录，不要求另做插拔压力测。
+3. **USB输入遥测仍有两次VERIFY(-12)**：id10/18，3202/3737行；此前3109/3643行已因
+   reasons0x2无输入停充，3210/3745行只保持禁用（step0/reasons0x1），3252/3790行再启充。
+   不是两次从启充态被-12主动关掉，也没有用户报告图标闪烁；按BUG-004已有采样问题补记。
+   不能称充电完全无问题。末段可见charging1和正电流，基础控制未永久失效。
+
+其他启动期BindFS/Pearl/FactoryData缺路径、Jetsam opt-in EINVAL、NVRAM同步NotReady、
+CarKit软链接缺失等，在0121a10亦有对应记录；无证据归因本轮GIC。不在F3内扩大用户态兼容修复。
+
+底稿`work1/scratch/artifact-0121a11/{analyze-gic.py,fb-vsync-gic.txt,gic-log-analysis.json,
+gic-analysis-summary.json,gic-selected.txt}`；用户态退出reason定义已从同轮实际云源码抽出核对。
+
+**下一步：** 同核`boot-16k-0121a11-fb-vsync-rdptr.img`，进系统后保持亮屏至少110秒，
+取得60秒partial0频率/间隔统计，再电源键手动息屏20–30秒/唤醒、简测输入与亮度。
+导出`sweetlog-0121a11-fb-vsync-rdptr.bin`；前端仍为软件vsync，先验收实际TE投递/ACK计帧。
+本轮只分析及记录，无新驱动/CI改动、无需新编译；完整hardware档留待该档结果核对后。

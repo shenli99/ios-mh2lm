@@ -1,6 +1,31 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-11-09, latest)
+## Agent handoff / active work (2026-11-10, latest)
+
+**CURRENT：0121a11 fb-vsync-gic实际投递通过；下一步同核RD_PTR计帧档。**
+日志sweetlog-0121a11-fb-vsync-gic.bin SHA256=2ecff7f99fdcdba61676b16be307c97307327daf8c50d77ad22746d9a3b6adcc；
+有效337146/flush36/未回卷/4500行。用户明确未察觉异常，只要求复核隐藏问题。
+367参数irq1/vsync0；89staged1，851 GIC probe passed hits1/peripheral untouched，证明实际
+GIC115 callback投递及50ms后检查通过；尚未开TE/RD_PTR，不证明Hz/ACK/硬件vsync成功。
+3546/3567实际off/on rc0，14/2ms；亮度2838→0→2838，9预算DCS rc0。18键事件各3对down/up，
+触摸14；37电池样本/36refresh全healthy1，末样本415.454s，事件继续；无驱动ERROR/mux隔离/
+SPMI timeout/kernel panic，BUG-002只正常观察无专项验收。
+隐藏旧问题：driverkitd在769–772 sig9/ns1/code7，核对实际reason.h88/kern_memorystatus.h290
+明确Jetsam单进程内存上限；0121a10 792–795已有同签名，登记BUG-005，具体limit/footprint/
+原因及影响未知，不直接放宽内存策略、不阻塞F3。不是内核panic或已证实GIC回归。
+USB7WARN（ep0六/ep5一）/7reset/2ACM；最后2次配置在1549/2471，后5reset未见ACM配置，
+可疑但无主机反馈不确证枚举失败，补BUG-001。USB VERIFY id10/18两份，之前已reasons2禁充，
+之后step0/reasons1保持禁用，再3252/3790启充；不称两次遥测主动从启充态停充/图标闪烁复现。
+旧BindFS缺路径/NVRAM NotReady/CarKit等与0121a10同类，用户态兼容不扩进F3。
+底稿scratch/artifact-0121a11/{analyze-gic.py,fb-vsync-gic.txt,gic-log-analysis.json,
+gic-analysis-summary.json,gic-selected.txt}；FRAMEBUFFER-VSYNC-F3第10节/BUGS已同步。
+NEXT：fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a11-fb-vsync-rdptr.img。
+进系统亮屏至少110秒（35s延迟接管后留足60s完整统计），手动OFF20–30s/ON，再简测亮度/
+三键/触摸，导出sweetlog-0121a11-fb-vsync-rdptr.bin；此档irq2/vsync0前端仍软件。
+不需新push/编译/重新打包；完整hardware档待rdptr结果后，baseline仅故障定位备用。
+本轮只分析/文档，无驱动/CI/boot变更或设备操作，未push；F3整体未验收。
+
+**以下为历史交接；当前结果与下一步以上段GIC实测为准。**
 
 **CURRENT：0121a11 / 0180云产物与同核四档boot已核对，待真实GIC投递档实测。**
 实现7329197/交接0907868；48源码与0180验证树逐字节一致，含7个改动文件/0178 mux修复；

@@ -1,6 +1,6 @@
 # MH2LM 遗留与回归 Bug 台账
 
-更新：2026-11-09。
+更新：2026-11-10。
 
 这里记录已有功能基本实现后，在后续使用或其他阶段测试中暴露的问题。与当前大目标的实施计划
 独立维护：发现 bug 不自动重开原任务，也不自动插入 framebuffer 的步骤或成为其验收前置。
@@ -18,6 +18,7 @@
 | BUG-002 | SPMI interrupt mux / 电池 / 按键 | drain 收尾 pending 被判永久故障，隔离 group 后失去插线或按键唤醒 | 代码已修复（0178 / 41a0efa）；后续正常使用观察，不安排专项复测 | 电池事件停止、禁充、百分比停留；按键失效后息屏无法唤醒 |
 | BUG-003 | 锁屏 / 充电过渡 / 显示接口 | 插电大充电图标消失后锁屏缺少时间，拔电恢复 | 未修复；按用户要求暂缓 | 锁屏中央时间显示；不阻塞F1架构重构 |
 | BUG-004 | 电池输入采样 / runtime3 | 电脑USB输入波动时，USB快照校验失败与恢复引发反复停充/启充，充电图标闪烁 | 未修复；0121a5两档同链复现，新MDSS后端非必要条件 | 充电控制及UI稳定性 |
+| BUG-005 | 用户态DriverKit / Jetsam | driverkitd启动时因单进程内存上限被终止 | 未修复；0121a10/0121a11同签名，具体上限及触发原因待查 | 用户态DriverKit服务未正常持续运行；当前可见功能影响未确认 |
 
 ## BUG-001：USB 多次插拔后无法识别
 
@@ -241,6 +242,40 @@ BUG-002组隔离，与此处反复停/启充分别记录。本轮USB源类型未
 修复须走charger provider接口，区分输入保护与协议快照，不隐藏UI状态、无条件忽略-12
 或穿透读写寄存器。关闭需同电脑源稳定充电、真实拔插/OV/温度保护仍正常的实机证据。
 
+
+## BUG-005：driverkitd启动时因单进程内存上限被Jetsam终止
+
+**状态：未修复；2026-11-10复核日志时登记，已有旧版本证据，不是已确认0180回归。**
+用户没有察觉本轮画面/输入异常，主动要求检查隐藏问题；发现daemon终止后独立记录，
+不作为F3继续测试的前置修复任务。
+
+**证据与确认原因**
+
+- `sweetlog-0121a11-fb-vsync-gic.bin`，SHA256
+  `2ecff7f99fdcdba61676b16be307c97307327daf8c50d77ad22746d9a3b6adcc`，解码769–772行：
+  `CRASH driverkitd[66] sig 9`，`reason ns 1 code 0x7: (none)`。
+- 上一轮`sweetlog-0121a10-fb-irq-preflight.bin`（SHA见上方伴随记录），792–795行同样
+  `driverkitd[66] sig9/ns1/code7`；0180实际GIC接管不是该现象出现的必要条件。
+- 已核对0121a11实际云XNU源码`bsd/sys/reason.h:88`：OS_REASON_JETSAM=1，
+  `bsd/sys/kern_memorystatus.h:290`：JETSAM_REASON_MEMORY_PERPROCESSLIMIT=7；
+  `bsd/kern/kern_memorystatus.c:4252`也使用该reason创建单进程上限终止原因。
+  属于按单进程内存上限终止（SIGKILL），不能仅看到CRASH或FAR就判越界访问/内核panic。
+
+**影响与未知**
+
+该用户态服务本次未持续正常运行；当前显示/按键/触摸/USB是内核驱动，实测仍有有效事件。
+具体哪些DriverKit用户态功能受影响未核实，不能据“屏幕正常”判无影响，也不能据单进程
+limit原因判整机物理内存耗尽。实际内存上限、当时footprint、限制是否配置不匹配、是否存在
+异常增长均未知。launchd还记录Jetsam opt-in EINVAL，但尚未证明两者的直接因果链。
+
+**后续处理/关闭条件**
+
+独立排期核对用户态crash/Jetsam报告、launchd job内存限制、进程footprint与本内核的memory
+limit兼容路径；不直接全局关闭Jetsam或扩大所有进程限制掩盖原因。关闭需实机证明driverkitd
+可持续运行及相关服务不退化。当前只记录，不增加新一轮设备测试或阻塞显示后续步骤。
+底稿与源码定义位于`work1/scratch/artifact-0121a11/`，详见[F3 GIC实测](FRAMEBUFFER-VSYNC-F3.md#10-0121a11-gic档实测父线投递通过伴随旧异常另记)。
+
+
 ## 维护约定
 
 新问题追加固定编号，至少记录发现版本、现象、影响、证据、已确认项、待核实项与关闭条件。
@@ -254,3 +289,12 @@ id10/17有两份USBIN VERIFY(-12)（3188/3471行），此前已分别step2/reaso
 用户确认无新增问题，未报告充电图标闪烁，不能称完整UI闪烁复现或BUG-004已修。
 另有10条USB端点命令WARN/10次reset/2次ACM配置，不据此认定BUG-001主机枚举失败。
 本轮无mux隔离/SPMI timeout，旧问题独立记录，不追加充电或BUG-002专项测试。
+
+
+**0121a11 / F3真实GIC档伴随记录（2026-11-10）：** 日志SHA见BUG-005。
+7条USB WARN（ep0六/ep5一）、7次bus reset，1549/2471两次ACM配置；3215行起后续5次reset
+未再见ACM配置，作为BUG-001相关观察保留，缺主机枚举反馈，不据此确证枚举失败。
+id10/18 USBIN VERIFY(-12)（3202/3737行）仍出现；3109/3643先因reasons0x2无输入禁充，
+3210/3745为step0/reasons0x1保持禁用，3252/3790重新启充；不是两次-12直接从启充态主动
+停充，不称完整BUG-004图标闪烁复现或已修复。用户明确未察觉异常；37样本/36refresh均
+healthy1，无mux隔离/poison/SPMI timeout/panic，不增BUG-002专项测试。
