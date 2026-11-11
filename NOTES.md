@@ -2,6 +2,50 @@
 
 ## Agent handoff / active work (2026-11-11, latest)
 
+**CURRENT：0186 typed MMCX/MX/CX供电链已实现并本地验证；未实机，D1整体未完成。**
+父提交35f61f1。0186-mh2lm-display-arc-votes.patch SHA256=
+41ced0dbec1edc12065c801804906d97b17f715b0e33bf956af26929ad1bb104，仅改SweetRPMh.h/.cpp。
+原IOService/apps-DRV唯一writer/gate/timer内新增displayPowerInfo/requestDisplayPower/
+copyDisplayPowerStatus；8consumer各有corner票，聚合最高请求。typed Off/LowSVS/SVS/Nominal/
+Turbo，不接受raw地址/mV/selector；ARC资源是cx.lvl/mx.lvl/mmcx.lvl，与四个面板LDO分开。
+按LG regulator/core实际图推导：MMCX ceil所需rawlevel，MX ceil(max(16,selectedMMCX-1))，
+CX display-supply floor48；MX无dropout不向CX传播等值level。选中值是DB raw semantic，
+硬件命令发selector。ARC aux LEu16/<=16项，Off0/严格上升/尾零/类型/地址唯一/范围保护；
+可选entry缺失不影响原LDO绑定，显式ARC请求拒绝，DB整体几何损坏仍拒绝startup。
+**首次接管保护：未知parent先CX/MX各自DB最高selector，MMCX目标ACK后再MX/CX降到需求。**
+不能在未知固件child高档时先降parent。最多五个stage，各自单命令独立fresh完成及清理；
+已拥有正常升档CX->MX->MMCX，降档反向，全部owned-Off再获取不重做guard。
+stage后记录appliedLevels/known/acknowledged，整链后才提交consumer/aggregate；失败不回滚
+parent、不reset/retry，保留确认值并poison，可能保留高guard，不能伪装目标已到达。
+1ms posted读回/100ms stage/500ms总预算，timer推进，不在gate长忙等；整链跨LDO/ARC串行。
+初始/每stage/屏蔽本槽IRQ后首payload前都查整链继承冲突；只动自己的IRQ位和真正空TCS。
+有效票/在途/uncertain显示请求detach=Busy；stop晚事件不MMIO，有写free后原boot retired保护。
+补ID/token耗尽不回绕；corner固定unsigned underlying，非法enum输入定义明确地拒绝。
+**MDSS生命周期尚未调用ARC，默认/boot参数无变化，没有自动投票；0185 upstream仍inherited。**
+不是实机电压/掉电证据，不具NoC/cold GDSC/PHY/PLL/host初始化，不能验收完整D1/面板驱动。
+0186严格应用到0185树，无offset/fuzz，两源码字节一致，114原CI marker保留。真实XNU/KDK
+arm64 RPMh基线/最终及MDSS最终对象通过；RPMh warning1228->1298，新增70全是固定数组
+usage提示，已审索引/边界，不声称零warning。六套实际源码ASan/UBSan+Python ADT通过，
+UBSan halt_on_error，日志无sanitizer报告；RPMh含首次guard/舍入/五阶段各处失败与确认值、
+共享票/反撤/并发LDO、继承冲突/准入后新冲突、11坏ARC entry、stop/retire/exhaustion。
+原显示/clock/FB/DSI/perf/ADT回归通过；LSan ptrace环境仍关，另断言对象/映射/分配/通知归零。
+底稿scratch/framebuffer-0186/{base,edited,verify,prepare-patch.py,compile.py,verification.json,
+warning-counts.json,reference-audit.json,tests.json,test-*.txt,*compile.txt}。实现依据与边界
+见docs/PANEL-ARC-D1.md，资源/clock/PD0/架构/主计划和两份总路线已同步。
+**NEXT实现display RSC/NoC typed带宽路由及其访问准入，再接实际MDSS资源/冷clock/GDSC/link生命周期。**
+LG apps与disp RSC不同：display头af20000/TCSaf21c00/DRV0，sleep1+wake1+active2布局不能
+直接复用apps ACTIVE0/1。_display BCM走rsc_disp，不盲发apps；BCM aux unit/width/VCD、
+14bitXY/VALID/COMMIT及VCD完成，ACV特殊语义另核对。SDE reg/MNOC/LLCC/EBI路径需完整，
+不把单MM0当全部带宽。sde_rscc自身有mdss_core_gdsc及RSCC/AHB/VSYNC依赖：先核对TCS/
+wrapper各自访问条件及bootstrap顺序，不能先盲读未供电RSC。现在没新映射/写display RSC。
+继续真实完整驱动，不回CPU双缓冲前置/单项只读云轮次/旧bug专项；A单缓冲B未提交、30Hz
+复制未改，旧卡顿未定因，0121a13用户改善不能归因本段。暂不需要push，合并可运行批次再说。
+未push/触发CI/操作设备，无新云产物/boot/run ID。CircleCI blob仍
+ da0b6c0947a66f03491b3a9023590b49665292df；USB/按键/触摸/电池/mux未修改。
+
+**以下0185按当时阶段保留，当前以0186为准。**
+
+
 **CURRENT：0185本地温态时钟lease及FB息屏统计修复已实现、本地验证通过；未实机，完整D1未完成。**
 父提交c02e345。新增0185-mh2lm-local-display-clock-leases.patch，SHA256=
 84d019a5201587645f8974254788cedd05a38ffcf2f688300863ed1d4276b059，6份变化源码。

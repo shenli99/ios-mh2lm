@@ -1,5 +1,9 @@
 # D1 资源层：RPMh provider、显示投票与资源 ABI（0184）
 
+0186补充：原provider已有typed MMCX/MX/CX分阶段事务，详见[ARC实现](PANEL-ARC-D1.md)。
+仍无自动投票，MDSS生命周期未调用；下文0184的实机证据仍仅为四路LDO元数据绑定。
+
+
 2026-11-10。本段接在0183命令执行器后，实现电源资源接口和实际TCS状态机；
 **本地验证通过；0121a13实机资源元数据/匹配通过，尚无实机投票证据，D1整体尚未完成。**
 没有改变30Hz复制、没有修复0121a12滑动卡顿，也没有开始面板reset/厂商表初始化。
@@ -36,7 +40,7 @@ provider不保存或回调consumer指针，不持有consumer gate；consumer持�
 provider由ADT的RSC/TCS/locator三段资源映射，严格验证物理地址/长度、ABI、RSC主版本1/2、
 DRV2几何和ncpt3..16；仅用两个ACTIVE TCS，不借用sleep/wake/control槽。
 command DB地址仅来自固件locator，有界低32位、对齐、magic、slave/entry/aux范围和唯一
-VRM地址检查；四个rail地址不能重叠。不扫RAM，不提供任意地址/ARC写接口。
+VRM地址检查；四个rail地址不能重叠。不扫RAM，不提供任意地址写接口。0184只实现VRM；0186增加独立typed ARC链，不开放raw selector。
 
 选槽前检查所有ACTIVE中同resource的继承payload；idle但仍有enable/wait/control也不覆盖。
 只屏蔽本槽IRQ位，payload按voltage→mode→enable写入。完成要求issued+complete、idle，
@@ -95,7 +99,8 @@ PHY0 `0x0ae94400/0x760`。PLL0位于同一窗口+0x500，不再重复映射/写�
 PD0原图的独立clock/GDSC provider在此明确调整为**MDSS内部typed资源模块的唯一所有者**：
 现有MDSS已经拥有GCC/DISPCC，不再另起一个重叠映射的空壳服务。当前仅资源所有权落地，
 0185已补typed本地分支lease、timer获取/撤回与温态GDSC准入，见[时钟模块](PANEL-CLOCK-D1.md)。
-时钟父源/频率、GDSC冷上下电、MMCX与NoC投票仍待实现；
+0186已补MMCX及父供电事务，但未接入MDSS实际调用；
+时钟父源/频率、GDSC冷上下电及NoC投票仍待实现；
 原`dp_clocks_on()`两个状态位检查仍不是acquire或ready证明。
 
 ## 本地验证与下一段

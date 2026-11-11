@@ -1,0 +1,417 @@
+diff --git a/iokit/Kernel/arm/SweetRPMh.cpp b/iokit/Kernel/arm/SweetRPMh.cpp
+--- a/iokit/Kernel/arm/SweetRPMh.cpp
++++ b/iokit/Kernel/arm/SweetRPMh.cpp
+@@ -21,6 +21,8 @@
+ static const SweetRailInfo railLimits[]={
+  {1800,1880,10000,false},{2856,3008,1,false},
+  {1200,1200,1,false},{880,880,1,false}};
++static const char *const displaySupplies[]={"cx.lvl","mx.lvl","mmcx.lvl"};
++static const unsigned displayMinimums[]={0,64,128,256,384};
+ enum { Stride=0x2a0, CommandStride=0x14, IRQEnable=0, IRQStatus=4, IRQClear=8,
+  Wait=0x10, Control=0x14, Status=0x18, Enable=0x1c,
+  Message=0x30, Address=0x34, Data=0x38, CommandStatus=0x3c,
+@@ -29,8 +31,9 @@
+ struct RPMhRequest {
+  unsigned op, rail; uint64_t client, token; SweetRailVote vote;
+  uint64_t *idOut; SweetRailInfo *info; SweetRPMhStatus *status;
++ SweetDisplayPowerInfo *displayInfo; SweetDisplayPowerStatus *displayStatus;
+ };
+-enum { Attach, Detach, Info, Vote, Query, Shutdown };
++enum { Attach, Detach, Info, Vote, Query, Shutdown, DisplayInfo, DisplayVote, DisplayQuery };
+ 
+ uint32_t SweetRPMh::read(vm_offset_t base,uint32_t off)
+ {
+@@ -76,6 +79,188 @@
+  if (matches!=1) return false;
+  for (unsigned r=0;r<rail;++r) if (fAddresses[r]==fAddresses[rail]) return false;
+  return true;
++}
++
++bool SweetRPMh::lookupArc(unsigned supply)
++{
++ uint32_t key[2]={0,0};
++ for (unsigned i=0;i<8 && displaySupplies[supply][i];++i)
++  key[i/4]|=(uint32_t)(uint8_t)displaySupplies[supply][i] << (8*(i%4));
++ unsigned matches=0;
++ for (unsigned i=0;i<8;++i) {
++  uint32_t h=8+16*i; unsigned slave=db16(h);
++  if (!slave) break;
++  uint32_t entries=DBHeader+db16(h+2), aux=DBHeader+db16(h+4);
++  unsigned count=db16(h+6);
++  if (slave<3 || slave>5 || (entries&3) || !range(entries,count*DBEntry) || !range(aux,0)) return false;
++  for (unsigned j=0;j<count;++j) {
++   uint32_t e=entries+DBEntry*j;
++   if (read(fDB,e)!=key[0] || read(fDB,e+4)!=key[1]) continue;
++   uint32_t address=read(fDB,e+16), table=aux+db16(e+22);
++   unsigned bytes=db16(e+20);
++   if (slave!=3 || (address>>16)!=3 || (address&3) || (table&1) ||
++       bytes<4 || bytes>32 || (bytes&1) || !range(table,bytes) || !range(table&~3u,((table&3)+bytes+3)&~3u)) return false;
++   ArcResource resource={}; resource.address=address;
++   bool padding=false;
++   for (unsigned k=0;k<bytes/2;++k) {
++    unsigned level=db16(table+2*k);
++    if (!k) { if (level) return false; }
++    else if (!level) padding=true;
++    else if (padding || level<=resource.levels[k-1]) return false;
++    if (!padding) resource.levels[resource.count++]=level;
++   }
++   if (resource.count<2) return false;
++   fArc[supply]=resource; ++matches;
++  }
++ }
++ if (matches!=1) return false;
++ for (unsigned r=0;r<supply;++r) if (fArc[r].address==fArc[supply].address) return false;
++ return true;
++}
++
++bool SweetRPMh::loadDisplayPower(void)
++{
++ if (!fArcMetadataTried) {
++  fArcMetadataTried=true; fArcAvailable=true;
++  for (unsigned r=0;r<SweetDisplaySupplyCount;++r)
++   if (!lookupArc(r)) { fArcAvailable=false; break; }
++  if (!fArcAvailable)
++   SWEET_LOG_WARN("SWEET RPMH: display ARC chain unavailable/malformed; requests rejected, no fallback\n");
++ }
++ return fArcAvailable;
++}
++
++bool SweetRPMh::displayTargets(SweetDisplayCorner corner,unsigned *selectors)
++{
++ if ((unsigned)corner>=SweetDisplayCornerCount || !fArcAvailable) return false;
++ for (unsigned r=0;r<SweetDisplaySupplyCount;++r) selectors[r]=0;
++ if (corner==SweetDisplayOff) return true;
++ /* LG MMCX has min-dropout=-1 in its level ABI (raw DB level+1).
++  * Select MMCX first, then MX >= selected raw MMCX-1, minimum retention16.
++  * The MX display-supply has no dropout propagation; its CX supply has a
++  * fixed MIN_SVS48 floor. Do not invent a CX=MMCX voltage relationship. */
++ unsigned required=displayMinimums[corner];
++ for (unsigned step=0;step<SweetDisplaySupplyCount;++step) {
++  unsigned r=SweetDisplayMMCX-step;
++  if (r==SweetDisplayMX) {
++   required=fArc[SweetDisplayMMCX].levels[selectors[SweetDisplayMMCX]]-1;
++   if (required<16) required=16;
++  } else if (r==SweetDisplayCX) required=48;
++  unsigned index=1;
++  while (index<fArc[r].count && fArc[r].levels[index]<required) ++index;
++  if (index==fArc[r].count) return false;
++  selectors[r]=index;
++ }
++ return true;
++}
++
++IOReturn SweetRPMh::selectArcTCS(unsigned *selected)
++{
++ int chosen=-1;
++ for (unsigned t=0;t<2;++t) {
++  uint32_t b=t*Stride, enabled=read(fTCS,b+Enable);
++  if (enabled & ~((1u<<fNCPT)-1u)) return kIOReturnIOError;
++  for (unsigned c=0;c<fNCPT;++c) if (enabled&(1u<<c)) {
++   uint32_t address=read(fTCS,b+Address+c*CommandStride);
++   /* Reserve the entire dependency chain, including a later stage's rail. */
++   for (unsigned r=0;r<SweetDisplaySupplyCount;++r)
++    if (address==fArc[r].address) return kIOReturnBusy;
++  }
++  if (chosen<0 && emptyTCS(t)) chosen=(int)t;
++ }
++ if (chosen<0) return kIOReturnBusy;
++ *selected=(unsigned)chosen; return kIOReturnSuccess;
++}
++
++IOReturn SweetRPMh::queueArcStage(void)
++{
++ unsigned chosen=0;
++ IOReturn result=selectArcTCS(&chosen);
++ if (result!=kIOReturnSuccess) return result;
++ uint32_t irq=read(fTCS,IRQEnable);
++ if (irq==~0u || !emptyTCS(chosen)) return kIOReturnBusy;
++ fTCSIndex=chosen; fSavedIRQ=irq;
++ fExecuting=false; fProgress=false; fOperation=fOperationCount=0; fWriteIssued=false;
++ fCommandCount=1; fCommandMask=1;
++ uint32_t b=chosen*Stride, bit=1u<<chosen;
++ const ArcStage &stage=fArcStages[fArcStage];
++ addOperation(IRQEnable,irq&~bit);
++ addOperation(b+Message,WriteACK);
++ addOperation(b+Address,fArc[stage.supply].address);
++ addOperation(b+Data,stage.selector);
++ addOperation(b+Wait,1); addOperation(b+Enable,1);
++ addOperation(b+Control,0); addOperation(b+Control,AMC);
++ fStageDeadline=nowNS()+100000000ULL;
++ fTimer->setTimeoutUS(1); return kIOReturnSuccess;
++}
++
++IOReturn SweetRPMh::beginDisplayPower(unsigned client,SweetDisplayCorner proposal)
++{
++ if (fMode!=2) return kIOReturnNotPermitted;
++ if (fPoisoned) return kIOReturnNotReady;
++ if (fBusy) return kIOReturnBusy;
++ if ((unsigned)proposal>=SweetDisplayCornerCount) return kIOReturnBadArgument;
++ if (!loadDisplayPower()) return kIOReturnNotReady;
++ SweetDisplayCorner aggregate=proposal;
++ for (unsigned i=0;i<8;++i) if (i!=client && fClients[i].id && fClients[i].displayVote>aggregate)
++  aggregate=fClients[i].displayVote;
++ unsigned target[SweetDisplaySupplyCount]={};
++ if (!displayTargets(aggregate,target)) return kIOReturnBadArgument;
++ if (fNextToken==~0ULL) return kIOReturnNoResources;
++ fArcStage=fArcStageCount=0;
++ /* An inherited child may still be at a high corner. First guard unknown
++  * parents at their highest DB-supported selector before changing the child.
++  * Once the child ACKs, lower the guards to its actual requirements. This is
++  * at most five stages, not a retry or a guess about inherited vote levels. */
++ unsigned planned[SweetDisplaySupplyCount]={};
++ for (unsigned r=0;r<SweetDisplaySupplyCount;++r) planned[r]=fArcApplied[r];
++ if (aggregate!=SweetDisplayOff) for (unsigned r=SweetDisplayCX;r<SweetDisplayMMCX;++r)
++  if (!fArcOwned[r]) {
++   planned[r]=fArc[r].count-1;
++   fArcStages[fArcStageCount++]={r,planned[r]};
++  }
++ /* Raises ACK parent->child; lowers ACK child->parent. An empty ledger's OFF
++  * never disables inherited resources. Each stage has independent completion. */
++ for (unsigned r=0;r<SweetDisplaySupplyCount;++r)
++  if (target[r]>planned[r]) {
++   fArcStages[fArcStageCount++]={r,target[r]}; planned[r]=target[r];
++  }
++ for (unsigned step=0;step<SweetDisplaySupplyCount;++step) {
++  unsigned r=SweetDisplayMMCX-step;
++  if (target[r]<planned[r]) fArcStages[fArcStageCount++]={r,target[r]};
++ }
++ if (fArcStageCount) {
++  IOReturn result=queueArcStage();
++  if (result!=kIOReturnSuccess) return result; /* No write/status/token change. */
++ }
++ SweetDisplayPowerStatus status={};
++ status.token=++fNextToken; status.state=SweetRPMhPending; status.corner=aggregate;
++ status.result=kIOReturnSuccess; status.enabled=aggregate!=SweetDisplayOff;
++ for (unsigned r=0;r<SweetDisplaySupplyCount;++r) {
++  status.levels[r]=fArc[r].levels[target[r]];
++  if (fArcOwned[r]) { status.known|=1u<<r; status.appliedLevels[r]=fArc[r].levels[fArcApplied[r]]; }
++ }
++ fClients[client].displayStatus=status;
++ fArcProposal=proposal; fArcNext=aggregate; fArcRequest=true; fClientIndex=client;
++ fBusy=true; fDeadline=nowNS()+500000000ULL;
++ if (!fArcStageCount) finish(kIOReturnSuccess,false);
++ return kIOReturnSuccess;
++}
++
++void SweetRPMh::completeTransaction(void)
++{
++ if (!fArcRequest) { finish(kIOReturnSuccess,false); return; }
++ const ArcStage &stage=fArcStages[fArcStage];
++ unsigned supply=stage.supply;
++ fArcApplied[supply]=stage.selector; fArcOwned[supply]=true;
++ SweetDisplayPowerStatus &status=fClients[fClientIndex].displayStatus;
++ status.acknowledged|=1u<<supply; status.known|=1u<<supply;
++ status.appliedLevels[supply]=fArc[supply].levels[stage.selector];
++ if (++fArcStage==fArcStageCount) { finish(kIOReturnSuccess,false); return; }
++ IOReturn result=queueArcStage();
++ /* Earlier stages already ACKed: retain their ledger and poison on failure.
++  * No automatic rollback may lower a parent after an uncertain child write. */
++ if (result!=kIOReturnSuccess) finish(result,true);
+ }
+ 
+ bool SweetRPMh::mapResources(IOService *provider)
+@@ -165,8 +350,9 @@
+   * ranges; reject constraints that cannot contain the rounded selection. */
+  unsigned rounded=railLimits[rail].minMV+((target.minMV-railLimits[rail].minMV+7)/8)*8;
+  if (rounded>target.maxMV) return kIOReturnBadArgument;
++ if (fNextToken==~0ULL) return kIOReturnNoResources;
+  target.minMV=rounded;
+- fClientIndex=client; fRail=rail; fProposal=proposal; fTarget=target;
++ fArcRequest=false; fClientIndex=client; fRail=rail; fProposal=proposal; fTarget=target;
+  SweetRPMhStatus status={++fNextToken,SweetRPMhComplete,rail,rounded,
+      load>=railLimits[rail].modeThresholdUA ? 7u : 4u,kIOReturnSuccess,target.enabled,false};
+  /* Never disable an inherited rail simply because software has no votes. */
+@@ -204,6 +390,21 @@
+ 
+ void SweetRPMh::finish(IOReturn result,bool uncertain)
+ {
++ if (fArcRequest) {
++  SweetDisplayPowerStatus &s=fClients[fClientIndex].displayStatus;
++  s.result=result; s.uncertain=uncertain;
++  s.state=result==kIOReturnSuccess ? SweetRPMhComplete : SweetRPMhFailed;
++  if (result==kIOReturnSuccess) {
++   fClients[fClientIndex].displayVote=fArcProposal; fArcAggregate=fArcNext;
++   SWEET_LOG_INFO("SWEET RPMH: token=%llu display ARC ACTIVE ACK corner=%u cx=%u mx=%u mmcx=%u mask=%#x; physical state unverified\n",
++       s.token,(unsigned)s.corner,s.levels[0],s.levels[1],s.levels[2],s.acknowledged);
++  } else {
++   fPoisoned|=uncertain;
++   SWEET_LOG_ERROR("SWEET RPMH: token=%llu display ARC failed rc=%#x acked=%#x uncertain=%u; votes retained, no rollback/reset\n",
++       s.token,(unsigned)result,s.acknowledged,uncertain);
++  }
++  fBusy=false; fTimer->cancelTimeout(); return;
++ }
+  SweetRPMhStatus &s=fClients[fClientIndex].status;
+  s.result=result; s.uncertain=uncertain;
+  s.state=result==kIOReturnSuccess ? SweetRPMhComplete : SweetRPMhFailed;
+@@ -221,7 +422,7 @@
+ {
+  if (!fAccepting || !fBusy) return;
+  uint64_t now=nowNS(); uint32_t b=fTCSIndex*Stride, bit=1u<<fTCSIndex;
+- if (now>=fDeadline) { finish(kIOReturnTimeout,true); return; }
++ if (now>=fDeadline || (fArcRequest && now>=fStageDeadline)) { finish(kIOReturnTimeout,true); return; }
+  /* Bounded fixed operation count. A posted write not yet visible resumes on
+   * the timer, never delay()/sleep or completion busy-wait inside the gate. */
+  while (fOperation<fOperationCount) {
+@@ -229,6 +430,13 @@
+   if (!fWriteIssued) {
+    /* Recheck ownership after masking and before first payload write. */
+    if (fOperation==1 && !fExecuting && !emptyTCS(fTCSIndex)) { finish(kIOReturnBusy,true); return; }
++   if (fOperation==1 && !fExecuting && fArcRequest) {
++    unsigned selected=0;
++    IOReturn result=selectArcTCS(&selected);
++    if (result!=kIOReturnSuccess || selected!=fTCSIndex) {
++     finish(result==kIOReturnSuccess ? kIOReturnBusy : result,true); return;
++    }
++   }
+    if (op.offset==IRQEnable) {
+     uint32_t current=read(fTCS,IRQEnable);
+     if (current==~0u) { finish(kIOReturnIOError,fEverWritten); return; }
+@@ -250,7 +458,7 @@
+    * a fresh completion. No stale command status can bypass this phase. */
+   fOperation=fOperationCount=0; fTimer->setTimeoutUS(100); return;
+  }
+- if (fOperationCount) { finish(kIOReturnSuccess,false); return; }
++ if (fOperationCount) { completeTransaction(); return; }
+  uint32_t irq=read(fTCS,IRQStatus), idle=read(fTCS,b+Status);
+  bool complete=true;
+  for (unsigned c=0;c<fCommandCount;++c) {
+@@ -282,7 +490,16 @@
+  }
+  if (!self->fAccepting || self->isInactive()) return kIOReturnNotReady;
+  if (r.op==Info) { *r.info=railLimits[r.rail]; r.info->available=true; return kIOReturnSuccess; }
++ if (r.op==DisplayInfo) {
++  *r.displayInfo={}; r.displayInfo->available=self->loadDisplayPower();
++  for (unsigned c=0;c<SweetDisplayCornerCount;++c) {
++   unsigned selectors[SweetDisplaySupplyCount]={};
++   r.displayInfo->supported[c]=self->displayTargets((SweetDisplayCorner)c,selectors);
++  }
++  return kIOReturnSuccess;
++ }
+  if (r.op==Attach) {
++  if (self->fNextClient==~0ULL) return kIOReturnNoResources;
+   for (unsigned i=0;i<8;++i) if (!self->fClients[i].id) {
+    self->fClients[i]={}; self->fClients[i].id=++self->fNextClient;
+    *r.idOut=self->fClients[i].id; return kIOReturnSuccess;
+@@ -293,11 +510,21 @@
+   if (r.op==Detach) {
+    if (self->fBusy && self->fClientIndex==i) return kIOReturnBusy;
+    for (unsigned rail=0;rail<SweetRailCount;++rail) if (self->fClients[i].votes[rail].enabled) return kIOReturnBusy;
++   if (self->fClients[i].displayVote!=SweetDisplayOff || self->fClients[i].displayStatus.uncertain) return kIOReturnBusy;
+    self->fClients[i]={}; return kIOReturnSuccess;
+   }
+   if (r.op==Query) {
+    if (!r.token || self->fClients[i].status.token!=r.token) return kIOReturnNotFound;
+    *r.status=self->fClients[i].status; return kIOReturnSuccess;
++  }
++  if (r.op==DisplayQuery) {
++   if (!r.token || self->fClients[i].displayStatus.token!=r.token) return kIOReturnNotFound;
++   *r.displayStatus=self->fClients[i].displayStatus; return kIOReturnSuccess;
++  }
++  if (r.op==DisplayVote) {
++   IOReturn result=self->beginDisplayPower(i,(SweetDisplayCorner)r.rail);
++   if (result==kIOReturnSuccess) *r.idOut=self->fClients[i].displayStatus.token;
++   return result;
+   }
+   IOReturn result=self->begin(i,r.rail,r.vote);
+   if (result==kIOReturnSuccess) *r.idOut=self->fClients[i].status.token;
+@@ -316,6 +543,12 @@
+ { if ((unsigned)rail>=SweetRailCount || !token) return kIOReturnBadArgument; *token=0; RPMhRequest r={}; r.op=Vote; r.client=id; r.rail=rail; r.vote=vote; r.idOut=token; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+ IOReturn SweetRPMh::copyStatus(uint64_t id,uint64_t token,SweetRPMhStatus *status)
+ { if (!status) return kIOReturnBadArgument; RPMhRequest r={}; r.op=Query; r.client=id; r.token=token; r.status=status; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetRPMh::displayPowerInfo(SweetDisplayPowerInfo *info)
++{ if (!info) return kIOReturnBadArgument; *info={}; RPMhRequest r={}; r.op=DisplayInfo; r.displayInfo=info; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetRPMh::requestDisplayPower(uint64_t id,SweetDisplayCorner corner,uint64_t *token)
++{ if (!token) return kIOReturnBadArgument; *token=0; if ((unsigned)corner>=SweetDisplayCornerCount) return kIOReturnBadArgument; RPMhRequest r={}; r.op=DisplayVote; r.client=id; r.rail=(unsigned)corner; r.idOut=token; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetRPMh::copyDisplayPowerStatus(uint64_t id,uint64_t token,SweetDisplayPowerStatus *status)
++{ if (!status) return kIOReturnBadArgument; RPMhRequest r={}; r.op=DisplayQuery; r.client=id; r.token=token; r.displayStatus=status; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+ 
+ void SweetRPMh::shutdown(void)
+ {
+diff --git a/iokit/Kernel/arm/SweetRPMh.h b/iokit/Kernel/arm/SweetRPMh.h
+--- a/iokit/Kernel/arm/SweetRPMh.h
++++ b/iokit/Kernel/arm/SweetRPMh.h
+@@ -20,6 +20,26 @@
+  bool enabled, uncertain;
+ };
+ 
++/* Semantic display corners, never millivolts or caller-supplied ARC indices.
++ * The provider derives MX/CX dependencies from the LG SM8150 supply graph. */
++enum SweetDisplayCorner : unsigned { SweetDisplayOff, SweetDisplayLowSVS, SweetDisplaySVS,
++ SweetDisplayNominal, SweetDisplayTurbo, SweetDisplayCornerCount };
++enum SweetDisplaySupply { SweetDisplayCX, SweetDisplayMX, SweetDisplayMMCX,
++ SweetDisplaySupplyCount };
++struct SweetDisplayPowerInfo {
++ bool available, supported[SweetDisplayCornerCount];
++};
++struct SweetDisplayPowerStatus {
++ uint64_t token;
++ unsigned state;
++ SweetDisplayCorner corner; /* Aggregate requested corner, not a clock rate. */
++ IOReturn result;
++ bool enabled, uncertain;
++ unsigned levels[SweetDisplaySupplyCount]; /* Selected raw DB semantic levels. */
++ unsigned acknowledged; /* Supplies ACKed in this request; not voltage proof. */
++ unsigned appliedLevels[SweetDisplaySupplyCount], known; /* Last confirmed votes. */
++};
++
+ class SweetRPMh : public IOService {
+  OSDeclareDefaultStructors(SweetRPMh);
+  IOWorkLoop *fLoop;
+@@ -30,7 +50,10 @@
+  unsigned fDBSize, fNCPT, fMode;
+  uint32_t fAddresses[SweetRailCount];
+  bool fGateAdded, fTimerAdded, fAccepting, fClaimed, fEverWritten, fPoisoned;
+- struct Client { uint64_t id; SweetRailVote votes[SweetRailCount]; SweetRPMhStatus status; };
++ struct Client {
++  uint64_t id; SweetRailVote votes[SweetRailCount]; SweetRPMhStatus status;
++  SweetDisplayCorner displayVote; SweetDisplayPowerStatus displayStatus;
++ };
+  Client fClients[8];
+  SweetRailVote fAggregate[SweetRailCount];
+  bool fOwned[SweetRailCount];
+@@ -41,12 +64,29 @@
+  SweetRailVote fProposal, fTarget;
+  struct Operation { uint32_t offset, value; bool w1c; };
+  Operation fOperations[20];
++ struct ArcResource { uint32_t address; unsigned count, levels[16]; };
++ ArcResource fArc[SweetDisplaySupplyCount];
++ bool fArcMetadataTried, fArcAvailable, fArcRequest;
++ bool fArcOwned[SweetDisplaySupplyCount];
++ unsigned fArcApplied[SweetDisplaySupplyCount];
++ struct ArcStage { unsigned supply, selector; };
++ ArcStage fArcStages[5]; /* Two inherited-parent guards + up to three targets. */
++ unsigned fArcStage, fArcStageCount;
++ SweetDisplayCorner fArcProposal, fArcAggregate, fArcNext;
++ uint64_t fStageDeadline;
+  static uint32_t read(vm_offset_t,uint32_t);
+  static void write(vm_offset_t,uint32_t,uint32_t);
+  static uint64_t nowNS(void);
+  uint16_t db16(uint32_t);
+  bool range(uint32_t,uint32_t);
+  bool lookup(unsigned);
++ bool lookupArc(unsigned);
++ bool loadDisplayPower(void);
++ bool displayTargets(SweetDisplayCorner,unsigned *);
++ IOReturn beginDisplayPower(unsigned,SweetDisplayCorner);
++ IOReturn selectArcTCS(unsigned *);
++ IOReturn queueArcStage(void);
++ void completeTransaction(void);
+  bool mapResources(IOService *);
+  bool emptyTCS(unsigned);
+  IOReturn begin(unsigned,unsigned,const SweetRailVote &);
+@@ -72,6 +112,15 @@
+   * all clients; Busy is explicit, no overwrite, hidden retry or fallback. */
+  IOReturn requestVote(uint64_t,SweetRail,const SweetRailVote &,uint64_t *);
+  IOReturn copyStatus(uint64_t,uint64_t,SweetRPMhStatus *);
++ /* Same apps-DRV owner, gate and timer as LDO votes. Metadata is lazy/read-only;
++  * missing ARC resources do not break the existing four-rail/default binding.
++  * Mode 2 permits requests but never automatically acquires a display vote.
++  * Caller must lower dependent clock rates before lowering the corner; last
++  * withdrawal requires stopping DMA/link and collapsing dependent domains.
++  * NoC votes and cold clock/GDSC readiness are separate. */
++ IOReturn displayPowerInfo(SweetDisplayPowerInfo *);
++ IOReturn requestDisplayPower(uint64_t,SweetDisplayCorner,uint64_t *);
++ IOReturn copyDisplayPowerStatus(uint64_t,uint64_t,SweetDisplayPowerStatus *);
+ };
+ 
+ /* Matching only retain/withdraw + queues owner event. stop outside owner gate.

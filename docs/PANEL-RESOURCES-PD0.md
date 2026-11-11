@@ -6,7 +6,8 @@ typed投票与MDSS匹配绑定，以及v1资源ABI，详见[资源层实现](PAN
 自有A接管/唤醒通过，用户反馈滑动有所改善、无新增异常，见[本批记录](PANEL-D1-0121A13.md)。
 第5节的独立clock/GDSC provider修订为MDSS内部typed资源模块（硬件独占映射不拆出第二writer）；
 0185已补MDSS内部温态本地时钟lease与分支控制，见[时钟模块](PANEL-CLOCK-D1.md)；
-父源/频率、GDSC冷控制及MMCX/NoC仍待实现，不将映射/继承状态当独立供电就绪。
+0186已补RPMh内MMCX及MX/CX事务，见[ARC实现](PANEL-ARC-D1.md)；尚未接入MDSS生命周期。
+父源/频率、GDSC冷控制、NoC/display RSC仍待实现，不将映射/继承状态当独立供电就绪。
 
 **执行顺序更新：** 用户要求完整驱动优先，拷贝双缓冲不再是PD2/PD3前置；E1/E4–E8
 仍只阻塞对应硬件写入，不阻塞先实现typed接口、资源所有者和离线可验证的命令执行器。
@@ -75,13 +76,13 @@ OFF `8b0def2d5a08f9534d8c9efdbbdbbba584387d1cfaecf9bdff50a3c0d71a5b95`。
 
 | 用途 | 源码资源/consumer要求 | 访问与依赖设计 | 现有实现 |
 |---|---|---|---|
-| 面板 VDDI | PM8150 L14 / `ldoa14`，1.8V、enable load62000µA、post-on20ms | RPMh regulator lease；共享资源按consumer合并投票 | 无面板lease |
-| 面板 VPNL | PM8150 L17 / `ldoa17`，3.0V、enable load857000µA | 与VDDI按供电表顺序启用，反序释放；provider校验可表示电压 | 无面板lease |
-| DSI host analog | PM8150L L3 / `ldoc3`，1.2V、21800µA | host/core资源阶段申请，不与面板vddi混为同一状态 | 无显示lease |
-| PHY analog | PM8150 L5 / `ldoa5`，0.88V、36000µA | 先有供电/接口时钟，才可复位/配置PHY | 无显示lease |
-| 核心电压级别 | `mmcx.lvl` / `VDD_MMCX_LEVEL`及相关父依赖 | 通过command DB取得等级表；选择与实际频率相容的corner，并保留其他consumer投票 | 有底层ARC helper，无显示频率/lease管理 |
-| MDSS电源域 | `mdss_core_gdsc`，0x0af03000 | 时钟/电源域provider拥有MMIO；按ready/超时执行，不由AppleCLCD写 | 当前不控制 |
-| AHB/AXI/MDP/DSI clocks | GCC DISP AHB/HF/SF AXI；DISPCC AHB/MDP/VSYNC/DSI0 byte、byte-intf、pixel、escape等 | provider显式设置父源、频率、分支和引用；实际需要的LUT/其他分支按pipeline确定 | 当前只检查部分门控位 |
+| 面板 VDDI | PM8150 L14 / `ldoa14`，1.8V、enable load62000µA、post-on20ms | RPMh regulator lease；共享资源按consumer合并投票 | 0184 typed LDO票已实现，面板生命周期未调用 |
+| 面板 VPNL | PM8150 L17 / `ldoa17`，3.0V、enable load857000µA | 与VDDI按供电表顺序启用，反序释放；provider校验可表示电压 | 0184 typed LDO票已实现，面板生命周期未调用 |
+| DSI host analog | PM8150L L3 / `ldoc3`，1.2V、21800µA | host/core资源阶段申请，不与面板vddi混为同一状态 | 0184 typed LDO票已实现，host/PHY生命周期未调用 |
+| PHY analog | PM8150 L5 / `ldoa5`，0.88V、36000µA | 先有供电/接口时钟，才可复位/配置PHY | 0184 typed LDO票已实现，host/PHY生命周期未调用 |
+| 核心电压级别 | `mmcx.lvl` / `VDD_MMCX_LEVEL`及相关父依赖 | 通过command DB取得等级表；选择与实际频率相容的corner，并保留其他consumer投票 | 0186 typed聚合/父依赖/分阶段ACK已本地实现；频率约束及MDSS实际调用未接入 |
+| MDSS电源域 | `mdss_core_gdsc`，0x0af03000 | 时钟/电源域provider拥有MMIO；按ready/超时执行，不由AppleCLCD写 | 0185只作温态准入，不写GDSCR |
+| AHB/AXI/MDP/DSI clocks | GCC DISP AHB/HF/SF AXI；DISPCC AHB/MDP/VSYNC/DSI0 byte、byte-intf、pixel、escape等 | provider显式设置父源、频率、分支和引用；实际需要的LUT/其他分支按pipeline确定 | 0185温态分支lease已实现；非XO父源/改频仍未控制 |
 | 互连/带宽 | LG `sde_power_handle.c` 的reg/data bus vote及RSC路径 | 不将“时钟开”当作DDR/NoC就绪；PD2列明最小带宽/请求与撤销方法 | 无显示资源管理接口 |
 
 电源数值来自 consumer table；例如 L17 provider 的初始化电压为2.856V，不等于面板
@@ -228,5 +229,6 @@ ON/OFF逐包长度/type/等待、表SHA；另有从0121a11真实buildtree提取�
 
 0183已实现D1的[命令基础/可撤销执行/性能计时](PANEL-COMMAND-D1.md)并本地验证；
 0184已实现资源ABI、RPMh统一所有者/typed投票及绑定；0121a13元数据/绑定实测通过。
-0185补本地温态时钟引用与分支控制；冷态clock-GDSC/MMCX/NoC及PHY/PLL初始化仍缺，
+0185补本地温态时钟引用与分支控制；0186补typed ARC供电事务，尚未接入MDSS调用；
+冷态clock-GDSC/NoC及PHY/PLL初始化仍缺，
 不能将窗口映射当就绪或将本轮当实机投票验证。

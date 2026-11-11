@@ -1,5 +1,11 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0186显示供电增量（本地验证通过，未实机投票）：** 原SweetRPMh内已加入typed MMCX及MX/CX父供电链，
+与LDO共用唯一apps-DRV/gate/timer；逐阶段ACK、共享票聚合、反向撤票与部分失败保留账本。
+没有自动投票或默认参数变化；MDSS生命周期尚未调用，NoC/display RSC及冷GDSC/PHY/PLL/host仍待实现，
+D1未整体完成。见[ARC实现与LG依据](PANEL-ARC-D1.md)。不为本段单独要求push或刷机。
+
+
 **0185本地时钟增量（本地验证通过，未实机启用）：** SweetMDSS内部已加入typed本地分支lease、
 共享引用、token、timer完成/超时和停止保护；温态校验继承GDSC，默认关闭。
 仅对已确认XO父源的关闭分支支持恢复/撤回，既有enable不关；没有MMCX/NoC票、GDSC冷上下电、
