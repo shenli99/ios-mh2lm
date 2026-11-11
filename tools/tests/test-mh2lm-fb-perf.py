@@ -42,8 +42,24 @@ int main(){
  assert(f->fPerf.pending.maxNS>=f->fPerf.latest.maxNS&&f->fPerf.copy.totalNS>0);
  f->swap(rec);AppleCLCD::vsyncFired(f,f->fVsync);
  assert(f->fPerf.interval.count==1&&f->fPerf.copy.count==2&&f->fPerf.bytes==128);
- auto bytes=f->fPerf.bytes;f->fPowerOff=true;AppleCLCD::vsyncFired(f,f->fVsync);
- assert(!f->fPerf.lastPresentNS&&f->fPerf.bytes==bytes);f->fPowerOff=false;
+ // Real API power transition, with NO vsync callback while OFF. Pending
+ // swap age deliberately survives; present interval must not include OFF.
+ auto bytes=f->fPerf.bytes;f->swap(rec);
+ auto pendingFirst=f->fPerf.firstPendingNS,pendingLast=f->fPerf.latestPendingNS;
+ assert(f->fPerf.lastPresentNS&&pendingFirst&&pendingLast);
+ f->fHardwareVsyncRequested=true;
+ assert(f->requestPanelPower(true)==kIOReturnSuccess);
+ assert(!f->fPerf.lastPresentNS&&f->fPerf.bytes==bytes);
+ assert(f->fPerf.firstPendingNS==pendingFirst&&f->fPerf.latestPendingNS==pendingLast);
+ auto intervalCount=f->fPerf.interval.count;
+ f->fPerf.nextReportNS=fakeTicks*1000+200000000000ULL;
+ fakeTicks+=90000000; // OFF: no timer or IRQ callback
+ assert(f->requestPanelPower(false)==kIOReturnSuccess&&!f->fPerf.lastPresentNS);
+ f->fHardwareVsyncRequested=false;
+ AppleCLCD::vsyncFired(f,f->fVsync);
+ assert(f->fPerf.interval.count==intervalCount&&f->fPerf.lastPresentNS);
+ assert(f->fPerf.pending.maxNS>=90000000000ULL); // retained pending includes OFF
+ assert(!f->fPerf.firstPendingNS&&!f->fPerf.latestPendingNS);
  f->reportPerf(f->fPerf.nextReportNS);assert(!f->fPerf.copy.count&&!f->fPerf.bytes&&!f->fPerf.swaps);
  // Disabled mode must avoid timestamps/accounting entirely.
  f->fPerf.enabled=false;auto ticks=fakeTicks;f->swap(rec);f->present(rec);

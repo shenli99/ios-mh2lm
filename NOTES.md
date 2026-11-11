@@ -1,6 +1,47 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-11-10, latest)
+## Agent handoff / active work (2026-11-11, latest)
+
+**CURRENT：0185本地温态时钟lease及FB息屏统计修复已实现、本地验证通过；未实机，完整D1未完成。**
+父提交c02e345。新增0185-mh2lm-local-display-clock-leases.patch，SHA256=
+84d019a5201587645f8974254788cedd05a38ffcf2f688300863ed1d4276b059，6份变化源码。
+SweetMDSSClock.inc为现有MDSS内部typed模块，无重叠MMIO/provider空壳/C实例桥；沿同一
+workloop/gate，retain(Core/DSI0)/status/release、四槽单调token、每分支引用、timer推进。
+原子writer所有权字无实例指针；写过的实例free后retired，防止同boot丢账本重建；无写可重建。
+分支AHB2080/root22bc、MDP200c/20c8、VSYNC2024/20f8、ESC2038/2148、BYTE2028/2110、
+INTF202c/2110+div2128、PCLK2004/2098，保存CFG/MND/divider。只恢复明确XO/div1关闭分支；
+非XO/PHY父源只保留已运行配置。继承enable绝不关闭；最后引用关自己新增分支前核实TE/auto/
+IRQIdle/DSI DMA-MDP空闲及无scanout/DSI过渡，消费者不能给布尔idle绕过。写读回不算完成，
+独立CLK_OFF状态确认；100us timer、单段10ms/请求200ms，无gate内长等待。
+GCC AHB按LG critical/HWCG保留，HF AXI须运行；config MMIO准入通过后才读GDSCR3000，
+PWR_ON1且SW_COLLAPSE/HW_CONTROL/SW_OVERRIDE全0才接收；不写GDSCR，不reset/cold enable。
+故障/timeout/源漂移关闭后续写，保留已改分支；stop取消源/标Stopped而不假定DMA退出关钟。
+sweetdisplayclocks默认0；1要求sweetdisplayresources2/v1 ADT，MDSS给DSI0获取实际boot lease。
+原亮度/DCS28/29/DSI/scanout在新模式检查lease，不就绪显式拒绝；没有静默转旧写路径。
+**上游MMCX/NoC/GDSC/非XO父源仍继承，不是完整供电/冷启动能力。** 新模式未加入boot矩阵，
+没有要求单段云编译/刷机；旧0121a13 resource1参数不受新clock模块影响。
+FB修复requestPanelPower实际转换清lastPresentNS，OFF没有vsync回调也不会混入CPUinterval；
+first/latestPending不清，保留待提交语义。没有改变30Hz/复制/屏障或修复已定因的卡顿。
+0185严格重放到0184验证树、无offset/fuzz、6源码字节一致、114原CI源码marker保留。
+真实XNU/KDK arm64 MDSS/FB基线和最终对象都编译通过；新增42条固定数组usage warning
+已核对索引和状态范围，FB告警不增，不声称零warning。六套ASan/UBSan测试及ADT检查全部通过：clock/
+display-service/framebuffer-service/DSI/RPMh/FBperf及ADT（ADT为Python检查）。clock含16准入
+错误/重复writer/分配失败/四token/引用/独立完成/关钟busy/源漂移/posted超时/stop晚事件/retire，
+实际DCS/电源/DSI拒绝不就绪；FBperf走真实OFF/ON，期间无vsync，interval排除OFF且pending保留。
+LSan受ptrace环境限制关闭，另断言对象/映射/通知/分配归零。没有实机时钟或投票新证据。
+底稿scratch/framebuffer-0185/{base,edited,verify,prepare-patch.py,compile.py,verification.json,
+warning-counts.json,reference-audit.json,tests.json,test-*.txt,*compile.txt}；实现/边界见
+ docs/PANEL-CLOCK-D1.md，架构/PD/面板主计划/总路线/0121a13统计状态已同步。
+**NEXT核对并实现真正MMCX/NoC上游依赖，再完成冷态clock/GDSC及PHY/PLL/host控制。**
+LG mmcx为sm8150-regulator.dtsi的mmcx.lvl，不是四个LDO；sm8150-bus.dtsi还分apps/display
+BCM及rsc_disp路由，不能把所有BCM盲发apps-DRV。下一段先核对DB资源类型/aux与RSC目标，
+再接实际typed投票/引用；不要以物理运行位替代拥有的上游lease。确认profile/reset/完整ONOFF
+接后续D2，不再回到CPU双缓冲前置/独立只读探针/旧bug重测。本段暂不要求push，合并可运行
+驱动批次再通知用户；未push/启动CI/设备操作，无新云产物/CI run ID/boot。
+CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df；USB/充电/按键/触摸/mux未修改。
+
+**以下为0121a13日志阶段交接，最新代码进度以上段0185为准。**
+
 
 
 **CURRENT：0121a13主档资源绑定、既有扫描接管/OFFON实测通过；用户反馈滑动有所改善，全部常用操作无新增异常。**

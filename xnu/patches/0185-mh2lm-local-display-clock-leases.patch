@@ -1,0 +1,486 @@
+diff --git a/iokit/Kernel/arm/SweetDisplayClock.h b/iokit/Kernel/arm/SweetDisplayClock.h
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetDisplayClock.h
+@@ -0,0 +1,18 @@
++/* MDSS-internal clock leases. No MMIO addresses in the caller API.
++ * Warm retention only: upstream MMCX/NoC and non-XO parents remain inherited.
++ * This interface grants no right to reset/collapse/reprogram a display domain.
++ */
++#ifndef SWEET_DISPLAY_CLOCK_H
++#define SWEET_DISPLAY_CLOCK_H
++#include <stdint.h>
++enum SweetClockUse { SweetClockCore, SweetClockDSI0, SweetClockUseCount };
++enum SweetClockState { SweetClockUnused, SweetClockPending, SweetClockHeld,
++ SweetClockReleasing, SweetClockReleased, SweetClockFailed, SweetClockStopped };
++enum { SweetClockCount=7 };
++struct SweetClockLease {
++ uint64_t token;
++ unsigned mask, state;
++ int result;
++ bool inheritedUpstream, uncertain;
++};
++#endif
+diff --git a/iokit/Kernel/arm/SweetFBService.inc b/iokit/Kernel/arm/SweetFBService.inc
+--- a/iokit/Kernel/arm/SweetFBService.inc
++++ b/iokit/Kernel/arm/SweetFBService.inc
+@@ -231,6 +231,7 @@
+  uint64_t start=mach_absolute_time(), elapsed;
+  bool changed=fPowerOff!=off;
+  if (changed && !off && fOwnScanoutPreflight) fScanoutAuditResume=true;
++ if (changed && fPerf.enabled) fPerf.lastPresentNS=0; /* OFF may suppress every vsync callback. */
+  fPowerOff=off; /* stop presenting before sending 28; keep latest pending swap */
+  if (fHardwareVsyncRequested) {
+   fHardwareVsyncActive=false;
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -9,6 +9,7 @@
+ #include "SweetDisplayBackend.h"
+ #include "SweetScanoutPool.h"
+ #include "SweetRPMh.h"
++#include "SweetDisplayClock.h"
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOCommandGate.h>
+ #include <IOKit/IOTimerEventSource.h>
+@@ -214,6 +215,31 @@
+  SweetRPMhClient *fRPMhClient;
+  SweetRPMh *fRPMh;
+  uint64_t fRPMhConsumer;
++ unsigned fDisplayResourceMode;
++ IOTimerEventSource *fClockTimer;
++ bool fClockTimerAdded, fClockEnabled, fClockClaimed, fClockTouched, fClockFault;
++ uint64_t fClockNextToken, fClockBootToken, fClockDeadline, fClockWaitDeadline;
++ SweetClockLease fClockLeases[4];
++ unsigned fClockReferences[SweetClockCount], fClockOwnedMask, fClockKnownMask;
++ uint32_t fClockParents[SweetClockCount][6];
++ unsigned fClockOperation, fClockCursor;
++ bool fClockReleasing, fClockWaiting;
++ bool setupLocalClocks(void);
++ bool clockPrerequisites(void);
++ bool clockParent(unsigned,uint32_t [6],bool = true);
++ bool clockCanGate(void);
++ bool clockBusy(void) const;
++ bool localClocksReady(void);
++ IOReturn retainLocalClocks(SweetClockUse,uint64_t *);
++ IOReturn releaseLocalClocks(uint64_t);
++ IOReturn localClockStatus(uint64_t,SweetClockLease *);
++ static IOReturn clockRetainAction(OSObject *,void *,void *,void *,void *);
++ static IOReturn clockReleaseAction(OSObject *,void *,void *,void *,void *);
++ static IOReturn clockStatusAction(OSObject *,void *,void *,void *,void *);
++ static void clockTimerAction(OSObject *,IOTimerEventSource *);
++ void advanceLocalClocks(void);
++ void finishLocalClocks(IOReturn);
++ void stopLocalClocks(void);
+  bool setupDisplayResources(IOService *);
+  static void resourcesChanged(OSObject *);
+  void closeDisplayResources(void);
+@@ -322,6 +348,7 @@
+  setProperty("SweetDisplayInterruptEnabled",false);
+  setupIrqProbe(provider);
+  setupIRQ(provider);
++ if (!setupLocalClocks()) return false;
+  SWEET_LOG_INFO("SWEET MDSS: F1a v1 IOService backend; ABL scanout unchanged\n");
+  registerService();
+  return true;
+@@ -345,11 +372,12 @@
+  if (!fMaps[12] || fMaps[12]->getPhysicalAddress()!=0x0ae94400 || fMaps[12]->getLength()!=0x760) {
+   SWEET_LOG_ERROR("SWEET MDSS: PHY/PLL window mismatch\n"); return false;
+  }
+- /* No read of newly mapped PHY/GDSC until explicit clock acquisition exists. */
++ fDisplayResourceMode=(unsigned)mode;
++ /* Merely mapping never reads the PHY or changes the domain. */
+  fRPMhClient=SweetRPMhClient::withOwner(this,fLoop,resourcesChanged);
+  if (!fRPMhClient || !fRPMhClient->watch()) return false;
+  setProperty("SweetDisplayResourceABI",1ULL,32);
+- setProperty("SweetDisplayClockOwnership","MDSS: acquisition not implemented");
++ setProperty("SweetDisplayClockOwnership","MDSS: local warm leases opt-in; upstream votes inherited");
+  return true;
+ }
+ 
+@@ -500,7 +528,7 @@
+ IOReturn
+ SweetMDSS::panelCommand(bool on)
+ {
+- if (!dp_clocks_on()) return kIOReturnNotReady;
++ if (!dp_clocks_on() || (fClockEnabled && !localClocksReady())) return kIOReturnNotReady;
+  /* LG R66456 PV: dtype05, last1, VC0, ack0, LP. Qualcomm's embedded
+   * short header is [DCS, 0, dtype, last<<7], not a long packet payload.
+   * dp_dcs_write already selects embedded/LP (DMA bits28/26). */
+@@ -519,6 +547,7 @@
+  if (self->dsiBusy()) return kIOReturnBusy;
+  if (self->fDsiPoisoned) return kIOReturnNotReady;
+  if (!self->fPanelPowerEnabled) return kIOReturnUnsupported;
++ if (self->fClockEnabled && !self->localClocksReady()) return kIOReturnNotReady;
+  /* A failed transaction may have reached the DDIC. Stop sending new OFFs
+   * after any fault, but never suppress a needed ON/recovery request. This
+   * path has its own state, independent of the brightness failure budget. */
+@@ -569,6 +598,7 @@
+ }
+ 
+ #include "SweetMDSSScanout.inc"
++#include "SweetMDSSClock.inc"
+ #include "SweetMDSSDSI.inc"
+ 
+ IOReturn
+@@ -577,7 +607,8 @@
+  SweetMDSS *self=(SweetMDSS *)owner;
+  if (!self->fAccepting || self->isInactive()) return kIOReturnNotReady;
+  if (self->dsiBusy()) return kIOReturnBusy;
+- return !self->fDsiPoisoned && self->dp_failed<3 && self->dp_clocks_on() ? kIOReturnSuccess : kIOReturnNotReady;
++ return !self->fDsiPoisoned && self->dp_failed<3 && self->dp_clocks_on() &&
++     (!self->fClockEnabled || self->localClocksReady()) ? kIOReturnSuccess : kIOReturnNotReady;
+ }
+ IOReturn
+ SweetMDSS::brightnessReady(void)
+@@ -591,7 +622,7 @@
+  if (!self->fAccepting || self->isInactive() || self->dp_failed>=3 || self->fDsiPoisoned) return kIOReturnNotReady;
+  if (self->dsiBusy()) return kIOReturnBusy;
+  if (self->fScanoutState==SweetScanoutQuiescing || self->fScanoutState==SweetScanoutSubmitted) return kIOReturnBusy;
+- if (!self->dp_clocks_on()) {
++ if (!self->dp_clocks_on() || (self->fClockEnabled && !self->localClocksReady())) {
+   SWEET_LOG_WARN("SWEET MDSS: dcs skipped: MDSS clock gate not met\n");
+   return kIOReturnNotReady;
+  }
+@@ -625,6 +656,7 @@
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  self->fAccepting=false;
++ self->stopLocalClocks();
+  if (self->dsiBusy()) self->finishDSI(kIOReturnAborted,SweetDSICancelled);
+  self->cancelScanout("provider stopped");
+  self->stopIRQ();
+@@ -649,6 +681,7 @@
+  if (fIrqProbeAdded) { fLoop->removeEventSource(fIrqProbe); fIrqProbeAdded=false; }
+  if (fIrqEventAdded) { fLoop->removeEventSource(fIrqEvent); fIrqEventAdded=false; }
+  if (fIrqTimerAdded) { fLoop->removeEventSource(fIrqTimer); fIrqTimerAdded=false; }
++ if (fClockTimerAdded) { fLoop->removeEventSource(fClockTimer); fClockTimerAdded=false; }
+  if (fDsiTimerAdded) { fLoop->removeEventSource(fDsiTimer); fDsiTimerAdded=false; }
+  /* Gate/maps stay valid through free, including retained pre-stop callers.
+   * Admission is closed; no MMIO may run after stopAction. */
+@@ -664,7 +697,10 @@
+  if (fScanoutTimerAdded) { fLoop->removeEventSource(fScanoutTimer); fScanoutTimerAdded=false; }
+  OSSafeReleaseNULL(fScanoutTimer);
+  OSSafeReleaseNULL(fHardwarePool);
++ if (fClockTimerAdded) { fLoop->removeEventSource(fClockTimer); fClockTimerAdded=false; }
+  if (fDsiTimerAdded) { fLoop->removeEventSource(fDsiTimer); fDsiTimerAdded=false; }
++ OSSafeReleaseNULL(fClockTimer);
++ if (fClockClaimed) { __atomic_store_n(&mdssClockWriter,fClockTouched ? 2u : 0u,__ATOMIC_RELEASE); fClockClaimed=false; }
+  OSSafeReleaseNULL(fDsiTimer); OSSafeReleaseNULL(fDsiSequence);
+  /* A timed-out/cancelled DMA keeps an independent prepared descriptor
+   * reference until reboot. Never infer DMA exit from service termination. */
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -0,0 +1,278 @@
++/* Local branch controller under SweetMDSS's sole MMIO ownership/workloop.
++ * Register facts: LG dispcc-sm8150.c, gcc-sm8150.c, clk-branch.c,
++ * clk-rcg2.c and gdsc-regulator.c. Original implementation, no Linux API shim.
++ * Never use PWR_ON or a running AXI clock as proof of an owned MMCX/NoC vote.
++ */
++static unsigned mdssClockWriter; /* 0 free, 1 owned, 2 retired; NOT an instance pointer */
++struct SweetClockBranch { uint32_t cbcr, root; unsigned sources; bool link; };
++static const SweetClockBranch mdssClockBranches[SweetClockCount]={
++ {0x2080,0x22bc,(1u<<0)|(1u<<4)|(1u<<5),false}, /* AHB */
++ {0x200c,0x20c8,(1u<<0)|(1u<<1)|(1u<<4)|(1u<<5),false}, /* MDP */
++ {0x2024,0x20f8,1u<<0,false}, /* VSYNC: 19.2MHz XO */
++ {0x2038,0x2148,1u<<0,false}, /* ESC0: 19.2MHz XO */
++ {0x2028,0x2110,1u<<1,true}, /* BYTE0: already-running PHY0 only */
++ {0x202c,0x2110,1u<<1,true}, /* BYTE0_INTF: same root + divider */
++ {0x2004,0x2098,1u<<1,true}, /* PCLK0: already-running PHY0 only */
++};
++static const unsigned mdssClockMasks[SweetClockUseCount]={0x07u,0x7fu};
++
++bool SweetMDSS::clockBusy(void) const
++{
++ return fClockOperation && (fClockLeases[fClockOperation-1].state==SweetClockPending ||
++     fClockLeases[fClockOperation-1].state==SweetClockReleasing);
++}
++bool SweetMDSS::clockPrerequisites(void)
++{
++ /* GCC AHB is critical/HWCG in LG: do not rewrite its controls, nor assume
++  * its OFF bit must stay clear. Existing MMIO admission checks its SW vote.
++  * No GDSC read until the config path passes its existing clock checks. */
++ if (!dp_clocks_on()) return false;
++ uint32_t hf=dp_rd(dp_gcc,0x38);
++ if (!(hf&1u) || ((hf&0xf0000000u)!=0x20000000u && (hf&CBCR_OFF))) return false;
++ uint32_t gdsc=dp_rd(dp_dispcc,0x3000);
++ /* Match LG's refusal to enable a HW-controlled domain. SW_OVERRIDE is not
++  * permission to force it. A TZ/HYP-only PWR_ON with SW_COLLAPSE set is not
++  * a usable inherited HLOS vote. No cold enable/collapse exists here. */
++ return (gdsc&0x80000007u)==0x80000000u;
++}
++bool SweetMDSS::clockParent(unsigned i,uint32_t out[6],bool requireOn)
++{
++ const SweetClockBranch &b=mdssClockBranches[i];
++ uint32_t cmd=dp_rd(dp_dispcc,b.root);
++ if ((cmd&0xf1u) || (requireOn && (cmd&0x80000000u))) return false; /* update/dirty or required live root */
++ out[0]=dp_rd(dp_dispcc,b.root+4);
++ unsigned source=(out[0]>>8)&7u;
++ if (!(b.sources&(1u<<source))) return false;
++ out[1]=b.link ? dp_rd(dp_dispcc,b.root+8) : 0;
++ out[2]=b.link ? dp_rd(dp_dispcc,b.root+12) : 0;
++ out[3]=b.link ? dp_rd(dp_dispcc,b.root+16) : 0;
++ out[4]=i==5 ? dp_rd(dp_dispcc,0x2128) : 0;
++ out[5]=source;
++ /* XO re-enable is limited to the exact divide-by-one integer configuration.
++  * Other roots/PHY parents may be retained, never enabled or reprogrammed.
++  * No unversioned PHY read or PLL lock-layout guess here. */
++ if (!source && ((out[0]&0x371fu)!=1u)) return false;
++ return true;
++}
++bool SweetMDSS::clockCanGate(void)
++{
++ if (dsiBusy() || fDsiPoisoned || fDsiPinned ||
++     fScanoutState==SweetScanoutQuiescing || fScanoutState==SweetScanoutSubmitted ||
++     (fIrqMode>=2 && __atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE)!=IrqIdle)) return false;
++ /* No boolean supplied by a consumer can substitute for hardware idle.
++  * Require TE/autorefresh disabled and no command/MDP engine in flight. */
++ return !(dp_rd(dp_intf1,0x288)&(1u<<20)) && !dp_rd(dp_intf1,0x2b4) &&
++     !(dp_rd(dp_dsi,8)&6u);
++}
++bool SweetMDSS::setupLocalClocks(void)
++{
++ int mode=0; (void)PE_parse_boot_argn("sweetdisplayclocks",&mode,sizeof(mode));
++ if (!mode) return true;
++ if (mode!=1 || fDisplayResourceMode!=2) {
++  SWEET_LOG_ERROR("SWEET MDSS CLOCK: warm mode1 requires display resource mode2; refused\n");
++  return false;
++ }
++ unsigned expected=0;
++ if (!__atomic_compare_exchange_n(&mdssClockWriter,&expected,1u,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
++  SWEET_LOG_ERROR("SWEET MDSS CLOCK: writer owned/retired; refused\n"); return false;
++ }
++ fClockClaimed=true; fClockEnabled=true;
++ fClockTimer=IOTimerEventSource::timerEventSource(this,clockTimerAction);
++ if (!fClockTimer || fLoop->addEventSource(fClockTimer)!=kIOReturnSuccess) return false;
++ fClockTimerAdded=true;
++ setProperty("SweetDisplayClockOwnership","MDSS: warm local leases; MMCX/NoC/parents inherited");
++ /* A real internal lease for the inherited display path, not a probe-only
++  * service. Defaults and resource mode1 never enter this path. */
++ IOReturn rc=retainLocalClocks(SweetClockDSI0,&fClockBootToken);
++ if (rc!=kIOReturnSuccess) {
++  SWEET_LOG_ERROR("SWEET MDSS CLOCK: warm lease admission rc=%#x; no cold fallback\n",(unsigned)rc);
++  return false;
++ }
++ return true;
++}
++IOReturn SweetMDSS::retainLocalClocks(SweetClockUse use,uint64_t *token)
++{
++ if (!token) return kIOReturnBadArgument;
++ *token=0;
++ return fGate ? fGate->runAction(clockRetainAction,&use,token) : kIOReturnNotReady;
++}
++IOReturn SweetMDSS::clockRetainAction(OSObject *owner,void *arg,void *output,void *,void *)
++{
++ SweetMDSS *s=(SweetMDSS *)owner;
++ unsigned use=*(SweetClockUse *)arg;
++ if (use>=SweetClockUseCount) return kIOReturnBadArgument;
++ if (!s->fClockEnabled) return kIOReturnUnsupported;
++ if (!s->fAccepting || s->isInactive() || s->fClockFault) return kIOReturnNotReady;
++ if (s->clockBusy()) return kIOReturnBusy;
++ unsigned slot=4;
++ for (unsigned n=0;n<4;++n)
++  if (!s->fClockLeases[n].token || s->fClockLeases[n].state==SweetClockReleased) { slot=n; break; }
++ if (slot==4 || s->fClockNextToken==~(uint64_t)0) return kIOReturnNoResources;
++ if (!s->clockPrerequisites()) return kIOReturnNotReady;
++ unsigned mask=mdssClockMasks[use]; uint32_t parents[SweetClockCount][6]={};
++ for (unsigned i=0;i<SweetClockCount;++i) if (mask&(1u<<i)) {
++  uint32_t v=dp_rd(s->dp_dispcc,mdssClockBranches[i].cbcr);
++  if (!s->clockParent(i,parents[i],(v&1u)!=0)) return kIOReturnNotReady;
++  if ((s->fClockKnownMask&(1u<<i)) && memcmp(s->fClockParents[i],parents[i],sizeof(parents[i])))
++   return kIOReturnNotReady;
++  if (v&1u) { if (v&CBCR_OFF) return kIOReturnNotReady; }
++  else {
++   if (!(v&CBCR_OFF) || parents[i][5] || mdssClockBranches[i].link) return kIOReturnNotReady;
++   if (!s->clockCanGate()) return kIOReturnBusy;
++  }
++ }
++ /* Preflight is all-or-nothing: no first branch write before the last
++  * resource/parent/idle check. Bookkeeping preserves inherited votes. */
++ for (unsigned i=0;i<SweetClockCount;++i) if (mask&(1u<<i))
++  memcpy(s->fClockParents[i],parents[i],sizeof(parents[i]));
++ s->fClockKnownMask|=mask;
++ SweetClockLease &lease=s->fClockLeases[slot]; lease={};
++ lease.token=++s->fClockNextToken; lease.mask=mask; lease.state=SweetClockPending;
++ lease.inheritedUpstream=true;
++ s->fClockOperation=slot+1; s->fClockCursor=0; s->fClockReleasing=false; s->fClockWaiting=false;
++ s->fClockDeadline=scanout_now()+200000000ULL;
++ *(uint64_t *)output=lease.token; s->fClockTimer->setTimeoutUS(100);
++ return kIOReturnSuccess;
++}
++IOReturn SweetMDSS::releaseLocalClocks(uint64_t token)
++{
++ return fGate ? fGate->runAction(clockReleaseAction,&token) : kIOReturnNotReady;
++}
++IOReturn SweetMDSS::clockReleaseAction(OSObject *owner,void *arg,void *,void *,void *)
++{
++ SweetMDSS *s=(SweetMDSS *)owner; uint64_t token=*(uint64_t *)arg;
++ if (!s->fAccepting || s->isInactive() || s->fClockFault) return kIOReturnNotReady;
++ if (s->clockBusy()) return kIOReturnBusy;
++ unsigned slot=4;
++ for (unsigned n=0;n<4;++n) if (token && s->fClockLeases[n].token==token) { slot=n; break; }
++ if (slot==4 || s->fClockLeases[slot].state!=SweetClockHeld) return kIOReturnBadArgument;
++ if (!s->clockPrerequisites()) return kIOReturnNotReady;
++ unsigned disable=0;
++ for (unsigned i=0;i<SweetClockCount;++i)
++  if ((s->fClockLeases[slot].mask&s->fClockOwnedMask&(1u<<i)) && s->fClockReferences[i]==1) disable|=1u<<i;
++ /* The boot lease is also the admission proof for live DCS/scanout. Do
++  * not revoke that proof under an in-flight transfer, even without writes. */
++ if ((disable || token==s->fClockBootToken) && !s->clockCanGate()) return kIOReturnBusy;
++ s->fClockLeases[slot].state=SweetClockReleasing;
++ s->fClockOperation=slot+1; s->fClockCursor=SweetClockCount-1; s->fClockReleasing=true; s->fClockWaiting=false;
++ s->fClockDeadline=scanout_now()+200000000ULL;
++ s->fClockTimer->setTimeoutUS(100); return kIOReturnSuccess;
++}
++IOReturn SweetMDSS::localClockStatus(uint64_t token,SweetClockLease *status)
++{
++ if (!status) return kIOReturnBadArgument;
++ *status={};
++ return fGate ? fGate->runAction(clockStatusAction,&token,status) : kIOReturnNotReady;
++}
++IOReturn SweetMDSS::clockStatusAction(OSObject *owner,void *arg,void *out,void *,void *)
++{
++ SweetMDSS *s=(SweetMDSS *)owner; uint64_t token=*(uint64_t *)arg;
++ for (unsigned n=0;n<4;++n) if (token && s->fClockLeases[n].token==token) {
++  *(SweetClockLease *)out=s->fClockLeases[n]; return kIOReturnSuccess;
++ }
++ return kIOReturnBadArgument; /* queries never touch MMIO */
++}
++void SweetMDSS::clockTimerAction(OSObject *owner,IOTimerEventSource *)
++{
++ SweetMDSS *s=(SweetMDSS *)owner;
++ if (s->fAccepting && !s->isInactive() && s->clockBusy()) s->advanceLocalClocks();
++}
++void SweetMDSS::advanceLocalClocks(void)
++{
++ if (!clockPrerequisites()) { finishLocalClocks(kIOReturnNotReady); return; }
++ uint64_t now=scanout_now();
++ if (now>=fClockDeadline) { finishLocalClocks(kIOReturnTimeout); return; }
++ SweetClockLease &lease=fClockLeases[fClockOperation-1]; unsigned i=fClockCursor;
++ unsigned bit=1u<<i; const SweetClockBranch &b=mdssClockBranches[i];
++ if (lease.mask&bit) {
++  uint32_t parent[6]={}, v=dp_rd(dp_dispcc,b.cbcr);
++  bool rootNeeded=!fClockReleasing && (v&1u) && !(v&CBCR_OFF);
++  if (!clockParent(i,parent,rootNeeded) || memcmp(parent,fClockParents[i],sizeof(parent))) {
++   finishLocalClocks(kIOReturnNotReady); return;
++  }
++  bool toggle=fClockReleasing ? ((fClockOwnedMask&bit) && fClockReferences[i]==1) : !(v&1u);
++  if (fClockWaiting) {
++   bool ready=fClockReleasing ? !(v&1u) && (v&CBCR_OFF) : (v&1u) && !(v&CBCR_OFF);
++   if (!ready) {
++    if (now>=fClockWaitDeadline) { finishLocalClocks(kIOReturnTimeout); return; }
++    fClockTimer->setTimeoutUS(100); return;
++   }
++   if (fClockReleasing) fClockOwnedMask&=~bit;
++   fClockWaiting=false;
++  } else if (toggle) {
++   if (!clockCanGate() || (!fClockReleasing && (parent[5] || b.link))) {
++    finishLocalClocks(kIOReturnBusy); return;
++   }
++   fClockTouched=true; lease.uncertain=true;
++   if (!fClockReleasing) fClockOwnedMask|=bit; /* retain even if posted write fails */
++   dp_wr(dp_dispcc,b.cbcr,fClockReleasing ? v&~1u : v|1u);
++   fClockWaiting=true; fClockWaitDeadline=now+10000000ULL;
++   fClockTimer->setTimeoutUS(100); return;
++  } else if (!fClockReleasing && (!(v&1u) || (v&CBCR_OFF))) {
++   finishLocalClocks(kIOReturnNotReady); return;
++  }
++ }
++ if ((!fClockReleasing && fClockCursor==SweetClockCount-1) ||
++     (fClockReleasing && fClockCursor==0)) {
++  finishLocalClocks(kIOReturnSuccess); return;
++ }
++ if (fClockReleasing) --fClockCursor; else ++fClockCursor;
++ fClockTimer->setTimeoutUS(100);
++}
++void SweetMDSS::finishLocalClocks(IOReturn rc)
++{
++ if (fClockTimer) fClockTimer->cancelTimeout();
++ SweetClockLease &lease=fClockLeases[fClockOperation-1];
++ if (rc==kIOReturnSuccess && !fClockReleasing) {
++  /* Earlier branches may have changed while later ones were being awaited. */
++  for (unsigned i=0;i<SweetClockCount;++i) if (lease.mask&(1u<<i)) {
++   uint32_t parent[6]={}, v=dp_rd(dp_dispcc,mdssClockBranches[i].cbcr);
++   if (!clockParent(i,parent) || memcmp(parent,fClockParents[i],sizeof(parent)) || !(v&1u) || (v&CBCR_OFF)) {
++    rc=kIOReturnNotReady; break;
++   }
++  }
++ }
++ if (rc==kIOReturnSuccess) {
++  for (unsigned i=0;i<SweetClockCount;++i) if (lease.mask&(1u<<i)) {
++   if (fClockReleasing) --fClockReferences[i]; else ++fClockReferences[i];
++   if (!fClockReferences[i] && !(fClockOwnedMask&(1u<<i))) fClockKnownMask&=~(1u<<i);
++  }
++  lease.state=fClockReleasing ? SweetClockReleased : SweetClockHeld; lease.uncertain=false;
++  SWEET_LOG_INFO("SWEET MDSS CLOCK: token=%llu state=%u mask=%#x owned=%#x; GDSC/MMCX/NoC/parents inherited\n",
++      lease.token,lease.state,lease.mask,fClockOwnedMask);
++ } else {
++  fClockFault=true; lease.state=SweetClockFailed;
++  /* No blind reverse writes on failure: DMA/state may have changed. Keep
++   * touched gates and reject all subsequent writes; stop is not DMA exit. */
++  SWEET_LOG_ERROR("SWEET MDSS CLOCK: token=%llu rc=%#x owned=%#x uncertain=%u; writes closed, no powerdown\n",
++      lease.token,(unsigned)rc,fClockOwnedMask,lease.uncertain);
++ }
++ lease.result=(int)rc; fClockOperation=0;
++ setProperty("SweetDisplayLocalClockFault",fClockFault);
++ setProperty("SweetDisplayLocalClockState",(unsigned long long)lease.state,32);
++}
++bool SweetMDSS::localClocksReady(void)
++{
++ if (!fAccepting || isInactive() || !fClockEnabled || fClockFault || !fClockBootToken || !clockPrerequisites()) return false;
++ SweetClockLease status={};
++ if (clockStatusAction(this,&fClockBootToken,&status,NULL,NULL)!=kIOReturnSuccess || status.state!=SweetClockHeld)
++  return false;
++ for (unsigned i=0;i<SweetClockCount;++i) if (status.mask&(1u<<i)) {
++  uint32_t parent[6]={}, v=dp_rd(dp_dispcc,mdssClockBranches[i].cbcr);
++  if (!clockParent(i,parent) || memcmp(parent,fClockParents[i],sizeof(parent)) || !(v&1u) || (v&CBCR_OFF)) return false;
++ }
++ return true;
++}
++void SweetMDSS::stopLocalClocks(void)
++{
++ if (fClockTimer) fClockTimer->cancelTimeout();
++ for (unsigned i=0;i<4;++i) {
++  SweetClockLease &lease=fClockLeases[i];
++  if (lease.state==SweetClockPending || lease.state==SweetClockReleasing || lease.state==SweetClockHeld) {
++   lease.state=SweetClockStopped; lease.result=(int)kIOReturnAborted;
++  }
++ }
++ fClockOperation=0;
++ /* No register access or vote withdrawal. Existing scanout/DSI may still
++  * read memory, so stop/free never powers down its inherited dependencies. */
++}
+diff --git a/iokit/Kernel/arm/SweetMDSSDSI.inc b/iokit/Kernel/arm/SweetMDSSDSI.inc
+--- a/iokit/Kernel/arm/SweetMDSSDSI.inc
++++ b/iokit/Kernel/arm/SweetMDSSDSI.inc
+@@ -66,7 +66,7 @@
+   * watchdog or infer panel power from opaque command bytes here. */
+  if (s->fIrqMode>=2 && __atomic_load_n(&s->fIrqState,__ATOMIC_ACQUIRE)!=IrqIdle)
+   return kIOReturnBusy;
+- if (!s->dp_clocks_on()) return kIOReturnNotReady;
++ if (!s->dp_clocks_on() || (s->fClockEnabled && !s->localClocksReady())) return kIOReturnNotReady;
+  /* This revision is already observed in 0121a12 (+0=20030000).
+   * Recheck live before writes; DT compatible alone does not authorize them. */
+  if (dp_rd(s->dp_dsi,0)!=0x20030000u || (dp_rd(s->dp_dsi,4)&7u)!=5u ||
+@@ -203,7 +203,7 @@
+ SweetMDSS::advanceDSI(void)
+ {
+  uint64_t now=scanout_now();
+- if (!dp_clocks_on()) { finishDSI(kIOReturnNotReady,SweetDSIFailed); return; }
++ if (!dp_clocks_on() || (fClockEnabled && !localClocksReady())) { finishDSI(kIOReturnNotReady,SweetDSIFailed); return; }
+  if (fDsiStatus.state==SweetDSIDelay) {
+   if (now<fDsiDeadline) { fDsiTimer->setTimeoutMS(1); return; }
+   if (fDsiStatus.completed==fDsiStatus.total) { finishDSI(kIOReturnSuccess,SweetDSIComplete); return; }
+diff --git a/iokit/Kernel/arm/SweetMDSSScanout.inc b/iokit/Kernel/arm/SweetMDSSScanout.inc
+--- a/iokit/Kernel/arm/SweetMDSSScanout.inc
++++ b/iokit/Kernel/arm/SweetMDSSScanout.inc
+@@ -98,6 +98,7 @@
+  if (mode!=2) return kIOReturnUnsupported;
+  if (s->dsiBusy()) return kIOReturnBusy;
+  if (s->fDsiPoisoned) return kIOReturnNotReady;
++ if (s->fClockEnabled && !s->localClocksReady()) return kIOReturnNotReady;
+  if (!s->fAccepting || s->isInactive() || !s->fIrqDisplayOn || s->fPanelState!=PanelOn ||
+      s->fIrqMode!=2 || s->fIrqPhase!=2 || !s->fEpochFrames || !arg1 || arg1!=s->fVsyncChannel)
+   return kIOReturnNotReady;

@@ -1,5 +1,12 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
+**0185本地时钟增量（本地验证通过，未实机启用）：** SweetMDSS内部已加入typed本地分支lease、
+共享引用、token、timer完成/超时和停止保护；温态校验继承GDSC，默认关闭。
+仅对已确认XO父源的关闭分支支持恢复/撤回，既有enable不关；没有MMCX/NoC票、GDSC冷上下电、
+PLL/PHY/host初始化，不能验收完整D1。另修复OFF跨呈现间隔统计，pending年龄保留。
+实现与本地验证见[时钟记录](PANEL-CLOCK-D1.md)；继续合并上游依赖/链路，不单独要求push或刷机。
+
+
 **0184资源层增量（本地通过，未上机）：** 已新增真实匹配的SweetRPMh IOService、唯一
 MH2LM apps-DRV writer、有界timer完成与typed consumer投票；MDSS自己的workloop绑定/查询，
 没有匹配回调初始化、全局C实例桥或自动电源写入。v1 ADT扩完整DISPCC并追加单一PHY/PLL窗口，

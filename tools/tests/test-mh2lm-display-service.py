@@ -22,6 +22,9 @@ legacy = (root/'bsd/dev/sweet_display_probe.c').read_text()
 source = source.replace('#include "SweetMDSSIRQ.inc"', (arm/'SweetMDSSIRQ.inc').read_text())
 source = source.replace('#include "SweetMDSSScanout.inc"', (arm/'SweetMDSSScanout.inc').read_text())
 source = source.replace('#include "SweetMDSSDSI.inc"', (arm/'SweetMDSSDSI.inc').read_text())
+if (arm/'SweetMDSSClock.inc').exists():
+    source = source.replace('#include "SweetMDSSClock.inc"', (arm/'SweetMDSSClock.inc').read_text())
+    source = source.replace('#include "SweetDisplayClock.h"', (arm/'SweetDisplayClock.h').read_text())
 source = source.replace('__asm__ volatile("dsb oshst" ::: "memory");', '(void)0;')
 fb = (arm/'SweetFramebuffer.cpp').read_text()
 backlight = fb[fb.index('#define SWEET_BL_MAX'):fb.index('#endif /* ARM64_BOARD_CONFIG_MH2LM */', fb.index('#define SWEET_BL_MAX'))]

@@ -94,7 +94,8 @@ PHY0 `0x0ae94400/0x760`。PLL0位于同一窗口+0x500，不再重复映射/写�
 
 PD0原图的独立clock/GDSC provider在此明确调整为**MDSS内部typed资源模块的唯一所有者**：
 现有MDSS已经拥有GCC/DISPCC，不再另起一个重叠映射的空壳服务。当前仅资源所有权落地，
-时钟父源/频率、分支/GDSC获取/撤回、MMCX与NoC依赖的控制代码仍待下一段实现；
+0185已补typed本地分支lease、timer获取/撤回与温态GDSC准入，见[时钟模块](PANEL-CLOCK-D1.md)。
+时钟父源/频率、GDSC冷上下电、MMCX与NoC投票仍待实现；
 原`dp_clocks_on()`两个状态位检查仍不是acquire或ready证明。
 
 ## 本地验证与下一段

@@ -1,7 +1,8 @@
 # D1 首段：完整面板命令传输基础（0183）
 
 **后续0184已完成资源ABI、真实RPMh provider/typed投票及MDSS绑定，见[资源层记录](PANEL-POWER-D1.md)。**
-本页0183的命令边界不变；D1剩余为clock/GDSC、MMCX/NoC及链路依赖，不再把RPMh服务写成全未实现。
+0185已补MDSS内部本地时钟lease及温态GDSC准入，见[时钟记录](PANEL-CLOCK-D1.md)；
+开启后DSI/旧DCS也检查该lease。冷态clock/GDSC、MMCX/NoC及链路依赖仍缺。
 
 2026-11-10。按用户“优先完整驱动，随后零拷贝”的要求，停止把 CPU 拷贝双缓冲当作
 PD2/PD3 前置。0183 先实现可复用的命令基础，并合并 0121a12 滑动性能回归的计时。
