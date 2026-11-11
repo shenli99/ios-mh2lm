@@ -1,5 +1,9 @@
 # 统一面板生命周期协调器（0194）
 
+**0195补充（本地通过，未实机）：** mode2现已接入完整厂商表、保留供电的sleep/reset恢复及亮度重放；
+引脚增加consumer/token取消。实际Mu/DarwinBoot身份传递、准入和未完成项见
+[PD3当前记录](PANEL-PROFILE-D1.md)。以下0194及更早描述按当时范围保留。
+
 2026-11-11。本批接通可运行的**温态接管及 Display Off/On 事务**，不再只绑定 provider。
 默认关闭；仅本地验证，未实机。完整面板驱动仍未完成，不能将本批称为冷初始化或断电恢复。
 补丁为 `xnu/patches/0194-mh2lm-panel-lifecycle-coordinator.patch`，接在0193后。

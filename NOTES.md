@@ -2,6 +2,62 @@
 
 ## Agent handoff / active work (2026-11-11, latest)
 
+**CURRENT：0195完整profile命令/保留供电的sleep-reset恢复与实际DarwinBoot身份传递本地通过，未实机；完整驱动未完成。**
+父提交b4ccbbb；XNU补丁0195-mh2lm-panel-profile-lifecycle.patch SHA256=
+80d05508fde251a47850c421b44bd187ca5509b46ef4f0313bd6333038d379de，9份源码变化，严格接0194verify/114原CI marker保留。
+另交付boot-support/0001-mh2lm-darwinboot-panel-selection.patch，SHA256=
+fac5b74dfb30fc947424e648a11074aaaeda1588415e0bbdf84dac046c98c026；7份启动侧文件，适配实际Mu UEFI→DarwinBoot链。
+UniXNU parent f86227c39bc4742dccb3c7d5f2eca6c4854740d5 / DarwinBoot component
+4ad0c423361fa7added7dd8a5d6589c1c51af3b1；真实原component内git apply --check -p3通过，未改该checkout。
+旧shim不是当前入口，本轮交付没有改shim。前期一度按旧shim研究，已纠正，勿再从那里取身份。
+ADT --panel-identity只预留96字节全零slot，与pins/touch/NoC组合/旧默认字节不变；没有手填revision参数。
+DarwinBoot在ADT验证后/kernel-window复制前，经Mu SEC x0 HOB及完整UEFI RAM范围检查读FDT；
+bounded v17结构/字符串/深度/完整tree，bootargs≤8192，FDT≤2MiB，只认唯一msm_drm.dsi_display0。
+PP1/DV1/DV2/PV精确label及默认config0/timing0，缺失/未知/重复/畸形分别记录，不复制整条bootargs。
+畸形/预填slot拒绝启动，未带slot不查HOB/FDT。XNU验证完整magic/version/source/ID-label/零保留字节。
+这是ABL选择证据，不是物理DDIC读回/认证；本机仍没有实际live label，不猜PV，E1没有实机关闭。
+四版八表逐字节LG源表：ON PP1 834/20包、DV1 538/16、DV2 538/16、PV694/17，OFF均35/4。
+LG ON末尾29→11→150ms不交换；OFF B003→510000后90ms→28→10后150ms，不误写成28后等150ms。
+工作区docs/panel.md该旧等待描述已修正（工作区资料，不在本仓库提交范围）。保留CAF版权/GPLv2来源。
+默认sweetpanellifecycle=0；1仍原温态28/29。新显式2要求live记录/pins2和原touch2/own2/power1/
+IRQ2/dsi1/managed1及resource/clock/NoC依赖，未知则拒绝，无静默PV或mode1回退。
+实际OFF：touchfence→显示/IRQ/DMA退出→完整OFF+延时，sleeping=true；触摸停驻，全部供电票保留。
+实际ON：同代fence/保票/静止→首轮typed activate→typed GPIO6 reset(10/2/10+LG5ms)→完整ON/
+长包prepared DMA→DCS51恢复typed目标→原TE/IRQ/fresh像素完成→原TCM实际识别/格式验证恢复。
+温态takeover保持0194，不自动reset/发vendor表。Standalone Prepare/Reset/Unprepare仍Unsupported。
+SweetMDSS typed setBrightness override同gate保存已知最新目标；未知亮度时完整OFFON副作用前NotReady，
+Busy目标继续保留，晚于restore发出的请求沿背光interest重试。FB mode2查额外capability及profile/
+sleeping/resetComplete/brightnessRestored/pixel/touch证据，不拿温态Complete冒充完整恢复。
+新增PinActivate/PinReset/Brightness，busy改显式阶段判断；pins100ms/完整表5s/亮度500ms/总16s。
+pins新增cancelRequest(id,token)，同步gate停timer/poison保留部分状态，不park/reset做cleanup。
+故障/撤回/超时/stop保票/DMA pin，关闭本代；取消不等于恢复/硬件已静止；pin-active不能假detach。
+无新线程/全局实例桥/consumer MMIO/空闲poll；USB/按键/充电/mux/触摸IRQ策略未改。
+18套通过：原16+实际parser/UEFIadapter与完整profile联测，17实际源码ASan/UBSan+PythonADT无最终报告。
+覆盖四版各3轮sleep/reset/ON、独立完整wire包/延时/输入与像素/实际C触摸worker、每pinphase取消、
+provider loss/stop、input/readback/期限/DMA pin/亮度/触摸失败、身份/配置拒绝、FB缺证据、
+HOB/map/分配故障、FDT/ADT每截断/bit mutation。LSan ptrace限制关闭，另断言资源和重启pin归零。
+真实当前out-bs/adt-16k-3g.adt和组合空identity slot解析通过（未复制设备/Apple产物进库）。
+真实XNU/KDK arm64 MDSS/FB/Pins base+final对象成功/关键符号核实；非整核链接。
+MDSS warnings1481→1503，22个固定ABI/表索引边界提示已审；发现的format类型告警已修，没有抑制。
+FB1397→1397、Pins1171→1171。Mu mh2实际消费DarwinBoot模块-Werror编译链接成功，模块
+41472 bytes/SHA256=56083c42fc786c4bcdf7cea6aa1feaee4ed2e6d46fdba64dfbe04bd4ec930487；1个既有平台HwResetSystemLib配置warning。
+**没有重建完整UEFI FD，没有替换out-bs/kernel-32m.blob，没有生成新boot、push/CI/设备操作或硬件结果。**
+**NEXT：继续PD3共享供电/反向释放设计及PD4冷NoC/MDP/独立重建；后续合并镜像要同时纳入新DarwinBoot。**
+同核先mode1取source/profile确认，再mode2验证保票的sleep/reset；无需为单个只读接口新开云编译。
+E7实际reset后触摸、E8共享电/偏压未验收，不能盲撤ABL或其它consumer票；rail release不等于物理断电。
+ABL初始buffer/console/panic、冷MDP、完整IOPM/正常关电及失败资源释放仍缺，不宣称PD3/完整驱动验收。
+A单缓冲/B未提交/30Hz复制不变，旧滑动退化/BUG003未宣称修复；不重测旧USB/BUG002/F3/半小时。
+CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df，暂不要求push/刷机。
+底稿scratch/framebuffer-0195/{base,edited,verify,prepare-patch.py,compile.py,run-tests.py,verification.json,
+base-continuity.json,tests.json,native-results.json,warning-counts.json,warning-review.json,*compile.txt,
+*-symbols.txt,real-adt-validation.json,uefi-base,uefi-edited,uefi-verify,prepare-uefi.py,compile-uefi.py,
+uefi-verification.json,uefi-native-result.json,uefi-native-build.txt,DarwinBoot.efi,DarwinBoot-headers.txt}。
+详见docs/PANEL-PROFILE-D1.md、boot-support/README.md；计划/架构/PD0/协调器/pins/touch文档同步。
+
+**以下0194按当时范围保留，当前以0195为准。**
+
+## Agent handoff / active work (2026-11-11, latest)
+
 **CURRENT：0194统一温态生命周期协调器已接实际调用并本地通过，未实机；完整面板驱动仍未完成。**
 父提交c3b530a；0194-mh2lm-panel-lifecycle-coordinator.patch SHA256=
 327e2ca4cf4582e52030337463c5f699c007dc5e90bae8c866c390d740627af7，12份源码变化。

@@ -1,5 +1,9 @@
 # 0193：面板生命周期所需的触摸暂停与恢复接口
 
+**0195补充（本地通过，未实机）：** mode2现已接入完整厂商表、保留供电的sleep/reset恢复及亮度重放；
+引脚增加consumer/token取消。实际Mu/DarwinBoot身份传递、准入和未完成项见
+[PD3当前记录](PANEL-PROFILE-D1.md)。以下0194及更早描述按当时范围保留。
+
 **0194补充：** MDSS已实际调用typed quiesce/resume，统一温态协调器及消费者token取消见
 [PANEL-LIFECYCLE-D1.md](PANEL-LIFECYCLE-D1.md)。`cancelRequest(consumer,token)`只关闭独占
 mailbox session并poison，不stop整个provider；仍不把取消返回当作硬件已静止。

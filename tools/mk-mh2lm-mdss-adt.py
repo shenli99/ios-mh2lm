@@ -19,8 +19,8 @@ PANEL_PIN_WINDOWS = ((0x03d06000, 0x1000), (0x03908000, 0x1000))  # GPIO6 SOUTH,
 NOC_WINDOWS = ((0x0af20000, 0x1c00), (0x0af21c00, 0x3000), (0x0af30000, 0x3fd4))
 
 
-def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False):
-    display_resources = display_resources or display_noc or panel_pins or panel_touch
+def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False):
+    display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity
     root, end = adt.parse(blob)
     if end != len(blob) or b'lge,mh2lm\0' not in (root.prop('compatible') or b''):
         raise ValueError('expected a complete MH2LM ADT')
@@ -54,6 +54,10 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
                   # controller before publishing standard interrupt properties.
                   ('sweet,mdss-intid', 0, struct.pack('<I', 115))]
     arm.children.append(mdss)
+    if panel_identity:
+        # ABI placeholder only. No CLI option can preselect a revision: the
+        # DarwinBoot adapter replaces this from ABL's live /chosen/bootargs before XNU.
+        mdss.props.append(('sweet,panel-identity', 0, bytes(96)))
     if display_noc:
         mdss.props.append(('sweet,display-noc-abi', 0, struct.pack('<I', 1)))
     if display_resources:
@@ -84,10 +88,11 @@ if __name__ == '__main__':
     parser.add_argument('--display-noc', action='store_true', help='append sole MDSS display RSC/TCS/wrapper windows; implies display resources, requires resource2/clock1 at runtime')
     parser.add_argument('--panel-pins', action='store_true', help='append GPIO6/reset and GPIO8/TE provider; implies display resources, never authorizes reset/vendor commands')
     parser.add_argument('--panel-touch', action='store_true', help='append typed touch worker coordination service; no new GPIO/IRQ mapping, no automatic pause/resume')
+    parser.add_argument('--panel-identity', action='store_true', help='reserve zeroed live-ABL panel selection slot; implies resources, never selects a revision')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
     source, destination = args.source, args.destination
     if source.resolve() == destination.resolve():
         sys.exit('output must differ from the baseline ADT')
-    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch))
+    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity))

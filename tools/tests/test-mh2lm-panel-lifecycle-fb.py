@@ -67,6 +67,21 @@ int main(){
  // Stop cancels exactly the retained token; a late timer never queries/advances.
  {Harness h;assert(h.request(true)==0);auto token=h.f->fPanelLifecycleToken;
   h.f->stop(h.p);auto frames=h.f->fVsyncCount;h.tick();assert(h.f->fVsyncCount==frames&&h.b->cancelled==std::vector<uint64_t>{token});}
+ // Mode2 never accepts a warm-only backend, or generic Complete without the
+ // matching profile/sleep/reset/brightness proofs. The actual FB checks run.
+ {Harness h;h.f->fPanelLifecycleFull=true;
+  assert(h.request(true)!=0&&h.b->operations.empty()&&h.f->fPanelLifecycleFault);}
+ {Harness h;h.f->fPanelLifecycleFull=true;h.b->cap|=SweetPanelRetainedSleepReset;
+  assert(h.request(true)==0);h.b->lifecycle.profile=4;h.b->lifecycle.sleeping=true;h.complete();
+  assert(!h.f->fPanelLifecycleFault&&h.f->fPowerOff);
+  assert(h.request(false)==0);h.b->lifecycle.profile=4;h.b->lifecycle.resetComplete=h.b->lifecycle.brightnessRestored=true;h.complete();
+  assert(!h.f->fPanelLifecycleFault&&!h.f->fPowerOff);}
+ for(unsigned missing=0;missing<4;++missing){Harness h;h.f->fPanelLifecycleFull=true;h.b->cap|=SweetPanelRetainedSleepReset;
+  assert(h.request(true)==0);h.b->lifecycle.profile=4;h.b->lifecycle.sleeping=true;h.complete();
+  assert(h.request(false)==0);h.b->lifecycle.profile=4;h.b->lifecycle.resetComplete=h.b->lifecycle.brightnessRestored=true;
+  if(missing==0)h.b->lifecycle.profile=0;if(missing==1)h.b->lifecycle.resetComplete=false;
+  if(missing==2)h.b->lifecycle.brightnessRestored=false;if(missing==3)h.b->lifecycle.sleeping=true;
+  h.complete();assert(h.f->fPanelLifecycleFault&&h.f->fPowerOff);}
  puts("PASS: actual FB asynchronous lifecycle requests/status, pending presentation freeze, rapid OFF/ON coalescing, no completion from frame mailbox, retained provider/token, explicit fault/withdrawal/stop, no legacy fallback and zero objects/allocations/buffers");
 }
 '''

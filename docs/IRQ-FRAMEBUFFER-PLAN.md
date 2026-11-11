@@ -1,5 +1,15 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
+**0195当前增量（本地通过，未实机）：** 已把四版LG完整ON/OFF表、Sleep In/Out、typed GPIO reset
+和亮度恢复接入原协调器，新增显式`sweetpanellifecycle=2`，保留全部供电/ARC/NoC/clock票。
+原0/1语义不变；2要求经实际Mu→DarwinBoot→ADT链路传递的唯一ABL选择及pins2等依赖，
+缺失/歧义/未知就拒绝，不猜PV。启动侧另交付DarwinBoot补丁，旧shim没有变更；仅新内核配旧UEFI
+不会得到身份。本机live选择及reset恢复仍未实测。FB核对完整模式能力与reset/亮度/像素证据，
+pins新增consumer/token取消、停timer保留部分状态。18套检查、arm64对象及Mu消费的DarwinBoot模块
+编译链接通过；不代表整核/完整FD/实机。详见[当前PD3架构与边界](PANEL-PROFILE-D1.md)。
+完整反向释放、冷NoC/MDP、独立重建与ABL退出仍缺；A单缓冲/30Hz复制不变。暂不要求push/刷机，
+CircleCI未改。以下0194及更早段落保留当时范围，当前以0195和NOTES顶部为准。
+
 **0194当前增量（本地通过，未实机）：** 已接通SweetMDSS内部统一生命周期协调器，复用
 原唯一gate/timer及资源/扫描/DSI执行层。显式sweetpanellifecycle=1把实际温态接管与28/29
 OFF/ON串成typed token事务：触摸暂停fence→显示DMA/IRQ真实静止→原资源/链路/像素完成→

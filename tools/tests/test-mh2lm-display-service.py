@@ -18,6 +18,9 @@ arm = root/'iokit/Kernel/arm'
 header = (arm/'SweetDisplayBackend.h').read_text()
 header = header.replace('#include "SweetDSICommand.h"', (arm/'SweetDSICommand.h').read_text())
 source = (arm/'SweetMDSS.cpp').read_text()
+if (arm/'SweetPanelProfile.h').exists():
+    profile = (arm/'SweetPanelProfile.h').read_text().replace('#include "SweetPanelIdentity.h"', (arm/'SweetPanelIdentity.h').read_text())
+    source = source.replace('#include "SweetPanelProfile.h"', profile)
 legacy = (root/'bsd/dev/sweet_display_probe.c').read_text()
 source = source.replace('#include "SweetMDSSIRQ.inc"', (arm/'SweetMDSSIRQ.inc').read_text())
 source = source.replace('#include "SweetMDSSScanout.inc"', (arm/'SweetMDSSScanout.inc').read_text())

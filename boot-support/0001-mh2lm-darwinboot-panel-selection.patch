@@ -1,0 +1,345 @@
+diff --git a/drivers/DarwinBoot/DarwinBootPkg/DarwinBoot.dsc b/drivers/DarwinBoot/DarwinBootPkg/DarwinBoot.dsc
+--- a/drivers/DarwinBoot/DarwinBootPkg/DarwinBoot.dsc
++++ b/drivers/DarwinBoot/DarwinBootPkg/DarwinBoot.dsc
+@@ -12,6 +12,7 @@
+ !include MdePkg/MdeLibs.dsc.inc
+ 
+ [LibraryClasses]
++  HobLib|MdePkg/Library/DxeHobLib/DxeHobLib.inf
+   BaseLib|MdePkg/Library/BaseLib/BaseLib.inf
+   BaseMemoryLib|MdePkg/Library/BaseMemoryLib/BaseMemoryLib.inf
+   MemoryAllocationLib|MdePkg/Library/UefiMemoryAllocationLib/UefiMemoryAllocationLib.inf
+diff --git a/drivers/DarwinBoot/DarwinBootPkg/Driver/DarwinBoot.c b/drivers/DarwinBoot/DarwinBootPkg/Driver/DarwinBoot.c
+--- a/drivers/DarwinBoot/DarwinBootPkg/Driver/DarwinBoot.c
++++ b/drivers/DarwinBoot/DarwinBootPkg/Driver/DarwinBoot.c
+@@ -1,5 +1,7 @@
+ // SPDX-License-Identifier: BSD-2-Clause-Patent
+ #include <Uefi.h>
++#include <PiDxe.h>
++#include <Library/HobLib.h>
+ #include <Guid/FileInfo.h>
+ #include <Library/BaseLib.h>
+ #include <Library/BaseMemoryLib.h>
+@@ -16,6 +18,7 @@
+ #include "BootVideo.h"
+ #include "PackedRamdisk.h"
+ #include "WindowSize.h"
++#include "PanelSelection.h"
+ 
+ #ifndef UNIXNU_HANDOFF_STALL_MS
+ #define UNIXNU_HANDOFF_STALL_MS 0
+@@ -615,6 +618,8 @@
+   WindowSize = 0;
+   KeepPacked = FALSE;
+   if (!AdtNode (Tree, TreeSize, &Offset, 0, 3, &RamdiskOffset, &TrustCacheOffset, &AddonOffset, &WindowSize, &KeepPacked) || (Offset != TreeSize)) { Status = EFI_COMPROMISED_DATA; goto Fail; }
++  Status = PopulatePanelSelection (Tree, TreeSize);
++  if (EFI_ERROR (Status)) { goto Fail; }
+   if (KeepPacked && (!RamdiskPacked || (RamdiskOffset == MAX_UINTN))) { Status = EFI_COMPROMISED_DATA; goto Fail; }
+   if (WindowSize == 0) { WindowSize = WINDOW_SIZE; }
+   if (Kernel.Base > MAX_UINT64 - WindowSize) { Status = EFI_LOAD_ERROR; goto Fail; }
+diff --git a/drivers/DarwinBoot/DarwinBootPkg/Driver/DarwinBoot.inf b/drivers/DarwinBoot/DarwinBootPkg/Driver/DarwinBoot.inf
+--- a/drivers/DarwinBoot/DarwinBootPkg/Driver/DarwinBoot.inf
++++ b/drivers/DarwinBoot/DarwinBootPkg/Driver/DarwinBoot.inf
+@@ -9,6 +9,10 @@
+ 
+ [Sources]
+   DarwinBoot.c
++  PanelSelection.h
++  panel_handoff.c
++  panel_handoff.h
++  panel_identity.h
+   PackedRamdisk.h
+   BootArgs.h
+   BootVideo.h
+@@ -21,6 +25,7 @@
+ 
+ [LibraryClasses]
+   BaseLib
++  HobLib
+   BaseMemoryLib
+   DebugLib
+   MemoryAllocationLib
+diff --git a/drivers/DarwinBoot/DarwinBootPkg/Driver/PanelSelection.h b/drivers/DarwinBoot/DarwinBootPkg/Driver/PanelSelection.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/DarwinBoot/DarwinBootPkg/Driver/PanelSelection.h
+@@ -0,0 +1,65 @@
++/* Board adapter for Mu Silicium's actual ABL x0 HOB. Opt-in ADT slot only.
++ * No command-line override or private bootargs copying; no controller I/O.
++ * Included by DarwinBoot before kernel/window copies and ExitBootServices. */
++#ifndef MH2LM_DARWINBOOT_PANEL_SELECTION_H
++#define MH2LM_DARWINBOOT_PANEL_SELECTION_H
++#include "panel_handoff.h"
++STATIC CONST EFI_GUID mPanelEntryArgHobGuid = {
++  0xDAEE82E6, 0x8090, 0x4E72, { 0xBF, 0xB9, 0x78, 0xC1, 0x3C, 0xD4, 0xE3, 0x59 }
++};
++STATIC BOOLEAN
++PanelMemoryRange (CONST EFI_MEMORY_DESCRIPTOR *Map, UINTN MapSize, UINTN DescSize, UINT64 Address, UINTN Size)
++{
++  if ((DescSize < sizeof (*Map)) || (MapSize % DescSize) || !Size || (Address < 0x80000000ULL)) { return FALSE; }
++  for (UINTN Offset = 0; Offset < MapSize; Offset += DescSize) {
++    CONST EFI_MEMORY_DESCRIPTOR *D = (CONST EFI_MEMORY_DESCRIPTOR *)((CONST UINT8 *)Map + Offset);
++    if ((D->Type > EfiACPIMemoryNVS) || (D->Type == EfiUnusableMemory) ||
++        (D->NumberOfPages > (MAX_UINT64 >> EFI_PAGE_SHIFT))) { continue; }
++    UINT64 Length = D->NumberOfPages << EFI_PAGE_SHIFT;
++    if ((Address >= D->PhysicalStart) && (Address - D->PhysicalStart <= Length) &&
++        (Size <= Length - (Address - D->PhysicalStart))) { return TRUE; }
++  }
++  return FALSE;
++}
++STATIC EFI_STATUS
++PopulatePanelSelection (VOID *Tree, UINTN TreeSize)
++{
++  UINT8 Record[MH2LM_PANEL_IDENTITY_SIZE];
++  EFI_MEMORY_DESCRIPTOR *Map = NULL;
++  UINTN MapSize = 0, Key = 0, DescSize = 0;
++  UINT32 Version = 0;
++  int Slot = mh2lm_panel_adt_has_slot (Tree, TreeSize);
++  /* Preserve all legacy ADTs: no HOB lookup or FDT read without the slot. */
++  if (Slot == 0) { return EFI_SUCCESS; }
++  if (Slot < 0) { return EFI_COMPROMISED_DATA; }
++  mh2lm_panel_record (Record, MH_PANEL_ABSENT, 0);
++  EFI_HOB_GUID_TYPE *Hob = GetFirstGuidHob (&mPanelEntryArgHobGuid);
++  if (Hob != NULL) {
++    mh2lm_panel_record (Record, MH_PANEL_MALFORMED, 0);
++    if (GET_GUID_HOB_DATA_SIZE (Hob) >= sizeof (UINT64)) {
++      UINT64 Address = ReadUnaligned64 ((CONST UINT64 *)GET_GUID_HOB_DATA (Hob));
++      EFI_STATUS Status = gBS->GetMemoryMap (&MapSize, NULL, &Key, &DescSize, &Version);
++      if ((Status == EFI_BUFFER_TOO_SMALL) && (DescSize >= sizeof (*Map)) &&
++          (DescSize <= 4096) && (MapSize <= SIZE_1MB - 8 * DescSize)) {
++        MapSize += 8 * DescSize;
++        Map = (EFI_MEMORY_DESCRIPTOR *)AllocatePool (MapSize);
++        if (Map != NULL) {
++          Status = gBS->GetMemoryMap (&MapSize, Map, &Key, &DescSize, &Version);
++          if (!EFI_ERROR (Status) && PanelMemoryRange (Map, MapSize, DescSize, Address, 40)) {
++            CONST UINT8 *Fdt = (CONST UINT8 *)(UINTN)Address;
++            UINTN Size = (UINTN)Fdt[4] << 24 | (UINTN)Fdt[5] << 16 | (UINTN)Fdt[6] << 8 | Fdt[7];
++            if ((Size >= 40) && (Size <= SIZE_2MB) && PanelMemoryRange (Map, MapSize, DescSize, Address, Size)) {
++              mh2lm_panel_from_fdt (Fdt, Size, Record);
++            }
++          }
++          FreePool (Map);
++        }
++      }
++    }
++  }
++  /* Invalid/pre-filled slot must not reach XNU as invented source evidence. */
++  if (mh2lm_panel_fill_adt (Tree, TreeSize, Record) != 1) { return EFI_COMPROMISED_DATA; }
++  DEBUG ((DEBUG_INFO, "DARWINBOOT PANEL: ABL source=%u profile=%u; selection, not physical DDIC ID\n", Record[12], Record[16]));
++  return EFI_SUCCESS;
++}
++#endif
+diff --git a/drivers/DarwinBoot/DarwinBootPkg/Driver/panel_handoff.c b/drivers/DarwinBoot/DarwinBootPkg/Driver/panel_handoff.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/DarwinBoot/DarwinBootPkg/Driver/panel_handoff.c
+@@ -0,0 +1,136 @@
++#include "panel_handoff.h"
++#define PANEL_FDT_LIMIT (2u*1024u*1024u)
++static uint32_t word(const uint8_t *p,int big)
++{
++ return big ? (uint32_t)p[0]<<24|(uint32_t)p[1]<<16|(uint32_t)p[2]<<8|p[3] :
++     (uint32_t)p[3]<<24|(uint32_t)p[2]<<16|(uint32_t)p[1]<<8|p[0];
++}
++static int range(size_t off,size_t n,size_t limit) {return off<=limit && n<=limit-off;}
++static int exact(const uint8_t *p,size_t n,const char *s)
++{size_t i;for(i=0;i<n;++i) if(!s[i] || p[i]!=(uint8_t)s[i]) return 0;return !s[n];}
++static int terminated(const uint8_t *p,size_t n,size_t *length)
++{size_t i;for(i=0;i<n;++i) if(!p[i]) {*length=i;return 1;}return 0;}
++static int space(uint8_t c) {return c==' ' || c=='\t' || c=='\r' || c=='\n';}
++static unsigned selection(const uint8_t *args,size_t n,unsigned *profile)
++{
++ static const char key[]="msm_drm.dsi_display0=";
++ size_t pos=0;unsigned count=0,found=0;
++ *profile=0;
++ if(!n || n>8192 || args[n-1]) return MH_PANEL_MALFORMED;
++ for(size_t i=0;i<n-1;++i) if((args[i]<32 && !space(args[i])) || args[i]>126) return MH_PANEL_MALFORMED;
++ while(pos<n-1) {
++  while(pos<n-1 && space(args[pos])) ++pos;
++  size_t begin=pos;while(pos<n-1 && !space(args[pos])) ++pos;
++  if(pos-begin<sizeof(key)-1) continue;
++  size_t i;for(i=0;i<sizeof(key)-1 && args[begin+i]==(uint8_t)key[i];++i) {}
++  if(i!=sizeof(key)-1) continue;
++  ++count;size_t value=begin+i,colon=value;
++  while(colon<pos && args[colon]!=':') ++colon;
++  /* Only the source's default topology/timing. A matching label with an
++   * unknown override must not authorize our fixed 1080x2340 pipeline. */
++  if(colon==pos || !(exact(args+colon,pos-colon,":") ||
++      exact(args+colon,pos-colon,":config0") || exact(args+colon,pos-colon,":config0:timing0"))) continue;
++  for(unsigned p=1;p<=4;++p) if(exact(args+value,colon-value,mh2lm_panel_label(p))) found=p;
++ }
++ if(count>1) return MH_PANEL_AMBIGUOUS;
++ if(!count) return MH_PANEL_ABSENT;
++ if(!found) return MH_PANEL_UNKNOWN;
++ *profile=found;return MH_PANEL_SELECTED;
++}
++void mh2lm_panel_from_fdt(const void *data,size_t available,uint8_t out[MH2LM_PANEL_IDENTITY_SIZE])
++{
++ const uint8_t *b=(const uint8_t *)data;unsigned source=MH_PANEL_MALFORMED,profile=0;
++ unsigned depth=0,roots=0,chosen=0,bootargs=0;int inChosen=0,ended=0;
++ size_t total,st,sz,strings,ssz,pos,end;
++ mh2lm_panel_record(out,source,0);
++ if(!b || available<40 || word(b,1)!=0xd00dfeedu) return;
++ total=word(b+4,1);st=word(b+8,1);strings=word(b+12,1);sz=word(b+36,1);ssz=word(b+32,1);
++ if(total<40 || total>available || total>PANEL_FDT_LIMIT || word(b+20,1)!=17 || word(b+24,1)>17 ||
++     st<40 || strings<40 || (st&3) || (sz&3) || !range(st,sz,total) || !range(strings,ssz,total) ||
++     !(st+sz<=strings || strings+ssz<=st)) return;
++ pos=st;end=st+sz;source=MH_PANEL_ABSENT;
++ while(range(pos,4,end)) {
++  uint32_t token=word(b+pos,1);pos+=4;
++  if(token==1) {
++   size_t n;if(depth>=64 || !terminated(b+pos,end-pos,&n) || !range(pos,(n+4)&~(size_t)3,end)) goto malformed;
++   ++depth;
++   if(depth==1) {if(roots++ || n) goto malformed;}
++   if(depth==2) {inChosen=exact(b+pos,n,"chosen");if(inChosen) ++chosen;}
++   pos+=(n+4)&~(size_t)3;
++  } else if(token==2) {
++   if(!depth) goto malformed;
++   if(depth==2) inChosen=0;
++   --depth;
++  } else if(token==3) {
++   if(!depth || !range(pos,8,end)) goto malformed;
++   size_t len=word(b+pos,1),noff=word(b+pos+4,1),name;
++   pos+=8;
++   if(noff>=ssz || !terminated(b+strings+noff,ssz-noff,&name) ||
++       !range(pos,len,end) || !range(pos,(len+3)&~(size_t)3,end)) goto malformed;
++   if(depth==2 && inChosen && exact(b+strings+noff,name,"bootargs")) {
++    ++bootargs;source=selection(b+pos,len,&profile);
++   }
++   pos+=(len+3)&~(size_t)3;
++  } else if(token==9) {
++   if(depth || roots!=1) goto malformed;
++   ended=1;break;
++  } else if(token!=4) goto malformed;
++ }
++ if(!ended) goto malformed;
++ if(chosen>1 || bootargs>1) {source=MH_PANEL_AMBIGUOUS;profile=0;}
++ mh2lm_panel_record(out,source,profile);return;
++malformed:
++ mh2lm_panel_record(out,MH_PANEL_MALFORMED,0);
++}
++/* ADT is little-endian; bounded recursion and linear traversal. Metadata has
++ * no authority until the shim replaces the single placeholder atomically. */
++struct adt_cursor {uint8_t *b;size_t size,pos,slot;unsigned slots,budget;};
++static int adt_node(struct adt_cursor *c,unsigned depth,unsigned path)
++{
++ if(depth>32 || !c->budget-- || !range(c->pos,8,c->size)) return 0;
++ unsigned np=word(c->b+c->pos,0),nc=word(c->b+c->pos+4,0);c->pos+=8;
++ if(np>(c->size-c->pos)/36 || nc>c->size/8) return 0;
++ unsigned nameSeen=0;size_t nameoff=0,namelen=0,slot=0;unsigned slots=0;
++ for(unsigned i=0;i<np;++i) {
++  if(!range(c->pos,36,c->size)) return 0;
++  size_t name,at=c->pos;uint32_t raw=word(c->b+at+32,0);size_t len=raw&0x7fffffffu;
++  if(!terminated(c->b+at,32,&name)) return 0;
++  c->pos+=36;if(!range(c->pos,(len+3)&~(size_t)3,c->size)) return 0;
++  if(exact(c->b+at,name,"name")) {
++   ++nameSeen;nameoff=c->pos;namelen=len;
++   if(raw>>31 || !len || c->b[c->pos+len-1]) return 0;
++  }
++  if(exact(c->b+at,name,MH2LM_PANEL_PROPERTY)) {
++   if(raw>>31 || len!=MH2LM_PANEL_IDENTITY_SIZE) return 0;
++   ++slots;slot=c->pos;
++  }
++  c->pos+=(len+3)&~(size_t)3;
++ }
++ if(nameSeen!=1) return 0;
++ unsigned next=0;
++ if(depth==0) next=1;
++ else if(depth==1 && path==1 && exact(c->b+nameoff,namelen-1,"arm-io")) next=2;
++ else if(depth==2 && path==2 && exact(c->b+nameoff,namelen-1,"mdss")) next=3;
++ if(slots) {
++  if(next!=3 || slots!=1) return 0;
++  for(size_t i=0;i<MH2LM_PANEL_IDENTITY_SIZE;++i) if(c->b[slot+i]) return 0;
++  c->slots+=slots;c->slot=slot;
++ }
++ for(unsigned i=0;i<nc;++i) if(!adt_node(c,depth+1,next)) return 0;
++ return 1;
++}
++int mh2lm_panel_adt_has_slot(const void *data,size_t size)
++{
++ struct adt_cursor c={(uint8_t *)(uintptr_t)data,size,0,0,0,4096};
++ if(!data || size>2u*1024u*1024u || !adt_node(&c,0,0) || c.pos!=size || c.slots>1) return -1;
++ return c.slots ? 1 : 0;
++}
++int mh2lm_panel_fill_adt(void *data,size_t size,const uint8_t record[MH2LM_PANEL_IDENTITY_SIZE])
++{
++ struct adt_cursor c={(uint8_t *)data,size,0,0,0,4096};
++ if(!record || !mh2lm_panel_source_status(record,MH2LM_PANEL_IDENTITY_SIZE) ||
++     !data || size>2u*1024u*1024u || !adt_node(&c,0,0) || c.pos!=size || c.slots>1) return -1;
++ if(!c.slots) return 0;
++ for(size_t i=0;i<MH2LM_PANEL_IDENTITY_SIZE;++i) c.b[c.slot+i]=record[i];
++ return 1;
++}
+diff --git a/drivers/DarwinBoot/DarwinBootPkg/Driver/panel_handoff.h b/drivers/DarwinBoot/DarwinBootPkg/Driver/panel_handoff.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/DarwinBoot/DarwinBootPkg/Driver/panel_handoff.h
+@@ -0,0 +1,13 @@
++#ifndef MH2LM_PANEL_HANDOFF_H
++#define MH2LM_PANEL_HANDOFF_H
++#include "panel_identity.h"
++/* Input extents are mandatory. No allocation, libc, unaligned word accesses,
++ * pointers into FDT in the result, or propagation of arbitrary bootargs. */
++void mh2lm_panel_from_fdt(const void *,size_t,uint8_t [MH2LM_PANEL_IDENTITY_SIZE]);
++/* 1=single empty slot, 0=no slot, -1=invalid tree/slot. No changes. */
++int mh2lm_panel_adt_has_slot(const void *,size_t);
++/* Replace exactly one zero-filled /arm-io/mdss slot, only after validating the
++ * WHOLE ADT. 1=filled, 0=no slot, -1=invalid (caller MUST refuse boot).
++ * No partial changes, new nodes, resizing, or unique-device data. */
++int mh2lm_panel_fill_adt(void *,size_t,const uint8_t [MH2LM_PANEL_IDENTITY_SIZE]);
++#endif
+diff --git a/drivers/DarwinBoot/DarwinBootPkg/Driver/panel_identity.h b/drivers/DarwinBoot/DarwinBootPkg/Driver/panel_identity.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/DarwinBoot/DarwinBootPkg/Driver/panel_identity.h
+@@ -0,0 +1,50 @@
++/* Fixed little-endian handoff, not a physical DDIC ID or authentication.
++ * Only the allowlisted ABL display choice crosses FDT -> ADT. Never bootargs.
++ * Keep identical to XNU SweetPanelIdentity.h (checked by the host test). */
++#ifndef MH2LM_PANEL_IDENTITY_H
++#define MH2LM_PANEL_IDENTITY_H
++#include <stdint.h>
++#include <stddef.h>
++#define MH2LM_PANEL_IDENTITY_SIZE 96u
++#define MH2LM_PANEL_LABEL_SIZE 72u
++#define MH2LM_PANEL_PROPERTY "sweet,panel-identity"
++enum mh2lm_panel_source { MH_PANEL_UNFILLED, MH_PANEL_ABSENT, MH_PANEL_SELECTED,
++ MH_PANEL_UNKNOWN, MH_PANEL_AMBIGUOUS, MH_PANEL_MALFORMED };
++static inline const char *mh2lm_panel_label(unsigned profile)
++{
++ switch (profile) {
++ case 1: return "dsi_r66456_tianmamd_pp1_1080_2340_cmd_display";
++ case 2: return "dsi_r66456_tianmamd_dv1_1080_2340_cmd_display";
++ case 3: return "dsi_r66456_tianmamd_dv2_1080_2340_cmd_display";
++ case 4: return "dsi_r66456_tianmamd_pv_1080_2340_cmd_display";
++ default: return NULL;
++ }
++}
++static inline void mh2lm_panel_record(uint8_t *out,unsigned source,unsigned profile)
++{
++ unsigned i;const char *label=source==MH_PANEL_SELECTED ? mh2lm_panel_label(profile) : NULL;
++ for (i=0;i<MH2LM_PANEL_IDENTITY_SIZE;++i) out[i]=0;
++ for (i=0;i<8;++i) out[i]=(uint8_t)"MHPANEL1"[i];
++ out[8]=1;out[12]=(uint8_t)source;
++ if (label) {out[16]=(uint8_t)profile;for (i=0;label[i];++i) out[24+i]=(uint8_t)label[i];}
++}
++/* Exact ABI, zero reserved/tail bytes, label and numeric ID must agree. */
++static inline unsigned mh2lm_panel_profile(const uint8_t *record,size_t length)
++{
++ unsigned i,profile;uint8_t expected[MH2LM_PANEL_IDENTITY_SIZE];
++ if (!record || length!=MH2LM_PANEL_IDENTITY_SIZE || record[12]!=MH_PANEL_SELECTED) return 0;
++ profile=record[16];if (!mh2lm_panel_label(profile)) return 0;
++ mh2lm_panel_record(expected,MH_PANEL_SELECTED,profile);
++ for (i=0;i<MH2LM_PANEL_IDENTITY_SIZE;++i) if (record[i]!=expected[i]) return 0;
++ return profile;
++}
++static inline unsigned mh2lm_panel_source_status(const uint8_t *record,size_t length)
++{
++ unsigned i;uint8_t expected[MH2LM_PANEL_IDENTITY_SIZE];
++ if (!record || length!=MH2LM_PANEL_IDENTITY_SIZE || record[12]<MH_PANEL_ABSENT || record[12]>MH_PANEL_MALFORMED) return 0;
++ mh2lm_panel_record(expected,record[12],record[16]);
++ for (i=0;i<MH2LM_PANEL_IDENTITY_SIZE;++i) if (record[i]!=expected[i]) return 0;
++ if (record[12]==MH_PANEL_SELECTED && !mh2lm_panel_profile(record,length)) return 0;
++ return record[12];
++}
++#endif

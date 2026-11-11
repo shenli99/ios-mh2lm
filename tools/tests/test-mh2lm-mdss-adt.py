@@ -202,3 +202,23 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-panel-adt-') as temp:
     assert source.read_bytes() == blob
     assert output.read_bytes() == m.derive(blob, display_noc=True, panel_pins=True, panel_touch=True)
 print('PASS: combined panel-touch/panel-pins/display-noc CLI output equals validated derivation; baseline file unchanged')
+
+# The opt-in identity slot has no revision or fabricated source evidence.
+for pins in (False, True):
+    for touch in (False, True):
+        for noc in (False, True):
+            result = m.derive(blob, display_noc=noc, panel_pins=pins, panel_touch=touch, panel_identity=True)
+            r, end = adt.parse(result)
+            assert end == len(result)
+            mdss = next(n for n in r.children[1].children if n.name == 'mdss')
+            assert mdss.prop('sweet,panel-identity') == bytes(96)
+            mdss.props = [(k, f, v) for k, f, v in mdss.props if k != 'sweet,panel-identity']
+            assert adt.serialize(r) == m.derive(blob, display_resources=True, display_noc=noc, panel_pins=pins, panel_touch=touch)
+with tempfile.TemporaryDirectory(prefix='mh2lm-identity-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'panel.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--panel-touch', '--panel-pins',
+                    '--display-noc', '--panel-identity', str(source), str(output)], check=True)
+    assert output.read_bytes() == m.derive(blob, display_noc=True, panel_pins=True, panel_touch=True, panel_identity=True)
+    assert source.read_bytes() == blob
+print('PASS: zeroed 96-byte live-ABL identity slot, all pins/touch/NoC compositions, unchanged old ADTs and CLI baseline')

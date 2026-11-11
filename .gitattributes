@@ -1,2 +1,3 @@
 xnu/patches/bearssl-vendor/** -whitespace
 xnu/patches/*.patch -whitespace
+boot-support/*.patch -whitespace
