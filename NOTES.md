@@ -2,6 +2,46 @@
 
 ## Agent handoff / active work (2026-11-11, latest)
 
+**CURRENT：0187 CN0/display NoC温态ACTIVE事务已实现并本地验证；未接入面板启停，D1整体未完成。**
+父提交1a0ac96。0187-mh2lm-display-noc-votes.patch SHA256=
+14d2845e6bf429833888de20d3bd99dd14f5b3c4d3eb30485c836c4f3b827937，6份变化源码。
+所有权：SweetRPMh保留唯一apps-DRV/gate/timer，新增CN0配置带宽；SweetMDSS在原gate/clock
+所有权内拥有display RSC/TCS/wrapper及数据BCM，不引入RPMh->MDSS反向同步调用或全局实例桥。
+新增typed BCM metadata（地址仅friend硬件owner可见），CN0多consumer max票，沿原VRM/ARC引擎。
+MDSS retainBandwidth/releaseBandwidth/bandwidthStatus：4lease、AB求和/IB max、完整MNOC两端口/
+LLCC/EBI路径，按DB unit/width/VCD有界上取整14bit；LG ACV_DISPLAY ID27006走普通XY，
+只有apps ACV ID7038特殊bitmask8，不把后者搬到display。资源/名字/地址/aux唯一有界校验。
+display DRV0按LG DTS顺序SLEEP0/WAKE1/ACTIVE2,3，按VCD整组提交、末COMMIT/响应/Wait，
+非末issued、末issued+complete，另需freshIRQ或执行变化+idle。仅本槽清理，保留无关IRQ位。
+CN0->真实RSC clock lease->数据；撤票数据->clock OFF完成->CN0。新增NON_GDSC_AHB4004/
+RSCC_AHB400c/RSCC_VSYNC4008，RSC clock mask381；数据清完前不允许撤其token。
+实际温态GDSC/clock条件与真实lease确认后才首次读RSC；拒绝solver启用/seqbusy/errorIRQ/
+collapse/未知版本。首次/全部Off后再取/任意撤票核实硬件idle，不允许历史owned位绕过。
+写回1ms、每VCD100ms、整链1.5s，timer推进；故障保留确认票和时钟、显式fault，无回滚/
+reset/静默回退；stop晚事件不MMIO，有写free后本boot writer retired。
+ADT --display-noc隐含resources，在MDSS追加13..15：af20000/1c00、af21c00/3000、af30000/3fd4，
+无重叠，require resource2/clock1；坏ABI类型/长度/值及缺映射启动显式失败。default/IRQ/v1字节不变。
+**无新boot档/自动请求；LDO/ARC/NoC尚未接入实际面板启停；本地clock上游仍标inherited。**
+不是冷GDSC/父源、solver/sleepwake/QoS/SBM/端口、PHY/PLL/host或完整面板驱动的验收。
+严格应用0186树，无offset/fuzz，6源码字节一致，114原CI marker保留。真实XNU/KDK arm64
+RPMh/MDSS基线/最终对象均通过；warning1298->1321/1324->1391，新增23/67仅有界数组提示，
+已审6BCM/4lease/5数据route/24操作槽/16map/10clock及DB范围，不声称零warning。
+8套最终检查全通过：7实际源码ASan/UBSan（NoC/clock/display/FB/DSI/RPMh/perf）+Python ADT，
+UBSan halt_on_error，无sanitizer报告；LSan ptrace限制关，另断言对象/映射/分配/通知归零。
+新测试含真实匹配、首次不读RSC、编码/VCD/fresh完成、共享/撤回/Off重取idle、继承新冲突、
+独立clock ONOFF+CN0保留、坏元数据/溢出/NCPT不足/准入拒绝/超时/清理/stop与ABI启动清理。
+旧clock回归原7次反扫上限改SweetClockCount，新10分支后仍验证同一独立物理OFF条件。
+底稿scratch/framebuffer-0187/{base,edited,verify,prepare-patch.py,compile.py,verification.json,
+native-results.json,warning-counts.json,array-bound-review.json,reference-audit.json,tests.json,
+test-*.txt,*compile.txt}；详见docs/PANEL-NOC-D1.md，架构/ARC/clock/PD0/主计划/总路线已同步。
+**NEXT把已有LDO/ARC/NoC/local clock接入实际MDSS资源生命周期，再补冷GDSC/父源/PHY/PLL/host，**
+再接确认profile/reset/完整ONOFF及独立重建，不止于metadata API。不回CPU双缓冲优先/单项只读
+云轮次/旧bug专项；A单缓冲B未提交、30Hz复制未变。暂不需要push，合并可运行驱动批次再通知。
+未push/触发CI/操作设备，无新云产物/boot/run ID。CircleCI blob保持
+ da0b6c0947a66f03491b3a9023590b49665292df；USB/按键/触摸/电池/mux未修改。
+
+**以下0186按当时阶段保留，当前以0187为准。**
+
 **CURRENT：0186 typed MMCX/MX/CX供电链已实现并本地验证；未实机，D1整体未完成。**
 父提交35f61f1。0186-mh2lm-display-arc-votes.patch SHA256=
 41ced0dbec1edc12065c801804906d97b17f715b0e33bf956af26929ad1bb104，仅改SweetRPMh.h/.cpp。

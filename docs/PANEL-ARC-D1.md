@@ -90,7 +90,9 @@ consumer 有有效显示票、在途请求或不确定显示请求时 detach 返
 关闭依赖域；任何降档前先降低依赖时钟频率。ACK 仅证明本 XNU ACTIVE 请求完成，既不证明
 实测电压/物理掉电，也不覆盖 AOP、其他执行环境或 sleep/wake 投票。
 
-## NoC 边界与后续
+## NoC 边界与后续（0186时点）
+
+0187已完成下述温态ACTIVE带宽事务，详见[NoC实现](PANEL-NOC-D1.md)；尚未接入面板生命周期。
 
 已核对 LG `sm8150.dtsi`、`sm8150-bus.dtsi`、`sm8150-sde.dtsi` 和
 `drivers/soc/qcom/msm_bus/msm_bus_{fabric,arb}_rpmh.c`：
@@ -98,7 +100,7 @@ consumer 有有效显示票、在途请求或不确定显示请求时 detach 返
 - apps RSC 与 display RSC 是不同的 DRV；后者窗口 `0xaf20000`、TCS `0xaf21c00`。
   `_display` BCM 节点使用 `rsc_disp`，不能沿用本段 apps-DRV 地址直接发它们的票。
 - BCM aux 为 unit-size/width/VCD；命令有14-bit X/Y、VALID、COMMIT，按 VCD 的完成边界组织。
-  ACV 还有特殊 RSC 位语义，不能套普通带宽公式。
+  ACV 语义当时待核对；0187已明确apps ACV与ACV_DISPLAY不同，后者在LG实际走普通X/Y分支。
 - SDE 有 reg bus 及 MNOC/LLCC/EBI 路径；完整带宽依赖不能只投一个 MM0。
 - LG `sde_rscc` 自身还声明 `mdss_core_gdsc` 和 RSCC/non-GDSC AHB/VSYNC 时钟依赖；
   后续须核对 TCS 与 wrapper 各自访问准入及冷启动先后，不能未经确认就访问未供电的 RSC。

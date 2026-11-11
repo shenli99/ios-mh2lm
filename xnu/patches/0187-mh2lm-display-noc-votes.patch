@@ -1,0 +1,841 @@
+diff --git a/iokit/Kernel/arm/SweetDisplayClock.h b/iokit/Kernel/arm/SweetDisplayClock.h
+--- a/iokit/Kernel/arm/SweetDisplayClock.h
++++ b/iokit/Kernel/arm/SweetDisplayClock.h
+@@ -5,10 +5,10 @@
+ #ifndef SWEET_DISPLAY_CLOCK_H
+ #define SWEET_DISPLAY_CLOCK_H
+ #include <stdint.h>
+-enum SweetClockUse { SweetClockCore, SweetClockDSI0, SweetClockUseCount };
++enum SweetClockUse { SweetClockCore, SweetClockDSI0, SweetClockRSC, SweetClockUseCount };
+ enum SweetClockState { SweetClockUnused, SweetClockPending, SweetClockHeld,
+  SweetClockReleasing, SweetClockReleased, SweetClockFailed, SweetClockStopped };
+-enum { SweetClockCount=7 };
++enum { SweetClockCount=10 };
+ struct SweetClockLease {
+  uint64_t token;
+  unsigned mask, state;
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -211,7 +211,7 @@
+  static IOReturn dsiStatusAction(OSObject *,void *,void *,void *,void *);
+  static IOReturn dsiCancelAction(OSObject *,void *,void *,void *,void *);
+  static void dsiTimerAction(OSObject *,IOTimerEventSource *);
+- IOMemoryMap *fMaps[13];
++ IOMemoryMap *fMaps[16];
+  SweetRPMhClient *fRPMhClient;
+  SweetRPMh *fRPMh;
+  uint64_t fRPMhConsumer;
+@@ -240,6 +240,42 @@
+  void advanceLocalClocks(void);
+  void finishLocalClocks(IOReturn);
+  void stopLocalClocks(void);
++ /* Same owner/gate as clocks/GDSC; display RSC is never mapped by RPMh. */
++ struct NoCLease { SweetDisplayBandwidth vote; SweetNoCStatus status; bool active; };
++ NoCLease fNoCLeases[4];
++ IOTimerEventSource *fNoCTimer;
++ bool fNoCTimerAdded, fNoCEnabled, fNoCClaimed, fNoCTouched, fNoCFault, fNoCReleasing;
++ uint64_t fNoCNextToken, fNoCDeadline, fNoCStepDeadline, fNoCWriteDeadline, fNoCClockToken, fNoCAppsToken;
++ unsigned fNoCSlot, fNoCPhase, fNoCGroup, fNoCCursor, fNoCCount, fNoCTCS, fNoCOp, fNoCOps;
++ unsigned fNoCOwned;
++ uint32_t fNoCSavedIRQ, fNoCEnable, fNoCWait;
++ bool fNoCExecuting, fNoCProgress, fNoCWriteIssued, fNoCAppsLower;
++ SweetDisplayBandwidth fNoCTarget, fNoCAggregate;
++ SweetBCMInfo fNoCInfo[SweetDisplayBCMCount];
++ uint32_t fNoCValues[SweetDisplayBCMCount];
++ uint32_t fNoCApplied[SweetDisplayBCMCount];
++ unsigned fNoCOrder[5];
++ struct NoCOperation { uint32_t offset, value; bool clear; };
++ NoCOperation fNoCOperations[24];
++ vm_offset_t fNoCRSC, fNoCTCSBase, fNoCWrapper;
++ unsigned fNoCNCPT;
++ bool setupNoC(IOService *);
++ bool noCBusy(void) const;
++ bool noCClocksReady(void);
++ bool noCCanReleaseClock(void) const;
++ bool noCAdmission(void);
++ IOReturn retainBandwidth(const SweetDisplayBandwidth &,uint64_t *);
++ IOReturn releaseBandwidth(uint64_t);
++ IOReturn bandwidthStatus(uint64_t,SweetNoCStatus *);
++ IOReturn beginBandwidth(unsigned,const SweetDisplayBandwidth &,bool);
++ bool noCPlan(const SweetDisplayBandwidth &);
++ IOReturn noCQueueGroup(void);
++ void noCAdd(uint32_t,uint32_t,bool = false);
++ void advanceNoC(void);
++ void finishNoC(IOReturn,bool);
++ void stopNoC(void);
++ static IOReturn noCAction(OSObject *,void *,void *,void *,void *);
++ static void noCTimerAction(OSObject *,IOTimerEventSource *);
+  bool setupDisplayResources(IOService *);
+  static void resourcesChanged(OSObject *);
+  void closeDisplayResources(void);
+@@ -349,6 +385,7 @@
+  setupIrqProbe(provider);
+  setupIRQ(provider);
+  if (!setupLocalClocks()) return false;
++ if (!setupNoC(provider)) return false;
+  SWEET_LOG_INFO("SWEET MDSS: F1a v1 IOService backend; ABL scanout unchanged\n");
+  registerService();
+  return true;
+@@ -389,6 +426,10 @@
+  SweetRPMh *provider=self->fRPMhClient->copyBackend();
+  if (provider==self->fRPMh) { OSSafeReleaseNULL(provider); return; }
+  if (self->fRPMh) {
++  if (self->fNoCEnabled && (self->noCBusy() || self->fNoCOwned)) {
++   if (self->noCBusy()) self->finishNoC(kIOReturnNotReady,true);
++   self->fNoCFault=true; /* Lost config-path owner; preserve resources. */
++  }
+   /* No vote is emitted by this D1 binding. Later lifecycle must explicitly
+    * withdraw votes only after stopping DMA/link; failed detach never powers off. */
+   (void)self->fRPMh->detachConsumer(self->fRPMhConsumer);
+@@ -599,6 +640,7 @@
+ 
+ #include "SweetMDSSScanout.inc"
+ #include "SweetMDSSClock.inc"
++#include "SweetMDSSNoC.inc"
+ #include "SweetMDSSDSI.inc"
+ 
+ IOReturn
+@@ -656,6 +698,7 @@
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  self->fAccepting=false;
++ self->stopNoC();
+  self->stopLocalClocks();
+  if (self->dsiBusy()) self->finishDSI(kIOReturnAborted,SweetDSICancelled);
+  self->cancelScanout("provider stopped");
+@@ -682,6 +725,7 @@
+  if (fIrqEventAdded) { fLoop->removeEventSource(fIrqEvent); fIrqEventAdded=false; }
+  if (fIrqTimerAdded) { fLoop->removeEventSource(fIrqTimer); fIrqTimerAdded=false; }
+  if (fClockTimerAdded) { fLoop->removeEventSource(fClockTimer); fClockTimerAdded=false; }
++ if (fNoCTimerAdded) { fLoop->removeEventSource(fNoCTimer); fNoCTimerAdded=false; }
+  if (fDsiTimerAdded) { fLoop->removeEventSource(fDsiTimer); fDsiTimerAdded=false; }
+  /* Gate/maps stay valid through free, including retained pre-stop callers.
+   * Admission is closed; no MMIO may run after stopAction. */
+@@ -700,6 +744,9 @@
+  if (fClockTimerAdded) { fLoop->removeEventSource(fClockTimer); fClockTimerAdded=false; }
+  if (fDsiTimerAdded) { fLoop->removeEventSource(fDsiTimer); fDsiTimerAdded=false; }
+  OSSafeReleaseNULL(fClockTimer);
++ if (fNoCTimerAdded) { fLoop->removeEventSource(fNoCTimer); fNoCTimerAdded=false; }
++ OSSafeReleaseNULL(fNoCTimer);
++ if (fNoCClaimed) { __atomic_store_n(&mdssNoCWriter,fNoCTouched ? 2u : 0u,__ATOMIC_RELEASE); fNoCClaimed=false; }
+  if (fClockClaimed) { __atomic_store_n(&mdssClockWriter,fClockTouched ? 2u : 0u,__ATOMIC_RELEASE); fClockClaimed=false; }
+  OSSafeReleaseNULL(fDsiTimer); OSSafeReleaseNULL(fDsiSequence);
+  /* A timed-out/cancelled DMA keeps an independent prepared descriptor
+@@ -714,7 +761,7 @@
+  if (fIntervals) { IOFreeData(fIntervals,4096*sizeof(*fIntervals)); fIntervals=NULL; }
+  OSSafeReleaseNULL(fIrqEvent); OSSafeReleaseNULL(fIrqTimer);
+  OSSafeReleaseNULL(fIrqProbe); OSSafeReleaseNULL(fProbe); OSSafeReleaseNULL(fGate); OSSafeReleaseNULL(fLoop);
+- for (unsigned i=0;i<13;++i) OSSafeReleaseNULL(fMaps[i]);
++ for (unsigned i=0;i<16;++i) OSSafeReleaseNULL(fMaps[i]);
+  SweetDisplayBackend::free();
+ }
+ 
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -13,8 +13,11 @@
+  {0x2028,0x2110,1u<<1,true}, /* BYTE0: already-running PHY0 only */
+  {0x202c,0x2110,1u<<1,true}, /* BYTE0_INTF: same root + divider */
+  {0x2004,0x2098,1u<<1,true}, /* PCLK0: already-running PHY0 only */
++ {0x4004,0x22bc,(1u<<0)|(1u<<4)|(1u<<5),false}, /* NON_GDSC_AHB */
++ {0x400c,0x22bc,(1u<<0)|(1u<<4)|(1u<<5),false}, /* RSCC_AHB */
++ {0x4008,0x20f8,1u<<0,false}, /* RSCC_VSYNC */
+ };
+-static const unsigned mdssClockMasks[SweetClockUseCount]={0x07u,0x7fu};
++static const unsigned mdssClockMasks[SweetClockUseCount]={0x07u,0x7fu,0x381u};
+ 
+ bool SweetMDSS::clockBusy(void) const
+ {
+@@ -146,6 +149,7 @@
+  unsigned slot=4;
+  for (unsigned n=0;n<4;++n) if (token && s->fClockLeases[n].token==token) { slot=n; break; }
+  if (slot==4 || s->fClockLeases[slot].state!=SweetClockHeld) return kIOReturnBadArgument;
++ if (token==s->fNoCClockToken && !s->noCCanReleaseClock()) return kIOReturnBusy;
+  if (!s->clockPrerequisites()) return kIOReturnNotReady;
+  unsigned disable=0;
+  for (unsigned i=0;i<SweetClockCount;++i)
+@@ -253,6 +257,7 @@
+ }
+ bool SweetMDSS::localClocksReady(void)
+ {
++ if (noCBusy() || (fNoCEnabled && fNoCFault)) return false; /* No re-entry during transition/fault. */
+  if (!fAccepting || isInactive() || !fClockEnabled || fClockFault || !fClockBootToken || !clockPrerequisites()) return false;
+  SweetClockLease status={};
+  if (clockStatusAction(this,&fClockBootToken,&status,NULL,NULL)!=kIOReturnSuccess || status.state!=SweetClockHeld)
+diff --git a/iokit/Kernel/arm/SweetMDSSNoC.inc b/iokit/Kernel/arm/SweetMDSSNoC.inc
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetMDSSNoC.inc
+@@ -0,0 +1,368 @@
++/* Display-data RSC lives with the actual MDSS clock/GDSC owner. Config CN0
++ * stays in SweetRPMh/apps-DRV. No reverse synchronous provider callback. */
++static unsigned mdssNoCWriter; /* Ownership state only, never an instance. */
++enum { NIdle, NAppsRaise, NClock, NData, NClockRelease, NAppsLower };
++enum { NStride=0x2a0, NCommandStride=0x14, NIRQEnable=0, NIRQStatus=4, NIRQClear=8,
++ NWait=0x10, NControl=0x14, NStatus=0x18, NEnable=0x1c, NMessage=0x30,
++ NAddress=0x34, NDataRegister=0x38, NCommandStatus=0x3c,
++ NAMC=1<<16, NTrigger=1<<24, NIssued=1<<8, NComplete=1<<16 };
++struct SweetNoCRequest {
++ unsigned operation; uint64_t token; const SweetDisplayBandwidth *vote;
++ uint64_t *output; SweetNoCStatus *status;
++};
++
++bool SweetMDSS::setupNoC(IOService *provider)
++{
++ OSObject *property=provider->getProperty("sweet,display-noc-abi");
++ if (!property) return true;
++ OSData *abi=OSDynamicCast(OSData,property);
++ if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),"\1\0\0\0",4) || fDisplayResourceMode!=2 || !fClockEnabled)
++  return false;
++ const uint64_t pa[]={0x0af20000,0x0af21c00,0x0af30000}, size[]={0x1c00,0x3000,0x3fd4};
++ for (unsigned n=0;n<3;++n) {
++  fMaps[13+n]=provider->mapDeviceMemoryWithIndex(13+n);
++  if (!fMaps[13+n] || fMaps[13+n]->getPhysicalAddress()!=pa[n] || fMaps[13+n]->getLength()!=size[n]) return false;
++ }
++ fNoCRSC=fMaps[13]->getVirtualAddress(); fNoCTCSBase=fMaps[14]->getVirtualAddress();
++ fNoCWrapper=fMaps[15]->getVirtualAddress();
++ fNoCTimer=IOTimerEventSource::timerEventSource(this,noCTimerAction);
++ if (!fNoCTimer || fLoop->addEventSource(fNoCTimer)!=kIOReturnSuccess) return false;
++ fNoCTimerAdded=true; fNoCEnabled=true;
++ setProperty("SweetDisplayNoCOwnership","MDSS display RSC; RPMh apps CN0; explicit warm requests only");
++ return true; /* Mapping never reads RSC, enables clocks or sends a vote. */
++}
++bool SweetMDSS::noCBusy(void) const { return fNoCPhase!=NIdle; }
++bool SweetMDSS::noCCanReleaseClock(void) const
++{ return fNoCPhase==NData && !fNoCTarget.registerPeak && fNoCCursor==fNoCCount; }
++bool SweetMDSS::noCClocksReady(void)
++{
++ if (!fAccepting || isInactive() || fClockFault || !fNoCClockToken || !clockPrerequisites()) return false;
++ SweetClockLease lease={};
++ if (clockStatusAction(this,&fNoCClockToken,&lease,NULL,NULL)!=kIOReturnSuccess ||
++     lease.state!=SweetClockHeld || lease.mask!=mdssClockMasks[SweetClockRSC]) return false;
++ for (unsigned i=0;i<SweetClockCount;++i) if (lease.mask&(1u<<i)) {
++  uint32_t parent[6]={}, v=dp_rd(dp_dispcc,mdssClockBranches[i].cbcr);
++  if (!clockParent(i,parent) || memcmp(parent,fClockParents[i],sizeof(parent)) || !(v&1u) || (v&CBCR_OFF)) return false;
++ }
++ return true;
++}
++bool SweetMDSS::noCAdmission(void)
++{
++ if (!noCClocksReady()) return false; /* No RSC access before clock/domain lease. */
++ uint32_t id=dp_rd(fNoCRSC,0), config=dp_rd(fNoCRSC,12);
++ unsigned major=(id>>16)&255, count=config&63u;
++ fNoCNCPT=(config>>27)&31u;
++ if ((major!=1 && major!=2) || count<4 || count>0x3000/NStride || !fNoCNCPT || fNoCNCPT>16) return false;
++ uint32_t override=dp_rd(fNoCWrapper,4), power=dp_rd(fNoCWrapper,0x24), ctrl=dp_rd(fNoCWrapper,0);
++ /* LG CLK state disables solver via wrapper bit0; never reprogram firmware's
++  * solver/sequencer. Busy/solver/collapse is an explicit refusal, not success. */
++ return override!=~0u && !(override&1u) && power!=~0u && !(power&(1u<<12)) &&
++     ctrl!=~0u && !(ctrl&2u) && dp_rd(fNoCRSC,0x404)==0 && dp_rd(fNoCRSC,0xd0)==0;
++}
++
++IOReturn SweetMDSS::retainBandwidth(const SweetDisplayBandwidth &vote,uint64_t *token)
++{
++ if (!token) return kIOReturnBadArgument;
++ *token=0; SweetNoCRequest r={}; r.vote=&vote; r.output=token;
++ return fGate ? fGate->runAction(noCAction,&r) : kIOReturnNotReady;
++}
++IOReturn SweetMDSS::releaseBandwidth(uint64_t token)
++{
++ SweetNoCRequest r={}; r.operation=1; r.token=token;
++ return fGate ? fGate->runAction(noCAction,&r) : kIOReturnNotReady;
++}
++IOReturn SweetMDSS::bandwidthStatus(uint64_t token,SweetNoCStatus *status)
++{
++ if (!status) return kIOReturnBadArgument;
++ *status={}; SweetNoCRequest r={}; r.operation=2; r.token=token; r.status=status;
++ return fGate ? fGate->runAction(noCAction,&r) : kIOReturnNotReady;
++}
++IOReturn SweetMDSS::noCAction(OSObject *owner,void *arg,void *,void *,void *)
++{
++ SweetMDSS *s=(SweetMDSS *)owner; SweetNoCRequest &r=*(SweetNoCRequest *)arg;
++ unsigned slot=4;
++ if (r.operation) {
++  for (unsigned n=0;n<4;++n) if (r.token && s->fNoCLeases[n].status.token==r.token) { slot=n; break; }
++  if (slot==4) return kIOReturnNotFound;
++  if (r.operation==2) { *r.status=s->fNoCLeases[slot].status; return kIOReturnSuccess; }
++ } else {
++  for (unsigned n=0;n<4;++n) if (s->fNoCLeases[n].status.state==SweetNoCEmpty ||
++      s->fNoCLeases[n].status.state==SweetNoCReleased) { slot=n; break; }
++  if (slot==4 || s->fNoCNextToken==~0ULL) return kIOReturnNoResources;
++ }
++ if (!s->fNoCEnabled || !s->fAccepting || s->isInactive() || s->fNoCFault) return kIOReturnNotReady;
++ if (s->noCBusy() || s->clockBusy() || s->dsiBusy()) return kIOReturnBusy;
++ if (r.operation && !s->fNoCLeases[slot].active) return kIOReturnBadArgument;
++ SweetDisplayBandwidth empty={};
++ IOReturn result=s->beginBandwidth(slot,r.operation ? empty : *r.vote,r.operation!=0);
++ if (result==kIOReturnSuccess && r.output) *r.output=s->fNoCLeases[slot].status.token;
++ return result;
++}
++
++bool SweetMDSS::noCPlan(const SweetDisplayBandwidth &v)
++{
++ if (v.port[0].average>~0ULL-v.port[1].average) return false;
++ uint64_t average=v.port[0].average+v.port[1].average;
++ uint64_t peak=v.port[0].peak>v.port[1].peak ? v.port[0].peak : v.port[1].peak;
++ unsigned x=0,y=0,a=0,b=0;
++ if (!fNoCInfo[SweetBCMMM1].scale(v.port[0].average,32,1,&x) ||
++     !fNoCInfo[SweetBCMMM1].scale(v.port[1].average,32,1,&a) ||
++     !fNoCInfo[SweetBCMMM1].scale(v.port[0].peak,32,1,&y) ||
++     !fNoCInfo[SweetBCMMM1].scale(v.port[1].peak,32,1,&b)) return false;
++ if (a>x) x=a;
++ if (b>y) y=b;
++ fNoCValues[SweetBCMMM1]=(x||y ? 1u<<29 : 0u)|(x<<14)|y;
++ for (unsigned r=SweetBCMMM0;r<SweetDisplayBCMCount;++r) {
++  unsigned width=r==SweetBCMMM0 ? 32 : (r==SweetBCMSH0 ? 16 : 4);
++  unsigned ports=r==SweetBCMMM0 ? 2 : 4;
++  SweetBandwidth bandwidth=r==SweetBCMMM0 ? SweetBandwidth{average,peak} :
++      (r==SweetBCMSH0 ? v.llcc : v.ebi);
++  if (!fNoCInfo[r].scale(bandwidth.average,width,ports,&x) || !fNoCInfo[r].scale(bandwidth.peak,width,1,&y)) return false;
++  /* LG ACV_DISPLAY is distinct from apps ACV (bitmask8). Its actual display
++   * node follows this ordinary X/Y branch; do not invent an apps mask here. */
++  fNoCValues[r]=(x||y ? 1u<<29 : 0u)|(x<<14)|y;
++ }
++ fNoCCount=0;
++ for (unsigned r=1;r<SweetDisplayBCMCount;++r)
++  if (((fNoCOwned&(1u<<r)) && fNoCApplied[r]!=fNoCValues[r]) ||
++      (!(fNoCOwned&(1u<<r)) && fNoCValues[r])) fNoCOrder[fNoCCount++]=r;
++ for (unsigned i=1;i<fNoCCount;++i) {
++  unsigned value=fNoCOrder[i], j=i;
++  while (j && fNoCInfo[fNoCOrder[j-1]].vcd>fNoCInfo[value].vcd) {
++   fNoCOrder[j]=fNoCOrder[j-1]; --j;
++  }
++  fNoCOrder[j]=value;
++ }
++ return true;
++}
++
++IOReturn SweetMDSS::beginBandwidth(unsigned slot,const SweetDisplayBandwidth &proposal,bool release)
++{
++ if (!fRPMh || !fRPMhConsumer) return kIOReturnNotReady;
++ if ((!fNoCAggregate.registerPeak || release) && !clockCanGate()) return kIOReturnBusy;
++ if (!clockPrerequisites()) return kIOReturnNotReady; /* Warm only; no cold fallback. */
++ if (!release) {
++  if (proposal.registerPeak<76800000ULL || (!proposal.port[0].peak && !proposal.port[1].peak) || !proposal.llcc.peak || !proposal.ebi.peak)
++   return kIOReturnBadArgument;
++  for (unsigned i=0;i<4;++i) {
++   const SweetBandwidth &v=i<2 ? proposal.port[i] : (i==2 ? proposal.llcc : proposal.ebi);
++   if (v.average>v.peak) return kIOReturnBadArgument;
++  }
++ }
++ SweetDisplayBandwidth target={};
++ for (unsigned n=0;n<4;++n) {
++  const SweetDisplayBandwidth *v=NULL;
++  if (n==slot) { if (!release) v=&proposal; }
++  else if (fNoCLeases[n].active) v=&fNoCLeases[n].vote;
++  if (!v) continue;
++  for (unsigned i=0;i<4;++i) {
++   const SweetBandwidth &from=i<2 ? v->port[i] : (i==2 ? v->llcc : v->ebi);
++   SweetBandwidth &to=i<2 ? target.port[i] : (i==2 ? target.llcc : target.ebi);
++   if (to.average>~0ULL-from.average) return kIOReturnBadArgument;
++   to.average+=from.average; if (to.peak<from.peak) to.peak=from.peak;
++  }
++  if (target.registerPeak<v->registerPeak) target.registerPeak=v->registerPeak;
++ }
++ for (unsigned r=0;r<SweetDisplayBCMCount;++r)
++  if (fRPMh->copyBCMInfo((SweetDisplayBCM)r,&fNoCInfo[r])!=kIOReturnSuccess) return kIOReturnNotReady;
++ unsigned check=0;
++ if (!fNoCInfo[0].scale(target.registerPeak,4,1,&check) || !noCPlan(target)) return kIOReturnBadArgument;
++ if (!fNoCClaimed) {
++  unsigned expected=0;
++  if (!__atomic_compare_exchange_n(&mdssNoCWriter,&expected,1u,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) return kIOReturnNotReady;
++  fNoCClaimed=true;
++ }
++ fNoCSlot=slot; fNoCTarget=target; fNoCReleasing=release;
++ fNoCCursor=0; fNoCExecuting=false; fNoCAppsToken=0;
++ fNoCAppsLower=target.registerPeak<fNoCAggregate.registerPeak;
++ NoCLease &lease=fNoCLeases[slot];
++ if (!release) { lease={}; lease.vote=proposal; lease.status.token=++fNoCNextToken; }
++ lease.status.state=release ? SweetNoCReleasing : SweetNoCPending;
++ lease.status.acknowledged=0; lease.status.registerAcknowledged=false; lease.status.uncertain=false;
++ fNoCPhase=NAppsRaise; fNoCDeadline=scanout_now()+1500000000ULL;
++ fNoCTimer->setTimeoutUS(1); return kIOReturnSuccess;
++}
++void SweetMDSS::noCAdd(uint32_t offset,uint32_t value,bool clear)
++{ fNoCOperations[fNoCOps++]={offset,value,clear}; }
++
++IOReturn SweetMDSS::noCQueueGroup(void)
++{
++ if (!noCAdmission()) return kIOReturnNotReady;
++ int chosen=-1;
++ for (unsigned t=2;t<4;++t) {
++  uint32_t b=t*NStride, enabled=dp_rd(fNoCTCSBase,b+NEnable), irq=dp_rd(fNoCTCSBase,NIRQStatus);
++  if (enabled&~((1u<<fNoCNCPT)-1u)) return kIOReturnIOError;
++  for (unsigned c=0;c<fNoCNCPT;++c) if (enabled&(1u<<c)) {
++   uint32_t address=dp_rd(fNoCTCSBase,b+NAddress+c*NCommandStride);
++   for (unsigned r=1;r<SweetDisplayBCMCount;++r) if (address==fNoCInfo[r].address) return kIOReturnBusy;
++  }
++  uint32_t idle=dp_rd(fNoCTCSBase,b+NStatus);
++  if (chosen<0 && idle && idle!=~0u && irq!=~0u && !(irq&(1u<<t)) && !enabled &&
++      !dp_rd(fNoCTCSBase,b+NControl) && !dp_rd(fNoCTCSBase,b+NWait)) chosen=(int)t;
++ }
++ if (chosen<0) return kIOReturnBusy;
++ fNoCGroup=1;
++ unsigned vcd=fNoCInfo[fNoCOrder[fNoCCursor]].vcd;
++ while (fNoCCursor+fNoCGroup<fNoCCount && fNoCInfo[fNoCOrder[fNoCCursor+fNoCGroup]].vcd==vcd) ++fNoCGroup;
++ if (fNoCGroup>fNoCNCPT) return kIOReturnNoResources; /* Never split a VCD commit. */
++ fNoCTCS=(unsigned)chosen; fNoCSavedIRQ=dp_rd(fNoCTCSBase,NIRQEnable);
++ if (fNoCSavedIRQ==~0u) return kIOReturnIOError;
++ fNoCOp=fNoCOps=0; fNoCExecuting=fNoCProgress=fNoCWriteIssued=false;
++ uint32_t b=fNoCTCS*NStride, bit=1u<<fNoCTCS;
++ fNoCEnable=(1u<<fNoCGroup)-1u; fNoCWait=1u<<(fNoCGroup-1);
++ noCAdd(NIRQEnable,fNoCSavedIRQ&~bit);
++ for (unsigned c=0;c<fNoCGroup;++c) {
++  unsigned r=fNoCOrder[fNoCCursor+c]; bool last=c+1==fNoCGroup;
++  noCAdd(b+NMessage+c*NCommandStride,8u|(1u<<16)|(last ? 1u<<8 : 0u));
++  noCAdd(b+NAddress+c*NCommandStride,fNoCInfo[r].address);
++  noCAdd(b+NDataRegister+c*NCommandStride,fNoCValues[r]|(last ? 1u<<30 : 0u));
++ }
++ noCAdd(b+NWait,fNoCWait); noCAdd(b+NEnable,fNoCEnable);
++ noCAdd(b+NControl,0); noCAdd(b+NControl,NAMC);
++ fNoCStepDeadline=scanout_now()+100000000ULL; return kIOReturnSuccess;
++}
++
++void SweetMDSS::noCTimerAction(OSObject *owner,IOTimerEventSource *)
++{ SweetMDSS *s=(SweetMDSS *)owner; if (s->fAccepting && !s->isInactive() && s->noCBusy()) s->advanceNoC(); }
++void SweetMDSS::advanceNoC(void)
++{
++ uint64_t now=scanout_now();
++ if (now>=fNoCDeadline) { finishNoC(kIOReturnTimeout,fNoCTouched); return; }
++ if (!fRPMh || !fRPMhConsumer) { finishNoC(kIOReturnNotReady,fNoCTouched); return; }
++ SweetNoCStatus &status=fNoCLeases[fNoCSlot].status;
++ if (fNoCPhase==NAppsRaise || fNoCPhase==NAppsLower) {
++  if (fNoCPhase==NAppsRaise && fNoCAppsLower) { fNoCPhase=NClock; }
++  else {
++   if (!fNoCAppsToken) {
++    IOReturn rc=fRPMh->requestRegisterBandwidth(fRPMhConsumer,fNoCTarget.registerPeak,&fNoCAppsToken);
++    if (rc!=kIOReturnSuccess) { finishNoC(rc,fNoCTouched); return; }
++    fNoCTouched=true; /* Admitted foreign work may write before our next tick. */
++   }
++   SweetRegisterBandwidthStatus apps={};
++   IOReturn rc=fRPMh->copyRegisterBandwidthStatus(fRPMhConsumer,fNoCAppsToken,&apps);
++   if (rc!=kIOReturnSuccess || apps.state==SweetRPMhFailed) { finishNoC(rc ? rc : apps.result,true); return; }
++   if (apps.state!=SweetRPMhComplete) { fNoCTimer->setTimeoutUS(100); return; }
++   status.registerAcknowledged=true; fNoCAppsToken=0;
++   if (fNoCPhase==NAppsLower) { finishNoC(kIOReturnSuccess,false); return; }
++   fNoCPhase=NClock;
++  }
++ }
++ if (fNoCPhase==NClock || fNoCPhase==NClockRelease) {
++  SweetClockLease clock={};
++  if (fNoCPhase==NClock && !fNoCClockToken) {
++   IOReturn rc=retainLocalClocks(SweetClockRSC,&fNoCClockToken);
++   if (rc!=kIOReturnSuccess) { finishNoC(rc,fNoCTouched); return; }
++  }
++  IOReturn rc=localClockStatus(fNoCClockToken,&clock);
++  if (rc!=kIOReturnSuccess || clock.state==SweetClockFailed || clock.state==SweetClockStopped) { finishNoC(rc ? rc : kIOReturnNotReady,true); return; }
++  unsigned expected=fNoCPhase==NClock ? SweetClockHeld : SweetClockReleased;
++  if (clock.state!=expected) { fNoCTimer->setTimeoutUS(100); return; }
++  if (fNoCPhase==NClockRelease) {
++   fNoCClockToken=0;
++   if (fNoCAppsLower) { fNoCPhase=NAppsLower; fNoCTimer->setTimeoutUS(1); return; }
++   finishNoC(kIOReturnSuccess,false); return;
++  }
++  fNoCPhase=NData;
++  if (fNoCCount) {
++   rc=noCQueueGroup();
++   if (rc!=kIOReturnSuccess) { finishNoC(rc,fNoCTouched); return; }
++  }
++ }
++ if (fNoCPhase!=NData) return;
++ if (!noCAdmission()) { finishNoC(kIOReturnNotReady,fNoCTouched); return; }
++ if (fNoCCursor==fNoCCount) {
++  if (!fNoCTarget.registerPeak) {
++   IOReturn rc=releaseLocalClocks(fNoCClockToken);
++   if (rc!=kIOReturnSuccess) { finishNoC(rc,fNoCTouched); return; }
++   fNoCPhase=NClockRelease;
++  } else if (fNoCAppsLower) fNoCPhase=NAppsLower;
++  else { finishNoC(kIOReturnSuccess,false); return; }
++  fNoCTimer->setTimeoutUS(100); return;
++ }
++ if (now>=fNoCStepDeadline) { finishNoC(kIOReturnTimeout,true); return; }
++ uint32_t base=fNoCTCS*NStride, bit=1u<<fNoCTCS;
++ while (fNoCOp<fNoCOps) {
++  NoCOperation &op=fNoCOperations[fNoCOp];
++  if (!fNoCWriteIssued) {
++   if (fNoCOp==1 && !fNoCExecuting) {
++    /* A new inherited request may have arrived after queue construction. */
++    for (unsigned t=2;t<4;++t) {
++     uint32_t enabled=dp_rd(fNoCTCSBase,t*NStride+NEnable);
++     if (enabled&~((1u<<fNoCNCPT)-1u)) { finishNoC(kIOReturnIOError,true); return; }
++     uint32_t idle=dp_rd(fNoCTCSBase,t*NStride+NStatus);
++     if (t==fNoCTCS && (enabled || dp_rd(fNoCTCSBase,base+NControl) || dp_rd(fNoCTCSBase,base+NWait) ||
++         !idle || idle==~0u || (dp_rd(fNoCTCSBase,NIRQStatus)&bit))) { finishNoC(kIOReturnBusy,true); return; }
++     for (unsigned c=0;c<fNoCNCPT;++c) if (enabled&(1u<<c))
++      for (unsigned r=1;r<SweetDisplayBCMCount;++r)
++       if (dp_rd(fNoCTCSBase,t*NStride+NAddress+c*NCommandStride)==fNoCInfo[r].address) { finishNoC(kIOReturnBusy,true); return; }
++    }
++   }
++   if (op.offset==NIRQEnable) {
++    uint32_t current=dp_rd(fNoCTCSBase,NIRQEnable);
++    if (current==~0u) { finishNoC(kIOReturnIOError,true); return; }
++    op.value=(current&~bit)|(fNoCExecuting ? fNoCSavedIRQ&bit : 0u);
++   }
++   fNoCTouched=true; dp_wr(fNoCTCSBase,op.offset,op.value);
++   fNoCWriteDeadline=now+1000000ULL; fNoCWriteIssued=true;
++  }
++  uint32_t value=dp_rd(fNoCTCSBase,op.clear ? NIRQStatus : op.offset);
++  if (op.clear ? (value&op.value)!=0 : value!=op.value) {
++   if (now>=fNoCWriteDeadline) finishNoC(kIOReturnIOError,true);
++   else fNoCTimer->setTimeoutUS(100);
++   return;
++  }
++  ++fNoCOp; fNoCWriteIssued=false;
++ }
++ if (!fNoCExecuting) {
++  dp_wr(fNoCTCSBase,base+NControl,NAMC|NTrigger); fNoCExecuting=true;
++  fNoCOp=fNoCOps=0; fNoCTimer->setTimeoutUS(100); return;
++ }
++ if (fNoCOps) {
++  for (unsigned c=0;c<fNoCGroup;++c) {
++   unsigned r=fNoCOrder[fNoCCursor+c];
++   fNoCApplied[r]=fNoCValues[r]; fNoCOwned|=1u<<r; status.acknowledged|=1u<<r;
++  }
++  fNoCCursor+=fNoCGroup;
++  if (fNoCCursor<fNoCCount) {
++   IOReturn rc=noCQueueGroup(); if (rc!=kIOReturnSuccess) { finishNoC(rc,true); return; }
++  }
++  fNoCTimer->setTimeoutUS(1); return;
++ }
++ uint32_t irq=dp_rd(fNoCTCSBase,NIRQStatus), idle=dp_rd(fNoCTCSBase,base+NStatus);
++ bool complete=true;
++ for (unsigned c=0;c<fNoCGroup;++c) {
++  uint32_t cmd=dp_rd(fNoCTCSBase,base+NCommandStatus+c*NCommandStride);
++  unsigned required=NIssued|(c+1==fNoCGroup ? NComplete : 0u);
++  complete&=cmd!=~0u && (cmd&required)==required;
++ }
++ fNoCProgress|=idle==0 || !complete;
++ if (irq==~0u || idle==~0u) { finishNoC(kIOReturnIOError,true); return; }
++ if (!idle || !complete || !((irq&bit)||fNoCProgress)) { fNoCTimer->setTimeoutUS(100); return; }
++ noCAdd(base+NControl,NAMC); noCAdd(base+NControl,0);
++ noCAdd(base+NEnable,0); noCAdd(base+NWait,0); noCAdd(NIRQClear,bit,true);
++ noCAdd(NIRQEnable,0); fNoCTimer->setTimeoutUS(1);
++}
++
++void SweetMDSS::finishNoC(IOReturn result,bool uncertain)
++{
++ NoCLease &lease=fNoCLeases[fNoCSlot];
++ lease.status.result=result; lease.status.uncertain=uncertain;
++ if (result==kIOReturnSuccess) {
++  lease.active=!fNoCReleasing;
++  lease.status.state=fNoCReleasing ? SweetNoCReleased : SweetNoCHeld;
++  fNoCAggregate=fNoCTarget;
++  SWEET_LOG_INFO("SWEET MDSS NOC: token=%llu state=%u ACK mask=%#x; ACTIVE only, no solver/physical bandwidth proof\n",
++      lease.status.token,lease.status.state,lease.status.acknowledged);
++ } else {
++  lease.status.state=SweetNoCFailed; fNoCFault=true;
++  SWEET_LOG_ERROR("SWEET MDSS NOC: token=%llu rc=%#x ACK mask=%#x uncertain=%u; votes/clocks retained, no fallback\n",
++      lease.status.token,(unsigned)result,lease.status.acknowledged,uncertain);
++ }
++ fNoCPhase=NIdle; if (fNoCTimer) fNoCTimer->cancelTimeout();
++}
++void SweetMDSS::stopNoC(void)
++{
++ if (noCBusy()) finishNoC(kIOReturnAborted,fNoCTouched);
++ if (fNoCTimer) fNoCTimer->cancelTimeout();
++ /* No implicit CN0/BCM withdrawal or clock/domain collapse during teardown. */
++}
+diff --git a/iokit/Kernel/arm/SweetRPMh.cpp b/iokit/Kernel/arm/SweetRPMh.cpp
+--- a/iokit/Kernel/arm/SweetRPMh.cpp
++++ b/iokit/Kernel/arm/SweetRPMh.cpp
+@@ -23,6 +23,7 @@
+  {1200,1200,1,false},{880,880,1,false}};
+ static const char *const displaySupplies[]={"cx.lvl","mx.lvl","mmcx.lvl"};
+ static const unsigned displayMinimums[]={0,64,128,256,384};
++static const char *const displayBCMs[]={"CN0","MM1","MM0","SH0","MC0","ACV"};
+ enum { Stride=0x2a0, CommandStride=0x14, IRQEnable=0, IRQStatus=4, IRQClear=8,
+  Wait=0x10, Control=0x14, Status=0x18, Enable=0x1c,
+  Message=0x30, Address=0x34, Data=0x38, CommandStatus=0x3c,
+@@ -32,8 +33,21 @@
+  unsigned op, rail; uint64_t client, token; SweetRailVote vote;
+  uint64_t *idOut; SweetRailInfo *info; SweetRPMhStatus *status;
+  SweetDisplayPowerInfo *displayInfo; SweetDisplayPowerStatus *displayStatus;
++ SweetBCMInfo *bcmInfo; uint64_t bandwidth; SweetRegisterBandwidthStatus *registerStatus;
+ };
+-enum { Attach, Detach, Info, Vote, Query, Shutdown, DisplayInfo, DisplayVote, DisplayQuery };
++enum { Attach, Detach, Info, Vote, Query, Shutdown, DisplayInfo, DisplayVote, DisplayQuery,
++ BCMInfo, RegisterVote, RegisterQuery };
++
++bool SweetBCMInfo::scale(uint64_t rate,unsigned busWidth,unsigned ports,unsigned *value) const
++{
++ if (!unit || !width || !busWidth || busWidth>32 || !ports || ports>4) return false;
++ uint64_t divisor=(uint64_t)busWidth*ports*unit;
++ /* Bound before multiplying; all valid products fit 64 bits. Round upward,
++  * never silently truncate a positive vote or clamp overflow to 14 bits. */
++ if (rate>(0x3fffULL*divisor)/width) return false;
++ uint64_t numerator=rate*width;
++ *value=(unsigned)(numerator/divisor+(numerator%divisor!=0)); return true;
++}
+ 
+ uint32_t SweetRPMh::read(vm_offset_t base,uint32_t off)
+ {
+@@ -118,6 +132,80 @@
+  return true;
+ }
+ 
++bool SweetRPMh::lookupBCM(unsigned bcm)
++{
++ unsigned bit=1u<<bcm;
++ if (fBCMTried&bit) return (fBCMAvailable&bit)!=0;
++ fBCMTried|=bit;
++ uint32_t key[2]={};
++ for (unsigned k=0;k<8 && displayBCMs[bcm][k];++k)
++  key[k/4]|=(uint32_t)(uint8_t)displayBCMs[bcm][k] << (8*(k%4));
++ unsigned matches=0; SweetBCMInfo found;
++ for (unsigned i=0;i<8;++i) {
++  uint32_t h=8+16*i; unsigned slave=db16(h);
++  if (!slave) break;
++  uint32_t entries=DBHeader+db16(h+2), aux=DBHeader+db16(h+4);
++  unsigned count=db16(h+6);
++  if (slave<3 || slave>5 || (entries&3) || !range(entries,count*DBEntry) || !range(aux,0)) return false;
++  for (unsigned j=0;j<count;++j) {
++   uint32_t e=entries+j*DBEntry;
++   if (read(fDB,e)!=key[0] || read(fDB,e+4)!=key[1]) continue;
++   uint32_t table=aux+db16(e+22), address=read(fDB,e+16);
++   if (slave!=5 || (address>>16)!=5 || (address&3) || db16(e+20)!=8 || (table&3) || !range(table,8)) return false;
++   uint32_t unit=read(fDB,table), packed=read(fDB,table+4);
++   if (!unit || !(packed&0xffffu) || ((packed>>16)&255)>=16 || (packed>>24)) return false;
++   found.address=address; found.unit=unit; found.width=packed&0xffff;
++   found.vcd=(packed>>16)&255; ++matches;
++  }
++ }
++ if (matches!=1) return false;
++ for (unsigned r=0;r<SweetDisplayBCMCount;++r)
++  if ((fBCMAvailable&(1u<<r)) && fBCM[r].address==found.address) return false;
++ fBCM[bcm]=found; fBCMAvailable|=bit; return true;
++}
++
++IOReturn SweetRPMh::beginRegisterBandwidth(unsigned client,uint64_t proposal)
++{
++ if (fMode!=2) return kIOReturnNotPermitted;
++ if (fPoisoned) return kIOReturnNotReady;
++ if (fBusy) return kIOReturnBusy;
++ if (!lookupBCM(SweetBCMCN0)) return kIOReturnNotReady;
++ uint64_t target=proposal;
++ for (unsigned i=0;i<8;++i) if (i!=client && fClients[i].id && fClients[i].registerVote>target)
++  target=fClients[i].registerVote;
++ unsigned y=0;
++ if (!fBCM[SweetBCMCN0].scale(target,4,1,&y)) return kIOReturnBadArgument;
++ if (fNextToken==~0ULL) return kIOReturnNoResources;
++ bool noWrite=(!target && !fRegisterOwned) || (fRegisterOwned && target==fRegisterAggregate);
++ unsigned chosen=0;
++ if (!noWrite) {
++  int empty=-1;
++  for (unsigned t=0;t<2;++t) {
++   uint32_t b=t*Stride, enabled=read(fTCS,b+Enable);
++   if (enabled&~((1u<<fNCPT)-1u)) return kIOReturnIOError;
++   for (unsigned c=0;c<fNCPT;++c)
++    if ((enabled&(1u<<c)) && read(fTCS,b+Address+c*CommandStride)==fBCM[SweetBCMCN0].address) return kIOReturnBusy;
++   if (empty<0 && emptyTCS(t)) empty=(int)t;
++  }
++  if (empty<0 || (fSavedIRQ=read(fTCS,IRQEnable))==~0u) return kIOReturnBusy;
++  chosen=(unsigned)empty;
++  if (!emptyTCS(chosen)) return kIOReturnBusy;
++ }
++ SweetRegisterBandwidthStatus status={++fNextToken,target,SweetRPMhPending,kIOReturnSuccess,false};
++ fClients[client].registerStatus=status;
++ fClientIndex=client; fRegisterProposal=proposal; fRegisterTarget=target;
++ fArcRequest=false; fRegisterRequest=true; fBusy=true;
++ if (noWrite) { finish(kIOReturnSuccess,false); return kIOReturnSuccess; }
++ fTCSIndex=chosen; fExecuting=false; fProgress=false; fOperation=fOperationCount=0; fWriteIssued=false;
++ fCommandCount=fCommandMask=1;
++ uint32_t b=chosen*Stride, bit=1u<<chosen;
++ addOperation(IRQEnable,fSavedIRQ&~bit); addOperation(b+Message,WriteACK);
++ addOperation(b+Address,fBCM[SweetBCMCN0].address);
++ addOperation(b+Data,(1u<<30)|(y ? 1u<<29 : 0u)|y);
++ addOperation(b+Wait,1); addOperation(b+Enable,1); addOperation(b+Control,0); addOperation(b+Control,AMC);
++ fDeadline=nowNS()+100000000ULL; fTimer->setTimeoutUS(1); return kIOReturnSuccess;
++}
++
+ bool SweetRPMh::loadDisplayPower(void)
+ {
+  if (!fArcMetadataTried) {
+@@ -241,7 +329,7 @@
+   if (fArcOwned[r]) { status.known|=1u<<r; status.appliedLevels[r]=fArc[r].levels[fArcApplied[r]]; }
+  }
+  fClients[client].displayStatus=status;
+- fArcProposal=proposal; fArcNext=aggregate; fArcRequest=true; fClientIndex=client;
++ fArcProposal=proposal; fArcNext=aggregate; fArcRequest=true; fRegisterRequest=false; fClientIndex=client;
+  fBusy=true; fDeadline=nowNS()+500000000ULL;
+  if (!fArcStageCount) finish(kIOReturnSuccess,false);
+  return kIOReturnSuccess;
+@@ -352,7 +440,7 @@
+  if (rounded>target.maxMV) return kIOReturnBadArgument;
+  if (fNextToken==~0ULL) return kIOReturnNoResources;
+  target.minMV=rounded;
+- fArcRequest=false; fClientIndex=client; fRail=rail; fProposal=proposal; fTarget=target;
++ fArcRequest=false; fRegisterRequest=false; fClientIndex=client; fRail=rail; fProposal=proposal; fTarget=target;
+  SweetRPMhStatus status={++fNextToken,SweetRPMhComplete,rail,rounded,
+      load>=railLimits[rail].modeThresholdUA ? 7u : 4u,kIOReturnSuccess,target.enabled,false};
+  /* Never disable an inherited rail simply because software has no votes. */
+@@ -390,6 +478,21 @@
+ 
+ void SweetRPMh::finish(IOReturn result,bool uncertain)
+ {
++ if (fRegisterRequest) {
++  SweetRegisterBandwidthStatus &s=fClients[fClientIndex].registerStatus;
++  s.result=result; s.uncertain=uncertain;
++  s.state=result==kIOReturnSuccess ? SweetRPMhComplete : SweetRPMhFailed;
++  if (result==kIOReturnSuccess) {
++   fClients[fClientIndex].registerVote=fRegisterProposal;
++   fRegisterAggregate=fRegisterTarget;
++   if (fRegisterTarget) fRegisterOwned=true;
++   SWEET_LOG_INFO("SWEET RPMH: token=%llu CN0 ACTIVE ACK bytes/s=%llu; apps RSC, not pixel bandwidth\n",s.token,s.bytesPerSecond);
++  } else {
++   fPoisoned|=uncertain;
++   SWEET_LOG_ERROR("SWEET RPMH: token=%llu CN0 rc=%#x uncertain=%u; no retry/reset\n",s.token,(unsigned)result,uncertain);
++  }
++  fBusy=false; fTimer->cancelTimeout(); return;
++ }
+  if (fArcRequest) {
+   SweetDisplayPowerStatus &s=fClients[fClientIndex].displayStatus;
+   s.result=result; s.uncertain=uncertain;
+@@ -437,6 +540,16 @@
+      finish(result==kIOReturnSuccess ? kIOReturnBusy : result,true); return;
+     }
+    }
++   if (fOperation==1 && !fExecuting && fRegisterRequest) {
++    for (unsigned t=0;t<2;++t) {
++     uint32_t enabled=read(fTCS,t*Stride+Enable);
++     if (enabled&~((1u<<fNCPT)-1u)) { finish(kIOReturnIOError,true); return; }
++     for (unsigned c=0;c<fNCPT;++c)
++      if ((enabled&(1u<<c)) && read(fTCS,t*Stride+Address+c*CommandStride)==fBCM[SweetBCMCN0].address) {
++       finish(kIOReturnBusy,true); return;
++      }
++    }
++   }
+    if (op.offset==IRQEnable) {
+     uint32_t current=read(fTCS,IRQEnable);
+     if (current==~0u) { finish(kIOReturnIOError,fEverWritten); return; }
+@@ -490,6 +603,10 @@
+  }
+  if (!self->fAccepting || self->isInactive()) return kIOReturnNotReady;
+  if (r.op==Info) { *r.info=railLimits[r.rail]; r.info->available=true; return kIOReturnSuccess; }
++ if (r.op==BCMInfo) {
++  if (!self->lookupBCM(r.rail)) return kIOReturnNotFound;
++  *r.bcmInfo=self->fBCM[r.rail]; return kIOReturnSuccess;
++ }
+  if (r.op==DisplayInfo) {
+   *r.displayInfo={}; r.displayInfo->available=self->loadDisplayPower();
+   for (unsigned c=0;c<SweetDisplayCornerCount;++c) {
+@@ -511,6 +628,7 @@
+    if (self->fBusy && self->fClientIndex==i) return kIOReturnBusy;
+    for (unsigned rail=0;rail<SweetRailCount;++rail) if (self->fClients[i].votes[rail].enabled) return kIOReturnBusy;
+    if (self->fClients[i].displayVote!=SweetDisplayOff || self->fClients[i].displayStatus.uncertain) return kIOReturnBusy;
++   if (self->fClients[i].registerVote || self->fClients[i].registerStatus.uncertain) return kIOReturnBusy;
+    self->fClients[i]={}; return kIOReturnSuccess;
+   }
+   if (r.op==Query) {
+@@ -524,6 +642,15 @@
+   if (r.op==DisplayVote) {
+    IOReturn result=self->beginDisplayPower(i,(SweetDisplayCorner)r.rail);
+    if (result==kIOReturnSuccess) *r.idOut=self->fClients[i].displayStatus.token;
++   return result;
++  }
++  if (r.op==RegisterQuery) {
++   if (!r.token || self->fClients[i].registerStatus.token!=r.token) return kIOReturnNotFound;
++   *r.registerStatus=self->fClients[i].registerStatus; return kIOReturnSuccess;
++  }
++  if (r.op==RegisterVote) {
++   IOReturn result=self->beginRegisterBandwidth(i,r.bandwidth);
++   if (result==kIOReturnSuccess) *r.idOut=self->fClients[i].registerStatus.token;
+    return result;
+   }
+   IOReturn result=self->begin(i,r.rail,r.vote);
+@@ -549,6 +676,12 @@
+ { if (!token) return kIOReturnBadArgument; *token=0; if ((unsigned)corner>=SweetDisplayCornerCount) return kIOReturnBadArgument; RPMhRequest r={}; r.op=DisplayVote; r.client=id; r.rail=(unsigned)corner; r.idOut=token; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+ IOReturn SweetRPMh::copyDisplayPowerStatus(uint64_t id,uint64_t token,SweetDisplayPowerStatus *status)
+ { if (!status) return kIOReturnBadArgument; RPMhRequest r={}; r.op=DisplayQuery; r.client=id; r.token=token; r.displayStatus=status; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetRPMh::copyBCMInfo(SweetDisplayBCM bcm,SweetBCMInfo *info)
++{ if (!info || (unsigned)bcm>=SweetDisplayBCMCount) return kIOReturnBadArgument; *info=SweetBCMInfo(); RPMhRequest r={}; r.op=BCMInfo; r.rail=(unsigned)bcm; r.bcmInfo=info; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetRPMh::requestRegisterBandwidth(uint64_t id,uint64_t bandwidth,uint64_t *token)
++{ if (!token) return kIOReturnBadArgument; *token=0; RPMhRequest r={}; r.op=RegisterVote; r.client=id; r.bandwidth=bandwidth; r.idOut=token; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetRPMh::copyRegisterBandwidthStatus(uint64_t id,uint64_t token,SweetRegisterBandwidthStatus *status)
++{ if (!status) return kIOReturnBadArgument; RPMhRequest r={}; r.op=RegisterQuery; r.client=id; r.token=token; r.registerStatus=status; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+ 
+ void SweetRPMh::shutdown(void)
+ {
+diff --git a/iokit/Kernel/arm/SweetRPMh.h b/iokit/Kernel/arm/SweetRPMh.h
+--- a/iokit/Kernel/arm/SweetRPMh.h
++++ b/iokit/Kernel/arm/SweetRPMh.h
+@@ -40,6 +40,39 @@
+  unsigned appliedLevels[SweetDisplaySupplyCount], known; /* Last confirmed votes. */
+ };
+ 
++enum SweetDisplayBCM : unsigned { SweetBCMCN0, SweetBCMMM1, SweetBCMMM0,
++ SweetBCMSH0, SweetBCMMC0, SweetBCMACV, SweetDisplayBCMCount };
++/* Hardware metadata is exchanged only between the actual MMIO owners.
++ * General consumers cannot construct commands or obtain a raw-address API. */
++class SweetBCMInfo {
++ friend class SweetRPMh;
++ friend class SweetMDSS;
++ uint32_t address, unit;
++ unsigned width, vcd;
++ bool scale(uint64_t,unsigned,unsigned,unsigned *) const;
++public:
++ SweetBCMInfo() : address(0), unit(0), width(0), vcd(0) {}
++};
++struct SweetRegisterBandwidthStatus {
++ uint64_t token, bytesPerSecond;
++ unsigned state;
++ IOReturn result;
++ bool uncertain;
++};
++struct SweetBandwidth { uint64_t average, peak; }; /* Bytes/second. */
++struct SweetDisplayBandwidth {
++ SweetBandwidth port[2], llcc, ebi;
++ uint64_t registerPeak;
++};
++enum SweetNoCState { SweetNoCEmpty, SweetNoCPending, SweetNoCHeld,
++ SweetNoCReleasing, SweetNoCReleased, SweetNoCFailed };
++struct SweetNoCStatus {
++ uint64_t token;
++ unsigned state, acknowledged;
++ IOReturn result;
++ bool uncertain, registerAcknowledged;
++};
++
+ class SweetRPMh : public IOService {
+  OSDeclareDefaultStructors(SweetRPMh);
+  IOWorkLoop *fLoop;
+@@ -53,6 +86,7 @@
+  struct Client {
+   uint64_t id; SweetRailVote votes[SweetRailCount]; SweetRPMhStatus status;
+   SweetDisplayCorner displayVote; SweetDisplayPowerStatus displayStatus;
++  uint64_t registerVote; SweetRegisterBandwidthStatus registerStatus;
+  };
+  Client fClients[8];
+  SweetRailVote fAggregate[SweetRailCount];
+@@ -74,6 +108,10 @@
+  unsigned fArcStage, fArcStageCount;
+  SweetDisplayCorner fArcProposal, fArcAggregate, fArcNext;
+  uint64_t fStageDeadline;
++ SweetBCMInfo fBCM[SweetDisplayBCMCount];
++ unsigned fBCMTried, fBCMAvailable;
++ bool fRegisterRequest, fRegisterOwned;
++ uint64_t fRegisterProposal, fRegisterTarget, fRegisterAggregate;
+  static uint32_t read(vm_offset_t,uint32_t);
+  static void write(vm_offset_t,uint32_t,uint32_t);
+  static uint64_t nowNS(void);
+@@ -81,6 +119,8 @@
+  bool range(uint32_t,uint32_t);
+  bool lookup(unsigned);
+  bool lookupArc(unsigned);
++ bool lookupBCM(unsigned);
++ IOReturn beginRegisterBandwidth(unsigned,uint64_t);
+  bool loadDisplayPower(void);
+  bool displayTargets(SweetDisplayCorner,unsigned *);
+  IOReturn beginDisplayPower(unsigned,SweetDisplayCorner);
+@@ -121,6 +161,11 @@
+  IOReturn displayPowerInfo(SweetDisplayPowerInfo *);
+  IOReturn requestDisplayPower(uint64_t,SweetDisplayCorner,uint64_t *);
+  IOReturn copyDisplayPowerStatus(uint64_t,uint64_t,SweetDisplayPowerStatus *);
++ IOReturn copyBCMInfo(SweetDisplayBCM,SweetBCMInfo *);
++ /* CN0 config path uses apps RSC; pixel data must use display RSC instead.
++  * Same client/gate/completion engine. Bytes/sec, no raw BCM bitfields. */
++ IOReturn requestRegisterBandwidth(uint64_t,uint64_t,uint64_t *);
++ IOReturn copyRegisterBandwidthStatus(uint64_t,uint64_t,SweetRegisterBandwidthStatus *);
+ };
+ 
+ /* Matching only retain/withdraw + queues owner event. stop outside owner gate.

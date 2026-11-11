@@ -6,8 +6,9 @@ typed投票与MDSS匹配绑定，以及v1资源ABI，详见[资源层实现](PAN
 自有A接管/唤醒通过，用户反馈滑动有所改善、无新增异常，见[本批记录](PANEL-D1-0121A13.md)。
 第5节的独立clock/GDSC provider修订为MDSS内部typed资源模块（硬件独占映射不拆出第二writer）；
 0185已补MDSS内部温态本地时钟lease与分支控制，见[时钟模块](PANEL-CLOCK-D1.md)；
-0186已补RPMh内MMCX及MX/CX事务，见[ARC实现](PANEL-ARC-D1.md)；尚未接入MDSS生命周期。
-父源/频率、GDSC冷控制、NoC/display RSC仍待实现，不将映射/继承状态当独立供电就绪。
+0186补RPMh内MMCX及MX/CX事务，见[ARC](PANEL-ARC-D1.md)；0187补apps CN0及MDSS独占的
+温态display RSC/NoC，见[NoC实现](PANEL-NOC-D1.md)，均未接入面板启停。
+父源/频率、GDSC及NoC冷配置仍待实现，不将映射/继承状态当独立供电就绪。
 
 **执行顺序更新：** 用户要求完整驱动优先，拷贝双缓冲不再是PD2/PD3前置；E1/E4–E8
 仍只阻塞对应硬件写入，不阻塞先实现typed接口、资源所有者和离线可验证的命令执行器。
@@ -83,7 +84,7 @@ OFF `8b0def2d5a08f9534d8c9efdbbdbbba584387d1cfaecf9bdff50a3c0d71a5b95`。
 | 核心电压级别 | `mmcx.lvl` / `VDD_MMCX_LEVEL`及相关父依赖 | 通过command DB取得等级表；选择与实际频率相容的corner，并保留其他consumer投票 | 0186 typed聚合/父依赖/分阶段ACK已本地实现；频率约束及MDSS实际调用未接入 |
 | MDSS电源域 | `mdss_core_gdsc`，0x0af03000 | 时钟/电源域provider拥有MMIO；按ready/超时执行，不由AppleCLCD写 | 0185只作温态准入，不写GDSCR |
 | AHB/AXI/MDP/DSI clocks | GCC DISP AHB/HF/SF AXI；DISPCC AHB/MDP/VSYNC/DSI0 byte、byte-intf、pixel、escape等 | provider显式设置父源、频率、分支和引用；实际需要的LUT/其他分支按pipeline确定 | 0185温态分支lease已实现；非XO父源/改频仍未控制 |
-| 互连/带宽 | LG `sde_power_handle.c` 的reg/data bus vote及RSC路径 | 不将“时钟开”当作DDR/NoC就绪；PD2列明最小带宽/请求与撤销方法 | 无显示资源管理接口 |
+| 互连/带宽 | LG `sde_power_handle.c` 的reg/data bus vote及RSC路径 | 不将“时钟开”当作DDR/NoC就绪；PD2列明最小带宽/请求与撤销方法 | 0187 typed CN0+display BCM温态ACTIVE事务已实现；面板实际调用及冷QoS/solver尚缺 |
 
 电源数值来自 consumer table；例如 L17 provider 的初始化电压为2.856V，不等于面板
 consumer申请的3.0V，不能照搬provider默认值替代面板要求。load是投票参数，不是实测电流。
@@ -197,7 +198,7 @@ timeout当完成，也不能关闭其他consumer电源或翻回ABL来伪装成�
 | E3 | autorefresh下提交、锁存与旧读者退出的对应事件 | F4后续翻页 | 0182有界暂停TE/auto，两次空闲采样，清旧PP0 DONE后提交；0121a12 frame130→131已观察新DONE/flush0/RD_PTR推进。不授予旧buffer释放权，提交池保留到重启；通用完成/撤销与A/B复用协议仍缺 |
 | E4 | 本机PHY/PLL版本、lane及频率/ready状态（DSI host版本已知） | PD2写link配置 | 0121a12已有DSI0 HW_VERSION=20030000；0183发送前复核。0184 v1 ABI已加入PHY/PLL单一受保护窗口，尚未取得clock，不读取版本或越界访问 |
 | E5 | RPMh写权限、实际投票/撤销及物理结果仍缺 | PD2/PD3 | 0184统一provider已实现；0121a13实测ldoa14/17/c3/a5地址0x42100/0x41300/0x41e00/0x40b00，pre-v3 RSC id0x10700/config0x800c8104/ncpt16/ACTIVE2、consumer1绑定通过。mode1无投票；继承请求不覆盖，ACK不当实际掉电证明 |
-| E6 | 冷态clock/GDSC/MMCX/NoC依赖及恢复状态 | PD2/PD4 | 0185本地温态lease/异步分支控制已实现并本地验证，尚未实机；上游仍继承，显式禁止冷开启/域reset，不能用运行状态替代实际投票 |
+| E6 | 冷态clock/GDSC/MMCX/NoC依赖及恢复状态 | PD2/PD4 | 0185温态clock、0186 ARC、0187 CN0/display NoC已本地验证；未接入面板启停/未实机投票，冷GDSC/父源/NoC配置仍缺，不能用运行位替代实际票 |
 | E7 | 面板/触摸共享供电与reset后的触摸需求 | PD3 reset/PD4 | 校对生效DTS和已有板级资料，设计quiesce/resume并用分档验证；引脚不重合不等于无共享 |
 | E8 | 是否存在额外偏压电源控制、完整off后的物理状态 | PD3/PD4 | 先沿实际选定panel供电表/生效DT和板级证据核对；不得仅因use-labibb而扫描/写PMIC偏压寄存器 |
 
@@ -229,6 +230,6 @@ ON/OFF逐包长度/type/等待、表SHA；另有从0121a11真实buildtree提取�
 
 0183已实现D1的[命令基础/可撤销执行/性能计时](PANEL-COMMAND-D1.md)并本地验证；
 0184已实现资源ABI、RPMh统一所有者/typed投票及绑定；0121a13元数据/绑定实测通过。
-0185补本地温态时钟引用与分支控制；0186补typed ARC供电事务，尚未接入MDSS调用；
-冷态clock-GDSC/NoC及PHY/PLL初始化仍缺，
+0185补本地温态时钟，0186补typed ARC，0187补CN0/display NoC，均未接入面板启停；
+冷态clock-GDSC/NoC配置及PHY/PLL初始化仍缺，
 不能将窗口映射当就绪或将本轮当实机投票验证。

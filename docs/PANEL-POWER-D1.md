@@ -1,7 +1,8 @@
 # D1 资源层：RPMh provider、显示投票与资源 ABI（0184）
 
-0186补充：原provider已有typed MMCX/MX/CX分阶段事务，详见[ARC实现](PANEL-ARC-D1.md)。
-仍无自动投票，MDSS生命周期未调用；下文0184的实机证据仍仅为四路LDO元数据绑定。
+0187补充：原provider已有[MMCX/MX/CX事务](PANEL-ARC-D1.md)及apps CN0带宽；MDSS拥有
+独立display RSC和[数据NoC事务](PANEL-NOC-D1.md)，实际获取RSC clock lease后才访问。
+均未接入面板启停、无自动投票；下文0184的实机证据仍仅为四路LDO元数据绑定。
 
 
 2026-11-10。本段接在0183命令执行器后，实现电源资源接口和实际TCS状态机；
@@ -99,8 +100,8 @@ PHY0 `0x0ae94400/0x760`。PLL0位于同一窗口+0x500，不再重复映射/写�
 PD0原图的独立clock/GDSC provider在此明确调整为**MDSS内部typed资源模块的唯一所有者**：
 现有MDSS已经拥有GCC/DISPCC，不再另起一个重叠映射的空壳服务。当前仅资源所有权落地，
 0185已补typed本地分支lease、timer获取/撤回与温态GDSC准入，见[时钟模块](PANEL-CLOCK-D1.md)。
-0186已补MMCX及父供电事务，但未接入MDSS实际调用；
-时钟父源/频率、GDSC冷上下电及NoC投票仍待实现；
+0186已补MMCX及父供电事务，0187补apps CN0/display NoC，均未接入面板启停；
+时钟父源/频率、GDSC冷上下电、NoC冷配置及实际资源生命周期仍待实现；
 原`dp_clocks_on()`两个状态位检查仍不是acquire或ready证明。
 
 ## 本地验证与下一段
@@ -115,6 +116,6 @@ LSan仍受ptrace环境限制关闭，另断言对象/映射/通知归零；不�
 
 补丁`xnu/patches/0184-mh2lm-display-resource-leases.patch`；底稿
 `scratch/framebuffer-0184/{verification.json,tests.json,test-*.txt,*compile.txt}`。
-下一段接时钟/GDSC/MMCX/NoC依赖与PHY/PLL/host控制，再接已确认profile/reset/完整ON/OFF。
+下一段接实际MDSS资源生命周期、冷态时钟/GDSC/NoC配置及PHY/PLL/host控制，再接已确认profile/reset/完整ON/OFF。
 E1仍只阻塞未知厂商表写入；这段没有选定PV或把映射成功写成完整驱动完成。
 未push、触发CI或操作设备；未改CircleCI、USB/充电/按键/触摸/mux策略。

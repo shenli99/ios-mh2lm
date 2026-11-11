@@ -1,7 +1,11 @@
 # D1 本地显示时钟引用与 GDSC 准入（0185）
 
-0186补充：RPMh现有[typed ARC父供电事务](PANEL-ARC-D1.md)，尚未接入MDSS生命周期。
-本时钟模块仍标记上游继承，不因新API存在而放开冷GDSC或PHY操作。
+0187补充：已有[typed ARC父供电事务](PANEL-ARC-D1.md)及[NoC事务](PANEL-NOC-D1.md)，
+均尚未接入面板启停。本时钟模块新增RSC use（AHB及NON_GDSC_AHB/RSCC_AHB/RSCC_VSYNC，
+mask0x381），由MDSS带宽模块持有真实lease；带宽撤回完成前不能单独释放该token。
+新增分支DISPCC+0x4004/0x400c共享AHB root0x22bc，+0x4008共享VSYNC root0x20f8。
+继承配置与仅XO/div1可重新使能的限制不变。下文0185按当时范围保留，上游仍标记继承，
+不因新API存在而放开冷GDSC或PHY操作。
 
 2026-11-11，接0184资源provider与0121a13实测。本段完成SweetMDSS内部本地分支控制、
 引用与有界异步完成；**尚未实现MMCX/NoC投票、GDSC冷开启/关闭或独立链路初始化**。

@@ -134,7 +134,7 @@ int main(){auto*n=nub();fixtures();auto*s=make(n);assert(!writes());
  regs[bases[4]+0x2b4]=0;regs[bases[6]+8]=2;assert(s->releaseLocalClocks(b)==kIOReturnBusy);
  regs[bases[6]+8]=0;
  assert(s->releaseLocalClocks(b)==0);
- for(unsigned j=0;j<7&&!s->fClockWaiting;++j)tick(s);
+ for(unsigned j=0;j<SweetClockCount&&!s->fClockWaiting;++j)tick(s);
  assert(s->fClockWaiting&&writes()==count+1);
  tick(s);assert(status(s,b).state==SweetClockReleasing);
  regs[bases[1]+0x2024]|=0x80000000u;regs[bases[1]+0x20f8]=0x80000000;complete(s);

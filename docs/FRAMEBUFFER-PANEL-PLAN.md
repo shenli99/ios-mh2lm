@@ -1,9 +1,12 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**0186显示供电增量（本地验证通过，未实机投票）：** 原SweetRPMh内已加入typed MMCX及MX/CX父供电链，
-与LDO共用唯一apps-DRV/gate/timer；逐阶段ACK、共享票聚合、反向撤票与部分失败保留账本。
-没有自动投票或默认参数变化；MDSS生命周期尚未调用，NoC/display RSC及冷GDSC/PHY/PLL/host仍待实现，
-D1未整体完成。见[ARC实现与LG依据](PANEL-ARC-D1.md)。不为本段单独要求push或刷机。
+**0187当前显示进度（本地验证通过，未实机投票）：** 在0186的typed MMCX/MX/CX供电链之后，
+已实现CN0配置带宽及MM1/MM0/SH0/MC0/ACV_DISPLAY数据带宽事务。RPMh独占apps RSC，MDSS
+在实际RSC时钟lease下独占display RSC；按VCD提交、独立完成、共享票与反向撤回，故障显式保留。
+资源接口尚未接入面板启停，默认不投票；冷GDSC/时钟父源、PHY/PLL/host及完整面板初始化仍缺，
+D1未整体完成。见[NoC架构与验证](PANEL-NOC-D1.md)、[ARC](PANEL-ARC-D1.md)。
+下一段接实际MDSS资源生命周期及冷域/链路，不为此单独要求push或刷机。
+下列0185/0184段落保留各自历史范围，当前增量以上述0187为准。
 
 
 **0185本地时钟增量（本地验证通过，未实机启用）：** SweetMDSS内部已加入typed本地分支lease、

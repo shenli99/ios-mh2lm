@@ -22,6 +22,8 @@ legacy = (root/'bsd/dev/sweet_display_probe.c').read_text()
 source = source.replace('#include "SweetMDSSIRQ.inc"', (arm/'SweetMDSSIRQ.inc').read_text())
 source = source.replace('#include "SweetMDSSScanout.inc"', (arm/'SweetMDSSScanout.inc').read_text())
 source = source.replace('#include "SweetMDSSDSI.inc"', (arm/'SweetMDSSDSI.inc').read_text())
+if (arm/'SweetMDSSNoC.inc').exists():
+    source = source.replace('#include "SweetMDSSNoC.inc"', (arm/'SweetMDSSNoC.inc').read_text())
 if (arm/'SweetMDSSClock.inc').exists():
     source = source.replace('#include "SweetMDSSClock.inc"', (arm/'SweetMDSSClock.inc').read_text())
     source = source.replace('#include "SweetDisplayClock.h"', (arm/'SweetDisplayClock.h').read_text())
@@ -143,8 +145,8 @@ struct IOTimerEventSource : IOEvent {
  static IOTimerEventSource*timerEventSource(OSObject*o,Action a){if(++timerCreates==failTimerCreate)return nullptr;auto*p=new IOTimerEventSource;p->owner=o;p->action=a;return p;}
  void setTimeoutMS(unsigned t){timeout=t;} void setTimeoutUS(unsigned t){timeout=t;} void cancelTimeout(){timeout=0;}
 };
-static constexpr uintptr_t bases[13]={0x0010b000,0x0af00000,0x0ae05000,0x0ae02000,0x0ae6b800,0x0ae6c000,0x0ae94000,0x15000000,0x15082000,0x0ae00000,0x0ae6e800,0x17a00000,0x0ae94400};
-static constexpr size_t lengths[13]={0x1000,0x3000,0x1000,0x1000,0x800,0x800,0x400,0x2000,0x1000,0x2000,0x200,0x10000,0x760};
+static constexpr uintptr_t bases[16]={0x0010b000,0x0af00000,0x0ae05000,0x0ae02000,0x0ae6b800,0x0ae6c000,0x0ae94000,0x15000000,0x15082000,0x0ae00000,0x0ae6e800,0x17a00000,0x0ae94400,0x0af20000,0x0af21c00,0x0af30000};
+static constexpr size_t lengths[16]={0x1000,0x3000,0x1000,0x1000,0x800,0x800,0x400,0x2000,0x1000,0x2000,0x200,0x10000,0x760,0x1c00,0x3000,0x3fd4};
 static int resourceMode=0;
 static unsigned badMap=99,missingMap=99,shortMap=99;
 static std::vector<unsigned> mapCalls;
@@ -179,7 +181,7 @@ struct IOService : OSObject {
  virtual IOWorkLoop*getWorkLoop()const{return nullptr;}
  OSObject*getProperty(const char*k){return properties.count(k)?properties[k]:nullptr;}
  bool isInactive(){return inactive;}
- int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){mapCalls.push_back(i);assert(i<13);if(i==missingMap)return nullptr;auto*m=new IOMemoryMap(i);if(rpmhNub){assert(i<3);static const uintptr_t pa[]={0x18220000,0x18220d00,0x0c3f000c};static const size_t n[]={0x100,0x3000,8};m->customPA=pa[i];m->customSize=n[i];}return m;}
+ int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){mapCalls.push_back(i);assert(i<16);if(i==missingMap)return nullptr;auto*m=new IOMemoryMap(i);if(rpmhNub){assert(i<3);static const uintptr_t pa[]={0x18220000,0x18220d00,0x0c3f000c};static const size_t n[]={0x100,0x3000,8};m->customPA=pa[i];m->customSize=n[i];}return m;}
  void setProperty(const char*,unsigned long long,unsigned){}void setProperty(const char*,bool){}
  void setProperty(const char*,const char*){} void setProperty(const char*,OSObject*){}
  void registerService(){}
@@ -244,7 +246,7 @@ static uint32_t readReg(uintptr_t b,uint32_t o){
 static bool irqMMIO=false,injectLateFrame=false,dropSourceWrite=false,keepPPDone=false;
 static uint32_t rpmhDrop=~0u;static bool rpmhKeepIRQ=false;
 static void writeReg(uintptr_t b,uint32_t o,uint32_t v){trace.push_back({true,b+o,v});
- if(b==0x18220d00){if(o==rpmhDrop)return;if(o==8){if(!rpmhKeepIRQ)regs[b+4]&=~v;return;}}
+ if(b==0x18220d00||b==0x0af21c00){if(o==rpmhDrop)return;if(o==8){if(!rpmhKeepIRQ)regs[b+4]&=~v;return;}}
  if(irqMMIO&&b==0x0ae00000&&o==0x1018){if(!keepPPDone)regs[b+0x1014]&=~v;return;}
  if(dropSourceWrite&&b==bases[2]&&o==0x14)return;
  if(irqMMIO&&b==0x17a00000&&o==0x18c){regs[b+0x10c]&=~v;return;}

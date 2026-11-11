@@ -106,3 +106,24 @@ except ValueError:
 else:
     raise AssertionError('accepted duplicate full resources')
 print('PASS: v1 thirteen MDSS windows, disjoint PHY/PLL ownership, separate RPMh ABI/nub, default and IRQ byte preservation')
+
+# NoC extension belongs to MDSS; the apps RPMh nub is byte-identical to v1.
+noc = m.derive(blob, display_noc=True)
+r, end = adt.parse(noc)
+assert end == len(noc)
+arm = r.children[1]
+mdss, rpmh = arm.children[-2:]
+assert mdss.prop('sweet,display-noc-abi') == struct.pack('<I', 1)
+assert len(mdss.prop('reg')) == 16*16
+translations = list(struct.iter_unpack('<QQQ', arm.prop('ranges')))
+all_windows = expected+list(m.NOC_WINDOWS)
+for (address, size), (pa, length) in zip(struct.iter_unpack('<QQ', mdss.prop('reg')), all_windows):
+    hits = [parent+address-base for base, parent, n in translations if base <= address and address+size <= base+n]
+    assert hits == [pa] and size == length
+for i, (pa, size) in enumerate(all_windows):
+    assert all(pa+size <= q or q+n <= pa for q, n in all_windows[i+1:])
+assert list(struct.iter_unpack('<QQ', rpmh.prop('reg'))) == [
+    (pa-m.SOC_BASE if pa >= m.SOC_BASE else m.LOW_ALIAS+pa, length) for pa, length in m.RPMH_WINDOWS]
+mdss.props = [(k, f, v[:13*16] if k == 'reg' else v) for k, f, v in mdss.props if k != 'sweet,display-noc-abi']
+assert adt.serialize(r) == full
+print('PASS: sixteen disjoint MDSS windows, display RSC/TCS/wrapper split, unchanged v1 apps nub and removable NoC extension')

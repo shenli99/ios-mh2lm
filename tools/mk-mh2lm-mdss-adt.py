@@ -15,9 +15,11 @@ WINDOWS = ((0x0010b000, 0x1000), (0x0af00000, 0x3000),
 IRQ_WINDOWS = ((0x0ae00000, 0x2000), (0x0ae6e800, 0x200), (0x17a00000, 0x10000))
 PHY_WINDOW = (0x0ae94400, 0x760)  # includes PLL0 +0x500; one owner/map
 RPMH_WINDOWS = ((0x18220000, 0x100), (0x18220d00, 0x3000), (0x0c3f000c, 8))
+NOC_WINDOWS = ((0x0af20000, 0x1c00), (0x0af21c00, 0x3000), (0x0af30000, 0x3fd4))
 
 
-def derive(blob, irq_preflight=False, display_resources=False):
+def derive(blob, irq_preflight=False, display_resources=False, display_noc=False):
+    display_resources = display_resources or display_noc
     root, end = adt.parse(blob)
     if end != len(blob) or b'lge,mh2lm\0' not in (root.prop('compatible') or b''):
         raise ValueError('expected a complete MH2LM ADT')
@@ -41,6 +43,8 @@ def derive(blob, irq_preflight=False, display_resources=False):
         windows.extend(IRQ_WINDOWS)
     if display_resources:
         windows.append(PHY_WINDOW)
+    if display_noc:
+        windows.extend(NOC_WINDOWS)
     regs = encode(windows)
     mdss = adt.Node()
     mdss.props = [('name', 0, b'mdss\0'), ('compatible', 0, b'sweet,mdss\0'),
@@ -49,6 +53,8 @@ def derive(blob, irq_preflight=False, display_resources=False):
                   # controller before publishing standard interrupt properties.
                   ('sweet,mdss-intid', 0, struct.pack('<I', 115))]
     arm.children.append(mdss)
+    if display_noc:
+        mdss.props.append(('sweet,display-noc-abi', 0, struct.pack('<I', 1)))
     if display_resources:
         mdss.props.append(('sweet,display-resource-abi', 0, struct.pack('<I', 1)))
         rpmh = adt.Node()
@@ -63,10 +69,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--irq-preflight', action='store_true', help='append optional F3 read-only IRQ resources')
     parser.add_argument('--display-resources', action='store_true', help='v1 expanded DISPCC, PHY/PLL and typed RPMh service (implies IRQ resources)')
+    parser.add_argument('--display-noc', action='store_true', help='append sole MDSS display RSC/TCS/wrapper windows; implies display resources, requires resource2/clock1 at runtime')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
     source, destination = args.source, args.destination
     if source.resolve() == destination.resolve():
         sys.exit('output must differ from the baseline ADT')
-    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources))
+    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc))
