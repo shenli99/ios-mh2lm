@@ -19,8 +19,8 @@ PANEL_PIN_WINDOWS = ((0x03d06000, 0x1000), (0x03908000, 0x1000))  # GPIO6 SOUTH,
 NOC_WINDOWS = ((0x0af20000, 0x1c00), (0x0af21c00, 0x3000), (0x0af30000, 0x3fd4))
 
 
-def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False):
-    display_resources = display_resources or display_noc or panel_pins
+def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False):
+    display_resources = display_resources or display_noc or panel_pins or panel_touch
     root, end = adt.parse(blob)
     if end != len(blob) or b'lge,mh2lm\0' not in (root.prop('compatible') or b''):
         raise ValueError('expected a complete MH2LM ADT')
@@ -28,7 +28,7 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
     expected = struct.pack('<QQQ', 0, SOC_BASE, 0x100000000 - SOC_BASE)
     if arm.prop('ranges') != expected:
         raise ValueError('unexpected arm-io ranges; refusing to replace translations')
-    if any(n.name in ('mdss', 'display-rpmh', 'panel-pins') for n in arm.children):
+    if any(n.name in ('mdss', 'display-rpmh', 'panel-pins', 'panel-touch') for n in arm.children):
         raise ValueError('display resource node already exists')
     # GCC's 0x10b000 page is below SOC_BASE. Add a disjoint low-PA alias;
     # never underflow an unsigned reg address or change the original range.
@@ -69,6 +69,11 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
                       ('reg', 0, encode(PANEL_PIN_WINDOWS)),
                       ('sweet,panel-pins-abi', 0, struct.pack('<I', 1))]
         arm.children.append(pins)
+    if panel_touch:
+        touch = adt.Node()
+        touch.props = [('name', 0, b'panel-touch\0'), ('compatible', 0, b'sweet,touch-panel\0'),
+                       ('sweet,touch-panel-abi', 0, struct.pack('<I', 1))]
+        arm.children.append(touch)  # mailbox facade: no new MMIO/IRQ resource
     return adt.serialize(root)
 
 
@@ -78,10 +83,11 @@ if __name__ == '__main__':
     parser.add_argument('--display-resources', action='store_true', help='v1 expanded DISPCC, PHY/PLL and typed RPMh service (implies IRQ resources)')
     parser.add_argument('--display-noc', action='store_true', help='append sole MDSS display RSC/TCS/wrapper windows; implies display resources, requires resource2/clock1 at runtime')
     parser.add_argument('--panel-pins', action='store_true', help='append GPIO6/reset and GPIO8/TE provider; implies display resources, never authorizes reset/vendor commands')
+    parser.add_argument('--panel-touch', action='store_true', help='append typed touch worker coordination service; no new GPIO/IRQ mapping, no automatic pause/resume')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
     source, destination = args.source, args.destination
     if source.resolve() == destination.resolve():
         sys.exit('output must differ from the baseline ADT')
-    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins))
+    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch))

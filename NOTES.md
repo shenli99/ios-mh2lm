@@ -2,6 +2,45 @@
 
 ## Agent handoff / active work (2026-11-11, latest)
 
+**CURRENT：0193触摸quiesce/resume执行层与MDSS匹配绑定本地通过，未实机；PD3完整协调器未接。**
+父提交354cc16；0193-mh2lm-panel-touch-coordination.patch SHA256=
+cce91ee520c9e868ad0082af0315aa0a9c5a836d6e3c0c161a053e4777fc2693，7份源码变化。
+新增SweetTouchPanel IOService/client及无MMIO/IRQ的ADT nub，typed consumer请求，MDSS真实registry
+通知仅retain/release+排队，自己的workloop attach。服务内部用受限C mailbox接既有唯一TCM worker，
+不是整个touch IOService化；C只存原子session/packed token+state/cancel，无provider实例或回调。
+原GPIO/I2C/GIC/HID所有权仍在worker；无新线程/映射，不改原IRQ-only策略/触摸供电初始化。
+sweettouchpanel默认0；1metadata/2允许显式请求；--panel-touch隐含resources可组合pins/NoC。
+start/matched/attach无硬件I/O/自动请求，worker未就绪不发token。MDSS本批仍只绑定，实际boot
+不quiesce/reset/ONOFF。暂停在worker事务边界maskGPIO122/GIC240、readback/RWP/active确认、
+HID all-up后才发QUIESCED，最长20次1ms睡眠；不是deep sleep/rail-off证明。
+parked worker/晚IRQ无MMIO/I2C/HID。resume要求caller已恢复panel/rails，复用实际tcm_start
+identify/app/config读回/原geometry匹配，再清stale pending和arm，无touch reset/rail/firmware写入。
+worker执行4s预算/transport字节与命令等待处取消；provider pending才1ms查mailbox，6s watchdog。
+无provider gate内等待/I2C、无空闲轮询；失败终止上报不自动重跑resume/退轮询（原协议内有界重传保留）。
+stop同步自己的timer后取消session，worker异步完成bus STOP/mask并退出；不阻塞join，不宣称
+取消=硬件静止。arm中取消可能已有部分enable写，复查后remask，不交付Ready。曾发请求session
+close退休至reboot；清ready/quiesced，服务free后worker无对象指针可解引用。
+未来协调器provider loss/fault必须停后续reset/撤电，保票，不拿旧fence继续；当前仍仅绑定/解绑。
+旧live-e-0114a15-irq-only-debug1.txt:1724已有TCM v1 part s3618-14.0.1证据（非panelrevision）；
+LG s3618 NOTIFY_TOUCH_RESET为空，LCD_MODE另有suspend/resume，不套S3706 reset，不推断无共享。
+14套通过：新增实际C worker/IRQ/TCMv1协议+C++provider/MDSS联测，及原13套；13实际源码
+ASan/UBSan+PythonADT，无报告。LSan ptrace限制关闭，另断言对象/映射/通知/分配归零。
+覆盖真实active drain/独立协议回复/HID release/无I/O parked/状态和总期限失败/等待竞态/并发/
+排队到arm中取消/服务free后收尾/退休/ID-token耗尽/consumer旧状态隔离/真实registry与ADT CLI。
+真实XNU/KDK arm64触摸C/MDSS基线最终与新provider对象成功；C warning1->1、MDSS1475->1475
+无新增签名，新provider1151为既有头/宏诊断，无压制。核实C对象有mailbox/IRQ/init实际符号。
+0193 base等0192verify，严格应用无offset/fuzz、7源码字节一致、114原CI marker保留。
+**NEXT：统一PD3生命周期事务，接touch fence/DMA/IRQ/资源/pins/已确认profile，完整ONOFF与反向释放。**
+E1身份未关闭，E7软件接口有而实机共享供电/reset恢复仍缺；不猜vendor表，不启动Android。
+NoC/MDP冷初始化、独立重建、ABL退出/零拷贝仍后续；A单缓冲/B未提交/30Hz复制不变。
+未push/触发CI/操作设备，无新boot/云产物/实机结果，暂不要求push/新刷机；CircleCI blob仍
+ da0b6c0947a66f03491b3a9023590b49665292df。USB/按键/电池/mux未改，不重测旧bug/半小时。
+底稿scratch/framebuffer-0193/{base,edited,verify,prepare-patch.py,compile.py,verification.json,
+base-continuity.json,native-results.json,native-worker-symbols.txt,warning-counts.json,warning-review.json,
+reference-audit.json,run-tests.py,tests.json,test-*.txt,*compile.txt}；详见docs/PANEL-TOUCH-D1.md，计划/架构/PD0已同步。
+
+**以下0192按当时阶段保留，当前以0193为准。**
+
 **CURRENT：0192 reset/TE引脚服务与MDSS匹配绑定已本地通过，尚未实机；PD3完整生命周期未接。**
 父提交52e4c8d；0192-mh2lm-panel-pin-provider.patch SHA256=
 ead1f8ef6cf6d19e409f847895bf2e8f4395eff06f78fde73706b1ee0f277a57，5份源码变化。

@@ -74,6 +74,11 @@ if (arm/'SweetPanelPins.h').exists():
     pins_source = re.sub(r'uint32_t SweetPanelPins::read\([^\n]*\)\n\{.*?\n\}', 'uint32_t SweetPanelPins::read(vm_offset_t b,uint32_t o) { return readReg(b,o); }', pins_source, flags=re.S)
     pins_source = re.sub(r'void SweetPanelPins::write\([^\n]*\)\n\{.*?\n\}', 'void SweetPanelPins::write(vm_offset_t b,uint32_t o,uint32_t v) { writeReg(b,o,v); }', pins_source, flags=re.S)
     source = re.sub(r'^#include.*\n', '', pins_header+pins_source, flags=re.M)+source
+if (arm/'SweetTouchPanel.h').exists():
+    touch_abi = (root/'bsd/dev/sweet_touch_panel.h').read_text()
+    touch_header = (arm/'SweetTouchPanel.h').read_text().replace('class SweetTouchPanel :', 'struct SweetTouchPanel :').replace('class SweetTouchPanelClient :', 'struct SweetTouchPanelClient :')
+    touch_source = (arm/'SweetTouchPanel.cpp').read_text()
+    source = re.sub(r'^#include.*\n', '', touch_abi+touch_header+touch_source, flags=re.M)+source
 header = header.replace('class SweetDisplayClient :', 'struct SweetDisplayClient :')
 header = re.sub(r'^#include.*\n', '', header, flags=re.M)
 source = re.sub(r'^#include.*\n', '', source, flags=re.M)
@@ -163,7 +168,7 @@ struct IOTimerEventSource : IOEvent {
 };
 static constexpr uintptr_t bases[16]={0x0010b000,0x0af00000,0x0ae05000,0x0ae02000,0x0ae6b800,0x0ae6c000,0x0ae94000,0x15000000,0x15082000,0x0ae00000,0x0ae6e800,0x17a00000,0x0ae94400,0x0af20000,0x0af21c00,0x0af30000};
 static constexpr size_t lengths[16]={0x1000,0x3000,0x1000,0x1000,0x800,0x800,0x400,0x2000,0x1000,0x2000,0x200,0x10000,0x760,0x1c00,0x3000,0x3fd4};
-static int resourceMode=0,panelPinsMode=0;
+static int resourceMode=0,panelPinsMode=0,touchPanelMode=0;
 static unsigned badMap=99,missingMap=99,shortMap=99;
 static std::vector<unsigned> mapCalls;
 struct IOMemoryMap : OSObject {
@@ -214,6 +219,7 @@ IONotifier*IOService::addMatchingNotification(const char*k,OSDictionary*d,Notify
 static void emit(const char*k,IOService*p){for(auto*n:subscriptions)if(n->kind==k)n->cb(n->target,nullptr,p,n);}
 static int enabled=1,probeEnabled=1,powerEnabled=0,irqProbeMode=0,irqMode=0,ownMode=0;
 static bool PE_parse_boot_argn(const char*k,void*v,size_t){
+ if(!strcmp(k,"sweettouchpanel")){*(int*)v=touchPanelMode;return true;}
  if(!strcmp(k,"sweetpanelpins")){*(int*)v=panelPinsMode;return true;}
  if(!strcmp(k,"sweetdisplayresources")){*(int*)v=resourceMode;return true;}
  if(!strcmp(k,"sweetfbown")){*(int*)v=ownMode;return true;}
@@ -278,6 +284,16 @@ static void resetRegs(){trace.clear();regs.clear();dmaFired=false;dmaDone=true;l
  regs[bases[4]+0x288]=0x12345678;regs[bases[4]+0x2b4]=0x3344;
  regs[bases[6]+0x3c]=0x9;regs[bases[6]+0x4c]=0x18;regs[bases[6]+0x84]=0x32;
 }
+'''
+if (root/'bsd/dev/sweet_touch_panel.h').exists():
+    prelude += "\n#include <cerrno>\n" + re.sub(r'^#include.*\n', '', (root/'bsd/dev/sweet_touch_panel.h').read_text(), flags=re.M)
+    prelude += r'''
+#ifndef SWEET_TOUCH_PANEL_REAL_WORKER
+extern "C" int sweet_touch_panel_open(uint64_t*p){*p=0;return EAGAIN;}
+extern "C" int sweet_touch_panel_close(uint64_t){assert(false);return EINVAL;}
+extern "C" int sweet_touch_panel_request(uint64_t,unsigned,uint64_t*){assert(false);return EINVAL;}
+extern "C" int sweet_touch_panel_snapshot(uint64_t,uint64_t,struct sweet_touch_panel_status*){assert(false);return EINVAL;}
+#endif
 '''
 pool_fixture = r'''
 struct IOMemoryDescriptor : OSObject {

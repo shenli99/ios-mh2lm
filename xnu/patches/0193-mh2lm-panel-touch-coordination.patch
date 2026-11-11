@@ -1,0 +1,808 @@
+diff --git a/bsd/dev/sweet_touch_panel.h b/bsd/dev/sweet_touch_panel.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_touch_panel.h
+@@ -0,0 +1,30 @@
++/* Typed, pointer-free mailbox to the existing sole TouchComm worker.
++ * IOService owns one session; it never performs TLMM/GIC/I2C/HID operations.
++ * No callback/IOService instance is stored by C. All public calls are bounded,
++ * nonblocking and perform no MMIO. The caller serializes its session methods.
++ */
++#ifndef SWEET_TOUCH_PANEL_H
++#define SWEET_TOUCH_PANEL_H
++#include <sys/types.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++enum sweet_touch_panel_state {
++ SWEET_TOUCH_OFF, SWEET_TOUCH_RUNNING, SWEET_TOUCH_PAUSE_REQUESTED,
++ SWEET_TOUCH_PAUSING, SWEET_TOUCH_QUIESCED, SWEET_TOUCH_RESUME_REQUESTED,
++ SWEET_TOUCH_RESUMING, SWEET_TOUCH_FAILED, SWEET_TOUCH_STOPPED
++};
++struct sweet_touch_panel_status { uint64_t token; unsigned state, available; };
++int sweet_touch_panel_open(uint64_t *);
++int sweet_touch_panel_close(uint64_t);
++int sweet_touch_panel_request(uint64_t, unsigned resume, uint64_t *);
++int sweet_touch_panel_snapshot(uint64_t, uint64_t, struct sweet_touch_panel_status *);
++/* A successful QUIESCED snapshot proves worker/IRQ/HID quiescence, not rails or
++ * physical touch low power. Resume requires caller's panel/rail-ready proof and
++ * re-identifies/reconfigures TouchComm before rearming. Stop cancels; a running
++ * worker finishes bus STOP/masking asynchronously and never calls a freed owner.
++ * Any session that issued a request retires on close until reboot. */
++#ifdef __cplusplus
++}
++#endif
++#endif
+diff --git a/bsd/dev/sweet_touch_tcm.c b/bsd/dev/sweet_touch_tcm.c
+--- a/bsd/dev/sweet_touch_tcm.c
++++ b/bsd/dev/sweet_touch_tcm.c
+@@ -34,6 +34,8 @@
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include "sweet_log_level.h"
++#include "sweet_touch_panel.h"
++#include <mach/mach_time.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ /* Mach MIG declaration is not included by BSD's exported thread.h. */
+@@ -112,19 +114,89 @@
+ 
+ static int ts_chan;
+ /* 0: inactive; 1: armed; 2: worker pending; 3: failed;
+- * 4: bounded GIC software-pending probe. */
++ * 4: bounded GIC software-pending probe; 5: panel-coordination parked. */
+ static volatile unsigned ts_irq_state, ts_irq_hits, ts_irq_probe_hits;
+ static vm_offset_t ts_gicd;
+ static int ts_irq_chan;
+ static bool ts_irq_ready;
+ static unsigned ts_irq_empty, ts_irq_no_progress;
+ 
++/* Panel coordination has no provider pointer/callback. The packed atomic
++ * frame publishes a coherent token+state; only the sole worker touches hardware.
++ * Open/submit/query/close are metadata-only. State5 in the IRQ engine is parked. */
++static uint64_t ts_panel_owner, ts_panel_serial, ts_panel_frame;
++static unsigned ts_panel_live, ts_panel_cancel;
++static bool ts_panel_servicing;
++static uint64_t ts_panel_deadline;
++static uint32_t ts_panel_pin_cfg;
++#define TS_PANEL_LIMIT (~0ULL >> 4)
++static uint64_t ts_panel_now(void)
++{
++ uint64_t n=0; absolutetime_to_nanoseconds(mach_absolute_time(), &n); return n;
++}
++static bool ts_panel_interrupted(void)
++{
++ return ts_panel_servicing && (__atomic_load_n(&ts_panel_cancel,__ATOMIC_ACQUIRE) ||
++     ts_panel_now()>=ts_panel_deadline);
++}
++int sweet_touch_panel_open(uint64_t *session)
++{
++ if (!session) return EINVAL;
++ *session=0;
++ uint64_t serial=__atomic_load_n(&ts_panel_serial,__ATOMIC_RELAXED);
++ if (serial>=TS_PANEL_LIMIT) return EOVERFLOW;
++ /* Native service start is single-owner, but competing starts remain safe. */
++ if (!__atomic_compare_exchange_n(&ts_panel_serial,&serial,serial+1,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) return EBUSY;
++ uint64_t empty=0;
++ if (!__atomic_compare_exchange_n(&ts_panel_owner,&empty,serial+1,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) return EBUSY;
++ *session=serial+1; return 0;
++}
++int sweet_touch_panel_close(uint64_t session)
++{
++ if (!session || session!=__atomic_load_n(&ts_panel_owner,__ATOMIC_ACQUIRE)) return ENOENT;
++ uint64_t frame=__atomic_load_n(&ts_panel_frame,__ATOMIC_ACQUIRE);
++ if (frame>>4) {
++  __atomic_store_n(&ts_panel_cancel,1u,__ATOMIC_RELEASE);
++  __atomic_store_n(&ts_panel_owner,~0ULL,__ATOMIC_RELEASE);
++  thread_wakeup(&ts_irq_chan); thread_wakeup(&ts_chan);
++ } else __atomic_store_n(&ts_panel_owner,0ULL,__ATOMIC_RELEASE);
++ return 0;
++}
++int sweet_touch_panel_request(uint64_t session,unsigned resume,uint64_t *token)
++{
++ if (!token) return EINVAL;
++ *token=0;
++ if (!session || session!=__atomic_load_n(&ts_panel_owner,__ATOMIC_ACQUIRE)) return ENOENT;
++ if (resume>1) return EINVAL;
++ if (!__atomic_load_n(&ts_panel_live,__ATOMIC_ACQUIRE) || __atomic_load_n(&ts_panel_cancel,__ATOMIC_ACQUIRE)) return EAGAIN;
++ uint64_t frame=__atomic_load_n(&ts_panel_frame,__ATOMIC_ACQUIRE);
++ unsigned state=(unsigned)(frame&15u);
++ if (state!=(resume ? SWEET_TOUCH_QUIESCED : SWEET_TOUCH_RUNNING)) return EBUSY;
++ uint64_t ticket=(frame>>4)+1;
++ if (ticket>TS_PANEL_LIMIT) return EOVERFLOW;
++ uint64_t next=(ticket<<4)|(resume ? SWEET_TOUCH_RESUME_REQUESTED : SWEET_TOUCH_PAUSE_REQUESTED);
++ if (!__atomic_compare_exchange_n(&ts_panel_frame,&frame,next,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) return EBUSY;
++ *token=ticket; thread_wakeup(&ts_irq_chan); return 0;
++}
++int sweet_touch_panel_snapshot(uint64_t session,uint64_t token,struct sweet_touch_panel_status *out)
++{
++ if (!out) return EINVAL;
++ *out=(struct sweet_touch_panel_status){0};
++ if (!session || session!=__atomic_load_n(&ts_panel_owner,__ATOMIC_ACQUIRE)) return ENOENT;
++ uint64_t frame=__atomic_load_n(&ts_panel_frame,__ATOMIC_ACQUIRE);
++ if (token && token!=frame>>4) return ENOENT;
++ out->token=frame>>4; out->state=(unsigned)(frame&15u);
++ out->available=__atomic_load_n(&ts_panel_live,__ATOMIC_ACQUIRE);
++ return 0;
++}
++
+ static void
+ ts_wait(unsigned ms)
+ {
+ 	uint64_t deadline;
+ 	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+ 	(void)assert_wait_deadline(&ts_chan, THREAD_UNINT, deadline);
++ if (ts_panel_interrupted()) clear_wait(current_thread(), THREAD_AWAKENED);
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
+@@ -275,7 +347,10 @@
+ 		thread_wakeup(&ts_irq_chan);
+ 		return true;
+ 	}
+-	if (expected == 2u || expected == 3u) {
++	/* Parked callbacks never touch registers. Mask/active confirmation happened
++  * before QUIESCED was published; a late callback cannot unpark the worker. */
++ if (expected == 5u) return true;
++ if (expected == 2u || expected == 3u) {
+ 		ts_gic_wr(0x180u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+ 		return true;
+ 	}
+@@ -287,7 +362,9 @@
+ {
+ 	(void)assert_wait(&ts_irq_chan, THREAD_UNINT);
+ 	if (__atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE) != observed ||
+-	    __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE) == 3u) {
++	    __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE) == 3u ||
++     (__atomic_load_n(&ts_panel_frame,__ATOMIC_ACQUIRE)&15u)!=SWEET_TOUCH_RUNNING ||
++     __atomic_load_n(&ts_panel_cancel,__ATOMIC_ACQUIRE)) {
+ 		clear_wait(current_thread(), THREAD_AWAKENED);
+ 	}
+ 	thread_block(THREAD_CONTINUE_NULL);
+@@ -325,7 +402,8 @@
+ 		ts_irq_fail("TLMM config readback");
+ 		return false;
+ 	}
+-	__atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
++	if (ts_panel_interrupted()) return false;
++ __atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
+ 	ts_gic_wr(0x100u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+ 	bool waited = ts_gic_wait();
+ 	bool enabled = (ts_gic_rd(0x100u + 4u * TS_IRQ_WORD) & TS_IRQ_BIT) != 0;
+@@ -334,6 +412,7 @@
+ 		ts_irq_fail("GIC enable readback");
+ 		return false;
+ 	}
++	if (ts_panel_interrupted()) return false;
+ 	ts_wr(tile, TS_INTR_CFG, cfg | 1u);
+ 	if ((ts_rd(tile, TS_INTR_CFG) & 1u) == 0) {
+ 		ts_irq_fail("TLMM enable readback");
+@@ -473,11 +552,13 @@
+ static int
+ ts_i2c_write(const uint8_t *tx, size_t n)
+ {
++ if (ts_panel_interrupted()) return ECANCELED;
+ 	int err;
+ 	bb_start();
+ 	bb_tx_byte((uint8_t)(TS_ADDR << 1));
+ 	err = bb_ack();
+ 	for (size_t i = 0; i < n && err == 0; ++i) {
++		if (ts_panel_interrupted()) { err=ECANCELED; break; }
+ 		bb_tx_byte(tx[i]);
+ 		err = bb_ack();
+ 	}
+@@ -491,11 +572,13 @@
+ static int
+ ts_i2c_read(uint8_t *rx, size_t n)
+ {
++ if (ts_panel_interrupted()) return ECANCELED;
+ 	int err;
+ 	bb_start();
+ 	bb_tx_byte((uint8_t)((TS_ADDR << 1) | 1u));
+ 	err = bb_ack();
+ 	for (size_t i = 0; i < n && err == 0; ++i) {
++		if (ts_panel_interrupted()) { err=ECANCELED; break; }
+ 		rx[i] = bb_rx_byte(i + 1u < n);
+ 	}
+ 	bb_stop();
+@@ -809,6 +892,7 @@
+ 		return rc;
+ 	}
+ 	for (unsigned n = 0; n < 300; ++n) {
++ if (ts_panel_interrupted()) return ECANCELED;
+ 		if (tcm.version != 2 || n) {
+ 			ts_wait(10);
+ 			rc = message();
+@@ -1033,6 +1117,102 @@
+ {
+ 	memset(ts_now, 0, sizeof ts_now);
+ 	ts_report();
++}
++
++/* Disable only our GPIO122 source and the already-owned summary line. No
++ * transport/rail/reset writes. Wait outside a spinlock for RWP and EOI/active;
++ * peripheral mask must be read back before declaring a drained worker. */
++static bool ts_panel_mask(void)
++{
++ __atomic_store_n(&ts_irq_state,5u,__ATOMIC_RELEASE);
++ vm_offset_t tile=ts_tiles[ts_tile(TS_PIN_IRQ)];
++ uint32_t config=ts_rd(tile,TS_INTR_CFG);
++ if (config==~0u) {
++  ts_gic_wr(0x180u+4u*TS_IRQ_WORD,TS_IRQ_BIT);
++  SWEET_LOG_ERROR("SWEET TOUCH PANEL: GPIO122 IRQ configuration unreadable\n");return false;
++ }
++ ts_panel_pin_cfg=config&~1u;
++ ts_wr(tile,TS_INTR_CFG,ts_panel_pin_cfg);
++ ts_gic_wr(0x180u+4u*TS_IRQ_WORD,TS_IRQ_BIT);
++ for (unsigned n=0;n<21;++n) {
++  uint32_t readback=ts_rd(tile,TS_INTR_CFG);
++  if (readback!=ts_panel_pin_cfg) {
++   SWEET_LOG_ERROR("SWEET TOUCH PANEL: GPIO122 disable mismatch want=%#x read=%#x\n",ts_panel_pin_cfg,readback);return false;
++  }
++  if (!(ts_gic_rd(0)&(1u<<31)) &&
++      !(ts_gic_rd(0x100u+4u*TS_IRQ_WORD)&TS_IRQ_BIT) &&
++      !(ts_gic_rd(0x300u+4u*TS_IRQ_WORD)&TS_IRQ_BIT)) return true;
++  if (n!=20) ts_wait(1);
++ }
++ SWEET_LOG_ERROR("SWEET TOUCH PANEL: IRQ drain deadline ctlr=%#x enabled=%#x active=%#x\n",
++     ts_gic_rd(0),ts_gic_rd(0x100u+4u*TS_IRQ_WORD),ts_gic_rd(0x300u+4u*TS_IRQ_WORD));
++ return false;
++}
++static void ts_panel_publish(uint64_t frame,unsigned state)
++{ __atomic_store_n(&ts_panel_frame,(frame&~15ULL)|state,__ATOMIC_RELEASE); }
++/* 0 run normal IRQ loop, 1 sleep with no GPIO/I2C/HID accesses, 2 exit. */
++static unsigned ts_panel_step(void)
++{
++ uint64_t frame=__atomic_load_n(&ts_panel_frame,__ATOMIC_ACQUIRE);
++ unsigned state=(unsigned)(frame&15u);
++ if (__atomic_load_n(&ts_panel_cancel,__ATOMIC_ACQUIRE)) {
++  (void)ts_panel_mask(); ts_release_all();
++  ts_panel_publish(frame,SWEET_TOUCH_STOPPED); return 2;
++ }
++ if (state==SWEET_TOUCH_QUIESCED) return 1;
++ bool resume=state==SWEET_TOUCH_RESUME_REQUESTED;
++ if (state!=SWEET_TOUCH_PAUSE_REQUESTED && !resume) return 0;
++ uint64_t working=(frame&~15ULL)|(resume ? SWEET_TOUCH_RESUMING : SWEET_TOUCH_PAUSING);
++ if (!__atomic_compare_exchange_n(&ts_panel_frame,&frame,working,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) return 0;
++ frame=working; ts_panel_servicing=true; ts_panel_deadline=ts_panel_now()+4000000000ULL;
++ bool ok;
++ if (!resume) {
++  ok=ts_panel_mask();
++  ts_release_all(); /* release every held HID contact before publication */
++ } else {
++  /* The caller has restored panel/rails. Do not reset touch or cycle its GPIO
++   * supplies: re-identify app mode and revalidate report configuration in RAM.
++   * IRQ remains masked during all protocol I/O; no contacts are dispatched. */
++  vm_offset_t tile=ts_tiles[ts_tile(TS_PIN_IRQ)];
++  unsigned old_x=tcm.max_x,old_y=tcm.max_y;
++  ok=__atomic_load_n(&ts_irq_state,__ATOMIC_ACQUIRE)==5u &&
++      ts_rd(tile,TS_INTR_CFG)==ts_panel_pin_cfg &&
++      !(ts_gic_rd(0x100u+4u*TS_IRQ_WORD)&TS_IRQ_BIT);
++  if (ok) {
++   int rc=tcm_start();
++   ok=rc==0 && tcm.ready && tcm.max_x==old_x && tcm.max_y==old_y;
++   if (rc) tcm_fail(rc);
++   else if (!ok) SWEET_LOG_ERROR("SWEET TOUCH PANEL: resume geometry/ready mismatch old=%ux%u new=%ux%u ready=%u\n",
++       old_x,old_y,tcm.max_x,tcm.max_y,tcm.ready);
++  }
++  if (ok && !ts_panel_interrupted()) {
++   /* Source still disabled: discard stale summary pending, then enable the
++    * level source only after fresh application/format readback has succeeded. */
++   ts_gic_wr(0x280u+4u*TS_IRQ_WORD,TS_IRQ_BIT);
++   ok=ts_gic_wait() && !(ts_gic_rd(0x200u+4u*TS_IRQ_WORD)&TS_IRQ_BIT);
++   ts_irq_empty=ts_irq_no_progress=0;
++   if (ok && !ts_panel_interrupted()) ok=ts_irq_arm();
++  }
++ }
++ bool cancelled=__atomic_load_n(&ts_panel_cancel,__ATOMIC_ACQUIRE)!=0;
++ ok=ok && !ts_panel_interrupted(); ts_panel_servicing=false;
++ if (!ok) {
++  bool masked=ts_panel_mask(); ts_release_all();
++  ts_panel_publish(frame,cancelled ? SWEET_TOUCH_STOPPED : SWEET_TOUCH_FAILED);
++  if (cancelled) SWEET_LOG_INFO("SWEET TOUCH PANEL: cancelled; irq-masked=%u, touch stopped\n",masked);
++  else SWEET_LOG_ERROR("SWEET TOUCH PANEL: %s failed irq-masked=%u; touch withheld, no reset/retry/rail change\n",resume ? "resume" : "quiesce",masked);
++  return 2;
++ }
++ ts_panel_publish(frame,resume ? SWEET_TOUCH_RUNNING : SWEET_TOUCH_QUIESCED);
++ SWEET_LOG_INFO("SWEET TOUCH PANEL: token=%llu %s; no low-power/rail proof\n",frame>>4,resume ? "app/format verified, IRQ resumed" : "worker/IRQ/HID quiesced");
++ return resume ? 0u : 1u;
++}
++static void ts_panel_wait(void)
++{
++ (void)assert_wait(&ts_irq_chan,THREAD_UNINT);
++ if ((__atomic_load_n(&ts_panel_frame,__ATOMIC_ACQUIRE)&15u)!=SWEET_TOUCH_QUIESCED ||
++     __atomic_load_n(&ts_panel_cancel,__ATOMIC_ACQUIRE)) clear_wait(current_thread(),THREAD_AWAKENED);
++ thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
+ static void
+@@ -1109,8 +1289,13 @@
+ 		goto out;
+ 	}
+ 
+-	unsigned errors = 0, ticks = 0, attn_low = 0, reports = 0;
++	ts_panel_publish(0,SWEET_TOUCH_RUNNING);
++ __atomic_store_n(&ts_panel_live,1u,__ATOMIC_RELEASE);
++ unsigned errors = 0, ticks = 0, attn_low = 0, reports = 0;
+ 	for (;;) {
++  unsigned control=ts_panel_step();
++  if (control==2u) goto irq_stop;
++  if (control==1u) { ts_panel_wait(); continue; }
+ 		unsigned observed = __atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE);
+ 		unsigned irqState = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);
+ 		if (irqState == 3u) {
+@@ -1197,6 +1382,9 @@
+ 	ts_release_all();
+ 
+ out:
++ __atomic_store_n(&ts_panel_live,0u,__ATOMIC_RELEASE);
++ uint64_t frame=__atomic_load_n(&ts_panel_frame,__ATOMIC_ACQUIRE);
++ if ((frame&15u)!=SWEET_TOUCH_STOPPED) ts_panel_publish(frame,SWEET_TOUCH_FAILED);
+ 	(void)thread_terminate(current_thread());
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -10,6 +10,7 @@
+ #include "SweetScanoutPool.h"
+ #include "SweetRPMh.h"
+ #include "SweetPanelPins.h"
++#include "SweetTouchPanel.h"
+ #include "SweetDisplayClock.h"
+ #include "SweetDSILink.h"
+ #include <IOKit/IOLib.h>
+@@ -349,6 +350,12 @@
+  void stopNoC(void);
+  static IOReturn noCAction(OSObject *,void *,void *,void *,void *);
+  static void noCTimerAction(OSObject *,IOTimerEventSource *);
++ SweetTouchPanelClient *fTouchPanelClient;
++ SweetTouchPanel *fTouchPanel;
++ uint64_t fTouchPanelConsumer;
++ bool setupTouchPanel(void);
++ static void touchPanelChanged(OSObject *);
++ void closeTouchPanel(void);
+  SweetPanelPinsClient *fPanelPinsClient;
+  SweetPanelPins *fPanelPins;
+  uint64_t fPanelPinsConsumer;
+@@ -469,6 +476,7 @@
+  if (!setupHost()) return false;
+  if (!setupLink()) return false;
+  if (!setupPanelPins()) return false;
++ if (!setupTouchPanel()) return false;
+  SWEET_LOG_INFO("SWEET MDSS: F1a v1 IOService backend; ABL scanout unchanged\n");
+  registerService();
+  return true;
+@@ -579,9 +587,49 @@
+  }
+ }
+ 
++/* Metadata binding only; lifecycle requests remain explicit. */
++bool SweetMDSS::setupTouchPanel(void)
++{
++ int mode=0; (void)PE_parse_boot_argn("sweettouchpanel",&mode,sizeof(mode));
++ if (!mode) return true;
++ if ((mode!=1 && mode!=2) || !fDisplayResourceMode) return false;
++ fTouchPanelClient=SweetTouchPanelClient::withOwner(this,fLoop,touchPanelChanged);
++ return fTouchPanelClient && fTouchPanelClient->watch();
++}
++void SweetMDSS::touchPanelChanged(OSObject *owner)
++{
++ SweetMDSS *s=(SweetMDSS *)owner;
++ if (!s->fAccepting) return;
++ SweetTouchPanel *p=s->fTouchPanelClient->copyBackend();
++ if (p==s->fTouchPanel) { OSSafeReleaseNULL(p); return; }
++ if (s->fTouchPanel) {
++  (void)s->fTouchPanel->detachConsumer(s->fTouchPanelConsumer);
++  OSSafeReleaseNULL(s->fTouchPanel); s->fTouchPanelConsumer=0;
++ }
++ s->setProperty("SweetDisplayTouchPanelBound",false);
++ if (!p) return;
++ uint64_t id=0;
++ if (p->attachConsumer(&id)!=kIOReturnSuccess) { p->release(); return; }
++ s->fTouchPanel=p; s->fTouchPanelConsumer=id;
++ s->setProperty("SweetDisplayTouchPanelBound",true);
++ SWEET_LOG_INFO("SWEET MDSS: matched touch panel consumer=%llu; no automatic quiesce/resume\n",id);
++}
++void SweetMDSS::closeTouchPanel(void)
++{
++ if (fTouchPanelClient) fTouchPanelClient->stop();
++ OSSafeReleaseNULL(fTouchPanelClient);
++ if (fTouchPanel) {
++  IOReturn rc=fTouchPanel->detachConsumer(fTouchPanelConsumer);
++  if (rc!=kIOReturnSuccess && rc!=kIOReturnNotReady)
++   SWEET_LOG_WARN("SWEET MDSS: touch panel detach rc=%#x; retained, no implicit resume\n",(unsigned)rc);
++  OSSafeReleaseNULL(fTouchPanel); fTouchPanelConsumer=0;
++ }
++}
++
+ void
+ SweetMDSS::closeDisplayResources(void)
+ {
++ closeTouchPanel();
+  closePanelPins();
+  /* Called outside owner gate: remove synchronizes matching callbacks, then
+   * removeEventSource synchronizes the owner's queued work before release. */
+diff --git a/iokit/Kernel/arm/SweetTouchPanel.cpp b/iokit/Kernel/arm/SweetTouchPanel.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetTouchPanel.cpp
+@@ -0,0 +1,273 @@
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include "SweetTouchPanel.h"
++#include <IOKit/IOLib.h>
++#include <libkern/c++/OSData.h>
++#include <sys/errno.h>
++#include <pexpert/pexpert.h>
++#include <kern/clock.h>
++#define SWEET_LOG_SINK IOLog
++#include "../../../bsd/dev/sweet_log_level.h"
++OSDefineMetaClassAndStructors(SweetTouchPanel,IOService);
++OSDefineMetaClassAndStructors(SweetTouchPanelClient,OSObject);
++struct TouchPanelRequest { unsigned op; uint64_t client,token; uint64_t *out; SweetTouchPanelStatus *status; bool *available; };
++static IOReturn touchPanelReturn(int rc)
++{
++ switch (rc) {
++ case 0:return kIOReturnSuccess;
++ case EBUSY:return kIOReturnBusy;
++ case ENOENT:return kIOReturnNotFound;
++ case EINVAL:return kIOReturnBadArgument;
++ case EOVERFLOW:return kIOReturnNoResources;
++ case EAGAIN:return kIOReturnNotReady;
++ default:return kIOReturnIOError;
++ }
++}
++uint64_t SweetTouchPanel::nowNS(void)
++{ uint64_t n=0; absolutetime_to_nanoseconds(mach_absolute_time(),&n); return n; }
++bool SweetTouchPanel::start(IOService *p)
++{
++ int mode=0;(void)PE_parse_boot_argn("sweettouchpanel",&mode,sizeof(mode));
++ if ((mode!=1 && mode!=2) || !IOService::start(p)) return false;
++ OSData *abi=OSDynamicCast(OSData,p->getProperty("sweet,touch-panel-abi"));
++ if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),"\1\0\0\0",4)) return false;
++ if (sweet_touch_panel_open(&fSession)!=0) return false;
++ fMode=(unsigned)mode;
++ fLoop=IOWorkLoop::workLoop();fGate=IOCommandGate::commandGate(this);
++ fTimer=IOTimerEventSource::timerEventSource(this,timerAction);
++ if (!fLoop || !fGate || !fTimer) return false;
++ if (fLoop->addEventSource(fGate)!=kIOReturnSuccess) return false;
++ fGateAdded=true;
++ if (fLoop->addEventSource(fTimer)!=kIOReturnSuccess) return false;
++ fTimerAdded=true;fAccepting=true;
++ setProperty("SweetTouchPanelABI",1ULL,32);
++ setProperty("SweetTouchPanelWritesEnabled",mode==2);
++ SWEET_LOG_INFO("SWEET TOUCH PANEL: native binding mode=%u; sole legacy worker retained, no automatic pause/resume\n",fMode);
++ registerService();return true;
++}
++void SweetTouchPanel::refresh(void)
++{
++ if (!fSession || !fStatus.token) return;
++ sweet_touch_panel_status p={};
++ int rc=sweet_touch_panel_snapshot(fSession,fStatus.token,&p);
++ if (rc) { fStatus.state=SWEET_TOUCH_FAILED;fStatus.result=touchPanelReturn(rc); }
++ else {
++  fStatus.state=p.available ? p.state : (unsigned)SWEET_TOUCH_FAILED;
++  bool pending=p.state==SWEET_TOUCH_PAUSE_REQUESTED || p.state==SWEET_TOUCH_PAUSING ||
++      p.state==SWEET_TOUCH_RESUME_REQUESTED || p.state==SWEET_TOUCH_RESUMING;
++  fStatus.quiesced=p.available && p.state==SWEET_TOUCH_QUIESCED;
++  fStatus.ready=p.available && p.state==SWEET_TOUCH_RUNNING;
++  fStatus.result=(fStatus.quiesced || fStatus.ready) ? kIOReturnSuccess :
++      (pending && p.available ? kIOReturnNotReady : kIOReturnIOError);
++  if (pending && p.available) return;
++ }
++ fBusy=false;
++ if (fTimer) fTimer->cancelTimeout();
++ if (fStatus.result!=kIOReturnSuccess) {
++  fPoisoned=true;fStatus.uncertain=fTouched;fStatus.quiesced=fStatus.ready=false;
++  SWEET_LOG_ERROR("SWEET TOUCH PANEL: worker unavailable/failed token=%llu state=%u; no implicit resume\n",fStatus.token,fStatus.state);
++ }
++}
++IOReturn SweetTouchPanel::action(OSObject *owner,void *arg,void *,void *,void *)
++{
++ SweetTouchPanel *s=(SweetTouchPanel *)owner;TouchPanelRequest &r=*(TouchPanelRequest *)arg;
++ if (r.op==OpStop) {
++  s->fAccepting=false;
++  if (s->fTimer) s->fTimer->cancelTimeout();
++  if (s->fSession) { (void)sweet_touch_panel_close(s->fSession);s->fSession=0; }
++  if (s->fStatus.token) {
++   s->fStatus.state=SWEET_TOUCH_STOPPED;s->fStatus.result=kIOReturnAborted;
++   s->fStatus.quiesced=s->fStatus.ready=false;s->fStatus.uncertain=s->fTouched;
++  }
++  s->fBusy=false;return kIOReturnSuccess;
++ }
++ if (r.op==OpQuery) {
++  if (!r.client || r.client!=s->fClient || !r.token || r.token!=s->fStatus.token) return kIOReturnNotFound;
++  if (s->fAccepting && !s->fPoisoned) s->refresh();
++  *r.status=s->fStatus;return kIOReturnSuccess;
++ }
++ if (!s->fAccepting || s->isInactive()) return kIOReturnNotReady;
++ if (r.op==OpInfo) {
++  sweet_touch_panel_status p={};
++  IOReturn rc=touchPanelReturn(sweet_touch_panel_snapshot(s->fSession,0,&p));
++  *r.available=!s->fPoisoned && rc==kIOReturnSuccess && p.available && p.state!=SWEET_TOUCH_FAILED && p.state!=SWEET_TOUCH_STOPPED;
++  return rc;
++ }
++ if (r.op==OpAttach) {
++  if (s->fPoisoned) return kIOReturnNotReady;
++  if (s->fClient) return kIOReturnBusy;
++  if (s->fNextClient==~0ULL) return kIOReturnNoResources;
++  s->fClient=++s->fNextClient;*r.out=s->fClient;return kIOReturnSuccess;
++ }
++ if (!r.client || r.client!=s->fClient) return kIOReturnNotFound;
++ if (r.op==OpDetach) {
++  if (!s->fPoisoned) s->refresh();
++  if (s->fBusy || s->fPoisoned || s->fStatus.quiesced) return kIOReturnBusy;
++  s->fClient=0;s->fStatus={};return kIOReturnSuccess;
++ }
++ if (s->fMode!=2) return kIOReturnNotPermitted;
++ if (s->fPoisoned) return kIOReturnNotReady;
++ if (s->fBusy) return kIOReturnBusy;
++ uint64_t token=0;
++ IOReturn rc=touchPanelReturn(sweet_touch_panel_request(s->fSession,r.op==OpResume,&token));
++ if (rc!=kIOReturnSuccess) return rc;
++ s->fStatus={};s->fStatus.token=token;
++ s->fStatus.state=r.op==OpResume ? SWEET_TOUCH_RESUME_REQUESTED : SWEET_TOUCH_PAUSE_REQUESTED;
++ s->fStatus.result=kIOReturnNotReady;s->fBusy=s->fTouched=true;
++ s->fDeadline=nowNS()+6000000000ULL;*r.out=token;s->fTimer->setTimeoutMS(1);
++ return kIOReturnSuccess;
++}
++void SweetTouchPanel::timerAction(OSObject *owner,IOTimerEventSource *)
++{
++ SweetTouchPanel *s=(SweetTouchPanel *)owner;
++ if (!s->fAccepting || s->isInactive() || !s->fBusy) return;
++ s->refresh();
++ if (!s->fBusy) return;
++ if (nowNS()>=s->fDeadline) {
++  (void)sweet_touch_panel_close(s->fSession);s->fSession=0;
++  s->fBusy=false;s->fPoisoned=true;
++  s->fStatus.state=SWEET_TOUCH_FAILED;s->fStatus.result=kIOReturnTimeout;
++  s->fStatus.ready=s->fStatus.quiesced=false;s->fStatus.uncertain=true;
++  SWEET_LOG_ERROR("SWEET TOUCH PANEL: worker deadline; cancelled, no quiescence assumed\n");
++  return;
++ }
++ s->fTimer->setTimeoutMS(1);
++}
++IOReturn SweetTouchPanel::request(unsigned op,uint64_t id,uint64_t *token)
++{ if (!token) return kIOReturnBadArgument;*token=0;TouchPanelRequest r={};r.op=op;r.client=id;r.out=token;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetTouchPanel::attachConsumer(uint64_t *id) { return request(OpAttach,0,id); }
++IOReturn SweetTouchPanel::quiesce(uint64_t id,uint64_t *token) { return request(OpQuiesce,id,token); }
++IOReturn SweetTouchPanel::resume(uint64_t id,uint64_t *token) { return request(OpResume,id,token); }
++IOReturn SweetTouchPanel::detachConsumer(uint64_t id)
++{ TouchPanelRequest r={};r.op=OpDetach;r.client=id;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetTouchPanel::copyWorkerAvailable(bool *available)
++{ if (!available) return kIOReturnBadArgument;*available=false;TouchPanelRequest r={};r.op=OpInfo;r.available=available;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetTouchPanel::copyStatus(uint64_t id,uint64_t token,SweetTouchPanelStatus *status)
++{ if (!status) return kIOReturnBadArgument;*status={};TouchPanelRequest r={};r.op=OpQuery;r.client=id;r.token=token;r.status=status;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++void SweetTouchPanel::shutdown(void)
++{
++ if (fGateAdded) { TouchPanelRequest r={};r.op=OpStop;(void)fGate->runAction(action,&r); }
++ else if (fSession) { (void)sweet_touch_panel_close(fSession);fSession=0; }
++ if (fTimerAdded) { fLoop->removeEventSource(fTimer);fTimerAdded=false; }
++}
++bool SweetTouchPanel::willTerminate(IOService *p,IOOptionBits o)
++{ shutdown();return IOService::willTerminate(p,o); }
++void SweetTouchPanel::stop(IOService *p)
++{
++ shutdown();
++ if (fClient) SWEET_LOG_WARN("SWEET TOUCH PANEL: consumer still attached at stop; worker cancellation retained\n");
++ IOService::stop(p);
++}
++void SweetTouchPanel::free(void)
++{
++ shutdown();
++ if (fGateAdded) { fLoop->removeEventSource(fGate);fGateAdded=false; }
++ OSSafeReleaseNULL(fTimer);OSSafeReleaseNULL(fGate);OSSafeReleaseNULL(fLoop);
++ IOService::free();
++}
++SweetTouchPanelClient *
++SweetTouchPanelClient::withOwner(OSObject *owner, IOWorkLoop *loop, void (*changed)(OSObject *))
++{
++ if (!owner || !loop || !changed) return NULL;
++ SweetTouchPanelClient *self=OSTypeAlloc(SweetTouchPanelClient);
++ if (!self) return NULL;
++ if (!self->init()) { self->release(); return NULL; }
++ self->fOwner=owner; self->fChanged=changed; self->fLoop=loop; loop->retain();
++ self->fLock=IOLockAlloc();
++ self->fEvent=IOInterruptEventSource::interruptEventSource(self, SweetTouchPanelClient::changed);
++ if (!self->fLock || !self->fEvent) { self->release(); return NULL; }
++ self->fEvent->disable();
++ if (loop->addEventSource(self->fEvent)!=kIOReturnSuccess) { self->release(); return NULL; }
++ self->fEventAdded=true;
++ return self;
++}
++
++bool
++SweetTouchPanelClient::watch(void)
++{
++ OSDictionary *matching=IOService::serviceMatching("SweetTouchPanel");
++ if (!matching) return false;
++ fTerminated=IOService::addMatchingNotification(gIOTerminatedNotification,matching,terminated,this);
++ if (fTerminated) fMatched=IOService::addMatchingNotification(gIOFirstMatchNotification,matching,matched,this);
++ matching->release(); /* API retains the dictionary */
++ if (!fTerminated || !fMatched) { stop(); return false; }
++ fEvent->enable(); fEvent->interruptOccurred(NULL,NULL,0);
++ return true;
++}
++
++bool
++SweetTouchPanelClient::matched(void *target, void *, IOService *service, IONotifier *)
++{
++ SweetTouchPanelClient *self=(SweetTouchPanelClient *)target;
++ SweetTouchPanel *backend=OSDynamicCast(SweetTouchPanel,service);
++ if (!backend) return true;
++ IOLockLock(self->fLock);
++ if (!self->fStopping && !self->fBackend && !backend->isInactive()) {
++  backend->retain(); self->fBackend=backend;
++  self->fEvent->interruptOccurred(NULL,NULL,0);
++ }
++ IOLockUnlock(self->fLock);
++ return true;
++}
++
++bool
++SweetTouchPanelClient::terminated(void *target, void *, IOService *service, IONotifier *)
++{
++ SweetTouchPanelClient *self=(SweetTouchPanelClient *)target;
++ SweetTouchPanel *old=NULL;
++ IOLockLock(self->fLock);
++ if (self->fBackend==service) {
++  old=self->fBackend; self->fBackend=NULL;
++  if (!self->fStopping) self->fEvent->interruptOccurred(NULL,NULL,0);
++ }
++ IOLockUnlock(self->fLock);
++ /* No provider method or register access in notification context. In-flight
++  * callers hold their own reference; provider checks inactive under its gate. */
++ OSSafeReleaseNULL(old);
++ return true;
++}
++
++void
++SweetTouchPanelClient::changed(OSObject *owner, IOInterruptEventSource *, int)
++{
++ SweetTouchPanelClient *self=(SweetTouchPanelClient *)owner;
++ IOLockLock(self->fLock); bool active=!self->fStopping; IOLockUnlock(self->fLock);
++ if (active) self->fChanged(self->fOwner);
++}
++
++SweetTouchPanel *
++SweetTouchPanelClient::copyBackend(void)
++{
++ IOLockLock(fLock);
++ SweetTouchPanel *backend=!fStopping ? fBackend : NULL;
++ if (backend) backend->retain();
++ IOLockUnlock(fLock);
++ return backend;
++}
++
++void
++SweetTouchPanelClient::stop(void)
++{
++ if (fLock) { IOLockLock(fLock); fStopping=true; IOLockUnlock(fLock); }
++ /* remove consumes the notifier and synchronizes callbacks. Never hold a
++  * consumer lock/gate here: a replaying notification may be waiting on it. */
++ if (fMatched) { fMatched->remove(); fMatched=NULL; }
++ if (fTerminated) { fTerminated->remove(); fTerminated=NULL; }
++ if (fEventAdded) {
++  fEvent->disable(); fLoop->removeEventSource(fEvent); fEventAdded=false;
++ }
++ if (fLock) {
++  IOLockLock(fLock); SweetTouchPanel *old=fBackend; fBackend=NULL; IOLockUnlock(fLock);
++  OSSafeReleaseNULL(old);
++ }
++}
++
++void
++SweetTouchPanelClient::free(void)
++{
++ stop(); OSSafeReleaseNULL(fEvent); OSSafeReleaseNULL(fLoop);
++ if (fLock) { IOLockFree(fLock); fLock=NULL; }
++ OSObject::free();
++}
++
++
++#endif
+diff --git a/iokit/Kernel/arm/SweetTouchPanel.h b/iokit/Kernel/arm/SweetTouchPanel.h
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetTouchPanel.h
+@@ -0,0 +1,76 @@
++/* Native service facade for the existing sole TouchComm worker. No MMIO. */
++#ifndef SWEET_TOUCH_PANEL_SERVICE_H
++#define SWEET_TOUCH_PANEL_SERVICE_H
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include <IOKit/IOService.h>
++#include <IOKit/IOCommandGate.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOLocks.h>
++#include "../../../bsd/dev/sweet_touch_panel.h"
++struct SweetTouchPanelStatus {
++ uint64_t token;
++ unsigned state;
++ IOReturn result;
++ bool quiesced, ready, uncertain;
++};
++class SweetTouchPanel : public IOService {
++ OSDeclareDefaultStructors(SweetTouchPanel);
++ IOWorkLoop *fLoop;
++ IOCommandGate *fGate;
++ IOTimerEventSource *fTimer;
++ bool fGateAdded, fTimerAdded, fAccepting, fBusy, fTouched, fPoisoned;
++ unsigned fMode;
++ uint64_t fSession, fClient, fNextClient, fDeadline;
++ SweetTouchPanelStatus fStatus;
++ enum Operation { OpAttach, OpDetach, OpQuery, OpQuiesce, OpResume, OpStop, OpInfo };
++ static IOReturn action(OSObject *,void *,void *,void *,void *);
++ static void timerAction(OSObject *,IOTimerEventSource *);
++ static uint64_t nowNS(void);
++ void refresh(void);
++ void shutdown(void);
++ IOReturn request(unsigned,uint64_t,uint64_t *);
++public:
++ bool start(IOService *) APPLE_KEXT_OVERRIDE;
++ bool willTerminate(IOService *,IOOptionBits) APPLE_KEXT_OVERRIDE;
++ void stop(IOService *) APPLE_KEXT_OVERRIDE;
++ void free(void) APPLE_KEXT_OVERRIDE;
++ IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE { return fLoop; }
++ IOReturn attachConsumer(uint64_t *);
++ IOReturn detachConsumer(uint64_t);
++ IOReturn copyWorkerAvailable(bool *);
++ IOReturn copyStatus(uint64_t,uint64_t,SweetTouchPanelStatus *);
++ /* Asynchronous worker operations, no MMIO in caller/provider. quiesced means
++  * worker boundary + peripheral/GIC masked/active drained + HID contacts up.
++  * It is not a touch sleep/rail-off proof. Resume requires caller-established
++  * panel/rail readiness; re-identifies application and readbacks the format,
++  * then rearms IRQ. No touch GPIO reset, supply or firmware write.
++  * Stop cancels through the mailbox: an in-flight worker may finish bus STOP
++  * and mask asynchronously, but stores no provider pointer and cannot call us.
++  * Any submitted request retires this worker session on service close. */
++ IOReturn quiesce(uint64_t,uint64_t *);
++ IOReturn resume(uint64_t,uint64_t *);
++};
++class SweetTouchPanelClient : public OSObject {
++ OSDeclareDefaultStructors(SweetTouchPanelClient);
++ IOLock *fLock;
++ IOWorkLoop *fLoop;
++ IOInterruptEventSource *fEvent;
++ IONotifier *fMatched, *fTerminated;
++ SweetTouchPanel *fBackend;
++ OSObject *fOwner;
++ void (*fChanged)(OSObject *);
++ bool fStopping, fEventAdded;
++ static bool matched(void *,void *,IOService *,IONotifier *);
++ static bool terminated(void *,void *,IOService *,IONotifier *);
++ static void changed(OSObject *,IOInterruptEventSource *,int);
++public:
++ static SweetTouchPanelClient *withOwner(OSObject *,IOWorkLoop *,void (*)(OSObject *));
++ bool watch(void);
++ SweetTouchPanel *copyBackend(void);
++ void stop(void);
++ void free(void) APPLE_KEXT_OVERRIDE;
++};
++#endif
++#endif
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -36,6 +36,11 @@
+     "("
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
++    "   {"
++    "     'IOClass'         = SweetTouchPanel;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'sweet,touch-panel';"
++    "   },"
+     "   {"
+     "     'IOClass'         = SweetPanelPins;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -33,3 +33,5 @@
+ iokit/Kernel/arm/SweetRPMh.cpp                                    optional iokitcpp
+ 
+ iokit/Kernel/arm/SweetPanelPins.cpp                               optional iokitcpp
++
++iokit/Kernel/arm/SweetTouchPanel.cpp                              optional iokitcpp

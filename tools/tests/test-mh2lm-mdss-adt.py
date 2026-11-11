@@ -165,3 +165,40 @@ for with_noc in (False, True):
     else:
         raise AssertionError('accepted duplicate panel pin provider')
 print('PASS: optional GPIO6 SOUTH/GPIO8 NORTH provider ABI, exact two pages/no GPIO7, separate MDSS/RPMh maps, no identity/IRQ claims, NoC composition and byte-identical legacy ADTs')
+
+# Touch coordination owns no new GPIO/GIC mapping: the sole legacy worker
+# remains the hardware writer. Older outputs and pin service stay byte-identical.
+for with_pins in (False, True):
+    for with_noc in (False, True):
+        touch_blob = m.derive(blob, display_noc=with_noc, panel_pins=with_pins, panel_touch=True)
+        r, end = adt.parse(touch_blob)
+        assert end == len(touch_blob)
+        touch = r.children[1].children.pop()
+        assert touch.name == 'panel-touch' and touch.prop('compatible') == b'sweet,touch-panel\0'
+        assert touch.prop('sweet,touch-panel-abi') == struct.pack('<I', 1)
+        assert touch.prop('reg') is None and touch.prop('interrupts') is None
+        assert touch.prop('interrupt-parent') is None
+        assert adt.serialize(r) == m.derive(blob, display_resources=True,
+                                          display_noc=with_noc, panel_pins=with_pins)
+        original, _ = adt.parse(blob)
+        original.children[1].children.append(touch)
+        try:
+            m.derive(adt.serialize(original), panel_touch=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('accepted duplicate touch coordination service')
+print('PASS: optional touch coordination metadata nub, no second GPIO/GIC writer, pins/NoC composition, old ABI bytes preserved and duplicate rejection')
+
+# Exercise the user-facing CLI, including simultaneous pins/touch/NoC options.
+import subprocess
+import tempfile
+with tempfile.TemporaryDirectory(prefix='mh2lm-panel-adt-') as temp:
+    source = Path(temp)/'base.adt'
+    output = Path(temp)/'panel.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--panel-touch', '--panel-pins',
+                    '--display-noc', str(source), str(output)], check=True)
+    assert source.read_bytes() == blob
+    assert output.read_bytes() == m.derive(blob, display_noc=True, panel_pins=True, panel_touch=True)
+print('PASS: combined panel-touch/panel-pins/display-noc CLI output equals validated derivation; baseline file unchanged')
