@@ -1,5 +1,16 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0191当前增量（本地通过，未实机）：** 实际 managed 接管已在资源完成后、host 重建前，
+加入 PHY v4.0 / PLL 7nm-v2 复位重配和 BYTE/PCLK 时钟重建。沿原 MDSS owner/gate/DSI timer，
+显式 `sweetdsilink=2` 要求 host1/core2/managed1；默认0保留0190行为。
+先分别确认分支/root 停稳、旧 lock 清除，再配 PHY/分数频率/SSC/分频；新 lock、RCG 更新和
+实际运行分别确认，最终仍需 host 重建及 fresh 像素完成。12套本地检查和arm64对象编译通过。
+profile 为 LG 板级选择，原始 revision byte 记录不当作自动识别；尚无新实机写入证据。
+面板 reset/vendor ON/OFF、反向释放、整屏冷启动及 ABL 退出仍缺，完整驱动未完成。
+详见[PHY/PLL/输出时钟实现与验证](PANEL-LINK-D1.md)。下一步面板生命周期/独立重建，
+完整驱动优先、之后零拷贝；暂不单独要求 push/刷机，A单缓冲/30Hz拷贝限制不变。
+以下0190及更早段落按当时范围保留，当前以0191及NOTES顶部为准。
+
 **0190当前增量（本地通过，未实机）：** 实际 managed 扫描接管在 NoC/DSI0 lease 完成后，
 接入 host v2.3 软复位和明确的 RGB888 command-mode 配置重建，再继续原自有 A/fresh 像素完成。
 复用 MDSS 唯一 owner/gate/DSI timer；默认关闭，显式 `sweetdsihost=1` 要求 managed1/core2

@@ -1,0 +1,782 @@
+diff --git a/iokit/Kernel/arm/SweetDSILink.h b/iokit/Kernel/arm/SweetDSILink.h
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetDSILink.h
+@@ -0,0 +1,25 @@
++#ifndef SWEET_DSI_LINK_H
++#define SWEET_DSI_LINK_H
++/* Fixed DPHY topology: VCO / 2 -> bit; bit / 8 -> byte; byte / 2 -> byte-intf; bit / 6 -> pixel.
++ * 19.2MHz XO doubled internally, 18 fractional bits; LG 7nm v2 arithmetic.
++ * No hardware access, rounding up of an unsupported rate, or arbitrary dividers. */
++struct SweetDSILinkPlan {
++ uint64_t bitHz, vcoHz, actualVcoHz;
++ uint32_t decimal, fraction, sscPeriod, sscStep;
++};
++static inline bool sweet_dsi_link_plan(uint64_t bitHz,SweetDSILinkPlan *out)
++{
++ if (!out || bitHz<500000000ULL || bitHz>=1500000000ULL) return false;
++ SweetDSILinkPlan p={}; p.bitHz=bitHz; p.vcoHz=bitHz*2;
++ uint64_t units=p.vcoHz*262144ULL/38400000ULL;
++ p.decimal=(uint32_t)(units>>18); p.fraction=(uint32_t)(units&0x3ffffu);
++ if (!p.decimal || p.decimal>255) return false;
++ p.actualVcoHz=units*38400000ULL/262144ULL;
++ /* LG defaults: 31.5kHz, 5000ppm DOWN spread, ADJPER=2. */
++ p.sscPeriod=((19200000u+31500u/2u)/31500u)/2u-1u;
++ p.sscPeriod-=(p.sscPeriod+1u)%3u;
++ p.sscStep=(uint32_t)((units*5000ULL*3ULL/(p.sscPeriod+1u)+500000ULL)/1000000ULL);
++ if (!p.sscStep || p.sscStep>65535u) return false;
++ *out=p; return true;
++}
++#endif
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -10,6 +10,7 @@
+ #include "SweetScanoutPool.h"
+ #include "SweetRPMh.h"
+ #include "SweetDisplayClock.h"
++#include "SweetDSILink.h"
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOCommandGate.h>
+ #include <IOKit/IOTimerEventSource.h>
+@@ -227,9 +228,31 @@
+  void advanceHost(void);
+  void finishHost(IOReturn,const char *);
+  void stopHost(void);
++ /* PHY/PLL and their downstream roots share the clock writer and DSI timer. */
++ enum LinkPhase { LinkIdle, LinkLaneIdle, LinkGatesOff, LinkPLLStop, LinkBiasOff,
++     LinkResetHold, LinkResetSettle, LinkRefgen, LinkPHYConfig, LinkPLLConfig,
++     LinkBiasOn, LinkLock, LinkRoots, LinkRootWait, LinkGatesOn, LinkResync,
++     LinkReady, LinkFault, LinkStopped };
++ unsigned fLinkProfile, fLinkPhase, fLinkCursor, fLinkRoot;
++ uint32_t fLinkMisc;
++ bool fLinkTouched;
++ uint64_t fLinkDeadline, fLinkWait, fLinkStepDeadline;
++ SweetDSILinkPlan fLinkPlan;
++ IOReturn fLinkResult;
++ bool setupLink(void);
++ bool linkBusy(void) const;
++ bool linkResourcesReady(void);
++ bool linkOtherUsers(void);
++ bool linkWarmAdmission(void);
++ bool linkConfiguration(void);
++ bool linkWrite(uint32_t,uint32_t);
++ IOReturn beginLink(void);
++ void advanceLink(void);
++ void finishLink(IOReturn,const char *);
++ void stopLink(void);
+  /* Managed warm takeover, driven by the existing scanout timer/gate. */
+  enum ManagedState { ManagedIdle, ManagedRails, ManagedARC, ManagedNoC,
+-     ManagedClock, ManagedReady, ManagedFault, ManagedStopped, ManagedCore, ManagedHost };
++     ManagedClock, ManagedReady, ManagedFault, ManagedStopped, ManagedCore, ManagedHost, ManagedLink };
+  bool fManagedEnabled, fManagedStarted;
+  unsigned fManagedState, fManagedRail, fManagedRails;
+  uint64_t fManagedToken, fManagedBandwidth, fManagedClock, fManagedWait, fManagedDeadline;
+@@ -437,6 +460,7 @@
+  if (!setupNoC(provider)) return false;
+  if (!setupManagedResources()) return false;
+  if (!setupHost()) return false;
++ if (!setupLink()) return false;
+  SWEET_LOG_INFO("SWEET MDSS: F1a v1 IOService backend; ABL scanout unchanged\n");
+  registerService();
+  return true;
+@@ -701,6 +725,7 @@
+ #include "SweetMDSSResources.inc"
+ #include "SweetMDSSDSI.inc"
+ #include "SweetMDSSHost.inc"
++#include "SweetMDSSLink.inc"
+ 
+ IOReturn
+ SweetMDSS::readyAction(OSObject *owner,void *,void *,void *,void *)
+@@ -749,6 +774,7 @@
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  if (!self->fAccepting || self->isInactive()) return;
++ if (self->fLinkPhase!=LinkIdle && self->fLinkPhase!=LinkReady) return;
+  if (self->fHostPhase!=HostIdle && self->fHostPhase!=HostReady) return;
+  if (self->fCorePhase!=CoreIdle && !self->coreReady()) return;
+  self->dp_probe(self->fPass,self->dp_gcc,self->dp_dispcc,self->dp_sspp,self->dp_ctl,
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -26,6 +26,7 @@
+ }
+ bool SweetMDSS::clockPrerequisites(void)
+ {
++ if (linkBusy() || fLinkPhase==LinkFault || fLinkPhase==LinkStopped) return false;
+  if (coreBusy() || fCorePhase==CoreFault || fCorePhase==CoreStopped) return false;
+  if (fCorePhase==CoreReady && !coreReady()) return false;
+  /* GCC AHB is critical/HWCG in LG: do not rewrite its controls, nor assume
+@@ -61,7 +62,7 @@
+ }
+ bool SweetMDSS::clockCanGate(void)
+ {
+- if (hostBusy() || dsiBusy() || fDsiPoisoned || fDsiPinned ||
++ if (linkBusy() || hostBusy() || dsiBusy() || fDsiPoisoned || fDsiPinned ||
+      fScanoutState==SweetScanoutQuiescing || fScanoutState==SweetScanoutSubmitted ||
+      (fIrqMode>=2 && __atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE)!=IrqIdle)) return false;
+  /* No boolean supplied by a consumer can substitute for hardware idle.
+@@ -120,9 +121,9 @@
+  unsigned use=*(SweetClockUse *)arg;
+  if (use>=SweetClockUseCount) return kIOReturnBadArgument;
+  if (!s->fClockEnabled) return kIOReturnUnsupported;
+- if (!s->fAccepting || s->isInactive() || s->fClockFault ||
++ if (!s->fAccepting || s->isInactive() || s->fClockFault || s->fLinkPhase==LinkFault || s->fLinkPhase==LinkStopped ||
+      (s->fHostTouched && (s->fHostPhase==HostFault || s->fHostPhase==HostStopped))) return kIOReturnNotReady;
+- if (s->clockBusy() || s->coreBusy() || s->hostBusy()) return kIOReturnBusy;
++ if (s->clockBusy() || s->coreBusy() || s->linkBusy() || s->hostBusy()) return kIOReturnBusy;
+  unsigned slot=4;
+  for (unsigned n=0;n<4;++n)
+   if (!s->fClockLeases[n].token || s->fClockLeases[n].state==SweetClockReleased) { slot=n; break; }
+@@ -160,9 +161,9 @@
+ IOReturn SweetMDSS::clockReleaseAction(OSObject *owner,void *arg,void *,void *,void *)
+ {
+  SweetMDSS *s=(SweetMDSS *)owner; uint64_t token=*(uint64_t *)arg;
+- if (!s->fAccepting || s->isInactive() || s->fClockFault ||
++ if (!s->fAccepting || s->isInactive() || s->fClockFault || s->fLinkPhase==LinkFault || s->fLinkPhase==LinkStopped ||
+      (s->fHostTouched && (s->fHostPhase==HostFault || s->fHostPhase==HostStopped))) return kIOReturnNotReady;
+- if (s->clockBusy() || s->coreBusy() || s->hostBusy()) return kIOReturnBusy;
++ if (s->clockBusy() || s->coreBusy() || s->linkBusy() || s->hostBusy()) return kIOReturnBusy;
+  unsigned slot=4;
+  for (unsigned n=0;n<4;++n) if (token && s->fClockLeases[n].token==token) { slot=n; break; }
+  if (slot==4 || s->fClockLeases[slot].state!=SweetClockHeld) return kIOReturnBadArgument;
+diff --git a/iokit/Kernel/arm/SweetMDSSDSI.inc b/iokit/Kernel/arm/SweetMDSSDSI.inc
+--- a/iokit/Kernel/arm/SweetMDSSDSI.inc
++++ b/iokit/Kernel/arm/SweetMDSSDSI.inc
+@@ -198,7 +198,8 @@
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
+  if (!s->fAccepting || s->isInactive()) return;
+- if (s->hostBusy()) s->advanceHost();
++ if (s->linkBusy()) s->advanceLink();
++ else if (s->hostBusy()) s->advanceHost();
+  else if (s->dsiBusy()) s->advanceDSI();
+ }
+ void
+diff --git a/iokit/Kernel/arm/SweetMDSSHost.inc b/iokit/Kernel/arm/SweetMDSSHost.inc
+--- a/iokit/Kernel/arm/SweetMDSSHost.inc
++++ b/iokit/Kernel/arm/SweetMDSSHost.inc
+@@ -43,7 +43,7 @@
+   * idle fence. The real beginHost repeats it after resource ACK/quiesce. */
+  return fHostProfile==1 && fHostPhase==HostIdle && !dsiBusy() && !fDsiPinned &&
+      !fDsiPoisoned && dp_rd(dp_dsi,0)==0x20030000u &&
+-     (dp_rd(dp_dsi,4)&7u)==5u && !dp_rd(dp_dsi,0x15c) &&
++     (dp_rd(dp_dsi,4)&7u)==(fLinkPhase==LinkReady ? 0u : 5u) && !dp_rd(dp_dsi,0x15c) &&
+      !(dp_rd(dp_dsi,0x110)&(1u<<24)) && !dp_rd(dp_dsi,0x68);
+ }
+ bool SweetMDSS::hostResourcesReady(void)
+@@ -53,6 +53,7 @@
+      !coreReady() || !localClocksReady() || fClockFault || fNoCFault ||
+      clockBusy() || noCBusy() || dsiBusy() || fDsiPinned || fDsiPoisoned ||
+      __atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE)!=IrqIdle) return false;
++ if (fLinkProfile && !linkConfiguration()) return false;
+  SweetClockLease clocks={}; SweetNoCStatus noc={}; SweetDisplayPowerStatus power={};
+  if (!fManagedClock || localClockStatus(fManagedClock,&clocks)!=kIOReturnSuccess ||
+      clocks.state!=SweetClockHeld || clocks.mask!=mdssClockMasks[SweetClockDSI0] ||
+@@ -143,7 +144,7 @@
+   SWEET_LOG_ERROR("SWEET MDSS HOST: FAILED %s rc=%#x touched=%u; partial host state/resources retained, no rollback/retry/PHY reset\n",
+       reason,(unsigned)rc,fHostTouched);
+  } else {
+-  SWEET_LOG_INFO("SWEET MDSS HOST: v2.3 soft-reset/rebuilt RGB888 1080x2340 VC0 lane-map8421 TE-ext; readback+idle only, fresh pixels pending; PHY/PLL/panel retained\n");
++  SWEET_LOG_INFO("SWEET MDSS HOST: v2.3 soft-reset/rebuilt RGB888 1080x2340 VC0 lane-map8421 TE-ext; readback+idle only, fresh pixels pending; link-profile=%u panel state retained\n",fLinkProfile);
+  }
+  setProperty("SweetDSIHostState",(unsigned long long)fHostPhase,32);
+  setProperty("SweetDSIHostFault",rc!=kIOReturnSuccess);
+diff --git a/iokit/Kernel/arm/SweetMDSSLink.inc b/iokit/Kernel/arm/SweetMDSSLink.inc
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetMDSSLink.inc
+@@ -0,0 +1,347 @@
++/* DPHY v4.0 / PLL 7nm v2, standalone PHY0. Explicit board profile, not a
++ * guessed revision decoder. LG sm8150-sde.dtsi + v2 overlay and R66456 common
++ * timing define the target. Same MDSS owner/gate/writer and existing DSI timer.
++ * Warm, quiesced reconstruction only; no panel reset/vendor commands here. */
++struct SweetLinkRegister { uint32_t offset,value; };
++#include "SweetMDSSLinkData.inc"
++static const SweetLinkRegister linkPHYCommon[]={
++ {0x024,0x60}, {0x03c,0}, {0x01c,0}, {0x034,0x21}, {0x038,0x84},
++ {0x018,0}, {0x020,0x5b}, {0x110,0x5c}, {0x030,0}, {0x10c,3},
++ {0x0ec,0x66}, {0x104,0}, {0x0f4,3}, {0x0f8,0x3c}, {0x100,0x55},
++ {0x024,0x7f}, {0x0a0,0x1f}, {0x02c,0x40}, {0x014,0}
++};
++static const uint8_t linkTiming[14]={0,0x21,8,8,0x25,0x22,9,8,6,3,4,0,0x1b,0x18};
++static const uint32_t linkGates[3]={0x2004,0x202c,0x2028}; /* off: pixel,intf,byte */
++static const uint32_t linkRoots[2]={0x2110,0x2098};
++/* LG v2.2 ops used by v2.3: wrapper bit0=0 masks AHB reset propagation;
++ * bits5/7/9 permit PHY0 pixel/byte/PHY dynamic gating. PHY1 bits untouched. */
++static const uint32_t linkMiscMask=0x2a1u;
++bool SweetMDSS::setupLink(void)
++{
++ int mode=0; (void)PE_parse_boot_argn("sweetdsilink",&mode,sizeof(mode));
++ if (!mode) return true;
++ if (mode!=2 || fHostProfile!=1 || fCoreProfile!=2 || !fManagedEnabled ||
++     !fMaps[12] || fMaps[12]->getPhysicalAddress()!=0x0ae94400ULL ||
++     fMaps[12]->getLength()<0x760 || !sweet_dsi_link_plan(1056619200ULL,&fLinkPlan)) {
++  SWEET_LOG_ERROR("SWEET MDSS LINK: profile2 requires host1/core2/managed1/PHY0 ABI; refused\n"); return false;
++ }
++ fLinkProfile=2;
++ setProperty("SweetDSILinkSelectedProfile",2ULL,32);
++ setProperty("SweetDSILinkState",(unsigned long long)LinkIdle,32);
++ return true; /* Selected v4.0/7nm-v2; no claim of revision detection. */
++}
++bool SweetMDSS::linkBusy(void) const
++{ return fLinkPhase>LinkIdle && fLinkPhase<LinkReady; }
++bool SweetMDSS::linkOtherUsers(void)
++{
++ /* DSI1 roots can also select PHY0. Reject a live or changing alias, including
++  * an orphan root with no software branch vote. No PHY1 mapping/writes. */
++ const uint32_t roots[]={0x212c,0x20b0}, gates[]={0x2030,0x2034,0x2008};
++ for (unsigned n=0;n<2;++n) if (((dp_rd(dp_dispcc,roots[n]+4)>>8)&7u)==1u) {
++  if ((dp_rd(dp_dispcc,roots[n])&0x800000f3u)!=0x80000000u) return true;
++  if (dp_rd(dp_dispcc,gates[n==0 ? 0 : 2])&1u) return true;
++  if (!n && (dp_rd(dp_dispcc,gates[1])&1u)) return true;
++ }
++ return false;
++}
++bool SweetMDSS::linkResourcesReady(void)
++{
++ if (!fAccepting || isInactive() || !fRPMh || !fRPMhConsumer ||
++     fManagedState!=ManagedLink || fManagedRails!=15u || !coreReady() ||
++     fClockFault || fNoCFault || clockBusy() || noCBusy() || dsiBusy() || hostBusy() ||
++     fDsiPinned || fDsiPoisoned || fHostPhase!=HostIdle ||
++     __atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE)!=IrqIdle || linkOtherUsers()) return false;
++ if (fLinkTouched && (dp_rd(dp_dispcc,0x8000)&~linkMiscMask)!=(fLinkMisc&~linkMiscMask)) return false;
++ SweetClockLease clock={}; SweetNoCStatus noc={}; SweetDisplayPowerStatus power={};
++ if (!fManagedClock || localClockStatus(fManagedClock,&clock)!=kIOReturnSuccess ||
++     clock.state!=SweetClockHeld || clock.mask!=mdssClockMasks[SweetClockDSI0] ||
++     !fManagedBandwidth || bandwidthStatus(fManagedBandwidth,&noc)!=kIOReturnSuccess ||
++     noc.state!=SweetNoCHeld || !fManagedARC ||
++     fRPMh->copyDisplayPowerStatus(fRPMhConsumer,fManagedARC,&power)!=kIOReturnSuccess ||
++     power.state!=SweetRPMhComplete || power.corner!=SweetDisplayTurbo) return false;
++ /* Validate only the unaffected local branches/parents. BYTE/PCLK are
++  * deliberately unavailable during rebuild; an old Held token is not proof
++  * that these physically run. Their snapshots are updated only at completion. */
++ for (unsigned n=0;n<SweetClockCount;++n) if ((fClockKnownMask&(1u<<n)) && !(0x70u&(1u<<n))) {
++  uint32_t p[6]={}; uint32_t branch=dp_rd(dp_dispcc,mdssClockBranches[n].cbcr);
++  if (!clockParent(n,p,true) || memcmp(p,fClockParents[n],sizeof(p)) ||
++      !(branch&1u) || (branch&CBCR_OFF)) return false;
++ }
++ return !(dp_rd(dp_intf1,0x288)&(1u<<20)) && !dp_rd(dp_intf1,0x2b4);
++}
++bool SweetMDSS::linkWarmAdmission(void)
++{
++ if (fLinkProfile!=2 || fLinkPhase!=LinkIdle || !fMaps[12] ||
++     !localClocksReady() || !clockCanGate() || !hostPreflight() || !scanoutConfiguration(true)) return false;
++ vm_offset_t p=fMaps[12]->getVirtualAddress();
++ /* Physical bytes are recorded without inventing their revision encoding.
++  * Linux also selects this driver by compatible. This mode is an explicit
++  * board-profile experiment, not automatic authorization on unknown boards. */
++ for (unsigned n=0;n<4;++n) if (dp_rd(p,4*n)>255u) return false;
++ if (dp_rd(dp_dispcc,0x8000)==~0u || (dp_rd(p,0x24)&0x7fu)!=0x7fu || (dp_rd(p,0xa0)&0x1fu)!=0x1fu ||
++     !(dp_rd(p,0x3c)&1u) || !(dp_rd(p,0x6b0)&1u) || !(dp_rd(p,0x140)&1u) ||
++     (dp_rd(p,0x18)&(1u<<6)) || (dp_rd(p,0x14)&~0x33u) ||
++     dp_rd(p,0x34)!=0x21u || dp_rd(p,0x38)!=0x84u ||
++     dp_rd(p,0xa4) || dp_rd(p,0xa8) || dp_rd(p,0xac)) return false;
++ for (unsigned n=0;n<5;++n) if (dp_rd(p,0x210+0x80*n)) return false; /* no PN swap */
++ return true;
++}
++bool SweetMDSS::linkWrite(uint32_t offset,uint32_t value)
++{
++ if (offset>=0x760 || (offset&3u)) return false;
++ vm_offset_t p=fMaps[12]->getVirtualAddress();
++ dp_wr(p,offset,value); return dp_rd(p,offset)==value;
++}
++IOReturn SweetMDSS::beginLink(void)
++{
++ if (!linkResourcesReady() || !linkWarmAdmission()) return kIOReturnNotReady;
++ if (!setupDSI()) return kIOReturnNoResources;
++ vm_offset_t p=fMaps[12]->getVirtualAddress();
++ SWEET_LOG_INFO("SWEET MDSS LINK: selected v4.0/7nm-v2 rev-bytes=%02x:%02x:%02x:%02x target-bit=%llu VCO=%llu actualVCO=%llu; warm rebuild, panel state retained\n",
++     dp_rd(p,0),dp_rd(p,4),dp_rd(p,8),dp_rd(p,12),fLinkPlan.bitHz,fLinkPlan.vcoHz,fLinkPlan.actualVcoHz);
++ fLinkMisc=dp_rd(dp_dispcc,0x8000);
++ fLinkTouched=fClockTouched=true;
++ dp_wr(dp_dispcc,0x8000,fLinkMisc&~linkMiscMask);
++ if (dp_rd(dp_dispcc,0x8000)!=(fLinkMisc&~linkMiscMask)) {
++  finishLink(kIOReturnIOError,"PHY reset mask/dynamic gating disable"); return kIOReturnIOError;
++ }
++ dp_wr(dp_dsi,0x110,0); /* enable bits only, no W1C acknowledgements */
++ dp_wr(dp_dsi,4,dp_rd(dp_dsi,4)&~7u);
++ if ((dp_rd(dp_dsi,0x110)&hostInterruptEnables) || (dp_rd(dp_dsi,4)&7u)) {
++  finishLink(kIOReturnIOError,"host disable"); return kIOReturnIOError;
++ }
++ fLinkDeadline=scanout_now()+250000000ULL;
++ fLinkPhase=LinkLaneIdle; fLinkStepDeadline=scanout_now()+100000ULL;
++ setProperty("SweetDSILinkState",(unsigned long long)fLinkPhase,32);
++ fDsiTimer->setTimeoutUS(10); return kIOReturnSuccess;
++}
++bool SweetMDSS::linkConfiguration(void)
++{
++ vm_offset_t p=fMaps[12]->getVirtualAddress();
++ if (!fLinkProfile || fLinkPhase!=LinkReady ||
++     dp_rd(dp_dispcc,0x8000)!=((fLinkMisc&~linkMiscMask)|0x2a0u) || !(dp_rd(p,0x140)&1u) ||
++     !(dp_rd(p,0x6b0)&1u) || dp_rd(p,0x3c)!=1 || dp_rd(p,0x24)!=0x7f ||
++     dp_rd(p,0x14)!=0x20 || dp_rd(p,0x10)!=0x62 || dp_rd(p,0x30)!=4 ||
++     dp_rd(p,0x1c)!=1 || dp_rd(p,0x34)!=0x21 || dp_rd(p,0x38)!=0x84 ||
++     dp_rd(p,0x5e0)!=fLinkPlan.decimal ||
++     dp_rd(p,0x5e4)!=(fLinkPlan.fraction&255u) ||
++     dp_rd(p,0x5e8)!=((fLinkPlan.fraction>>8)&255u) ||
++     dp_rd(p,0x5ec)!=(fLinkPlan.fraction>>16) || dp_rd(p,0x654) ||
++     dp_rd(p,0x650)!=2 || dp_rd(p,0x620)!=(fLinkPlan.sscStep&255u) ||
++     dp_rd(p,0x624)!=(fLinkPlan.sscStep>>8) || dp_rd(p,0x628)!=(fLinkPlan.sscPeriod&255u) ||
++     dp_rd(p,0x62c)!=(fLinkPlan.sscPeriod>>8) || dp_rd(p,0x630)!=2 || dp_rd(p,0x634)) return false;
++ for (unsigned n=0;n<14;++n) if (dp_rd(p,0xb4+4*n)!=linkTiming[n]) return false;
++ for (unsigned n=0;n<5;++n) {
++  uint32_t b=0x200+0x80*n;
++  if (dp_rd(p,b) || dp_rd(p,b+4) || dp_rd(p,b+8)!=(n==4 ? 0x8au : 0xau) ||
++      dp_rd(p,b+0x10) || dp_rd(p,b+0x14)!=(n ? 0u : 3u) ||
++      dp_rd(p,b+0x18)!=(n==4 ? 1u : (n==3 ? 4u : 0u))) return false;
++ }
++ return true; /* independent fresh pixels still required */
++}
++void SweetMDSS::advanceLink(void)
++{
++ if (!linkBusy()) return;
++ uint64_t now=scanout_now();
++ if (!linkResourcesReady()) { finishLink(kIOReturnNotReady,"resource/alias/idle admission lost"); return; }
++ if (now>=fLinkDeadline) { finishLink(kIOReturnTimeout,"link rebuild deadline"); return; }
++ if (now<fLinkWait) { fDsiTimer->setTimeoutUS(1); return; }
++ vm_offset_t p=fMaps[12]->getVirtualAddress();
++ switch (fLinkPhase) {
++ case LinkLaneIdle:
++  if ((dp_rd(p,0x14c)&0x1fu)!=0x1fu || (dp_rd(dp_dsi,8)&6u)) {
++   if (now>=fLinkStepDeadline) { finishLink(kIOReturnTimeout,"lane/engine stop state"); return; }
++   break;
++  }
++  for (unsigned n=0;n<3;++n) {
++   uint32_t b=linkGates[n]; dp_wr(dp_dispcc,b,dp_rd(dp_dispcc,b)&~1u);
++   if (dp_rd(dp_dispcc,b)&1u) { finishLink(kIOReturnIOError,"link gate disable"); return; }
++  }
++  fLinkPhase=LinkGatesOff; fLinkStepDeadline=now+10000000ULL; break;
++ case LinkGatesOff: {
++  bool off=true;
++  for (unsigned n=0;n<3;++n) if (!(dp_rd(dp_dispcc,linkGates[n])&CBCR_OFF)) off=false;
++  /* Branch halt alone does not prove that a root has stopped consuming the
++   * old PLL. Require ROOT_OFF and no pending UPDATE/dirty state before any
++   * PLL stop, PHY reset or parent/divider change. */
++  for (unsigned n=0;n<2;++n)
++   if ((dp_rd(dp_dispcc,linkRoots[n])&0x800000f1u)!=0x80000000u) off=false;
++  if (!off) {
++   if (now>=fLinkStepDeadline) { finishLink(kIOReturnTimeout,"link gates/roots did not halt"); return; }
++   break;
++  }
++  /* No downstream reader remains. Clock leases/reference counts stay retained,
++   * while physical readiness is explicitly closed for this transaction. */
++  if (!linkWrite(0x14,dp_rd(p,0x14)&~(1u<<5)) || !linkWrite(0x3c,0)) {
++   finishLink(kIOReturnIOError,"PLL stop readback"); return;
++  }
++  fLinkPhase=LinkPLLStop; fLinkStepDeadline=now+5000000ULL; break;
++ }
++ case LinkPLLStop:
++  if (dp_rd(p,0x6b0)&1u) {
++   if (now>=fLinkStepDeadline) { finishLink(kIOReturnTimeout,"PLL lock did not clear"); return; }
++   break;
++  }
++  if (!linkWrite(0x528,0) || !linkWrite(0x24,dp_rd(p,0x24)&~(1u<<5))) {
++   finishLink(kIOReturnIOError,"PLL bias off"); return;
++  }
++  fLinkPhase=LinkBiasOff; fLinkWait=scanout_now()+250; break;
++ case LinkBiasOff:
++  if (!linkWrite(0xa0,0) || !linkWrite(0x24,0)) { finishLink(kIOReturnIOError,"PHY disable"); return; }
++  dp_wr(dp_dsi,0x12c,0x01000001u);
++  __asm__ volatile("dsb oshst" ::: "memory");
++  if (dp_rd(dp_dsi,0x12c)!=0x01000001u) { finishLink(kIOReturnIOError,"PHY reset assert"); return; }
++  fLinkPhase=LinkResetHold; fLinkWait=scanout_now()+1000000ULL; break;
++ case LinkResetHold:
++  dp_wr(dp_dsi,0x12c,0);
++  __asm__ volatile("dsb oshst" ::: "memory");
++  if (dp_rd(dp_dsi,0x12c)) { finishLink(kIOReturnIOError,"PHY reset exit"); return; }
++  fLinkPhase=LinkResetSettle; fLinkWait=scanout_now()+100000ULL; break;
++ case LinkResetSettle:
++  fLinkPhase=LinkRefgen; fLinkStepDeadline=now+1000000ULL; break;
++ case LinkRefgen:
++  if (!(dp_rd(p,0x140)&1u)) {
++   if (now>=fLinkStepDeadline) { finishLink(kIOReturnTimeout,"PHY REFGEN not ready"); return; }
++   break;
++  }
++  fLinkPhase=LinkPHYConfig; break;
++ case LinkPHYConfig:
++  for (unsigned n=0;n<sizeof(linkPHYCommon)/sizeof(linkPHYCommon[0]);++n)
++   if (!linkWrite(linkPHYCommon[n].offset,linkPHYCommon[n].value)) { finishLink(kIOReturnIOError,"PHY common config"); return; }
++  for (unsigned n=0;n<14;++n)
++   if (!linkWrite(0xb4+4*n,linkTiming[n])) { finishLink(kIOReturnIOError,"PHY timing"); return; }
++  for (unsigned n=0;n<5;++n) {
++   uint32_t b=0x200+0x80*n;
++   /* DTS supplies four lane-config bytes; LG v4 writes the first THREE.
++    * Do not manufacture a CFG3 register from the unused fourth byte. */
++   if (!linkWrite(b,0) || !linkWrite(b+4,0) || !linkWrite(b+8,n==4 ? 0x8a : 0xa) ||
++       !linkWrite(b+0x14,n ? 0 : 3) || !linkWrite(b+0x18,n==4 ? 1 : (n==3 ? 4 : 0)) ||
++       !linkWrite(b+0x10,0)) { finishLink(kIOReturnIOError,"PHY lane config"); return; }
++  }
++  fLinkCursor=0; fLinkPhase=LinkPLLConfig; break;
++ case LinkPLLConfig: {
++  unsigned count=(unsigned)(sizeof(linkPLLInitial)/sizeof(linkPLLInitial[0])),end=fLinkCursor+8;
++  if (end>count) end=count;
++  while (fLinkCursor<end) {
++   const SweetLinkRegister &r=linkPLLInitial[fLinkCursor++];
++   if (!linkWrite(r.offset,r.value)) { finishLink(kIOReturnIOError,"PLL initial config"); return; }
++  }
++  if (fLinkCursor<count) break;
++  const SweetLinkRegister rate[]={
++   {0x5bc,0x12}, {0x5e0,fLinkPlan.decimal}, {0x5e4,fLinkPlan.fraction&255u},
++   {0x5e8,(fLinkPlan.fraction>>8)&255u}, {0x5ec,fLinkPlan.fraction>>16},
++   {0x658,0x40}, {0x694,6}, {0x750,0x10}, {0x748,0x28}
++  };
++  for (unsigned n=0;n<sizeof(rate)/sizeof(rate[0]);++n)
++   if (!linkWrite(rate[n].offset,rate[n].value)) { finishLink(kIOReturnIOError,"PLL fractional rate"); return; }
++  for (unsigned n=0;n<sizeof(linkPLLFinal)/sizeof(linkPLLFinal[0]);++n)
++   if (!linkWrite(linkPLLFinal[n].offset,linkPLLFinal[n].value)) { finishLink(kIOReturnIOError,"PLL v2 final config"); return; }
++  const SweetLinkRegister div[]={
++   {0x620,fLinkPlan.sscStep&255u},{0x624,fLinkPlan.sscStep>>8},
++   {0x628,fLinkPlan.sscPeriod&255u},{0x62c,fLinkPlan.sscPeriod>>8},{0x630,2},{0x634,0},
++   {0x650,2},{0x654,0},{0x010,0x62},{0x014,0},{0x024,0x7f},{0x528,0xc0}
++  };
++  for (unsigned n=0;n<sizeof(div)/sizeof(div[0]);++n)
++   if (!linkWrite(div[n].offset,div[n].value)) { finishLink(kIOReturnIOError,"PLL SSC/dividers/bias"); return; }
++  fLinkPhase=LinkBiasOn; fLinkWait=scanout_now()+250; break;
++ }
++ case LinkBiasOn:
++  if (!linkWrite(0x3c,1)) { finishLink(kIOReturnIOError,"PLL start"); return; }
++  fLinkPhase=LinkLock; fLinkStepDeadline=scanout_now()+5000000ULL; break;
++ case LinkLock:
++  if (!(dp_rd(p,0x6b0)&1u)) {
++   if (now>=fLinkStepDeadline) { finishLink(kIOReturnTimeout,"fresh PLL lock"); return; }
++   break;
++  }
++  if (!linkWrite(0x128,1) || !linkWrite(0x128,0) || !linkWrite(0x30,4) || !linkWrite(0x14,0x30)) {
++   finishLink(kIOReturnIOError,"PHY digital reset/global clock"); return;
++  }
++  fLinkRoot=0; fLinkPhase=LinkRoots; break;
++ case LinkRoots: {
++  uint32_t root=linkRoots[fLinkRoot],cmd=dp_rd(dp_dispcc,root);
++  if (cmd&0xf1u) { finishLink(kIOReturnBusy,"DSI RCG already updating"); return; }
++  uint32_t cfg=(fClockParents[fLinkRoot ? 6 : 4][0]&~0x10371fu)|0x101u;
++  dp_wr(dp_dispcc,root+4,cfg);
++  if (fLinkRoot) { dp_wr(dp_dispcc,root+8,0); dp_wr(dp_dispcc,root+12,0); dp_wr(dp_dispcc,root+16,0); }
++  if (dp_rd(dp_dispcc,root+4)!=cfg) { finishLink(kIOReturnIOError,"DSI RCG config readback"); return; }
++  dp_wr(dp_dispcc,root,cmd|1u); fLinkPhase=LinkRootWait; fLinkStepDeadline=now+500000ULL; break;
++ }
++ case LinkRootWait: {
++  uint32_t root=linkRoots[fLinkRoot];
++  if (dp_rd(dp_dispcc,root)&0xf1u) {
++   if (now>=fLinkStepDeadline) { finishLink(kIOReturnTimeout,"DSI RCG update"); return; }
++   break;
++  }
++  if (++fLinkRoot<2) { fLinkPhase=LinkRoots; break; }
++  uint32_t divider=(fClockParents[5][4]&~3u)|1u; /* DPHY byte_intf = byte / 2 */ dp_wr(dp_dispcc,0x2128,divider);
++  if (dp_rd(dp_dispcc,0x2128)!=divider) { finishLink(kIOReturnIOError,"BYTE_INTF divider"); return; }
++  /* Reverse gate order: byte -> intf -> pixel. Check actual CLK_OFF below. */
++  for (unsigned n=3;n>0;--n) {
++   uint32_t b=linkGates[n-1]; dp_wr(dp_dispcc,b,dp_rd(dp_dispcc,b)|1u);
++   if (!(dp_rd(dp_dispcc,b)&1u)) { finishLink(kIOReturnIOError,"link gate enable"); return; }
++  }
++  fLinkPhase=LinkGatesOn; fLinkStepDeadline=now+10000000ULL; break;
++ }
++ case LinkGatesOn: {
++  bool on=true;
++  for (unsigned n=0;n<3;++n) if (dp_rd(dp_dispcc,linkGates[n])&CBCR_OFF) on=false;
++  for (unsigned n=0;n<2;++n) if (dp_rd(dp_dispcc,linkRoots[n])&0x800000f1u) on=false;
++  if (!on) {
++   if (now>=fLinkStepDeadline) { finishLink(kIOReturnTimeout,"link gates/root not running"); return; }
++   break;
++  }
++  fLinkPhase=LinkResync; break;
++ }
++ case LinkResync: {
++  if (!linkWrite(0x1c,0) || !linkWrite(0x1c,1) || !linkWrite(0x14,0x20)) {
++   finishLink(kIOReturnIOError,"PHY resync"); return;
++  }
++  /* Update only controlled root fields. Non-controlled MND, source, branch
++   * and other-parent drift must still be caught; never recapture all clocks. */
++  uint32_t expected[3][6]={};
++  for (unsigned n=0;n<3;++n) {
++   unsigned i=4+n; memcpy(expected[n],fClockParents[i],sizeof(expected[n]));
++   expected[n][0]=(expected[n][0]&~0x10371fu)|0x101u; expected[n][5]=1;
++   if (i==5) expected[n][4]=(expected[n][4]&~3u)|1u;
++   if (i==6) expected[n][1]=expected[n][2]=expected[n][3]=0;
++   uint32_t actual[6]={};
++   if (!clockParent(i,actual,true) || memcmp(actual,expected[n],sizeof(actual))) {
++    finishLink(kIOReturnIOError,"controlled root/parent drift"); return;
++   }
++  }
++  dp_wr(dp_dispcc,0x8000,(fLinkMisc&~linkMiscMask)|0x2a0u);
++  fLinkPhase=LinkReady;
++  if (!linkConfiguration()) { finishLink(kIOReturnIOError,"PHY/PLL completion validation"); return; }
++  for (unsigned n=0;n<3;++n) memcpy(fClockParents[4+n],expected[n],sizeof(expected[n]));
++  finishLink(kIOReturnSuccess,"configured"); return;
++ }
++ default: finishLink(kIOReturnIOError,"invalid link phase"); return;
++ }
++ setProperty("SweetDSILinkState",(unsigned long long)fLinkPhase,32);
++ fDsiTimer->setTimeoutUS(10);
++}
++void SweetMDSS::finishLink(IOReturn rc,const char *reason)
++{
++ if (fDsiTimer) fDsiTimer->cancelTimeout();
++ unsigned phase=fLinkPhase;
++ fLinkResult=rc; fLinkPhase=rc==kIOReturnSuccess ? LinkReady : LinkFault;
++ if (rc!=kIOReturnSuccess) {
++  if (fLinkTouched) fDsiPoisoned=true;
++  SWEET_LOG_ERROR("SWEET MDSS LINK: FAILED %s phase=%u rc=%#x touched=%u; votes/partial link retained, no rollback/retry/panel reset\n",
++      reason,phase,(unsigned)rc,fLinkTouched);
++ } else {
++  SWEET_LOG_INFO("SWEET MDSS LINK: v4.0/7nm-v2 configured VCO=%llu bit=%llu byte=%llu byte-intf=%llu pixel=%llu DOWN-SSC; fresh unlock/lock and running roots observed; host rebuild/fresh pixels pending\n",
++      fLinkPlan.actualVcoHz,fLinkPlan.actualVcoHz/2,fLinkPlan.actualVcoHz/16,fLinkPlan.actualVcoHz/32,fLinkPlan.actualVcoHz/12);
++ }
++ setProperty("SweetDSILinkState",(unsigned long long)fLinkPhase,32);
++ setProperty("SweetDSILinkFault",rc!=kIOReturnSuccess);
++}
++void SweetMDSS::stopLink(void)
++{
++ if (!linkBusy()) return;
++ if (fDsiTimer) fDsiTimer->cancelTimeout();
++ fLinkPhase=LinkStopped; fLinkResult=kIOReturnAborted;
++ if (fLinkTouched) fDsiPoisoned=true;
++ setProperty("SweetDSILinkState",(unsigned long long)fLinkPhase,32);
++ /* No reset release, speculative rollback, PLL stop or rail withdrawal here. */
++}
+diff --git a/iokit/Kernel/arm/SweetMDSSLinkData.inc b/iokit/Kernel/arm/SweetMDSSLinkData.inc
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetMDSSLinkData.inc
+@@ -0,0 +1,146 @@
++/* Numerical register data from LG mdss-dsi-pll-7nm.c, v2 only.
++ * Original controller below; no Linux API/clock-framework shim.
++ * Autonomous status/debug RO registers are deliberately not written. */
++static const SweetLinkRegister linkPLLInitial[]={
++ {0x500,0x0}, /* PLL_ANALOG_CONTROLS_ONE */
++ {0x508,0x3f}, /* PLL_INT_LOOP_SETTINGS */
++ {0x50c,0x0}, /* PLL_INT_LOOP_SETTINGS_TWO */
++ {0x514,0x0}, /* PLL_ANALOG_CONTROLS_FOUR */
++ {0x51c,0x80}, /* PLL_INT_LOOP_CONTROLS */
++ {0x528,0x0}, /* PLL_SYSTEM_MUXES */
++ {0x52c,0x0}, /* PLL_FREQ_UPDATE_CONTROL_OVERRIDES */
++ {0x530,0x10}, /* PLL_CMODE */
++ {0x534,0x20}, /* PLL_PSM_CTRL */
++ {0x538,0x10}, /* PLL_RSM_CTRL */
++ {0x53c,0x2}, /* PLL_VCO_TUNE_MAP */
++ {0x540,0x1c}, /* PLL_PLL_CNTRL */
++ {0x548,0x0}, /* PLL_BAND_SEL_CAL_TIMER_LOW */
++ {0x54c,0x2}, /* PLL_BAND_SEL_CAL_TIMER_HIGH */
++ {0x550,0x20}, /* PLL_BAND_SEL_CAL_SETTINGS */
++ {0x554,0x0}, /* PLL_BAND_SEL_MIN */
++ {0x558,0xff}, /* PLL_BAND_SEL_MAX */
++ {0x55c,0x0}, /* PLL_BAND_SEL_PFILT */
++ {0x560,0xa}, /* PLL_BAND_SEL_IFILT */
++ {0x564,0x25}, /* PLL_BAND_SEL_CAL_SETTINGS_TWO */
++ {0x568,0xba}, /* PLL_BAND_SEL_CAL_SETTINGS_THREE */
++ {0x56c,0x4f}, /* PLL_BAND_SEL_CAL_SETTINGS_FOUR */
++ {0x570,0xa}, /* PLL_BAND_SEL_ICODE_HIGH */
++ {0x574,0x0}, /* PLL_BAND_SEL_ICODE_LOW */
++ {0x578,0xc}, /* PLL_FREQ_DETECT_SETTINGS_ONE */
++ {0x57c,0x20}, /* PLL_FREQ_DETECT_THRESH */
++ {0x580,0x0}, /* PLL_FREQ_DET_REFCLK_HIGH */
++ {0x584,0xff}, /* PLL_FREQ_DET_REFCLK_LOW */
++ {0x588,0x10}, /* PLL_FREQ_DET_PLLCLK_HIGH */
++ {0x58c,0x46}, /* PLL_FREQ_DET_PLLCLK_LOW */
++ {0x598,0x54}, /* PLL_PLL_GAIN */
++ {0x59c,0x0}, /* PLL_ICODE_LOW */
++ {0x5a0,0x0}, /* PLL_ICODE_HIGH */
++ {0x5a4,0x40}, /* PLL_LOCKDET */
++ {0x5ac,0x4}, /* PLL_FASTLOCK_CONTROL */
++ {0x5b0,0x0}, /* PLL_PASS_OUT_OVERRIDE_ONE */
++ {0x5b4,0x0}, /* PLL_PASS_OUT_OVERRIDE_TWO */
++ {0x5b8,0x0}, /* PLL_CORE_OVERRIDE */
++ {0x5bc,0x10}, /* PLL_CORE_INPUT_OVERRIDE */
++ {0x5c0,0x0}, /* PLL_RATE_CHANGE */
++ {0x5c4,0x8}, /* PLL_PLL_DIGITAL_TIMERS */
++ {0x5c8,0x8}, /* PLL_PLL_DIGITAL_TIMERS_TWO */
++ {0x5dc,0x0}, /* PLL_DEC_FRAC_MUXES */
++ {0x600,0x3}, /* PLL_MASH_CONTROL */
++ {0x604,0x0}, /* PLL_SSC_STEPSIZE_LOW */
++ {0x608,0x0}, /* PLL_SSC_STEPSIZE_HIGH */
++ {0x60c,0x0}, /* PLL_SSC_DIV_PER_LOW */
++ {0x610,0x0}, /* PLL_SSC_DIV_PER_HIGH */
++ {0x614,0x0}, /* PLL_SSC_ADJPER_LOW */
++ {0x618,0x0}, /* PLL_SSC_ADJPER_HIGH */
++ {0x61c,0x0}, /* PLL_SSC_MUX_CONTROL */
++ {0x620,0x0}, /* PLL_SSC_STEPSIZE_LOW_1 */
++ {0x624,0x0}, /* PLL_SSC_STEPSIZE_HIGH_1 */
++ {0x628,0x0}, /* PLL_SSC_DIV_PER_LOW_1 */
++ {0x62c,0x0}, /* PLL_SSC_DIV_PER_HIGH_1 */
++ {0x630,0x0}, /* PLL_SSC_ADJPER_LOW_1 */
++ {0x634,0x0}, /* PLL_SSC_ADJPER_HIGH_1 */
++ {0x638,0x0}, /* PLL_SSC_STEPSIZE_LOW_2 */
++ {0x63c,0x0}, /* PLL_SSC_STEPSIZE_HIGH_2 */
++ {0x640,0x0}, /* PLL_SSC_DIV_PER_LOW_2 */
++ {0x644,0x0}, /* PLL_SSC_DIV_PER_HIGH_2 */
++ {0x648,0x0}, /* PLL_SSC_ADJPER_LOW_2 */
++ {0x64c,0x0}, /* PLL_SSC_ADJPER_HIGH_2 */
++ {0x650,0x0}, /* PLL_SSC_CONTROL */
++ {0x654,0x0}, /* PLL_PLL_OUTDIV_RATE */
++ {0x658,0x40}, /* PLL_PLL_LOCKDET_RATE_1 */
++ {0x65c,0x40}, /* PLL_PLL_LOCKDET_RATE_2 */
++ {0x660,0xc}, /* PLL_PLL_PROP_GAIN_RATE_1 */
++ {0x664,0xa}, /* PLL_PLL_PROP_GAIN_RATE_2 */
++ {0x668,0xc0}, /* PLL_PLL_BAND_SEL_RATE_1 */
++ {0x66c,0x0}, /* PLL_PLL_BAND_SEL_RATE_2 */
++ {0x670,0x54}, /* PLL_PLL_INT_GAIN_IFILT_BAND_1 */
++ {0x674,0x54}, /* PLL_PLL_INT_GAIN_IFILT_BAND_2 */
++ {0x678,0x4c}, /* PLL_PLL_FL_INT_GAIN_PFILT_BAND_1 */
++ {0x67c,0x4c}, /* PLL_PLL_FL_INT_GAIN_PFILT_BAND_2 */
++ {0x680,0x3}, /* PLL_PLL_FASTLOCK_EN_BAND */
++ {0x684,0x0}, /* PLL_FREQ_TUNE_ACCUM_INIT_MID */
++ {0x688,0x0}, /* PLL_FREQ_TUNE_ACCUM_INIT_HIGH */
++ {0x68c,0x0}, /* PLL_FREQ_TUNE_ACCUM_INIT_MUX */
++ {0x690,0x80}, /* PLL_PLL_LOCK_OVERRIDE */
++ {0x694,0x6}, /* PLL_PLL_LOCK_DELAY */
++ {0x698,0x19}, /* PLL_PLL_LOCK_MIN_DELAY */
++ {0x69c,0x0}, /* PLL_CLOCK_INVERTERS */
++ {0x6a0,0x0}, /* PLL_SPARE_AND_JPC_OVERRIDES */
++ {0x6a4,0x40}, /* PLL_BIAS_CONTROL_1 */
++ {0x6a8,0x20}, /* PLL_BIAS_CONTROL_2 */
++ {0x6ac,0x0}, /* PLL_ALOG_OBSV_BUS_CTRL_1 */
++ {0x6d0,0x0}, /* PLL_PLL_MISC_CONFIG */
++ {0x6d4,0x2}, /* PLL_FLL_CONFIG */
++ {0x6d8,0x11}, /* PLL_FLL_FREQ_ACQ_TIME */
++ {0x6dc,0x0}, /* PLL_FLL_CODE0 */
++ {0x6e0,0x0}, /* PLL_FLL_CODE1 */
++ {0x6e4,0x80}, /* PLL_FLL_GAIN0 */
++ {0x6e8,0x0}, /* PLL_FLL_GAIN1 */
++ {0x6ec,0x0}, /* PLL_SW_RESET */
++ {0x6f0,0x0}, /* PLL_FAST_PWRUP */
++ {0x6f4,0x0}, /* PLL_LOCKTIME0 */
++ {0x6f8,0x0}, /* PLL_LOCKTIME1 */
++ {0x6fc,0x0}, /* PLL_DEBUG_BUS_SEL */
++ {0x710,0x0}, /* PLL_ANALOG_FLL_CONTROL_OVERRIDES */
++ {0x714,0x0}, /* PLL_VCO_CONFIG */
++ {0x724,0x0}, /* PLL_TDC_OFFSET */
++ {0x728,0x1d}, /* PLL_PS3_PWRDOWN_CONTROLS */
++ {0x72c,0x1c}, /* PLL_PS4_PWRDOWN_CONTROLS */
++ {0x730,0xff}, /* PLL_PLL_RST_CONTROLS */
++ {0x734,0x22}, /* PLL_GEAR_BAND_SELECT_CONTROLS */
++ {0x738,0x9}, /* PLL_PSM_CLK_CONTROLS */
++ {0x73c,0x0}, /* PLL_SYSTEM_MUXES_2 */
++ {0x740,0x0}, /* PLL_VCO_CONFIG_1 */
++ {0x744,0x0}, /* PLL_VCO_CONFIG_2 */
++ {0x748,0x40}, /* PLL_CLOCK_INVERTERS_1 */
++ {0x74c,0x0}, /* PLL_CLOCK_INVERTERS_2 */
++ {0x750,0x10}, /* PLL_CMODE_1 */
++ {0x754,0x10}, /* PLL_CMODE_2 */
++ {0x75c,0x3}, /* PLL_ANALOG_CONTROLS_FIVE_2 */
++};
++static const SweetLinkRegister linkPLLFinal[]={
++ {0x758,0x1}, /* PLL_ANALOG_CONTROLS_FIVE_1 */
++ {0x740,0x0}, /* PLL_VCO_CONFIG_1 */
++ {0x734,0x22}, /* PLL_GEAR_BAND_SELECT_CONTROLS */
++ {0x518,0x1}, /* PLL_ANALOG_CONTROLS_FIVE */
++ {0x504,0x3}, /* PLL_ANALOG_CONTROLS_TWO */
++ {0x510,0x0}, /* PLL_ANALOG_CONTROLS_THREE */
++ {0x520,0x0}, /* PLL_DSM_DIVIDER */
++ {0x524,0x4e}, /* PLL_FEEDBACK_DIVIDER */
++ {0x544,0x40}, /* PLL_CALIBRATION_SETTINGS */
++ {0x568,0xba}, /* PLL_BAND_SEL_CAL_SETTINGS_THREE */
++ {0x578,0xc}, /* PLL_FREQ_DETECT_SETTINGS_ONE */
++ {0x5a8,0x0}, /* PLL_OUTDIV */
++ {0x5b8,0x0}, /* PLL_CORE_OVERRIDE */
++ {0x5c8,0x8}, /* PLL_PLL_DIGITAL_TIMERS_TWO */
++ {0x660,0xa}, /* PLL_PLL_PROP_GAIN_RATE_1 */
++ {0x668,0xc0}, /* PLL_PLL_BAND_SEL_RATE_1 */
++ {0x670,0x84}, /* PLL_PLL_INT_GAIN_IFILT_BAND_1 */
++ {0x670,0x82}, /* PLL_PLL_INT_GAIN_IFILT_BAND_1 */
++ {0x678,0x4c}, /* PLL_PLL_FL_INT_GAIN_PFILT_BAND_1 */
++ {0x690,0x80}, /* PLL_PLL_LOCK_OVERRIDE */
++ {0x590,0x29}, /* PLL_PFILT */
++ {0x590,0x2f}, /* PLL_PFILT */
++ {0x594,0x2a}, /* PLL_IFILT */
++ {0x594,0x22}, /* PLL_IFILT */
++};
+diff --git a/iokit/Kernel/arm/SweetMDSSNoC.inc b/iokit/Kernel/arm/SweetMDSSNoC.inc
+--- a/iokit/Kernel/arm/SweetMDSSNoC.inc
++++ b/iokit/Kernel/arm/SweetMDSSNoC.inc
+@@ -90,9 +90,9 @@
+       s->fNoCLeases[n].status.state==SweetNoCReleased) { slot=n; break; }
+   if (slot==4 || s->fNoCNextToken==~0ULL) return kIOReturnNoResources;
+  }
+- if (!s->fNoCEnabled || !s->fAccepting || s->isInactive() || s->fNoCFault ||
++ if (!s->fNoCEnabled || !s->fAccepting || s->isInactive() || s->fNoCFault || s->fLinkPhase==LinkFault || s->fLinkPhase==LinkStopped ||
+      (s->fHostTouched && (s->fHostPhase==HostFault || s->fHostPhase==HostStopped))) return kIOReturnNotReady;
+- if (s->noCBusy() || s->clockBusy() || s->hostBusy() || s->dsiBusy()) return kIOReturnBusy;
++ if (s->noCBusy() || s->clockBusy() || s->linkBusy() || s->hostBusy() || s->dsiBusy()) return kIOReturnBusy;
+  if (r.operation && !s->fNoCLeases[slot].active) return kIOReturnBadArgument;
+  SweetDisplayBandwidth empty={};
+  IOReturn result=s->beginBandwidth(slot,r.operation ? empty : *r.vote,r.operation!=0);
+diff --git a/iokit/Kernel/arm/SweetMDSSResources.inc b/iokit/Kernel/arm/SweetMDSSResources.inc
+--- a/iokit/Kernel/arm/SweetMDSSResources.inc
++++ b/iokit/Kernel/arm/SweetMDSSResources.inc
+@@ -85,7 +85,7 @@
+  /* The core timer owns transient GDSC/RCG states. Do not read a domain
+   * pipeline or compare old root snapshots while it is changing them. */
+  if (!fRPMh || !fRPMhConsumer || fNoCFault || fClockFault ||
+-     (fManagedState!=ManagedCore && fManagedState!=ManagedHost && (!clockPrerequisites() || !clockCanGate() || !scanoutConfiguration(true)))) {
++     (fManagedState!=ManagedCore && fManagedState!=ManagedHost && fManagedState!=ManagedLink && (!clockPrerequisites() || !clockCanGate() || !scanoutConfiguration(true)))) {
+   failManagedResources(kIOReturnNotReady,"provider/pipeline/clock admission changed"); return;
+  }
+  if (now<fManagedWait) return; /* No sleep or long wait under the gate. */
+@@ -154,7 +154,7 @@
+    failManagedResources(kIOReturnNotReady,"final resource validation failed"); return;
+   }
+   if (fHostProfile) {
+-   fManagedState=ManagedHost;
++   fManagedState=fLinkProfile ? ManagedLink : ManagedHost;
+    setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32); return;
+   }
+   fManagedState=ManagedReady; fManagedResult=kIOReturnSuccess;
+@@ -163,6 +163,19 @@
+       "MDSS: typed LDO/ARC/NoC/local clock held; GDSC/non-XO parents inherited");
+   SWEET_LOG_INFO("SWEET MDSS RESOURCES: warm resources acquired rails=%#x ARC=Turbo NoC=%llu clock=%llu; core-profile=%u; retained across DCS OFF, PHY/link cold setup pending\n",
+       fManagedRails,fManagedBandwidth,fManagedClock,fCoreProfile);
++ } else if (fManagedState==ManagedLink) {
++  if (fLinkPhase==LinkIdle) {
++   rc=beginLink();
++   if (rc!=kIOReturnSuccess) { failManagedResources(rc,"DSI link rebuild refused"); return; }
++  }
++  if (fLinkPhase==LinkFault || fLinkPhase==LinkStopped) {
++   failManagedResources(fLinkResult,"DSI link rebuild failed"); return;
++  }
++  if (fLinkPhase!=LinkReady) return;
++  if (!localClocksReady() || !linkConfiguration()) {
++   failManagedResources(kIOReturnNotReady,"DSI link final validation failed"); return;
++  }
++  fManagedState=ManagedHost;
+  } else if (fManagedState==ManagedHost) {
+   if (fHostPhase==HostIdle) {
+    rc=beginHost();
+@@ -176,8 +189,9 @@
+    failManagedResources(kIOReturnNotReady,"DSI host final validation failed"); return;
+   }
+   fManagedState=ManagedReady; fManagedResult=kIOReturnSuccess;
+-  setProperty("SweetDisplayClockOwnership","MDSS: LDO/ARC/NoC/core/DSI0 clocks and host configured; PHY/PLL inherited");
+-  SWEET_LOG_INFO("SWEET MDSS RESOURCES: host rebuilt, retained pipeline checked; fresh scanout transfer still required; PHY/PLL inherited\n");
++  setProperty("SweetDisplayClockOwnership",fLinkProfile ? "MDSS: resources/core/DSI0/PHY/PLL/host configured; panel lifecycle inherited" :
++      "MDSS: LDO/ARC/NoC/core/DSI0 clocks and host configured; PHY/PLL inherited");
++  SWEET_LOG_INFO("SWEET MDSS RESOURCES: host rebuilt, retained pipeline checked; fresh scanout transfer still required; link-profile=%u\n",fLinkProfile);
+  }
+  setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32);
+ }
+@@ -185,6 +199,7 @@
+ {
+  if (!fManagedStarted || fManagedState==ManagedFault || fManagedState==ManagedStopped) return;
+  fManagedState=ManagedFault; fManagedResult=rc;
++ stopLink();
+  stopHost();
+  if (noCBusy()) stopNoC();
+  if (clockBusy() || coreBusy()) stopLocalClocks();
+@@ -196,6 +211,7 @@
+ }
+ void SweetMDSS::stopManagedResources(void)
+ {
++ stopLink();
+  stopHost();
+  if (fManagedStarted && fManagedState!=ManagedFault && fManagedState!=ManagedStopped) {
+   fManagedState=ManagedStopped; fManagedResult=kIOReturnAborted;
+diff --git a/iokit/Kernel/arm/SweetMDSSScanout.inc b/iokit/Kernel/arm/SweetMDSSScanout.inc
+--- a/iokit/Kernel/arm/SweetMDSSScanout.inc
++++ b/iokit/Kernel/arm/SweetMDSSScanout.inc
+@@ -15,6 +15,7 @@
+  SweetScanoutSnapshot *v=(SweetScanoutSnapshot *)arg;
+  if (!v) return kIOReturnBadArgument;
+  if (!s->fAccepting || s->isInactive() ||
++     (s->fLinkPhase!=LinkIdle && s->fLinkPhase!=LinkReady) ||
+      (s->fHostPhase!=HostIdle && s->fHostPhase!=HostReady) || (s->fCorePhase!=CoreIdle && !s->coreReady()) || !s->dp_clocks_on() ||
+      !s->dp_smmu || !s->dp_smmu_cb2 || !s->fMaps[9] || !s->fMaps[10]) return kIOReturnNotReady;
+  /* Sequential observations, NOT an atomic hardware snapshot. The top half

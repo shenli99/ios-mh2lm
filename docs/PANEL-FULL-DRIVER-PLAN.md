@@ -1,5 +1,16 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+**0191当前增量（本地通过，未实机）：** 实际 managed 接管已在资源完成后、host 重建前，
+加入 PHY v4.0 / PLL 7nm-v2 复位重配和 BYTE/PCLK 时钟重建。沿原 MDSS owner/gate/DSI timer，
+显式 `sweetdsilink=2` 要求 host1/core2/managed1；默认0保留0190行为。
+先分别确认分支/root 停稳、旧 lock 清除，再配 PHY/分数频率/SSC/分频；新 lock、RCG 更新和
+实际运行分别确认，最终仍需 host 重建及 fresh 像素完成。12套本地检查和arm64对象编译通过。
+profile 为 LG 板级选择，原始 revision byte 记录不当作自动识别；尚无新实机写入证据。
+面板 reset/vendor ON/OFF、反向释放、整屏冷启动及 ABL 退出仍缺，完整驱动未完成。
+详见[PHY/PLL/输出时钟实现与验证](PANEL-LINK-D1.md)。下一步面板生命周期/独立重建，
+完整驱动优先、之后零拷贝；暂不单独要求 push/刷机，A单缓冲/30Hz拷贝限制不变。
+以下0190及更早段落按当时范围保留，当前以0191及NOTES顶部为准。
+
 **0190当前增量（本地通过，未实机）：** 实际 managed 扫描接管在 NoC/DSI0 lease 完成后，
 接入 host v2.3 软复位和明确的 RGB888 command-mode 配置重建，再继续原自有 A/fresh 像素完成。
 复用 MDSS 唯一 owner/gate/DSI timer；默认关闭，显式 `sweetdsihost=1` 要求 managed1/core2
@@ -135,11 +146,12 @@ RSC/NoC温态ACTIVE带宽、实际RSC时钟lease及VCD完成/反向撤回。0188
 仍需温态。NoC冷配置及link/完整ONOFF仍缺，D1未整体完成。见[命令](PANEL-COMMAND-D1.md)、
 [资源](PANEL-POWER-D1.md)、[本地时钟](PANEL-CLOCK-D1.md)、[ARC](PANEL-ARC-D1.md)、[NoC](PANEL-NOC-D1.md)。
 见[资源生命周期首段](PANEL-MANAGED-D1.md)及[核心控制](PANEL-CORE-D1.md)。0190进一步接入host v2.3软复位/公共command配置重建，见[host](PANEL-HOST-D1.md)；
-下一段补PHY/PLL，再接完整面板ON/OFF和资源反向释放；温态获取不等于独立重建。
+0191已接PHY/PLL/输出时钟重建，见[link](PANEL-LINK-D1.md)；
+下一段接完整面板ON/OFF和资源反向释放；温态获取不等于独立重建。
 
 | 批次 | 合并实现内容 | 提交/测试门槛 |
 |---|---|---|
-| D1：资源与命令基础（0183–0190资源/命令/clock/ARC/NoC/核心域及host重建本地通过） | 按PD0补完整且不重叠的资源ABI/映射与版本保护；统一现有RPMh TCS writer并提供显示资源lease，明确时钟/GDSC所有者；typed DSI消息编码、支持完整vendor长包的传输和可撤销命令序列执行 | 真实源码编译与超时/部分失败验证；硬件身份/电源权限未知时拒绝相应写入；不为孤立版本读数或空壳服务单独云编译 |
+| D1：资源与命令基础（0183–0191资源/命令/clock/ARC/NoC/核心域及host/link重建本地通过） | 按PD0补完整且不重叠的资源ABI/映射与版本保护；统一现有RPMh TCS writer并提供显示资源lease，明确时钟/GDSC所有者；typed DSI消息编码、支持完整vendor长包的传输和可撤销命令序列执行 | 真实源码编译与超时/部分失败验证；硬件身份/电源权限未知时拒绝相应写入；不为孤立版本读数或空壳服务单独云编译 |
 | D2：硬件/面板实现 | PD2最小pipeline与DSI host/PHY/PLL配置；PD3已确认profile的供电/reset/ON/OFF、亮度恢复；共用安全暂停/提交/完成基础 | 一次内核按参数逐级开链路重建、睡眠/复位与恢复；同核保留明确对照，错误显式报告；未知面板表不试写 |
 | D3：独立重建与ABL退出 | PD4验证实际状态失效后的重建；PD1自有首帧、default surface/console/panic；PD5最低必要停止/资源回滚与IOPM状态对接 | 证明未读ABL像素仍可显示和恢复，晚完成不踩空；断电/重建确有证据，不能只回写ABL快照 |
 | D4：直扫落地 | F5可扫描surface分配、DMA可达性/缓存、token关联提交/完成/SwapWait与复用；兼容surface用已有拷贝路径，只有确有需要才扩拷贝双缓冲 | CPU拷贝数/耗时、直扫占比、实际呈现节奏及交互表现共同验收；不凭60Hz IRQ宣称60Hz UI |

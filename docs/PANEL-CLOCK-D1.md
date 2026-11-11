@@ -1,5 +1,10 @@
 # D1 本地显示时钟引用与 GDSC 准入（0185）
 
+**0191后续更新：** 已将 PHY v4.0 / PLL 7nm-v2 与 BYTE/PCLK roots 的真实重建接到
+managed 链的 host 之前，沿原 owner/gate/DSI timer；独立确认停稳、失锁/新锁及更新/运行。
+本地12套检查和arm64对象编译通过，未实机；面板生命周期/整屏冷启动仍未完成。
+默认关闭，详见[link实现与边界](PANEL-LINK-D1.md)，下文原阶段记录保留。
+
 **0189当前增量（本地通过，未实机）：** 显式 core profile2 已将 GDSC 软件票、两颗核心
 PLL、AHB75MHz/MDP460MHz 的配置与完成检查接到实际 managed 扫描资源链，复用 MDSS
 唯一 owner/gate/clock timer；先实际 ARC/CN0 ACK，失败保票并关闭写入。工作 PLL 保留，

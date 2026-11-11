@@ -1,5 +1,10 @@
 # DSI0 host 重建（0190，PD2 / D1 后续）
 
+**0191后续更新：** 已将 PHY v4.0 / PLL 7nm-v2 与 BYTE/PCLK roots 的真实重建接到
+managed 链的 host 之前，沿原 owner/gate/DSI timer；独立确认停稳、失锁/新锁及更新/运行。
+本地12套检查和arm64对象编译通过，未实机；面板生命周期/整屏冷启动仍未完成。
+默认关闭，详见[link实现与边界](PANEL-LINK-D1.md)，下文原阶段记录保留。
+
 2026-11-11，接0189。`SweetMDSSHost.inc` 已接实际 managed 扫描接管：软复位 host，
 从明确的 command-mode 配置重建寄存器，再继续原自有 A 提交及新帧完成检查。
 **本地编译和测试通过，未上机；PHY/PLL 仍继承运行状态，完整面板驱动未完成。**

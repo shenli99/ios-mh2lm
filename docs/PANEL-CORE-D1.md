@@ -1,5 +1,10 @@
 # D1：GDSC 与显示核心时钟控制（0189）
 
+**0191后续更新：** 已将 PHY v4.0 / PLL 7nm-v2 与 BYTE/PCLK roots 的真实重建接到
+managed 链的 host 之前，沿原 owner/gate/DSI timer；独立确认停稳、失锁/新锁及更新/运行。
+本地12套检查和arm64对象编译通过，未实机；面板生命周期/整屏冷启动仍未完成。
+默认关闭，详见[link实现与边界](PANEL-LINK-D1.md)，下文原阶段记录保留。
+
 后续0190已接入host软复位/公共配置重建，复用本段核心资源，详见[host记录](PANEL-HOST-D1.md)。
 PHY/PLL仍继承；以下0189记录按该轮范围保留。
 

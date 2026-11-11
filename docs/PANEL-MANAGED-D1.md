@@ -1,5 +1,10 @@
 # D1：实际扫描接管中的资源获取（0188）
 
+**0191后续更新：** 已将 PHY v4.0 / PLL 7nm-v2 与 BYTE/PCLK roots 的真实重建接到
+managed 链的 host 之前，沿原 owner/gate/DSI timer；独立确认停稳、失锁/新锁及更新/运行。
+本地12套检查和arm64对象编译通过，未实机；面板生命周期/整屏冷启动仍未完成。
+默认关闭，详见[link实现与边界](PANEL-LINK-D1.md)，下文原阶段记录保留。
+
 **0190当前增量（本地通过，未实机）：** 实际 managed 扫描接管在 NoC/DSI0 lease 完成后，
 接入 host v2.3 软复位和明确的 RGB888 command-mode 配置重建，再继续原自有 A/fresh 像素完成。
 复用 MDSS 唯一 owner/gate/DSI timer；默认关闭，显式 `sweetdsihost=1` 要求 managed1/core2

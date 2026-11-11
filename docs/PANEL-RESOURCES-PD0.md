@@ -1,5 +1,10 @@
 # PD0：完整显示/面板驱动的资源、接口与实施依赖
 
+**0191后续更新：** 已将 PHY v4.0 / PLL 7nm-v2 与 BYTE/PCLK roots 的真实重建接到
+managed 链的 host 之前，沿原 owner/gate/DSI timer；独立确认停稳、失锁/新锁及更新/运行。
+本地12套检查和arm64对象编译通过，未实机；面板生命周期/整屏冷启动仍未完成。
+默认关闭，详见[link实现与边界](PANEL-LINK-D1.md)，下文原阶段记录保留。
+
 **0184实现更新：** 下文原静态清单/设计按PD0保留。实际已有RPMh provider、唯一TCS入口、
 typed投票与MDSS匹配绑定，以及v1资源ABI，详见[资源层实现](PANEL-POWER-D1.md)。
 0121a13已实测四路command DB/pre-v3 RSC及MDSS consumer绑定，尚未实测投票；

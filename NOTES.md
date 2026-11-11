@@ -2,6 +2,41 @@
 
 ## Agent handoff / active work (2026-11-11, latest)
 
+**CURRENT：0191 PHY v4.0/PLL7nm-v2/输出时钟重建已接实际managed扫描，本地通过；未实机。**
+父提交90c51d6；0191-mh2lm-dsi-link-rebuild.patch SHA256=
+ba6ea09922027fc2058421b3c9f25c7d13263ac266b9f4cbc6a815de9bfaa3d6，10份变化源码。
+新增SweetDSILink.h纯计算、SweetMDSSLink.inc与数值表；沿原MDSS owner/gate/DSI timer和
+clock writer退休账本，无新provider/映射/线程/C实例桥。显式sweetdsilink=2要求host1/core2/
+managed1及原依赖，默认0保留0190行为；startup/matched不reset。
+实际NoC/DSI0 Held后：停止host/IRQ/TE-auto->lane idle->分支CLK_OFF与ROOT_OFF/无UPDATE各自
+确认->PLL stop等旧lock清->bias/PHY关->PHY reset>=1ms/退出100us->REFGEN->明确PHY/timing/
+v2 PLL表/DEC-FRAC/DOWN-SSC/分频->新lock->两RCG各自UPDATE完成->分支与root运行->resync->
+仅更新受控父源快照->host重建->原A pin/提交/freshPPDONE+flush0+RD_PTR。锁定不等于像素完成。
+目标bit1056619200/VCO2113238400，DEC37/FRAC2106，实际VCO2113238378（计算非测量）；
+byte132077398/intf66038699/pixel176103198，SSCperiod302/step714。LG四R66456源表rate/timing一致。
+profile为LG板级选择，不臆造revision编码；记录原始四byte，拒绝未知坏状态/alias/ULPS/CPHY/
+PNswap。没有新硬件identity证据，不写PHY1、panel GPIO或vendor表。
+过渡期间clock lease保留但readiness关闭，亮度/DCS/power不准入，clock/NoC修改Busy，token
+查询可用；每步核对typed资源/非受控clock/alias/idle，250ms整链及分阶段期限，timer无长忙等。
+失败保票/部分状态并poison，不回放/重试/恢复TE/盲撤电；stop/晚timer无MMIO或偷偷解除reset。
+0191基线等0190验证树；严格应用无offset/fuzz，10源码字节一致，114原CI marker保留。
+真实XNU/KDK arm64 MDSS基线/最终对象通过，warning1417->1475（58有界数组提示逐项审，无抑制）。
+12套通过：link新增+原11套；11实际源码ASan/UBSan+PythonADT，UBSanhalt_on_error无报告。
+LSan因ptrace限制关，另断言对象/映射/通知/分配归零。专项涵盖真实资源/host/扫描链、reset
+销毁配置、独立branch/root停稳及运行、旧lock/新lock/REFGEN/UPDATE超时、写丢/漂移/alias/
+provider/stop/晚timer、host时PLL丢锁、未ready不提交及真实fresh帧。
+**NEXT：确认panel身份，接reset/pinctrl/完整ONOFF与资源反向释放，再做独立重建/ABL退出。**
+NoC冷solver/QoS/端口/sleepwake和MDP冷初始化也仍缺。真实start仍温态，DCS OFF不撤票，
+不宣称整屏冷启动/完整驱动完成。A单缓冲/B未提交/30Hz复制不变，不声称旧卡顿已修好。
+继续合并可运行完整驱动批次，暂不要求push/新刷机轮次；未push/触发CI/操作设备。
+CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df；USB/按键/触摸/电池/mux未改，
+不重测旧BUG-002/USB充电/F3/半小时。无新boot/云产物/硬件结果。
+底稿scratch/framebuffer-0191/{base,edited,verify,prepare-patch.py,compile.py,verification.json,
+native-results.json,warning-counts.json,array-bound-review.json,reference-audit.json,pll-table-audit.json,
+tests.json,test-*.txt,*compile.txt}；详见docs/PANEL-LINK-D1.md，主计划/架构/PD0/依赖文档已同步。
+
+**以下0190按当时阶段保留，当前以0191为准。**
+
 **CURRENT：0190 DSI host v2.3重建已接实际managed扫描，本地通过，未实机；完整面板驱动仍未完成。**
 父提交fbabaee；0190-mh2lm-dsi-host-rebuild.patch SHA256=
 48aac4737c1e755d507996efc3fc1b4bdc240e10c040f9dc2c8f530aaf547f47，7份变化源码。新增SweetMDSSHost.inc，沿原MDSS唯一owner/gate、DSI timer与clock writer退休账本。
