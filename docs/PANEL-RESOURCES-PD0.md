@@ -11,6 +11,8 @@ typed投票与MDSS匹配绑定，以及v1资源ABI，详见[资源层实现](PAN
 实际扫描资源获取，见[获取/失败/保留边界](PANEL-MANAGED-D1.md)，尚未完整面板ON/OFF或反向释放。
 0189已补GDSC与核心PLL/AHB/MDP控制并接实际温态获取，见[核心资源](PANEL-CORE-D1.md)；
 冷核心组件测试不等于现有start支持整屏冷启动。NoC冷配置及DSI/PHY/完整ONOFF仍缺。
+0190已将host v2.3软复位/公共command配置重建接入实际managed路径，见[host](PANEL-HOST-D1.md)；
+实机版本20030000已有证据，目标TRIG外部TE位与ABL不同，尚未实测。PHY/PLL仍继承。
 
 **执行顺序更新：** 用户要求完整驱动优先，拷贝双缓冲不再是PD2/PD3前置；E1/E4–E8
 仍只阻塞对应硬件写入，不阻塞先实现typed接口、资源所有者和离线可验证的命令执行器。

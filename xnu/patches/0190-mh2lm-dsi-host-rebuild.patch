@@ -1,0 +1,367 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -211,9 +211,25 @@
+  static IOReturn dsiStatusAction(OSObject *,void *,void *,void *,void *);
+  static IOReturn dsiCancelAction(OSObject *,void *,void *,void *,void *);
+  static void dsiTimerAction(OSObject *,IOTimerEventSource *);
++ /* Host reset/config uses the original DSI timer and MDSS gate/MMIO owner.
++  * Profile1 is the common R66456 link format, not DDIC identification. */
++ enum HostPhase { HostIdle, HostResetHold, HostConfigure, HostReady, HostFault, HostStopped };
++ unsigned fHostProfile, fHostPhase;
++ bool fHostTouched;
++ uint64_t fHostDeadline, fHostWait;
++ IOReturn fHostResult;
++ bool setupHost(void);
++ bool hostBusy(void) const;
++ bool hostResourcesReady(void);
++ bool hostPreflight(void);
++ bool hostConfiguration(void);
++ IOReturn beginHost(void);
++ void advanceHost(void);
++ void finishHost(IOReturn,const char *);
++ void stopHost(void);
+  /* Managed warm takeover, driven by the existing scanout timer/gate. */
+  enum ManagedState { ManagedIdle, ManagedRails, ManagedARC, ManagedNoC,
+-     ManagedClock, ManagedReady, ManagedFault, ManagedStopped, ManagedCore };
++     ManagedClock, ManagedReady, ManagedFault, ManagedStopped, ManagedCore, ManagedHost };
+  bool fManagedEnabled, fManagedStarted;
+  unsigned fManagedState, fManagedRail, fManagedRails;
+  uint64_t fManagedToken, fManagedBandwidth, fManagedClock, fManagedWait, fManagedDeadline;
+@@ -420,6 +436,7 @@
+  if (!setupLocalClocks()) return false;
+  if (!setupNoC(provider)) return false;
+  if (!setupManagedResources()) return false;
++ if (!setupHost()) return false;
+  SWEET_LOG_INFO("SWEET MDSS: F1a v1 IOService backend; ABL scanout unchanged\n");
+  registerService();
+  return true;
+@@ -683,6 +700,7 @@
+ #include "SweetMDSSNoC.inc"
+ #include "SweetMDSSResources.inc"
+ #include "SweetMDSSDSI.inc"
++#include "SweetMDSSHost.inc"
+ 
+ IOReturn
+ SweetMDSS::readyAction(OSObject *owner,void *,void *,void *,void *)
+@@ -731,6 +749,7 @@
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  if (!self->fAccepting || self->isInactive()) return;
++ if (self->fHostPhase!=HostIdle && self->fHostPhase!=HostReady) return;
+  if (self->fCorePhase!=CoreIdle && !self->coreReady()) return;
+  self->dp_probe(self->fPass,self->dp_gcc,self->dp_dispcc,self->dp_sspp,self->dp_ctl,
+      self->dp_intf1,self->dp_intf2,self->dp_dsi,self->dp_smmu);
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -61,7 +61,7 @@
+ }
+ bool SweetMDSS::clockCanGate(void)
+ {
+- if (dsiBusy() || fDsiPoisoned || fDsiPinned ||
++ if (hostBusy() || dsiBusy() || fDsiPoisoned || fDsiPinned ||
+      fScanoutState==SweetScanoutQuiescing || fScanoutState==SweetScanoutSubmitted ||
+      (fIrqMode>=2 && __atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE)!=IrqIdle)) return false;
+  /* No boolean supplied by a consumer can substitute for hardware idle.
+@@ -120,8 +120,9 @@
+  unsigned use=*(SweetClockUse *)arg;
+  if (use>=SweetClockUseCount) return kIOReturnBadArgument;
+  if (!s->fClockEnabled) return kIOReturnUnsupported;
+- if (!s->fAccepting || s->isInactive() || s->fClockFault) return kIOReturnNotReady;
+- if (s->clockBusy() || s->coreBusy()) return kIOReturnBusy;
++ if (!s->fAccepting || s->isInactive() || s->fClockFault ||
++     (s->fHostTouched && (s->fHostPhase==HostFault || s->fHostPhase==HostStopped))) return kIOReturnNotReady;
++ if (s->clockBusy() || s->coreBusy() || s->hostBusy()) return kIOReturnBusy;
+  unsigned slot=4;
+  for (unsigned n=0;n<4;++n)
+   if (!s->fClockLeases[n].token || s->fClockLeases[n].state==SweetClockReleased) { slot=n; break; }
+@@ -159,8 +160,9 @@
+ IOReturn SweetMDSS::clockReleaseAction(OSObject *owner,void *arg,void *,void *,void *)
+ {
+  SweetMDSS *s=(SweetMDSS *)owner; uint64_t token=*(uint64_t *)arg;
+- if (!s->fAccepting || s->isInactive() || s->fClockFault) return kIOReturnNotReady;
+- if (s->clockBusy() || s->coreBusy()) return kIOReturnBusy;
++ if (!s->fAccepting || s->isInactive() || s->fClockFault ||
++     (s->fHostTouched && (s->fHostPhase==HostFault || s->fHostPhase==HostStopped))) return kIOReturnNotReady;
++ if (s->clockBusy() || s->coreBusy() || s->hostBusy()) return kIOReturnBusy;
+  unsigned slot=4;
+  for (unsigned n=0;n<4;++n) if (token && s->fClockLeases[n].token==token) { slot=n; break; }
+  if (slot==4 || s->fClockLeases[slot].state!=SweetClockHeld) return kIOReturnBadArgument;
+diff --git a/iokit/Kernel/arm/SweetMDSSDSI.inc b/iokit/Kernel/arm/SweetMDSSDSI.inc
+--- a/iokit/Kernel/arm/SweetMDSSDSI.inc
++++ b/iokit/Kernel/arm/SweetMDSSDSI.inc
+@@ -197,8 +197,9 @@
+ SweetMDSS::dsiTimerAction(OSObject *owner,IOTimerEventSource *)
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
+- if (!s->fAccepting || s->isInactive() || !s->dsiBusy()) return;
+- s->advanceDSI();
++ if (!s->fAccepting || s->isInactive()) return;
++ if (s->hostBusy()) s->advanceHost();
++ else if (s->dsiBusy()) s->advanceDSI();
+ }
+ void
+ SweetMDSS::advanceDSI(void)
+diff --git a/iokit/Kernel/arm/SweetMDSSHost.inc b/iokit/Kernel/arm/SweetMDSSHost.inc
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetMDSSHost.inc
+@@ -0,0 +1,159 @@
++/* D1 DSI0 host v2.3 rebuild. Register facts: LG dsi_ctrl_hw_cmn.c,
++ * dsi_ctrl_hw_2_0.c, dsi_ctrl_reg.h and the four R66456 command panels.
++ * Original state machine on MDSS's sole gate/MMIO writer and DSI timer.
++ * This operation intentionally retains the live PHY/PLL and panel state.
++ */
++static const uint32_t hostForceClocks=0x200b3fu;
++static const uint32_t hostInterruptEnables=0xa222aa02u;
++struct SweetHostRegister { uint32_t offset,value; };
++/* Common to PP1/DV1/DV2/PV: VC0, RGB888, 1080x2340, 4 DPHY lanes,
++ * one-hot identity map, no DSC/split/CPHY; T_CLK_POST=18/PRE=1b.
++ * No vendor command, DDIC revision or reset GPIO is inferred from this table.
++ * TRIG bit31 follows LG te-pin-select=1 (ABL observed only SW trigger=4).
++ * It selects external TE; MDP trigger remains NONE, DMA trigger remains SW.
++ */
++static const SweetHostRegister hostCommandProfile[]={
++ {0x004,0x1f0}, {0x03c,0x14000000}, {0x040,8}, {0x044,0x13c2c},
++ {0x048,0}, {0x04c,0}, {0x050,0},
++ {0x058,0x0ca90039}, {0x05c,0x09240438},
++ {0x060,0x0ca90039}, {0x064,0x09240438},
++ {0x084,0x80000004}, {0x0ac,0}, {0x0b0,0x8421},
++ {0x0bc,0x3fd08}, {0x0c4,0x181b}, {0x0cc,1},
++ {0x10c,0}, {0x15c,0}, {0x180,0}, {0x1b8,1u<<16},
++ {0x2a8,0}, {0x2ac,0}, {0x2b4,0}, {0x2d8,0}, {0x330,0}
++};
++bool SweetMDSS::setupHost(void)
++{
++ int mode=0; (void)PE_parse_boot_argn("sweetdsihost",&mode,sizeof(mode));
++ if (!mode) return true;
++ if (mode!=1 || !fManagedEnabled || fCoreProfile!=2) {
++  SWEET_LOG_ERROR("SWEET MDSS HOST: host1 requires managed1/core2 and their prerequisites; refused\n");
++  return false;
++ }
++ fHostProfile=1;
++ setProperty("SweetDSIHostProfile",1ULL,32);
++ setProperty("SweetDSIHostState",(unsigned long long)HostIdle,32);
++ return true; /* No reset/configuration on startup/matched. */
++}
++bool SweetMDSS::hostBusy(void) const
++{ return fHostPhase==HostResetHold || fHostPhase==HostConfigure; }
++bool SweetMDSS::hostPreflight(void)
++{
++ /* Warm admission while inherited scanout may still run; this is not an
++  * idle fence. The real beginHost repeats it after resource ACK/quiesce. */
++ return fHostProfile==1 && fHostPhase==HostIdle && !dsiBusy() && !fDsiPinned &&
++     !fDsiPoisoned && dp_rd(dp_dsi,0)==0x20030000u &&
++     (dp_rd(dp_dsi,4)&7u)==5u && !dp_rd(dp_dsi,0x15c) &&
++     !(dp_rd(dp_dsi,0x110)&(1u<<24)) && !dp_rd(dp_dsi,0x68);
++}
++bool SweetMDSS::hostResourcesReady(void)
++{
++ if (!fAccepting || isInactive() || !fRPMh || !fRPMhConsumer ||
++     fManagedState!=ManagedHost || fManagedRails!=15u ||
++     !coreReady() || !localClocksReady() || fClockFault || fNoCFault ||
++     clockBusy() || noCBusy() || dsiBusy() || fDsiPinned || fDsiPoisoned ||
++     __atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE)!=IrqIdle) return false;
++ SweetClockLease clocks={}; SweetNoCStatus noc={}; SweetDisplayPowerStatus power={};
++ if (!fManagedClock || localClockStatus(fManagedClock,&clocks)!=kIOReturnSuccess ||
++     clocks.state!=SweetClockHeld || clocks.mask!=mdssClockMasks[SweetClockDSI0] ||
++     !fManagedBandwidth || bandwidthStatus(fManagedBandwidth,&noc)!=kIOReturnSuccess ||
++     noc.state!=SweetNoCHeld || !fManagedARC ||
++     fRPMh->copyDisplayPowerStatus(fRPMhConsumer,fManagedARC,&power)!=kIOReturnSuccess ||
++     power.state!=SweetRPMhComplete || power.corner!=SweetDisplayTurbo) return false;
++ /* Do not inspect reset-domain host registers while reset is asserted. */
++ return !(dp_rd(dp_intf1,0x288)&(1u<<20)) && !dp_rd(dp_intf1,0x2b4);
++}
++IOReturn SweetMDSS::beginHost(void)
++{
++ if (fHostPhase!=HostIdle || !hostResourcesReady() || !hostPreflight() ||
++     !clockCanGate() || !scanoutConfiguration(true)) return kIOReturnNotReady;
++ if (!setupDSI()) return kIOReturnNoResources;
++ fHostDeadline=scanout_now()+20000000ULL;
++ /* Claim/retire the existing writer ledger before the first effective write.
++  * No second mapping, singleton or independent reset owner is introduced. */
++ fHostTouched=true; fClockTouched=true;
++ dp_wr(dp_dsi,0x110,0); /* disables only enables; zero never ACKs W1C status */
++ if (dp_rd(dp_dsi,0x110)&hostInterruptEnables) {
++  finishHost(kIOReturnIOError,"interrupt enable readback"); return kIOReturnIOError;
++ }
++ dp_wr(dp_dsi,4,dp_rd(dp_dsi,4)&~7u);
++ if (dp_rd(dp_dsi,4)&7u) { finishHost(kIOReturnIOError,"engine disable readback"); return kIOReturnIOError; }
++ dp_wr(dp_dsi,0x11c,hostForceClocks);
++ if (dp_rd(dp_dsi,0x11c)!=hostForceClocks) {
++  finishHost(kIOReturnIOError,"force clock readback"); return kIOReturnIOError;
++ }
++ dp_wr(dp_dsi,0x118,1);
++ __asm__ volatile("dsb oshst" ::: "memory");
++ fHostWait=scanout_now()+1000ULL; /* >=1us; timer may schedule later */
++ fHostPhase=HostResetHold;
++ setProperty("SweetDSIHostState",(unsigned long long)fHostPhase,32);
++ fDsiTimer->setTimeoutUS(1);
++ return kIOReturnSuccess;
++}
++bool SweetMDSS::hostConfiguration(void)
++{
++ if (dp_rd(dp_dsi,0)!=0x20030000u || dp_rd(dp_dsi,0x118) ||
++     dp_rd(dp_dsi,0x11c)!=0x23fu || (dp_rd(dp_dsi,8)&6u) ||
++     (dp_rd(dp_dsi,0x110)&(hostInterruptEnables|(1u<<24))) || dp_rd(dp_dsi,0x68)) return false;
++ for (unsigned n=0;n<sizeof(hostCommandProfile)/sizeof(hostCommandProfile[0]);++n) {
++  const SweetHostRegister &r=hostCommandProfile[n];
++  uint32_t expected=r.offset==4 ? r.value|5u : r.value;
++  if (dp_rd(dp_dsi,r.offset)!=expected) return false;
++ }
++ return true; /* Host readback/idle is not pixel transfer completion. */
++}
++void SweetMDSS::advanceHost(void)
++{
++ if (!hostBusy()) return;
++ uint64_t now=scanout_now();
++ if (!hostResourcesReady()) { finishHost(kIOReturnNotReady,"resource/idle admission lost"); return; }
++ if (now>=fHostDeadline) { finishHost(kIOReturnTimeout,"host rebuild deadline"); return; }
++ if (now<fHostWait) { fDsiTimer->setTimeoutUS(1); return; }
++ if (fHostPhase==HostResetHold) {
++  dp_wr(dp_dsi,0x118,0);
++  __asm__ volatile("dsb oshst" ::: "memory");
++  if (dp_rd(dp_dsi,0x118) || dp_rd(dp_dsi,0)!=0x20030000u ||
++      (dp_rd(dp_dsi,8)&6u) || (dp_rd(dp_dsi,0x110)&(1u<<24)) || dp_rd(dp_dsi,0x68)) {
++   finishHost(kIOReturnIOError,"reset exit/idle/error"); return;
++  }
++  fHostPhase=HostConfigure;
++  /* Explicit target configuration, never replay an ABL host snapshot. */
++  dp_wr(dp_dsi,0x11c,hostForceClocks);
++  for (unsigned n=0;n<sizeof(hostCommandProfile)/sizeof(hostCommandProfile[0]);++n)
++   dp_wr(dp_dsi,hostCommandProfile[n].offset,hostCommandProfile[n].value);
++  dp_wr(dp_dsi,0x110,0); /* no DSI IRQ owner yet, including ERROR mask */
++  __asm__ volatile("dsb oshst" ::: "memory");
++  dp_wr(dp_dsi,4,0x1f1); /* controller enabled under forced clocks */
++  __asm__ volatile("dsb oshst" ::: "memory");
++  dp_wr(dp_dsi,0x11c,0x23f);
++  dp_wr(dp_dsi,4,0x1f5); /* command engine; VIDEO remains disabled */
++  __asm__ volatile("dsb oshst" ::: "memory");
++  setProperty("SweetDSIHostState",(unsigned long long)fHostPhase,32);
++  fDsiTimer->setTimeoutUS(1); return; /* independent final observation */
++ }
++ if (!hostConfiguration()) { finishHost(kIOReturnIOError,"configuration/idle readback"); return; }
++ finishHost(kIOReturnSuccess,"configured");
++}
++void SweetMDSS::finishHost(IOReturn rc,const char *reason)
++{
++ if (fDsiTimer) fDsiTimer->cancelTimeout();
++ fHostResult=rc; fHostPhase=rc==kIOReturnSuccess ? HostReady : HostFault;
++ if (rc!=kIOReturnSuccess) {
++  if (fHostTouched) fDsiPoisoned=true;
++  SWEET_LOG_ERROR("SWEET MDSS HOST: FAILED %s rc=%#x touched=%u; partial host state/resources retained, no rollback/retry/PHY reset\n",
++      reason,(unsigned)rc,fHostTouched);
++ } else {
++  SWEET_LOG_INFO("SWEET MDSS HOST: v2.3 soft-reset/rebuilt RGB888 1080x2340 VC0 lane-map8421 TE-ext; readback+idle only, fresh pixels pending; PHY/PLL/panel retained\n");
++ }
++ setProperty("SweetDSIHostState",(unsigned long long)fHostPhase,32);
++ setProperty("SweetDSIHostFault",rc!=kIOReturnSuccess);
++}
++void SweetMDSS::stopHost(void)
++{
++ if (!hostBusy()) return;
++ if (fDsiTimer) fDsiTimer->cancelTimeout();
++ fHostPhase=HostStopped; fHostResult=kIOReturnAborted;
++ if (fHostTouched) fDsiPoisoned=true;
++ setProperty("SweetDSIHostState",(unsigned long long)fHostPhase,32);
++ /* No late MMIO, reset release or power withdrawal after admission closes. */
++}
+diff --git a/iokit/Kernel/arm/SweetMDSSNoC.inc b/iokit/Kernel/arm/SweetMDSSNoC.inc
+--- a/iokit/Kernel/arm/SweetMDSSNoC.inc
++++ b/iokit/Kernel/arm/SweetMDSSNoC.inc
+@@ -90,8 +90,9 @@
+       s->fNoCLeases[n].status.state==SweetNoCReleased) { slot=n; break; }
+   if (slot==4 || s->fNoCNextToken==~0ULL) return kIOReturnNoResources;
+  }
+- if (!s->fNoCEnabled || !s->fAccepting || s->isInactive() || s->fNoCFault) return kIOReturnNotReady;
+- if (s->noCBusy() || s->clockBusy() || s->dsiBusy()) return kIOReturnBusy;
++ if (!s->fNoCEnabled || !s->fAccepting || s->isInactive() || s->fNoCFault ||
++     (s->fHostTouched && (s->fHostPhase==HostFault || s->fHostPhase==HostStopped))) return kIOReturnNotReady;
++ if (s->noCBusy() || s->clockBusy() || s->hostBusy() || s->dsiBusy()) return kIOReturnBusy;
+  if (r.operation && !s->fNoCLeases[slot].active) return kIOReturnBadArgument;
+  SweetDisplayBandwidth empty={};
+  IOReturn result=s->beginBandwidth(slot,r.operation ? empty : *r.vote,r.operation!=0);
+diff --git a/iokit/Kernel/arm/SweetMDSSResources.inc b/iokit/Kernel/arm/SweetMDSSResources.inc
+--- a/iokit/Kernel/arm/SweetMDSSResources.inc
++++ b/iokit/Kernel/arm/SweetMDSSResources.inc
+@@ -63,7 +63,8 @@
+  /* Do not lower/reprogram inherited clocks while taking over their supply.
+   * Turbo is the existing typed SM8150 upper corner, not a raw voltage guess.
+   * It is held until the later rate/domain owner can safely lower it. */
+- if (!localClocksReady() || (fCoreProfile && !corePreflight())) {
++ if (!localClocksReady() || (fCoreProfile && !corePreflight()) ||
++     (fHostProfile && !hostPreflight())) {
+   SWEET_LOG_ERROR("SWEET MDSS RESOURCES: preflight inherited local clocks not held; no votes\n"); return kIOReturnNotReady;
+  }
+  return kIOReturnSuccess;
+@@ -84,7 +85,7 @@
+  /* The core timer owns transient GDSC/RCG states. Do not read a domain
+   * pipeline or compare old root snapshots while it is changing them. */
+  if (!fRPMh || !fRPMhConsumer || fNoCFault || fClockFault ||
+-     (fManagedState!=ManagedCore && (!clockPrerequisites() || !clockCanGate() || !scanoutConfiguration(true)))) {
++     (fManagedState!=ManagedCore && fManagedState!=ManagedHost && (!clockPrerequisites() || !clockCanGate() || !scanoutConfiguration(true)))) {
+   failManagedResources(kIOReturnNotReady,"provider/pipeline/clock admission changed"); return;
+  }
+  if (now<fManagedWait) return; /* No sleep or long wait under the gate. */
+@@ -152,12 +153,31 @@
+   if (fManagedRails!=15u || !localClocksReady()) {
+    failManagedResources(kIOReturnNotReady,"final resource validation failed"); return;
+   }
++  if (fHostProfile) {
++   fManagedState=ManagedHost;
++   setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32); return;
++  }
+   fManagedState=ManagedReady; fManagedResult=kIOReturnSuccess;
+   setProperty("SweetDisplayClockOwnership",fCoreProfile ?
+       "MDSS: LDO/ARC/NoC/GDSC/AHB75/MDP460 held; DSI PHY/link inherited" :
+       "MDSS: typed LDO/ARC/NoC/local clock held; GDSC/non-XO parents inherited");
+   SWEET_LOG_INFO("SWEET MDSS RESOURCES: warm resources acquired rails=%#x ARC=Turbo NoC=%llu clock=%llu; core-profile=%u; retained across DCS OFF, PHY/link cold setup pending\n",
+       fManagedRails,fManagedBandwidth,fManagedClock,fCoreProfile);
++ } else if (fManagedState==ManagedHost) {
++  if (fHostPhase==HostIdle) {
++   rc=beginHost();
++   if (rc!=kIOReturnSuccess) { failManagedResources(rc,"DSI host rebuild refused"); return; }
++  }
++  if (fHostPhase==HostFault || fHostPhase==HostStopped) {
++   failManagedResources(fHostResult,"DSI host rebuild failed"); return;
++  }
++  if (fHostPhase!=HostReady) return;
++  if (!hostResourcesReady() || !hostConfiguration() || !clockCanGate() || !scanoutConfiguration(true)) {
++   failManagedResources(kIOReturnNotReady,"DSI host final validation failed"); return;
++  }
++  fManagedState=ManagedReady; fManagedResult=kIOReturnSuccess;
++  setProperty("SweetDisplayClockOwnership","MDSS: LDO/ARC/NoC/core/DSI0 clocks and host configured; PHY/PLL inherited");
++  SWEET_LOG_INFO("SWEET MDSS RESOURCES: host rebuilt, retained pipeline checked; fresh scanout transfer still required; PHY/PLL inherited\n");
+  }
+  setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32);
+ }
+@@ -165,6 +185,7 @@
+ {
+  if (!fManagedStarted || fManagedState==ManagedFault || fManagedState==ManagedStopped) return;
+  fManagedState=ManagedFault; fManagedResult=rc;
++ stopHost();
+  if (noCBusy()) stopNoC();
+  if (clockBusy() || coreBusy()) stopLocalClocks();
+  setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32);
+@@ -175,6 +196,7 @@
+ }
+ void SweetMDSS::stopManagedResources(void)
+ {
++ stopHost();
+  if (fManagedStarted && fManagedState!=ManagedFault && fManagedState!=ManagedStopped) {
+   fManagedState=ManagedStopped; fManagedResult=kIOReturnAborted;
+   setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32);
+diff --git a/iokit/Kernel/arm/SweetMDSSScanout.inc b/iokit/Kernel/arm/SweetMDSSScanout.inc
+--- a/iokit/Kernel/arm/SweetMDSSScanout.inc
++++ b/iokit/Kernel/arm/SweetMDSSScanout.inc
+@@ -14,7 +14,8 @@
+  SweetMDSS *s=(SweetMDSS *)owner;
+  SweetScanoutSnapshot *v=(SweetScanoutSnapshot *)arg;
+  if (!v) return kIOReturnBadArgument;
+- if (!s->fAccepting || s->isInactive() || (s->fCorePhase!=CoreIdle && !s->coreReady()) || !s->dp_clocks_on() ||
++ if (!s->fAccepting || s->isInactive() ||
++     (s->fHostPhase!=HostIdle && s->fHostPhase!=HostReady) || (s->fCorePhase!=CoreIdle && !s->coreReady()) || !s->dp_clocks_on() ||
+      !s->dp_smmu || !s->dp_smmu_cb2 || !s->fMaps[9] || !s->fMaps[10]) return kIOReturnNotReady;
+  /* Sequential observations, NOT an atomic hardware snapshot. The top half
+   * may update its timestamp independently; use the last processed frame. */

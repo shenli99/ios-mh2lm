@@ -1,5 +1,14 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+**0190当前增量（本地通过，未实机）：** 实际 managed 扫描接管在 NoC/DSI0 lease 完成后，
+接入 host v2.3 软复位和明确的 RGB888 command-mode 配置重建，再继续原自有 A/fresh 像素完成。
+复用 MDSS 唯一 owner/gate/DSI timer；默认关闭，显式 `sweetdsihost=1` 要求 managed1/core2
+及原依赖。失败保留资源/部分状态、关闭后续写入，无自动恢复旧配置。PHY/PLL 仍继承，
+未发送 vendor 表或操作面板 reset；没有整屏冷启动/独立重建证据，完整驱动仍未完成。
+详见[host实现与验证](PANEL-HOST-D1.md)。下一步补 PHY/PLL 和完整面板生命周期；
+完整驱动优先、之后零拷贝，暂不单独要求 push/刷机，旧性能限制不变。
+以下旧段落按当时范围保留，当前增量以0190为准。
+
 2026-11-10，用户要求加入大目标二。PD0静态资源核对和接口设计已交付，见
 [PD0资源与依赖清单](PANEL-RESOURCES-PD0.md)；硬件身份/状态证据仍按该表跟踪，
 PD2–PD5完整初始化尚未实现；0183已补D1命令基础及性能计时，本地验证见
@@ -125,12 +134,12 @@ RSC/NoC温态ACTIVE带宽、实际RSC时钟lease及VCD完成/反向撤回。0188
 0189已补GDSC及两颗核心PLL/AHB/MDP控制并接实际温态获取；冷核心组件通过，实际start
 仍需温态。NoC冷配置及link/完整ONOFF仍缺，D1未整体完成。见[命令](PANEL-COMMAND-D1.md)、
 [资源](PANEL-POWER-D1.md)、[本地时钟](PANEL-CLOCK-D1.md)、[ARC](PANEL-ARC-D1.md)、[NoC](PANEL-NOC-D1.md)。
-见[资源生命周期首段](PANEL-MANAGED-D1.md)及[核心控制](PANEL-CORE-D1.md)。下一段补DSI/PHY/PLL/host，
-再接完整面板ON/OFF和资源反向释放；温态获取不等于独立重建。
+见[资源生命周期首段](PANEL-MANAGED-D1.md)及[核心控制](PANEL-CORE-D1.md)。0190进一步接入host v2.3软复位/公共command配置重建，见[host](PANEL-HOST-D1.md)；
+下一段补PHY/PLL，再接完整面板ON/OFF和资源反向释放；温态获取不等于独立重建。
 
 | 批次 | 合并实现内容 | 提交/测试门槛 |
 |---|---|---|
-| D1：资源与命令基础（0183–0189资源/命令/clock/ARC/NoC及核心域/频率控制本地通过） | 按PD0补完整且不重叠的资源ABI/映射与版本保护；统一现有RPMh TCS writer并提供显示资源lease，明确时钟/GDSC所有者；typed DSI消息编码、支持完整vendor长包的传输和可撤销命令序列执行 | 真实源码编译与超时/部分失败验证；硬件身份/电源权限未知时拒绝相应写入；不为孤立版本读数或空壳服务单独云编译 |
+| D1：资源与命令基础（0183–0190资源/命令/clock/ARC/NoC/核心域及host重建本地通过） | 按PD0补完整且不重叠的资源ABI/映射与版本保护；统一现有RPMh TCS writer并提供显示资源lease，明确时钟/GDSC所有者；typed DSI消息编码、支持完整vendor长包的传输和可撤销命令序列执行 | 真实源码编译与超时/部分失败验证；硬件身份/电源权限未知时拒绝相应写入；不为孤立版本读数或空壳服务单独云编译 |
 | D2：硬件/面板实现 | PD2最小pipeline与DSI host/PHY/PLL配置；PD3已确认profile的供电/reset/ON/OFF、亮度恢复；共用安全暂停/提交/完成基础 | 一次内核按参数逐级开链路重建、睡眠/复位与恢复；同核保留明确对照，错误显式报告；未知面板表不试写 |
 | D3：独立重建与ABL退出 | PD4验证实际状态失效后的重建；PD1自有首帧、default surface/console/panic；PD5最低必要停止/资源回滚与IOPM状态对接 | 证明未读ABL像素仍可显示和恢复，晚完成不踩空；断电/重建确有证据，不能只回写ABL快照 |
 | D4：直扫落地 | F5可扫描surface分配、DMA可达性/缓存、token关联提交/完成/SwapWait与复用；兼容surface用已有拷贝路径，只有确有需要才扩拷贝双缓冲 | CPU拷贝数/耗时、直扫占比、实际呈现节奏及交互表现共同验收；不凭60Hz IRQ宣称60Hz UI |

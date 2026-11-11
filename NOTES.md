@@ -2,6 +2,40 @@
 
 ## Agent handoff / active work (2026-11-11, latest)
 
+**CURRENT：0190 DSI host v2.3重建已接实际managed扫描，本地通过，未实机；完整面板驱动仍未完成。**
+父提交fbabaee；0190-mh2lm-dsi-host-rebuild.patch SHA256=
+48aac4737c1e755d507996efc3fc1b4bdc240e10c040f9dc2c8f530aaf547f47，7份变化源码。新增SweetMDSSHost.inc，沿原MDSS唯一owner/gate、DSI timer与clock writer退休账本。
+显式sweetdsihost=1要求managed1/core2及原依赖，默认0保留0189行为；不增加空壳provider/映射/线程。
+setup/matched不reset。真正beginScanout暂停TE/auto/IRQ后LDO/ARC/core/NoC/独立DSI0 lease
+完成，再ManagedHost：核实资源/版本/idle->关IRQ enables/CTRL低3位->force clocks->host reset
+>=1us timer->解除reset->明确公共command配置->controller/cmd enable->独立读回/idle->
+managed复核->原IRQ重开/A pin+源提交/freshPPDONE+flush0+RD_PTR。hostReady不代替像素完成。
+LG四R66456版本公共RGB8881080x2340/VC0/4lane/无DSC；one-hot lane map=8421，不能用3210。
+TRIG=80000004按LG外部TE，比ABL4多bit31；MDP_CTRL=8按LGinterleave0，ABL100008为1，
+这些差异尚未实测。已有0121a12/a13 HW_VERSION20030000，写前再核对；没有新增身份读数。
+INT_CTRL混合W1C/enable，只写0关使能，不整字等值读回/随意ACK ERROR。host配置表非ABL快照。
+只写host+118 reset，不写+12c/PHYPLL/resetGPIO，不发vendor；PHY/PLL/面板状态仍继承。
+DCS/亮度/面板电源、clock/NoC修改在过渡中关闭/Busy，查询token可用；快照/probe避开host过渡。
+每步核对ARC/NoC/DSI0 Held/core/clock/IRQidle/TEauto，20ms预算；失败保票/部分硬件状态并
+poison DSI，无恢复旧配置/TE、自动重试/reset/撤电。stop/晚timer不MMIO，不偷偷释放reset。
+严格应用0189树无offset/fuzz，7源码字节一致，114原CI marker保留。真实XNU/KDK arm64
+MDSS基线/最终对象通过，warning1413->1417（4处固定有界数组提示已审，无抑制）。
+11套通过：host新增+原10套，10实际源码ASan/UBSan+PythonADT；UBSanhalt_on_error无报告。
+LSan因ptrace限制关，另断言对象/映射/通知/分配归零。host专项含reset销毁配置、>=1us、
+W1C/enable、逐项丢写/版本错误/忙准入、真实fresh扫描完成、资源/error/timeout/provider/
+stop晚timer、无PHY/vendor写入。没有新boot/云产物/硬件结果。
+**NEXT：PHY v4.0/7nm PLL版本准入及真实配置、DSI输出时钟，再接已确认panel身份/reset/**
+**完整ONOFF、反向释放、独立重建/ABL退出；NoC冷solver/QoS/sleepwake/端口也仍缺。**
+实际start仍需温态splash，DCS OFF仍不撤票；不宣称冷启动/完整驱动/旧卡顿修好。
+A单缓冲/B未提交/30Hz复制未改。继续合并可运行完整驱动批次，暂不要求push或新刷机轮次。
+未push/触发CI/操作设备；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df；
+USB/按键/触摸/电池/mux未改，不重测旧BUG-002/USB充电/F3/半小时。
+底稿scratch/framebuffer-0190/{base,edited,verify,prepare-patch.py,compile.py,verification.json,
+native-results.json,warning-counts.json,array-bound-review.json,reference-audit.json,tests.json,
+test-*.txt,*compile.txt}。详见docs/PANEL-HOST-D1.md；主计划/架构/PD0/managed/core/总路线已同步。
+
+**以下0189按当时阶段保留，当前以0190为准。**
+
 **CURRENT：0189 GDSC/核心PLL/AHB/MDP控制已接实际managed扫描链，本地通过；未实机，D1整体未完成。**
 父提交9b71a3b；0189-mh2lm-display-core-control.patch SHA256=
 ae2980e54f3bc97fb6421c8eda1e151c4348eff4b4c4de310fe2df6a3bd27043，7份变化源码。
