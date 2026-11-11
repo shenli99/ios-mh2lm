@@ -1,5 +1,13 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
+**0189当前增量（本地通过，未实机）：** 显式 core profile2 已将 GDSC 软件票、两颗核心
+PLL、AHB75MHz/MDP460MHz 的配置与完成检查接到实际 managed 扫描资源链，复用 MDSS
+唯一 owner/gate/clock timer；先实际 ARC/CN0 ACK，失败保票并关闭写入。工作 PLL 保留，
+关闭 PLL 才初始化；不改 DSI PHY/PCLK/BYTE。冷态核心引擎已做组件测试，但真实 start 仍为
+温态入口，尚无整屏冷启动/完整断电恢复或撤票。详见[核心资源控制](PANEL-CORE-D1.md)。
+默认关闭，无新刷机轮次，继续补 DSI host/PHY/PLL 和面板完整 ON/OFF；D1 未整体完成。
+以下旧段落按当时范围保留，当前增量以0189为准。
+
 **0188当前显示进度（本地验证通过，未实机投票）：** 已把四路LDO、ARC、CN0/display NoC与
 本地clock事务接到实际自有扫描接管，显式managed模式在暂停/idle后顺序获取资源，全部完成
 才pin/提交A，并继续要求fresh传输完成。部分失败保留票并关闭写入，不自动恢复旧流。

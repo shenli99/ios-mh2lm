@@ -122,14 +122,15 @@ PD0仍是资料/接口设计交付；安全回收/双缓冲、PD1首帧/console/
 MMCX/MX/CX分阶段供电事务、共享票与部分失败保护。0187补apps CN0与MDSS独占的display
 RSC/NoC温态ACTIVE带宽、实际RSC时钟lease及VCD完成/反向撤回。0188在显式managed模式下
 将四路LDO/ARC/NoC/local clock实际接入自有扫描资源获取；默认关闭，DCS OFF暂不撤票。
-冷态clock/GDSC/NoC配置及link仍缺，D1未整体完成。见[命令](PANEL-COMMAND-D1.md)、
+0189已补GDSC及两颗核心PLL/AHB/MDP控制并接实际温态获取；冷核心组件通过，实际start
+仍需温态。NoC冷配置及link/完整ONOFF仍缺，D1未整体完成。见[命令](PANEL-COMMAND-D1.md)、
 [资源](PANEL-POWER-D1.md)、[本地时钟](PANEL-CLOCK-D1.md)、[ARC](PANEL-ARC-D1.md)、[NoC](PANEL-NOC-D1.md)。
-见[资源生命周期首段](PANEL-MANAGED-D1.md)。下一段补冷域/时钟父源/PHY/PLL/host，
+见[资源生命周期首段](PANEL-MANAGED-D1.md)及[核心控制](PANEL-CORE-D1.md)。下一段补DSI/PHY/PLL/host，
 再接完整面板ON/OFF和资源反向释放；温态获取不等于独立重建。
 
 | 批次 | 合并实现内容 | 提交/测试门槛 |
 |---|---|---|
-| D1：资源与命令基础（0183–0188资源/命令/温态clock/ARC/NoC及实际温态获取本地通过） | 按PD0补完整且不重叠的资源ABI/映射与版本保护；统一现有RPMh TCS writer并提供显示资源lease，明确时钟/GDSC所有者；typed DSI消息编码、支持完整vendor长包的传输和可撤销命令序列执行 | 真实源码编译与超时/部分失败验证；硬件身份/电源权限未知时拒绝相应写入；不为孤立版本读数或空壳服务单独云编译 |
+| D1：资源与命令基础（0183–0189资源/命令/clock/ARC/NoC及核心域/频率控制本地通过） | 按PD0补完整且不重叠的资源ABI/映射与版本保护；统一现有RPMh TCS writer并提供显示资源lease，明确时钟/GDSC所有者；typed DSI消息编码、支持完整vendor长包的传输和可撤销命令序列执行 | 真实源码编译与超时/部分失败验证；硬件身份/电源权限未知时拒绝相应写入；不为孤立版本读数或空壳服务单独云编译 |
 | D2：硬件/面板实现 | PD2最小pipeline与DSI host/PHY/PLL配置；PD3已确认profile的供电/reset/ON/OFF、亮度恢复；共用安全暂停/提交/完成基础 | 一次内核按参数逐级开链路重建、睡眠/复位与恢复；同核保留明确对照，错误显式报告；未知面板表不试写 |
 | D3：独立重建与ABL退出 | PD4验证实际状态失效后的重建；PD1自有首帧、default surface/console/panic；PD5最低必要停止/资源回滚与IOPM状态对接 | 证明未读ABL像素仍可显示和恢复，晚完成不踩空；断电/重建确有证据，不能只回写ABL快照 |
 | D4：直扫落地 | F5可扫描surface分配、DMA可达性/缓存、token关联提交/完成/SwapWait与复用；兼容surface用已有拷贝路径，只有确有需要才扩拷贝双缓冲 | CPU拷贝数/耗时、直扫占比、实际呈现节奏及交互表现共同验收；不凭60Hz IRQ宣称60Hz UI |

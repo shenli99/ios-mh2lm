@@ -2,6 +2,47 @@
 
 ## Agent handoff / active work (2026-11-11, latest)
 
+**CURRENT：0189 GDSC/核心PLL/AHB/MDP控制已接实际managed扫描链，本地通过；未实机，D1整体未完成。**
+父提交9b71a3b；0189-mh2lm-display-core-control.patch SHA256=
+ae2980e54f3bc97fb6421c8eda1e151c4348eff4b4c4de310fe2df6a3bd27043，7份变化源码。
+新增SweetMDSSCore.inc，仍为MDSS唯一DISPCC/GDSC owner，复用gate/clock timer/writer与retired账本。
+显式sweetdisplaycore=2选择SM8150-v2，要求clock1/managed1及原依赖，默认0保留0188行为；
+SelectedProfile不是实机版本检测。原解码DT称v2，但本轮无新硬件identity证据；不写v1 TEST字段。
+真实beginScanout暂停/idle/IRQ后LDO->ARC Turbo->CN0 300MB/s实际完成->GDSC软件票->
+两核心TRION PLL->AHB75/MDP460 RCG->核心分支实际运行->原NoC/DSI0 lease->自有A/fresh完成。
+GDSC只清SW_COLLAPSE、拒绝HW_CONTROL/OVERRIDE；>=1us后PWR_ON，成功再稳定2us。
+PLL0=1380MHz(L47/alphae000)，PLL1=600MHz(L1f/alpha4000)；工作PLL校验后保留/标继承，
+不重配live/FSM/更新中/错误频率PLL。关闭PLL逐写v2 CONFIG/CAL/USER与STANDBY/RESET/RUN，
+等独立LOCK再开输出；检查四可选root无孤立使用者。AHB75=PLL1/8，MDP460=PLL0/3+HWCTRL；
+只更新这两受控root的lease CFG/source，其他父源漂移仍拒绝。CFG写后独立UPDATE/dirty清，
+冷分支另等真实CLK_OFF清及root运行；Ready整体复核。仍持Turbo，未做DVFS/低功耗策略。
+内部typed Warm/Cold入口；实际start仍需温态splash，仅调用Warm。Cold组件已执行真实核心
+代码的域/PLL/分支开启，要求从未有IRQ/clock/DMA账本，ARC和CN0 ACK前不读GDSC/PLL，
+过程中不读MDSS/DSI/PHY/display RSC；**这不是现有start支持整屏冷启动的证据。**
+预算：整链500ms、GDSC100us、PLL锁1ms、RCG500us、分支10ms，timer推进无忙等。
+过渡期协调器/诊断/扫描快照不读临时pipeline/旧父源；暂停IRQ后晚watchdog在Idle不误报。
+域丢失时pauseIRQ避免MDSS访问，GIC照常安全mask；失败显式保票/部分效果、不reset/重试/
+盲撤/恢复旧TE。stop不撤电、晚timer无MMIO。core期间CN0 token完整校验；Ready后原NoC
+以同consumer/同300MB/s票接新token，无第二apps writer。ARC token保留并逐步校验。
+严格0188树重放无offset/fuzz，7源码字节一致，114原CI marker保留。真实XNU/KDK arm64
+MDSS基线/最终对象通过，warning1398->1413（新增15固定有界数组提示已审，无抑制）。
+10套最终检查通过：9实际源码ASan/UBSan（core/managed/NoC/clock/display/FB/DSI/RPMh/perf）
++Python ADT；UBSan halt_on_error，无sanitizer报告。LSan ptrace限制仍关，另assert对象/
+映射/通知/分配归零。测试覆盖真实扫描链、冷核心独立完成/无冷域读取、保留live PLL、单/
+双PLL初始化、参数/频率/FSM/更新/孤立root拒绝、PWR/LOCK/UPDATE/分支故障、stop/provider
+丢失、controlled快照/fresh帧、DCS保票/晚watchdog及零对象。无新boot/云编译/硬件结果。
+**仍缺NoC冷solver/sleepwake/QoS/SBM/端口、DSI host/PHY/PLL、panel身份/reset/完整ONOFF、**
+**完整unprepare与GDSC/PLL关闭/资源反向释放、独立重建/ABL退出。DCS OFF不撤资源。**
+NEXT继续DSI host/PHY/PLL真实配置，再接panel完整生命周期/反向释放/独立重建，之后零拷贝。
+A单缓冲/B未提交/30Hz复制未改，不声称旧卡顿已解决；不回CPU双缓冲/孤立只读云轮次/旧bug专项。
+暂不需要push，继续合并可运行完整驱动批次。未push/触发CI/操作设备；CircleCI blob仍
+ da0b6c0947a66f03491b3a9023590b49665292df；USB/按键/触摸/电池/mux未修改。
+底稿scratch/framebuffer-0189/{base,edited,verify,prepare-patch.py,compile.py,verification.json,
+native-results.json,warning-counts.json,array-bound-review.json,reference-audit.json,tests.json,
+test-*.txt,*compile.txt}；详见docs/PANEL-CORE-D1.md，主计划/架构/PD0/clock/managed已同步。
+
+**以下0188按当时阶段保留，当前以0189为准。**
+
 **CURRENT：0188实际扫描接管已接LDO/ARC/NoC/local clock资源获取，本地通过；未实机，D1整体未完成。**
 父提交e912bd6。0188-mh2lm-managed-display-resources.patch SHA256=
 9c8552e22ed68a0a6944fee7c6d7ea5a02f219c96587b195d6407df3800b7ea8，7份变化源码。

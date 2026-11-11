@@ -1,0 +1,583 @@
+diff --git a/iokit/Kernel/arm/SweetDisplayClock.h b/iokit/Kernel/arm/SweetDisplayClock.h
+--- a/iokit/Kernel/arm/SweetDisplayClock.h
++++ b/iokit/Kernel/arm/SweetDisplayClock.h
+@@ -1,11 +1,16 @@
+ /* MDSS-internal clock leases. No MMIO addresses in the caller API.
+- * Warm retention only: domain/non-XO parents inherited; supply/NoC votes
++ * Branch leases retain inherited parents unless the separate typed core
++ * controller has explicitly established their rates/domain. Supply/NoC votes
+  * are separate typed transactions, not implied by a local clock lease.
+  * This interface grants no right to reset/collapse/reprogram a display domain.
+  */
+ #ifndef SWEET_DISPLAY_CLOCK_H
+ #define SWEET_DISPLAY_CLOCK_H
+ #include <stdint.h>
++enum SweetCoreStart { SweetCoreWarm, SweetCoreCold };
++enum SweetCorePhase { CoreIdle, CoreConfigVote, CoreDomain, CoreDomainWait,
++ CoreStable, CorePLL, CorePLLConfig, CorePLLRun, CorePLLLock, CorePLLOut,
++ CorePLLGlobal, CoreRoot, CoreRootUpdate, CoreRootWait, CoreBranches, CoreReady, CoreFault, CoreStopped };
+ enum SweetClockUse { SweetClockCore, SweetClockDSI0, SweetClockRSC, SweetClockUseCount };
+ enum SweetClockState { SweetClockUnused, SweetClockPending, SweetClockHeld,
+  SweetClockReleasing, SweetClockReleased, SweetClockFailed, SweetClockStopped };
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -213,10 +213,11 @@
+  static void dsiTimerAction(OSObject *,IOTimerEventSource *);
+  /* Managed warm takeover, driven by the existing scanout timer/gate. */
+  enum ManagedState { ManagedIdle, ManagedRails, ManagedARC, ManagedNoC,
+-     ManagedClock, ManagedReady, ManagedFault, ManagedStopped };
++     ManagedClock, ManagedReady, ManagedFault, ManagedStopped, ManagedCore };
+  bool fManagedEnabled, fManagedStarted;
+  unsigned fManagedState, fManagedRail, fManagedRails;
+  uint64_t fManagedToken, fManagedBandwidth, fManagedClock, fManagedWait, fManagedDeadline;
++ uint64_t fManagedARC;
+  IOReturn fManagedResult;
+  bool setupManagedResources(void);
+  IOReturn managedPreflight(void);
+@@ -238,6 +239,24 @@
+  uint32_t fClockParents[SweetClockCount][6];
+  unsigned fClockOperation, fClockCursor;
+  bool fClockReleasing, fClockWaiting;
++ /* Core resource control shares the clock writer, gate and timer. Profile2
++  * is an explicit SM8150-v2 selection, not a hardware revision detector. */
++ unsigned fCoreProfile, fCorePhase, fCorePLL, fCoreCursor, fCoreRoot;
++ unsigned fCoreInheritedPLL, fCoreOwnedBranches;
++ uint64_t fCoreCN0, fCoreDeadline, fCoreStepDeadline, fCoreWait;
++ uint32_t fCoreRootCFG;
++ bool fCoreCold;
++ IOReturn fCoreResult;
++ bool coreBusy(void) const;
++ bool coreConfigAccessible(void);
++ bool corePLLReady(unsigned);
++ bool corePLLAdmissible(unsigned);
++ bool corePreflight(void);
++ bool coreReady(void);
++ IOReturn beginCoreResources(SweetCoreStart);
++ void advanceCoreResources(void);
++ void finishCoreResources(IOReturn);
++ void stopCoreResources(void);
+  bool setupLocalClocks(void);
+  bool clockPrerequisites(void);
+  bool clockParent(unsigned,uint32_t [6],bool = true);
+@@ -555,7 +574,7 @@
+      pass,ctl,typer,iid,pidr2,group,groupmod,(en>>19)&1u,(pending>>19)&1u,(active>>19)&1u,
+      (cfg>>6)&3u,(priority>>24)&0xffu,routeHi,routeLo);
+  if (self->fIrqProbeMode==2) {
+-  if (self->dp_clocks_on()) {
++  if ((self->fCorePhase==CoreIdle || self->coreReady()) && self->dp_clocks_on()) {
+    const vm_offset_t top=self->fMaps[9]->getVirtualAddress();
+    const vm_offset_t tear=self->fMaps[10]->getVirtualAddress();
+    const uint32_t rev=dp_rd(top,0), sources=dp_rd(top,0x10);
+@@ -660,6 +679,7 @@
+ 
+ #include "SweetMDSSScanout.inc"
+ #include "SweetMDSSClock.inc"
++#include "SweetMDSSCore.inc"
+ #include "SweetMDSSNoC.inc"
+ #include "SweetMDSSResources.inc"
+ #include "SweetMDSSDSI.inc"
+@@ -711,6 +731,7 @@
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  if (!self->fAccepting || self->isInactive()) return;
++ if (self->fCorePhase!=CoreIdle && !self->coreReady()) return;
+  self->dp_probe(self->fPass,self->dp_gcc,self->dp_dispcc,self->dp_sspp,self->dp_ctl,
+      self->dp_intf1,self->dp_intf2,self->dp_dsi,self->dp_smmu);
+  if (++self->fPass<3) sender->setTimeoutMS(1000);
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -26,6 +26,8 @@
+ }
+ bool SweetMDSS::clockPrerequisites(void)
+ {
++ if (coreBusy() || fCorePhase==CoreFault || fCorePhase==CoreStopped) return false;
++ if (fCorePhase==CoreReady && !coreReady()) return false;
+  /* GCC AHB is critical/HWCG in LG: do not rewrite its controls, nor assume
+   * its OFF bit must stay clear. Existing MMIO admission checks its SW vote.
+   * No GDSC read until the config path passes its existing clock checks. */
+@@ -70,7 +72,11 @@
+ bool SweetMDSS::setupLocalClocks(void)
+ {
+  int mode=0; (void)PE_parse_boot_argn("sweetdisplayclocks",&mode,sizeof(mode));
+- if (!mode) return true;
++ if (!mode) {
++  int core=0; (void)PE_parse_boot_argn("sweetdisplaycore",&core,sizeof(core));
++  if (core) { SWEET_LOG_ERROR("SWEET MDSS CORE: requires clock1; refused\n"); return false; }
++  return true;
++ }
+  if (mode!=1 || fDisplayResourceMode!=2) {
+   SWEET_LOG_ERROR("SWEET MDSS CLOCK: warm mode1 requires display resource mode2; refused\n");
+   return false;
+@@ -79,6 +85,15 @@
+  if (!__atomic_compare_exchange_n(&mdssClockWriter,&expected,1u,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
+   SWEET_LOG_ERROR("SWEET MDSS CLOCK: writer owned/retired; refused\n"); return false;
+  }
++ int profile=0,managed=0;
++ (void)PE_parse_boot_argn("sweetdisplaycore",&profile,sizeof(profile));
++ (void)PE_parse_boot_argn("sweetdisplaymanaged",&managed,sizeof(managed));
++ if (profile && (profile!=2 || managed!=1)) {
++  __atomic_store_n(&mdssClockWriter,0u,__ATOMIC_RELEASE);
++  SWEET_LOG_ERROR("SWEET MDSS CORE: explicit profile2 requires managed1; refused\n"); return false;
++ }
++ fCoreProfile=(unsigned)profile;
++ setProperty("SweetDisplayCoreSelectedProfile",(unsigned long long)fCoreProfile,32);
+  fClockClaimed=true; fClockEnabled=true;
+  fClockTimer=IOTimerEventSource::timerEventSource(this,clockTimerAction);
+  if (!fClockTimer || fLoop->addEventSource(fClockTimer)!=kIOReturnSuccess) return false;
+@@ -106,7 +121,7 @@
+  if (use>=SweetClockUseCount) return kIOReturnBadArgument;
+  if (!s->fClockEnabled) return kIOReturnUnsupported;
+  if (!s->fAccepting || s->isInactive() || s->fClockFault) return kIOReturnNotReady;
+- if (s->clockBusy()) return kIOReturnBusy;
++ if (s->clockBusy() || s->coreBusy()) return kIOReturnBusy;
+  unsigned slot=4;
+  for (unsigned n=0;n<4;++n)
+   if (!s->fClockLeases[n].token || s->fClockLeases[n].state==SweetClockReleased) { slot=n; break; }
+@@ -145,7 +160,7 @@
+ {
+  SweetMDSS *s=(SweetMDSS *)owner; uint64_t token=*(uint64_t *)arg;
+  if (!s->fAccepting || s->isInactive() || s->fClockFault) return kIOReturnNotReady;
+- if (s->clockBusy()) return kIOReturnBusy;
++ if (s->clockBusy() || s->coreBusy()) return kIOReturnBusy;
+  unsigned slot=4;
+  for (unsigned n=0;n<4;++n) if (token && s->fClockLeases[n].token==token) { slot=n; break; }
+  if (slot==4 || s->fClockLeases[slot].state!=SweetClockHeld) return kIOReturnBadArgument;
+@@ -179,7 +194,9 @@
+ void SweetMDSS::clockTimerAction(OSObject *owner,IOTimerEventSource *)
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
+- if (s->fAccepting && !s->isInactive() && s->clockBusy()) s->advanceLocalClocks();
++ if (!s->fAccepting || s->isInactive()) return;
++ if (s->coreBusy()) s->advanceCoreResources();
++ else if (s->clockBusy()) s->advanceLocalClocks();
+ }
+ void SweetMDSS::advanceLocalClocks(void)
+ {
+@@ -242,8 +259,8 @@
+    if (!fClockReferences[i] && !(fClockOwnedMask&(1u<<i))) fClockKnownMask&=~(1u<<i);
+   }
+   lease.state=fClockReleasing ? SweetClockReleased : SweetClockHeld; lease.uncertain=false;
+-  SWEET_LOG_INFO("SWEET MDSS CLOCK: token=%llu state=%u mask=%#x owned=%#x; GDSC/non-XO parents inherited, supply/NoC votes tracked separately\n",
+-      lease.token,lease.state,lease.mask,fClockOwnedMask);
++  SWEET_LOG_INFO("SWEET MDSS CLOCK: token=%llu state=%u mask=%#x owned=%#x; core-profile=%u; PHY/link inherited, supply/NoC votes tracked separately\n",
++      lease.token,lease.state,lease.mask,fClockOwnedMask,fCoreProfile);
+  } else {
+   fClockFault=true; lease.state=SweetClockFailed;
+   /* No blind reverse writes on failure: DMA/state may have changed. Keep
+@@ -270,6 +287,7 @@
+ }
+ void SweetMDSS::stopLocalClocks(void)
+ {
++ stopCoreResources();
+  if (fClockTimer) fClockTimer->cancelTimeout();
+  for (unsigned i=0;i<4;++i) {
+   SweetClockLease &lease=fClockLeases[i];
+diff --git a/iokit/Kernel/arm/SweetMDSSCore.inc b/iokit/Kernel/arm/SweetMDSSCore.inc
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetMDSSCore.inc
+@@ -0,0 +1,290 @@
++/* SM8150-v2 core resources, under the existing MDSS clock owner/gate/timer.
++ * Register facts: LG gdsc-regulator.c, dispcc-sm8150.c, clk-alpha-pll.c and
++ * clk-rcg2.c. This is an original asynchronous implementation, not Linux CCF.
++ * No PHY PLL, pixel root, reset, solver, automatic collapse or rail withdrawal.
++ */
++bool SweetMDSS::coreBusy(void) const
++{ return fCorePhase>CoreIdle && fCorePhase<CoreReady; }
++bool SweetMDSS::coreConfigAccessible(void)
++{
++ /* LG's GDSC ahb_clk is GCC_DISP_AHB, outside the switchable MDSS domain.
++  * Requiring DISPCC_AHB/MDP here would make a powered-off domain impossible
++  * to enable. Do not read MDSS, DSI, display RSC or PHY through this check. */
++ return dp_gcc && dp_dispcc && (dp_rd(dp_gcc,GCC_DISP_AHB)&CBCR_ENABLE);
++}
++bool SweetMDSS::corePLLReady(unsigned pll)
++{
++ if (pll>1) return false;
++ uint32_t b=pll*0x1000u, mode=dp_rd(dp_dispcc,b);
++ return !(mode&0x00700080u) && (mode&0x80000005u)==0x80000005u &&
++     dp_rd(dp_dispcc,b+0x38)==1u && (dp_rd(dp_dispcc,b+0xc)&1u) &&
++     dp_rd(dp_dispcc,b+4)==(pll ? 0x1fu : 0x47u) &&
++     dp_rd(dp_dispcc,b+0x40)==(pll ? 0x4000u : 0xe000u);
++}
++bool SweetMDSS::corePLLAdmissible(unsigned pll)
++{
++ if (corePLLReady(pll)) return true; /* Keep a live PLL; never retune it. */
++ uint32_t b=pll*0x1000u, mode=dp_rd(dp_dispcc,b);
++ /* Partially running/FSM-controlled/unknown state is not a cold PLL. */
++ if ((mode&0xf0700081u) || dp_rd(dp_dispcc,b+0x38)!=0) return false;
++ /* All DISPCC roots which can select these core PLLs, per LG's parent maps.
++  * An enabled orphan root is a fault, not permission to restart its parent. */
++ const uint32_t roots[]={0x22bc,0x22a4,0x20c8,0x20e0};
++ for (unsigned i=0;i<4;++i) {
++  uint32_t cmd=dp_rd(dp_dispcc,roots[i]);
++  unsigned source=(dp_rd(dp_dispcc,roots[i]+4)>>8)&7u;
++  bool selected=pll ? source==4 || source==5 : (i>=2 && source==1);
++  if (selected && (!(cmd&0x80000000u) || (cmd&0xf3u))) return false;
++ }
++ return true;
++}
++bool SweetMDSS::corePreflight(void)
++{
++ if (fCoreProfile!=2 || !coreConfigAccessible() || clockBusy() || noCBusy() || dsiBusy()) return false;
++ if (dp_rd(dp_dispcc,0x3000)&6u) return false; /* No forced HW_CONTROL/OVERRIDE takeover. */
++ for (unsigned pll=0;pll<2;++pll) if (!corePLLAdmissible(pll)) return false;
++ const uint32_t roots[]={0x22bc,0x20c8};
++ for (unsigned r=0;r<2;++r)
++  if (dp_rd(dp_dispcc,roots[r])&0xf1u) return false;
++ return true;
++}
++bool SweetMDSS::coreReady(void)
++{
++ if (fCorePhase!=CoreReady || !coreConfigAccessible() ||
++     (dp_rd(dp_dispcc,0x3000)&0x80000007u)!=0x80000000u ||
++     !corePLLReady(0) || !corePLLReady(1)) return false;
++ const uint32_t roots[]={0x22bc,0x20c8}, cfg[]={0x40fu,0x100105u};
++ for (unsigned i=0;i<2;++i)
++  if ((dp_rd(dp_dispcc,roots[i])&0x800000f1u) ||
++      (dp_rd(dp_dispcc,roots[i]+4)&0x10371fu)!=cfg[i]) return false;
++ const uint32_t branches[]={0x2080,0x200c};
++ for (unsigned i=0;i<2;++i) {
++  uint32_t v=dp_rd(dp_dispcc,branches[i]);
++  if (!(v&1u) || (v&CBCR_OFF)) return false;
++ }
++ return true;
++}
++IOReturn SweetMDSS::beginCoreResources(SweetCoreStart kind)
++{
++ /* Internal typed lifecycle entry; all callers run on the MDSS gate. Cold
++  * bring-up is reserved for a future link-init entry, never loss recovery of
++  * an existing splash/DMA. The current real takeover calls warm only. */
++ if (!fAccepting || isInactive() || fCorePhase!=CoreIdle || !fClockEnabled ||
++     !fRPMh || !fRPMhConsumer || (kind!=SweetCoreWarm && kind!=SweetCoreCold)) return kIOReturnNotReady;
++ SweetDisplayPowerStatus power={};
++ if (!fManagedARC || fRPMh->copyDisplayPowerStatus(fRPMhConsumer,fManagedARC,&power)!=kIOReturnSuccess ||
++     power.state!=SweetRPMhComplete || power.corner!=SweetDisplayTurbo) return kIOReturnNotReady;
++ bool cold=kind==SweetCoreCold;
++ if (cold) {
++  /* No domain-register idle reads while powered off. Refuse ANY previous
++   * clock/DMA/IRQ ownership; this is not a resume or failed-transfer retry. */
++  if (fClockTouched || fIrqClaimed || fGicTouched || fSourceOwned || fDsiPoisoned ||
++      fClockKnownMask || fClockBootToken || fScanoutUsed ||
++      fDsiPinned || fDsiPrepared || dsiBusy() || fIrqPhase || fHardwarePool) return kIOReturnBusy;
++ } else {
++  if (!corePreflight()) return kIOReturnNotReady;
++  if ((dp_rd(dp_dispcc,0x3000)&0x80000007u)!=0x80000000u || !clockCanGate()) return kIOReturnBusy;
++ }
++ fCoreCold=cold; fCorePhase=CoreConfigVote;
++ fCoreDeadline=scanout_now()+500000000ULL; fCoreResult=kIOReturnSuccess;
++ fCoreWait=0; fCorePLL=fCoreCursor=fCoreRoot=0;
++ fClockTimer->setTimeoutUS(1);
++ setProperty("SweetDisplayCoreState",(unsigned long long)fCorePhase,32);
++ return kIOReturnSuccess;
++}
++void SweetMDSS::advanceCoreResources(void)
++{
++ if (!coreBusy()) return;
++ uint64_t now=scanout_now();
++ if (now>=fCoreDeadline) { finishCoreResources(kIOReturnTimeout); return; }
++ if (!coreConfigAccessible() || !fRPMh || !fRPMhConsumer) {
++  finishCoreResources(kIOReturnNotReady); return;
++ }
++ SweetDisplayPowerStatus power={};
++ if (fRPMh->copyDisplayPowerStatus(fRPMhConsumer,fManagedARC,&power)!=kIOReturnSuccess ||
++     power.state!=SweetRPMhComplete || power.corner!=SweetDisplayTurbo) {
++  finishCoreResources(kIOReturnNotReady); return;
++ }
++ if (now<fCoreWait) { fClockTimer->setTimeoutUS(1); return; }
++ if (fCorePhase==CoreConfigVote) {
++  if (!fCoreCN0) {
++   IOReturn rc=fRPMh->requestRegisterBandwidth(fRPMhConsumer,300000000ULL,&fCoreCN0);
++   if (rc!=kIOReturnSuccess) { finishCoreResources(rc); return; }
++  }
++  SweetRegisterBandwidthStatus v={};
++  IOReturn rc=fRPMh->copyRegisterBandwidthStatus(fRPMhConsumer,fCoreCN0,&v);
++  if (rc!=kIOReturnSuccess || v.state==SweetRPMhFailed) {
++   finishCoreResources(rc ? rc : kIOReturnNotReady); return;
++  }
++  if (v.state!=SweetRPMhComplete) { fClockTimer->setTimeoutUS(100); return; }
++  if (v.bytesPerSecond<300000000ULL) { finishCoreResources(kIOReturnNotReady); return; }
++  /* Cold GDSC/PLL accesses start only AFTER both actual upstream ACKs. */
++  if (!corePreflight() || (fCoreCold && (dp_rd(dp_dispcc,0x3000)&0x80000000u))) {
++   finishCoreResources(kIOReturnNotReady); return;
++  }
++  fCorePhase=CoreDomain;
++ } else {
++  /* CN0 cannot be overwritten/withdrawn while operating on this config path.
++   * After CoreReady the NoC module replaces this same consumer's CN0 request
++   * with an equal floor and owns its newer status token. */
++  SweetRegisterBandwidthStatus v={};
++  if (fRPMh->copyRegisterBandwidthStatus(fRPMhConsumer,fCoreCN0,&v)!=kIOReturnSuccess ||
++      v.state!=SweetRPMhComplete || v.bytesPerSecond<300000000ULL) {
++   finishCoreResources(kIOReturnNotReady); return;
++  }
++  uint32_t gdsc=dp_rd(dp_dispcc,0x3000);
++  if ((gdsc&6u) || (!fCoreCold && !(gdsc&0x80000000u))) {
++   finishCoreResources(kIOReturnNotReady); return;
++  }
++  if (fCorePhase>=CoreStable && (gdsc&0x80000007u)!=0x80000000u) {
++   finishCoreResources(kIOReturnNotReady); return;
++  }
++  uint32_t b=fCorePLL*0x1000u;
++  switch (fCorePhase) {
++   case CoreDomain:
++    fClockTouched=true;
++    dp_wr(dp_dispcc,0x3000,gdsc&~1u); /* Only the HLOS SW_COLLAPSE vote. */
++    fCorePhase=CoreDomainWait; fCoreStepDeadline=now+100000ULL;
++    fCoreWait=now+1000ULL; break; /* >=8 XO cycles before first PWR_ON poll. */
++   case CoreDomainWait:
++    if ((gdsc&0x80000007u)!=0x80000000u) {
++     if (now>=fCoreStepDeadline) { finishCoreResources(kIOReturnTimeout); return; }
++     break;
++    }
++    fCorePhase=CoreStable; fCoreWait=now+2000ULL; break;
++   case CoreStable:
++    fCorePhase=CorePLL; break;
++   case CorePLL:
++    if (corePLLReady(fCorePLL)) {
++     fCoreInheritedPLL|=1u<<fCorePLL;
++     if (++fCorePLL==2) { fCorePLL=0; fCorePhase=CoreRoot; }
++    } else if (!corePLLAdmissible(fCorePLL)) { finishCoreResources(kIOReturnNotReady); return; }
++    else { fCorePhase=CorePLLConfig; fCoreCursor=0; }
++    break;
++   case CorePLLConfig: {
++    /* TRION v2: no v1 TEST_CTL_HI=2 write. One bounded write per timer.
++     * Configure only STANDBY/output-disabled PLLs; never reset a live parent. */
++    const uint32_t offsets[]={4,8,0x40,0x18,0x1c,0x20,0x10,0x14,0,0,0x38,0};
++    const uint32_t values[]={fCorePLL ? 0x1fu : 0x47u,0x44u,
++        fCorePLL ? 0x4000u : 0xe000u,0x20485699u,0x2267u,0x24u,0x805u,0xd0u,0,0,0,0};
++    unsigned c=fCoreCursor; uint32_t value=values[c];
++    if (c==8) value=dp_rd(dp_dispcc,b)|(1u<<23);
++    if (c==9) value=dp_rd(dp_dispcc,b)&~1u;
++    if (c==11) value=dp_rd(dp_dispcc,b)|4u;
++    fClockTouched=true; dp_wr(dp_dispcc,b+offsets[c],value);
++    /* MODE contains autonomous status bits; verify only the control just
++     * written, not an old LOCK/PCAL snapshot which hardware may update. */
++    uint32_t mask=c==8 ? 1u<<23 : (c==9 ? 1u : (c==11 ? 4u : ~0u));
++    if ((dp_rd(dp_dispcc,b+offsets[c])&mask)!=(value&mask)) { finishCoreResources(kIOReturnIOError); return; }
++    if (++fCoreCursor==12) fCorePhase=CorePLLRun;
++    break;
++   }
++   case CorePLLRun:
++    fClockTouched=true; dp_wr(dp_dispcc,b+0x38,1u);
++    if (dp_rd(dp_dispcc,b+0x38)!=1u) { finishCoreResources(kIOReturnIOError); return; }
++    fCorePhase=CorePLLLock; fCoreStepDeadline=now+1000000ULL; break;
++   case CorePLLLock:
++    if (dp_rd(dp_dispcc,b)&0x80000000u) fCorePhase=CorePLLOut;
++    else if (now>=fCoreStepDeadline) { finishCoreResources(kIOReturnTimeout); return; }
++    break;
++   case CorePLLOut:
++    dp_wr(dp_dispcc,b+0xc,dp_rd(dp_dispcc,b+0xc)|7u);
++    fCorePhase=CorePLLGlobal; break;
++   case CorePLLGlobal:
++    dp_wr(dp_dispcc,b,dp_rd(dp_dispcc,b)|1u);
++    if (!corePLLReady(fCorePLL)) { finishCoreResources(kIOReturnIOError); return; }
++    if (++fCorePLL==2) { fCorePLL=0; fCorePhase=CoreRoot; }
++    else fCorePhase=CorePLL;
++    break;
++   case CoreRoot: {
++    if (!corePLLReady(0) || !corePLLReady(1)) { finishCoreResources(kIOReturnNotReady); return; }
++    uint32_t root=fCoreRoot ? 0x20c8u : 0x22bcu;
++    uint32_t cmd=dp_rd(dp_dispcc,root);
++    if (cmd&0xf1u) { finishCoreResources(kIOReturnBusy); return; }
++    /* LG's highest AHB75MHz: PLL1(600)/8; MDP460MHz: PLL0(1380)/3.
++     * MDP uses HW_CLK_CTRL_MODE. Preserve unrelated/reserved CFG bits. */
++    uint32_t cfg=dp_rd(dp_dispcc,root+4);
++    fCoreRootCFG=(cfg&~0x10371fu)|(fCoreRoot ? 0x100105u : 0x40fu);
++    fClockTouched=true; dp_wr(dp_dispcc,root+4,fCoreRootCFG);
++    if (dp_rd(dp_dispcc,root+4)!=fCoreRootCFG) { finishCoreResources(kIOReturnIOError); return; }
++    fCorePhase=CoreRootUpdate; break;
++   }
++   case CoreRootUpdate: {
++    uint32_t root=fCoreRoot ? 0x20c8u : 0x22bcu;
++    dp_wr(dp_dispcc,root,dp_rd(dp_dispcc,root)|1u);
++    fCoreStepDeadline=now+500000ULL; fCorePhase=CoreRootWait; break;
++   }
++   case CoreRootWait: {
++    uint32_t root=fCoreRoot ? 0x20c8u : 0x22bcu, cmd=dp_rd(dp_dispcc,root);
++    if (cmd&0xf1u) {
++     if (now>=fCoreStepDeadline) { finishCoreResources(kIOReturnTimeout); return; }
++     break;
++    }
++    if (dp_rd(dp_dispcc,root+4)!=fCoreRootCFG || (!fCoreCold && (cmd&0x80000000u))) {
++     finishCoreResources(kIOReturnNotReady); return;
++    }
++    /* Deliberately commit ONLY this controlled root to existing leases.
++     * Other parent drift remains an error; never blindly resnapshot all. */
++    for (unsigned i=0;i<SweetClockCount;++i)
++     if ((fClockKnownMask&(1u<<i)) && mdssClockBranches[i].root==root) {
++      fClockParents[i][0]=fCoreRootCFG; fClockParents[i][5]=(fCoreRootCFG>>8)&7u;
++     }
++    if (++fCoreRoot==2) { fCorePhase=CoreBranches; fCoreCursor=0; break; }
++    fCorePhase=CoreRoot; break;
++   }
++   case CoreBranches: {
++    const uint32_t branches[]={0x2080,0x200c};
++    unsigned i=fCoreCursor/2; uint32_t off=branches[i], v=dp_rd(dp_dispcc,off);
++    if (!(fCoreCursor&1u)) {
++     if (!(v&1u)) {
++      if (!fCoreCold || !(v&CBCR_OFF)) { finishCoreResources(kIOReturnNotReady); return; }
++      fCoreOwnedBranches|=1u<<i; fClockTouched=true;
++      dp_wr(dp_dispcc,off,v|1u);
++     }
++     ++fCoreCursor; fCoreStepDeadline=now+10000000ULL;
++    } else {
++     uint32_t root=i ? 0x20c8u : 0x22bcu;
++     if (!(v&1u) || (v&CBCR_OFF) || (dp_rd(dp_dispcc,root)&0x800000f1u)) {
++      if (now>=fCoreStepDeadline) { finishCoreResources(kIOReturnTimeout); return; }
++      break;
++     }
++     if (++fCoreCursor==4) { finishCoreResources(kIOReturnSuccess); return; }
++    }
++    break;
++   }
++   default: finishCoreResources(kIOReturnIOError); return;
++  }
++ }
++ setProperty("SweetDisplayCoreState",(unsigned long long)fCorePhase,32);
++ fClockTimer->setTimeoutUS(1); /* Asynchronous, no busy wait under the gate. */
++}
++void SweetMDSS::finishCoreResources(IOReturn rc)
++{
++ unsigned phase=fCorePhase;
++ if (fClockTimer) fClockTimer->cancelTimeout();
++ if (rc==kIOReturnSuccess) {
++  fCorePhase=CoreReady;
++  /* Both core branches, physical roots, PLLs and domain must be live.
++   * This does not claim that DSI/PHY or a framebuffer is initialized. */
++  if (!coreReady()) rc=kIOReturnNotReady;
++ }
++ fCoreResult=rc;
++ if (rc!=kIOReturnSuccess) {
++  fCorePhase=CoreFault; fClockFault=true;
++  SWEET_LOG_ERROR("SWEET MDSS CORE: failed phase=%u rc=%#x pll=%u root=%u; votes/partial effects retained, no reset/rollback/collapse\n",
++      phase,(unsigned)rc,fCorePLL,fCoreRoot);
++ } else {
++  SWEET_LOG_INFO("SWEET MDSS CORE: profile2 GDSC held, PLL0=1380MHz PLL1=600MHz inherited-mask=%#x AHB=75MHz MDP=460MHz cold=%u; PHY/link outside this operation\n",
++      fCoreInheritedPLL,fCoreCold);
++ }
++ setProperty("SweetDisplayCoreState",(unsigned long long)fCorePhase,32);
++ setProperty("SweetDisplayCoreFault",rc!=kIOReturnSuccess);
++}
++void SweetMDSS::stopCoreResources(void)
++{
++ if (fCorePhase!=CoreIdle && fCorePhase!=CoreFault && fCorePhase!=CoreStopped) {
++  fCorePhase=CoreStopped; fCoreResult=kIOReturnAborted;
++  setProperty("SweetDisplayCoreState",(unsigned long long)fCorePhase,32);
++ }
++ /* Parent votes and hardware are retained until a full link teardown exists. */
++}
+diff --git a/iokit/Kernel/arm/SweetMDSSIRQ.inc b/iokit/Kernel/arm/SweetMDSSIRQ.inc
+--- a/iokit/Kernel/arm/SweetMDSSIRQ.inc
++++ b/iokit/Kernel/arm/SweetMDSSIRQ.inc
+@@ -217,7 +217,7 @@
+  }
+  if (state!=IrqFailed && state!=IrqStopped) __atomic_store_n(&fIrqState,IrqIdle,__ATOMIC_RELEASE);
+  if (fGicTouched) dp_wr(fMaps[11]->getVirtualAddress(),0x18c,MDSS_IRQ_BIT);
+- if (fSourceOwned && dp_clocks_on()) {
++ if (fSourceOwned && (fCorePhase==CoreIdle || coreReady()) && dp_clocks_on()) {
+   const vm_offset_t tear=fMaps[10]->getVirtualAddress();
+   dp_wr(tear,0,dp_rd(tear,0)&~MDSS_RDPTR_BIT);
+   dp_wr(tear,8,MDSS_RDPTR_BIT);
+@@ -364,7 +364,8 @@
+   }
+   return;
+  }
+- if (!self->fIrqDisplayOn || self->fIrqMode!=2) return;
++ if (!self->fIrqDisplayOn || self->fIrqMode!=2 ||
++     __atomic_load_n(&self->fIrqState,__ATOMIC_ACQUIRE)==IrqIdle) return;
+  uint64_t now=mdss_irq_ns(mach_absolute_time());
+  if (now-self->fLastFrameNs>250000000ULL) { self->failIRQ("RD_PTR watchdog >250ms"); return; }
+  if (now-self->fWindowStartNs>=60000000000ULL) self->reportIRQ(false);
+diff --git a/iokit/Kernel/arm/SweetMDSSResources.inc b/iokit/Kernel/arm/SweetMDSSResources.inc
+--- a/iokit/Kernel/arm/SweetMDSSResources.inc
++++ b/iokit/Kernel/arm/SweetMDSSResources.inc
+@@ -63,7 +63,7 @@
+  /* Do not lower/reprogram inherited clocks while taking over their supply.
+   * Turbo is the existing typed SM8150 upper corner, not a raw voltage guess.
+   * It is held until the later rate/domain owner can safely lower it. */
+- if (!localClocksReady()) {
++ if (!localClocksReady() || (fCoreProfile && !corePreflight())) {
+   SWEET_LOG_ERROR("SWEET MDSS RESOURCES: preflight inherited local clocks not held; no votes\n"); return kIOReturnNotReady;
+  }
+  return kIOReturnSuccess;
+@@ -74,15 +74,17 @@
+  fManagedDeadline=scanout_now()+4000000000ULL;
+  if (!clockCanGate()) { failManagedResources(kIOReturnBusy,"quiesce/IRQ idle not confirmed"); return; }
+  setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32);
+- SWEET_LOG_INFO("SWEET MDSS RESOURCES: warm takeover paused; LDO -> ARC Turbo -> NoC -> DSI0 clock; no cold reset\n");
++ SWEET_LOG_INFO("SWEET MDSS RESOURCES: warm takeover paused; LDO -> ARC Turbo -> core-profile%u -> NoC -> DSI0 clock; no panel reset\n",fCoreProfile);
+ }
+ void SweetMDSS::advanceManagedResources(void)
+ {
+  if (!fManagedStarted || fManagedState==ManagedReady || fManagedState==ManagedFault || fManagedState==ManagedStopped) return;
+  uint64_t now=scanout_now();
+  if (now>=fManagedDeadline) { failManagedResources(kIOReturnTimeout,"resource-chain deadline"); return; }
+- if (!fRPMh || !fRPMhConsumer || !clockPrerequisites() || !clockCanGate() ||
+-     !scanoutConfiguration(true) || fNoCFault || fClockFault) {
++ /* The core timer owns transient GDSC/RCG states. Do not read a domain
++  * pipeline or compare old root snapshots while it is changing them. */
++ if (!fRPMh || !fRPMhConsumer || fNoCFault || fClockFault ||
++     (fManagedState!=ManagedCore && (!clockPrerequisites() || !clockCanGate() || !scanoutConfiguration(true)))) {
+   failManagedResources(kIOReturnNotReady,"provider/pipeline/clock admission changed"); return;
+  }
+  if (now<fManagedWait) return; /* No sleep or long wait under the gate. */
+@@ -113,7 +115,19 @@
+    failManagedResources(rc ? rc : status.result,"ARC transaction failed"); return;
+   }
+   if (status.state!=SweetRPMhComplete) return;
+-  fManagedToken=0; fManagedState=ManagedNoC;
++  fManagedARC=fManagedToken; fManagedToken=0;
++  fManagedState=fCoreProfile ? ManagedCore : ManagedNoC;
++ } else if (fManagedState==ManagedCore) {
++  if (fCorePhase==CoreIdle) {
++   rc=beginCoreResources(SweetCoreWarm);
++   if (rc!=kIOReturnSuccess) { failManagedResources(rc,"core domain/rate request refused"); return; }
++  }
++  if (fCorePhase==CoreFault || fCorePhase==CoreStopped) {
++   failManagedResources(fCoreResult,"core domain/rate transaction failed"); return;
++  }
++  if (fCorePhase!=CoreReady) return;
++  if (!coreReady()) { failManagedResources(kIOReturnNotReady,"core completion lost"); return; }
++  fManagedState=ManagedNoC;
+  } else if (fManagedState==ManagedNoC) {
+   if (!fManagedBandwidth) {
+    rc=retainBandwidth(managedBandwidth(),&fManagedBandwidth);
+@@ -139,9 +153,11 @@
+    failManagedResources(kIOReturnNotReady,"final resource validation failed"); return;
+   }
+   fManagedState=ManagedReady; fManagedResult=kIOReturnSuccess;
+-  setProperty("SweetDisplayClockOwnership","MDSS: typed LDO/ARC/NoC/local clock held; GDSC/non-XO parents inherited");
+-  SWEET_LOG_INFO("SWEET MDSS RESOURCES: warm resources acquired rails=%#x ARC=Turbo NoC=%llu clock=%llu; retained across DCS OFF, upstream cold setup still inherited\n",
+-      fManagedRails,fManagedBandwidth,fManagedClock);
++  setProperty("SweetDisplayClockOwnership",fCoreProfile ?
++      "MDSS: LDO/ARC/NoC/GDSC/AHB75/MDP460 held; DSI PHY/link inherited" :
++      "MDSS: typed LDO/ARC/NoC/local clock held; GDSC/non-XO parents inherited");
++  SWEET_LOG_INFO("SWEET MDSS RESOURCES: warm resources acquired rails=%#x ARC=Turbo NoC=%llu clock=%llu; core-profile=%u; retained across DCS OFF, PHY/link cold setup pending\n",
++      fManagedRails,fManagedBandwidth,fManagedClock,fCoreProfile);
+  }
+  setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32);
+ }
+@@ -150,7 +166,7 @@
+  if (!fManagedStarted || fManagedState==ManagedFault || fManagedState==ManagedStopped) return;
+  fManagedState=ManagedFault; fManagedResult=rc;
+  if (noCBusy()) stopNoC();
+- if (clockBusy()) stopLocalClocks();
++ if (clockBusy() || coreBusy()) stopLocalClocks();
+  setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32);
+  setProperty("SweetDisplayManagedFault",true);
+  pauseIRQ();
+diff --git a/iokit/Kernel/arm/SweetMDSSScanout.inc b/iokit/Kernel/arm/SweetMDSSScanout.inc
+--- a/iokit/Kernel/arm/SweetMDSSScanout.inc
++++ b/iokit/Kernel/arm/SweetMDSSScanout.inc
+@@ -14,7 +14,7 @@
+  SweetMDSS *s=(SweetMDSS *)owner;
+  SweetScanoutSnapshot *v=(SweetScanoutSnapshot *)arg;
+  if (!v) return kIOReturnBadArgument;
+- if (!s->fAccepting || s->isInactive() || !s->dp_clocks_on() ||
++ if (!s->fAccepting || s->isInactive() || (s->fCorePhase!=CoreIdle && !s->coreReady()) || !s->dp_clocks_on() ||
+      !s->dp_smmu || !s->dp_smmu_cb2 || !s->fMaps[9] || !s->fMaps[10]) return kIOReturnNotReady;
+  /* Sequential observations, NOT an atomic hardware snapshot. The top half
+   * may update its timestamp independently; use the last processed frame. */

@@ -1,5 +1,13 @@
 # D1 本地显示时钟引用与 GDSC 准入（0185）
 
+**0189当前增量（本地通过，未实机）：** 显式 core profile2 已将 GDSC 软件票、两颗核心
+PLL、AHB75MHz/MDP460MHz 的配置与完成检查接到实际 managed 扫描资源链，复用 MDSS
+唯一 owner/gate/clock timer；先实际 ARC/CN0 ACK，失败保票并关闭写入。工作 PLL 保留，
+关闭 PLL 才初始化；不改 DSI PHY/PCLK/BYTE。冷态核心引擎已做组件测试，但真实 start 仍为
+温态入口，尚无整屏冷启动/完整断电恢复或撤票。详见[核心资源控制](PANEL-CORE-D1.md)。
+默认关闭，无新刷机轮次，继续补 DSI host/PHY/PLL 和面板完整 ON/OFF；D1 未整体完成。
+以下旧段落按当时范围保留，当前增量以0189为准。
+
 0187补充：已有[typed ARC父供电事务](PANEL-ARC-D1.md)及[NoC事务](PANEL-NOC-D1.md)，
 0188已在显式managed模式下接实际扫描资源获取，见[生命周期首段](PANEL-MANAGED-D1.md)。
 本时钟模块新增RSC use（AHB及NON_GDSC_AHB/RSCC_AHB/RSCC_VSYNC，
