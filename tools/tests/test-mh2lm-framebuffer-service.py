@@ -42,6 +42,8 @@ source = source.replace('class SweetVsyncChannel;', 'struct SweetVsyncChannel;')
 # Exercise the real retained mailbox, including its close/publication lock.
 header=(arm/'SweetDisplayBackend.h').read_text()
 channel=header[header.index('class SweetMDSS;'):header.index('class SweetDisplayBackend :')]
+if '/* Warm transactions' in header:
+    channel=header[header.index('/* Warm transactions'):header.index('class SweetMDSS;')]+channel
 channel=channel.replace('class SweetVsyncChannel :', 'struct SweetVsyncChannel :')
 channel=channel.replace('public:', '').replace('private:', '')
 channel+=(arm/'SweetMDSSIRQ.inc').read_text().split('static IOSimpleLock *mdssIRQDispatch;')[0]
@@ -78,7 +80,7 @@ using IOReturn=uint32_t;using UInt32=uint32_t;using SInt32=int32_t;
 using task_t=uintptr_t;using mach_port_t=uint32_t;using mach_vm_address_t=uint64_t;
 using io_user_reference_t=uint64_t;using OSAsyncReference64=uint64_t[8];
 constexpr IOReturn kIOReturnSuccess=0,kIOReturnBadArgument=0xe00002c2,kIOReturnOffline=0xe00002d7,
- kIOReturnUnsupported=0xe00002c7,kIOReturnNoMemory=0xe00002bd,kIOReturnNotReady=0xe00002d8,kIOReturnBusy=0xe00002d5;
+ kIOReturnTimeout=0xe00002d6,kIOReturnIOError=0xe00002e9,kIOReturnUnsupported=0xe00002c7,kIOReturnNoMemory=0xe00002bd,kIOReturnNotReady=0xe00002d8,kIOReturnBusy=0xe00002d5;
 constexpr uint32_t kIOUCVariableStructureSize=0xffffffffU,MACH_PORT_NULL=0;
 constexpr unsigned kIOExternalMethodScalarInputCountMax=16,kIOExternalMethodScalarOutputCountMax=16;
 constexpr unsigned kIOUserNotifyOptionCanDrop=1;
@@ -193,6 +195,10 @@ static unsigned barriers=0;
 static std::vector<bool> panelRequests;
 static IOReturn panelResult=0;
 struct SweetDisplayBackend : IOService {
+ unsigned panelLifecycleCapabilities(){return 0;}
+ IOReturn beginPanelLifecycle(unsigned,uint64_t*){return kIOReturnUnsupported;}
+ IOReturn panelLifecycleStatus(uint64_t,SweetPanelLifecycleStatus*){return kIOReturnUnsupported;}
+ void cancelPanelLifecycle(uint64_t){}
  SweetVsyncChannel*channel=nullptr;unsigned fallbackRequests=0,inspectCalls=0;uint64_t frame=0;
  IOReturn inspectResult=0,beginResult=0;unsigned handoffState=SweetScanoutQuiescing,beginCalls=0,abandons=0;
  IOReturn beginScanout(SweetScanoutPool*,SweetVsyncChannel*){++beginCalls;return beginResult;}

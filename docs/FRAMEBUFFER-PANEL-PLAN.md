@@ -1,5 +1,17 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
+**0194当前增量（本地通过，未实机）：** 已接通SweetMDSS内部统一生命周期协调器，复用
+原唯一gate/timer及资源/扫描/DSI执行层。显式sweetpanellifecycle=1把实际温态接管与28/29
+OFF/ON串成typed token事务：触摸暂停fence→显示DMA/IRQ真实静止→原资源/链路/像素完成→
+触摸验证恢复；完成前FB不交付Active/不呈现。快速相反电源请求合并，取消/provider撤回/超时/
+stop终止本代、保票/保DMA pin，无自动恢复。背光Busy保存最新目标，原生IOKit interest仅排队
+自己的事件，事务完成后重试，无空闲轮询。默认关闭，未知profile的prepare/reset/unprepare
+在副作用前Unsupported，不调用pins activate/reset/park、不猜vendor表。16套本地检查、
+真实XNU/KDK arm64对象与严格重放通过；详见[协调器架构、接口和边界](PANEL-LIFECYCLE-D1.md)。
+完整reset/ONOFF/反向释放、冷NoC/MDP、独立重建和ABL退出仍未完成。后续继续完整驱动优先，
+之后零拷贝；暂不要求push/刷机，CircleCI未改。以下0193及更早段落均按当时范围保留，
+当前以0194及NOTES顶部为准。
+
 **0193当前增量（本地通过，未实机）：** 已补`SweetTouchPanel : IOService`及MDSS真实
 匹配绑定，typed暂停/恢复交给原唯一TouchComm worker；消费者不穿透读写寄存器。
 暂停fence要求peripheral/GIC禁用读回、active退出和HID触点释放；parked worker/晚IRQ无硬件I/O。

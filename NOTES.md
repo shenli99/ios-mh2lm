@@ -2,6 +2,49 @@
 
 ## Agent handoff / active work (2026-11-11, latest)
 
+**CURRENT：0194统一温态生命周期协调器已接实际调用并本地通过，未实机；完整面板驱动仍未完成。**
+父提交c3b530a；0194-mh2lm-panel-lifecycle-coordinator.patch SHA256=
+327e2ca4cf4582e52030337463c5f699c007dc5e90bae8c866c390d740627af7，12份源码变化。
+SweetMDSSLifecycle.inc是原SweetMDSS内部模块，同一gate/唯一MMIO owner、独立推进timer；
+无新线程/全局实例桥/映射。默认sweetpanellifecycle=0；1要求own2/power1/IRQ2/dsi1/
+touchpanel2/managed1及原resource/clock/NoC依赖。start/match不自动发life请求。
+实际beginScanout：原只读准入→touch QUIESCED→原TE/auto停流→GIC115 RWP/enable/active及
+peripheral禁用/DSI DMAidle确认→原LDO/ARC/core/NoC/clock/可选PHY-host重建→自有A提交→
+freshPPDONE+flush0+RD_PTR→原TCM应用/格式验证恢复→对外Active；不复制另一套重建算法。
+DisplayOff/On使用原异步DSI 28/29，保票；Off继续parked触摸/停流，On须新像素完成及touchReady。
+仍是温态DisplayOff，不是SleepIn/断电/reset；prepare/reset/unprepare在副作用前Unsupported。
+没有调用pins activate/reset/park或发送候选vendor表。status显式token/phase/result/证据账本，
+原setPanelPower在默认档不变，协调档必须新typed异步接口；FB在pending冻结呈现、保最新swap，
+快速相反请求合并、核对token/op及完成标记，consumer17s watchdog，无F2/ABL静默回退。
+每段touch6.5s、display/IRQdrain50ms、takeover5s、DSI500ms、freshpixel100ms，总16s；
+原子状态/计时仅协调期间工作，无新增空闲poll。fReady等worker状态仍沿0193原子mailbox。
+每个生命周期/scanout/DSI/clock/NoC推进检查冻结provider身份、inactive及已取得touchfence；
+withdrawal即使changed事件未运行，也不能继续下一写入，旧token不能接续新provider。
+consumer cancel新增SweetTouchPanel::cancelRequest(id,token)，关独占C session/poison而非stop服务；
+worker异步收尾/退休至reboot，取消不冒充hardware fence。协调器failure/stop终止子timer，
+DSI显式noRestore、scanout不恢复继承TE，保票/部分状态/DMA pin，无自动reset/resume/撤电。
+背光Busy保最新目标；SweetDisplayClient真实registerInterest/messageClients，仅回调排队IES，
+完成后背光自己的loop重试，不反向同步进gate/不idlepoll；匹配/interest/保留引用stop同步清理。
+16套通过：原14+真实生命周期与FB消费者；15套实际源码ASan/UBSan+PythonADT，无最终报告。
+新增覆盖TCM实际Cworker/协议、GICactive/RWP、真实资源/PHY/host/DSI/像素完成、假DONE/缺frame、
+touch格式/availability失效、pins/其他provider撤回早于changed、取消/期限/stop/晚timer、
+保票/pin、token/ID错误/耗尽、快速OFFON、错误完成/consumerwatchdog、实际背光interest重试。
+LSan环境ptrace限制关闭，另断言对象/映射/通知/分配及模拟重启后的pin归零。
+真实XNU/KDK arm64 MDSS/FB基线最终与TouchPanel对象成功，核实实际生命周期/取消/consumer符号。
+MDSS warnings1475→1481：6个固定fMaps[9/10/11]/clock mask数组访问已审；FB1397→1397；
+TouchPanel1151为原头/宏诊断，无warning抑制。不是整核链接或硬件结果。
+0194base与0193verify字节连续，严格应用无offset/fuzz、12源码一致、114原CI markers保留。
+**NEXT：继续完整驱动，确认实际panel profile及共享供电证据，接pins/reset/完整vendor ONOFF与反向释放；**
+之后冷NoC/MDP、独立重建与ABL退出，再零拷贝。E1/E7/E8未关闭，不猜厂商表、不启动Android。
+A单缓冲/B未提交/30Hz复制不变，不宣称旧卡顿或BUG003修复；协调档仅在自有接管后受理OFFON。
+本轮无push/CI/设备操作/新boot/实机结果，暂不要求push或新刷机；CircleCI blob仍
+ da0b6c0947a66f03491b3a9023590b49665292df。USB/按键/充电/mux和触摸硬件策略未改。
+底稿scratch/framebuffer-0194/{base,edited,verify,prepare-patch.py,compile.py,run-tests.py,
+verification.json,base-continuity.json,native-results.json,warning-counts.json,warning-review.json,
+tests.json,test-*.txt,*compile.txt,*symbols.txt}；docs/PANEL-LIFECYCLE-D1.md及计划/架构/PD0已同步。
+
+**以下0193按当时范围保留，当前以0194为准。**
+
 **CURRENT：0193触摸quiesce/resume执行层与MDSS匹配绑定本地通过，未实机；PD3完整协调器未接。**
 父提交354cc16；0193-mh2lm-panel-touch-coordination.patch SHA256=
 cce91ee520c9e868ad0082af0315aa0a9c5a836d6e3c0c161a053e4777fc2693，7份源码变化。

@@ -22,6 +22,8 @@ legacy = (root/'bsd/dev/sweet_display_probe.c').read_text()
 source = source.replace('#include "SweetMDSSIRQ.inc"', (arm/'SweetMDSSIRQ.inc').read_text())
 source = source.replace('#include "SweetMDSSScanout.inc"', (arm/'SweetMDSSScanout.inc').read_text())
 source = source.replace('#include "SweetMDSSDSI.inc"', (arm/'SweetMDSSDSI.inc').read_text())
+if (arm/'SweetMDSSLifecycle.inc').exists():
+    source = source.replace('#include "SweetMDSSLifecycle.inc"', (arm/'SweetMDSSLifecycle.inc').read_text())
 if (arm/'SweetMDSSResources.inc').exists():
     source = source.replace('#include "SweetMDSSResources.inc"', (arm/'SweetMDSSResources.inc').read_text())
 if (arm/'SweetMDSSNoC.inc').exists():
@@ -192,10 +194,15 @@ struct OSDictionary : OSObject {
 };
 struct IONotifier;
 static std::vector<IONotifier*> subscriptions;
-static constexpr const char *gIOTerminatedNotification="term",*gIOFirstMatchNotification="match";
+static constexpr const char *gIOTerminatedNotification="term",*gIOFirstMatchNotification="match",*gIOGeneralInterest="interest";
+using vm_size_t=size_t;
+static constexpr unsigned kIOMessageServicePropertyChange=0x1234;
 struct IOService : OSObject {
  bool inactive=false,rpmhNub=false,pinsNub=false;std::map<std::string,OSObject*>properties;
  using Notify=bool(*)(void*,void*,IOService*,IONotifier*);
+ using Interest=IOReturn(*)(void*,void*,uint32_t,IOService*,void*,vm_size_t);
+ IONotifier*registerInterest(const char*,Interest,void*);
+ void messageClients(unsigned);
  virtual bool start(IOService*){return true;}virtual void stop(IOService*){}
  virtual bool willTerminate(IOService*,IOOptionBits){inactive=true;return true;}
  virtual IOReturn setProperties(OSObject*){return 0;}
@@ -210,12 +217,17 @@ struct IOService : OSObject {
  static IONotifier*addMatchingNotification(const char*,OSDictionary*,Notify,void*);
 };
 struct IONotifier : OSObject {
- const char*kind;OSDictionary*dict;IOService::Notify cb;void*target;
- void remove(){subscriptions.erase(std::find(subscriptions.begin(),subscriptions.end(),this));dict->release();release();}
+ const char*kind;OSDictionary*dict=nullptr;IOService::Notify cb=nullptr;void*target;
+ IOService *observed=nullptr;IOService::Interest interest=nullptr;
+ void remove(){subscriptions.erase(std::find(subscriptions.begin(),subscriptions.end(),this));if(dict)dict->release();release();}
 };
 IONotifier*IOService::addMatchingNotification(const char*k,OSDictionary*d,Notify cb,void*t){
  auto*n=new IONotifier;n->kind=k;n->dict=d;d->retain();n->cb=cb;n->target=t;subscriptions.push_back(n);return n;
 }
+IONotifier*IOService::registerInterest(const char*k,Interest cb,void*t){
+ auto*n=new IONotifier;n->kind=k;n->observed=this;n->interest=cb;n->target=t;subscriptions.push_back(n);return n;
+}
+void IOService::messageClients(unsigned type){for(auto*n:subscriptions)if(n->observed==this)n->interest(n->target,nullptr,type,this,nullptr,0);}
 static void emit(const char*k,IOService*p){for(auto*n:subscriptions)if(n->kind==k)n->cb(n->target,nullptr,p,n);}
 static int enabled=1,probeEnabled=1,powerEnabled=0,irqProbeMode=0,irqMode=0,ownMode=0;
 static bool PE_parse_boot_argn(const char*k,void*v,size_t){
@@ -359,6 +371,8 @@ int main(){
  s=make(nub);auto*loop=IOWorkLoop::workLoop();
  auto*c=SweetDisplayClient::withOwner(nub,loop,changed);assert(c&&c->watch());pump();changes=0;
  emit(gIOFirstMatchNotification,s);assert(changes==0);pump();assert(changes==1);
+ // Native readiness interest only queues the consumer; no inline gate callback.
+ s->messageClients(kIOMessageServicePropertyChange);assert(changes==1);pump();assert(changes==2);changes=1;
  auto*retained=c->copyBackend();assert(retained==s);
  s->inactive=true;emit(gIOTerminatedNotification,s);assert(!c->copyBackend());pump();assert(changes==2);
  resetRegs();assert(retained->setBrightness(2)==kIOReturnNotReady&&trace.empty());

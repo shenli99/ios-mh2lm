@@ -1,5 +1,10 @@
 # 0193：面板生命周期所需的触摸暂停与恢复接口
 
+**0194补充：** MDSS已实际调用typed quiesce/resume，统一温态协调器及消费者token取消见
+[PANEL-LIFECYCLE-D1.md](PANEL-LIFECYCLE-D1.md)。`cancelRequest(consumer,token)`只关闭独占
+mailbox session并poison，不stop整个provider；仍不把取消返回当作硬件已静止。
+以下0193描述为当时范围，完整面板reset/上下电仍未完成。
+
 2026-11-11，本地实现与验证通过，**尚未实机**。补丁
 `0193-mh2lm-panel-touch-coordination.patch` 接在0192之后，SHA256：
 `cce91ee520c9e868ad0082af0315aa0a9c5a836d6e3c0c161a053e4777fc2693`。

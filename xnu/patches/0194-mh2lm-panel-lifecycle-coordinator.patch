@@ -1,0 +1,928 @@
+diff --git a/iokit/Kernel/arm/SweetDisplayBackend.h b/iokit/Kernel/arm/SweetDisplayBackend.h
+--- a/iokit/Kernel/arm/SweetDisplayBackend.h
++++ b/iokit/Kernel/arm/SweetDisplayBackend.h
+@@ -8,10 +8,24 @@
+ #include <IOKit/IOLocks.h>
+ #include "SweetDSICommand.h"
+ 
++/* Warm transactions preserve rails and panel initialization. Full prepare,
++ * reset and unprepare are deliberately separate, unsupported operations until
++ * a verified DDIC profile and shared-power teardown are available. */
++enum SweetPanelOperation { SweetPanelTakeover=1, SweetPanelDisplayOff,
++ SweetPanelDisplayOn, SweetPanelPrepare, SweetPanelReset, SweetPanelUnprepare };
++enum SweetPanelPhase { SweetPanelIdle, SweetPanelTouchPause, SweetPanelDrain,
++ SweetPanelTakeoverPending, SweetPanelCommand, SweetPanelFrame,
++ SweetPanelTouchResume, SweetPanelComplete, SweetPanelFault, SweetPanelStopped };
++struct SweetPanelLifecycleStatus {
++ uint64_t token, touchToken, commandToken;
++ unsigned operation, phase, rails;
++ IOReturn result;
++ bool touchQuiesced, displayDrained, resourcesHeld, pixelsComplete, uncertain;
++};
+ class SweetMDSS;
+ class SweetScanoutPool;
+ enum SweetScanoutState { SweetScanoutIdle, SweetScanoutQuiescing,
+- SweetScanoutSubmitted, SweetScanoutActive, SweetScanoutFailed, SweetScanoutResources };
++ SweetScanoutSubmitted, SweetScanoutActive, SweetScanoutFailed, SweetScanoutResources, SweetScanoutCoordinating };
+ struct SweetScanoutStatus {
+  unsigned state;
+  bool hardwareReachable;
+@@ -84,6 +98,13 @@
+  virtual IOReturn beginDSISequence(const uint8_t *,size_t,uint64_t *) { return kIOReturnUnsupported; }
+  virtual IOReturn dsiSequenceStatus(uint64_t,SweetDSIStatus *) { return kIOReturnUnsupported; }
+  virtual void cancelDSISequence(uint64_t) {}
++ /* Nonblocking lifecycle requests. Admission is not completion. Zero caps
++  * means this backend uses the legacy F2 path. Tokens never wrap or resume
++  * through a replacement provider. Status remains readable after stop. */
++ virtual unsigned panelLifecycleCapabilities(void) { return 0; }
++ virtual IOReturn beginPanelLifecycle(unsigned,uint64_t *) { return kIOReturnUnsupported; }
++ virtual IOReturn panelLifecycleStatus(uint64_t,SweetPanelLifecycleStatus *) { return kIOReturnUnsupported; }
++ virtual void cancelPanelLifecycle(uint64_t) {}
+  virtual IOReturn brightnessReady(void) = 0;
+  virtual IOReturn dcsWrite(const uint32_t *words, unsigned count) = 0;
+  IOReturn setBrightness(uint32_t level);
+@@ -98,13 +119,15 @@
+  IOLock *fLock;
+  IOWorkLoop *fLoop;
+  IOInterruptEventSource *fEvent;
+- IONotifier *fMatched, *fTerminated;
++ IONotifier *fMatched, *fTerminated, *fInterest;
++ SweetDisplayBackend *fObserved;
+  SweetDisplayBackend *fBackend;
+  OSObject *fOwner;                 /* borrowed until stop synchronizes event */
+  void (*fChanged)(OSObject *);
+  bool fStopping, fEventAdded;
+  static bool matched(void *, void *, IOService *, IONotifier *);
+  static bool terminated(void *, void *, IOService *, IONotifier *);
++ static IOReturn interest(void *,void *,uint32_t,IOService *,void *,vm_size_t);
+  static void changed(OSObject *, IOInterruptEventSource *, int);
+ public:
+  static SweetDisplayClient *withOwner(OSObject *, IOWorkLoop *, void (*)(OSObject *));
+diff --git a/iokit/Kernel/arm/SweetFBService.inc b/iokit/Kernel/arm/SweetFBService.inc
+--- a/iokit/Kernel/arm/SweetFBService.inc
++++ b/iokit/Kernel/arm/SweetFBService.inc
+@@ -8,6 +8,9 @@
+  fStateGate=IOCommandGate::commandGate(this);
+  if (!fStateGate || fWorkLoop->addEventSource(fStateGate)!=kIOReturnSuccess) return false;
+  fStateGateAdded=true;
++ int lifecycle=0; (void)PE_parse_boot_argn("sweetpanellifecycle",&lifecycle,sizeof(lifecycle));
++ fPanelLifecycleRequested=lifecycle==1;
++ if (fPanelLifecycleRequested && (!fHardwareVsyncRequested || !fOwnScanoutRequested)) return false;
+  if (fHardwareVsyncRequested && !setupHardwareVsync()) return false;
+  fDisplayClient=SweetDisplayClient::withOwner(this,fWorkLoop,backendChanged);
+  if (!fDisplayClient || !fDisplayClient->watch()) return false;
+@@ -28,6 +31,10 @@
+  if (fb->fServiceStopped) return;
+  SweetDisplayBackend *backend=fb->fDisplayClient->copyBackend();
+  bool bound=backend!=NULL;
++ if (fb->fPanelLifecycleBackend && backend!=fb->fPanelLifecycleBackend) {
++  fb->stopPanelLifecycle();fb->fPanelLifecycleFault=true;fb->fPowerOff=true;
++  fb->setProperty("SweetPanelPowerLastResult",(unsigned long long)(uint32_t)kIOReturnNotReady,32);
++ }
+  if (fb->fHardwareVsyncRequested) fb->bindHardwareVsync(backend);
+  OSSafeReleaseNULL(backend);
+  fb->setProperty("SweetDisplayBackendBound",bound);
+@@ -68,6 +75,7 @@
+   fb->fServiceStopped=true;
+   if (fb->fVsync) fb->fVsync->cancelTimeout();
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
++  fb->stopPanelLifecycle();
+   fb->shutdownScanout();
+   if (fb->fHardwareVsyncRequested) fb->shutdownHardwareVsync();
+   OSSafeReleaseNULL(fb->fScanoutPool); /* submitted pools carry an independent hardware pin */
+@@ -152,9 +160,9 @@
+   if (fHardwareVsyncRequested) {
+    if (fStateGateAdded) fStateGate->runAction([](OSObject *owner,void *,void *,void *,void *) -> IOReturn {
+     AppleCLCD *fb=(AppleCLCD *)owner;
+-    fb->fServiceStopped=true; fb->shutdownScanout(); fb->shutdownHardwareVsync(); return kIOReturnSuccess;
++    fb->fServiceStopped=true; fb->stopPanelLifecycle(); fb->shutdownScanout(); fb->shutdownHardwareVsync(); return kIOReturnSuccess;
+    });
+-   else { shutdownScanout(); shutdownHardwareVsync(); }
++   else { stopPanelLifecycle(); shutdownScanout(); shutdownHardwareVsync(); }
+   }
+ #endif
+   if (fVsyncAdded) { fVsync->cancelTimeout(); fWorkLoop->removeEventSource(fVsync); }
+@@ -228,6 +236,7 @@
+ AppleCLCD::requestPanelPower(bool off)
+ {
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
++ if (fPanelLifecycleRequested) return requestCoordinatedPower(off);
+  uint64_t start=mach_absolute_time(), elapsed;
+  bool changed=fPowerOff!=off;
+  if (changed && !off && fOwnScanoutPreflight) fScanoutAuditResume=true;
+@@ -261,3 +270,75 @@
+  return kIOReturnUnsupported;
+ #endif
+ }
++
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++/* Asynchronous consumer: no MMIO, waits, sleeps or callback from MDSS gate.
++ * A rapid opposite request is coalesced, then submitted after the current
++ * token completes. A failure freezes presentation and never silently falls
++ * back to synchronous F2 or adopts a new provider's token. */
++IOReturn AppleCLCD::requestCoordinatedPower(bool off)
++{
++ fPanelLifecycleDesiredOff=off;
++ if (fPanelLifecycleFault || fServiceStopped) return kIOReturnNotReady;
++ if (fPanelLifecycleBackend) return kIOReturnSuccess;
++ if (off==fPanelLifecycleDisplayOff) return kIOReturnSuccess;
++ SweetDisplayBackend *b=fDisplayClient->copyBackend();
++ IOReturn rc=kIOReturnNotReady;uint64_t token=0;
++ if (b && (b->panelLifecycleCapabilities()&(1u<<(off ? SweetPanelDisplayOff : SweetPanelDisplayOn))))
++  rc=b->beginPanelLifecycle(off ? SweetPanelDisplayOff : SweetPanelDisplayOn,&token);
++ if (rc==kIOReturnSuccess && token) {
++  fPanelLifecycleBackend=b;fPanelLifecycleToken=token;fPanelLifecycleRequestOff=off;fPanelLifecycleStart=mach_absolute_time();
++  fPowerOff=true;fHardwareVsyncActive=false;fFadeStep=0;
++  if (fPerf.enabled) fPerf.lastPresentNS=0;
++  setProperty("SweetFramebufferHardwareVsync",false);
++  setProperty("SweetPanelPowerLastResult",(unsigned long long)(uint32_t)kIOReturnNotReady,32);
++  if (fVsync) {fVsync->cancelTimeout();fVsync->setTimeoutMS(1);}
++  return kIOReturnSuccess; /* admitted only; result published on completion */
++ }
++ OSSafeReleaseNULL(b);
++ if (rc==kIOReturnSuccess) rc=kIOReturnIOError;
++ fPanelLifecycleFault=true;fPowerOff=true;fHardwareVsyncActive=false;
++ setProperty("SweetPanelPowerLastResult",(unsigned long long)(uint32_t)rc,32);
++ SWEET_LOG_ERROR("SWEET FB PANEL: lifecycle admission failed rc=%#x; pixels frozen\n",(unsigned)rc);
++ return rc;
++}
++void AppleCLCD::servicePanelLifecycle(void)
++{
++ if (!fPanelLifecycleBackend) return;
++ SweetDisplayBackend *current=fDisplayClient->copyBackend();
++ bool same=current==fPanelLifecycleBackend && !fPanelLifecycleBackend->isInactive();
++ OSSafeReleaseNULL(current);
++ SweetPanelLifecycleStatus v={};
++ IOReturn rc=same ? fPanelLifecycleBackend->panelLifecycleStatus(fPanelLifecycleToken,&v) : kIOReturnNotReady;
++ uint64_t elapsed=0;absolutetime_to_nanoseconds(mach_absolute_time()-fPanelLifecycleStart,&elapsed);
++ if (elapsed>=17000000000ULL) rc=kIOReturnTimeout;
++ if (rc==kIOReturnSuccess && v.token==fPanelLifecycleToken &&
++     v.phase!=SweetPanelComplete && v.phase!=SweetPanelFault && v.phase!=SweetPanelStopped) {
++  if (fVsync) fVsync->setTimeoutMS(1);return;
++ }
++ bool completed=rc==kIOReturnSuccess && v.token==fPanelLifecycleToken &&
++     v.phase==SweetPanelComplete && v.result==kIOReturnSuccess && !v.uncertain &&
++     v.operation==(fPanelLifecycleRequestOff ? SweetPanelDisplayOff : SweetPanelDisplayOn) &&
++     v.resourcesHeld && (fPanelLifecycleRequestOff ? (v.touchQuiesced && v.displayDrained) : (v.pixelsComplete && !v.touchQuiesced));
++ if (!completed) {
++  if (rc==kIOReturnSuccess) rc=v.result==kIOReturnSuccess ? kIOReturnIOError : v.result;
++  stopPanelLifecycle();fPanelLifecycleFault=true;fPowerOff=true;
++  setProperty("SweetPanelPowerLastResult",(unsigned long long)(uint32_t)rc,32);
++  SWEET_LOG_ERROR("SWEET FB PANEL: lifecycle completion failed rc=%#x; no legacy recovery\n",(unsigned)rc);
++  return;
++ }
++ fPanelLifecycleDisplayOff=v.operation==SweetPanelDisplayOff;
++ OSSafeReleaseNULL(fPanelLifecycleBackend);fPanelLifecycleToken=0;
++ fPowerOff=fPanelLifecycleDisplayOff;fDirty=true;
++ setProperty("SweetPanelPowerLastResult",(unsigned long long)(uint32_t)kIOReturnSuccess,32);
++ if (fPanelLifecycleDesiredOff!=fPanelLifecycleDisplayOff) {
++  (void)requestCoordinatedPower(fPanelLifecycleDesiredOff);return;
++ }
++ if (!fPowerOff && fVsync) {fScanoutAuditResume=true;fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);}
++}
++void AppleCLCD::stopPanelLifecycle(void)
++{
++ if (fPanelLifecycleBackend) fPanelLifecycleBackend->cancelPanelLifecycle(fPanelLifecycleToken);
++ OSSafeReleaseNULL(fPanelLifecycleBackend);fPanelLifecycleToken=0;
++}
++#endif
+diff --git a/iokit/Kernel/arm/SweetFBVsync.inc b/iokit/Kernel/arm/SweetFBVsync.inc
+--- a/iokit/Kernel/arm/SweetFBVsync.inc
++++ b/iokit/Kernel/arm/SweetFBVsync.inc
+@@ -52,7 +52,7 @@
+ AppleCLCD::hardwareVsyncFired(OSObject *owner,IOInterruptEventSource *,int)
+ {
+  AppleCLCD *fb=(AppleCLCD *)owner;
+- if (fb->fServiceStopped || fb->isInactive()) return;
++ if (fb->fServiceStopped || fb->isInactive() || fb->fPanelLifecycleBackend || fb->fPanelLifecycleFault) return;
+  SweetDisplayBackend *current=fb->fDisplayClient->copyBackend();
+  bool bound=current && current==fb->fVsyncBackend && !current->isInactive();
+  OSSafeReleaseNULL(current);
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -162,6 +162,12 @@
+  void shutdownHardwareVsync(void);
+  void fallbackHardwareVsync(const char *);
+  static void hardwareVsyncFired(OSObject *,IOInterruptEventSource *,int);
++ bool fPanelLifecycleRequested, fPanelLifecycleFault, fPanelLifecycleDisplayOff, fPanelLifecycleDesiredOff, fPanelLifecycleRequestOff;
++ SweetDisplayBackend *fPanelLifecycleBackend;
++ uint64_t fPanelLifecycleToken, fPanelLifecycleStart;
++ void servicePanelLifecycle(void);
++ void stopPanelLifecycle(void);
++ IOReturn requestCoordinatedPower(bool);
+ 	IOReturn requestPanelPower(bool off); /* framebuffer gate -> typed backend */
+ 	enum { StateCall, StateAddClient, StateCloseClient, StatePort, StateStop };
+ 	struct StateRequest {
+@@ -501,6 +507,9 @@
+ 			}
+ 			bl->fAwaitingBackend=false;
+ 			IOReturn result=backend->setBrightness(level);
++   /* Lifecycle owns DSI temporarily or is parked OFF. Keep newest target;
++    * native property interest queues a retry at completion, no idle polling. */
++   if (result==kIOReturnBusy && backend->panelLifecycleCapabilities()) bl->fAwaitingBackend=true;
+ 			backend->release();
+ 			rc=result==kIOReturnSuccess ? 0 : -1;
+ 		} else rc=sweet_display_brightness_set(level);
+@@ -718,6 +727,8 @@
+ 	if (fb->fServiceMode && fb->fServiceStopped) return;
+ 	uint64_t now = mach_absolute_time();
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
++ if (fb->fPanelLifecycleBackend) fb->servicePanelLifecycle();
++ if (fb->fPanelLifecycleBackend || fb->fPanelLifecycleFault) return;
+  if (fb->fPerf.enabled && fb->fPowerOff) fb->fPerf.lastPresentNS=0;
+  if (fb->fOwnScanoutRequested) fb->scanoutStep();
+  if (fb->fHardwareVsyncRequested) {
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -14,6 +14,7 @@
+ #include "SweetDisplayClock.h"
+ #include "SweetDSILink.h"
+ #include <IOKit/IOLib.h>
++#include <IOKit/IOMessage.h>
+ #include <IOKit/IOCommandGate.h>
+ #include <IOKit/IOTimerEventSource.h>
+ #include <IOKit/IOMemoryDescriptor.h>
+@@ -106,9 +107,32 @@
+ {
+  SweetDisplayClient *self=(SweetDisplayClient *)owner;
+  IOLockLock(self->fLock); bool active=!self->fStopping; IOLockUnlock(self->fLock);
+- if (active) self->fChanged(self->fOwner);
+-}
+-
++ if (!active) return;
++ SweetDisplayBackend *backend=self->copyBackend();
++ if (backend!=self->fObserved) {
++  if (self->fInterest) {self->fInterest->remove();self->fInterest=NULL;}
++  OSSafeReleaseNULL(self->fObserved);
++  if (backend && !backend->isInactive()) {
++   self->fObserved=backend;backend=NULL;
++   self->fInterest=self->fObserved->registerInterest(gIOGeneralInterest,interest,self);
++   if (!self->fInterest) SWEET_LOG_ERROR("SWEET DISPLAY CLIENT: readiness interest unavailable; deferred requests await a new client event\n");
++  }
++ }
++ OSSafeReleaseNULL(backend);
++ self->fChanged(self->fOwner);
++}
++
++/* Native interest notification only queues work; never enters the consumer
++ * gate from MDSS's gate. Notification is not a readiness proof: the next
++ * typed request still checks admission under the provider gate. */
++IOReturn SweetDisplayClient::interest(void *target,void *,uint32_t type,IOService *provider,void *,vm_size_t)
++{
++ SweetDisplayClient *self=(SweetDisplayClient *)target;
++ if (type!=kIOMessageServicePropertyChange) return kIOReturnSuccess;
++ IOLockLock(self->fLock);
++ if (!self->fStopping && self->fBackend==provider) self->fEvent->interruptOccurred(NULL,NULL,0);
++ IOLockUnlock(self->fLock);return kIOReturnSuccess;
++}
+ SweetDisplayBackend *
+ SweetDisplayClient::copyBackend(void)
+ {
+@@ -130,6 +154,10 @@
+  if (fEventAdded) {
+   fEvent->disable(); fLoop->removeEventSource(fEvent); fEventAdded=false;
+  }
++ /* changed() is now synchronized. Interest callback uses only fLock and
++  * queues the disabled event, so removal outside the consumer gate is safe. */
++ if (fInterest) {fInterest->remove();fInterest=NULL;}
++ OSSafeReleaseNULL(fObserved);
+  if (fLock) {
+   IOLockLock(fLock); SweetDisplayBackend *old=fBackend; fBackend=NULL; IOLockUnlock(fLock);
+   OSSafeReleaseNULL(old);
+@@ -207,7 +235,7 @@
+  bool dsiBusy(void) const;
+  bool dsiDMAReady(void);
+  bool setupDSI(void);
+- void finishDSI(IOReturn,unsigned);
++ void finishDSI(IOReturn,unsigned,bool = false);
+  void restoreDSICommand(void);
+  void advanceDSI(void);
+  static IOReturn dsiBeginAction(OSObject *,void *,void *,void *,void *);
+@@ -350,6 +378,28 @@
+  void stopNoC(void);
+  static IOReturn noCAction(OSObject *,void *,void *,void *,void *);
+  static void noCTimerAction(OSObject *,IOTimerEventSource *);
++ /* Unified lifecycle module, same gate/owner as scanout, resources and DSI.
++  * No provider callback ever waits on this gate. Delays use one timer. */
++ IOTimerEventSource *fLifecycleTimer;
++ bool fLifecycleEnabled, fLifecycleTimerAdded, fLifecycleInternal, fLifecycleParked;
++ SweetPanelLifecycleStatus fLifecycle;
++ uint64_t fLifecycleNextToken, fLifecycleDeadline, fLifecycleStepDeadline, fLifecycleFrame;
++ uint32_t fLifecycleTE, fLifecycleAuto;
++ unsigned fLifecycleIdleSamples;
++ SweetScanoutPool *fLifecyclePool;
++ bool setupLifecycle(void);
++ bool lifecycleBusy(void) const;
++ bool lifecycleBlocked(void) const;
++ bool lifecycleParticipants(void);
++ bool lifecycleIRQDrained(void);
++ bool lifecycleResourcesHeld(void);
++ IOReturn beginLifecycle(unsigned,SweetScanoutPool *,uint64_t *);
++ void advanceLifecycle(void);
++ void finishLifecycle(IOReturn,const char *,bool = false);
++ void publishLifecycle(void);
++ void restoreLifecycleStream(void);
++ static IOReturn lifecycleAction(OSObject *,void *,void *,void *,void *);
++ static void lifecycleTimerAction(OSObject *,IOTimerEventSource *);
+  SweetTouchPanelClient *fTouchPanelClient;
+  SweetTouchPanel *fTouchPanel;
+  uint64_t fTouchPanelConsumer;
+@@ -403,6 +453,10 @@
+  void requestVsyncFallback(void) APPLE_KEXT_OVERRIDE;
+  void stop(IOService *) APPLE_KEXT_OVERRIDE;
+  void free(void) APPLE_KEXT_OVERRIDE;
++ unsigned panelLifecycleCapabilities(void) APPLE_KEXT_OVERRIDE;
++ IOReturn beginPanelLifecycle(unsigned,uint64_t *) APPLE_KEXT_OVERRIDE;
++ IOReturn panelLifecycleStatus(uint64_t,SweetPanelLifecycleStatus *) APPLE_KEXT_OVERRIDE;
++ void cancelPanelLifecycle(uint64_t) APPLE_KEXT_OVERRIDE;
+  IOReturn setPanelPower(bool) APPLE_KEXT_OVERRIDE;
+  IOReturn inspectScanout(SweetScanoutSnapshot *) APPLE_KEXT_OVERRIDE;
+  IOReturn beginScanout(SweetScanoutPool *,SweetVsyncChannel *) APPLE_KEXT_OVERRIDE;
+@@ -477,6 +531,7 @@
+  if (!setupLink()) return false;
+  if (!setupPanelPins()) return false;
+  if (!setupTouchPanel()) return false;
++ if (!setupLifecycle()) return false;
+  SWEET_LOG_INFO("SWEET MDSS: F1a v1 IOService backend; ABL scanout unchanged\n");
+  registerService();
+  return true;
+@@ -517,6 +572,8 @@
+  SweetRPMh *provider=self->fRPMhClient->copyBackend();
+  if (provider==self->fRPMh) { OSSafeReleaseNULL(provider); return; }
+  if (self->fRPMh) {
++  if (self->fLifecycleEnabled && self->fLifecycle.token)
++   self->finishLifecycle(kIOReturnNotReady,"resourcesChanged: participant withdrawn");
+   if (self->fManagedStarted) {
+    self->failManagedResources(kIOReturnNotReady,"RPMh provider changed");
+    self->cancelScanout("managed RPMh provider changed");
+@@ -564,6 +621,8 @@
+  SweetPanelPins *p=s->fPanelPinsClient->copyBackend();
+  if (p==s->fPanelPins) { OSSafeReleaseNULL(p); return; }
+  if (s->fPanelPins) {
++  if (s->fLifecycleEnabled && s->fLifecycle.token)
++   s->finishLifecycle(kIOReturnNotReady,"panelPinsChanged: participant withdrawn");
+   (void)s->fPanelPins->detachConsumer(s->fPanelPinsConsumer);
+   OSSafeReleaseNULL(s->fPanelPins); s->fPanelPinsConsumer=0;
+  }
+@@ -603,6 +662,8 @@
+  SweetTouchPanel *p=s->fTouchPanelClient->copyBackend();
+  if (p==s->fTouchPanel) { OSSafeReleaseNULL(p); return; }
+  if (s->fTouchPanel) {
++  if (s->fLifecycleEnabled && s->fLifecycle.token)
++   s->finishLifecycle(kIOReturnNotReady,"touchPanelChanged: participant withdrawn");
+   (void)s->fTouchPanel->detachConsumer(s->fTouchPanelConsumer);
+   OSSafeReleaseNULL(s->fTouchPanel); s->fTouchPanelConsumer=0;
+  }
+@@ -758,6 +819,7 @@
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  bool on=(uintptr_t)arg!=0;
++ if (self->fLifecycleEnabled) return kIOReturnUnsupported; /* use asynchronous typed lifecycle */
+  if (self->fManagedEnabled && !self->managedAccessReady()) return kIOReturnNotReady;
+  if (self->fScanoutState==SweetScanoutQuiescing || self->fScanoutState==SweetScanoutSubmitted)
+   self->cancelScanout("panel transition interrupted handoff");
+@@ -823,11 +885,13 @@
+ #include "SweetMDSSDSI.inc"
+ #include "SweetMDSSHost.inc"
+ #include "SweetMDSSLink.inc"
++#include "SweetMDSSLifecycle.inc"
+ 
+ IOReturn
+ SweetMDSS::readyAction(OSObject *owner,void *,void *,void *,void *)
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
++ if (self->lifecycleBlocked()) return kIOReturnBusy;
+  if (!self->fAccepting || self->isInactive()) return kIOReturnNotReady;
+  if (self->dsiBusy()) return kIOReturnBusy;
+  return self->managedAccessReady() && !self->fDsiPoisoned && self->dp_failed<3 && self->dp_clocks_on() &&
+@@ -842,6 +906,7 @@
+ SweetMDSS::writeAction(OSObject *owner,void *words,void *n,void *,void *)
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
++ if (self->lifecycleBlocked()) return kIOReturnBusy;
+  if (!self->fAccepting || self->isInactive() || self->dp_failed>=3 || self->fDsiPoisoned) return kIOReturnNotReady;
+  if (self->dsiBusy()) return kIOReturnBusy;
+  if (!self->managedAccessReady()) return kIOReturnNotReady;
+@@ -883,6 +948,9 @@
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  self->fAccepting=false;
++ if (self->fLifecycleEnabled && self->fLifecycle.token)
++  self->finishLifecycle(kIOReturnAborted,"provider stopped",true);
++ if (self->fLifecycleTimer) self->fLifecycleTimer->cancelTimeout();
+  self->stopManagedResources();
+  self->stopNoC();
+  self->stopLocalClocks();
+@@ -905,6 +973,7 @@
+ {
+  if (fGateAdded) (void)fGate->runAction(stopAction);
+  closeDisplayResources();
++ if (fLifecycleTimerAdded) { fLoop->removeEventSource(fLifecycleTimer); fLifecycleTimerAdded=false; }
+  if (fScanoutTimerAdded) { fLoop->removeEventSource(fScanoutTimer); fScanoutTimerAdded=false; }
+  if (fProbeAdded) { fLoop->removeEventSource(fProbe); fProbeAdded=false; }
+  if (fIrqProbeAdded) { fLoop->removeEventSource(fIrqProbe); fIrqProbeAdded=false; }
+@@ -924,7 +993,10 @@
+  /* Covers partial start too; any hardware-reachable pool has its own pin. */
+  if (fGateAdded) (void)fGate->runAction(stopAction);
+  closeDisplayResources();
++ if (fLifecycleTimerAdded) { fLoop->removeEventSource(fLifecycleTimer); fLifecycleTimerAdded=false; }
+  if (fScanoutTimerAdded) { fLoop->removeEventSource(fScanoutTimer); fScanoutTimerAdded=false; }
++ OSSafeReleaseNULL(fLifecycleTimer);
++ OSSafeReleaseNULL(fLifecyclePool);
+  OSSafeReleaseNULL(fScanoutTimer);
+  OSSafeReleaseNULL(fHardwarePool);
+  if (fClockTimerAdded) { fLoop->removeEventSource(fClockTimer); fClockTimerAdded=false; }
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -197,6 +197,7 @@
+ void SweetMDSS::clockTimerAction(OSObject *owner,IOTimerEventSource *)
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
++ if (s->fLifecycleEnabled && s->lifecycleBusy() && !s->lifecycleParticipants()) { s->finishLifecycle(kIOReturnNotReady,"resource participant lost");return; }
+  if (!s->fAccepting || s->isInactive()) return;
+  if (s->coreBusy()) s->advanceCoreResources();
+  else if (s->clockBusy()) s->advanceLocalClocks();
+diff --git a/iokit/Kernel/arm/SweetMDSSDSI.inc b/iokit/Kernel/arm/SweetMDSSDSI.inc
+--- a/iokit/Kernel/arm/SweetMDSSDSI.inc
++++ b/iokit/Kernel/arm/SweetMDSSDSI.inc
+@@ -56,6 +56,7 @@
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
+  OSData *data=(OSData *)arg;
++ if (!s->fLifecycleInternal && s->lifecycleBlocked()) return kIOReturnBusy;
+  if (!s->fAccepting || s->isInactive() || s->fDsiPoisoned) return kIOReturnNotReady;
+  if (!s->fDsiEnabled) return kIOReturnUnsupported;
+  if (!s->managedAccessReady()) return kIOReturnNotReady;
+@@ -141,6 +142,7 @@
+ SweetMDSS::dsiCancelAction(OSObject *owner,void *arg,void *,void *,void *)
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
++ if (s->fLifecycleEnabled && s->lifecycleBusy()) return kIOReturnBusy;
+  if (*(uint64_t *)arg!=s->fDsiStatus.token) return kIOReturnBadArgument;
+  if (s->dsiBusy()) s->finishDSI(kIOReturnAborted,SweetDSICancelled);
+  return kIOReturnSuccess;
+@@ -159,7 +161,7 @@
+  fDsiSaved=false;
+ }
+ void
+-SweetMDSS::finishDSI(IOReturn result,unsigned terminal)
++SweetMDSS::finishDSI(IOReturn result,unsigned terminal,bool noRestore)
+ {
+  if (fDsiTimer) fDsiTimer->cancelTimeout();
+  /* Once triggered, cancellation or timeout is not proof of DMA exit.
+@@ -167,8 +169,8 @@
+   * TE/auto paused. No reset/clock-off pretending to be a completion fence.
+   * A partially applied table is also an unknown DDIC state, even when its
+   * command DMA is already idle/unpinned. Recovery belongs to full rebuild. */
+- bool clocks=dp_clocks_on();
+- bool uncertain=fDsiStatus.state==SweetDSITransferring || (fDsiPaused && !clocks) ||
++ bool clocks=!noRestore && dp_clocks_on();
++ bool uncertain=noRestore || fDsiStatus.state==SweetDSITransferring || (fDsiPaused && !clocks) ||
+      (result!=kIOReturnSuccess && (fDsiStatus.completed || result==kIOReturnIOError));
+  fDsiStatus.hardwareUncertain=uncertain;
+  if (uncertain) fDsiPoisoned=true;
+@@ -198,6 +200,7 @@
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
+  if (!s->fAccepting || s->isInactive()) return;
++ if (s->fLifecycleEnabled && s->lifecycleBusy() && !s->lifecycleParticipants()) { s->finishLifecycle(kIOReturnNotReady,"DSI participant lost"); return; }
+  if (s->linkBusy()) s->advanceLink();
+  else if (s->hostBusy()) s->advanceHost();
+  else if (s->dsiBusy()) s->advanceDSI();
+diff --git a/iokit/Kernel/arm/SweetMDSSLifecycle.inc b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+@@ -0,0 +1,274 @@
++/* Unified warm lifecycle transaction. One MDSS gate, no cross-gate waits,
++ * reverse callbacks, extra MMIO owner or hidden recovery. A timer advances
++ * only the currently admitted token. Full DDIC prepare/reset/unprepare stays
++ * unsupported until actual profile and shared-power teardown are verified. */
++bool SweetMDSS::setupLifecycle(void)
++{
++ int mode=0,touch=0,own=0;
++ (void)PE_parse_boot_argn("sweetpanellifecycle",&mode,sizeof(mode));
++ if (!mode) return true;
++ (void)PE_parse_boot_argn("sweettouchpanel",&touch,sizeof(touch));
++ (void)PE_parse_boot_argn("sweetfbown",&own,sizeof(own));
++ if (mode!=1 || touch!=2 || own!=2 || !fTouchPanelClient || !fManagedEnabled ||
++     !fDsiEnabled || !fPanelPowerEnabled || fIrqMode!=2) return false;
++ fLifecycleTimer=IOTimerEventSource::timerEventSource(this,lifecycleTimerAction);
++ if (!fLifecycleTimer || fLoop->addEventSource(fLifecycleTimer)!=kIOReturnSuccess) return false;
++ fLifecycleTimerAdded=true;fLifecycleEnabled=true;
++ publishLifecycle();
++ SWEET_LOG_INFO("SWEET PANEL: unified warm lifecycle enabled; full prepare/reset/unprepare unavailable\n");
++ return true;
++}
++bool SweetMDSS::lifecycleBusy(void) const
++{ return fLifecycle.phase>=SweetPanelTouchPause && fLifecycle.phase<=SweetPanelTouchResume; }
++bool SweetMDSS::lifecycleBlocked(void) const
++{ return fLifecycleEnabled && (lifecycleBusy() || fLifecycleParked || fLifecycle.phase==SweetPanelFault || fLifecycle.phase==SweetPanelStopped); }
++unsigned SweetMDSS::panelLifecycleCapabilities(void)
++{
++ return fLifecycleEnabled ? (1u<<SweetPanelTakeover)|(1u<<SweetPanelDisplayOff)|(1u<<SweetPanelDisplayOn) : 0;
++}
++void SweetMDSS::publishLifecycle(void)
++{
++ setProperty("SweetPanelLifecycleToken",(unsigned long long)fLifecycle.token,64);
++ setProperty("SweetPanelLifecycleOperation",(unsigned long long)fLifecycle.operation,32);
++ setProperty("SweetPanelLifecyclePhase",(unsigned long long)fLifecycle.phase,32);
++ setProperty("SweetPanelLifecycleResult",(unsigned long long)(uint32_t)fLifecycle.result,32);
++ setProperty("SweetPanelLifecycleUncertain",fLifecycle.uncertain);
++}
++/* Client withdrawal is checked even before its queued changed() event runs.
++ * Participants remain retained by MDSS until that event faults this generation
++ * BEFORE detach/release. No replacement may inherit an old completion token. */
++bool SweetMDSS::lifecycleParticipants(void)
++{
++ if (!fAccepting || isInactive() || !fTouchPanel || !fRPMh ||
++     fTouchPanel->isInactive() || fRPMh->isInactive() || !fTouchPanelConsumer || !fRPMhConsumer) return false;
++ SweetTouchPanel *t=fTouchPanelClient->copyBackend();
++ SweetRPMh *r=fRPMhClient->copyBackend();
++ SweetPanelPins *p=fPanelPinsClient ? fPanelPinsClient->copyBackend() : NULL;
++ bool ok=t==fTouchPanel && r==fRPMh && p==fPanelPins && (!p || !p->isInactive());
++ if (ok && fLifecycle.touchQuiesced) {
++  SweetTouchPanelStatus fence={};
++  ok=t->copyStatus(fTouchPanelConsumer,fLifecycle.touchToken,&fence)==kIOReturnSuccess &&
++      fence.token==fLifecycle.touchToken && fence.quiesced && !fence.ready && !fence.uncertain && fence.result==kIOReturnSuccess;
++ }
++ OSSafeReleaseNULL(t);OSSafeReleaseNULL(r);OSSafeReleaseNULL(p);
++ return ok;
++}
++bool SweetMDSS::lifecycleIRQDrained(void)
++{
++ if (!fMaps[11] || __atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE)!=IrqIdle) return false;
++ vm_offset_t g=fMaps[11]->getVirtualAddress();const uint32_t bit=1u<<19;
++ /* RWP, enable AND active must each settle. Software IrqIdle alone cannot
++  * prove the GIC top half has executed its final ICC_EOIR1_EL1. */
++ return !(dp_rd(g,0)&(1u<<31)) && !(dp_rd(g,0x10c)&bit) && !(dp_rd(g,0x30c)&bit) &&
++     !dp_rd(fMaps[10]->getVirtualAddress(),0);
++}
++bool SweetMDSS::lifecycleResourcesHeld(void)
++{
++ if (fManagedState!=ManagedReady || fManagedRails!=15 || !fManagedARC || !fManagedBandwidth ||
++     !fManagedClock || fNoCFault || fClockFault || !localClocksReady() ||
++     (fCoreProfile && !coreReady()) || (fHostProfile && fHostPhase!=HostReady) ||
++     (fLinkProfile && (fLinkPhase!=LinkReady || !linkConfiguration()))) return false;
++ SweetClockLease c={};SweetNoCStatus n={};SweetDisplayPowerStatus a={};
++ return localClockStatus(fManagedClock,&c)==kIOReturnSuccess && c.state==SweetClockHeld &&
++     c.mask==mdssClockMasks[SweetClockDSI0] && bandwidthStatus(fManagedBandwidth,&n)==kIOReturnSuccess &&
++     n.state==SweetNoCHeld && fRPMh->copyDisplayPowerStatus(fRPMhConsumer,fManagedARC,&a)==kIOReturnSuccess &&
++     a.state==SweetRPMhComplete && !a.uncertain && a.corner==SweetDisplayTurbo;
++}
++struct SweetLifecycleRequest { unsigned action,operation; uint64_t token,*out; SweetPanelLifecycleStatus *status; };
++IOReturn SweetMDSS::beginPanelLifecycle(unsigned op,uint64_t *token)
++{
++ if (!token) return kIOReturnBadArgument;*token=0;
++ SweetLifecycleRequest r={};r.operation=op;r.out=token;
++ return fGate ? fGate->runAction(lifecycleAction,&r) : kIOReturnNotReady;
++}
++IOReturn SweetMDSS::panelLifecycleStatus(uint64_t token,SweetPanelLifecycleStatus *status)
++{
++ if (!status) return kIOReturnBadArgument;*status={};
++ SweetLifecycleRequest r={};r.action=1;r.token=token;r.status=status;
++ return fGate ? fGate->runAction(lifecycleAction,&r) : kIOReturnNotReady;
++}
++void SweetMDSS::cancelPanelLifecycle(uint64_t token)
++{
++ SweetLifecycleRequest r={};r.action=2;r.token=token;
++ if (fGate) (void)fGate->runAction(lifecycleAction,&r);
++}
++IOReturn SweetMDSS::lifecycleAction(OSObject *owner,void *arg,void *,void *,void *)
++{
++ SweetMDSS *s=(SweetMDSS *)owner;SweetLifecycleRequest &r=*(SweetLifecycleRequest *)arg;
++ if (r.action) {
++  if (!r.token || r.token!=s->fLifecycle.token) return kIOReturnNotFound;
++  if (r.action==1) { *r.status=s->fLifecycle;return kIOReturnSuccess; }
++  if (s->lifecycleBusy() || s->fLifecycleParked)
++   s->finishLifecycle(kIOReturnAborted,"consumer cancelled");
++  return kIOReturnSuccess;
++ }
++ /* Takeover needs the retained pool and channel from beginScanout(). */
++ if (r.operation==SweetPanelTakeover) return kIOReturnBadArgument;
++ return s->beginLifecycle(r.operation,NULL,r.out);
++}
++IOReturn SweetMDSS::beginLifecycle(unsigned op,SweetScanoutPool *pool,uint64_t *token)
++{
++ *token=0;
++ if (!fLifecycleEnabled) return kIOReturnUnsupported;
++ /* Unknown profile operations rejected BEFORE touch/mailbox, TE or votes. */
++ if (op!=SweetPanelTakeover && op!=SweetPanelDisplayOff && op!=SweetPanelDisplayOn) return kIOReturnUnsupported;
++ if (!fAccepting || isInactive() || fDsiPoisoned ||
++     fLifecycle.phase==SweetPanelFault || fLifecycle.phase==SweetPanelStopped) return kIOReturnNotReady;
++ if (lifecycleBusy() || dsiBusy() || clockBusy() || noCBusy() || hostBusy() || linkBusy()) return kIOReturnBusy;
++ if (fLifecycleNextToken==~0ULL) return kIOReturnNoResources;
++ if (!lifecycleParticipants()) return kIOReturnNotReady;
++ bool available=false;
++ if (fTouchPanel->copyWorkerAvailable(&available)!=kIOReturnSuccess || !available) return kIOReturnNotReady;
++ if (op==SweetPanelTakeover) {
++  if (!pool || fLifecycle.token || fScanoutUsed || fLifecycleParked) return kIOReturnBusy;
++ } else {
++  if (fScanoutState!=SweetScanoutActive || !lifecycleResourcesHeld() || !scanoutConfiguration(false)) return kIOReturnNotReady;
++  if ((op==SweetPanelDisplayOff && (fPanelState!=PanelOn || fLifecycleParked)) ||
++      (op==SweetPanelDisplayOn && (fPanelState!=PanelOff || !fLifecycleParked))) return kIOReturnNotReady;
++ }
++ uint64_t touch=0;
++ if (op==SweetPanelDisplayOn) {
++  SweetTouchPanelStatus t={};
++  if (fTouchPanel->copyStatus(fTouchPanelConsumer,fLifecycle.touchToken,&t)!=kIOReturnSuccess ||
++      !t.quiesced || t.uncertain || t.result!=kIOReturnSuccess) return kIOReturnNotReady;
++  touch=t.token;
++ } else {
++  IOReturn rc=fTouchPanel->quiesce(fTouchPanelConsumer,&touch);
++  if (rc!=kIOReturnSuccess) return rc; /* no lifecycle token, no display effect */
++ }
++ fLifecycle={};fLifecycle.token=++fLifecycleNextToken;fLifecycle.operation=op;
++ fLifecycle.touchToken=touch;fLifecycle.result=kIOReturnNotReady;
++ fLifecycle.phase=op==SweetPanelDisplayOn ? SweetPanelDrain : SweetPanelTouchPause;
++ fLifecycle.touchQuiesced=op==SweetPanelDisplayOn;
++ fLifecycle.resourcesHeld=op!=SweetPanelTakeover;fLifecycle.rails=fManagedRails;
++ fLifecycleDeadline=scanout_now()+16000000000ULL;
++ fLifecycleStepDeadline=scanout_now()+(op==SweetPanelDisplayOn ? 50000000ULL : 6500000000ULL);fLifecycleIdleSamples=0;
++ if (pool) {pool->retain();fLifecyclePool=pool;}
++ *token=fLifecycle.token;publishLifecycle();fLifecycleTimer->setTimeoutMS(1);
++ SWEET_LOG_INFO("SWEET PANEL: begin token=%llu operation=%u; admitted, not completed\n",fLifecycle.token,op);
++ return kIOReturnSuccess;
++}
++void SweetMDSS::finishLifecycle(IOReturn result,const char *why,bool stopped)
++{
++ if (!fLifecycle.token || fLifecycle.phase==SweetPanelFault || fLifecycle.phase==SweetPanelStopped) return;
++ if (fLifecycleTimer) fLifecycleTimer->cancelTimeout();
++ if (result!=kIOReturnSuccess) {
++  /* Invalidate before cancelling children. No callback can advance a dead
++   * generation. Keep all votes/pins and any DMA lifetime pin, no auto resume,
++   * old TE replay, reset, powerdown or background transport continuation. */
++  fLifecycle.phase=stopped ? SweetPanelStopped : SweetPanelFault;
++  fLifecycle.result=result;fLifecycle.uncertain=true;fPanelState=PanelUnknown;
++  if (fTouchPanel && fLifecycle.touchToken)
++   (void)fTouchPanel->cancelRequest(fTouchPanelConsumer,fLifecycle.touchToken);
++  if (dsiBusy()) finishDSI(result,SweetDSICancelled,true);
++  cancelScanout(why);
++  failManagedResources(result,why);
++  pauseIRQ();
++  fDsiPoisoned=true;fLifecycle.touchQuiesced=false;
++  publishPanelState();
++  SWEET_LOG_ERROR("SWEET PANEL: token=%llu failed rc=%#x %s; resources retained, no recovery\n",fLifecycle.token,(unsigned)result,why);
++ } else {
++  fLifecycle.phase=SweetPanelComplete;fLifecycle.result=result;
++  fLifecycleParked=fLifecycle.operation==SweetPanelDisplayOff;
++  SWEET_LOG_INFO("SWEET PANEL: token=%llu complete operation=%u parked=%u; rails retained\n",fLifecycle.token,fLifecycle.operation,fLifecycleParked);
++ }
++ publishLifecycle();
++ /* Wake deferred typed clients (e.g. brightness) without a reverse gate
++  * call. Their interest callback only queues their own software event. */
++ if (result==kIOReturnSuccess) messageClients(kIOMessageServicePropertyChange);
++}
++void SweetMDSS::restoreLifecycleStream(void)
++{
++ const vm_offset_t top=fMaps[9]->getVirtualAddress();
++ dp_wr(top,0x1018,1u<<8);
++ if (dp_rd(top,0x1014)&(1u<<8)) { finishLifecycle(kIOReturnIOError,"stale pixel done did not clear");return; }
++ fLifecycleFrame=fFrameCount;fPanelState=PanelOn;fIrqDisplayOn=true;publishPanelState();
++ if (!armIRQ()) { finishLifecycle(kIOReturnIOError,"pixel IRQ rearm");return; }
++ dp_wr(dp_intf1,0x2b4,fLifecycleAuto);dp_wr(dp_intf1,0x288,fLifecycleTE);
++ fLifecycle.phase=SweetPanelFrame;fLifecycleStepDeadline=scanout_now()+100000000ULL;
++}
++void SweetMDSS::lifecycleTimerAction(OSObject *owner,IOTimerEventSource *sender)
++{
++ SweetMDSS *s=(SweetMDSS *)owner;
++ if (!s->lifecycleBusy()) return;
++ s->advanceLifecycle();
++ if (s->lifecycleBusy()) sender->setTimeoutMS(1);
++}
++void SweetMDSS::advanceLifecycle(void)
++{
++ if (!lifecycleParticipants()) {finishLifecycle(kIOReturnNotReady,"participant unavailable");return;}
++ uint64_t now=scanout_now();
++ if (now>=fLifecycleDeadline || now>=fLifecycleStepDeadline) {finishLifecycle(kIOReturnTimeout,"lifecycle deadline");return;}
++ if (fLifecycle.phase==SweetPanelTouchPause || fLifecycle.phase==SweetPanelTouchResume) {
++  SweetTouchPanelStatus t={};
++  if (fTouchPanel->copyStatus(fTouchPanelConsumer,fLifecycle.touchToken,&t)!=kIOReturnSuccess ||
++      t.uncertain || (t.result!=kIOReturnSuccess && t.result!=kIOReturnNotReady)) {
++   finishLifecycle(kIOReturnIOError,"touch fence failed");return;
++  }
++  if (t.result==kIOReturnNotReady) return;
++  if (fLifecycle.phase==SweetPanelTouchResume) {
++   if (!t.ready || t.quiesced) {finishLifecycle(kIOReturnIOError,"touch resume proof absent");return;}
++   fLifecycle.touchQuiesced=false;finishLifecycle(kIOReturnSuccess,"warm lifecycle ready");return;
++  }
++  if (!t.quiesced || t.ready) {finishLifecycle(kIOReturnIOError,"touch pause proof absent");return;}
++  fLifecycle.touchQuiesced=true;
++  if (fLifecycle.operation==SweetPanelTakeover) {
++   fLifecycleInternal=true;
++   IOReturn rc=scanoutBeginAction(this,fLifecyclePool,fVsyncChannel,NULL,NULL);
++   fLifecycleInternal=false;
++   if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"takeover continuation refused");return;}
++   fLifecycle.phase=SweetPanelTakeoverPending;fLifecycleStepDeadline=now+5000000000ULL;
++  } else {
++   fLifecycleTE=dp_rd(dp_intf1,0x288);fLifecycleAuto=dp_rd(dp_intf1,0x2b4);
++   dp_wr(dp_intf1,0x288,fLifecycleTE&~(1u<<20));dp_wr(dp_intf1,0x2b4,0);
++   pauseIRQ();fLifecycle.phase=SweetPanelDrain;fLifecycleStepDeadline=now+50000000ULL;
++  }
++  publishLifecycle();return;
++ }
++ if (fLifecycle.phase==SweetPanelTakeoverPending) {
++  if (fScanoutState==SweetScanoutFailed || fManagedState==ManagedFault) {finishLifecycle(kIOReturnIOError,"takeover child failed");return;}
++  if (fScanoutState!=SweetScanoutActive) return;
++  if (!lifecycleResourcesHeld()) {finishLifecycle(kIOReturnNotReady,"takeover resources not held");return;}
++  fLifecycle.resourcesHeld=fLifecycle.pixelsComplete=true;fLifecycle.rails=fManagedRails;
++ } else if (fLifecycle.phase==SweetPanelDrain) {
++  if (!lifecycleResourcesHeld() || !dp_clocks_on()) {finishLifecycle(kIOReturnNotReady,"warm resource lease lost");return;}
++  if (!lifecycleIRQDrained() || (dp_rd(dp_dsi,8)&6u)) return;
++  if (dp_rd(dp_intf1,0x2b4) || (dp_rd(dp_intf1,0x288)&(1u<<20))) {finishLifecycle(kIOReturnIOError,"stream pause drift");return;}
++  uint32_t line=dp_rd(dp_intf1,0x2b0)&0xffffu;
++  if (line>0 && line<2340) fLifecycleIdleSamples=0;else ++fLifecycleIdleSamples;
++  if (fLifecycleIdleSamples<2) return;
++  fLifecycle.displayDrained=true;
++  /* Only the already-used 28/29 command is authorized here. No generic
++   * vendor bytes, sleep, reset or pin operation implied by a warm request. */
++  const uint8_t command[]={5,1,0,0,0,0,1,(uint8_t)(fLifecycle.operation==SweetPanelDisplayOn ? 0x29 : 0x28)};
++  fLifecycleInternal=true;
++  IOReturn rc=beginDSISequence(command,sizeof(command),&fLifecycle.commandToken);
++  fLifecycleInternal=false;
++  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"display command admission");return;}
++  fPanelState=fLifecycle.operation==SweetPanelDisplayOn ? PanelOnPending : PanelOffPending;
++  publishPanelState();fLifecycle.phase=SweetPanelCommand;fLifecycleStepDeadline=now+500000000ULL;
++  publishLifecycle();return;
++ } else if (fLifecycle.phase==SweetPanelCommand) {
++  if (!lifecycleResourcesHeld()) {finishLifecycle(kIOReturnNotReady,"command resource lease lost");return;}
++  if (dsiBusy()) return;
++  if (fDsiStatus.token!=fLifecycle.commandToken || fDsiStatus.state!=SweetDSIComplete ||
++      fDsiStatus.result!=kIOReturnSuccess || fDsiStatus.hardwareUncertain) {finishLifecycle(kIOReturnIOError,"display command failed");return;}
++  if (fLifecycle.operation==SweetPanelDisplayOff) {
++   fPanelState=PanelOff;fIrqDisplayOn=false;publishPanelState();
++   finishLifecycle(kIOReturnSuccess,"display off, not sleep/rail-off");return;
++  }
++  restoreLifecycleStream();publishLifecycle();return;
++ } else if (fLifecycle.phase==SweetPanelFrame) {
++  unsigned irq=__atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE);
++  if (!lifecycleResourcesHeld() || !scanoutConfiguration(false) || (irq!=IrqArmed && irq!=IrqPending) ||
++      dp_rd(dp_intf1,0x2b4)!=fLifecycleAuto || dp_rd(dp_intf1,0x288)!=fLifecycleTE) {finishLifecycle(kIOReturnNotReady,"resumed pixel configuration lost");return;}
++  if (dp_rd(dp_ctl,0x18) || !(dp_rd(fMaps[9]->getVirtualAddress(),0x1014)&(1u<<8)) || fFrameCount<=fLifecycleFrame) return;
++  fLifecycle.pixelsComplete=true;
++ } else return;
++ /* A retained rail lease plus fresh pixel transfer precedes touch recovery.
++  * This is NOT a proof that reset/shared-rail power-cycling is safe. */
++ uint64_t touch=0;IOReturn rc=fTouchPanel->resume(fTouchPanelConsumer,&touch);
++ if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"touch resume admission");return;}
++ fLifecycle.touchToken=touch;fLifecycle.touchQuiesced=false;fLifecycle.phase=SweetPanelTouchResume;
++ fLifecycleStepDeadline=scanout_now()+6500000000ULL;publishLifecycle();
++}
+diff --git a/iokit/Kernel/arm/SweetMDSSNoC.inc b/iokit/Kernel/arm/SweetMDSSNoC.inc
+--- a/iokit/Kernel/arm/SweetMDSSNoC.inc
++++ b/iokit/Kernel/arm/SweetMDSSNoC.inc
+@@ -224,7 +224,11 @@
+ }
+ 
+ void SweetMDSS::noCTimerAction(OSObject *owner,IOTimerEventSource *)
+-{ SweetMDSS *s=(SweetMDSS *)owner; if (s->fAccepting && !s->isInactive() && s->noCBusy()) s->advanceNoC(); }
++{
++ SweetMDSS *s=(SweetMDSS *)owner;
++ if (s->fLifecycleEnabled && s->lifecycleBusy() && !s->lifecycleParticipants()) { s->finishLifecycle(kIOReturnNotReady,"resource participant lost");return; }
++ if (s->fAccepting && !s->isInactive() && s->noCBusy()) s->advanceNoC();
++}
+ void SweetMDSS::advanceNoC(void)
+ {
+  uint64_t now=scanout_now();
+diff --git a/iokit/Kernel/arm/SweetMDSSScanout.inc b/iokit/Kernel/arm/SweetMDSSScanout.inc
+--- a/iokit/Kernel/arm/SweetMDSSScanout.inc
++++ b/iokit/Kernel/arm/SweetMDSSScanout.inc
+@@ -96,6 +96,7 @@
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
+  SweetScanoutPool *pool=(SweetScanoutPool *)arg0;
++ if (s->fLifecycleEnabled && !s->fLifecycleInternal && s->lifecycleBlocked()) return kIOReturnBusy;
+  int mode=0; (void)PE_parse_boot_argn("sweetfbown",&mode,sizeof(mode));
+  if (mode!=2) return kIOReturnUnsupported;
+  if (s->dsiBusy()) return kIOReturnBusy;
+@@ -121,6 +122,9 @@
+   IOReturn rc=s->managedPreflight();
+   if (rc!=kIOReturnSuccess) return rc; /* Before quiesce or any resource vote. */
+  }
++ if (s->fLifecycleEnabled && !s->fLifecycleInternal) {
++  uint64_t token=0; return s->beginLifecycle(SweetPanelTakeover,pool,&token);
++ }
+  s->fScanoutTimer=IOTimerEventSource::timerEventSource(s,scanoutTimerAction);
+  if (!s->fScanoutTimer) return kIOReturnNoMemory;
+  if (s->fLoop->addEventSource(s->fScanoutTimer)!=kIOReturnSuccess) {
+@@ -146,7 +150,7 @@
+  if (fManagedStarted) failManagedResources(kIOReturnAborted,reason);
+  /* Before any source register write the pool is CPU-only: restore inherited
+   * TE/auto if accessible. After a write, never roll back/free on readback alone. */
+- if (!fScanoutTouched && !fManagedStarted && dp_clocks_on()) {
++ if (!fLifecycleEnabled && !fScanoutTouched && !fManagedStarted && dp_clocks_on()) {
+   dp_wr(dp_intf1,0x2b4,fScanoutAuto);
+   dp_wr(dp_intf1,0x288,fScanoutTE);
+  }
+@@ -162,7 +166,15 @@
+ SweetMDSS::scanoutTimerAction(OSObject *owner,IOTimerEventSource *sender)
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
++ if (s->fLifecycleEnabled && s->lifecycleBusy() && !s->lifecycleParticipants()) {
++  s->finishLifecycle(kIOReturnNotReady,"scanout participant lost"); return;
++ }
+  if (s->fScanoutState==SweetScanoutResources) {
++  if (s->fLifecycleEnabled && !s->fManagedStarted) {
++   if (scanout_now()>=s->fScanoutDeadline) { s->finishLifecycle(kIOReturnTimeout,"takeover IRQ drain"); return; }
++   if (!s->lifecycleIRQDrained() || (dp_rd(s->dp_dsi,8)&6u)) { sender->setTimeoutMS(1); return; }
++   s->fLifecycle.displayDrained=true; s->beginManagedResources();
++  }
+   if (!s->fAccepting || s->isInactive() || !s->fIrqDisplayOn || s->fPanelState!=PanelOn) {
+    s->cancelScanout("resource takeover admission lost"); return;
+   }
+@@ -197,7 +209,8 @@
+   if (s->fManagedEnabled && !s->fManagedStarted) {
+    s->pauseIRQ(); /* publication only; no reverse consumer-gate callback */
+    s->fScanoutState=SweetScanoutResources;
+-   s->beginManagedResources();
++   if (!s->fLifecycleEnabled) s->beginManagedResources();
++   else s->fScanoutDeadline=now+50000000ULL;
+    sender->setTimeoutMS(1); return;
+   }
+   /* Separate hardware lifetime pin precedes the FIRST possibly effective
+@@ -249,7 +262,11 @@
+ SweetMDSS::scanoutStatusAction(OSObject *owner,void *arg0,void *arg1,void *,void *)
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
+- if (!arg0 || arg0!=s->fHardwarePool || !arg1) return kIOReturnBadArgument;
++ if (!arg0 || (arg0!=s->fHardwarePool && arg0!=s->fLifecyclePool) || !arg1) return kIOReturnBadArgument;
++ if (s->fLifecycleEnabled && s->fLifecyclePool && s->fLifecycle.phase==SweetPanelTouchPause) {
++  *(SweetScanoutStatus *)arg1={}; ((SweetScanoutStatus *)arg1)->state=SweetScanoutCoordinating;
++  return kIOReturnSuccess;
++ }
+  unsigned irq=__atomic_load_n(&s->fIrqState,__ATOMIC_ACQUIRE);
+  if (s->fManagedEnabled && s->fManagedState==ManagedFault)
+   s->cancelScanout("managed resources unavailable");
+@@ -257,6 +274,10 @@
+   s->cancelScanout("owned scanout IRQ unavailable"); /* touched=true: no MMIO */
+  s->fScanoutStatus.state=s->fScanoutState;
+  *(SweetScanoutStatus *)arg1=s->fScanoutStatus;
++ if (s->fLifecycleEnabled && s->fLifecycle.operation==SweetPanelTakeover && s->lifecycleBusy())
++  ((SweetScanoutStatus *)arg1)->state=SweetScanoutCoordinating;
++ if (s->fLifecycleEnabled && (s->fLifecycle.phase==SweetPanelFault || s->fLifecycle.phase==SweetPanelStopped))
++  ((SweetScanoutStatus *)arg1)->state=SweetScanoutFailed;
+  return kIOReturnSuccess; /* legal after stop: pure retained state, no MMIO */
+ }
+ void
+@@ -268,6 +289,8 @@
+ SweetMDSS::scanoutAbandonAction(OSObject *owner,void *arg0,void *,void *,void *)
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
++ if (s->fLifecycleEnabled && arg0 && (arg0==s->fLifecyclePool || arg0==s->fHardwarePool))
++  s->finishLifecycle(kIOReturnAborted,"scanout consumer detached");
+  if (arg0 && arg0==s->fHardwarePool) s->cancelScanout("consumer detached");
+  return kIOReturnSuccess;
+ }
+diff --git a/iokit/Kernel/arm/SweetTouchPanel.cpp b/iokit/Kernel/arm/SweetTouchPanel.cpp
+--- a/iokit/Kernel/arm/SweetTouchPanel.cpp
++++ b/iokit/Kernel/arm/SweetTouchPanel.cpp
+@@ -85,6 +85,15 @@
+   if (s->fAccepting && !s->fPoisoned) s->refresh();
+   *r.status=s->fStatus;return kIOReturnSuccess;
+  }
++ if (r.op==OpCancel) {
++  if (!r.client || r.client!=s->fClient || !r.token || r.token!=s->fStatus.token) return kIOReturnNotFound;
++  if (s->fTimer) s->fTimer->cancelTimeout();
++  if (s->fSession) { (void)sweet_touch_panel_close(s->fSession);s->fSession=0; }
++  s->fBusy=false;s->fPoisoned=true;
++  s->fStatus.state=SWEET_TOUCH_STOPPED;s->fStatus.result=kIOReturnAborted;
++  s->fStatus.quiesced=s->fStatus.ready=false;s->fStatus.uncertain=s->fTouched;
++  return kIOReturnSuccess;
++ }
+  if (!s->fAccepting || s->isInactive()) return kIOReturnNotReady;
+  if (r.op==OpInfo) {
+   sweet_touch_panel_status p={};
+@@ -143,6 +152,8 @@
+ { if (!available) return kIOReturnBadArgument;*available=false;TouchPanelRequest r={};r.op=OpInfo;r.available=available;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+ IOReturn SweetTouchPanel::copyStatus(uint64_t id,uint64_t token,SweetTouchPanelStatus *status)
+ { if (!status) return kIOReturnBadArgument;*status={};TouchPanelRequest r={};r.op=OpQuery;r.client=id;r.token=token;r.status=status;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetTouchPanel::cancelRequest(uint64_t id,uint64_t token)
++{ TouchPanelRequest r={};r.op=OpCancel;r.client=id;r.token=token;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+ void SweetTouchPanel::shutdown(void)
+ {
+  if (fGateAdded) { TouchPanelRequest r={};r.op=OpStop;(void)fGate->runAction(action,&r); }
+diff --git a/iokit/Kernel/arm/SweetTouchPanel.h b/iokit/Kernel/arm/SweetTouchPanel.h
+--- a/iokit/Kernel/arm/SweetTouchPanel.h
++++ b/iokit/Kernel/arm/SweetTouchPanel.h
+@@ -24,7 +24,7 @@
+  unsigned fMode;
+  uint64_t fSession, fClient, fNextClient, fDeadline;
+  SweetTouchPanelStatus fStatus;
+- enum Operation { OpAttach, OpDetach, OpQuery, OpQuiesce, OpResume, OpStop, OpInfo };
++ enum Operation { OpAttach, OpDetach, OpQuery, OpQuiesce, OpResume, OpStop, OpInfo, OpCancel };
+  static IOReturn action(OSObject *,void *,void *,void *,void *);
+  static void timerAction(OSObject *,IOTimerEventSource *);
+  static uint64_t nowNS(void);
+@@ -51,6 +51,9 @@
+   * Any submitted request retires this worker session on service close. */
+  IOReturn quiesce(uint64_t,uint64_t *);
+  IOReturn resume(uint64_t,uint64_t *);
++ /* Consumer-scoped cancellation retires the exclusive mailbox session. It
++  * does not stop this IOService or claim the worker already drained. */
++ IOReturn cancelRequest(uint64_t,uint64_t);
+ };
+ class SweetTouchPanelClient : public OSObject {
+  OSDeclareDefaultStructors(SweetTouchPanelClient);
