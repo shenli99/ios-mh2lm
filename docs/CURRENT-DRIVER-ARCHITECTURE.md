@@ -1,5 +1,14 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0192当前增量（本地通过，未实机）：** 已补独立`SweetPanelPins : IOService`及MDSS真实
+registry匹配绑定，管理GPIO6/SOUTH reset与GPIO8/NORTH TE。typed请求在provider workloop/
+gate/timer执行，分别确认输出latch与实际输入，reset最短10/2/10/5ms；支持park后低保持重激活。
+默认关闭，MDSS本批仅绑定，不调用activate/reset/park；实际启动尚未复位面板。
+13套本地检查及arm64单文件对象通过，严格重放和114个原CI marker通过；CircleCI未改。
+详见[引脚服务架构、时序与边界](PANEL-PINS-D1.md)。PD3仍需实际panel身份、触摸协调、
+完整vendor ON/OFF及资源反向释放，整屏冷初始化/ABL退出未完成。继续完整驱动优先，暂不要求push/刷机。
+以下旧段落按当时范围保留，当前以0192及NOTES顶部为准。
+
 **0191当前增量（本地通过，未实机）：** 实际 managed 接管已在资源完成后、host 重建前，
 加入 PHY v4.0 / PLL 7nm-v2 复位重配和 BYTE/PCLK 时钟重建。沿原 MDSS owner/gate/DSI timer，
 显式 `sweetdsilink=2` 要求 host1/core2/managed1；默认0保留0190行为。

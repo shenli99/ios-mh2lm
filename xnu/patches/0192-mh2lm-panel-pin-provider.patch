@@ -1,0 +1,567 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -9,6 +9,7 @@
+ #include "SweetDisplayBackend.h"
+ #include "SweetScanoutPool.h"
+ #include "SweetRPMh.h"
++#include "SweetPanelPins.h"
+ #include "SweetDisplayClock.h"
+ #include "SweetDSILink.h"
+ #include <IOKit/IOLib.h>
+@@ -348,6 +349,12 @@
+  void stopNoC(void);
+  static IOReturn noCAction(OSObject *,void *,void *,void *,void *);
+  static void noCTimerAction(OSObject *,IOTimerEventSource *);
++ SweetPanelPinsClient *fPanelPinsClient;
++ SweetPanelPins *fPanelPins;
++ uint64_t fPanelPinsConsumer;
++ bool setupPanelPins(void);
++ static void panelPinsChanged(OSObject *);
++ void closePanelPins(void);
+  bool setupDisplayResources(IOService *);
+  static void resourcesChanged(OSObject *);
+  void closeDisplayResources(void);
+@@ -461,6 +468,7 @@
+  if (!setupManagedResources()) return false;
+  if (!setupHost()) return false;
+  if (!setupLink()) return false;
++ if (!setupPanelPins()) return false;
+  SWEET_LOG_INFO("SWEET MDSS: F1a v1 IOService backend; ABL scanout unchanged\n");
+  registerService();
+  return true;
+@@ -531,9 +539,50 @@
+  SWEET_LOG_INFO("SWEET MDSS: matched RPMh consumer=%llu; metadata ready, no automatic votes\n",id);
+ }
+ 
++/* Binding only; actual reset/ON/OFF will require confirmed identity and the
++ * full lifecycle coordinator. No pin operations in startup/matched/change. */
++bool SweetMDSS::setupPanelPins(void)
++{
++ int mode=0; (void)PE_parse_boot_argn("sweetpanelpins",&mode,sizeof(mode));
++ if (!mode) return true;
++ if ((mode!=1 && mode!=2) || !fDisplayResourceMode) return false;
++ fPanelPinsClient=SweetPanelPinsClient::withOwner(this,fLoop,panelPinsChanged);
++ return fPanelPinsClient && fPanelPinsClient->watch();
++}
++void SweetMDSS::panelPinsChanged(OSObject *owner)
++{
++ SweetMDSS *s=(SweetMDSS *)owner;
++ if (!s->fAccepting) return;
++ SweetPanelPins *p=s->fPanelPinsClient->copyBackend();
++ if (p==s->fPanelPins) { OSSafeReleaseNULL(p); return; }
++ if (s->fPanelPins) {
++  (void)s->fPanelPins->detachConsumer(s->fPanelPinsConsumer);
++  OSSafeReleaseNULL(s->fPanelPins); s->fPanelPinsConsumer=0;
++ }
++ s->setProperty("SweetDisplayPanelPinsBound",false);
++ if (!p) return;
++ uint64_t id=0;
++ if (p->attachConsumer(&id)!=kIOReturnSuccess) { p->release(); return; }
++ s->fPanelPins=p; s->fPanelPinsConsumer=id;
++ s->setProperty("SweetDisplayPanelPinsBound",true);
++ SWEET_LOG_INFO("SWEET MDSS: matched panel pins consumer=%llu; no reset or pinctrl writes\n",id);
++}
++void SweetMDSS::closePanelPins(void)
++{
++ if (fPanelPinsClient) fPanelPinsClient->stop();
++ OSSafeReleaseNULL(fPanelPinsClient);
++ if (fPanelPins) {
++  IOReturn rc=fPanelPins->detachConsumer(fPanelPinsConsumer);
++  if (rc!=kIOReturnSuccess && rc!=kIOReturnNotReady)
++   SWEET_LOG_WARN("SWEET MDSS: panel pins detach rc=%#x; retained, no implicit reset\n",(unsigned)rc);
++  OSSafeReleaseNULL(fPanelPins); fPanelPinsConsumer=0;
++ }
++}
++
+ void
+ SweetMDSS::closeDisplayResources(void)
+ {
++ closePanelPins();
+  /* Called outside owner gate: remove synchronizes matching callbacks, then
+   * removeEventSource synchronizes the owner's queued work before release. */
+  if (fRPMhClient) fRPMhClient->stop();
+diff --git a/iokit/Kernel/arm/SweetPanelPins.cpp b/iokit/Kernel/arm/SweetPanelPins.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetPanelPins.cpp
+@@ -0,0 +1,354 @@
++/* Register facts: LG pinctrl-sm8150.c / pinctrl-msm.c, sm8150-pinctrl.dtsi,
++ * sm8150_common-panel.dtsi and lge_dsi_panel.c. Original gated/timer engine.
++ * GPIO6 is SOUTH, GPIO8 NORTH. Neither GPIO7 nor any IRQ register is written.
++ */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include "SweetPanelPins.h"
++#include <IOKit/IOLib.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <libkern/c++/OSData.h>
++#include <pexpert/pexpert.h>
++#include <kern/clock.h>
++#define SWEET_LOG_SINK IOLog
++#include "../../../bsd/dev/sweet_log_level.h"
++OSDefineMetaClassAndStructors(SweetPanelPins,IOService);
++OSDefineMetaClassAndStructors(SweetPanelPinsClient,OSObject);
++/* Ownership latch only: free=0, owned=1, retired after any write=2. No pointer. */
++static unsigned panelPinsOwner;
++struct PanelPinsRequest { unsigned op; uint64_t client,token; uint64_t *out; SweetPanelPinStatus *status; };
++static const uint64_t panelPinsPA[2]={0x03d06000ULL,0x03908000ULL};
++static const uint32_t pinControlMask=0x3ffu, pinOutput=2u;
++uint32_t SweetPanelPins::read(vm_offset_t b,uint32_t o)
++{
++ uint32_t v=*(volatile uint32_t *)(b+o);
++ __asm__ volatile("dmb oshld" ::: "memory"); return v;
++}
++void SweetPanelPins::write(vm_offset_t b,uint32_t o,uint32_t v)
++{
++ __asm__ volatile("dmb oshst" ::: "memory");
++ *(volatile uint32_t *)(b+o)=v;
++ __asm__ volatile("dsb osh" ::: "memory");
++}
++uint64_t SweetPanelPins::nowNS(void)
++{ uint64_t n=0; absolutetime_to_nanoseconds(mach_absolute_time(),&n); return n; }
++bool SweetPanelPins::start(IOService *provider)
++{
++ int mode=0; (void)PE_parse_boot_argn("sweetpanelpins",&mode,sizeof(mode));
++ if ((mode!=1 && mode!=2) || !IOService::start(provider)) return false;
++ OSData *abi=OSDynamicCast(OSData,provider->getProperty("sweet,panel-pins-abi"));
++ if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),"\1\0\0\0",4) ||
++     provider->getResources()!=kIOReturnSuccess) return false;
++ unsigned expected=0;
++ if (!__atomic_compare_exchange_n(&panelPinsOwner,&expected,1u,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
++  SWEET_LOG_ERROR("SWEET PANEL PINS: owner live/retired; refused\n"); return false;
++ }
++ fClaimed=true; fMode=(unsigned)mode;
++ for (unsigned n=0;n<2;++n) {
++  fMaps[n]=provider->mapDeviceMemoryWithIndex(n);
++  if (!fMaps[n] || fMaps[n]->getPhysicalAddress()!=panelPinsPA[n] || fMaps[n]->getLength()!=0x1000) {
++   SWEET_LOG_ERROR("SWEET PANEL PINS: GPIO6/8 ABI window %u mismatch\n",n); return false;
++  }
++  fBase[n]=fMaps[n]->getVirtualAddress();
++ }
++ fLoop=IOWorkLoop::workLoop(); fGate=IOCommandGate::commandGate(this);
++ fTimer=IOTimerEventSource::timerEventSource(this,timerAction);
++ if (!fLoop || !fGate || !fTimer) return false;
++ if (fLoop->addEventSource(fGate)!=kIOReturnSuccess) return false;
++ fGateAdded=true;
++ if (fLoop->addEventSource(fTimer)!=kIOReturnSuccess) return false;
++ fTimerAdded=true; fAccepting=true;
++ setProperty("SweetPanelPinsABI",1ULL,32);
++ setProperty("SweetPanelPinsWritesEnabled",mode==2);
++ SWEET_LOG_INFO("SWEET PANEL PINS: GPIO6/SOUTH reset, GPIO8/NORTH TE; mode=%u, no automatic pin access\n",fMode);
++ registerService(); return true;
++}
++bool SweetPanelPins::sample(bool capture)
++{
++ for (unsigned n=0;n<2;++n) {
++  uint32_t ctl=read(fBase[n],0),irq=read(fBase[n],8);
++  /* No eGPIO ownership, GPIO IRQ or competing alternate reset/TE mux.
++   * Preserve upper fields; compare IRQ/CTL snapshots on every timer step.
++   * TE must already be mdp_vsync input. Never steal a GPIO IRQ owner. */
++  if (ctl==~0u || irq==~0u || (ctl&(1u<<12)) || (irq&1u) ||
++      (ctl&0x3cu)!=(n ? 4u : 0u) || (n && (ctl&(1u<<9)))) return false;
++  if (capture) { fControl[n]=ctl; fInterrupt[n]=irq; }
++  else if (ctl!=fControl[n] || irq!=fInterrupt[n]) return false;
++ }
++ uint32_t io=read(fBase[0],4);
++ if (io==~0u || (capture ? !(fControl[0]&(1u<<9)) : (io&pinOutput)!=fOutput)) return false;
++ if (capture) fOutput=io&pinOutput;
++ return true;
++}
++bool SweetPanelPins::writeControl(unsigned n,uint32_t bits)
++{
++ uint32_t value=(fControl[n]&~pinControlMask)|bits;
++ fTouched=true; write(fBase[n],0,value);
++ if (read(fBase[n],0)!=value) return false;
++ fControl[n]=value; return true;
++}
++bool SweetPanelPins::writeReset(bool high)
++{
++ /* Do not write back the independent read-only input bit or reserved IO bits. */
++ fTouched=true; write(fBase[0],4,high ? pinOutput : 0);
++ if ((read(fBase[0],4)&pinOutput)!=(high ? pinOutput : 0u)) return false;
++ fOutput=high ? pinOutput : 0u; fStatus.resetKnown=false; return true;
++}
++bool SweetPanelPins::levelIs(bool high)
++{
++ uint32_t io=read(fBase[0],4);
++ return io!=~0u && (io&3u)==(high ? 3u : 0u);
++}
++IOReturn SweetPanelPins::action(OSObject *owner,void *arg,void *,void *,void *)
++{
++ SweetPanelPins *s=(SweetPanelPins *)owner; PanelPinsRequest &r=*(PanelPinsRequest *)arg;
++ if (r.op==OpStop) {
++  if (!s->fAccepting) return kIOReturnSuccess;
++  s->fAccepting=false;
++  if (s->fTimer) s->fTimer->cancelTimeout();
++  if (s->fStatus.token) s->finish(kIOReturnAborted,SweetPinsStopped,"owner stopped");
++  return kIOReturnSuccess;
++ }
++ if (r.op==OpQuery) {
++  if (!r.client || r.client!=s->fClient || !r.token || r.token!=s->fStatus.token) return kIOReturnNotFound;
++  *r.status=s->fStatus; return kIOReturnSuccess; /* no MMIO, even after stop */
++ }
++ if (!s->fAccepting || s->isInactive()) return kIOReturnNotReady;
++ if (r.op==OpAttach) {
++  if (s->fPoisoned) return kIOReturnNotReady;
++  if (s->fClient) return kIOReturnBusy;
++  if (s->fNextClient==~0ULL) return kIOReturnNoResources;
++  s->fClient=++s->fNextClient; *r.out=s->fClient; return kIOReturnSuccess;
++ }
++ if (!r.client || r.client!=s->fClient) return kIOReturnNotFound;
++ if (r.op==OpDetach) {
++  if (s->fBusy || (s->fPoisoned && s->fTouched) || s->fConfigured) return kIOReturnBusy;
++  s->fClient=0; s->fStatus={}; return kIOReturnSuccess;
++ }
++ if (s->fMode!=2) return kIOReturnNotPermitted;
++ if (s->fPoisoned) return kIOReturnNotReady;
++ if (s->fBusy) return kIOReturnBusy;
++ if (s->fNextToken==~0ULL) return kIOReturnNoResources;
++ if (r.op==OpActivate) {
++  if (s->fConfigured) return kIOReturnBusy;
++ } else if (r.op==OpReset || r.op==OpPark) {
++  if (!s->fConfigured) return kIOReturnNotReady;
++ } else return kIOReturnBadArgument;
++ /* Admission only queues; pin sampling/writes execute on this workloop. */
++ s->fOperation=r.op; s->fPhase=Configure; s->fBusy=true;
++ s->fDeadline=nowNS()+100000000ULL; s->fWait=0;
++ s->fStatus={}; s->fStatus.token=++s->fNextToken;
++ s->fStatus.state=SweetPinsPending; s->fStatus.result=kIOReturnNotReady;
++ *r.out=s->fStatus.token; s->fTimer->setTimeoutUS(1); return kIOReturnSuccess;
++}
++void SweetPanelPins::advance(void)
++{
++ if (!fAccepting || isInactive() || !fBusy) return;
++ uint64_t now=nowNS();
++ if (now>=fDeadline) { finish(kIOReturnTimeout,SweetPinsFailed,"operation deadline"); return; }
++ bool capture=fOperation==OpActivate && fPhase==Configure && !fTouched;
++ if (!sample(capture)) { finish(kIOReturnNotReady,SweetPinsFailed,"pin owner/configuration changed"); return; }
++ if ((fPhase==HighHold || fPhase==LowHold || fPhase==FinalHighHold || fPhase==Settle || fPhase==ParkHold) &&
++     !levelIs(fPhase!=LowHold && fPhase!=ParkHold)) {
++  finish(kIOReturnIOError,SweetPinsFailed,"reset input changed during hold"); return;
++ }
++ if (now<fWait) { fTimer->setTimeoutUS(100); return; }
++ if (fPhase==Configure) {
++  if (fOperation==OpActivate) {
++   if (!levelIs(!fParked)) { finish(kIOReturnNotReady,SweetPinsFailed,"warm/parked reset level mismatch"); return; }
++   if (!writeControl(0,0x2c0) || !writeControl(1,5)) {
++    finish(kIOReturnIOError,SweetPinsFailed,"active pinctrl readback"); return;
++   }
++   fConfigured=true; fStatus.resetKnown=true; fStatus.resetHigh=!fParked; fParked=false;
++   finish(kIOReturnSuccess,SweetPinsActive,"active"); return;
++  }
++  bool high=fOperation==OpReset;
++  if (!writeReset(high)) { finish(kIOReturnIOError,SweetPinsFailed,"reset output latch"); return; }
++  fPhase=high ? HighConfirm : ParkConfirm; fEdgeDeadline=nowNS()+1000000ULL;
++ } else if (fPhase==HighConfirm || fPhase==LowConfirm || fPhase==FinalHighConfirm || fPhase==ParkConfirm) {
++  bool high=fPhase==HighConfirm || fPhase==FinalHighConfirm;
++  if (!levelIs(high)) {
++   if (now>=fEdgeDeadline) { finish(kIOReturnTimeout,SweetPinsFailed,"reset input did not follow latch"); return; }
++  } else {
++   fStatus.resetKnown=true; fStatus.resetHigh=high;
++   fWait=now+(high ? 10000000ULL : (fPhase==ParkConfirm ? 5000000ULL : 2000000ULL));
++   fPhase=fPhase==HighConfirm ? HighHold : (fPhase==LowConfirm ? LowHold :
++       (fPhase==FinalHighConfirm ? FinalHighHold : ParkHold));
++  }
++ } else if (fPhase==HighHold || fPhase==LowHold) {
++  bool high=fPhase==LowHold;
++  if (!levelIs(!high) || !writeReset(high)) { finish(kIOReturnIOError,SweetPinsFailed,"reset hold/output latch"); return; }
++  fPhase=high ? FinalHighConfirm : LowConfirm; fEdgeDeadline=nowNS()+1000000ULL;
++ } else if (fPhase==FinalHighHold) {
++  if (!levelIs(true)) { finish(kIOReturnIOError,SweetPinsFailed,"reset high hold"); return; }
++  fPhase=Settle; fWait=now+5000000ULL;
++ } else if (fPhase==Settle) {
++  if (!levelIs(true)) { finish(kIOReturnIOError,SweetPinsFailed,"reset settle"); return; }
++  finish(kIOReturnSuccess,SweetPinsResetComplete,"reset complete"); return;
++ } else if (fPhase==ParkHold) {
++  if (!levelIs(false) || !writeControl(0,0x201) || !writeControl(1,5)) {
++   finish(kIOReturnIOError,SweetPinsFailed,"park level/pinctrl readback"); return;
++  }
++  fConfigured=false; fParked=true; finish(kIOReturnSuccess,SweetPinsParked,"parked"); return;
++ } else { finish(kIOReturnIOError,SweetPinsFailed,"invalid phase"); return; }
++ fStatus.phase=fPhase; fTimer->setTimeoutUS(100);
++}
++void SweetPanelPins::timerAction(OSObject *owner,IOTimerEventSource *)
++{ ((SweetPanelPins *)owner)->advance(); }
++void SweetPanelPins::finish(IOReturn rc,unsigned state,const char *reason)
++{
++ if (fTimer) fTimer->cancelTimeout();
++ fBusy=false; fStatus.result=rc; fStatus.state=state; fStatus.phase=fPhase;
++ fStatus.uncertain=rc!=kIOReturnSuccess && fTouched;
++ if (rc!=kIOReturnSuccess) {
++  fPoisoned=true;
++  if (fStatus.uncertain) fStatus.resetKnown=false;
++  if (rc==kIOReturnAborted) SWEET_LOG_INFO("SWEET PANEL PINS: stopped phase=%u touched=%u; pins retained\n",fPhase,fTouched);
++  else SWEET_LOG_ERROR("SWEET PANEL PINS: FAILED %s rc=%#x phase=%u touched=%u; pins retained, no rollback/retry\n",
++      reason,(unsigned)rc,fPhase,fTouched);
++ } else SWEET_LOG_INFO("SWEET PANEL PINS: token=%llu %s; reset input=%u, no DSI/power implication\n",
++      fStatus.token,reason,fStatus.resetHigh);
++ setProperty("SweetPanelPinsState",(unsigned long long)state,32);
++ setProperty("SweetPanelPinsUncertain",fStatus.uncertain);
++}
++IOReturn SweetPanelPins::request(unsigned op,uint64_t id,uint64_t *token)
++{ if (!token) return kIOReturnBadArgument; *token=0; PanelPinsRequest r={}; r.op=op; r.client=id; r.out=token; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetPanelPins::attachConsumer(uint64_t *id)
++{ return request(OpAttach,0,id); }
++IOReturn SweetPanelPins::detachConsumer(uint64_t id)
++{ PanelPinsRequest r={}; r.op=OpDetach; r.client=id; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetPanelPins::activate(uint64_t id,uint64_t *token)
++{ return request(OpActivate,id,token); }
++IOReturn SweetPanelPins::reset(uint64_t id,uint64_t *token)
++{ return request(OpReset,id,token); }
++IOReturn SweetPanelPins::park(uint64_t id,uint64_t *token)
++{ return request(OpPark,id,token); }
++IOReturn SweetPanelPins::copyStatus(uint64_t id,uint64_t token,SweetPanelPinStatus *status)
++{ if (!status) return kIOReturnBadArgument; *status={}; PanelPinsRequest r={}; r.op=OpQuery; r.client=id; r.token=token; r.status=status; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++void SweetPanelPins::shutdown(void)
++{
++ if (fGateAdded) { PanelPinsRequest r={}; r.op=OpStop; (void)fGate->runAction(action,&r); }
++ if (fTimerAdded) { fLoop->removeEventSource(fTimer); fTimerAdded=false; }
++}
++bool SweetPanelPins::willTerminate(IOService *p,IOOptionBits o)
++{ shutdown(); return IOService::willTerminate(p,o); }
++void SweetPanelPins::stop(IOService *p)
++{
++ shutdown();
++ if (fClient) SWEET_LOG_WARN("SWEET PANEL PINS: consumer %llu still attached at stop; no implicit pin transition\n",fClient);
++ IOService::stop(p);
++}
++void SweetPanelPins::free(void)
++{
++ shutdown();
++ if (fGateAdded) { fLoop->removeEventSource(fGate); fGateAdded=false; }
++ OSSafeReleaseNULL(fTimer); OSSafeReleaseNULL(fGate); OSSafeReleaseNULL(fLoop);
++ for (unsigned n=0;n<2;++n) OSSafeReleaseNULL(fMaps[n]);
++ if (fClaimed) { __atomic_store_n(&panelPinsOwner,fTouched ? 2u : 0u,__ATOMIC_RELEASE); fClaimed=false; }
++ IOService::free();
++}
++SweetPanelPinsClient *
++SweetPanelPinsClient::withOwner(OSObject *owner, IOWorkLoop *loop, void (*changed)(OSObject *))
++{
++ if (!owner || !loop || !changed) return NULL;
++ SweetPanelPinsClient *self=OSTypeAlloc(SweetPanelPinsClient);
++ if (!self) return NULL;
++ if (!self->init()) { self->release(); return NULL; }
++ self->fOwner=owner; self->fChanged=changed; self->fLoop=loop; loop->retain();
++ self->fLock=IOLockAlloc();
++ self->fEvent=IOInterruptEventSource::interruptEventSource(self, SweetPanelPinsClient::changed);
++ if (!self->fLock || !self->fEvent) { self->release(); return NULL; }
++ self->fEvent->disable();
++ if (loop->addEventSource(self->fEvent)!=kIOReturnSuccess) { self->release(); return NULL; }
++ self->fEventAdded=true;
++ return self;
++}
++
++bool
++SweetPanelPinsClient::watch(void)
++{
++ OSDictionary *matching=IOService::serviceMatching("SweetPanelPins");
++ if (!matching) return false;
++ fTerminated=IOService::addMatchingNotification(gIOTerminatedNotification,matching,terminated,this);
++ if (fTerminated) fMatched=IOService::addMatchingNotification(gIOFirstMatchNotification,matching,matched,this);
++ matching->release(); /* API retains the dictionary */
++ if (!fTerminated || !fMatched) { stop(); return false; }
++ fEvent->enable(); fEvent->interruptOccurred(NULL,NULL,0);
++ return true;
++}
++
++bool
++SweetPanelPinsClient::matched(void *target, void *, IOService *service, IONotifier *)
++{
++ SweetPanelPinsClient *self=(SweetPanelPinsClient *)target;
++ SweetPanelPins *backend=OSDynamicCast(SweetPanelPins,service);
++ if (!backend) return true;
++ IOLockLock(self->fLock);
++ if (!self->fStopping && !self->fBackend && !backend->isInactive()) {
++  backend->retain(); self->fBackend=backend;
++  self->fEvent->interruptOccurred(NULL,NULL,0);
++ }
++ IOLockUnlock(self->fLock);
++ return true;
++}
++
++bool
++SweetPanelPinsClient::terminated(void *target, void *, IOService *service, IONotifier *)
++{
++ SweetPanelPinsClient *self=(SweetPanelPinsClient *)target;
++ SweetPanelPins *old=NULL;
++ IOLockLock(self->fLock);
++ if (self->fBackend==service) {
++  old=self->fBackend; self->fBackend=NULL;
++  if (!self->fStopping) self->fEvent->interruptOccurred(NULL,NULL,0);
++ }
++ IOLockUnlock(self->fLock);
++ /* No provider method or register access in notification context. In-flight
++  * callers hold their own reference; provider checks inactive under its gate. */
++ OSSafeReleaseNULL(old);
++ return true;
++}
++
++void
++SweetPanelPinsClient::changed(OSObject *owner, IOInterruptEventSource *, int)
++{
++ SweetPanelPinsClient *self=(SweetPanelPinsClient *)owner;
++ IOLockLock(self->fLock); bool active=!self->fStopping; IOLockUnlock(self->fLock);
++ if (active) self->fChanged(self->fOwner);
++}
++
++SweetPanelPins *
++SweetPanelPinsClient::copyBackend(void)
++{
++ IOLockLock(fLock);
++ SweetPanelPins *backend=!fStopping ? fBackend : NULL;
++ if (backend) backend->retain();
++ IOLockUnlock(fLock);
++ return backend;
++}
++
++void
++SweetPanelPinsClient::stop(void)
++{
++ if (fLock) { IOLockLock(fLock); fStopping=true; IOLockUnlock(fLock); }
++ /* remove consumes the notifier and synchronizes callbacks. Never hold a
++  * consumer lock/gate here: a replaying notification may be waiting on it. */
++ if (fMatched) { fMatched->remove(); fMatched=NULL; }
++ if (fTerminated) { fTerminated->remove(); fTerminated=NULL; }
++ if (fEventAdded) {
++  fEvent->disable(); fLoop->removeEventSource(fEvent); fEventAdded=false;
++ }
++ if (fLock) {
++  IOLockLock(fLock); SweetPanelPins *old=fBackend; fBackend=NULL; IOLockUnlock(fLock);
++  OSSafeReleaseNULL(old);
++ }
++}
++
++void
++SweetPanelPinsClient::free(void)
++{
++ stop(); OSSafeReleaseNULL(fEvent); OSSafeReleaseNULL(fLoop);
++ if (fLock) { IOLockFree(fLock); fLock=NULL; }
++ OSObject::free();
++}
++
++#endif
+diff --git a/iokit/Kernel/arm/SweetPanelPins.h b/iokit/Kernel/arm/SweetPanelPins.h
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetPanelPins.h
+@@ -0,0 +1,96 @@
++/* Restricted SM8150 panel GPIO6/reset and GPIO8/TE provider. No raw GPIO API. */
++#ifndef SWEET_PANEL_PINS_H
++#define SWEET_PANEL_PINS_H
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include <IOKit/IOService.h>
++#include <IOKit/IOCommandGate.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOLocks.h>
++
++enum SweetPanelPinState { SweetPinsIdle, SweetPinsPending, SweetPinsActive,
++ SweetPinsResetComplete, SweetPinsParked, SweetPinsFailed, SweetPinsStopped };
++struct SweetPanelPinStatus {
++ uint64_t token;
++ unsigned state, phase;
++ IOReturn result;
++ bool uncertain, resetKnown, resetHigh;
++};
++class SweetPanelPins : public IOService {
++ OSDeclareDefaultStructors(SweetPanelPins);
++ IOWorkLoop *fLoop;
++ IOCommandGate *fGate;
++ IOTimerEventSource *fTimer;
++ IOMemoryMap *fMaps[2];
++ vm_offset_t fBase[2];
++ bool fGateAdded, fTimerAdded, fAccepting, fClaimed, fTouched, fPoisoned, fBusy;
++ bool fConfigured, fParked;
++ unsigned fMode, fOperation, fPhase;
++ uint64_t fClient, fNextClient, fNextToken, fDeadline, fWait, fEdgeDeadline;
++ uint32_t fControl[2], fInterrupt[2], fOutput;
++ SweetPanelPinStatus fStatus;
++ enum Operation { OpAttach, OpDetach, OpQuery, OpActivate, OpReset, OpPark, OpStop };
++ enum Phase { Configure, HighConfirm, HighHold, LowConfirm, LowHold,
++  FinalHighConfirm, FinalHighHold, Settle, ParkConfirm, ParkHold };
++ static uint32_t read(vm_offset_t,uint32_t);
++ static void write(vm_offset_t,uint32_t,uint32_t);
++ static uint64_t nowNS(void);
++ static IOReturn action(OSObject *,void *,void *,void *,void *);
++ static void timerAction(OSObject *,IOTimerEventSource *);
++ bool sample(bool);
++ bool writeControl(unsigned,uint32_t);
++ bool writeReset(bool);
++ bool levelIs(bool);
++ void advance(void);
++ void finish(IOReturn,unsigned,const char *);
++ void shutdown(void);
++ IOReturn request(unsigned,uint64_t,uint64_t *);
++public:
++ bool start(IOService *) APPLE_KEXT_OVERRIDE;
++ bool willTerminate(IOService *,IOOptionBits) APPLE_KEXT_OVERRIDE;
++ void stop(IOService *) APPLE_KEXT_OVERRIDE;
++ void free(void) APPLE_KEXT_OVERRIDE;
++ IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE { return fLoop; }
++ /* Single exclusive consumer. No retain of consumer object; caller retains us.
++  * Attach/query/start/matching never reconfigure a pin. IDs/tokens do not wrap. */
++ IOReturn attachConsumer(uint64_t *);
++ IOReturn detachConsumer(uint64_t);
++ IOReturn copyStatus(uint64_t,uint64_t,SweetPanelPinStatus *);
++ /* Requests only queue work on this service's loop. Mode2 explicitly permits
++  * writes. First warm activate requires GPIO6 output already high; a parked lease
++  * reactivates with reset held low. No takeover of unknown cold state.
++  * Caller must authorize panel identity, own rails and quiesce DMA/IRQ/touch
++  * before activate/reset/park. This provider cannot prove those dependencies.
++  * reset: high10ms -> low2ms -> high10ms -> settle5ms. Output latch readback
++  * is separate from input level confirmation; no rail/DSI/consumer callbacks.
++  * park: reset low confirmed, >=5ms, suspend pull/drive; TE stays mdp_vsync.
++  * Detach cannot silently release an active/uncertain pin. No automatic reset,
++  * park, rollback, retry or pin transition on termination. */
++ IOReturn activate(uint64_t,uint64_t *);
++ IOReturn reset(uint64_t,uint64_t *);
++ IOReturn park(uint64_t,uint64_t *);
++};
++
++class SweetPanelPinsClient : public OSObject {
++ OSDeclareDefaultStructors(SweetPanelPinsClient);
++ IOLock *fLock;
++ IOWorkLoop *fLoop;
++ IOInterruptEventSource *fEvent;
++ IONotifier *fMatched, *fTerminated;
++ SweetPanelPins *fBackend;
++ OSObject *fOwner;
++ void (*fChanged)(OSObject *);
++ bool fStopping, fEventAdded;
++ static bool matched(void *,void *,IOService *,IONotifier *);
++ static bool terminated(void *,void *,IOService *,IONotifier *);
++ static void changed(OSObject *,IOInterruptEventSource *,int);
++public:
++ static SweetPanelPinsClient *withOwner(OSObject *,IOWorkLoop *,void (*)(OSObject *));
++ bool watch(void);
++ SweetPanelPins *copyBackend(void);
++ void stop(void); /* outside consumer gate, synchronizes callbacks/events */
++ void free(void) APPLE_KEXT_OVERRIDE;
++};
++#endif
++#endif
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -36,6 +36,11 @@
+     "("
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
++    "   {"
++    "     'IOClass'         = SweetPanelPins;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'sweet,panel-pins';"
++    "   },"
+     "   {"
+     "     'IOClass'         = SweetRPMh;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -31,3 +31,5 @@
+ iokit/Kernel/arm/SweetMDSS.cpp                                    optional iokitcpp
+ 
+ iokit/Kernel/arm/SweetRPMh.cpp                                    optional iokitcpp
++
++iokit/Kernel/arm/SweetPanelPins.cpp                               optional iokitcpp

@@ -2,6 +2,38 @@
 
 ## Agent handoff / active work (2026-11-11, latest)
 
+**CURRENT：0192 reset/TE引脚服务与MDSS匹配绑定已本地通过，尚未实机；PD3完整生命周期未接。**
+父提交52e4c8d；0192-mh2lm-panel-pin-provider.patch SHA256=
+ead1f8ef6cf6d19e409f847895bf2e8f4395eff06f78fde73706b1ee0f277a57，5份源码变化。
+新增SweetPanelPins IOService与client、独立ADT nub/编译入口；GPIO6 SOUTH0x03d06000/4K，
+GPIO8 NORTH0x03908000/4K。不写GPIO7/IRQ/触摸pin，旧触摸整tile映射与两页有包含关系。
+sweetpanelpins默认0，1 metadata/attach/query，2允许显式typed请求；start/matched/attach/query
+无引脚MMIO。MDSS要求resource mode并真实匹配/自己的loop attach，通知仅retain/release+排队。
+本批MDSS不调用activate/reset/park，实际boot不reset，不发送vendor表。
+provider独占consumer/单调token，用原生loop/gate/timer；warm高电平准入、CTL高位/完整IRQ快照，
+reset latch和实际input分别确认，每edge最多1ms，hold>=10/2/10ms+settle5ms，整体100ms。
+park确认低>=5ms再弱drive/pull/OE保留；重activate仍低。漂移/丢写/电平不跟随poison，保留部分
+效果，不回滚/重试/自动park，active/uncertain不可detach。stop同步timer/无pin变化，晚timer无MMIO。
+写过后owner retired latch拒绝同boot无账本重建，无全局实例桥。INFO停止/ERROR失败/WARN残consumer。
+13套通过：pins新增+原12；12实际源码ASan/UBSan+PythonADT，无报告。LSan ptrace限制关闭，
+另断言对象/映射/通知/分配归零；覆盖独立input、最短hold、park/reactivate、owner/IRQ/eGPIO漂移、
+读回/输入超时/总期限、每phase stop/晚timer、并发gate stop、ID/token耗尽/退休、真实MDSS绑定。
+真实XNU/KDK arm64 MDSS基线/最终及pins对象通过；MDSS warning1475->1475，无新增签名，
+pins1171含原XNU/KDK宏/头warning；数组/页内MMIO边界已审，无抑制。不是完整链接或硬件结果。
+0192 base等0191verify，严格应用无offset/fuzz、5源码字节一致、114原CI marker保留。
+**NEXT：继续PD3触摸quiesce/resume与生命周期协调；实际panel/revision证据未有，不发候选vendor表。**
+E1/E7仍开；reset/完整ONOFF/资源反向释放/NoC与MDP冷初始化/独立重建/ABL退出仍缺。
+caller必须自己证明identity/rails/link/DMA/IRQ/touch依赖，pins provider不伪造这些证明。
+provider丢失当前只解绑（尚无实际pin使用）；接lifecycle时必须加fault/cancel。
+A单缓冲/B未提交/30Hz复制不变，不宣称完整驱动或旧卡顿修好；暂不要求push/新刷机。
+未push/触发CI/操作设备，CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+USB/按键/触摸/电池/mux未改，不重测旧BUG-002/USB充电/F3/半小时，无新boot/云产物/实机结果。
+底稿scratch/framebuffer-0192/{base,edited,verify,prepare-patch.py,compile.py,verification.json,
+base-continuity.json,native-results.json,warning-counts.json,array-bound-review.json,reference-audit.json,
+run-tests.py,tests.json,test-*.txt,*compile.txt}；详见docs/PANEL-PINS-D1.md，计划/架构/PD0已同步。
+
+**以下0191按当时阶段保留，当前以0192为准。**
+
 **CURRENT：0191 PHY v4.0/PLL7nm-v2/输出时钟重建已接实际managed扫描，本地通过；未实机。**
 父提交90c51d6；0191-mh2lm-dsi-link-rebuild.patch SHA256=
 ba6ea09922027fc2058421b3c9f25c7d13263ac266b9f4cbc6a815de9bfaa3d6，10份变化源码。

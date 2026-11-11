@@ -68,6 +68,12 @@ rpmh_source = (arm/'SweetRPMh.cpp').read_text() if rpmh_header else ''
 rpmh_source = re.sub(r'uint32_t SweetRPMh::read\([^\n]*\)\n\{.*?\n\}', 'uint32_t SweetRPMh::read(vm_offset_t b,uint32_t o) { return readReg(b,o); }', rpmh_source, flags=re.S)
 rpmh_source = re.sub(r'void SweetRPMh::write\([^\n]*\)\n\{.*?\n\}', 'void SweetRPMh::write(vm_offset_t b,uint32_t o,uint32_t v) { writeReg(b,o,v); }', rpmh_source, flags=re.S)
 source = re.sub(r'^#include.*\n', '', rpmh_header+rpmh_source, flags=re.M)+source
+if (arm/'SweetPanelPins.h').exists():
+    pins_header = (arm/'SweetPanelPins.h').read_text().replace('class SweetPanelPins :', 'struct SweetPanelPins :').replace('class SweetPanelPinsClient :', 'struct SweetPanelPinsClient :')
+    pins_source = (arm/'SweetPanelPins.cpp').read_text()
+    pins_source = re.sub(r'uint32_t SweetPanelPins::read\([^\n]*\)\n\{.*?\n\}', 'uint32_t SweetPanelPins::read(vm_offset_t b,uint32_t o) { return readReg(b,o); }', pins_source, flags=re.S)
+    pins_source = re.sub(r'void SweetPanelPins::write\([^\n]*\)\n\{.*?\n\}', 'void SweetPanelPins::write(vm_offset_t b,uint32_t o,uint32_t v) { writeReg(b,o,v); }', pins_source, flags=re.S)
+    source = re.sub(r'^#include.*\n', '', pins_header+pins_source, flags=re.M)+source
 header = header.replace('class SweetDisplayClient :', 'struct SweetDisplayClient :')
 header = re.sub(r'^#include.*\n', '', header, flags=re.M)
 source = re.sub(r'^#include.*\n', '', source, flags=re.M)
@@ -157,7 +163,7 @@ struct IOTimerEventSource : IOEvent {
 };
 static constexpr uintptr_t bases[16]={0x0010b000,0x0af00000,0x0ae05000,0x0ae02000,0x0ae6b800,0x0ae6c000,0x0ae94000,0x15000000,0x15082000,0x0ae00000,0x0ae6e800,0x17a00000,0x0ae94400,0x0af20000,0x0af21c00,0x0af30000};
 static constexpr size_t lengths[16]={0x1000,0x3000,0x1000,0x1000,0x800,0x800,0x400,0x2000,0x1000,0x2000,0x200,0x10000,0x760,0x1c00,0x3000,0x3fd4};
-static int resourceMode=0;
+static int resourceMode=0,panelPinsMode=0;
 static unsigned badMap=99,missingMap=99,shortMap=99;
 static std::vector<unsigned> mapCalls;
 struct IOMemoryMap : OSObject {
@@ -183,7 +189,7 @@ struct IONotifier;
 static std::vector<IONotifier*> subscriptions;
 static constexpr const char *gIOTerminatedNotification="term",*gIOFirstMatchNotification="match";
 struct IOService : OSObject {
- bool inactive=false,rpmhNub=false;std::map<std::string,OSObject*>properties;
+ bool inactive=false,rpmhNub=false,pinsNub=false;std::map<std::string,OSObject*>properties;
  using Notify=bool(*)(void*,void*,IOService*,IONotifier*);
  virtual bool start(IOService*){return true;}virtual void stop(IOService*){}
  virtual bool willTerminate(IOService*,IOOptionBits){inactive=true;return true;}
@@ -191,7 +197,7 @@ struct IOService : OSObject {
  virtual IOWorkLoop*getWorkLoop()const{return nullptr;}
  OSObject*getProperty(const char*k){return properties.count(k)?properties[k]:nullptr;}
  bool isInactive(){return inactive;}
- int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){mapCalls.push_back(i);assert(i<16);if(i==missingMap)return nullptr;auto*m=new IOMemoryMap(i);if(rpmhNub){assert(i<3);static const uintptr_t pa[]={0x18220000,0x18220d00,0x0c3f000c};static const size_t n[]={0x100,0x3000,8};m->customPA=pa[i];m->customSize=n[i];}return m;}
+ int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){mapCalls.push_back(i);assert(i<16);if(i==missingMap)return nullptr;auto*m=new IOMemoryMap(i);if(pinsNub){assert(i<2);m->customPA=i?0x03908000:0x03d06000;m->customSize=0x1000;}if(rpmhNub){assert(i<3);static const uintptr_t pa[]={0x18220000,0x18220d00,0x0c3f000c};static const size_t n[]={0x100,0x3000,8};m->customPA=pa[i];m->customSize=n[i];}return m;}
  void setProperty(const char*,unsigned long long,unsigned){}void setProperty(const char*,bool){}
  void setProperty(const char*,const char*){} void setProperty(const char*,OSObject*){}
  void registerService(){}
@@ -208,6 +214,7 @@ IONotifier*IOService::addMatchingNotification(const char*k,OSDictionary*d,Notify
 static void emit(const char*k,IOService*p){for(auto*n:subscriptions)if(n->kind==k)n->cb(n->target,nullptr,p,n);}
 static int enabled=1,probeEnabled=1,powerEnabled=0,irqProbeMode=0,irqMode=0,ownMode=0;
 static bool PE_parse_boot_argn(const char*k,void*v,size_t){
+ if(!strcmp(k,"sweetpanelpins")){*(int*)v=panelPinsMode;return true;}
  if(!strcmp(k,"sweetdisplayresources")){*(int*)v=resourceMode;return true;}
  if(!strcmp(k,"sweetfbown")){*(int*)v=ownMode;return true;}
  if(!strcmp(k,"sweetmdss")){*(int*)v=enabled;return true;}
