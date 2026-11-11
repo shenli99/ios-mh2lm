@@ -2,6 +2,46 @@
 
 ## Agent handoff / active work (2026-11-11, latest)
 
+**CURRENT：0188实际扫描接管已接LDO/ARC/NoC/local clock资源获取，本地通过；未实机，D1整体未完成。**
+父提交e912bd6。0188-mh2lm-managed-display-resources.patch SHA256=
+9c8552e22ed68a0a6944fee7c6d7ea5a02f219c96587b195d6407df3800b7ea8，7份变化源码。
+新增SweetMDSSResources.inc，沿原MDSS gate/scanout timer，无新映射/writer/全局桥/直写供电。
+显式sweetdisplaymanaged=1要求own2/power1/IRQ2/resource2/clock1/NoC ABI；默认0不改变旧行为，
+startup/matched仍不投票。实际beginScanout先完整metadata/约束/可表示性preflight，暂停TE/auto，
+两次非有效扫描行后pauseIRQ，新增SweetScanoutResources状态，通过原typed status等待。
+实际VDDI->VPNL->Host->PHY逐路ACK，VDDI后20ms、VPNL后5ms timer等待；然后ARC Turbo
+整链完成->NoC lease->独立DSI0 clock lease。全确认、复核pipeline/idle/clock，rearm IRQ，
+再走原A pin/源提交/恢复TE-auto/freshPPDONE+flush0+RD_PTR新帧；资源ACK不替代新传输完成。
+LG sm8150-sde enabled RSC usecase：每MNOC端口/LLCC/EBI IB6.4GB/s、AB0，CN0最高300MB/s；
+Turbo是温态不改频下的typed保守bootstrap，不是电压猜测或正常最低功耗策略。真DB若14bit
+不能表示则首票前拒绝并打印具体preflight ERROR，不clamp/减票冒充满足。各阶段Busy显式失败。
+获取期间亮度/DCS/DSI序列/电源入口NotReady；Idle未开始仍保留旧splash DCS，Ready后恢复。
+资源链4s预算，原quiesce/新传输50/100ms独立。rails位图/各token/状态账本；Fault保留已得/
+在途票，停止本MDSS NoC/clock推进，不恢复旧TE-auto、不提交新源、不盲撤父；已送RPMh事务
+可能继续完成，provider自身管理，保留其票。失去provider也故障并关扫描入口；无静默回退。
+正常stop为ManagedStopped/Aborted，不当本协调器硬件ERROR；晚timer无MMIO，DMA pin规则未变。
+**普通DCS OFF不撤电/带宽。完整unprepare/反向释放仍缺，GDSC/非XO父源仍继承。**
+补clock日志/ownership属性，避免将已获得LDO/ARC/NoC一概标继承；lease inheritedUpstream仍真，
+表示剩余domain/parents没有完整接管。仍无冷GDSC/NoC QoS/solver/sleepwake/PHY/PLL/host控制，
+无reset/vendor完整初始化或ABL完全退出，不能验收完整D1/面板驱动。未新开boot矩阵。
+严格0187树应用无offset/fuzz，7源码字节一致，114原CI marker保留。真实XNU/KDK arm64
+MDSS/FB基线和最终对象通过，MDSS1391->1398告警（7有界数组提示，已审rail0..3/BCM0..5），
+FB1397不增，不声称零warning。9套最终检查全通过：8实际源码ASan/UBSan（managed/NoC/
+clock/display/FB/DSI/RPMh/perf）+Python ADT；UBSan halt_on_error，无sanitizer报告。
+managed从真实beginScanout进入，含真实IRQ暂停/恢复及provider引擎，测未ACK不提交/20ms/
+顺序/实际A pin-fresh完成/DCS保票/5坏startup/metadata/8阶段故障期限stop/运行后provider丢失；
+默认旧回归保留。LSan ptrace限制关，另断言对象/映射/分配/通知归零。没有实机投票证据。
+底稿scratch/framebuffer-0188/{base,edited,verify,prepare-patch.py,compile.py,verification.json,
+native-results.json,warning-counts.json,array-bound-review.json,reference-audit.json,tests.json,
+test-*.txt,*compile.txt}；docs/PANEL-MANAGED-D1.md及架构/ARC/clock/NoC/PD0/主计划/总路线已同步。
+**NEXT补冷GDSC及clock父源/频率，再接PHY/PLL/host、确认profile/reset/完整ONOFF与资源撤回，**
+再验证独立重建/ABL退出，之后零拷贝。managed1是实际获取首段，不要重回纯metadata接口迭代。
+完整驱动优先；A单缓冲B未提交/30Hz复制未改，不重测旧bug/F3矩阵/半小时，不开孤立只读云轮次。
+暂不需要push，继续合并可运行驱动批次。未push/触发CI/操作设备，无新云产物/boot/run ID。
+CircleCI blob保持da0b6c0947a66f03491b3a9023590b49665292df；USB/按键/触摸/电池/mux未修改。
+
+**以下0187按当时阶段保留，当前以0188为准。**
+
 **CURRENT：0187 CN0/display NoC温态ACTIVE事务已实现并本地验证；未接入面板启停，D1整体未完成。**
 父提交1a0ac96。0187-mh2lm-display-noc-votes.patch SHA256=
 14d2845e6bf429833888de20d3bd99dd14f5b3c4d3eb30485c836c4f3b827937，6份变化源码。

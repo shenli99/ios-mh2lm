@@ -1,5 +1,8 @@
 # D1：MMCX 与 MX/CX 父供电事务（0186）
 
+0188补充：显式managed模式在实际扫描接管时请求Turbo并等待整链完成，见[资源获取](PANEL-MANAGED-D1.md)。
+尚无实机投票、冷域控制或最后撤票的安全停止证据；以下0186按原阶段保留。
+
 2026-11-11。0186 在原 `SweetRPMh` IOService 中实现显示 ARC 投票链，继续使用同一个
 apps-DRV writer、workloop、command gate 和 timer。没有新增重叠映射、第二个 writer 或全局
 C 实例桥。**本地验证通过，未实机投票；D1 整体未完成。**

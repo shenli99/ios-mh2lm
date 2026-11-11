@@ -1,12 +1,12 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**0187当前显示进度（本地验证通过，未实机投票）：** 在0186的typed MMCX/MX/CX供电链之后，
-已实现CN0配置带宽及MM1/MM0/SH0/MC0/ACV_DISPLAY数据带宽事务。RPMh独占apps RSC，MDSS
-在实际RSC时钟lease下独占display RSC；按VCD提交、独立完成、共享票与反向撤回，故障显式保留。
-资源接口尚未接入面板启停，默认不投票；冷GDSC/时钟父源、PHY/PLL/host及完整面板初始化仍缺，
-D1未整体完成。见[NoC架构与验证](PANEL-NOC-D1.md)、[ARC](PANEL-ARC-D1.md)。
-下一段接实际MDSS资源生命周期及冷域/链路，不为此单独要求push或刷机。
-下列0185/0184段落保留各自历史范围，当前增量以上述0187为准。
+**0188当前显示进度（本地验证通过，未实机投票）：** 已把四路LDO、ARC、CN0/display NoC与
+本地clock事务接到实际自有扫描接管，显式managed模式在暂停/idle后顺序获取资源，全部完成
+才pin/提交A，并继续要求fresh传输完成。部分失败保留票并关闭写入，不自动恢复旧流。
+默认关闭，DCS OFF暂不撤票；冷GDSC/时钟父源、PHY/PLL/host及完整面板ON/OFF仍缺，D1未完成。
+见[资源获取与失败边界](PANEL-MANAGED-D1.md)、[NoC](PANEL-NOC-D1.md)、[ARC](PANEL-ARC-D1.md)。
+下一段补冷域/时钟/链路，再完成资源反向释放及独立重建；暂不单独要求push或刷机。
+下列0185/0184段落保留各自历史范围，当前增量以上述0188为准。
 
 
 **0185本地时钟增量（本地验证通过，未实机启用）：** SweetMDSS内部已加入typed本地分支lease、

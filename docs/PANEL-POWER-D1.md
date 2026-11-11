@@ -2,7 +2,8 @@
 
 0187补充：原provider已有[MMCX/MX/CX事务](PANEL-ARC-D1.md)及apps CN0带宽；MDSS拥有
 独立display RSC和[数据NoC事务](PANEL-NOC-D1.md)，实际获取RSC clock lease后才访问。
-均未接入面板启停、无自动投票；下文0184的实机证据仍仅为四路LDO元数据绑定。
+0188已在显式managed模式下接入实际扫描资源获取，见[生命周期首段](PANEL-MANAGED-D1.md)；
+默认关闭，普通DCS OFF不撤票。下文0184的实机证据仍仅为四路LDO元数据绑定。
 
 
 2026-11-10。本段接在0183命令执行器后，实现电源资源接口和实际TCS状态机；
@@ -98,10 +99,10 @@ PHY0 `0x0ae94400/0x760`。PLL0位于同一窗口+0x500，不再重复映射/写�
 用户反馈滑动改善且无新增异常；无需补刷control。未测试电源投票，不追加元数据专项云构建。
 
 PD0原图的独立clock/GDSC provider在此明确调整为**MDSS内部typed资源模块的唯一所有者**：
-现有MDSS已经拥有GCC/DISPCC，不再另起一个重叠映射的空壳服务。当前仅资源所有权落地，
+现有MDSS已经拥有GCC/DISPCC，不再另起一个重叠映射的空壳服务。0184先落实资源所有权，
 0185已补typed本地分支lease、timer获取/撤回与温态GDSC准入，见[时钟模块](PANEL-CLOCK-D1.md)。
-0186已补MMCX及父供电事务，0187补apps CN0/display NoC，均未接入面板启停；
-时钟父源/频率、GDSC冷上下电、NoC冷配置及实际资源生命周期仍待实现；
+0186补MMCX父供电、0187补CN0/display NoC，0188在显式managed模式下接扫描资源获取；
+时钟父源/频率、GDSC冷上下电、NoC冷配置及完整资源反向释放仍待实现；
 原`dp_clocks_on()`两个状态位检查仍不是acquire或ready证明。
 
 ## 本地验证与下一段
@@ -116,6 +117,6 @@ LSan仍受ptrace环境限制关闭，另断言对象/映射/通知归零；不�
 
 补丁`xnu/patches/0184-mh2lm-display-resource-leases.patch`；底稿
 `scratch/framebuffer-0184/{verification.json,tests.json,test-*.txt,*compile.txt}`。
-下一段接实际MDSS资源生命周期、冷态时钟/GDSC/NoC配置及PHY/PLL/host控制，再接已确认profile/reset/完整ON/OFF。
+下一段补冷态时钟/GDSC/NoC配置及PHY/PLL/host控制，再接已确认profile/reset/完整ON/OFF及资源撤回。
 E1仍只阻塞未知厂商表写入；这段没有选定PV或把映射成功写成完整驱动完成。
 未push、触发CI或操作设备；未改CircleCI、USB/充电/按键/触摸/mux策略。

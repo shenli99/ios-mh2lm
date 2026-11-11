@@ -1,0 +1,375 @@
+diff --git a/iokit/Kernel/arm/SweetDisplayBackend.h b/iokit/Kernel/arm/SweetDisplayBackend.h
+--- a/iokit/Kernel/arm/SweetDisplayBackend.h
++++ b/iokit/Kernel/arm/SweetDisplayBackend.h
+@@ -11,7 +11,7 @@
+ class SweetMDSS;
+ class SweetScanoutPool;
+ enum SweetScanoutState { SweetScanoutIdle, SweetScanoutQuiescing,
+- SweetScanoutSubmitted, SweetScanoutActive, SweetScanoutFailed };
++ SweetScanoutSubmitted, SweetScanoutActive, SweetScanoutFailed, SweetScanoutResources };
+ struct SweetScanoutStatus {
+  unsigned state;
+  bool hardwareReachable;
+diff --git a/iokit/Kernel/arm/SweetDisplayClock.h b/iokit/Kernel/arm/SweetDisplayClock.h
+--- a/iokit/Kernel/arm/SweetDisplayClock.h
++++ b/iokit/Kernel/arm/SweetDisplayClock.h
+@@ -1,5 +1,6 @@
+ /* MDSS-internal clock leases. No MMIO addresses in the caller API.
+- * Warm retention only: upstream MMCX/NoC and non-XO parents remain inherited.
++ * Warm retention only: domain/non-XO parents inherited; supply/NoC votes
++ * are separate typed transactions, not implied by a local clock lease.
+  * This interface grants no right to reset/collapse/reprogram a display domain.
+  */
+ #ifndef SWEET_DISPLAY_CLOCK_H
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -211,6 +211,20 @@
+  static IOReturn dsiStatusAction(OSObject *,void *,void *,void *,void *);
+  static IOReturn dsiCancelAction(OSObject *,void *,void *,void *,void *);
+  static void dsiTimerAction(OSObject *,IOTimerEventSource *);
++ /* Managed warm takeover, driven by the existing scanout timer/gate. */
++ enum ManagedState { ManagedIdle, ManagedRails, ManagedARC, ManagedNoC,
++     ManagedClock, ManagedReady, ManagedFault, ManagedStopped };
++ bool fManagedEnabled, fManagedStarted;
++ unsigned fManagedState, fManagedRail, fManagedRails;
++ uint64_t fManagedToken, fManagedBandwidth, fManagedClock, fManagedWait, fManagedDeadline;
++ IOReturn fManagedResult;
++ bool setupManagedResources(void);
++ IOReturn managedPreflight(void);
++ bool managedAccessReady(void) const;
++ void beginManagedResources(void);
++ void advanceManagedResources(void);
++ void failManagedResources(IOReturn,const char *);
++ void stopManagedResources(void);
+  IOMemoryMap *fMaps[16];
+  SweetRPMhClient *fRPMhClient;
+  SweetRPMh *fRPMh;
+@@ -386,6 +400,7 @@
+  setupIRQ(provider);
+  if (!setupLocalClocks()) return false;
+  if (!setupNoC(provider)) return false;
++ if (!setupManagedResources()) return false;
+  SWEET_LOG_INFO("SWEET MDSS: F1a v1 IOService backend; ABL scanout unchanged\n");
+  registerService();
+  return true;
+@@ -426,6 +441,10 @@
+  SweetRPMh *provider=self->fRPMhClient->copyBackend();
+  if (provider==self->fRPMh) { OSSafeReleaseNULL(provider); return; }
+  if (self->fRPMh) {
++  if (self->fManagedStarted) {
++   self->failManagedResources(kIOReturnNotReady,"RPMh provider changed");
++   self->cancelScanout("managed RPMh provider changed");
++  }
+   if (self->fNoCEnabled && (self->noCBusy() || self->fNoCOwned)) {
+    if (self->noCBusy()) self->finishNoC(kIOReturnNotReady,true);
+    self->fNoCFault=true; /* Lost config-path owner; preserve resources. */
+@@ -582,6 +601,7 @@
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  bool on=(uintptr_t)arg!=0;
++ if (self->fManagedEnabled && !self->managedAccessReady()) return kIOReturnNotReady;
+  if (self->fScanoutState==SweetScanoutQuiescing || self->fScanoutState==SweetScanoutSubmitted)
+   self->cancelScanout("panel transition interrupted handoff");
+  if (!self->fAccepting || self->isInactive()) return kIOReturnNotReady;
+@@ -641,6 +661,7 @@
+ #include "SweetMDSSScanout.inc"
+ #include "SweetMDSSClock.inc"
+ #include "SweetMDSSNoC.inc"
++#include "SweetMDSSResources.inc"
+ #include "SweetMDSSDSI.inc"
+ 
+ IOReturn
+@@ -649,7 +670,7 @@
+  SweetMDSS *self=(SweetMDSS *)owner;
+  if (!self->fAccepting || self->isInactive()) return kIOReturnNotReady;
+  if (self->dsiBusy()) return kIOReturnBusy;
+- return !self->fDsiPoisoned && self->dp_failed<3 && self->dp_clocks_on() &&
++ return self->managedAccessReady() && !self->fDsiPoisoned && self->dp_failed<3 && self->dp_clocks_on() &&
+      (!self->fClockEnabled || self->localClocksReady()) ? kIOReturnSuccess : kIOReturnNotReady;
+ }
+ IOReturn
+@@ -663,6 +684,7 @@
+  SweetMDSS *self=(SweetMDSS *)owner;
+  if (!self->fAccepting || self->isInactive() || self->dp_failed>=3 || self->fDsiPoisoned) return kIOReturnNotReady;
+  if (self->dsiBusy()) return kIOReturnBusy;
++ if (!self->managedAccessReady()) return kIOReturnNotReady;
+  if (self->fScanoutState==SweetScanoutQuiescing || self->fScanoutState==SweetScanoutSubmitted) return kIOReturnBusy;
+  if (!self->dp_clocks_on() || (self->fClockEnabled && !self->localClocksReady())) {
+   SWEET_LOG_WARN("SWEET MDSS: dcs skipped: MDSS clock gate not met\n");
+@@ -698,6 +720,7 @@
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  self->fAccepting=false;
++ self->stopManagedResources();
+  self->stopNoC();
+  self->stopLocalClocks();
+  if (self->dsiBusy()) self->finishDSI(kIOReturnAborted,SweetDSICancelled);
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -242,7 +242,7 @@
+    if (!fClockReferences[i] && !(fClockOwnedMask&(1u<<i))) fClockKnownMask&=~(1u<<i);
+   }
+   lease.state=fClockReleasing ? SweetClockReleased : SweetClockHeld; lease.uncertain=false;
+-  SWEET_LOG_INFO("SWEET MDSS CLOCK: token=%llu state=%u mask=%#x owned=%#x; GDSC/MMCX/NoC/parents inherited\n",
++  SWEET_LOG_INFO("SWEET MDSS CLOCK: token=%llu state=%u mask=%#x owned=%#x; GDSC/non-XO parents inherited, supply/NoC votes tracked separately\n",
+       lease.token,lease.state,lease.mask,fClockOwnedMask);
+  } else {
+   fClockFault=true; lease.state=SweetClockFailed;
+diff --git a/iokit/Kernel/arm/SweetMDSSDSI.inc b/iokit/Kernel/arm/SweetMDSSDSI.inc
+--- a/iokit/Kernel/arm/SweetMDSSDSI.inc
++++ b/iokit/Kernel/arm/SweetMDSSDSI.inc
+@@ -58,6 +58,7 @@
+  OSData *data=(OSData *)arg;
+  if (!s->fAccepting || s->isInactive() || s->fDsiPoisoned) return kIOReturnNotReady;
+  if (!s->fDsiEnabled) return kIOReturnUnsupported;
++ if (!s->managedAccessReady()) return kIOReturnNotReady;
+  if (s->dsiBusy() || s->fScanoutState==SweetScanoutQuiescing ||
+      s->fScanoutState==SweetScanoutSubmitted) return kIOReturnBusy;
+  /* Full ON/OFF tables can exceed the250ms RD_PTR watchdog. The panel
+diff --git a/iokit/Kernel/arm/SweetMDSSResources.inc b/iokit/Kernel/arm/SweetMDSSResources.inc
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetMDSSResources.inc
+@@ -0,0 +1,169 @@
++/* D1 managed WARM takeover. The real scanout continuation calls these methods
++ * on MDSS's gate after TE/autorefresh stop and observed DMA idle. All resource
++ * writes go through the existing typed owners; no new MMIO or singleton.
++ * Cold domain/link setup and full rail withdrawal are deliberately separate. */
++static const SweetRailVote managedRailVotes[SweetRailCount]={
++ {true,1800,1800,62000}, {true,3000,3000,857000},
++ {true,1200,1200,21800}, {true,880,880,36000}
++};
++static SweetDisplayBandwidth managedBandwidth(void)
++{
++ /* LG sm8150-sde.dtsi's enabled RSC usecase: each MNOC port and the LLCC/
++  * EBI path has IB=6400000 KB/s, AB=0. Config uses its highest 300000 KB/s
++  * usecase during takeover; this is a conservative bootstrap, not DVFS. */
++ SweetDisplayBandwidth v={};
++ v.port[0].peak=v.port[1].peak=v.llcc.peak=v.ebi.peak=6400000000ULL;
++ v.registerPeak=300000000ULL; return v;
++}
++bool SweetMDSS::setupManagedResources(void)
++{
++ int mode=0,own=0; (void)PE_parse_boot_argn("sweetdisplaymanaged",&mode,sizeof(mode));
++ if (!mode) return true;
++ (void)PE_parse_boot_argn("sweetfbown",&own,sizeof(own));
++ if (mode!=1 || own!=2 || !fPanelPowerEnabled || fIrqMode!=2 || !fIrqClaimed ||
++     fDisplayResourceMode!=2 || !fClockEnabled || !fNoCEnabled) {
++  SWEET_LOG_ERROR("SWEET MDSS RESOURCES: managed1 requires own2/power1/IRQ2/resource2/clock1/NoC ABI; refused\n");
++  return false;
++ }
++ fManagedEnabled=true;
++ setProperty("SweetDisplayManagedResources",true);
++ setProperty("SweetDisplayManagedState",(unsigned long long)ManagedIdle,32);
++ return true; /* No resource requests in startup or matching callbacks. */
++}
++bool SweetMDSS::managedAccessReady(void) const
++{ return !fManagedEnabled || fManagedState==ManagedIdle || fManagedState==ManagedReady; }
++IOReturn SweetMDSS::managedPreflight(void)
++{
++ if (!fRPMh || !fRPMhConsumer || !fNoCEnabled || fNoCFault || fClockFault) {
++  SWEET_LOG_ERROR("SWEET MDSS RESOURCES: preflight owner absent/faulted; no votes\n"); return kIOReturnNotReady;
++ }
++ if (fManagedStarted || clockBusy() || noCBusy() || dsiBusy()) {
++  SWEET_LOG_WARN("SWEET MDSS RESOURCES: preflight transaction busy; no votes\n"); return kIOReturnBusy;
++ }
++ SweetDisplayPowerInfo power={};
++ if (fRPMh->displayPowerInfo(&power)!=kIOReturnSuccess || !power.available ||
++     !power.supported[SweetDisplayTurbo]) {
++  SWEET_LOG_ERROR("SWEET MDSS RESOURCES: preflight ARC Turbo chain unavailable; no votes\n"); return kIOReturnNotReady;
++ }
++ for (unsigned r=0;r<SweetRailCount;++r) {
++  SweetRailInfo info={};
++  if (fRPMh->resourceInfo((SweetRail)r,&info)!=kIOReturnSuccess || !info.available ||
++      managedRailVotes[r].minMV<info.minMV || managedRailVotes[r].maxMV>info.maxMV) {
++   SWEET_LOG_ERROR("SWEET MDSS RESOURCES: preflight LDO %u constraints unavailable; no votes\n",r); return kIOReturnNotReady;
++  }
++ }
++ for (unsigned r=0;r<SweetDisplayBCMCount;++r)
++  if (fRPMh->copyBCMInfo((SweetDisplayBCM)r,&fNoCInfo[r])!=kIOReturnSuccess) {
++   SWEET_LOG_ERROR("SWEET MDSS RESOURCES: preflight BCM %u metadata unavailable; no votes\n",r); return kIOReturnNotReady;
++  }
++ SweetDisplayBandwidth v=managedBandwidth(); unsigned y=0;
++ if (!fNoCInfo[SweetBCMCN0].scale(v.registerPeak,4,1,&y) || !noCPlan(v)) {
++  SWEET_LOG_ERROR("SWEET MDSS RESOURCES: preflight LG bootstrap bandwidth unrepresentable; no clamping/votes\n"); return kIOReturnBadArgument;
++ }
++ /* Do not lower/reprogram inherited clocks while taking over their supply.
++  * Turbo is the existing typed SM8150 upper corner, not a raw voltage guess.
++  * It is held until the later rate/domain owner can safely lower it. */
++ if (!localClocksReady()) {
++  SWEET_LOG_ERROR("SWEET MDSS RESOURCES: preflight inherited local clocks not held; no votes\n"); return kIOReturnNotReady;
++ }
++ return kIOReturnSuccess;
++}
++void SweetMDSS::beginManagedResources(void)
++{
++ fManagedStarted=true; fManagedState=ManagedRails;
++ fManagedDeadline=scanout_now()+4000000000ULL;
++ if (!clockCanGate()) { failManagedResources(kIOReturnBusy,"quiesce/IRQ idle not confirmed"); return; }
++ setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32);
++ SWEET_LOG_INFO("SWEET MDSS RESOURCES: warm takeover paused; LDO -> ARC Turbo -> NoC -> DSI0 clock; no cold reset\n");
++}
++void SweetMDSS::advanceManagedResources(void)
++{
++ if (!fManagedStarted || fManagedState==ManagedReady || fManagedState==ManagedFault || fManagedState==ManagedStopped) return;
++ uint64_t now=scanout_now();
++ if (now>=fManagedDeadline) { failManagedResources(kIOReturnTimeout,"resource-chain deadline"); return; }
++ if (!fRPMh || !fRPMhConsumer || !clockPrerequisites() || !clockCanGate() ||
++     !scanoutConfiguration(true) || fNoCFault || fClockFault) {
++  failManagedResources(kIOReturnNotReady,"provider/pipeline/clock admission changed"); return;
++ }
++ if (now<fManagedWait) return; /* No sleep or long wait under the gate. */
++ IOReturn rc=kIOReturnSuccess;
++ if (fManagedState==ManagedRails) {
++  if (!fManagedToken) {
++   rc=fRPMh->requestVote(fRPMhConsumer,(SweetRail)fManagedRail,managedRailVotes[fManagedRail],&fManagedToken);
++   if (rc!=kIOReturnSuccess) { failManagedResources(rc,"LDO request refused"); return; }
++  }
++  SweetRPMhStatus status={}; rc=fRPMh->copyStatus(fRPMhConsumer,fManagedToken,&status);
++  if (rc!=kIOReturnSuccess || status.state==SweetRPMhFailed) {
++   failManagedResources(rc ? rc : status.result,"LDO transaction failed"); return;
++  }
++  if (status.state!=SweetRPMhComplete) return;
++  fManagedRails|=1u<<fManagedRail; fManagedToken=0;
++  /* LG panel VDDI post-on 20ms and pre-prepare post-rails 5ms. Warm
++   * takeover keeps the panel reset/state intact; no ON table is guessed. */
++  fManagedWait=now+(fManagedRail==SweetRailVDDI ? 20000000ULL :
++      (fManagedRail==SweetRailVPNL ? 5000000ULL : 0ULL));
++  if (++fManagedRail==SweetRailCount) fManagedState=ManagedARC;
++ } else if (fManagedState==ManagedARC) {
++  if (!fManagedToken) {
++   rc=fRPMh->requestDisplayPower(fRPMhConsumer,SweetDisplayTurbo,&fManagedToken);
++   if (rc!=kIOReturnSuccess) { failManagedResources(rc,"ARC request refused"); return; }
++  }
++  SweetDisplayPowerStatus status={}; rc=fRPMh->copyDisplayPowerStatus(fRPMhConsumer,fManagedToken,&status);
++  if (rc!=kIOReturnSuccess || status.state==SweetRPMhFailed) {
++   failManagedResources(rc ? rc : status.result,"ARC transaction failed"); return;
++  }
++  if (status.state!=SweetRPMhComplete) return;
++  fManagedToken=0; fManagedState=ManagedNoC;
++ } else if (fManagedState==ManagedNoC) {
++  if (!fManagedBandwidth) {
++   rc=retainBandwidth(managedBandwidth(),&fManagedBandwidth);
++   if (rc!=kIOReturnSuccess) { failManagedResources(rc,"NoC request refused"); return; }
++  }
++  SweetNoCStatus status={}; rc=bandwidthStatus(fManagedBandwidth,&status);
++  if (rc!=kIOReturnSuccess || status.state==SweetNoCFailed) {
++   failManagedResources(rc ? rc : status.result,"NoC transaction failed"); return;
++  }
++  if (status.state!=SweetNoCHeld) return;
++  fManagedState=ManagedClock;
++ } else if (fManagedState==ManagedClock) {
++  if (!fManagedClock) {
++   rc=retainLocalClocks(SweetClockDSI0,&fManagedClock);
++   if (rc!=kIOReturnSuccess) { failManagedResources(rc,"DSI0 clock request refused"); return; }
++  }
++  SweetClockLease status={}; rc=localClockStatus(fManagedClock,&status);
++  if (rc!=kIOReturnSuccess || status.state==SweetClockFailed || status.state==SweetClockStopped) {
++   failManagedResources(rc ? rc : kIOReturnNotReady,"DSI0 clock transaction failed"); return;
++  }
++  if (status.state!=SweetClockHeld) return;
++  if (fManagedRails!=15u || !localClocksReady()) {
++   failManagedResources(kIOReturnNotReady,"final resource validation failed"); return;
++  }
++  fManagedState=ManagedReady; fManagedResult=kIOReturnSuccess;
++  setProperty("SweetDisplayClockOwnership","MDSS: typed LDO/ARC/NoC/local clock held; GDSC/non-XO parents inherited");
++  SWEET_LOG_INFO("SWEET MDSS RESOURCES: warm resources acquired rails=%#x ARC=Turbo NoC=%llu clock=%llu; retained across DCS OFF, upstream cold setup still inherited\n",
++      fManagedRails,fManagedBandwidth,fManagedClock);
++ }
++ setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32);
++}
++void SweetMDSS::failManagedResources(IOReturn rc,const char *reason)
++{
++ if (!fManagedStarted || fManagedState==ManagedFault || fManagedState==ManagedStopped) return;
++ fManagedState=ManagedFault; fManagedResult=rc;
++ if (noCBusy()) stopNoC();
++ if (clockBusy()) stopLocalClocks();
++ setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32);
++ setProperty("SweetDisplayManagedFault",true);
++ pauseIRQ();
++ SWEET_LOG_ERROR("SWEET MDSS RESOURCES: FAILED %s rc=%#x rails=%#x token=%llu NoC=%llu clock=%llu; confirmed/in-flight votes retained, no resume/rollback\n",
++     reason,(unsigned)rc,fManagedRails,fManagedToken,fManagedBandwidth,fManagedClock);
++}
++void SweetMDSS::stopManagedResources(void)
++{
++ if (fManagedStarted && fManagedState!=ManagedFault && fManagedState!=ManagedStopped) {
++  fManagedState=ManagedStopped; fManagedResult=kIOReturnAborted;
++  setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32);
++  SWEET_LOG_INFO("SWEET MDSS RESOURCES: owner stopped; votes retained, no implicit powerdown\n");
++ }
++ /* DCS Display Off and service termination are not proof of domain/link
++  * collapse. Never withdraw LDO/ARC or NoC beneath inherited active hardware. */
++}
+diff --git a/iokit/Kernel/arm/SweetMDSSScanout.inc b/iokit/Kernel/arm/SweetMDSSScanout.inc
+--- a/iokit/Kernel/arm/SweetMDSSScanout.inc
++++ b/iokit/Kernel/arm/SweetMDSSScanout.inc
+@@ -115,6 +115,10 @@
+  if (!s->scanoutConfiguration(true) || dp_rd(s->dp_intf1,0x288)!=0x180088u ||
+      dp_rd(s->dp_intf1,0x2b4)!=0x80000001u || dp_rd(s->fMaps[9]->getVirtualAddress(),0x1010))
+   return kIOReturnNotReady;
++ if (s->fManagedEnabled) {
++  IOReturn rc=s->managedPreflight();
++  if (rc!=kIOReturnSuccess) return rc; /* Before quiesce or any resource vote. */
++ }
+  s->fScanoutTimer=IOTimerEventSource::timerEventSource(s,scanoutTimerAction);
+  if (!s->fScanoutTimer) return kIOReturnNoMemory;
+  if (s->fLoop->addEventSource(s->fScanoutTimer)!=kIOReturnSuccess) {
+@@ -137,9 +141,10 @@
+ {
+  if (!fScanoutUsed || fScanoutState==SweetScanoutFailed) return;
+  if (fScanoutTimer) fScanoutTimer->cancelTimeout();
++ if (fManagedStarted) failManagedResources(kIOReturnAborted,reason);
+  /* Before any source register write the pool is CPU-only: restore inherited
+   * TE/auto if accessible. After a write, never roll back/free on readback alone. */
+- if (!fScanoutTouched && dp_clocks_on()) {
++ if (!fScanoutTouched && !fManagedStarted && dp_clocks_on()) {
+   dp_wr(dp_intf1,0x2b4,fScanoutAuto);
+   dp_wr(dp_intf1,0x288,fScanoutTE);
+  }
+@@ -155,6 +160,22 @@
+ SweetMDSS::scanoutTimerAction(OSObject *owner,IOTimerEventSource *sender)
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
++ if (s->fScanoutState==SweetScanoutResources) {
++  if (!s->fAccepting || s->isInactive() || !s->fIrqDisplayOn || s->fPanelState!=PanelOn) {
++   s->cancelScanout("resource takeover admission lost"); return;
++  }
++  s->advanceManagedResources();
++  if (s->fManagedState==ManagedFault) { s->cancelScanout("managed resource transaction failed"); return; }
++  if (s->fManagedState!=ManagedReady) { sender->setTimeoutMS(1); return; }
++  /* Re-check the retained pipeline before exposing the new source address. */
++  if (!s->scanoutConfiguration(true) || !s->clockCanGate() || !s->localClocksReady()) {
++   s->cancelScanout("resource-complete pipeline changed"); return;
++  }
++  if (!s->armIRQ()) { s->cancelScanout("resource-complete IRQ rearm failed"); return; }
++  s->fScanoutState=SweetScanoutQuiescing;
++  s->fScanoutIdleSamples=0; s->fScanoutDeadline=scanout_now()+50000000ULL;
++  sender->setTimeoutMS(1); return;
++ }
+  if (s->fScanoutState!=SweetScanoutQuiescing && s->fScanoutState!=SweetScanoutSubmitted) return;
+  unsigned irq=__atomic_load_n(&s->fIrqState,__ATOMIC_ACQUIRE);
+  if (!s->fAccepting || s->isInactive() || !s->fIrqDisplayOn || s->fPanelState!=PanelOn ||
+@@ -171,6 +192,12 @@
+   if (line>0 && line<2340) s->fScanoutIdleSamples=0;
+   else ++s->fScanoutIdleSamples;
+   if (s->fScanoutIdleSamples<2) { sender->setTimeoutMS(1); return; }
++  if (s->fManagedEnabled && !s->fManagedStarted) {
++   s->pauseIRQ(); /* publication only; no reverse consumer-gate callback */
++   s->fScanoutState=SweetScanoutResources;
++   s->beginManagedResources();
++   sender->setTimeoutMS(1); return;
++  }
+   /* Separate hardware lifetime pin precedes the FIRST possibly effective
+    * source write. Stop/timeout/free can never return this pool to the VM. */
+   dp_wr(top,0x1018,1u<<8); /* PP0 DONE W1C only; no completion IRQ enabled */
+@@ -222,6 +249,8 @@
+  SweetMDSS *s=(SweetMDSS *)owner;
+  if (!arg0 || arg0!=s->fHardwarePool || !arg1) return kIOReturnBadArgument;
+  unsigned irq=__atomic_load_n(&s->fIrqState,__ATOMIC_ACQUIRE);
++ if (s->fManagedEnabled && s->fManagedState==ManagedFault)
++  s->cancelScanout("managed resources unavailable");
+  if (s->fScanoutState==SweetScanoutActive && (irq==IrqFailed || irq==IrqStopped))
+   s->cancelScanout("owned scanout IRQ unavailable"); /* touched=true: no MMIO */
+  s->fScanoutStatus.state=s->fScanoutState;

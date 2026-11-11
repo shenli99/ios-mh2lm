@@ -22,6 +22,8 @@ legacy = (root/'bsd/dev/sweet_display_probe.c').read_text()
 source = source.replace('#include "SweetMDSSIRQ.inc"', (arm/'SweetMDSSIRQ.inc').read_text())
 source = source.replace('#include "SweetMDSSScanout.inc"', (arm/'SweetMDSSScanout.inc').read_text())
 source = source.replace('#include "SweetMDSSDSI.inc"', (arm/'SweetMDSSDSI.inc').read_text())
+if (arm/'SweetMDSSResources.inc').exists():
+    source = source.replace('#include "SweetMDSSResources.inc"', (arm/'SweetMDSSResources.inc').read_text())
 if (arm/'SweetMDSSNoC.inc').exists():
     source = source.replace('#include "SweetMDSSNoC.inc"', (arm/'SweetMDSSNoC.inc').read_text())
 if (arm/'SweetMDSSClock.inc').exists():
