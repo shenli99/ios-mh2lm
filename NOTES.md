@@ -1,5 +1,21 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a15 verified; retained diagnostic boot ready)
+
+**CURRENT：0121a15源码/内核核对及ABI608镜像打包通过，待用户启动取证。**
+78份源码与0202验证树完全一致、114项CI marker及新warm admission/gdsc/root/branch字符串通过。
+内核c941024722649a5c019614b78b4cc3c95276c236a9c3acbd124ba8810876f8ed，17723760bytes、ARM64 subtype0，自带SHA匹配。
+完整build log/CI run ID未提供，不冒称核对了具体CI提交。与842d964验证源码相符。
+同一已启动的ABI608固件blob27e7a1d1...18ea480，retained参数605字节和ADT与失败档完全一致。
+四档Android header/firmware/FAT payload回读通过，旧镜像/基线保留；只交付retained测试。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a15-abi608-panel-retained.img**
+SHA=e380f1ae57cb1fe9f6ce90e6326b765f7f2885e8769dbb933f07953542491cd6，35545088bytes。
+进系统停留约一分钟导sweetlog-0121a15-abi608-panel-retained.bin；启动自动打印准入门槛，
+不用再调亮度或按息屏，不做插拔/长测，combined/supply继续暂停。启动panic记录寄存器。
+本轮仅诊断，硬件准入未修复；先读admit gate及同次读值，若通过再查后续managed/服务发布。
+详见docs/PANEL-D1-0121A15.md；证据scratch/artifact-0121a15/。
+本轮未改驱动/固件/CI、未push/触发CI/操作设备；以下NEXT均为历史。
+
 ## Agent handoff / active work (2026-11-12, retained FAIL; 0202 diagnostics ready)
 
 **CURRENT：用户报告亮度不变、息屏静帧。已定位MDSS启动时钟准入失败，未修复具体硬件条件。**

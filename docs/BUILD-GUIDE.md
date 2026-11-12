@@ -98,6 +98,11 @@ tools/mk-mh2lm-event-matrix.sh W/logs/xnu-kernel-<LABEL>.gz <LABEL> --battery-ba
 
 ### 4.1 0201完整固件与面板生命周期四档
 
+**0121a15当前执行点：** 新产物已核对0202诊断并打包，使用已通过启动的ABI608固件。
+只启动`boot-16k-0121a15-abi608-panel-retained.img`，进系统停留约一分钟导日志，
+无需再调亮度或按息屏；combined/supply暂停。这是启动准入取证，尚未修复硬件条件。
+见[0121a15镜像、核对及步骤](PANEL-D1-0121A15.md)。以下0121a14失败记录保留。
+
 0121a14已下载并核对0201补丁、SHA及实际产物，本轮ABI修正只涉及loader和本地打包，
 可复用该内核，无需push/云编译。未来内核仍需核对相应marker，不能拿不含0201的旧kernel只改参数。
 完整Mu FD已在本地构建，包含ABL→Mu HOB→DarwinBoot→ADT身份传递adapter。
