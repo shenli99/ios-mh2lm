@@ -1,12 +1,13 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
-**0121a14当前进展（2026-11-12）：** power0档进入SpringBoard，四显示开关全0也未复现panic。
-进一步发现实际XNU的CommandLine为608字节，DarwinBoot却按1024布局；失败长参数占据内核
-memSizeActual位置，导致HFS默认缓冲大小溢出，已离线复现。修正loader ABI及参数长度检查，
-完整固件和四档已本地构建/回读。**下一步只测`0121a14-abi608-panel-identity`**；
-原内核不变，参数477字节，不启reset/链路/供电周期。成功后再恢复后三档，原失败镜像不复测。
-完整panic消除仍待实机；USB/HFS clonefile等旧异常保留。无需云编译，详见
-[ABI原因与修正](BOOTARGS-ABI-0121A14.md)及[历次启动对照](PANEL-D1-0121A14.md)。
+**0121a14当前进展（2026-11-12）：** ABI修正版identity已实机进入系统，持久日志477字节
+参数匹配，source2/profile4、MDSS/RPMh/SpringBoard正常，无panic/驱动ERROR。
+原loader1024/XNU608交接错误已修正，原NULL写本轮未复现；旧USB、HFS clonefile及关机
+分配错误仍在，不扩大为所有HFS错误已解决或完整面板验收。
+**下一步只测`0121a14-abi608-panel-retained`**：lifecycle2、605字节参数、保留供电票，
+两次手动OFF/ON验证完整厂商表、面板reset、亮度/fresh像素/实际触摸恢复。
+combined/supply继续暂停，E7/E8仍待本机证据，无需云编译。详见
+[ABI修正与当前测试步骤](BOOTARGS-ABI-0121A14.md)及[历次启动对照](PANEL-D1-0121A14.md)。
 
 **0201当前增量（2026-11-12，本地通过，未实机）：** 统一协调器新增显式
 `sweetpanellifecycle=6`：完整OFF→reset实际低保持→原mode5 DATA/link停驻→VPNL/VDDI

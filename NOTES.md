@@ -1,5 +1,25 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, abi608 identity PASS; retained next)
+
+**CURRENT：用户确认ABI修正版进入系统，持久日志吻合；恢复面板生命周期分档测试。**
+logs/sweetlog-0121a14-abi608-panel-identity.bin SHA=fa471912e0284870a59ea85b419d8cec6c6868a1be61e66f48f80cf14479c938；
+total242952/flush9。386行477字节参数完全吻合；88行source2/profile4（ABL选择，非DDIC读回），
+89行MDSS、100行RPMh、666行SpringBoard，5条touch。无panic/驱动ERROR，无显示IRQ、
+scanout或生命周期事务，符合metadata-only。原NULL写本轮未复现，不扩大为完整面板验收。
+仍有3USB warning、13HFS clonefile -34、3BindFS ENOENT及2关机signal-reason分配失败。
+日志未见unmount；无live memSizeActual/HFS分配读回，不称原panic全过程已重现或所有HFS错误修复。
+loader ABI修正提交23f9153，内核仍0121a14；无需push/云编译，本轮未改驱动/固件/CI。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a14-abi608-panel-retained.img**
+SHA=a0bf30f21b2fab53bfc5fe076be45ec24d648cc74dea3eb78e961bb0dd94e828，已再次核对。
+参数605字节，lifecycle2，完整ADT；保留供电票，首次温态takeover不自动reset，
+实际OFF执行完整表/触摸静止，ON执行GPIO reset/完整ON/亮度/fresh像素/TCM恢复。
+进系统后调亮度、手动电源息屏约5–10秒后唤醒，做两次，确认画面/亮度/触摸/三个按键。
+若启动或首轮失败停止，不继续combined/supply；成功导sweetlog-0121a14-abi608-panel-retained.bin。
+无需额外USB插拔、自动息屏或半小时测试。combined/supply仍暂停，尚未验收E7/E8。
+底稿scratch/artifact-0121a14/{abi608-panel-identity-persistent.txt,abi608-panel-identity-log-analysis.json}。
+BOOTARGS-ABI及面板计划/架构同步；以下NEXT为历史，以本段为准。
+
 ## Agent handoff / active work (2026-11-12, power0 PASS; boot_args ABI defect fixed locally)
 
 **CURRENT：power0成功；找到loader1024/XNU608 ABI错位，已本地修正并打包，待实机。**
