@@ -406,7 +406,8 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
  fi
  if [ "$PANEL_LIFECYCLE" = '1' ]; then
   for marker in 'SweetPanelSupplyCycleEnabled' 'SweetPanelLifecyclePanelVotesParked' \
-      'SweetPanelSelectedProfile' 'SWEET PANEL SUPPLY:' 'SweetPanelLifecycleResetHeldLow'; do
+      'SweetPanelSelectedProfile' 'SWEET PANEL SUPPLY:' 'SweetPanelLifecycleResetHeldLow' \
+      'SWEET RPMH IRQ: INTID37 configured' 'SWEET RPMH IRQ: fresh ACTIVE completion'; do
    if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
     printf 'kernel lacks panel lifecycle marker: %s\n' "$marker" >&2
     exit 1
@@ -415,7 +416,7 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
   # NoC ABI declaration requires resource2/clock1 even before lifecycle setup.
   # Keep metadata admission independent of hardware lifecycle providers.
   python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --panel-identity "$ADT" "$TMPDIR/identity.adt"
-  python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --display-noc --panel-pins --panel-touch --panel-identity "$ADT" "$TMPDIR/mdss.adt"
+  python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --display-noc --panel-pins --panel-touch --panel-identity --rpmh-irq "$ADT" "$TMPDIR/mdss.adt"
  elif [ "$PANEL_RESOURCES" = '1' ]; then
   for marker in 'SweetRPMhABI' 'SweetRPMhWritesAllowed' 'SweetDisplayRPMhBound' \
       'SWEET MDSS: matched RPMh consumer=' 'SWEET RPMH: pre-v3 RSC id=' \

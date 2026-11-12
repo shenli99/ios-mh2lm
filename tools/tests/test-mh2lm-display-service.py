@@ -74,6 +74,8 @@ rpmh_source = (arm/'SweetRPMh.cpp').read_text() if rpmh_header else ''
 # primitives are substituted; its new resource path has dedicated cases too.
 rpmh_source = re.sub(r'uint32_t SweetRPMh::read\([^\n]*\)\n\{.*?\n\}', 'uint32_t SweetRPMh::read(vm_offset_t b,uint32_t o) { return readReg(b,o); }', rpmh_source, flags=re.S)
 rpmh_source = re.sub(r'void SweetRPMh::write\([^\n]*\)\n\{.*?\n\}', 'void SweetRPMh::write(vm_offset_t b,uint32_t o,uint32_t v) { writeReg(b,o,v); }', rpmh_source, flags=re.S)
+rpmh_source = rpmh_source.replace('*(volatile uint64_t *)(gic+GICRoute)=0;', 'writeReg(gic,GICRoute,0);writeReg(gic,GICRoute+4,0);')
+rpmh_source = rpmh_source.replace('__asm__ volatile("dmb oshst" ::: "memory");', '(void)0;').replace('__asm__ volatile("dsb osh" ::: "memory");', '(void)0;')
 source = re.sub(r'^#include.*\n', '', rpmh_header+rpmh_source, flags=re.M)+source
 if (arm/'SweetPanelPins.h').exists():
     pins_header = (arm/'SweetPanelPins.h').read_text().replace('class SweetPanelPins :', 'struct SweetPanelPins :').replace('class SweetPanelPinsClient :', 'struct SweetPanelPinsClient :')
@@ -149,12 +151,13 @@ static void IOLockUnlock(IOLock*p){p->unlock();}
 struct IOWorkLoop;
 struct IOEvent : OSObject {IOWorkLoop *loop=nullptr; bool enabled=true; OSObject *owner=nullptr;
  void enable(){enabled=true;} void disable(){enabled=false;}};
+static void cancelQueued(IOEvent*);
 static unsigned eventAdds=0,failEventAdd=0,timerCreates=0,failTimerCreate=0;
 struct IOWorkLoop : OSObject {
  std::recursive_mutex gate;
  static IOWorkLoop *workLoop(){return new IOWorkLoop;}
  int addEventSource(IOEvent *e){if(++eventAdds==failEventAdd)return kIOReturnIOError;e->loop=this;e->retain();return 0;}
- void removeEventSource(IOEvent *e){std::lock_guard<std::recursive_mutex> l(gate);e->loop=nullptr;e->release();}
+ void removeEventSource(IOEvent *e){std::lock_guard<std::recursive_mutex> l(gate);e->loop=nullptr;cancelQueued(e);e->release();}
 };
 struct IOCommandGate : IOEvent {
  using Action=IOReturn(*)(OSObject*,void*,void*,void*,void*);
@@ -167,6 +170,7 @@ struct IOInterruptEventSource : IOEvent {
  static IOInterruptEventSource *interruptEventSource(OSObject *o,Action a){auto*p=new IOInterruptEventSource;p->owner=o;p->action=a;return p;}
  void interruptOccurred(void*,void*,int){if(std::find(queued.begin(),queued.end(),this)==queued.end())queued.push_back(this);}
 };
+static void cancelQueued(IOEvent*e){queued.erase(std::remove(queued.begin(),queued.end(),e),queued.end());}
 static void pump(){auto list=queued;queued.clear();for(auto*e:list)if(e->loop&&e->enabled){std::lock_guard<std::recursive_mutex> l(e->loop->gate);e->action(e->owner,e,1);}}
 struct IOTimerEventSource : IOEvent {
  using Action=void(*)(OSObject*,IOTimerEventSource*);Action action;unsigned timeout=0;
@@ -214,7 +218,7 @@ struct IOService : OSObject {
  virtual IOWorkLoop*getWorkLoop()const{return nullptr;}
  OSObject*getProperty(const char*k){return properties.count(k)?properties[k]:nullptr;}
  bool isInactive(){return inactive;}
- int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){mapCalls.push_back(i);assert(i<16);if(i==missingMap)return nullptr;auto*m=new IOMemoryMap(i);if(pinsNub){assert(i<2);m->customPA=i?0x03908000:0x03d06000;m->customSize=0x1000;}if(rpmhNub){assert(i<3);static const uintptr_t pa[]={0x18220000,0x18220d00,0x0c3f000c};static const size_t n[]={0x100,0x3000,8};m->customPA=pa[i];m->customSize=n[i];}return m;}
+ int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){mapCalls.push_back(i);assert(i<16);if(i==missingMap)return nullptr;auto*m=new IOMemoryMap(i);if(pinsNub){assert(i<2);m->customPA=i?0x03908000:0x03d06000;m->customSize=0x1000;}if(rpmhNub){assert(i<4);static const uintptr_t pa[]={0x18220000,0x18220d00,0x0c3f000c,0x17a00000};static const size_t n[]={0x100,0x3000,8,0x10000};m->customPA=pa[i];m->customSize=n[i];}return m;}
  void setProperty(const char*,unsigned long long,unsigned){}void setProperty(const char*,bool){}
  void setProperty(const char*,const char*){} void setProperty(const char*,OSObject*){}
  void registerService(){}
@@ -286,6 +290,11 @@ static uint32_t readReg(uintptr_t b,uint32_t o){
 static bool irqMMIO=false,injectLateFrame=false,dropSourceWrite=false,keepPPDone=false;
 static uint32_t rpmhDrop=~0u;static bool rpmhKeepIRQ=false;
 static void writeReg(uintptr_t b,uint32_t o,uint32_t v){trace.push_back({true,b+o,v});
+ if(b==0x17a00000){
+  if(o==0x104){regs[b+o]|=v;return;}
+  if(o==0x184){regs[b+0x104]&=~v;return;}
+  if(o==0x284){regs[b+0x204]&=~v;return;}
+ }
  if(b==0x18220d00||b==0x0af21c00){if(o==rpmhDrop)return;if(o==8){if(!rpmhKeepIRQ)regs[b+4]&=~v;return;}}
  if(irqMMIO&&b==0x0ae00000&&o==0x1018){if(!keepPPDone)regs[b+0x1014]&=~v;return;}
  if(dropSourceWrite&&b==bases[2]&&o==0x14)return;
@@ -297,6 +306,7 @@ static void writeReg(uintptr_t b,uint32_t o,uint32_t v){trace.push_back({true,b+
  regs[b+o]=v;if(b==bases[6]&&o==0x90){dmaFired=true;activeDMAFails=failNextDMAs>0;if(failNextDMAs)--failNextDMAs;}}
 static void resetRegs(){trace.clear();regs.clear();dmaFired=false;dmaDone=true;lateError=false;
  failNextDMAs=0;activeDMAFails=false;
+ regs[0x17a0ffe8]=0x30;regs[0x17a00004]=31;regs[0x17a00000]=2;
  regs[bases[0]+0xc]=1;regs[bases[1]+0x2080]=0;regs[bases[6]+4]=5;
  regs[bases[4]+0x288]=0x12345678;regs[bases[4]+0x2b4]=0x3344;
  regs[bases[6]+0x3c]=0x9;regs[bases[6]+0x4c]=0x18;regs[bases[6]+0x84]=0x32;

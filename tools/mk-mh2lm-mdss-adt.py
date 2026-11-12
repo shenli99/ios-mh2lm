@@ -19,8 +19,8 @@ PANEL_PIN_WINDOWS = ((0x03d06000, 0x1000), (0x03908000, 0x1000))  # GPIO6 SOUTH,
 NOC_WINDOWS = ((0x0af20000, 0x1c00), (0x0af21c00, 0x3000), (0x0af30000, 0x3fd4))
 
 
-def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False):
-    display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity
+def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False):
+    display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
     root, end = adt.parse(blob)
     if end != len(blob) or b'lge,mh2lm\0' not in (root.prop('compatible') or b''):
         raise ValueError('expected a complete MH2LM ADT')
@@ -64,8 +64,13 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
         mdss.props.append(('sweet,display-resource-abi', 0, struct.pack('<I', 1)))
         rpmh = adt.Node()
         rpmh.props = [('name', 0, b'display-rpmh\0'), ('compatible', 0, b'sweet,rpmh\0'),
-                      ('reg', 0, encode(RPMH_WINDOWS)),
+                      ('reg', 0, encode(RPMH_WINDOWS + (IRQ_WINDOWS[-1:] if rpmh_irq else ()))),
                       ('sweet,rpmh-abi', 0, struct.pack('<I', 1))]
+        if rpmh_irq:
+            # Explicit append-only extension. Mode2 uses GIC callback + native
+            # event/workloop; metadata-only and old ABI output stay unchanged.
+            rpmh.props.extend([('sweet,rpmh-irq-abi', 0, struct.pack('<I', 1)),
+                               ('sweet,rpmh-intid', 0, struct.pack('<I', 37))])
         arm.children.append(rpmh)
     if panel_pins:
         pins = adt.Node()
@@ -89,10 +94,11 @@ if __name__ == '__main__':
     parser.add_argument('--panel-pins', action='store_true', help='append GPIO6/reset and GPIO8/TE provider; implies display resources, never authorizes reset/vendor commands')
     parser.add_argument('--panel-touch', action='store_true', help='append typed touch worker coordination service; no new GPIO/IRQ mapping, no automatic pause/resume')
     parser.add_argument('--panel-identity', action='store_true', help='reserve zeroed live-ABL panel selection slot; implies resources, never selects a revision')
+    parser.add_argument('--rpmh-irq', action='store_true', help='append apps RSC GIC mapping and INTID37 completion ABI; implies display resources')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
     source, destination = args.source, args.destination
     if source.resolve() == destination.resolve():
         sys.exit('output must differ from the baseline ADT')
-    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity))
+    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq))

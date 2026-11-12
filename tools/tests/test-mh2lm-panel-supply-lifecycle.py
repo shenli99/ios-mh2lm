@@ -150,7 +150,7 @@ int main(){
   auto expected=h.m->fManagedRails;auto token=h.m->fLifecycle.supplyToken;
   auto*r=h.r;uint32_t b=r->fTCSIndex*0x2a0;regs[TCS+4]|=1u<<r->fTCSIndex;regs[TCS+b+0x18]=1;
   for(unsigned c=0;c<r->fCommandCount;++c)regs[TCS+b+0x3c+c*0x14]=(1<<8)|(1<<16);
-  for(unsigned i=0;i<3&&r->fBusy;++i){fakeTicks+=100000;std::lock_guard<std::recursive_mutex>l(r->fLoop->gate);r->advance();}
+  for(unsigned i=0;i<3&&r->fBusy;++i){fakeTicks+=100000;if(!deliverRPMhIRQ()){std::lock_guard<std::recursive_mutex>l(r->fLoop->gate);r->advance();}}
   assert(!r->fBusy&&r->fClients[0].status.token==token&&r->fClients[0].status.state==SweetRPMhComplete);
   assert(h.m->fManagedRails==expected);h.m->cancelPanelLifecycle(h.m->fLifecycle.token);supplyFailed(h);
   assert(h.m->fManagedRails==(on ? (expected|(1u<<rail)) : (expected&~(1u<<rail)))&&!h.m->fLifecycle.supplyToken);
@@ -167,8 +167,8 @@ int main(){
   if(fault==5)h.p->cancelRequest(h.m->fPanelPinsConsumer,h.m->fLifecycle.pinToken);
   if(fault==6)h.t->cancelRequest(h.m->fTouchPanelConsumer,h.m->fLifecycle.touchToken);
   if(fault==7)fakeTicks+=500000000ULL;
-  auto before=writes();{std::lock_guard<std::recursive_mutex>l(h.r->fLoop->gate);h.r->advance();}
-  assert(before==writes()&&!h.r->fBusy);h.life();supplyFailed(h);
+  auto from=trace.size();auto oldEnable=regs[TCS];{std::lock_guard<std::recursive_mutex>l(h.r->fLoop->gate);h.r->advance();}
+  assert(!h.r->fBusy);irqQuiesceOnly(from,oldEnable);h.life();supplyFailed(h);
  }
  // Missing ACK, posted-write failure and pin input loss never bypass the
  // dependency. A retry cannot adopt a partly released supply generation.

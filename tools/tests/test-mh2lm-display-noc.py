@@ -66,7 +66,7 @@ static void step(SweetMDSS*m,SweetRPMh*r,bool apps=true,bool data=true){
   for(unsigned c=0;c<m->fNoCGroup;++c)
    regs[DT+m->fNoCTCS*0x2a0+0x3c+c*0x14]=(1<<8)|(c+1==m->fNoCGroup ? 1<<16 : 0);
  }
- {std::lock_guard<std::recursive_mutex>l(r->fLoop->gate);r->advance();}
+ if(!deliverRPMhIRQ()){std::lock_guard<std::recursive_mutex>l(r->fLoop->gate);r->advance();}
  {std::lock_guard<std::recursive_mutex>l(m->fLoop->gate);SweetMDSS::clockTimerAction(m,m->fClockTimer);SweetMDSS::noCTimerAction(m,m->fNoCTimer);}
 }
 static void drive(SweetMDSS*m,SweetRPMh*r){for(unsigned n=0;n<256&&m->noCBusy();++n)step(m,r);assert(!m->noCBusy()&&!m->fNoCFault);}
@@ -234,7 +234,7 @@ int main(){
  nocFixtures();n=nub();r=make(n);a=attach(r);assert(r->requestRegisterBandwidth(a,76800000,&rt)==0);
  regs[TCS+0x2a0+0x1c]=1;regs[TCS+0x2a0+0x34]=0x50000;tick(r);
  SweetRegisterBandwidthStatus rs{};assert(r->copyRegisterBandwidthStatus(a,rt,&rs)==0&&rs.state==SweetRPMhFailed&&rs.uncertain);
- for(auto op:trace)if(op.write)assert(op.addr==TCS);
+ for(auto op:trace)if(op.write)assert(op.addr==TCS||irqConfigurationWrite(op));
  destroy(r,n);dropNub(n);reboot();
  // Inputs, missing metadata, overflow, and live inherited pipeline: no writes.
  for(unsigned fault=0;fault<7;++fault){nocFixtures();n=nub();r=make(n);d=displayNub();m=displayMake(d,r);auto v=demand();

@@ -1,0 +1,413 @@
+diff --git a/iokit/Kernel/arm/SweetRPMh.cpp b/iokit/Kernel/arm/SweetRPMh.cpp
+--- a/iokit/Kernel/arm/SweetRPMh.cpp
++++ b/iokit/Kernel/arm/SweetRPMh.cpp
+@@ -1,6 +1,7 @@
+ /* Adapted from this project's sweet_rpmh.c (command DB/pre-v3 TCS layout).
+  * Only this service writes MH2LM apps-DRV. Other-board legacy code is excluded
+- * on MH2LM. Completion and posted-write readback use bounded timer phases. */
++ * on MH2LM. ACTIVE completion uses IRQ/event/workloop; timers bound posted
++ * readback, GIC drain and watchdog phases without polling completion. */
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ #include "SweetRPMh.h"
+ #include "SweetPanelPins.h"
+@@ -84,6 +85,154 @@
+  *(volatile uint32_t *)(base+off)=value;
+  __asm__ volatile("dsb osh" ::: "memory");
+ }
++/* apps RSC: LG SM8150 DTS SPI5 => INTID37 (level high), GICv3.
++ * Same native physical-dispatch pattern as MDSS, not a consumer singleton.
++ * The permanent lock fences late callbacks before service/event/map release. */
++static IOSimpleLock *rpmhIRQDispatch;
++static SweetRPMh *rpmhIRQService;
++static IOSimpleLock *rpmh_irq_lock(void)
++{
++ IOSimpleLock *lock=__atomic_load_n(&rpmhIRQDispatch,__ATOMIC_ACQUIRE);
++ if (!lock) {
++  IOSimpleLock *candidate=IOSimpleLockAlloc();
++  if (!candidate) return NULL;
++  if (__atomic_compare_exchange_n(&rpmhIRQDispatch,&lock,candidate,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) lock=candidate;
++  else IOSimpleLockFree(candidate);
++ }
++ return lock;
++}
++enum { GICBit=1u<<5, GICEnable=0x104, GICDisable=0x184,
++ GICPending=0x204, GICClearPending=0x284, GICActive=0x304,
++ GICGroup=0x084, GICConfig=0xc08, GICPriority=0x424, GICRoute=0x6128 };
++
++bool SweetRPMh::setupIRQ(IOService *provider)
++{
++ /* Mode1 remains metadata-only with the original three-resource ABI. The
++  * explicit extension is mandatory for mode2; never fall back to polling. */
++ OSData *abi=OSDynamicCast(OSData,provider->getProperty("sweet,rpmh-irq-abi"));
++ if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),"\1\0\0\0",4)) return false;
++ OSData *intid=OSDynamicCast(OSData,provider->getProperty("sweet,rpmh-intid"));
++ const uint32_t expected=37;
++ if (!intid || intid->getLength()!=4 || memcmp(intid->getBytesNoCopy(),&expected,4)) return false;
++ fIRQMap=provider->mapDeviceMemoryWithIndex(3);
++ if (!fIRQMap || fIRQMap->getPhysicalAddress()!=0x17a00000 || fIRQMap->getLength()!=0x10000) return false;
++ const vm_offset_t gic=fIRQMap->getVirtualAddress();
++ if ((read(gic,0xffe8)&0xf0u)!=0x30u || ((read(gic,4)&31u)+1u)*32u<=37u ||
++     !(read(gic,0)&2u) || ((read(gic,GICEnable)|read(gic,GICPending)|read(gic,GICActive))&GICBit)) return false;
++ fIRQEvent=IOInterruptEventSource::interruptEventSource(this,irqAction);
++ if (!fIRQEvent || fLoop->addEventSource(fIRQEvent)!=kIOReturnSuccess) return false;
++ fIRQEventAdded=true;
++ IOSimpleLock *lock=rpmh_irq_lock();
++ if (!lock) return false;
++ IOInterruptState saved=IOSimpleLockLockDisableInterrupt(lock);
++ if (!rpmhIRQService) { rpmhIRQService=this; fIRQClaimed=true; }
++ IOSimpleLockUnlockEnableInterrupt(lock,saved);
++ return fIRQClaimed;
++}
++
++IOReturn SweetRPMh::prepareIRQ(void)
++{
++ const vm_offset_t gic=fIRQMap->getVirtualAddress();
++ if (fIRQConfigured) {
++  if ((read(gic,GICConfig)&0xc00u) || (read(gic,GICPriority)&0xff00u)!=0xa000u ||
++      read(gic,GICRoute) || read(gic,GICRoute+4)) return kIOReturnIOError;
++  return kIOReturnSuccess;
++ }
++ if (!fIRQTouched) {
++  /* Fail read-only if another owner, pending source or unsupported geometry
++   * exists. Do not acknowledge inherited peripheral/GIC pending state. */
++  if ((read(gic,0xffe8)&0xf0u)!=0x30u || ((read(gic,4)&31u)+1u)*32u<=37u ||
++      !(read(gic,0)&2u) || ((read(gic,GICEnable)|read(gic,GICPending)|read(gic,GICActive))&GICBit) ||
++      read(fTCS,IRQStatus)) return kIOReturnBusy;
++  fIRQTouched=true; fEverWritten=true;
++  write(gic,GICDisable,GICBit);
++  write(gic,GICGroup,read(gic,GICGroup)|GICBit);
++  write(gic,GICConfig,read(gic,GICConfig)&~0xc00u); /* INTID37 only, level */
++  write(gic,GICPriority,(read(gic,GICPriority)&~0xff00u)|0xa000u);
++  /* Aligned 64-bit IROUTER access, established boot CPU MPIDR0 route. */
++  __asm__ volatile("dmb oshst" ::: "memory");
++  *(volatile uint64_t *)(gic+GICRoute)=0;
++  __asm__ volatile("dsb osh" ::: "memory");
++  fIRQConfigureDeadline=nowNS()+1000000ULL;
++ }
++ /* RWP is an asynchronous timer phase, never a spin or delay under a lock. */
++ if (read(gic,0)&(1u<<31))
++  return nowNS()<fIRQConfigureDeadline ? kIOReturnNotReady : kIOReturnIOError;
++ if ((read(gic,GICConfig)&0xc00u) || (read(gic,GICPriority)&0xff00u)!=0xa000u ||
++     read(gic,GICRoute) || read(gic,GICRoute+4)) return kIOReturnIOError;
++ if (!fIRQConfigured) {
++  fIRQConfigured=true; __atomic_store_n(&fIRQOnline,1u,__ATOMIC_RELEASE);
++  setProperty("SweetRPMhCompletionIRQ",37ULL,32);
++  SWEET_LOG_INFO("SWEET RPMH IRQ: INTID37 configured; ACTIVE completion on provider workloop, no status polling\n");
++ }
++ return kIOReturnSuccess;
++}
++
++bool SweetRPMh::handleIRQ(void)
++{
++ /* Dispatch lock held: event/map stay alive. No peripheral ACK, client gate,
++  * payload scan, allocation or wait in the top half. sleh performs GIC EOI. */
++ if (!__atomic_load_n(&fIRQOnline,__ATOMIC_ACQUIRE)) return true;
++ write(fIRQMap->getVirtualAddress(),GICDisable,GICBit);
++ __atomic_add_fetch(&fIRQEntries,1u,__ATOMIC_RELAXED);
++ if (!__atomic_exchange_n(&fIRQArmed,0u,__ATOMIC_ACQ_REL)) return true;
++ __atomic_store_n(&fIRQPosted,1u,__ATOMIC_RELEASE);
++ fIRQEvent->interruptOccurred(NULL,NULL,0);
++ return true;
++}
++extern "C" bool sweet_rpmh_irq(unsigned int intid)
++{
++ if (intid!=37u) return false;
++ IOSimpleLock *lock=__atomic_load_n(&rpmhIRQDispatch,__ATOMIC_ACQUIRE);
++ if (lock) {
++  IOInterruptState saved=IOSimpleLockLockDisableInterrupt(lock);
++  if (rpmhIRQService) (void)rpmhIRQService->handleIRQ();
++  IOSimpleLockUnlockEnableInterrupt(lock,saved);
++ }
++ return true; /* Reserved apps RSC SPI, including late stopped delivery. */
++}
++void SweetRPMh::irqAction(OSObject *owner,IOInterruptEventSource *,int)
++{
++ SweetRPMh *self=(SweetRPMh *)owner;
++ if (!__atomic_exchange_n(&self->fIRQPosted,0u,__ATOMIC_ACQ_REL) || !self->fAccepting) return;
++ if (!self->fBusy || !self->fExecuting || self->fOperationCount ||
++     !(read(self->fTCS,IRQStatus)&(1u<<self->fTCSIndex))) {
++  SWEET_LOG_ERROR("SWEET RPMH IRQ: unexpected ACTIVE completion; source retained, no foreign ACK\n");
++  self->quietIRQ(); self->fPoisoned=true;
++  if (self->fBusy) self->finish(kIOReturnIOError,true);
++  return;
++ }
++ self->fIRQObserved=true;
++ self->advance();
++}
++void SweetRPMh::quietIRQ(void)
++{
++ __atomic_store_n(&fIRQArmed,0u,__ATOMIC_RELEASE);
++ if (fIRQTouched) write(fIRQMap->getVirtualAddress(),GICDisable,GICBit);
++ if (fIRQSourceMask) {
++  uint32_t enabled=read(fTCS,IRQEnable);
++  if (enabled!=~0u) write(fTCS,IRQEnable,enabled&~fIRQSourceMask);
++ }
++}
++void SweetRPMh::stopIRQ(void)
++{
++ __atomic_store_n(&fIRQOnline,0u,__ATOMIC_RELEASE);
++ if (fIRQClaimed) {
++  IOSimpleLock *lock=__atomic_load_n(&rpmhIRQDispatch,__ATOMIC_ACQUIRE);
++  IOInterruptState saved=IOSimpleLockLockDisableInterrupt(lock);
++  if (rpmhIRQService==this) rpmhIRQService=NULL;
++  fIRQClaimed=false;
++  IOSimpleLockUnlockEnableInterrupt(lock,saved);
++ }
++ if (fIRQEventAdded) { fIRQEvent->disable(); fLoop->removeEventSource(fIRQEvent); fIRQEventAdded=false; }
++}
++void SweetRPMh::waitCompletion(void)
++{
++ uint64_t now=nowNS(),deadline=fDeadline;
++ if (fArcRequest && fStageDeadline<deadline) deadline=fStageDeadline;
++ fTimer->setTimeoutUS((unsigned)(deadline>now ? (deadline-now+999)/1000 : 1));
++}
++
+ uint64_t SweetRPMh::nowNS(void)
+ {
+  uint64_t ns=0; absolutetime_to_nanoseconds(mach_absolute_time(),&ns); return ns;
+@@ -245,13 +394,13 @@
+  fClientIndex=client; fRegisterProposal=proposal; fRegisterTarget=target;
+  fArcRequest=false; fRegisterRequest=true; fBusy=true;
+  if (noWrite) { finish(kIOReturnSuccess,false); return kIOReturnSuccess; }
+- fTCSIndex=chosen; fExecuting=false; fProgress=false; fOperation=fOperationCount=0; fWriteIssued=false;
++ fTCSIndex=chosen; fExecuting=false; fIRQObserved=false; fOperation=fOperationCount=0; fWriteIssued=false;
+  fCommandCount=fCommandMask=1;
+  uint32_t b=chosen*Stride, bit=1u<<chosen;
+- addOperation(IRQEnable,fSavedIRQ&~bit); addOperation(b+Message,WriteACK);
++ addOperation(IRQEnable,fSavedIRQ&~bit); addOperation(IRQClear,bit,true); addOperation(b+Message,WriteACK);
+  addOperation(b+Address,fBCM[SweetBCMCN0].address);
+  addOperation(b+Data,(1u<<30)|(y ? 1u<<29 : 0u)|y);
+- addOperation(b+Wait,1); addOperation(b+Enable,1); addOperation(b+Control,0); addOperation(b+Control,AMC);
++ addOperation(b+Wait,1); addOperation(b+Enable,1); addOperation(b+Control,0); addOperation(b+Control,AMC); addOperation(IRQEnable,0);
+  fDeadline=nowNS()+100000000ULL; fTimer->setTimeoutUS(1); return kIOReturnSuccess;
+ }
+ 
+@@ -317,16 +466,16 @@
+  uint32_t irq=read(fTCS,IRQEnable);
+  if (irq==~0u || !emptyTCS(chosen)) return kIOReturnBusy;
+  fTCSIndex=chosen; fSavedIRQ=irq;
+- fExecuting=false; fProgress=false; fOperation=fOperationCount=0; fWriteIssued=false;
++ fExecuting=false; fIRQObserved=false; fOperation=fOperationCount=0; fWriteIssued=false;
+  fCommandCount=1; fCommandMask=1;
+  uint32_t b=chosen*Stride, bit=1u<<chosen;
+  const ArcStage &stage=fArcStages[fArcStage];
+- addOperation(IRQEnable,irq&~bit);
++ addOperation(IRQEnable,irq&~bit); addOperation(IRQClear,bit,true);
+  addOperation(b+Message,WriteACK);
+  addOperation(b+Address,fArc[stage.supply].address);
+  addOperation(b+Data,stage.selector);
+  addOperation(b+Wait,1); addOperation(b+Enable,1);
+- addOperation(b+Control,0); addOperation(b+Control,AMC);
++ addOperation(b+Control,0); addOperation(b+Control,AMC); addOperation(IRQEnable,0);
+  fStageDeadline=nowNS()+100000000ULL;
+  fTimer->setTimeoutUS(1); return kIOReturnSuccess;
+ }
+@@ -452,7 +601,11 @@
+  if (fLoop->addEventSource(fGate)!=kIOReturnSuccess) return false;
+  fGateAdded=true;
+  if (fLoop->addEventSource(fTimer)!=kIOReturnSuccess) return false;
+- fTimerAdded=true; fAccepting=true;
++ fTimerAdded=true;
++ if (fMode==2 && !setupIRQ(provider)) {
++  SWEET_LOG_ERROR("SWEET RPMH IRQ: ABI/map/event/ownership rejected; mode2 disabled, no polling fallback\n"); return false;
++ }
++ fAccepting=true;
+  setProperty("SweetRPMhABI",1ULL,32); setProperty("SweetRPMhWritesAllowed",fMode==2);
+  unsigned sharedMask=0;
+  for (unsigned r=0;r<SweetRailCount;++r) if (railLimits[r].lastDisableRequiresHandoff) sharedMask|=1u<<r;
+@@ -533,9 +686,9 @@
+  fTCSIndex=(unsigned)chosen;
+  if (!emptyTCS(fTCSIndex)) return kIOReturnBusy;
+  fClients[client].status=status; fClients[client].status.state=SweetRPMhPending;
+- fBusy=true; fExecuting=false; fProgress=false; fOperation=0; fOperationCount=0; fWriteIssued=false;
++ fBusy=true; fExecuting=false; fIRQObserved=false; fOperation=0; fOperationCount=0; fWriteIssued=false;
+  uint32_t b=fTCSIndex*Stride, bit=1u<<fTCSIndex;
+- addOperation(IRQEnable,fSavedIRQ&~bit);
++ addOperation(IRQEnable,fSavedIRQ&~bit); addOperation(IRQClear,bit,true);
+  fCommandCount=target.enabled ? 3u : 1u; fCommandMask=(1u<<fCommandCount)-1u;
+  const uint32_t offsets[]={0,8,4}, values[]={rounded,status.mode,1};
+  for (unsigned c=0;c<fCommandCount;++c) {
+@@ -544,13 +697,14 @@
+   addOperation(b+Data+c*CommandStride,target.enabled ? values[c] : 0);
+  }
+  addOperation(b+Wait,fCommandMask); addOperation(b+Enable,fCommandMask);
+- addOperation(b+Control,0); addOperation(b+Control,AMC);
++ addOperation(b+Control,0); addOperation(b+Control,AMC); addOperation(IRQEnable,0);
+  fDeadline=nowNS()+100000000ULL;
+  fTimer->setTimeoutUS(1); return kIOReturnSuccess;
+ }
+ 
+ void SweetRPMh::finish(IOReturn result,bool uncertain)
+ {
++ if (result!=kIOReturnSuccess) quietIRQ();
+  clearPanelFence();
+  if (fRegisterRequest) {
+   SweetRegisterBandwidthStatus &s=fClients[fClientIndex].registerStatus;
+@@ -610,9 +764,9 @@
+   const char *phase=!fExecuting ? "program" : (fOperationCount ? "cleanup" : "completion");
+   /* The following finish() record carries the consumer token/resource name.
+    * Keep this common path independent of client/stage/payload array indexing. */
+-  SWEET_LOG_ERROR("SWEET RPMH SNAPSHOT: reason=%s phase=%s request=%s rail=%u arc-stage=%u tcs=%u commands=%u mask=%#x executing=%u progress=%u written=%u operation=%u/%u posted=%u deadline-late-us=%llu stage-late-us=%llu write-late-us=%llu\n",
++  SWEET_LOG_ERROR("SWEET RPMH SNAPSHOT: reason=%s phase=%s request=%s rail=%u arc-stage=%u tcs=%u commands=%u mask=%#x executing=%u irq-observed=%u written=%u operation=%u/%u posted=%u deadline-late-us=%llu stage-late-us=%llu write-late-us=%llu\n",
+    reason,phase,fArcRequest ? "ARC" : (fRegisterRequest ? "CN0" : "VRM"),
+-   fRail,fArcRequest ? fArcStage : 0u,fTCSIndex,fCommandCount,fCommandMask,fExecuting,fProgress,fEverWritten,
++   fRail,fArcRequest ? fArcStage : 0u,fTCSIndex,fCommandCount,fCommandMask,fExecuting,fIRQObserved,fEverWritten,
+    fOperation,fOperationCount,fWriteIssued,now>fDeadline ? (now-fDeadline)/1000 : 0ULL,
+    fArcRequest && now>fStageDeadline ? (now-fStageDeadline)/1000 : 0ULL,
+    fWriteIssued && now>fWriteDeadline ? (now-fWriteDeadline)/1000 : 0ULL);
+@@ -630,6 +784,24 @@
+  };
+  if (now>=fDeadline || (fArcRequest && now>=fStageDeadline)) {
+   diagnose("deadline"); finish(kIOReturnTimeout,true); return;
++ }
++ if (!fExecuting && fOperation==0 && !fWriteIssued) {
++  IOReturn result=prepareIRQ();
++  if (result==kIOReturnNotReady) { fTimer->setTimeoutUS(100); return; }
++  if (result!=kIOReturnSuccess) {
++   SWEET_LOG_ERROR("SWEET RPMH IRQ: GIC/source admission failed rc=%#x; no trigger\n",(unsigned)result);
++   finish(result,fEverWritten); return;
++  }
++  const vm_offset_t gic=fIRQMap->getVirtualAddress();
++  /* An IRQ worker may beat the previous sleh EOI on another CPU. Wait via
++   * timer while the owned line drains, never overwrite an active generation. */
++  if (read(gic,GICActive)&GICBit) { fTimer->setTimeoutUS(100); return; }
++  if (read(gic,GICPending)&GICBit) {
++   if (read(fTCS,IRQStatus)) { finish(kIOReturnBusy,true); return; }
++   write(gic,GICClearPending,GICBit);
++   if (read(gic,GICPending)&GICBit) { fTimer->setTimeoutUS(100); return; }
++  }
++  __atomic_store_n(&fIRQPosted,0u,__ATOMIC_RELEASE);
+  }
+  /* Bounded fixed operation count. A posted write not yet visible resumes on
+   * the timer, never delay()/sleep or completion busy-wait inside the gate. */
+@@ -658,7 +830,9 @@
+    if (op.offset==IRQEnable) {
+     uint32_t current=read(fTCS,IRQEnable);
+     if (current==~0u) { finish(kIOReturnIOError,fEverWritten); return; }
+-    op.value=(current&~bit) | (fExecuting ? (fSavedIRQ&bit) : 0u);
++    op.value=fExecuting ? ((current&~bit)|(fSavedIRQ&bit)) :
++        (fOperation ? (current|bit) : (current&~bit));
++    if (!fExecuting && fOperation) fIRQSourceMask|=bit;
+    }
+    if (fPanelFence.pins && (isInactive() || !panelFenceValid(fPanelFence))) {
+     finish(kIOReturnNotReady,fExecuting || fWriteIssued || fOperation!=0); return;
+@@ -679,24 +853,37 @@
+  }
+  if (!fExecuting) {
+   if (fPanelFence.pins && (isInactive() || !panelFenceValid(fPanelFence))) { finish(kIOReturnNotReady,true); return; }
+-  write(fTCS,b+Control,AMC|Trigger); fExecuting=true;
+-  /* Initial programming consumed; cleanup queue is constructed only after
+-   * a fresh completion. No stale command status can bypass this phase. */
+-  fOperation=fOperationCount=0; fTimer->setTimeoutUS(100); return;
++  /* Source is enabled while GIC remains masked. The selected completion was
++   * explicitly cleared while idle: require zero after unmask, BEFORE trigger.
++   * This excludes masked stale status without accepting old CMD_STATUS. */
++  uint32_t irq=read(fTCS,IRQStatus);
++  if (irq==~0u || (irq&bit)) { diagnose("stale-before-trigger"); finish(kIOReturnIOError,true); return; }
++  fIRQObserved=false; fExecuting=true;
++  fOperation=fOperationCount=0;
++  __atomic_store_n(&fIRQArmed,1u,__ATOMIC_RELEASE);
++  write(fTCS,b+Control,AMC|Trigger);
++  /* Fast completion before enable stays pending on the level-high line. Do
++   * not clear GIC/peripheral pending after trigger. Actual callback is required. */
++  write(fIRQMap->getVirtualAddress(),GICEnable,GICBit);
++  waitCompletion(); return;
+  }
+  if (fOperationCount) {
+   if (fPanelFence.pins && (isInactive() || !panelFenceValid(fPanelFence))) { finish(kIOReturnNotReady,true); return; }
+   completeTransaction(); return;
+  }
++ if (!fIRQObserved) { waitCompletion(); return; } /* watchdog only, no status polling */
+  uint32_t irq=read(fTCS,IRQStatus), idle=read(fTCS,b+Status);
+  bool complete=true;
+  for (unsigned c=0;c<fCommandCount;++c) {
+   uint32_t status=read(fTCS,b+CommandStatus+c*CommandStride);
+   complete &= status!=~0u && (status&(Issued|Complete))==(Issued|Complete);
+  }
+- fProgress|=idle==0 || !complete;
+  if (irq==~0u || idle==~0u) { diagnose("invalid-completion"); finish(kIOReturnIOError,true); return; }
+- if (!idle || !(irq&bit || fProgress) || !complete) { fTimer->setTimeoutUS(100); return; }
++ if (!idle || !(irq&bit) || !complete) {
++  diagnose("incomplete-irq"); finish(kIOReturnIOError,true); return;
++ }
++ SWEET_LOG_INFO("SWEET RPMH IRQ: fresh ACTIVE completion tcs=%u commands=%u entries=%u; cleanup pending\n",
++  fTCSIndex,fCommandCount,__atomic_load_n(&fIRQEntries,__ATOMIC_ACQUIRE));
+  addOperation(b+Control,AMC); addOperation(b+Control,0);
+  addOperation(b+Enable,0); addOperation(b+Wait,0); addOperation(IRQClear,bit,true);
+  uint32_t enabled=read(fTCS,IRQEnable);
+@@ -712,7 +899,7 @@
+ {
+  SweetRPMh *self=(SweetRPMh *)owner; RPMhRequest &r=*(RPMhRequest *)arg;
+  if (r.op==Shutdown) {
+-  self->fAccepting=false;
++  self->fAccepting=false; self->quietIRQ();
+   if (self->fBusy) self->finish(kIOReturnAborted,self->fEverWritten);
+   if (self->fTimer) self->fTimer->cancelTimeout();
+   return kIOReturnSuccess;
+@@ -827,6 +1014,7 @@
+ void SweetRPMh::shutdown(void)
+ {
+  if (fGateAdded) { RPMhRequest r={}; r.op=Shutdown; (void)fGate->runAction(action,&r); }
++ stopIRQ();
+  if (fTimerAdded) { fLoop->removeEventSource(fTimer); fTimerAdded=false; }
+ }
+ bool SweetRPMh::willTerminate(IOService *provider,IOOptionBits options)
+@@ -839,6 +1027,7 @@
+  for (unsigned i=0;i<8;++i) if (fClients[i].id)
+   SWEET_LOG_WARN("SWEET RPMH: consumer %llu still attached; preserving votes, no automatic powerdown\n",fClients[i].id);
+  if (fGateAdded) { fLoop->removeEventSource(fGate); fGateAdded=false; }
++ OSSafeReleaseNULL(fIRQEvent); OSSafeReleaseNULL(fIRQMap);
+  OSSafeReleaseNULL(fTimer); OSSafeReleaseNULL(fGate); OSSafeReleaseNULL(fLoop);
+  for (unsigned i=0;i<4;++i) OSSafeReleaseNULL(fMaps[i]);
+  if (fClaimed) { __atomic_store_n(&rpmhOwner,fEverWritten ? 2u : 0u,__ATOMIC_RELEASE); fClaimed=false; }
+diff --git a/iokit/Kernel/arm/SweetRPMh.h b/iokit/Kernel/arm/SweetRPMh.h
+--- a/iokit/Kernel/arm/SweetRPMh.h
++++ b/iokit/Kernel/arm/SweetRPMh.h
+@@ -94,7 +94,10 @@
+  uint64_t pinsConsumer, pinsToken, touchConsumer, touchToken;
+ };
+ 
++extern "C" bool sweet_rpmh_irq(unsigned int);
++
+ class SweetRPMh : public IOService {
++ friend bool sweet_rpmh_irq(unsigned int);
+  OSDeclareDefaultStructors(SweetRPMh);
+  IOWorkLoop *fLoop;
+  IOCommandGate *fGate;
+@@ -115,7 +118,21 @@
+  uint64_t fNextClient, fNextToken, fDeadline, fWriteDeadline;
+  unsigned fClientIndex, fRail, fTCSIndex, fCommandCount, fOperation, fOperationCount;
+  uint32_t fSavedIRQ, fCommandMask;
+- bool fBusy, fProgress, fWriteIssued, fExecuting;
++ bool fBusy, fIRQObserved, fWriteIssued, fExecuting;
++ /* Physical IRQ dispatch owns no consumer access. Gate -> dispatch lock only;
++  * the top half masks one SPI and queues this service's software event. */
++ IOMemoryMap *fIRQMap;
++ IOInterruptEventSource *fIRQEvent;
++ bool fIRQEventAdded, fIRQClaimed, fIRQTouched, fIRQConfigured;
++ uint64_t fIRQConfigureDeadline;
++ unsigned fIRQOnline, fIRQArmed, fIRQPosted, fIRQEntries, fIRQSourceMask;
++ bool setupIRQ(IOService *);
++ IOReturn prepareIRQ(void);
++ bool handleIRQ(void);
++ void quietIRQ(void);
++ void stopIRQ(void);
++ void waitCompletion(void);
++ static void irqAction(OSObject *,IOInterruptEventSource *,int);
+  SweetRailVote fProposal, fTarget;
+  SweetPanelSupplyFence fPanelFence;
+  bool panelFenceValid(const SweetPanelSupplyFence &);
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1895,6 +1895,10 @@
+ 			sweet_handled = sweet_touch_irq(intid);
+ 		}
+ 		if (!sweet_handled) {
++			extern bool sweet_rpmh_irq(unsigned int intid);
++			sweet_handled = sweet_rpmh_irq(intid);
++		}
++		if (!sweet_handled) {
+ 			extern bool sweet_mdss_irq(unsigned int intid);
+ 			sweet_handled = sweet_mdss_irq(intid);
+ 		}

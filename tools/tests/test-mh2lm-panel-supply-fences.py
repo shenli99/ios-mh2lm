@@ -41,7 +41,7 @@ static uint64_t panelVote(Harness&h,SweetRail rail,bool enable,const SweetPanelS
  assert(writes()==before);return token;
 }
 static void child(Harness&h){
- fakeTicks+=100000;std::lock_guard<std::recursive_mutex>l(h.r->fLoop->gate);SweetRPMh::timerAction(h.r,h.r->fTimer);
+ fakeTicks+=100000;if(!deliverRPMhIRQ()){std::lock_guard<std::recursive_mutex>l(h.r->fLoop->gate);SweetRPMh::timerAction(h.r,h.r->fTimer);}
 }
 static void freshACK(Harness&h){
  auto*r=h.r;uint32_t b=r->fTCSIndex*0x2a0;
@@ -110,7 +110,7 @@ int main(){
   if(fault==9){uint64_t newer;assert(h.p->activate(f.pinsConsumer,&newer)==0);}
   if(fault==10){uint64_t newer;assert(h.t->resume(f.touchConsumer,&newer)==0);}
   if(fault==11)h.r->inactive=true;
-  auto before=writes();child(h);assert(writes()==before&&!h.r->fBusy);
+  auto from=trace.size();auto oldEnable=regs[TCS];child(h);assert(!h.r->fBusy);irqQuiesceOnly(from,oldEnable);
   auto s=h.r->fClients[0].status;assert(s.token==token&&s.state==SweetRPMhFailed&&s.result==kIOReturnNotReady&&s.uncertain==(phase!=0));
   assert(h.r->fClients[0].votes[SweetRailVPNL].enabled&&h.r->fAggregate[SweetRailVPNL].enabled);
   assert(h.p->refs==pr&&h.t->refs==tr&&!h.r->fPanelFence.pins&&!h.r->fPanelFence.touch);
@@ -147,11 +147,11 @@ int main(){
   if(phase>=1)child(h);if(phase==2){freshACK(h);child(h);}
   assert(h.r->cancelPanelVote(h.m->fRPMhConsumer+1,token)==kIOReturnNotFound);
   assert(h.r->cancelPanelVote(h.m->fRPMhConsumer,token+1)==kIOReturnNotFound&&h.r->fBusy);
-  auto before=writes();
+  auto from=trace.size();auto oldEnable=regs[TCS];
   if(fault==0)assert(h.r->cancelPanelVote(h.m->fRPMhConsumer,token)==0);
   if(fault==1){fakeTicks+=100000000ULL;child(h);}
   if(fault==2)h.r->stop(h.n);
-  assert(!h.r->fBusy&&writes()==before&&!h.r->fPanelFence.pins&&h.p->refs==pr&&h.t->refs==tr);
+  assert(!h.r->fBusy&&!h.r->fPanelFence.pins&&h.p->refs==pr&&h.t->refs==tr);irqQuiesceOnly(from,oldEnable);
   assert(h.r->fClients[0].votes[SweetRailVPNL].enabled);
   auto n=trace.size();child(h);assert(trace.size()==n);
  }

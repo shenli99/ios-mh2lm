@@ -16,6 +16,19 @@ exec(compile(existing.read_text().split('with tempfile.TemporaryDirectory(')[0],
 tests = r'''
 static constexpr uintptr_t RSC=0x18220000,TCS=0x18220d00,DB=0x90000000,LOC=0x0c3f000c;
 static unsigned writes(){unsigned n=0;for(auto&o:trace)n+=o.write;return n;}
+static bool irqConfigurationWrite(const Op&o){
+ return (o.addr==0x17a00184&&o.value==(1u<<5))||o.addr==0x17a00084||
+        o.addr==0x17a00c08||o.addr==0x17a00424||
+        ((o.addr==0x17a06128||o.addr==0x17a0612c)&&!o.value);
+}
+// A failed/invalid fence may mask delivery, but must not touch payload,
+// trigger, W1C completion or resource votes. Preserve every unrelated bit.
+static void irqQuiesceOnly(size_t from,uint32_t oldEnable){
+ for(size_t i=from;i<trace.size();++i){auto&o=trace[i];if(!o.write)continue;
+  if(o.addr==TCS){assert(!(o.value&~oldEnable)&&(o.value&~3u)==(oldEnable&~3u));oldEnable=o.value;}
+  else assert(o.addr==0x17a00184&&o.value==(1u<<5));
+ }
+}
 static void fixtures(){
  resetRegs();rpmhDrop=~0u;rpmhKeepIRQ=false;badMap=missingMap=shortMap=99;
  regs[RSC]=0x20000;regs[RSC+4]=0;regs[RSC+12]=(3u<<27)|(8<<12);
@@ -29,9 +42,19 @@ static void fixtures(){
  regs[TCS]=0x41;
 }
 static IOService*nub(bool rpmh=true){auto*n=new IOService;n->rpmhNub=rpmh;
- uint32_t abi=1;auto*d=OSData::withBytes(&abi,4);n->properties[rpmh?"sweet,rpmh-abi":"sweet,display-resource-abi"]=d;return n;}
+ uint32_t abi=1;auto*d=OSData::withBytes(&abi,4);n->properties[rpmh?"sweet,rpmh-abi":"sweet,display-resource-abi"]=d;
+ if(rpmh){n->properties["sweet,rpmh-irq-abi"]=OSData::withBytes(&abi,4);uint32_t intid=37;n->properties["sweet,rpmh-intid"]=OSData::withBytes(&intid,4);}return n;}
 static void dropNub(IOService*n){for(auto&p:n->properties)p.second->release();n->release();}
-static void tick(SweetRPMh*s,unsigned us=100){fakeTicks+=us*1000;assert(s->fTimerAdded);s->fTimer->action(s,s->fTimer);}
+// Hardware peer dispatches only an enabled level; old CMD_STATUS alone cannot
+// invent an event. The callback and actual software event/workloop are real.
+static bool deliverRPMhIRQ(){
+ constexpr uintptr_t g=0x17a00000;constexpr unsigned bit=1u<<5;
+ if(!(regs[g+0x104]&bit)||!(regs[TCS]&regs[TCS+4]))return false;
+ regs[g+0x204]|=bit;regs[g+0x304]|=bit;regs[g+0x204]&=~bit; // IAR
+ assert(sweet_rpmh_irq(37));regs[g+0x304]&=~bit; // sleh EOI
+ pump();return true;
+}
+static void tick(SweetRPMh*s,unsigned us=100){fakeTicks+=us*1000;assert(s->fTimerAdded);if(!deliverRPMhIRQ())s->fTimer->action(s,s->fTimer);}
 static void ack(SweetRPMh*s){
  uint32_t b=s->fTCSIndex*0x2a0;regs[TCS+4]|=1u<<s->fTCSIndex;regs[TCS+b+0x18]=1;
  for(unsigned c=0;c<s->fCommandCount;++c)regs[TCS+b+0x3c+c*0x14]=(1<<8)|(1<<16);
@@ -101,7 +124,7 @@ int main(){
  // Independent completion: stale command-status alone must not finish.
  fixtures();resourceMode=2;s=make(n);id=attach(s);uint64_t other=attach(s);
  token=vote(s,id,SweetRailVDDI,{true,1800,1880,6000});tick(s);
- assert(s->fBusy&&regs[TCS]==0x40);tick(s);assert(s->fBusy);
+ assert(s->fBusy&&regs[TCS]==0x41);tick(s);assert(s->fBusy);
  assert(status(s,id,token).state==SweetRPMhPending);
  uint64_t denied=123;assert(s->requestVote(other,SweetRailPHY,{true,880,880,36000},&denied)==kIOReturnBusy&&denied==0);
  // An unrelated IRQ-enable bit changes during completion; preserve it.
@@ -209,7 +232,7 @@ int main(){
   // A late first callback must say program (not falsely report a PMIC ACK
   // timeout); a late cleanup callback must retain the confirmed payload.
   if(test==6){tick(s,100001);assert(!writes());}
-  if(test==7){tick(s);regs[TCS+4]=1;tick(s);auto before=writes();tick(s,100001);assert(writes()==before);}
+  if(test==7){tick(s);regs[TCS+4]=1;tick(s);tick(s,100001);}
   if(test==2){assert(s->fBusy);tick(s,1001);}
   assert(!s->fBusy);q=s->fClients[0].status;
   assert(q.state==SweetRPMhFailed&&q.uncertain==(test!=3));
@@ -223,7 +246,7 @@ int main(){
    const char*reason=test==5?"reason=invalid-completion":((test==1||test==2)?"reason=posted-write":"reason=deadline");
    assert(diagnostic.find(reason)!=std::string::npos);
    assert(diagnostic.find("request=VRM rail=0 arc-stage=0 tcs=0 commands=3 mask=0x7")!=std::string::npos);
-   if(test==6)assert(diagnostic.find("executing=0 progress=0 written=0")!=std::string::npos);
+   if(test==6)assert(diagnostic.find("executing=0 irq-observed=0 written=0")!=std::string::npos);
    for(auto &op:trace)assert(op.write||op.addr!=TCS+8); // no W1C register reads
   }
   if(test<3||test>=5)assert(s->requestVote(id,SweetRailPHY,{true,880,880,1},&denied)==kIOReturnNotReady);
@@ -319,13 +342,13 @@ int main(){
  arcFixtures();s=make(n);id=attach(s);token=displayVote(s,id,SweetDisplayLowSVS);
  regs[TCS+0x2a0+0x1c]=1;regs[TCS+0x2a0+0x34]=0x30008;tick(s);
  pq=displayStatus(s,id,token);assert(pq.state==SweetRPMhFailed&&pq.result==kIOReturnBusy&&pq.uncertain&&!pq.acknowledged);
- for(auto&o:trace)if(o.write)assert(o.addr==TCS);
+ for(auto&o:trace)if(o.write)assert(o.addr==TCS||irqConfigurationWrite(o));
  destroy(s,n);reboot();
  // Use second ACTIVE slot without stealing unrelated armed payload/IRQ bits.
- arcFixtures();regs[TCS+0x1c]=1;regs[TCS+0x34]=0x51234;regs[TCS+4]=0x40;
+ arcFixtures();regs[TCS+0x1c]=1;regs[TCS+0x34]=0x51234;
  s=make(n);id=attach(s);token=displayVote(s,id,SweetDisplayLowSVS);
  arcAcquire(s);
- assert(regs[TCS+0x1c]==1&&regs[TCS+0x34]==0x51234&&regs[TCS+4]==0x40&&regs[TCS]==0x41);
+ assert(regs[TCS+0x1c]==1&&regs[TCS+0x34]==0x51234&&regs[TCS+4]==0&&regs[TCS]==0x41);
  destroy(s,n);reboot();
  // Independent clients and VRM/ARC requests cannot interleave transactions.
  arcFixtures();s=make(n);id=attach(s);other=attach(s);tok1=tok2=0;

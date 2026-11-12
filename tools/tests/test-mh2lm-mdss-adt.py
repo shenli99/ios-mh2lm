@@ -222,3 +222,32 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-identity-adt-') as temp:
     assert output.read_bytes() == m.derive(blob, display_noc=True, panel_pins=True, panel_touch=True, panel_identity=True)
     assert source.read_bytes() == blob
 print('PASS: zeroed 96-byte live-ABL identity slot, all pins/touch/NoC compositions, unchanged old ADTs and CLI baseline')
+
+# 0208 opts in to a separate append-only apps completion IRQ extension.
+# Existing ADTs/metadata-only identity stay byte-identical; SPI ownership is
+# per INTID, not exclusive ownership of the whole shared GIC map.
+for kwargs in ({}, dict(display_noc=True, panel_pins=True, panel_touch=True, panel_identity=True)):
+    old = m.derive(blob, **kwargs)
+    extended_irq = m.derive(blob, rpmh_irq=True, **kwargs)
+    root_irq, end = adt.parse(extended_irq)
+    assert end == len(extended_irq)
+    rpmh = next(n for n in root_irq.children[1].children if n.name == 'display-rpmh')
+    assert rpmh.prop('sweet,rpmh-abi') == struct.pack('<I', 1)
+    assert rpmh.prop('sweet,rpmh-irq-abi') == struct.pack('<I', 1)
+    assert rpmh.prop('sweet,rpmh-intid') == struct.pack('<I', 37)
+    assert rpmh.prop('interrupts') is None and rpmh.prop('interrupt-parent') is None
+    assert len(rpmh.prop('reg')) == 4*16
+    assert struct.unpack('<QQ', rpmh.prop('reg')[-16:]) == (0x17a00000-m.SOC_BASE, 0x10000)
+    rpmh.props = [(k, f, v[:3*16] if k == 'reg' else v) for k, f, v in rpmh.props
+                  if k not in ('sweet,rpmh-irq-abi', 'sweet,rpmh-intid')]
+    assert adt.serialize(root_irq) == m.derive(blob, display_resources=True, **kwargs)
+print('PASS: opt-in apps RSC INTID37 IRQ ABI, append-only GIC resource, exact legacy ADT restoration, no standard interrupt registration')
+with tempfile.TemporaryDirectory(prefix='mh2lm-rpmh-irq-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'panel.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--display-noc', '--panel-pins',
+                    '--panel-touch', '--panel-identity', '--rpmh-irq', str(source), str(output)], check=True)
+    assert output.read_bytes() == m.derive(blob, display_noc=True, panel_pins=True,
+                                          panel_touch=True, panel_identity=True, rpmh_irq=True)
+    assert source.read_bytes() == blob
+print('PASS: lifecycle hardware CLI declares completion IRQ; identity/default ADT bytes unchanged')
