@@ -1,9 +1,11 @@
 # D1 本地显示时钟引用与 GDSC 准入（0185）
 
-**0121a15当前执行点：** 新产物已核对0202诊断并打包，使用已通过启动的ABI608固件。
-只启动`boot-16k-0121a15-abi608-panel-retained.img`，进系统停留约一分钟导日志，
-无需再调亮度或按息屏；combined/supply暂停。这是启动准入取证，尚未修复硬件条件。
-见[0121a15镜像、核对及步骤](PANEL-D1-0121A15.md)。以下0121a14失败记录保留。
+**0121a15当前结论：** 诊断确认ESC0的XO整数HID=0旁路被误拒绝；GCC/GDSC及前三
+分支均通过。0203已按LG RCG2规则允许旁路0和div1编码1，保留所有其它准入、原始快照
+和漂移检查，不重写时钟。需用户push/云编译后测新retained；旧0121a15不重测，
+combined/supply继续暂停。BYTE/PCLK与完整生命周期尚未验证。
+见[读值、源码依据与修复验证](PANEL-D1-0121A15.md#实测结果esc0-的合法-xo-旁路被错误拒绝)。
+以下0121a14失败记录保留。
 
 **0121a14 retained实测失败（2026-11-12）：** 可进系统，但亮度滑条不生效，按息屏后画面冻结。
 日志第85行MDSS在warm clock lease准入返回NotReady（0xe00002d8），start未完成、未发布服务；
@@ -90,7 +92,7 @@ MDP、VSYNC；DSI0包含Core、ESC0、BYTE0、BYTE0_INTF、PCLK0。每个分支�
 | BYTE0_INTF | 0x202c | 0x2110 | 同上，另保存0x2128 divider |
 | PCLK0 | 0x2004 | 0x2098 | 同上，保存M/N/D与配置 |
 
-仅当非link分支的父源明确为XO、整数div1且没有update/dirty时，允许恢复原先关闭的分支；
+仅当非link分支的父源明确为XO、整数旁路或div1且没有update/dirty时，允许恢复原先关闭的分支；
 不改RCG父源/频率、PLL或PHY。默认的非XO父源只保留，不据DT就启动它。
 
 GCC AHB是LG的critical/HWCG时钟，本段不写它；按既有config MMIO准入检查SW enable及

@@ -1,5 +1,25 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, ESC0 XO bypass bug fixed locally; needs build)
+
+**CURRENT：0121a15诊断已定位并本地修正ESC0合法旁路被拒绝，不称完整驱动已通过。**
+日志SHA=42c6f5f060029d9e9577b13b589f31674d35da80c6226d3332445591c1a18ab1，total265904/flush18；383行605字节参数匹配。
+86行GCC AHB80000003/DISPCC AHB1/HF4221/GDSCf822f000通过；AHB/MDP/VSYNC通过；
+94行xo-config branch3/root2148/CMD0/CFG0，95行NotReady，无MDSS发布/managed接管。
+LG clk-rcg2.c241–249：HID0旁路、HID1=parent*2/2，都为XO原频；旧掩码只接受1是软件错误。
+0203只改SweetMDSSClock.inc一处predicate允许0/1，原始parent快照/漂移、update/dirty/root/
+branch/source/域/空闲检查不变，不写寄存器强修状态，无fallback/新参数。
+实测前缀回归旧代码拒绝、新代码成功且无写；16组合/1280独立rate判据、原始漂移、
+旁路ESC0真实异步ON/OFF及19错误拒绝通过。5套ASan/UBSan、前后MDSS arm64编译通过、
+无新增warning；0185–0203累计strict replay/78文件一致/114marker通过。
+本轮无panic，3USB warning/15HFS clonefile -34/3BindFS ENOENT另记，未测试息屏。
+**NEXT：告知用户push本地0203提交并云编译；新产物后同ABI608/605参数打新retained。**
+先查BYTE/PCLK后续准入/MDSS发布/接管，若startup仍失败只取日志；后续再安排亮度/OFFON。
+不重测旧0121a15，combined/supply继续暂停。尚未证明全部时钟或完整生命周期通过。
+文档docs/PANEL-D1-0121A15.md；底稿scratch/framebuffer-0203/和artifact-0121a15/。
+未push/触发CI/操作设备；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df，
+未改固件/USB/按键/触摸/电池；以下NEXT均为历史。
+
 ## Agent handoff / active work (2026-11-12, 0121a15 verified; retained diagnostic boot ready)
 
 **CURRENT：0121a15源码/内核核对及ABI608镜像打包通过，待用户启动取证。**

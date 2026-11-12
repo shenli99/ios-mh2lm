@@ -86,7 +86,7 @@ int main(){auto*n=nub();fixtures();auto*s=make(n);assert(!writes());
   if(test==9)regs[bases[1]+0x2110]=1;
   if(test==10)regs[bases[1]+0x2110]=0x80000000;
   if(test==11)regs[bases[1]+0x2114]=0x201; // DSI1 parent refused
-  if(test==12)regs[bases[1]+0x214c]=0; // wrong XO divider
+  if(test==12)regs[bases[1]+0x214c]=2; // HID=2 is a real divide-by-1.5, not XO bypass
   if(test==13)regs[bases[1]+0x2028]=0x80000000; // no PHY-parent acquisition yet
   if(test==14)regs[bases[1]+0x200c]=0x80000000; // cannot enable inherited PLL root
   if(test==15)regs[bases[1]+0x2148]=0x10; // dirty source
@@ -112,6 +112,49 @@ int main(){auto*n=nub();fixtures();auto*s=make(n);assert(!writes());
   }
   s->release();queued.clear();assert(!liveMaps&&!rawBlocks&&!mdssClockWriter);
  }
+ // Actual 0121a15 prefix through ESC0, with unobserved BYTE/PCLK supplied by
+ // the fixture. HID=0 is bypass, not a stopped/unknown XO source. No repair write.
+ fixtures();regs[bases[0]+0xc]=0x80000003;regs[bases[0]+0x38]=0x4221;
+ regs[bases[1]+0x3000]=0xf822f000;regs[bases[1]+0x200c]=0x221;
+ regs[bases[1]+0x22c0]=1;regs[bases[1]+0x20cc]=0x100107;regs[bases[1]+0x214c]=0;
+ s=make(n);assert(s->fClockParents[3][0]==0&&s->localClocksReady()&&!writes());
+ // Equivalent frequency must not weaken the raw-parent drift guard.
+ regs[bases[1]+0x214c]=1;assert(!s->localClocksReady());uint64_t driftToken=999;
+ assert(s->retainLocalClocks(SweetClockDSI0,&driftToken)==kIOReturnNotReady&&!driftToken&&!writes());
+ destroy(s,n);
+ // All combinations of bypass/div1 on AHB/MDP/VSYNC/ESC0 are warm-retainable.
+ for(unsigned config=0;config<16;++config){fixtures();
+  const uint32_t cfg[]={0x22c0,0x20cc,0x20fc,0x214c};
+  for(unsigned i=0;i<4;++i)regs[bases[1]+cfg[i]]=(config>>i)&1u;
+  s=make(n);assert(!writes());destroy(s,n);
+ }
+ // Independent rate oracle from LG clk_rcg2_calc_rate(): HID=0 bypasses;
+ // nonzero HID scales parent by 2/(HID+1). Fractional modes stay disallowed.
+ fixtures();s=make(n);
+ for(unsigned i=0;i<SweetClockCount;++i){const auto&branch=mdssClockBranches[i];
+  for(unsigned hid=0;hid<32;++hid)for(unsigned mode=0;mode<4;++mode){
+   regs[bases[1]+branch.root+4]=(mode<<12)|hid;uint32_t parent[6]={};
+   const uint64_t xo=19200000,rate=hid ? (xo*2)/(hid+1) : xo;
+   bool expected=(branch.sources&1u)&&mode==0&&rate==xo;
+   assert(s->clockParent(i,parent,true)==expected);
+  }
+ }
+ assert(!writes());destroy(s,n);
+ // An owned bypass-configured ESC0 still needs real branch/root ON/OFF:
+ // a posted software vote alone never finishes the lease.
+ fixtures();regs[bases[1]+0x214c]=0;s=make(n);releaseBoot(s);
+ regs[bases[1]+0x2038]=0x80000000;regs[bases[1]+0x2148]=0x80000000;
+ uint64_t bypass=0;assert(s->retainLocalClocks(SweetClockDSI0,&bypass)==0);
+ for(unsigned j=0;j<SweetClockCount&&!s->fClockWaiting;++j)tick(s);
+ assert(s->fClockWaiting&&writes()==1);tick(s);assert(status(s,bypass).state==SweetClockPending);
+ regs[bases[1]+0x2038]&=~0x80000000u;regs[bases[1]+0x2148]=0;complete(s);
+ assert(status(s,bypass).state==SweetClockHeld&&s->fClockOwnedMask==8&&regs[bases[1]+0x214c]==0);
+ assert(s->releaseLocalClocks(bypass)==0);
+ for(unsigned j=0;j<SweetClockCount&&!s->fClockWaiting;++j)tick(s);
+ assert(s->fClockWaiting&&writes()==2);tick(s);assert(status(s,bypass).state==SweetClockReleasing);
+ regs[bases[1]+0x2038]|=0x80000000u;regs[bases[1]+0x2148]=0x80000000;complete(s);
+ assert(status(s,bypass).state==SweetClockReleased&&!s->fClockOwnedMask&&regs[bases[1]+0x214c]==0);
+ destroy(s,n,true);
  // Duplicate writers and timer-allocation/add failures do not steal ownership.
  fixtures();s=make(n);auto*other=new SweetMDSS();assert(!other->start(n));other->release();
  assert(mdssClockWriter==1);destroy(s,n);
@@ -205,7 +248,7 @@ int main(){auto*n=nub();fixtures();auto*s=make(n);assert(!writes());
  destroy(s,n);
  for(auto&kv:n->properties)kv.second->release();n->properties.clear();n->release();
  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
- puts("PASS: actual warm clock leases; defaults/no writes,19 admission faults/exact failure gate/short-circuit read safety/quiet runtime, bounded tokens/shared refs, independent ON/OFF, busy release, parent drift/deadline/posted-write faults, stop/late event/retirement, no PHY/domain writes and zero live objects");
+ puts("PASS: actual warm clock leases; XO bypass/div1 warm admission/16 combinations/1280 rate-oracle cases/raw drift/independent bypass ON-OFF, defaults/no writes,19 admission faults/exact failure gate/short-circuit read safety/quiet runtime, bounded tokens/shared refs, independent ON/OFF, busy release, parent drift/deadline/posted-write faults, stop/late event/retirement, no PHY/domain writes and zero live objects");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-display-clocks-') as temp:

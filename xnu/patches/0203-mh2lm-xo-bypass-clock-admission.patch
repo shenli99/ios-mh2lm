@@ -1,0 +1,17 @@
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -85,8 +85,11 @@
+  out[3]=b.link ? dp_rd(dp_dispcc,b.root+16) : 0;
+  out[4]=i==5 ? dp_rd(dp_dispcc,0x2128) : 0;
+  out[5]=source;
+- /* Only exact XO divide-by-one integer configuration may be re-enabled. */
+- if (!source && ((out[0]&0x371fu)!=1u)) {
++ /* LG clk_rcg2_calc_rate(): HID=0 bypasses the divider, HID=1 gives
++  * parent*2/(1+1). Both are exact XO rate in integer mode. Keep the raw
++  * parent snapshot: equivalent rates do not authorize configuration drift. */
++ uint32_t xoConfig=out[0]&0x371fu;
++ if (!source && xoConfig>1u) {
+   if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=xo-config branch=%u root=%#x cmd=%#x cfg=%#x\n",i,b.root,cmd,out[0]);
+   return false;
+  }
