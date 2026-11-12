@@ -1,5 +1,12 @@
 # D1：显示 NoC 带宽事务与 RSC 所有权（0187）
 
+**0121a21实测更新：** apps RPMh共10次真实完成IRQ，四LDO、ARC和CN0 ACK通过，core profile2成功。
+新首错为display NoC token1/NotReady(0xe00002d8)/data ACK mask0；后续managed/HANDOFF失败是连锁结果，未提交新DMA。
+现日志未分RSC clock lease与RSC/wrapper准入拒绝，不能认定具体寄存器或硬件拒票；下一步补NoC分支取证。
+详见[逐项证据、边界与下一步](PANEL-D1-0121A21.md#实测结果apps-rpmh通过display-noc准入失败)。
+本次仅分析记录，无新生产补丁/编译要求，不重刷旧镜像；接管前OFFON/combined/supply仍暂停。
+以下0121a21“待实机”等为历史。
+
 **0205当前修复（2026-11-12）：** 按用户决定将display ACV建模为 `0x8` 开关资源；
 保留真实width0/unit1/VCD11，EBI有需求发送X0/Y8，无需求撤票。普通BCM缩放/非零width检查保留。
 本地验证通过，待push云编译及新retained镜像实测；不是再次只加诊断，也不代表面板接管已验收。

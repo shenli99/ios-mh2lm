@@ -1,5 +1,12 @@
 # 首次面板资源接管：ldoa14 RPMh超时与0207故障快照
 
+**0121a21实测更新：** apps RPMh共10次真实完成IRQ，四LDO、ARC和CN0 ACK通过，core profile2成功。
+新首错为display NoC token1/NotReady(0xe00002d8)/data ACK mask0；后续managed/HANDOFF失败是连锁结果，未提交新DMA。
+现日志未分RSC clock lease与RSC/wrapper准入拒绝，不能认定具体寄存器或硬件拒票；下一步补NoC分支取证。
+详见[逐项证据、边界与下一步](PANEL-D1-0121A21.md#实测结果apps-rpmh通过display-noc准入失败)。
+本次仅分析记录，无新生产补丁/编译要求，不重刷旧镜像；接管前OFFON/combined/supply仍暂停。
+以下0121a21“待实机”等为历史。
+
 **0121a21已核对并打包：** 78源码匹配0208（代码190c558）、114 source/171 binary markers及镜像回读通过。
 只启动新ABI608 retained档，等约90秒导完整启动日志，目标INTID37 configured→fresh ACTIVE completion→
 ldoa14 ACK及后续首错/新DMA。固件/605字节参数同0121a20，hardware ADT新增显式RPMh IRQ扩展，identity不变。

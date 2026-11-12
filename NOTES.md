@@ -1,5 +1,25 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a21 RPMh IRQ PASS; next display NoC admission)
+
+**CURRENT：0121a21日志已核对；0208 apps RPMh实测通过本轮事务，首错移到display NoC NotReady。**
+live-0121a21-abi608-panel-retained.txt，243716bytes/3288行，SHA95fb47d73a88926dc852ba515cf8e208eb93331659376ab357ece392928ac8f3。
+1731触摸quiesce/1736managed；1737INTID37 configured；1738–1758共10 fresh IRQ，entries连续1–10。
+四LDO token1–4 ACK、ARC五stage/token5/Turbo/cx64mx384mmcx384/mask7、CN0 token6/300M完成。
+1759core2/GDSC/PLL0/1=1380/600/AHB75/MDP460成功；1761NoC的CN0 token7同值no-op完成（非第11硬件IRQ）。
+1762首错display NoC token1/NotReady0xe00002d8/ACKmask0/uncertain1；1764后续managed因fNoCFault连锁失败，
+rails0xf/NoC1/clock0，1765无新DMA，1768pixels冻结。无RPMh SNAPSHOT/panic签名，未验收物理电压/完整接管。
+NoC advance的NClock retain/status与NData noCAdmission均可给同码；当前日志无phase/clock lease/原始准入值，
+不能认定具体时钟或wrapper/solver条件。dataACK0不证明未写payload；uncertain1也可由apps工作设置。
+**NEXT：为SweetMDSSNoC的准入失败补分支/phase/clock lease/现有读值取证，先保可访问性，再RSC/wrapper。**
+保留typed provider/MMIO所有权，不放宽保护或盲目触发，不改已通过apps IRQ，不扫描未知地址。
+本次仅分析/文档无新patch/boot，不需push云编译或重刷0121a21；接管前OFFON/亮度/combined/supply继续暂停。
+详见docs/PANEL-D1-0121A21.md实测节及NoC页/架构/计划；底稿scratch/artifact-0121a21/live-retained-log-analysis.json。
+4USB WARN及16FG profile match0/integrity0伴随，未归因NoC，不切任务。FSR400WARN仍非已定位停止分支，不清除。
+未改CI/驱动/固件、未push/触发CI/操作设备；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+以下NEXT均为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a21 completion IRQ retained boot ready)
 
 **CURRENT：用户下载0121a21，0208产物/源码/镜像回读通过，待实机。**
