@@ -1,5 +1,26 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, vsync0 PASS; IRQ0 next)
+
+**CURRENT：vsync0持久日志支持正常启动，下一步只测MDSS IRQ0。原NULL写未修复。**
+logs/sweetlog-0121a14-identity-vsync0-control.bin SHA=1fb245cd7657f7bfefebd6281a12c343ef0178e149d1b6f7aae3c8ce97c291b5；
+total244487/flush9。388行参数power1/IRQ2/vsync0/own0吻合；90行source2/profile4，
+91行MDSS、102行RPMh、668行SpringBoard、11条touch/7组FB PERF。
+无F4 pool/handoff/FB hardware mailbox；MDSS IRQ仍有GIC/RD_PTR armed、60066ms/3598帧≈59.9Hz，
+不等于FB用硬件IRQ呈现。无panic/ERROR；3USB warning，本采集无HFS clonefile/signal-reason错误。
+无MDSS POWER请求，不称息屏恢复通过。组合/时序/分配原因仍不能排除。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a14-identity-irq0-control.img**
+SHA=a9ac3de3ad17d7e3a052ecec53c2fcf2c22c30fd9c4d8823484771857798254c。
+仅成功vsync0档sweetmdssirq2→0，power1/vsync0/own0保留；其余参数/内核/固件/ADT不变。
+实际setupIRQ(mode0)早退，无interval/event/INTID115 claim；FB本已软件timer，依赖合法。
+原镜像保留，容器/全部FAT回读只TOML单参数不同。managed/lifecycle关闭，无reset/供电周期。
+只确认进系统，成功导sweetlog-0121a14-identity-irq0-control.bin，无需其它测试。
+若panic记录寄存器，聚焦IRQ启动/分配；若通过最后只改power0。IRQ2依赖power1，不能反过来。
+无需push/编译；后三档暂停；无驱动/内核修复，未改CI/操作设备/推送/触发CI。
+证据scratch/artifact-0121a14/{identity-vsync0-control-persistent.txt,identity-vsync0-control-log-analysis.json,
+make-irq0-control.py,identity-irq0-control-verification.json,identity-irq0-control.unixnu.toml}。
+文档和计划已更新；以下NEXT均为历史，以本段为准。
+
 ## Agent handoff / active work (2026-11-12, own0 PASS; vsync0 next)
 
 **CURRENT：own0持久日志确认进SpringBoard，单独关闭F4未复现panic。下一步只测vsync0。**

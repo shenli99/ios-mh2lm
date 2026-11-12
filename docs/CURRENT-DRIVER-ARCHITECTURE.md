@@ -1,10 +1,10 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
-**0121a14当前进展（2026-11-12）：** own0日志确认power1/IRQ2/vsync1/own0进入SpringBoard，
-身份source2/profile4、MDSS/RPMh及硬件vsync正常，无panic/ERROR，也无F4池/接管记录。
-单独own0未复现原NULL写；不据此排除组合/时序问题。
-**下一步只测`0121a14-identity-vsync0-control`**：在本档仅改sweetfbvsync=1→0，保留power1/IRQ2/own0。
-固件/内核/ADT及其它参数相同，软件timer提供FB vsync，MDSS IRQ仍保留；原NULL写仍未修复。
+**0121a14当前进展（2026-11-12）：** vsync0档日志确认power1/IRQ2/vsync0/own0进入SpringBoard，
+身份source2/profile4正常，FB硬件mailbox缺席、MDSS IRQ仍采到3598帧；无panic/ERROR。
+关闭F4及FB硬件vsync消费仍未复现原NULL写，根因未确定。
+**下一步只测`0121a14-identity-irq0-control`**：仅sweetmdssirq=2→0，保留power1/vsync0/own0。
+固件/内核/ADT及其它参数不变；若通过，再最后拆power，避免IRQ2依赖power1导致非法组合。
 无需云编译，retained/combined/supply仍暂停。详情见[0121a14排查记录](PANEL-D1-0121A14.md)。
 
 **0201当前增量（2026-11-12，本地通过，未实机）：** 统一协调器新增显式
