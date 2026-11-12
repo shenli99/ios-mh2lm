@@ -1,0 +1,114 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -321,6 +321,13 @@
+  uint32_t fClockParents[SweetClockCount][6];
+  unsigned fClockOperation, fClockCursor, fClockReleaseMask;
+  bool fClockReleasing, fClockWaiting;
++ /* Diagnostic samples only; never authorize writes or complete a lease. */
++ struct ClockTrace {
++  uint64_t writeEntryNS, writeIssuedNS, sampleNS;
++  unsigned writeBranch, sampleBranch;
++  uint32_t writeBefore, writeWant, sampleCBCR, parentCFG, parentSource;
++  bool writeValid, sampleValid, parentValid;
++ } fClockTrace;
+  /* Core resource control shares the clock writer, gate and timer. Profile2
+   * is an explicit SM8150-v2 selection, not a hardware revision detector. */
+  unsigned fCoreProfile, fCorePhase, fCorePLL, fCoreCursor, fCoreRoot;
+@@ -355,6 +362,7 @@
+  static IOReturn clockStatusAction(OSObject *,void *,void *,void *,void *);
+  static void clockTimerAction(OSObject *,IOTimerEventSource *);
+  void advanceLocalClocks(void);
++ void logClockTimeout(const char *,uint64_t,bool);
+  void finishLocalClocks(IOReturn);
+  void stopLocalClocks(void);
+  /* Same owner/gate as clocks/GDSC; display RSC is never mapped by RPMh. */
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -224,6 +224,7 @@
+  lease.inheritedUpstream=true;
+  s->fClockOperation=slot+1; s->fClockCursor=0; s->fClockReleaseMask=0;
+  s->fClockReleasing=false; s->fClockWaiting=false; s->fClockVoteSettleAt=0;
++ s->fClockTrace={};
+  s->fClockDeadline=scanout_now()+200000000ULL;
+  *(uint64_t *)output=lease.token; s->fClockTimer->setTimeoutUS(100);
+  return kIOReturnSuccess;
+@@ -252,6 +253,7 @@
+  if ((disable || token==s->fClockBootToken) && !s->clockCanGate()) return kIOReturnBusy;
+  s->fClockLeases[slot].state=SweetClockReleasing;
+  s->fClockReleaseMask=disable; s->fClockVoteSettleAt=0;
++ s->fClockTrace={};
+  s->fClockOperation=slot+1; s->fClockCursor=SweetClockCount-1; s->fClockReleasing=true; s->fClockWaiting=false;
+  s->fClockDeadline=scanout_now()+200000000ULL;
+  s->fClockTimer->setTimeoutUS(100); return kIOReturnSuccess;
+@@ -280,21 +282,47 @@
+  if (s->coreBusy()) s->advanceCoreResources();
+  else if (s->clockBusy()) s->advanceLocalClocks();
+ }
++void SweetMDSS::logClockTimeout(const char *reason,uint64_t now,bool currentSample)
++{
++ /* No MMIO, clock/parent helpers, provider calls or timer changes here.
++  * An overall deadline can expire before any branch sample in this tick. */
++ const ClockTrace &t=fClockTrace;
++ const SweetClockLease &lease=fClockLeases[fClockOperation-1];
++ uint32_t offset=fClockCursor<SweetClockCount ? mdssClockBranches[fClockCursor].cbcr : 0;
++ SWEET_LOG_ERROR("SWEET MDSS CLOCK TIMEOUT: reason=%s token=%llu branch=%u offset=%#x release=%u waiting=%u now-ns=%llu request-deadline-ns=%llu wait-deadline-ns=%llu request-late-ns=%llu wait-late-ns=%llu\n",
++     reason,lease.token,fClockCursor,offset,(unsigned)fClockReleasing,(unsigned)fClockWaiting,
++     now,fClockDeadline,fClockWaiting ? fClockWaitDeadline : 0,
++     now>=fClockDeadline ? now-fClockDeadline : 0,
++     fClockWaiting && now>=fClockWaitDeadline ? now-fClockWaitDeadline : 0);
++ SWEET_LOG_ERROR("SWEET MDSS CLOCK WRITE: valid=%u branch=%u before=%#x want=%#x entry-ns=%llu issued-ns=%llu\n",
++     (unsigned)t.writeValid,t.writeBranch,t.writeBefore,t.writeWant,t.writeEntryNS,t.writeIssuedNS);
++ SWEET_LOG_ERROR("SWEET MDSS CLOCK SAMPLE: valid=%u current=%u branch=%u cbcr=%#x enable=%u off=%u sample-ns=%llu age-ns=%llu parent-valid=%u cfg=%#x source=%u\n",
++     (unsigned)t.sampleValid,(unsigned)(currentSample && t.sampleValid && t.sampleBranch==fClockCursor),
++     t.sampleBranch,t.sampleCBCR,(t.sampleCBCR&1u)!=0,(t.sampleCBCR&CBCR_OFF)!=0,
++     t.sampleNS,t.sampleValid && now>=t.sampleNS ? now-t.sampleNS : 0,
++     (unsigned)t.parentValid,t.parentCFG,t.parentSource);
++}
+ void SweetMDSS::advanceLocalClocks(void)
+ {
+  const ClockDiagnostics diagnose=noCClockDiagnostics() ? ClockFailure : ClockSilent;
+  if (!clockPrerequisites(diagnose)) { finishLocalClocks(kIOReturnNotReady); return; }
+  uint64_t now=scanout_now();
+- if (now>=fClockDeadline) { finishLocalClocks(kIOReturnTimeout); return; }
++ if (now>=fClockDeadline) {
++  logClockTimeout("overall",now,false); finishLocalClocks(kIOReturnTimeout); return;
++ }
+  SweetClockLease &lease=fClockLeases[fClockOperation-1]; unsigned i=fClockCursor;
+  unsigned bit=1u<<i; const SweetClockBranch &b=mdssClockBranches[i];
+  if (lease.mask&bit) {
+   uint32_t parent[6]={}, v=dp_rd(dp_dispcc,b.cbcr);
++  fClockTrace.sampleValid=true; fClockTrace.sampleBranch=i; fClockTrace.sampleCBCR=v;
++  fClockTrace.sampleNS=scanout_now(); fClockTrace.parentValid=false;
++  fClockTrace.parentCFG=fClockTrace.parentSource=0;
+   bool rootNeeded=!fClockReleasing && (v&1u) && !(v&CBCR_OFF);
+   if (!clockParent(i,parent,rootNeeded,diagnose) || memcmp(parent,fClockParents[i],sizeof(parent))) {
+    if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: NoC gate=worker-parent branch=%u cbcr=%#x\n",i,v);
+    finishLocalClocks(kIOReturnNotReady); return;
+   }
++  fClockTrace.parentValid=true; fClockTrace.parentCFG=parent[0]; fClockTrace.parentSource=parent[5];
+   if (!fClockReleasing && (fClockOwnedMask&bit) && !clockEnableParentReady(i,parent)) {
+    if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: NoC gate=owned-parent branch=%u cbcr=%#x\n",i,v);
+    finishLocalClocks(kIOReturnNotReady); return;
+@@ -310,7 +338,9 @@
+     ready=!(v&1u) && fClockVoteSettleAt && now>=fClockVoteSettleAt;
+    }
+    if (!ready) {
+-    if (now>=fClockWaitDeadline) { finishLocalClocks(kIOReturnTimeout); return; }
++    if (now>=fClockWaitDeadline) {
++     logClockTimeout("branch-wait",now,true); finishLocalClocks(kIOReturnTimeout); return;
++    }
+     fClockTimer->setTimeoutUS(100); return;
+    }
+    if (fClockReleasing) fClockOwnedMask&=~bit;
+@@ -327,6 +357,9 @@
+    fClockTouched=true; lease.uncertain=true;
+    if (!fClockReleasing) fClockOwnedMask|=bit; /* retain even if posted write fails */
+    dp_wr(dp_dispcc,b.cbcr,fClockReleasing ? v&~1u : v|1u);
++   fClockTrace.writeValid=true; fClockTrace.writeBranch=i;
++   fClockTrace.writeBefore=v; fClockTrace.writeWant=fClockReleasing ? v&~1u : v|1u;
++   fClockTrace.writeEntryNS=now; fClockTrace.writeIssuedNS=scanout_now();
+    fClockWaiting=true; fClockWaitDeadline=now+10000000ULL;
+    fClockVoteSettleAt=0;
+    if (b.voted) SWEET_LOG_INFO("SWEET MDSS CLOCK: voted branch=%u enable=%u; awaiting own vote readback%s\n",

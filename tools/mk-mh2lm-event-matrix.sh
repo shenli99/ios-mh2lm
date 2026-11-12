@@ -409,7 +409,8 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
       'SweetPanelSelectedProfile' 'SWEET PANEL SUPPLY:' 'SweetPanelLifecycleResetHeldLow' \
       'SWEET RPMH IRQ: INTID37 configured' 'SWEET RPMH IRQ: fresh ACTIVE completion' \
       'SWEET MDSS NOC ADMIT:' 'SWEET MDSS NOC CONTEXT:' \
-      'SWEET MDSS CLOCK: voted branch=' 'SWEET MDSS NOC ADMIT: gate=clock-owned-parent'; do
+      'SWEET MDSS CLOCK: voted branch=' 'SWEET MDSS NOC ADMIT: gate=clock-owned-parent' \
+      'SWEET MDSS CLOCK TIMEOUT:' 'SWEET MDSS CLOCK WRITE:' 'SWEET MDSS CLOCK SAMPLE:'; do
    if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
     printf 'kernel lacks panel lifecycle marker: %s\n' "$marker" >&2
     exit 1
