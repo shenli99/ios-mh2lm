@@ -98,19 +98,23 @@ tools/mk-mh2lm-event-matrix.sh W/logs/xnu-kernel-<LABEL>.gz <LABEL> --battery-ba
 
 ### 4.1 0201完整固件与面板生命周期四档
 
-本轮代码/本地验证完成，先由用户push并跑CircleCI。下载新kernel与buildtree后，agent核对
-0201补丁、SHA及实际产物；不能拿旧kernel只改参数。
+0121a14已下载并核对0201补丁、SHA及实际产物，本轮ABI修正只涉及loader和本地打包，
+可复用该内核，无需push/云编译。未来内核仍需核对相应marker，不能拿不含0201的旧kernel只改参数。
 完整Mu FD已在本地构建，包含ABL→Mu HOB→DarwinBoot→ADT身份传递adapter。
 原`out-bs/kernel-32m.blob`未改；完整FD构建成功尚不代表手机启动成功。
 
 在仓库根目录执行（将`LABEL`替换为用户实际下载编号）：
 
 ```sh
-SWEET_PANEL_UEFI_MANIFEST=/home/shenli/work1/out-bs/panel-uefi-0201-final/panel-uefi.json \
+SWEET_PANEL_UEFI_MANIFEST=/home/shenli/work1/out-bs/panel-uefi-0121a14-bootargs608/panel-uefi.json \
   tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-LABEL.gz LABEL --panel-lifecycle
 ```
 
 脚本核验manifest ABI/full-FD与blob SHA，检查新内核marker；四档共用内核/新固件。
+manifest必须声明`xnu8796-arm64-608`，旧1024-byte loader布局不兼容。所有参数需ASCII且
+不超过607字节；面板矩阵省略经源码核对的默认值，保留非默认硬件模式，不静默截断。
+当前identity477字节、后三档605字节。原0201-final manifest及原失败镜像仅保留取证，
+勿继续上机；[ABI错误与修正](BOOTARGS-ABI-0121A14.md)记录了原因和测试边界。
 identity独立ADT仅增加resource/RPMh与96-byte全零身份slot，不声明NoC/Pins/Touch，使用
 resource1/clock0/pins0/touch0。后三档共用包含NoC/Pins/Touch的完整ADT，使用resource2/clock1。
 NoC声明与resource1/clock0不兼容，会导致SweetMDSS启动失败；不要混用两种ADT。

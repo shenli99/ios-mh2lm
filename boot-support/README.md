@@ -3,6 +3,15 @@
 The current phone boots through Mu Silicium and DarwinBoot. The old `shim/`
 loader is not the active path and is unchanged by this work.
 
+**0121a14 ABI correction:** `0002-mh2lm-darwinboot-xnu8796-bootargs.patch`
+matches the actual XNU 8796 ARM64 `boot_args`: CommandLine is 608 bytes,
+BootFlags is at 0x2d0 and MemorySizeActual at 0x2d8. The previous loader's
+1024-byte layout is incompatible: long arguments become the kernel's memory
+size. Both patches are applied in order to an isolated loader copy. The new
+manifest records `xnu_boot_args_abi=xnu8796-arm64-608`; the panel packager rejects
+older manifests and arguments above 607 bytes, without truncating them.
+See [evidence and validation](../docs/BOOTARGS-ABI-0121A14.md).
+
 `0001-mh2lm-darwinboot-panel-selection.patch` adds the board adapter and the exact
 bounded C parser in `panel-handoff/` to the existing DarwinBoot component. It
 runs after ADT validation and before the kernel/window copies. A missing ADT slot
@@ -35,9 +44,9 @@ preserves the baseline BootShim and both appended DTBs and leaves the existing
 `out-bs/kernel-32m.blob` unchanged. This is not a device boot result.
 
 The current local manifest is
-`/home/shenli/work1/out-bs/panel-uefi-0201-final/panel-uefi.json`;
+`/home/shenli/work1/out-bs/panel-uefi-0121a14-bootargs608/panel-uefi.json`;
 the blob SHA256 is
-`8e1e65d891a831b6f9b9005701f339d80330378c21520ec6f6ef4159d8e9561e`.
+`27e7a1d1a3f9421af18d02f216e4e7d651137d42f2955be775f9142f118ea480`.
 Source HEADs, build command and FD/module/blob hashes are in the manifest.
 Reproduce with local Mu/UniXNU sources and toolchain already installed:
 
@@ -50,6 +59,8 @@ Use a fresh output directory. The kernel matrix `--panel-lifecycle` requires
 it refuses to silently reuse the old firmware. Firmware binaries and board DTBs
 remain outside git. The earlier 0195 result built only the consumer module;
 that limitation is superseded by this complete-FD result, not by a phone test.
+The earlier 0201-final bundle is preserved for diagnosis and must not be used
+for new panel boots: it predates the boot_args ABI correction.
 
 The parser and the actual adapter also run under ASan/UBSan
 with HOB, memory service and allocation failures; every FDT/ADT truncation and

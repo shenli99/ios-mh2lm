@@ -63,12 +63,15 @@ def build(args):
     shutil.copytree(unixnu/'package', source/'package', ignore=ignore, dirs_exist_ok=True)
     loader = source/'drivers/DarwinBoot'
     shutil.copytree(unixnu/'drivers/DarwinBoot', loader, ignore=ignore, dirs_exist_ok=True)
-    patch = repo/'boot-support/0001-mh2lm-darwinboot-panel-selection.patch'
-    for flags in [['--check'], ['--verbose']]:
-        result = subprocess.run(['git', 'apply', *flags, '-p3', str(patch)],
-                                cwd=loader, text=True, capture_output=True)
-        if result.returncode or 'offset' in result.stderr.lower() or 'fuzz' in result.stderr.lower():
-            raise RuntimeError('loader patch is not a strict match: '+result.stderr)
+    patches = [repo/'boot-support'/name for name in [
+        '0001-mh2lm-darwinboot-panel-selection.patch',
+        '0002-mh2lm-darwinboot-xnu8796-bootargs.patch']]
+    for patch in patches:
+        for flags in [['--check'], ['--verbose']]:
+            result = subprocess.run(['git', 'apply', *flags, '-p3', str(patch)],
+                                    cwd=loader, text=True, capture_output=True)
+            if result.returncode or 'offset' in result.stderr.lower() or 'fuzz' in result.stderr.lower():
+                raise RuntimeError('loader patch is not a strict match: '+result.stderr)
     driver = loader/'DarwinBootPkg/Driver'
     for name in ['panel_handoff.c', 'panel_handoff.h', 'panel_identity.h']:
         if (driver/name).read_bytes() != (repo/'boot-support/panel-handoff'/name).read_bytes():
@@ -136,7 +139,9 @@ def build(args):
         blob=str(blob), blob_sha256=sha(blob.read_bytes()), fd=str(fd), fd_sha256=sha(data),
         shim_sha256=sha(shim), appended_dtb_sha256=sha(tail), appended_dtb_count=dtb_count, baseline_sha256=sha(original),
         darwinboot_sha256=sha(module.read_bytes()), darwinboot_ffs_sha256=sha(ffs.read_bytes()),
-        loader_patch_sha256=sha(patch.read_bytes()),
+        loader_patch_sha256=sha(patches[0].read_bytes()),
+        loader_patches={p.name: sha(p.read_bytes()) for p in patches},
+        xnu_boot_args_abi='xnu8796-arm64-608', boot_line_length=608,
         loader_head=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=unixnu/'drivers/DarwinBoot', text=True).strip(),
         mu_head=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=mu, text=True).strip(),
         build_command=cmd, full_fd_built=True, hardware_tested=False)

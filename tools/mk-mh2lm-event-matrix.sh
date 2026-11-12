@@ -121,6 +121,7 @@ from pathlib import Path
 import hashlib,json,sys
 p=Path(sys.argv[1]);m=json.loads(p.read_text())
 assert m.get('abi')==1 and m.get('panel_handoff') is True and m.get('full_fd_built') is True, 'expected completed panel firmware bundle'
+assert m.get('xnu_boot_args_abi')=='xnu8796-arm64-608' and m.get('boot_line_length')==608, 'rebuild firmware with the XNU 8796 boot_args ABI fix; old 1024-byte layout is incompatible'
 b=Path(m['blob']);assert b.is_absolute() and hashlib.sha256(b.read_bytes()).hexdigest()==m['blob_sha256'], 'panel firmware blob hash mismatch'
 print(b)
 PYMANIFEST
@@ -461,6 +462,11 @@ make_profile() {
 	sed "s| cpus=1 | |; s|^args = \"\(.*\)\"\$|args = \"\\1 $base $extra\"|; s|^title = \"LG G8X - XNU (Debug)\"|title = \"$title\"|" \
 		"$TOML_BASE" > "$toml"
 	grep -Fq "$extra" "$toml"
+	if [ "$PANEL_LIFECYCLE" = '1' ]; then
+		python3 "$SCRIPT_DIR/mh2lm-boot-args.py" "$toml" --compact-panel
+	else
+		python3 "$SCRIPT_DIR/mh2lm-boot-args.py" "$toml"
+	fi
 
 	mcopy -o -i "$ramdisk" "$toml" ::/EFI/UniXNU/unixnu.toml
 	mcopy -o -i "$ramdisk" "$kernel" ::/EFI/UniXNU/Payloads/kernel.macho

@@ -1,5 +1,34 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, power0 PASS; boot_args ABI defect fixed locally)
+
+**CURRENT：power0成功；找到loader1024/XNU608 ABI错位，已本地修正并打包，待实机。**
+logs/sweetlog-0121a14-identity-power0-control.bin SHA=8687f94b8a68a3639be33019a6aded99398ae07c4dcf51dce2cb197a46fa6d43；
+total254168/flush10。386行power0/IRQ0/vsync0/own0吻合，88行source2/profile4，
+666行SpringBoard，7条touch，无panic/驱动ERROR。仍有3USB warning、10HFS clonefile -34、
+3BindFS ENOENT和关机2signal-reason分配失败；日志到unmount开始，不证明完整停机。
+此前逐项对照由5116321记录，本轮不继续猜显示开关或逐个测8个默认参数。
+实际云端ARM64 boot.h=608（含EXPORT_HDRS），loader=1024，flags/memActual偏移分别
+0x2d0/0x2d8与0x470/0x478。失败参数739字节，内核读flags='sweetdis'、memActual='playcore'
+=0x65726f6379616c70。成功590字节时两处0，内核回退memSize，掩盖错误。
+实际.CFLAGS证实OSX构建，hw.memsize用max_mem_actual；实际HFS默认大小片段离线得到
+-328335360（正常3GiB为1572864）。错误ABI与HFS溢出已实证，原现场分配/NULL写因果待实机收口。
+新增boot-support/0002 loader补丁（不入xnu/patches）；独立副本构建，不改参考仓库。
+新增mh2lm-boot-args.py长度/重复检查，面板仅省略默认值，USB/电池/非默认硬件模式均保留。
+identity477字节，后三档605；keys仍默认1，INFO默认2、probe默认1，power1隐含preserveOff。
+ASan/UBSan真实头文件布局+实际参数parser、0..1024边界及四shell分支通过；旧manifest拒绝。
+完整FD构建/封装链验证及四boot header/FAT/payload回读通过；旧镜像/基线不变。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a14-abi608-panel-identity.img**
+SHA=959b734560beaf05eec555a0bc22a489d0ba89fa1ac3dd756d02801629e11bff。
+只确认进系统，成功导sweetlog-0121a14-abi608-panel-identity.bin；失败记录寄存器。
+不启reset/链路/供电周期；先检查该档再依次retained/combined/supply，后三档暂停。
+新manifest=out-bs/panel-uefi-0121a14-bootargs608/panel-uefi.json；blob27e7a1d1...18ea480，
+内核仍7943a67e...68322f，无需云编译/推送。原失败镜像原样复测安排已撤回。
+未改HFS/内核驱动/CircleCI/Actions、未操作设备/推送/触发CI。工作区只含loader/打包/测试/文档。
+详情docs/BOOTARGS-ABI-0121A14.md；底稿scratch/artifact-0121a14/{identity-power0-control-log-analysis.json,
+bootargs-abi-root-cause.json,bootargs-hfs-default-repro.c,verify-boots-abi608.py,boot-abi608-verification.json}。
+以下NEXT均为历史，以本段为准。
+
 ## Agent handoff / active work (2026-11-12, IRQ0 PASS; power0 next)
 
 **CURRENT：IRQ0日志确认进SpringBoard，下一步仅改power0。原NULL写未修复。**

@@ -1,11 +1,12 @@
 # PD0：完整显示/面板驱动的资源、接口与实施依赖
 
-**0121a14当前进展（2026-11-12）：** IRQ0档日志确认power1/IRQ0/vsync0/own0进入SpringBoard，
-身份source2/profile4、MDSS/RPMh正常，无显示IRQ/FB硬件mailbox/F4记录，无panic/ERROR。
-仍有USB警告、HFS clonefile -34及关机signal-reason分配失败，不能称所有异常已解决。
-**下一步只测`0121a14-identity-power0-control`**：仅sweetfbpower=1→0，其余配置保持本轮成功状态。
-该档四项显示开关均0；与原失败minimal档公共参数一致，差别还包括原档显式列出的8个默认0选项。
-无需云编译，原NULL写未修复，retained/combined/supply仍暂停。详情见[排查记录](PANEL-D1-0121A14.md)。
+**0121a14当前进展（2026-11-12）：** power0档进入SpringBoard，四显示开关全0也未复现panic。
+进一步发现实际XNU的CommandLine为608字节，DarwinBoot却按1024布局；失败长参数占据内核
+memSizeActual位置，导致HFS默认缓冲大小溢出，已离线复现。修正loader ABI及参数长度检查，
+完整固件和四档已本地构建/回读。**下一步只测`0121a14-abi608-panel-identity`**；
+原内核不变，参数477字节，不启reset/链路/供电周期。成功后再恢复后三档，原失败镜像不复测。
+完整panic消除仍待实机；USB/HFS clonefile等旧异常保留。无需云编译，详见
+[ABI原因与修正](BOOTARGS-ABI-0121A14.md)及[历次启动对照](PANEL-D1-0121A14.md)。
 
 **以下为各实现阶段的历史范围，当前执行点以上段及NOTES为准。**
 
