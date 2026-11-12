@@ -1,5 +1,22 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a22 RSC branch admission diagnosed)
+
+**CURRENT：a22实测定位到NON_GDSC_AHB branch7准入，尚未修复。**
+日志220866bytes/3061行，SHA=78c0176f0bb518c06191834ba1642946440ff9bcd68480bda2612a11b2ecdd54。
+1722–1752 apps IRQ共10次fresh/entries1–10，四LDO/ARC/CN0通过；1753core2/AHB75/MDP460成功。
+1757首错CLOCK branch-unowned branch7/cbcr0/source4/link0；1758clock-retain NotReady；
+1759phase2/clock-token0/register-acked1/cursor0/5/executing0/op0/0，尚未进入display TCS，并非BCM未ACK。
+LG branch7=+4004 NON_GDSC_AHB/BRANCH_VOTED，source4=PLL1 main，共用AHB root22bc；
+旧retain和worker仍限关闭+XO策略，未对接core profile2实际PLL1 AHB父时钟；cbcr0也不满足原halt准入。
+**NEXT：实现显式RSC voted/halt分支策略，在coreReady/父源及票据成立下取得自己的enable，覆盖worker/final/release/fault。**
+不要普遍放行PLL/删除保护；RSCC_AHB/VSYNC为BRANCH_HALT，只有NON_GDSC_AHB voted，不强求撤票后全局OFF。
+先有界组件测试与真实ARM64编译/补丁重放，再交付新代码供用户push；本次没有新patch/boot，不重刷a22。
+未见kernel panic或RPMh SNAPSHOT；4USB WARN/8FG profile mismatch/charging0/HFS -34伴随，a21亦有，未归因本次首错。
+详见docs/PANEL-D1-0121A22.md实测；底稿scratch/artifact-0121a22/live-retained-log-analysis.json。
+未改驱动/固件/CI，未push/触发CI/操作设备；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。以下NEXT历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a22 NoC diagnostic retained boot ready)
 
 **CURRENT：0121a22产物/源码/镜像回读通过，0209已在新kernel内，待实机。**

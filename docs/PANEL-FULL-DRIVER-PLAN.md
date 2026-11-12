@@ -1,5 +1,12 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+**0121a22实测已定位首错：** 四LDO/ARC/CN0和core profile2通过，RSC clock在
+`branch-unowned branch=7 cbcr=0 source=4 link=0`拒绝；phase2/clock-token0/executing0，尚未进入display TCS。
+branch7是LG定义的NON_GDSC_AHB/BRANCH_VOTED，原warm通用策略要求关闭态+XO，未对接core已建立的PLL1 AHB父源。
+下一步需区分voted语义，并受coreReady/父配置/上游票约束地取得RSC分支自身票，覆盖worker与撤回；不能简单删保护。
+详见[实测和修复边界](PANEL-D1-0121A22.md#实测首错定位到-rsc-non_gdsc_ahb-分支准入)。本次仅分析/文档，无新编译要求。
+
+
 **0121a22产物已核对并打包，待实机：** 78源码匹配0209（a325219），114 source/173 binary markers通过。
 固件ABI608、ADT和605字节retained参数保持0121a21；boot/FAT回读通过。
 本轮只启动retained约90秒取首条CLOCK/NOC gate、CONTEXT和原NoC错误；仍属诊断，未证明修复。
