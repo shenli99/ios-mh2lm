@@ -1,5 +1,29 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a19 startup-wait retained boot ready)
+
+**CURRENT：用户下载0121a19，产物/源码/boot回读通过，待实机。**
+78源码与0206树字节一致，内容对应5966378；114 CI source/160 binary markers通过，
+含waiting/worker-ready/participant/worker拒绝和启动期限。无CI run ID/build log，不声称CI提交元数据核对。
+内核ARM64 subtype0/17723824bytes、自带SHA一致，SHA=2c008e7dc33c74f3216c39223744df7dfe6601743d7c4ee225192f0496114c27。
+四档镜像header/firmware/FAT payload通过；ABI608固件仍27e7a1d1...18ea480，retained605字节参数
+及ADT与0121a18完全一致，旧镜像/基线保留，只交付retained。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a19-abi608-panel-retained.img**
+镜像35545088bytes，SHA=464c7f6b1bc47ed2a528043cbbc0b33d9ef5a1106b9aee53a2ffe637e0ebdcb0。
+启动后等约90秒，看早期静帧是否继续Logo/系统，导live-0121a19-abi608-panel-retained.txt或sweetlog同名bin；
+一种完整日志即可。目标waiting→worker-ready→quiesce→managed/SCANOUT/HANDOFF及首次错误；
+若触摸原已ready可无waiting。先不息屏/亮度/反复USB/长测，确认接管再同镜像OFFON。
+identity不重测，combined/supply暂停；旧0121a18不重测，panic记PC/LR/FAR/ESR。
+用户问触摸/面板为何竞态：已核对是主动软件生命周期依赖+provider先匹配/worker后ready，
+不是已证实共享I²C/DSI或reset寄存器冲突。显示DSI/reset6/TE8/INTID115；触摸I²C55/56/reset54/
+ATTN122/INTID240。TLMM映射包含但引脚写所有权不重叠；共享供电影响未知，不声称电气全独立。
+LG panel BLANK通知会进S3618 LCD_MODE；RESET通知在本型号分支为空。首次统一暂停为保守软件策略，
+不是面板硬件上电已证明必须等待触摸。已写入PANEL-TOUCH-STARTUP-WAIT.md末节。
+详见docs/PANEL-D1-0121A19.md；证据scratch/artifact-0121a19/（两verify脚本/JSON/packaging.txt）。
+本轮仅核对/打包/文档，未改驱动/固件/CI、未push/触发CI/操作设备；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+本轮文档本地提交不需重编，直接测已打好的0121a19；以下NEXT均为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a18 ACV PASS; 0206 late-touch startup fix ready)
 
 **CURRENT：用户0121a18仍静帧；USB日志证明ACV metadata已通过，已修下一处启动竞态。**

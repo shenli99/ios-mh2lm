@@ -1,5 +1,9 @@
 # 首次面板接管与触摸异步初始化竞态（0206）
 
+**0121a19已准备：** 实际78源码、114 source/160 binary markers及镜像回读通过。
+新retained镜像同ABI608/605字节参数，待实机waiting→ready→managed/接管；旧0121a18不复测。
+见[0121a19命令与日志目标](PANEL-D1-0121A19.md)。本次仅打包，不为文档重新编译。
+
 2026-11-12，接[0121a18镜像](PANEL-D1-0121A18.md)。用户仍见早期日志静帧。
 ACV metadata阻塞已解除；本次修复首次接管过早请求触摸worker、一次拒绝后永久冻结的启动竞态。
 本地复现及修复验证通过，尚待新内核实机确认，不能称面板已完成接管。
@@ -70,3 +74,28 @@ CircleCI blob仍 `da0b6c0947a66f03491b3a9023590b49665292df`。
 FG capacity有效性也为0。与本次显示修改没有已证实因果，不据此修改电池或声称真实充电正常。
 另有4条USB endpoint WARN，ACM仍传日志；不据此关闭或新增BUG-001枚举故障结论。
 保留这些观察，不为当前面板修复增加电池/USB专项测试。
+
+## 为什么面板接管会依赖触摸（用户追问核对）
+
+这次已复现的是**软件初始化顺序与生命周期依赖**。MDSS协调器要求先取得触摸quiesced fence，
+再改变显示链路；但IOService匹配成功与C TouchComm worker初始化/IRQ ready是两个时刻。
+把服务可用误当成后台线程就绪，且首次begin拒绝后不再继续，才形成永久静帧。
+不是已证实同一硬件寄存器被两个驱动同时写坏。
+
+| 项目 | 显示/面板 | 触摸 |
+|---|---|---|
+| 数据链路 | MIPI DSI，经MDSS host/PHY | TouchComm，经GPIO55/56软件I²C |
+| reset | GPIO6，SweetPanelPins所有者 | GPIO54，原触摸worker所有者 |
+| 同步/输入IRQ | MDSS INTID115；面板TE GPIO8 | ATTN GPIO122，经现有TLMM汇聚INTID240 |
+| 生命周期关系 | 协调器等待触摸暂停/恢复fence | 关闭IRQ、收尾消息、释放HID触点后才确认暂停 |
+
+TLMM触摸驱动映射整tile，PanelPins只映射两页，地址窗口存在包含关系；当前引脚写入所有权不重叠。
+两套reset引脚独立不能证明电源或模块电气影响完全独立；共享供电/面板reset对触摸影响仍缺实机证据。
+首次Takeover前暂停触摸是当前统一协调器的保守策略，**不是已证明面板硬件上电必须等触摸初始化**。
+它让首次接管与后续reset/OFFON遵守相同事务入口，不在切换中让旧触点/在途报文越过状态边界。
+
+LG/Lineage也有显示到触摸的通知链：`touch_core.c:964–981`将panel BLANK转换为LCD_EVENT_LCD_MODE、
+RESET转NOTIFY_TOUCH_RESET；本机`synaptics/s3618/touch_s3618.c:3829`的RESET分支为空，
+`:3831`的LCD_MODE分支实际进入s3618_lcd_mode/check_mode及异步fb_notify_work。
+这支持显示/触摸应协调状态，不证明它们共用reset线，也不能把别的触摸型号动作套到本机。
+0206保留typed provider/原worker分工，仅让首次事务有界等待就绪，没有让MDSS直接操作触摸寄存器。

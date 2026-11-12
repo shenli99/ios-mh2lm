@@ -1,5 +1,11 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+**0121a19已核对打包：** 0206首次接管等待触摸worker修复已包含；78源码、114 source/160 binary
+markers及镜像回读通过。只启动新的ABI608 retained档，等约90秒导启动日志，先不做OFFON/长测。
+参数605字节及ADT同上一轮，旧镜像保留；见[本轮步骤](PANEL-D1-0121A19.md)。
+触摸与面板的接口/独立reset/IRQ及软件依赖见[关系说明](PANEL-TOUCH-STARTUP-WAIT.md#为什么面板接管会依赖触摸用户追问核对)。
+以下0206待push/0121a18待测步骤为已完成历史，实机修复结果仍待验证。
+
 **0121a18实测/0206增量：** ACV width0/mask8元数据已通过；首次生命周期准入仍NotReady，
 触摸worker稍后才ready，原framebuffer一次性请求永久失败。0206仅协调器接收首次Takeover后
 异步等待worker，真实quiesce证明前不改显示/投票；超时/退出仍失败。待push云编译，不复测旧镜像。
