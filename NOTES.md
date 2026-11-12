@@ -2,6 +2,12 @@
 
 ## Agent handoff / active work (2026-11-12, 0208 RPMh ACTIVE completion IRQ ready)
 
+**补充复核：** 用户要求CMD_STATUS delta/IRQ_ENABLE/doorbell诊断，已核对0208实际路径并提供
+docs/PANEL-RPMH-SUBMIT-DIAGNOSTICS.md完整示例和判断标准。IRQ source开启/读回和命令后trigger已实现；
+尚无前后status delta与最终trigger显式读回。delta0不能证明未执行，非零也不是全命令fresh ACK。
+示例仅文档，隔离树ARM64编译通过，新增6条unsafe-buffer-usage提示未屏蔽；未接入生产/实机。
+底稿scratch/rpmh-submit-review。无新编译测试轮次要求，0208待用户push/云编译的NEXT保持。
+
 **CURRENT：0208已实现并本地提交`190c558`，待用户push/云编译，未实机验收。**
 针对0121a20 ldoa14 completion缺fresh证据，新增apps RSC SPI5/INTID37 level-high路径：
 GIC callback只mask/原子排队→software IOInterruptEventSource→SweetRPMh workloop核验selected IRQ、

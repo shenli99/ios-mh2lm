@@ -2,6 +2,9 @@
 
 2026-11-12。本地实现及验证完成，尚未云编译或实机验收。
 
+提交顺序复核、CMD_STATUS delta的证据边界、IRQ_ENABLE/doorbell诊断代码见
+[RPMh提交诊断](PANEL-RPMH-SUBMIT-DIAGNOSTICS.md)。该示例尚未接入生产补丁，不改变本页0208实现。
+
 0121a20 的第一笔 ldoa14 请求停在 completion：三条 CMD_STATUS 均为 0x10101，
 但 IRQ_STATUS=0、progress=0。旧命令状态不能证明本轮 ACK；0208 将完成证据改为真实
 apps RSC 中断，不删除 fresh 检查，不延长期限。实测依据见
