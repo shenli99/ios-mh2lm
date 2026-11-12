@@ -1,5 +1,13 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
+**0121a23实测：** a22的branch-unowned准入拒绝已越过，实际发出branch7 enable；
+随后clock token2 Timeout（原result0xe00002d6），尚无Held/mask381。NoC phase2/clock-token2/
+register-token7/executing0/clock-cursor7/waiting1，未进入display TCS；后续NotReady/HANDOFF冻结为连锁结果。
+当前未记录超时出口/期限/CBCR样本，不能区分enable读回、物理OFF或整体期限/调度问题。
+下一步补有界clock timeout证据，不延长期限或删保护。见[实测分析](PANEL-D1-0121A23.md#实测准入已越过branch7-开启完成等待超时)。
+本次仅分析/文档，无新编译要求；旧a23不重测，完整接管前其他显示测试暂停。
+
+
 **0121a23产物/镜像已核对，待实机：** 78源码匹配0210（7d35162），114 source/177 binary markers通过。
 ABI608固件、ADT和605字节retained参数保持a22；boot/FAT回读通过。本轮只启动retained约90秒，
 验证RSC clock Held/mask0x381，取NoC后续首错或新DMA证据；尚未证明完整接管成功。

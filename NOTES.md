@@ -1,5 +1,25 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a23 branch7 completion timeout)
+
+**CURRENT：a23屏幕静帧，已分析日志；a22准入拒绝已越过，branch7开启等待超时，尚未Held。**
+日志218900bytes/3118行，SHA=6ac16167b9ccdcf67606d53a139c1fbe402f1178ad3d599b1b3591bdd42c0c5c。
+1757–1775 10次fresh IRQ/四LDO/ARC/CN0，1776core2/AHB75/MDP460成功，1777CN0 token7成功。
+1778 voted branch7 enable1说明RMW发出，不是enable读回或ON证明；1779首错clock token2 Timeout0xe00002d6/owned80/uncertain1。
+1780 clock-status token2/state5/resultTimeout；1781 phase2/clock-token2/register-token7/register-acked1/cursor0/5/
+executing0/op0/0/clock-cursor7/waiting1/clock-fault1。仍在时钟阶段，未进入display TCS或新DMA。
+后续NoC NotReady是失败转换，managed/HANDOFF冻结及2923按键后lifecycle拒绝是连锁结果。
+clock整体200ms超时出口在当次CBCR读取前；另有10ms等待超时。日志缺原因/期限/CBCR，不能分enable未读回、
+OFF未清或整体期限/调度晚到；owned80为写前保守账本，不能当成enable成功。不可宣称0210实机获取已成功。
+**NEXT：补clock timeout有界取证：区分overall/branch-wait、now/deadline/cursor/waiting，写before/want/time及已有等待样本。**
+整体期限无当次CBCR时明确unavailable或用带时间的缓存样本，不把旧值当当前；不改期限/重试/读写顺序或绕过前置。
+先组件验证enable/OFF与两类timeout，再交付取证代码供用户push。本次仅分析文档，无新patch/boot，不重测a23。
+LG+4004/bit0/BRANCH_VOTED及enable流程再核对，未发现凭据支持改地址/跳过完成。无kernel panic签名，USB/进程/按键后续活动。
+4USB WARN/4FG mismatch/charging0及既存HFS用户态报错未归因本次首错；不转移任务。
+详见docs/PANEL-D1-0121A23.md实测；底稿scratch/artifact-0121a23/live-retained-log-analysis.json。
+未改驱动/固件/CI，未push/触发CI/操作设备；CircleCI blob保持da0b6c0947a66f03491b3a9023590b49665292df。以下NEXT历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a23 RSC vote retained boot ready)
 
 **CURRENT：0121a23源码/内核/镜像核对通过，0210修复在新kernel内，待实机。**
