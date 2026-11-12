@@ -78,6 +78,20 @@ static void cleanup(SweetMDSS*m,IOService*d,SweetRPMh*r,IOService*n){
  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());rpmhOwner=mdssClockWriter=mdssNoCWriter=0;
 }
 int main(){
+ // Metadata identity must omit the NoC extension when resource1/clock0.
+ // The original lifecycle matrix declared NoC and could not reach identity
+ // publication. Check actual start/free with both declarations and no writes.
+ for(unsigned declareNoC=0;declareNoC<2;++declareNoC){
+  nocFixtures();resourceMode=1;clockMode=0;
+  auto*metadata=nub(false);
+  uint8_t identity[96]={};metadata->properties["sweet,panel-identity"]=OSData::withBytes(identity,sizeof(identity));
+  if(declareNoC){uint32_t one=1;metadata->properties["sweet,display-noc-abi"]=OSData::withBytes(&one,4);}
+  auto*service=new SweetMDSS();assert(service->start(metadata)==!declareNoC);
+  assert(!service->fNoCEnabled&&!writes());
+  if(!declareNoC)service->stop(metadata);
+  service->release();queued.clear();dropNub(metadata);
+  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty()&&!mdssClockWriter&&!mdssNoCWriter);
+ }
  // An explicit extension must never silently downgrade on malformed ABI or
  // missing maps. Failed startup frees all previously acquired clock resources.
  for(unsigned fault=0;fault<7;++fault){

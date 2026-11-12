@@ -110,8 +110,11 @@ SWEET_PANEL_UEFI_MANIFEST=/home/shenli/work1/out-bs/panel-uefi-0201-final/panel-
   tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-LABEL.gz LABEL --panel-lifecycle
 ```
 
-脚本核验manifest ABI/full-FD与blob SHA，检查新内核marker；ADT增加NoC、Pins、Touch与
-96-byte全零身份slot，不接受静态指定panel。四档共用内核/ADT/新固件，保留USB ACM、按键与电池：
+脚本核验manifest ABI/full-FD与blob SHA，检查新内核marker；四档共用内核/新固件。
+identity独立ADT仅增加resource/RPMh与96-byte全零身份slot，不声明NoC/Pins/Touch，使用
+resource1/clock0/pins0/touch0。后三档共用包含NoC/Pins/Touch的完整ADT，使用resource2/clock1。
+NoC声明与resource1/clock0不兼容，会导致SweetMDSS启动失败；不要混用两种ADT。
+不接受静态指定panel。保留USB ACM、按键与电池：
 
 | 镜像（位于`W/out-bs/`） | 测什么 |
 |---|---|

@@ -1,5 +1,32 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, kernel-control PASS; identity packaging fix)
+
+**CURRENT：用户确认kernel-control成功进系统；本地已修正identity配置，尚未实机。**
+USB日志logs/live-0121a14-kernel-control.txt SHA256=1f37328114f5a3f74a76556cefc7a982858217cac202bbfeed8fcac786561f95，
+223576 bytes；425行SpringBoard、850–851行fresh PP_DONE/own A接管、10条touch、2条vsync；
+无panic/data abort/[ERROR]。从用户态开始，早期参数/服务日志缺失；不称全量启动日志验证。
+6条USB cmd warning、3条临时scanout warning、10条旧式HFS clonefile -34，末段charging0；
+不是NULL panic重现，也不称HFS完全正常或充电通过。kernel-control-log-analysis.json存底。
+实际云端setupNoC要求resource2/clock1；原identity full ADT声明NoC却resource1/clock0，
+必然start失败且到不了setupLifecycle。这是确定的打包错误，HFS NULL因果仍未证实。
+不能因HFS源码没改或kernel-control成功就排除新驱动间接影响。
+修正matrix：identity单独--panel-identity ADT（resource/RPMh/零slot，无NoC/Pins/Touch），
+pins0/touch0，其他identity参数保留；后三档完整ADT及参数不变。make_profile支持单档ADT。
+实际源码ASan/UBSan NoC回归含两种配置start/free准入和无写入；ADT suite、bash语法通过。
+隔离NONBOOTABLE包装fixture及四个真boot完整FAT/header/kernel/ADT/TOML/固件回读通过。
+**NEXT：仅由用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a14-fix-panel-identity.img**
+SHA256=860586416eb546e8e714a81c9fa4247ffc999ed52c2f786d7b8e29fd76fb67e5。
+正常进入后基本画面/触摸/按键即可，导出sweetlog-0121a14-fix-panel-identity.bin持久日志，
+核对早期SWEET PANEL source2/profile1..4；USB仍开着，但live可能漏早期行。
+后三档仍暂停，不能宣称本修正已消除panic；不重测旧USB/BUG002/F3/半小时。
+内核仍7943a67e...68322f，新固件仍8e1e65d8...9561e；无需push/云编译。
+原四档、olduefi与成功kernel-control保留，原四档/control SHA已再核对。
+底稿scratch/artifact-0121a14/{kernel-control-log-analysis.json,check-packaging-fixed.py,
+packaging-fixed-results.json,packaging-fixed.txt,verify-boots-fixed.py,boot-fixed-verification.json}。
+不改HFS/充电/USB、未操作设备/推送/CI；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+详情docs/PANEL-D1-0121A14.md；以下是历史记录，当前NEXT以本段为准。
+
 ## Agent handoff / active work (2026-11-12, 0121a14 identity panic)
 
 **当前执行点更新：用户报告olduefi对照仍panic。新固件不是必要条件，本轮内核间接影响不能排除。**

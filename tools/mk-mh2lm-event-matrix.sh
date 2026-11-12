@@ -1,7 +1,8 @@
 #!/bin/bash
 # Build several temporary MH2LM fastboot-boot images from one CI kernel artifact.
-# The profiles differ only in UniXNU boot arguments; every image shares the
-# extracted kernel, the known 16K ADT, and the clean 32 MiB ramdisk baseline.
+# Profiles share the extracted kernel and clean 32 MiB ramdisk baseline.
+# Panel identity uses a metadata-only ADT; hardware lifecycle profiles also
+# declare NoC/pins/touch resources and enable their required runtime modes.
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
@@ -410,6 +411,9 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
     exit 1
    fi
   done
+  # NoC ABI declaration requires resource2/clock1 even before lifecycle setup.
+  # Keep metadata admission independent of hardware lifecycle providers.
+  python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --panel-identity "$ADT" "$TMPDIR/identity.adt"
   python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --display-noc --panel-pins --panel-touch --panel-identity "$ADT" "$TMPDIR/mdss.adt"
  elif [ "$PANEL_RESOURCES" = '1' ]; then
   for marker in 'SweetRPMhABI' 'SweetRPMhWritesAllowed' 'SweetDisplayRPMhBound' \
@@ -444,6 +448,7 @@ make_profile() {
 	local name=$1
 	local title=$2
 	local extra=$3
+	local profile_adt=${4:-$ADT}
 	local kernel="$OUT/kernel.development.mh2lm-${LABEL}-${name}"
 	local ramdisk="$OUT/ramdisk-16k-${LABEL}-${name}"
 	local toml="$OUT/unixnu-16k-${LABEL}-${name}.toml"
@@ -459,7 +464,7 @@ make_profile() {
 
 	mcopy -o -i "$ramdisk" "$toml" ::/EFI/UniXNU/unixnu.toml
 	mcopy -o -i "$ramdisk" "$kernel" ::/EFI/UniXNU/Payloads/kernel.macho
-	mcopy -o -i "$ramdisk" "$ADT" ::/EFI/UniXNU/Payloads/kernel.macho.adt
+	mcopy -o -i "$ramdisk" "$profile_adt" ::/EFI/UniXNU/Payloads/kernel.macho.adt
 
 	mkdir -p "$verify"
 	mcopy -o -i "$ramdisk" ::/EFI/UniXNU/unixnu.toml "$verify/unixnu.toml"
@@ -467,7 +472,7 @@ make_profile() {
 	mcopy -o -i "$ramdisk" ::/EFI/UniXNU/Payloads/kernel.macho.adt "$verify/kernel.macho.adt"
 	cmp "$verify/unixnu.toml" "$toml"
 	cmp "$verify/kernel.macho" "$kernel"
-	cmp "$verify/kernel.macho.adt" "$ADT"
+	cmp "$verify/kernel.macho.adt" "$profile_adt"
 
 	(
 		cd "$MU"
@@ -483,7 +488,7 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
  if [ "$PANEL_LIFECYCLE" = '1' ]; then
   PANEL_ARGS="$FB_ARGS sweetmdss=1 sweetfbservice=1 sweetmdssirqprobe=0 sweetfbperf=1"
   make_profile panel-identity "LG G8X - XNU live ABL panel selection, metadata only (${LABEL})" \
-   "$PANEL_ARGS sweetfbpower=0 sweetmdssirq=0 sweetfbvsync=0 sweetfbown=0 sweetdsi=0 sweetdisplayresources=1 sweetdisplayclocks=0 sweetdisplaycore=0 sweetdisplaymanaged=0 sweetdsihost=0 sweetdsilink=0 sweetpanelpins=1 sweettouchpanel=1 sweetpanellifecycle=0"
+   "$PANEL_ARGS sweetfbpower=0 sweetmdssirq=0 sweetfbvsync=0 sweetfbown=0 sweetdsi=0 sweetdisplayresources=1 sweetdisplayclocks=0 sweetdisplaycore=0 sweetdisplaymanaged=0 sweetdsihost=0 sweetdsilink=0 sweetpanelpins=0 sweettouchpanel=0 sweetpanellifecycle=0" "$TMPDIR/identity.adt"
   PANEL_ARGS="$PANEL_ARGS sweetfbpower=1 sweetmdssirq=2 sweetfbvsync=1 sweetfbown=2 sweetdsi=1 sweetdisplayresources=2 sweetdisplayclocks=1 sweetdisplaycore=2 sweetdisplaymanaged=1 sweetdsihost=1 sweetdsilink=2 sweetpanelpins=2 sweettouchpanel=2"
   make_profile panel-retained "LG G8X - XNU full panel reset, all supply votes held (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=2"
   make_profile panel-combined "LG G8X - XNU DATA and link parking, supply votes held (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=5"

@@ -1,11 +1,11 @@
 # PD3：统一协调器的面板供电票撤销与恢复（0201）
 
-**0121a14产物进展（2026-11-12）：** 已取得77c7631/0201的云端链接内核，78份源码与
-本地verify逐字节一致，114 CI marker及7个新增关键方法的最终内核定义通过。
-四档identity/retained/combined/supply已打包并回读，使用新Mu固件，同kernel/ADT，无重复参数。
-**当前先测panel-identity，等待live身份与正常启动日志，尚无实机结果。**
-不再需要为0201重复push/编译；后档在本档日志通过后逐级测试。详见
-[本轮产物、路径、检查和测试步骤](PANEL-D1-0121A14.md)。以下0201“待云编译”按历史阶段保留。
+**0121a14最新状态（2026-11-12）：** 用户确认kernel-control进系统；USB日志有SpringBoard、
+自有扫描缓冲接管及触摸，未采集到panic。原identity配置有已确认错误：声明NoC ABI却使用
+resource1/clock0，SweetMDSS必然在setupNoC失败，尚不能证明它导致HFS空指针。
+已修正打包：identity使用不含NoC/Pins/Touch的独立metadata ADT；后三档保留完整ADT。
+同内核/新固件，原镜像保留。**下一步仅测`0121a14-fix-panel-identity`，后三档暂停。**
+无需重新云编译。详情、证据及边界见[0121a14记录](PANEL-D1-0121A14.md)。
 
 2026-11-12。接父提交 `8722913` 的0200实时依赖接口，新增显式
 `sweetpanellifecycle=6`。本地验证通过，完整Mu FD已构建，**尚未整核链接或实机验收**。
@@ -91,7 +91,8 @@ FB模式6独立核验能力、rails、两票token、低保持、资源与链路�
 FD SHA256：`fadb5b59f3ec22f67ebac3e33babc642d372e42cdb004c5730fdaf376d43e48f`。
 完整FD构建成功不代表手机可启动；本轮尚无可刷的新内核镜像。
 
-同一新云端内核用`--panel-lifecycle`生成四档，同kernel/ADT/新固件，仅参数不同：
+同一新云端内核用`--panel-lifecycle`生成四档，共用kernel/新固件。identity使用独立metadata ADT，
+含RPMh/resource ABI及零身份slot，不声明NoC/Pins/Touch；后三档用相同完整ADT，仅lifecycle参数不同：
 
 | 镜像后缀 | 模式 | 验收重点 |
 |---|---|---|

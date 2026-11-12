@@ -1,11 +1,11 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
-**0121a14产物进展（2026-11-12）：** 已取得77c7631/0201的云端链接内核，78份源码与
-本地verify逐字节一致，114 CI marker及7个新增关键方法的最终内核定义通过。
-四档identity/retained/combined/supply已打包并回读，使用新Mu固件，同kernel/ADT，无重复参数。
-**当前先测panel-identity，等待live身份与正常启动日志，尚无实机结果。**
-不再需要为0201重复push/编译；后档在本档日志通过后逐级测试。详见
-[本轮产物、路径、检查和测试步骤](PANEL-D1-0121A14.md)。以下0201“待云编译”按历史阶段保留。
+**0121a14最新状态（2026-11-12）：** 用户确认kernel-control进系统；USB日志有SpringBoard、
+自有扫描缓冲接管及触摸，未采集到panic。原identity配置有已确认错误：声明NoC ABI却使用
+resource1/clock0，SweetMDSS必然在setupNoC失败，尚不能证明它导致HFS空指针。
+已修正打包：identity使用不含NoC/Pins/Touch的独立metadata ADT；后三档保留完整ADT。
+同内核/新固件，原镜像保留。**下一步仅测`0121a14-fix-panel-identity`，后三档暂停。**
+无需重新云编译。详情、证据及边界见[0121a14记录](PANEL-D1-0121A14.md)。
 
 **0201当前增量（2026-11-12，本地通过，未实机）：** 统一协调器新增显式
 `sweetpanellifecycle=6`：完整OFF→reset实际低保持→原mode5 DATA/link停驻→VPNL/VDDI
