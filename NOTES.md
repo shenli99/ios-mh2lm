@@ -1,5 +1,29 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, fixed identity still PANIC)
+
+**CURRENT：用户报告fix-panel-identity仍panic。NoC配置修正未能解决NULL写；根因未定。**
+新PC=0xfffffe0007b95478/FAR0/ESR0x96000045与旧一致；实际memmove向0写指令。
+LR原文0xfffffe0077c8c68共15hex位，不补位声称与旧HFS调用点完全一致；本次无独立panic日志。
+identity-fixed-panic-report.json保留原文。成功kernel-control的持久日志也已解码：
+logs/sweetlog-0121a14-kernel-control.bin SHA=b87b2d077b8a0a453fbf835eacb1b51aab84e043ef7b03e5a1dcc93f4cb7f044；
+85–86行source0/profile0及MDSS发布、96行RPMh绑定、178行pool、1098行own A接管，
+392行boot-args与成功TOML完全相同。USB缺早期的限制由这份persist补足，仅针对成功档。
+原成功→fix身份档仍同时变固件/身份slot及power-IRQ-vsync-own(1/2/1/2→0/0/0/0)。
+已确认fix ADT删去唯一96-byte零slot即与成功ADT逐字节相同；不能忽略显示参数/分配路径。
+**NEXT：只测 /home/shenli/work1/out-bs/boot-16k-0121a14-firmware-control.img**
+SHA256=fbff2365215791f064787262536a224421b07b07bc5d2f4e6a1fe4c328db72d3。
+该档以成功kernel-control为底，仅boot kernel段换新Mu固件；整FAT ramdisk逐字节相同，
+内核/ADT/所有TOML和boot-args保留（菜单旧标题0121a13是刻意保留，不是旧内核）。
+无身份slot，adapter按代码不读HOB/FDT。boot header/整ramdisk/各SHA回读通过，原control未改。
+尚未实机，只测是否进系统；成功导live-0121a14-firmware-control.txt，失败记录panic寄存器。
+成功才在此基础仅加slot；失败查新固件/内存交接，不声称已定位到根因，不修HFS/磁盘。
+无需push/云编译；身份/retained/combined/supply均暂停，不重测旧USB/BUG002/F3/半小时。
+证据scratch/artifact-0121a14/{make-firmware-control.py,firmware-control-verification.json,
+kernel-control-persistent.txt,kernel-control-persistent-analysis.json,identity-fixed-panic-report.json}。
+只更新文档与本地镜像，未修改内核/驱动/CircleCI或操作设备，未push/触发CI。
+详情docs/PANEL-D1-0121A14.md。以下NEXT均为历史阶段，当前以本段为准。
+
 ## Agent handoff / active work (2026-11-12, kernel-control PASS; identity packaging fix)
 
 **CURRENT：用户确认kernel-control成功进系统；本地已修正identity配置，尚未实机。**

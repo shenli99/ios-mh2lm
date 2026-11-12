@@ -1,11 +1,11 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
-**0121a14最新状态（2026-11-12）：** 用户确认kernel-control进系统；USB日志有SpringBoard、
-自有扫描缓冲接管及触摸，未采集到panic。原identity配置有已确认错误：声明NoC ABI却使用
-resource1/clock0，SweetMDSS必然在setupNoC失败，尚不能证明它导致HFS空指针。
-已修正打包：identity使用不含NoC/Pins/Touch的独立metadata ADT；后三档保留完整ADT。
-同内核/新固件，原镜像保留。**下一步仅测`0121a14-fix-panel-identity`，后三档暂停。**
-无需重新云编译。详情、证据及边界见[0121a14记录](PANEL-D1-0121A14.md)。
+**0121a14当前阻塞（2026-11-12）：** 用户报告`fix-panel-identity`仍panic，PC/FAR/ESR与
+前次一致。NoC/参数不匹配已纠正，但不是充分修复；HFS NULL目的地址的上游原因仍未确定。
+成功kernel-control的持久日志补证：MDSS启动、RPMh绑定、自有缓冲接管均成功，boot-args匹配。
+**下一步只测`0121a14-firmware-control`**：以成功档为底，仅换新固件，ramdisk逐字节不变。
+原身份档还同时更改身份slot与power/IRQ/vsync/own模式，不能用它单独判定哪项导致panic。
+身份/retained/combined/supply均暂停。无需云编译；详情见[0121a14排查记录](PANEL-D1-0121A14.md)。
 
 **0201当前增量（2026-11-12，本地通过，未实机）：** 统一协调器新增显式
 `sweetpanellifecycle=6`：完整OFF→reset实际低保持→原mode5 DATA/link停驻→VPNL/VDDI
