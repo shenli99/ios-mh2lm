@@ -1,5 +1,9 @@
 # DSI0 host 重建（0190，PD2 / D1 后续）
 
+**0197后续增量（本地通过，未实机）：** 新增mode4，保留全部票，实际关闭并重建host/PHY/PLL；
+clock状态另报物理暂停，FB核对关闭/重建证据。原0/1/2/3范围保留；未实现rail-off。
+详见[硬件关闭及恢复、架构和边界](PANEL-LINK-POWER-D1.md)。以下按原阶段范围保留。
+
 **0191后续更新：** 已将 PHY v4.0 / PLL 7nm-v2 与 BYTE/PCLK roots 的真实重建接到
 managed 链的 host 之前，沿原 owner/gate/DSI timer；独立确认停稳、失锁/新锁及更新/运行。
 本地12套检查和arm64对象编译通过，未实机；面板生命周期/整屏冷启动仍未完成。

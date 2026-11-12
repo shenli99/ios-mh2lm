@@ -1,5 +1,15 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0197当前增量（2026-11-12，本地通过，未实机）：** 协调器新增显式`sweetpanellifecycle=4`：
+完整OFF后实际关闭host、BYTE/PCLK分支、PHY PLL/bias和PHY blocks，确认停稳；ON复用原执行层
+重新reset/配置PHY、PLL、root和host，再执行面板reset/ON/亮度/fresh像素/触摸恢复。
+全部资源票保留，clock查询另报hardwareSuspended，暂停期间普通接口拒绝操作；不是rail-off。
+原0/1/2/3语义保留，无降档；额外link使用者/DSI1 alias在DDI副作用前拒绝，子timer重查fence和期限。
+20套本地检查及MDSS/FB真实arm64单文件编译通过，严格重放/114原CI marker通过。
+详见[硬件下电、重建与架构](PANEL-LINK-POWER-D1.md)。完整供电释放、冷NoC/MDP及ABL退出仍缺，
+live profile/E7/E8未实机；无新FD/boot、push/CI/设备操作，CircleCI未改。暂不单开云编译/刷机。
+下一步组合资源票释放与硬件下电，继续完整驱动。以下0196及更早段落保留当时范围，当前以0197为准。
+
 **0196当前增量（2026-11-12，本地通过，未实机）：** 协调器增加显式`sweetpanellifecycle=3`：
 完整OFF后取得独立config-only NoC票，再释放managed clock/DATA NoC票；ON先重新取得新票，
 再执行原reset/完整ON/亮度/fresh像素/触摸恢复。CN0 300MB/s floor、boot/RSC clock、

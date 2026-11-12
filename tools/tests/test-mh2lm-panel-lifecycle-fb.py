@@ -113,6 +113,30 @@ int main(){
   if(missing==6)v.resourcesRestored=false;if(missing==7)v.dataToken=0;if(missing==8)v.resourcesParked=true;
   h.complete();assert(h.f->fPanelLifecycleFault&&h.f->fPowerOff);
  }
+
+ lifecycleArg=4;
+ {Harness h;assert(h.f->fPanelLifecycleFull&&h.f->fPanelLifecycleLinkCycle&&!h.f->fPanelLifecycleDataParking);
+  h.b->cap|=SweetPanelRetainedSleepReset;assert(h.request(true)!=0&&h.b->operations.empty());}
+ {Harness h;h.b->cap|=SweetPanelRetainedSleepReset|SweetPanelLinkPowerCycle;
+  assert(h.request(true)==0);auto&v=h.b->lifecycle;v.profile=4;v.sleeping=v.retainedPower=v.linkPoweredDown=true;
+  v.dataToken=2;v.clockToken=3;v.phase=SweetPanelComplete;v.result=0;v.touchQuiesced=v.displayDrained=true;h.tick();
+  assert(!h.f->fPanelLifecycleFault&&h.f->fPowerOff&&!h.f->fPanelLifecycleBackend);
+  assert(h.request(false)==0);v.profile=4;v.retainedPower=v.linkRebuilt=true;v.dataToken=2;v.clockToken=3;
+  v.resetComplete=v.brightnessRestored=true;h.complete();assert(!h.f->fPanelLifecycleFault&&!h.f->fPowerOff);
+ }
+ for(unsigned missing=0;missing<8;++missing){Harness h;h.b->cap|=SweetPanelRetainedSleepReset|SweetPanelLinkPowerCycle;
+  assert(h.request(true)==0);auto&v=h.b->lifecycle;v.profile=4;v.sleeping=v.retainedPower=v.linkPoweredDown=true;
+  v.dataToken=2;v.clockToken=3;v.phase=SweetPanelComplete;v.result=0;v.touchQuiesced=v.displayDrained=true;
+  if(missing<5){
+   if(missing==0)v.linkPoweredDown=false;if(missing==1)v.resourcesHeld=true;if(missing==2)v.retainedPower=false;
+   if(missing==3)v.dataToken=0;if(missing==4)v.clockToken=0;
+   h.tick();assert(h.f->fPowerOff&&h.f->fPanelLifecycleFault);continue;
+  }
+  h.tick();assert(h.request(false)==0);v.profile=4;v.retainedPower=v.linkRebuilt=true;v.dataToken=2;v.clockToken=3;
+  v.resetComplete=v.brightnessRestored=true;if(missing==5)v.linkRebuilt=false;
+  if(missing==6)v.linkPoweredDown=true;if(missing==7)v.retainedPower=false;
+  h.complete();assert(h.f->fPowerOff&&h.f->fPanelLifecycleFault);
+ }
  lifecycleArg=1;
  puts("PASS: actual FB asynchronous lifecycle requests/status, pending presentation freeze, rapid OFF/ON coalescing, no completion from frame mailbox, retained provider/token, explicit fault/withdrawal/stop, no legacy fallback and zero objects/allocations/buffers");
 }

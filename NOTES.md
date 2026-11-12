@@ -2,6 +2,54 @@
 
 ## Agent handoff / active work (2026-11-12, latest)
 
+**CURRENT：0197 host/PHY/PLL实际关闭与重建已本地通过，未实机；保留全部票，未完成rail-off/完整驱动。**
+父提交9791218；0197-mh2lm-panel-link-power-cycle.patch SHA256=
+efdca7364953775c661ed8dda2e91e3638aad3b570b132e589fd8e934bc40bb7，12份源码，base字节连续于0196verify；严格应用无offset/fuzz/114原CI marker通过。
+新增sweetpanellifecycle=4，默认0及原1/2/3语义保留；4要求live profile/pins2/touch2/own2/
+power1/IRQ2/dsi1/managed1/core2/host1/link2及原resource/clock/NoC依赖，无猜PV/降档。
+实际OFF：原touch fence/显示IRQDMA静止/完整OFF及等待→typed host disable（command先停，
+0x200b3f dynamic force→controller停→恢复0x23f，每步读回）→lanes idle→pixel/intf/byte关→
+roots确实off/无update→PLL global/控制off→新LOCK清零→bias off>=250ns→LPRX/lane/PHY blocks关。
+成功终态LinkDormant/HostDormant，读回gates/roots/PLL/bias/PHY/host/reset未assert才发完成。
+OFF无PHY/面板reset、无撤票；stopLink/stopHost仍只取消，无清理硬件副作用。
+实际ON只接受自己同provider成功Dormant且再次读回一致→原PHY reset/refgen/完整PHY+PLLrate/
+SSC/新LOCK/root更新/实际running/受控snapshot提交→原host reset+显式配置读回→原面板
+activate/reset/完整ON/最新亮度/fresh像素/真实TCM恢复。自有A布局，未重跑一次性takeover。
+全部LDO/ARC/NoC/clock票保留，mode4不叠加mode3释放。首次关link gate前置suspended mask0x70，
+localClockStatus除逻辑Held另给hardwareSuspended，localClocksReady=false；暂停时普通clock/NoC
+增撤票及DSI/scanout均拒绝。只有实际PHY/PLL/root/branch/parent恢复成功后才清mask；失败保留mask。
+DDI副作用前拒绝额外active软件link票/refs异常/硬件DSI1 alias，事务期间重复检查，不越过其它consumer。
+新增lifecycle LinkPowerDown/LinkRebuild、SweetPanelLinkPowerCycle能力、linkPoweredDown/linkRebuilt
+证据与属性；FB mode4要求供电和data/clock票保留、OFF真实关闭/ON链路及原恢复证据，不能普通Complete冒充。
+原唯一MDSS gate/MMIO owner/DSI timer和Link前后半段、Host执行层，无新provider/线程/映射/实例桥。
+每协调器/DSI/clock/NoC子timer重查同代participant/touch、保留票、非link clock/core、alias、
+IRQ/TEauto/DSIbusy/CTL/line/自有A/SMMU及期限；允许受控link非Ready期间只读MDP/AHB snapshot，
+不跳过core/clock准入。原总16s，link段1s、原link250ms/host20ms和各短期限保留。
+取消/stop/provider撤回/失败关闭本代、保票/部分硬件/DMA pin，无恢复或复位收尾、回放TE、降档。
+加root/divider更新前漂移验证和Dormant保留字段检查，避免旧快照覆盖未知变化。
+20套检查通过：19实际源码ASan/UBSan+PythonADT，无最终报告。四版各4轮真实状态驱动关闭/重建，
+独立wire/物理响应、OFF无reset/ON必经破坏配置的PHY+host reset、保留token、暂停API拒绝、
+TCM/pixel、额外users、每link阶段cancel/stop/withdrawal、halt/unlock/refgen/lock/root/postedwrite/
+host失败、停驻取消/撤回/root漂移、子timer先运行依赖变化及FB档4证据拒绝。LSan环境ptrace
+限制关闭，另断言对象/映射/通知/分配及模拟reboot DMA pin归零。真实XNU/KDK arm64 MDSS/FB
+base+final对象与关键符号核实通过，不是整核链接；warnings MDSS1510→1524净增14数组提示
+逐项边界已审，FB1397不变，无抑制。最近仅修改mode4错误状态/提前准入后重跑新联测和MDSS对象，原19路径不变。
+**NEXT：组合票释放与硬件下电，继续PD3共享电/偏压E8与PD4冷NoC/MDP独立重建。**
+LG完整unprepare仍有core/domain/面板reset-low/regulator撤销，本轮未完成，不用软件stop冒充物理off。
+共享labibb/触摸/ABL票归属未确认，不盲撤未知偏压或其它票。live profile/E7/E8仍未实测。
+0195实际DarwinBoot身份补丁和ADT slot仍须纳入后续完整FD/boot；只换XNU配旧UEFI无live身份。
+无新FD/boot、push/CI/设备操作，暂不要求push/刷机；CircleCI blob仍
+ da0b6c0947a66f03491b3a9023590b49665292df，USB/按键/电池/mux和触摸IRQ策略未改。
+正常rail-off、故障后受控释放、冷NoC/MDP、ABL buffer/console/panic退出、完整IOPM仍缺；
+A单缓冲/B未提交/30Hz复制保留，不宣称旧滑动退化/BUG003修复，不重测旧USB/BUG002/F3/半小时。
+详见docs/PANEL-LINK-POWER-D1.md；计划/架构/PD0/协调器/Link/Host/Clock等已同步。
+底稿scratch/framebuffer-0197/{base,edited,verify,prepare-patch.py,compile.py,native-checks.py,run-tests.py,
+verification.json,base-continuity.json,native-results.json,warning-review.json,tests.json,*compile.txt,*symbols.txt}。
+
+**以下0196按当时范围保留，当前以0197为准。**
+
+## Agent handoff / active work (2026-11-12, latest)
+
 **CURRENT：0196协调器数据资源票反向释放/重新取得已本地通过，未实机；不等于物理断电或完整驱动。**
 父提交c675d46；XNU补丁0196-mh2lm-panel-resource-parking.patch SHA256=
 6f5e5026aa3ea655ac927ae2010452b22f4db287d615b5258b604bd382f8d32c，8份源码，base逐字节等0195verify，严格应用无offset/fuzz，114原CI marker保留。

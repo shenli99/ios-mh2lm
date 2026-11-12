@@ -1,5 +1,9 @@
 # PD3：数据资源票的反向释放与重新取得（0196）
 
+**0197后续增量（本地通过，未实机）：** 新增mode4，保留全部票，实际关闭并重建host/PHY/PLL；
+clock状态另报物理暂停，FB核对关闭/重建证据。原0/1/2/3范围保留；未实现rail-off。
+详见[硬件关闭及恢复、架构和边界](PANEL-LINK-POWER-D1.md)。以下按原阶段范围保留。
+
 2026-11-12，接0195。新增显式 `sweetpanellifecycle=3`，默认0，原1/2语义保留。
 沿用原SweetMDSS内部协调器、gate、timer和typed资源执行层，接通完整休眠后的
 managed DSI0 clock lease及DATA NoC lease释放，唤醒重新取得后才reset/ON。

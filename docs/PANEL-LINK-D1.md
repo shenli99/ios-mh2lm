@@ -1,5 +1,9 @@
 # DSI0 PHY、PLL 与输出时钟重建（0191，PD2 / D1 后续）
 
+**0197后续增量（本地通过，未实机）：** 新增mode4，保留全部票，实际关闭并重建host/PHY/PLL；
+clock状态另报物理暂停，FB核对关闭/重建证据。原0/1/2/3范围保留；未实现rail-off。
+详见[硬件关闭及恢复、架构和边界](PANEL-LINK-POWER-D1.md)。以下按原阶段范围保留。
+
 2026-11-11，接0190 / `90c51d6`。新增 `SweetMDSSLink.inc`、数值配置表
 `SweetMDSSLinkData.inc` 和纯计算 `SweetDSILink.h`，已接实际 managed 自有扫描接管。
 **本地编译与回归通过，尚未上机。实际启动仍要求温态 splash，完整面板驱动未完成。**
