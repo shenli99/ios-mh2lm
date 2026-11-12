@@ -1,5 +1,23 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a17 live ACV diagnosis complete)
+
+**CURRENT：USB日志已取得所需字段，不需补持久日志或重测。**
+logs/live-0121a17-abi608-panel-retained.txt SHA=cb9f4f944dc35e881514ae3ea901834cff8a9130256239fff739ddc3fb0decfc。
+862–866五项metadata成功；867 ACV gate=values addr5000c/table9c0/unit1/packedb0000/
+width0/VCD11/reserved0。直接拒绝条件是width非零假设；不是key缺失/aux长度/unit0。
+已过该条目前置检查，未完成后续唯一性/alias验证。868–869 managed preflight/scanout失败。
+SpringBoard430；14个完整RD_PTR窗口约59.9Hz，无panic；4USB warning/15HFS clonefile-34。
+**NEXT：按LG依据修正ACV资源模型前，先追清display ACV构票语义。**
+LG接受width0；display27006不进入apps7038的mask8特殊分支。重要新观察：
+msm_bus_arb_rpmh.c bcm_update_bus_req的max_ab/max_ib在BCM循环外初始化，内部不清零，
+MC0后ACV可能继承上一轮归一化累计值；不能看到width0就声称display最终票恒0。
+这是源码事实，尚未证明硬件期望；继续追构票/提交，不猜width、不跳过ACV或套apps mask。
+本轮仅日志分析/文档，无新代码、无需push/云编译；combined/supply暂停。
+详见docs/PANEL-D1-0121A17.md新增实测段；底稿artifact-0121a17/live-retained-log-analysis.json。
+未改CI/固件/驱动，未操作设备。以下NEXT为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a17 verified; ACV diagnostic boot ready)
 
 **CURRENT：0121a17实际源码/内核已核对0204并打包，待实机ACV具体gate与字段。**

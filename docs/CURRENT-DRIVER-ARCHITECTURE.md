@@ -1,5 +1,12 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0121a17诊断已取得：** USB日志867行ACV实际unit1/width0/VCD11/reserved0，当前统一
+非零width检查导致拒绝，随后managed接管失败。无需补持久日志/重测；下一步核对LG display
+ACV构票语义并修正模型，不能直接替换width或套apps mask。当前无新编译需求。
+见[实测字段与修复边界](PANEL-D1-0121A17.md#usb实测诊断目标已取得拒绝条件为acv-width0)。
+以下镜像步骤为已完成历史。
+
+
 **0121a17当前执行点：** 已核对0204 ACV metadata诊断：78源码字节一致、114 source/154
 binary markers及ABI608镜像回读通过。只启动`boot-16k-0121a17-abi608-panel-retained.img`，
 停留约一分钟导日志，目标取ACV具体gate/字段；这不是ACV修复版，仍可能显示静帧。
