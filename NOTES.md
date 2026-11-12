@@ -1,5 +1,17 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a14 identity panic)
+
+**CURRENT：用户报告panel-identity未进入系统即panic，暂停后三档；需要屏幕panic内容。**
+已解码logs/sweetlog-0121a14-panel-identity.bin；它与旧0121a13-panel-resources.bin整文件
+逐字节相同，SHA256=461a537553b33b12f8740035985eaa45d7442ed62820c397085e70c48fd6e236，
+total440091/flush77。仍为旧resources参数及SpringBoard正常运行，无新identity参数/本次panic栈。
+不能据旧日志认定本轮进系统或解释新panic；本次尚未更新该持久区，不能确定UEFI/XNU故障阶段。
+NEXT：用户再次启动同一identity镜像，从屏幕记录panic首行、PC/LR/backtrace；不测其它档。
+现有镜像/参数未改，未要求重新编译；不推测根因为面板供电/reset（首档未启用这些新动作）。
+证据scratch/artifact-0121a14/{panel-identity.txt,panel-identity-log-analysis.json}；
+docs/PANEL-D1-0121A14.md已记录首档失败，以下“待实机”段落是打包时状态。
+
 ## Agent handoff / active work (2026-11-12, 0121a14 artifacts)
 
 **CURRENT：0121a14实际内核核对通过，四档boot已打包并回读。当前只测panel-identity，等待用户日志。**
