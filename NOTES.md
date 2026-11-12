@@ -1,5 +1,30 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, firmware-control PASS; slot-only next)
+
+**CURRENT：用户确认firmware-control进系统，持久日志支持；下一步只测identity-slot-control。**
+logs/sweetlog-0121a14-firmware-control.bin SHA=b3d39299d4e677bd350457f842a1568ed00a407b1851c7578b417e908406d1c4，
+total256574/flush10，区别于上轮；85–86行source0/profile0+MDSS发布、96行RPMh绑定，
+392行参数与成功TOML一致、672行SpringBoard、1099–1100行own A接管；2组off/on rc0，
+owned resume成功，17条touch，无panic/[ERROR]。3条scanout临时warning后成功接管、
+3条USB cmd warning、3条旧HFS clonefile -34；external1/charging0，未验收充电。
+新固件在成功配置能启动；无slot所以身份adapter早退，不能排除HOB/FDT路径或称修好NULL写。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a14-identity-slot-control.img**
+SHA256=5fb1501e53ae1af3483659eb8d99e35d324d96f0444623e7ba3ae4b1ce7500ba。
+以成功firmware-control为底，仅ADT加96-byte零身份slot（含属性头总增132bytes），
+固件/内核/全部TOML及参数原样；power1/IRQ2/vsync1/own2保留，菜单旧0121a13属刻意。
+新ADT与失败fix身份档完全一致，去掉唯一slot重建原ADT；3个FAT文件全量比较仅ADT变，
+boot容器/各payload回读通过，原control未改。无NoC/Pins/Touch，不启新reset/供电周期。
+实际新固件parser与仓库相同，真实新ADT+20种合成记录ASan/UBSan验证只改96byte/canary完好；
+只是本地合成身份测试，不是本机ABL证据，不证明HOB/FDT运行正确。
+用户确认能否进系统，导sweetlog-0121a14-identity-slot-control.bin查早期source2/profile1..4。
+USB可用但可能漏早期行；不重测插拔/旧USB/BUG002/F3/半小时，后三档继续暂停。
+成功后再定位原显示开关组合；失败集中身份路径，仍不定罪具体函数。
+无需push/云编译；未改内核/驱动/CircleCI、未操作设备/推送/触发CI。
+证据scratch/artifact-0121a14/{firmware-control-persistent.txt,firmware-control-log-analysis.json,
+make-identity-slot-control.py,identity-slot-control-verification.json,identity-slot-native-check.*}。
+文档docs/PANEL-D1-0121A14.md及架构/计划已同步；以下NEXT都是历史阶段。
+
 ## Agent handoff / active work (2026-11-12, fixed identity still PANIC)
 
 **CURRENT：用户报告fix-panel-identity仍panic。NoC配置修正未能解决NULL写；根因未定。**
