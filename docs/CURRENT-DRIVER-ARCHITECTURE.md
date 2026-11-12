@@ -1,5 +1,12 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0121a20实测：** SCANOUT审计WARN由原始CB2 FSR0x400触发，随后仍接受接管并进入managed。
+新快照确定ldoa14卡在completion：TCS0/idle1/三cmd状态10101，但IRQ_STATUS0、progress0，fresh完成条件未满足。
+不能单凭CMD_STATUS认定本轮新ACK；下一步核对provider完成取证/ACTIVE IRQ路径，保留fresh保护。
+详见[RPMh实测分析](PANEL-RPMH-FIRST-VOTE-TIMEOUT.md#0121a20实测审计警告与完成证据缺失2026-11-12)。本轮无代码改动，无新编译要求。
+以下0121a20待测步骤为历史，OFFON/combined/supply仍暂停。
+
+
 **0121a20已核对打包：** 78源码匹配0207（代码ae78f99）、114 source/164 binary markers与镜像回读通过。
 只测新ABI608 retained档，605字节参数/ADT同0121a19；等约90秒导启动日志，取首次RPMh SNAPSHOT。
 这是定位ldoa14超时阶段的诊断版，仍可能静帧；接管前不做OFFON/亮度/长测，identity不重测，combined/supply暂停。

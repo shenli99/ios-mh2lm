@@ -1,5 +1,29 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a20 completion evidence missing; audit WARN explained)
+
+**CURRENT：0121a20日志已到，用户追问SCANOUT WARN；已定位WARN分支及RPMh完成条件阻塞。**
+日志live-0121a20-abi608-panel-retained.txt，225225bytes/3119行，SHA=84560e58b3d0f726573be90e2620cb80e6537b95ca06875726f7d9e8476b0109。
+607/695/840审计WARN来自SweetFBScanout.inc的AppleCLCD::auditScanout原始cbFault0x400非零；layout/route符合既有条件，
+此WARN分支不置Failed/不拦接管。849 F4 accepted、1651触摸quiesce、1657 managed证明已继续。
+1679 SNAPSHOT deadline/completion VRMrail0/TCS0/cmd3/mask7/executing1/progress0/operation0/0/posted0/总期限迟68us。
+1680 IRQ_ENABLE0/saved1/IRQ_STATUS0/TCS_STATUS1/CONTROL1010000/ENABLE7/WAIT7。
+1681–1683 addr42100/data708、42108/data7、42104/data1，三个CMD_STATUS均10101（含issued8/complete16）。
+1684 token1/ldoa14 Timeout；1686账本rails0/NoC0/clock0，1687未提交新DMA，1696pixels冻结。
+具体阻塞条件是irq&bit || fProgress为假。已排除仍program或cleanup；未证明CMD_STATUS属于本轮新ACK，
+不能称已成功供电或确定纯假超时。优先查mask+timer fresh证据路径；是否IRQ_STATUS被mask影响/错过busy/旧status尚未闭合。
+FSR0x400不是本轮停止分支，但未证明其无害，不清/删WARN；CMD_STATUS额外bit0含义不猜。
+**NEXT：继续时优先设计/修正SweetRPMh获取fresh完成证据方式，参考LG ACTIVE IRQ。**
+若接apps RSC IRQ，先审DTS SPI5→INTID37的既有所有者/GIC回调/event/workloop/source启停ACK/stop，
+完整安装接收路径后才启source。不能仅删fresh/加超时/忙等。仍由typed provider唯一writer完成，不穿透consumer。
+本轮仅日志/源码分析和文档，无新patch/boot，不需push编译/旧镜像复测；接管前OFFON/combined/supply继续暂停。
+代码ae78f99/文档7fd04c0对应0121a20产物；本次分析文档另行本地提交。
+详见PANEL-RPMH-FIRST-VOTE-TIMEOUT.md实测节、PANEL-D1-0121A20.md、架构/两计划。
+证据scratch/artifact-0121a20/live-retained-log-analysis.json。11FG profile/4USB WARN伴随记录，未转移任务。
+未改CI/固件/USB/输入/电池/mux，未push/触发CI/操作设备；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+以下NEXT均为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a20 RPMh snapshot retained boot ready)
 
 **CURRENT：用户下载0121a20，0207产物/源码/boot回读通过，待实机。**
