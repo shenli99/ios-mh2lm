@@ -2,6 +2,18 @@
 
 ## Agent handoff / active work (2026-11-12, 0121a14 identity panic)
 
+**最新：** 用户修正ESR=0x96000045，确认FAR=0、x0=0、x1=0xfffffe205cd42040、x2=0xfe0、
+LR=0xfffffe00077c8c68。LR准确匹配实际memmove call返回，PC为stp x12,x13,[x0]，
+确认HFS end_transaction的memcpy目的地址为NULL；same-EL write level1 translation fault。
+目的来自blhdrim->buffers+tbuffer_offset，分配失败vs后续破坏未定，不要求继续找backtrace。
+全sweet_hfs及IOLib.cpp/kalloc.c共83份源码与0121a13完全相同，证据hfs-and-allocator-comparison.json。
+本轮未改HFS/分配器，但新显示服务/ADT和新Mu RELEASE FD可有间接影响，不能仅凭故障点定根因。
+NEXT：已生成/home/shenli/work1/out-bs/boot-16k-0121a14-panel-identity-olduefi.img，
+仅换回旧DEBUG firmware，实际ramdisk（kernel/ADT/TOML）与identity逐字节相同。
+SHA256=22a39d30891c125174169209bf491a886547e0be3fc72d8cfd64dcc0313be7de；
+olduefi-control-verification.json记录完整容器对比；无需新编译，不验证live身份，只测能否启动。
+尚未实机，不测后三档、不修改HFS/文件系统或做修复。以下首轮定位过程保留历史抄录与不确定性。
+
 **CURRENT：用户报告panel-identity未进入系统即panic，暂停后三档；需要屏幕panic内容。**
 已取得首行：PC=0xfffffe0007b95478命中本轮memcpy/memmove+0x48，指令stp x12,x13,[x0]。
 LR=0xfffffe00077c8c60在HFS end_transaction附近，但call返回点为...8c68，需核对末位。
