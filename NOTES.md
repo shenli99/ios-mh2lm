@@ -1,5 +1,29 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0208 RPMh ACTIVE completion IRQ ready)
+
+**CURRENT：0208已实现并本地提交`190c558`，待用户push/云编译，未实机验收。**
+针对0121a20 ldoa14 completion缺fresh证据，新增apps RSC SPI5/INTID37 level-high路径：
+GIC callback只mask/原子排队→software IOInterruptEventSource→SweetRPMh workloop核验selected IRQ、
+idle和全部issued/complete→cleanup读回→成功票据。timer仅期限/posted/GIC RWP或EOI drain，无completion polling。
+触发前在已认领空闲TCS清旧完成、启source并核验selected status0；先Armed再trigger再启GIC，trigger后不清pending。
+启动与首请求检查SPI owner；保留邻GIC字段及其他source位，未知/partial/丢失IRQ明确失败，不ACKforeign或伪造票据。
+stop关准入/mask→Online0→dispatch lock撤物理入口→同步移除event→释放map；原100ms/ARC期限不增加。
+原typed consumer和唯一writer不变；physical dispatch指针不是consumer全局单例桥接。
+16套真实源码ASan/UBSan通过，另ADT/CLI检查；RPMh/sleh真实ARM64对象通过，warnings1326→1326/1→1，符号相符。
+0185–0208严格累计应用、78源码字节比较、114原CI source marker通过。补丁SHA=afd9f1480ce665b238065aa5127e27795b3cf7f3cc02aa2592048db323b09b05。
+工具增加--rpmh-irq：RPMh nub原3资源不动，尾加GIC17a00000/10000及irq-abi1/intid37；mode2必须新扩展，mode1兼容。
+hardware ADT现在不同于0121a20，须重生成；identity旧ADT保持。matrix要求新IRQ binary markers，拒绝旧kernel冒充。
+**NEXT：用户自行push并云编译，下载新kernel/buildtree后核对0208源码/IRQ markers，同ABI608及原参数重打retained。**
+先只取完整启动日志，目标INTID37 configured→fresh ACTIVE completion→ldoa14 ACTIVE ACK及后续首次错误/新DMA。
+旧0121a20/identity不重测；完整接管前不测亮度/OFFON/长测/反复USB，combined/supply继续暂停。
+ACK不是物理电压证明；不宣称实机已修好或完整面板驱动完成。未生成新boot，不能刷旧kernel验证新IRQ。
+详见docs/PANEL-RPMH-COMPLETION-IRQ.md，超时页/架构/两显示计划及总计划已同步。
+本地证据scratch/framebuffer-0208/{verification,tests,cumulative-replay,warning-comparison}.json与编译/测试日志。
+未改CI/固件/boot args/USB/按键/触摸/电池/mux，未push/触发CI/操作设备；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+以下NEXT均为历史，当前执行点以本节为准。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a20 completion evidence missing; audit WARN explained)
 
 **CURRENT：0121a20日志已到，用户追问SCANOUT WARN；已定位WARN分支及RPMh完成条件阻塞。**

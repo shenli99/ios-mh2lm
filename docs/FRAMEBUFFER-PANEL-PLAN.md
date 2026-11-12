@@ -1,5 +1,11 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
+**0208当前执行点（代码`190c558`，本地通过、未实机）：** D1首次资源获取的RPMh完成路径
+已改为真实INTID37→软件event/workloop，保留fresh/期限和唯一writer。16套回归及ARM64对象通过。
+现在需要用户push云编译；核对新产物后用带IRQ扩展的新ADT重打ABI608 retained，先取启动日志
+确认ldoa14 ACK及后续首错。完整接管前不测OFFON/亮度/长测，combined/supply仍暂停。
+详见[实现、证据和下一步](PANEL-RPMH-COMPLETION-IRQ.md)。以下“无代码改动/无编译要求”按历史保留。
+
 **0121a20实测：** SCANOUT审计WARN由原始CB2 FSR0x400触发，随后仍接受接管并进入managed。
 新快照确定ldoa14卡在completion：TCS0/idle1/三cmd状态10101，但IRQ_STATUS0、progress0，fresh完成条件未满足。
 不能单凭CMD_STATUS认定本轮新ACK；下一步核对provider完成取证/ACTIVE IRQ路径，保留fresh保护。

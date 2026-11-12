@@ -1,5 +1,11 @@
 # 首次面板资源接管：ldoa14 RPMh超时与0207故障快照
 
+**0208修复已准备（代码`190c558`，本地通过、未实机）：** apps RSC INTID37 经
+GIC callback/software IOInterruptEventSource/IOWorkLoop取得fresh完成，再核验命令和清理，
+保留原期限及失败保护。hardware ADT新增显式IRQ扩展，不能复用0121a20旧ADT；固件/参数不变。
+现在需要用户push云编译；产物核对后重打retained，只先确认启动、真实IRQ和ldoa14 ACK。
+详见[中断实现、验证及实机目标](PANEL-RPMH-COMPLETION-IRQ.md)。以下“下一步设计IRQ”按历史保留。
+
 **0121a20已核对打包：** 78源码匹配0207（代码ae78f99）、114 source/164 binary markers与镜像回读通过。
 只测新ABI608 retained档，605字节参数/ADT同0121a19；等约90秒导启动日志，取首次RPMh SNAPSHOT。
 这是定位ldoa14超时阶段的诊断版，仍可能静帧；接管前不做OFFON/亮度/长测，identity不重测，combined/supply暂停。

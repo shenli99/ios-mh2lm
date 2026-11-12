@@ -1,5 +1,11 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
+**0208最新执行点（代码`190c558`，本地通过、未实机）：** 当前仍在面板D1。
+0121a20证明首次ldoa14请求缺fresh完成证据；已接 apps RSC INTID37 的GIC callback/software event/
+workloop完成路径，不放宽ACK或期限。16套回归及RPMh/sleh ARM64对象通过，待用户push云编译。
+新hardware ADT追加IRQ资源，产物核对后重打retained，只先取启动日志；完整接管前OFFON/
+combined/supply暂停。详见[完成IRQ实现及验证](PANEL-RPMH-COMPLETION-IRQ.md)。以下进展按历史保留。
+
 **0121a14产物进展（2026-11-12）：** 已取得77c7631/0201的云端链接内核，78份源码与
 本地verify逐字节一致，114 CI marker及7个新增关键方法的最终内核定义通过。
 四档identity/retained/combined/supply已打包并回读，使用新Mu固件，同kernel/ADT，无重复参数。

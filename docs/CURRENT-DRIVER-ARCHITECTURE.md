@@ -1,5 +1,12 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0208当前增量（代码`190c558`，本地通过、未实机）：** SweetRPMh新增 apps RSC SPI5/
+INTID37 level-high完成路径：GIC callback→software IOInterruptEventSource→provider workloop，
+核验本次IRQ/命令并完成cleanup后才确认票据。timer仅期限、posted读回与GIC drain，不再轮询完成。
+typed consumer接口不变；不经过SPMI mux。新hardware ADT显式追加GIC资源和IRQ ABI，固件/参数保持。
+16套回归及RPMh/sleh ARM64对象通过；待用户push云编译、新retained启动日志验证ldoa14 ACK。
+详见[RPMh IRQ架构、所有权及退出](PANEL-RPMH-COMPLETION-IRQ.md)。以下0121a20“无编译要求”为历史。
+
 **0121a20实测：** SCANOUT审计WARN由原始CB2 FSR0x400触发，随后仍接受接管并进入managed。
 新快照确定ldoa14卡在completion：TCS0/idle1/三cmd状态10101，但IRQ_STATUS0、progress0，fresh完成条件未满足。
 不能单凭CMD_STATUS认定本轮新ACK；下一步核对provider完成取证/ACTIVE IRQ路径，保留fresh保护。
