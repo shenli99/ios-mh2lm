@@ -96,7 +96,17 @@ int main(){
   if(bad==3)record->bytes[12]=MH_PANEL_ABSENT;if(bad==4)panelPinsMode=1;if(bad==5)lifecycleMode=7;
   auto*m=new SweetMDSS();assert(!m->start(d));m->release();queued.clear();dropNub(d);
   assert(!writes()&&!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());mdssClockWriter=mdssNoCWriter=0;}
- for(unsigned profile=1;profile<=4;++profile){selectedProfile=profile;Harness h;h.takeover();
+ for(unsigned profile=1;profile<=4;++profile){selectedProfile=profile;Harness h;
+  // Real retained mode2: all four selected profiles also tolerate a late
+  // worker without issuing reset/commands/votes before the touch fence.
+  tcFixtureOnline(0);h.begin();auto startup=h.m->fLifecycle.token;
+  trace.clear();fakeTicks+=8000000000ULL;h.life();
+  assert(trace.empty()&&!h.m->fLifecycle.touchToken&&!h.p->fTouched&&panelPackets.empty());
+  tcFixtureOnline(1);h.life();assert(h.m->fLifecycle.touchToken&&h.m->fLifecycle.token==startup);
+  for(unsigned i=0;i<12000&&h.m->fScanoutState!=SweetScanoutSubmitted&&h.m->fLifecycle.phase!=SweetPanelFault;++i)h.step();
+  assert(h.m->fScanoutState==SweetScanoutSubmitted&&h.pool->pinned);
+  regs[0x0ae01014]|=0x100;regs[bases[3]+0x18]=0;realFrame(h.m);h.scan();h.complete();
+  assert(h.m->fLifecycle.token==startup);
   assert(h.m->panelLifecycleCapabilities()&SweetPanelRetainedSleepReset);
   uint64_t rejected=99;auto before=trace.size();assert(h.m->beginPanelLifecycle(SweetPanelDisplayOff,&rejected)==kIOReturnNotReady&&!rejected&&trace.size()==before);
   SweetDisplayBackend*b=h.m;assert(b->setBrightness(0x345)==0);panelPackets.clear();panelFIFO.clear();
@@ -139,7 +149,7 @@ int main(){
  // Latest target on Busy is preserved; backlight retries any change arriving later.
  {Harness h;ready(h);sleep(h);h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelPinReset);
   SweetDisplayBackend*b=h.m;assert(b->setBrightness(0x678)==kIOReturnBusy);panelPackets.clear();h.wakePixels();checkPackets(4,true,0x678);}
- puts("PASS: actual mode2 four LG profile tables over FIFO/prepared DMA; three sleep/reset/wake cycles each, exact wire/delay/reset+settle and brightness recovery, physical touch reinit/pixel completion, live identity/dependency rejection, cancel every pin phase, provider loss/stop/input/ACK/timeout/DMA/brightness/touch faults, retained votes and zero objects/maps/allocations/notifications after simulated reboot");
+ puts("PASS: actual mode2 four profiles late-worker single-takeover, LG profile tables over FIFO/prepared DMA; three sleep/reset/wake cycles each, exact wire/delay/reset+settle and brightness recovery, physical touch reinit/pixel completion, live identity/dependency rejection, cancel every pin phase, provider loss/stop/input/ACK/timeout/DMA/brightness/touch faults, retained votes and zero objects/maps/allocations/notifications after simulated reboot");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-profile-lifecycle-') as temp:

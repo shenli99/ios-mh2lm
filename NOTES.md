@@ -1,5 +1,36 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a18 ACV PASS; 0206 late-touch startup fix ready)
+
+**CURRENT：用户0121a18仍静帧；USB日志证明ACV metadata已通过，已修下一处启动竞态。**
+live-0121a18-abi608-panel-retained.txt，237460bytes/3311行，SHA=c7077d1e0d78526591716db9dfe344f4b19e0b99027e3d5ee003fef7c9ee3446。
+813–818六BCM全通过，ACVunit1/width0/VCD11/mask8；819 begin NotReady，无managed预检ERROR/
+lifecycle begin或warm paused，尚未开始managed资源写。1601–1638触摸才identify/app/ready/IRQarm。
+两个RD_PTR完整窗59877/59867mHz，SpringBoard/USB/按键/触摸活着，无panic签名；
+3265息屏生命周期拒绝为接管未完成的后续表现。CB2 FSR400仍泛化审计项，不清/绕保护。
+原TouchPanel服务可先匹配，worker后online；beginLifecycle要求worker available，FB只begin一次，
+NotReady永久Failed。旧日志没分支诊断，不能排除同时的participant绑定问题；已直接联合复现
+“provider匹配但worker晚8秒online”原代码拒绝/无重试，修复后一次token继续完成managed接管。
+0206仅改SweetMDSSLifecycle.inc：首次Takeover接受后TouchPause/token0等待已有worker软件快照，
+50ms IOKit timer/30秒上限，不轮询硬件/忙等/sleep；等待期不发quiesce、不改显示/投票/pinpool。
+ready后一次typed quiesce，重启原16秒总/6.5秒pause预算，真实quiesced后才原scanout/managed链。
+普通OFF/ON准入/运行期故障策略不放宽；timeout/cancel/stop/provider退出不能被迟到ready复活。
+补participant/worker拒绝ERROR及waiting/ready INFO，不高频刷日志。ACV0205保持。
+15套ASan/UBSan通过；新增等待8秒/无MMIO/一次请求完成、超时/取消/stop/touch和RPMh退出；
+retained mode2四profile晚worker接管及三轮原OFF/ON通过。旧baseline新增case按预期失败。
+MDSS前后真实XNU/KDK ARM64单文件通过，无新增warning1538→1538；0185–0206严格累计应用、
+78源码字节一致、114现有CI marker通过。不是整核/实机修复验收。
+**NEXT：用户push本轮0206本地提交并云编译，下载新kernel/buildtree后同ABI608/605参数打新retained。**
+先取启动waiting→ready→quiesce→managed/SCANOUT/HANDOFF及首次错误；不重测0121a18、identity/
+combined/supply，不做额外USB插拔/长测。实测确认接管后再同镜像亮度/OFFON。
+详见docs/PANEL-TOUCH-STARTUP-WAIT.md；PANEL-D1-0121A18/架构/两计划/ACV页已更新。
+证据scratch/framebuffer-0206/与artifact-0121a18/live-retained-log-analysis.json。
+伴随观察：10份FG profile match0/integrity0/nominal3510，capacity有效位0；4USB WARN，未定因，
+不把这轮称真实充电正常或因显示导致，也不额外安排电池/USB测试。
+未改CI/固件/boot参数/USB/输入/电池，未push/触发CI/操作设备；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+本轮代码/测试/文档本地提交；以下NEXT均为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a18 ACV-fixed retained boot ready)
 
 **CURRENT：用户下载0121a18，两包校验/实际源码/打包回读均通过，待实机。**

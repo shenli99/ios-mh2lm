@@ -1,5 +1,10 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0121a18实测/0206增量：** ACV width0/mask8元数据已通过；首次生命周期准入仍NotReady，
+触摸worker稍后才ready，原framebuffer一次性请求永久失败。0206仅协调器接收首次Takeover后
+异步等待worker，真实quiesce证明前不改显示/投票；超时/退出仍失败。待push云编译，不复测旧镜像。
+见[日志、复现及修复边界](PANEL-TOUCH-STARTUP-WAIT.md)。以下0121a18待测步骤已完成。
+
 **0121a18已核对并打包：** 78源码与0205一致、114 source/155 binary markers及镜像回读通过。
 待启动 `boot-16k-0121a18-abi608-panel-retained.img`，先取一分钟启动日志及画面，确认ACV准入
 和managed扫描接管。ABI608固件、605字节参数及ADT保持；不重测旧诊断，combined/supply暂停。

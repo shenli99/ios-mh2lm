@@ -67,8 +67,7 @@ int main(){
   assert(h.m->panelLifecycleCapabilities()==((1u<<SweetPanelTakeover)|(1u<<SweetPanelDisplayOn)|(1u<<SweetPanelDisplayOff)));
   for(unsigned op:{unsigned(SweetPanelPrepare),unsigned(SweetPanelReset),unsigned(SweetPanelUnprepare),99u}){
    auto before=trace.size();uint64_t token=99;assert(h.m->beginPanelLifecycle(op,&token)==kIOReturnUnsupported&&!token&&trace.size()==before&&!(tcFixtureFrame()>>4));}
-  tcFixtureOnline(0);assert(h.m->beginScanout(h.pool,h.channel)==kIOReturnNotReady&&!h.m->fLifecycle.token&&!writes());
-  tcFixtureOnline(1);h.begin();auto token=h.m->fLifecycle.token;
+  h.begin();auto token=h.m->fLifecycle.token;
   assert(state(h).phase==SweetPanelTouchPause&&!writes()&&!sourceWritten());
   auto untouched=tcFixtureFrame();assert(h.t->cancelRequest(h.m->fTouchPanelConsumer+1,h.m->fLifecycle.touchToken)==kIOReturnNotFound);
   assert(h.t->cancelRequest(h.m->fTouchPanelConsumer,h.m->fLifecycle.touchToken+1)==kIOReturnNotFound&&tcFixtureFrame()==untouched);
@@ -103,6 +102,39 @@ int main(){
   h.untilLife(SweetPanelFrame);h.life();assert(state(h,on).phase==SweetPanelFrame);
   regs[0x0ae01014]|=0x100;h.life();assert(state(h,on).phase==SweetPanelFrame); // no RD_PTR yet
   realFrame(h.m);h.complete();assert(!h.m->fLifecycleParked&&!state(h).touchQuiesced&&h.m->fPanelState==SweetMDSS::PanelOn);
+ }
+ // Reproduce the actual startup ordering: native provider matched but its
+ // TouchComm worker is still initializing. The framebuffer calls begin ONCE.
+ {Harness h;tcFixtureOnline(0);h.begin();auto token=h.m->fLifecycle.token;
+  assert(token&&!h.m->fLifecycle.touchToken&&!h.m->fScanoutUsed&&!writes());
+  assert(state(h).phase==SweetPanelTouchPause);
+  SweetScanoutStatus pending{};assert(h.m->scanoutStatus(h.pool,&pending)==0&&pending.state==SweetScanoutCoordinating);
+  trace.clear();fakeTicks+=8000000000ULL; // beyond the OLD 6.5s pause budget
+  for(unsigned i=0;i<4;++i)h.life();
+  assert(state(h).phase==SweetPanelTouchPause&&!writes()&&trace.empty());
+  assert(!h.m->fLifecycle.touchToken&&!h.m->fManagedStarted&&!h.pool->pinned&&!(tcFixtureFrame()>>4));
+  tcFixtureOnline(1);h.life();auto touch=h.m->fLifecycle.touchToken;
+  assert(touch&&h.m->fLifecycle.token==token&&h.m->fLifecycleDeadline>fakeTicks+15000000000ULL);
+  assert(h.m->fLifecycleStepDeadline>fakeTicks+6000000000ULL);
+  h.life();assert(h.m->fLifecycle.touchToken==touch); // no second quiesce request
+  for(unsigned i=0;i<12000&&h.m->fScanoutState!=SweetScanoutSubmitted&&h.m->fLifecycle.phase!=SweetPanelFault;++i)h.step();
+  assert(h.m->fScanoutState==SweetScanoutSubmitted&&h.pool->pinned&&h.m->fLifecycle.token==token);
+  regs[0x0ae01014]|=0x100;regs[bases[3]+0x18]=0;realFrame(h.m);h.scan();h.complete();
+  assert(state(h).phase==SweetPanelComplete);
+ }
+ // Bounded wait, cancellation, stop and participant withdrawal cannot start
+ // a delayed takeover after the original generation has been invalidated.
+ for(unsigned reason=0;reason<5;++reason){Harness h;tcFixtureOnline(0);h.begin();auto token=h.m->fLifecycle.token;
+  assert(token&&!h.m->fLifecycle.touchToken&&!h.m->fManagedStarted&&!sourceWritten());
+  if(reason==0){fakeTicks+=30000000001ULL;h.life();assert(state(h).result==kIOReturnTimeout);}
+  if(reason==1)h.m->cancelPanelLifecycle(token);
+  if(reason==2)h.m->stop(h.d);
+  if(reason==3)SweetTouchPanelClient::terminated(h.m->fTouchPanelClient,nullptr,h.t,nullptr);
+  if(reason==4)SweetRPMhClient::terminated(h.m->fRPMhClient,nullptr,h.r,nullptr);
+  h.life();pump();assert(state(h).phase==(reason==2?SweetPanelStopped:SweetPanelFault));
+  assert(!h.m->fLifecycle.touchToken&&!h.t->fTouched&&!h.t->fPoisoned&&!h.pool->pinned&&!sourceWritten());
+  trace.clear();tcFixtureOnline(1);h.life();h.scan();assert(trace.empty()&&!(tcFixtureFrame()>>4));
+  assert(!h.m->fManagedStarted&&h.m->fLifecycle.token==token);
  }
  // Native interest replays newest brightness after lifecycle, no busy-loop retry
  // or consumer gate callback from MDSS. The actual backlight and DCS code run.
@@ -158,7 +190,7 @@ int main(){
   auto token=h.m->fLifecycle.token;h.m->stop(h.d);auto before=trace.size();h.life();h.scan();SweetMDSS::dsiTimerAction(h.m,h.m->fDsiTimer);
   assert(before==trace.size()&&state(h,token).phase==SweetPanelStopped);}
  {Harness h;h.m->fLifecycleNextToken=~0ULL;assert(h.m->beginScanout(h.pool,h.channel)==kIOReturnNoResources&&!writes()&&!(tcFixtureFrame()>>4));}
- puts("PASS: real unified lifecycle+TCM worker+managed core/PHY/host/scanout and asynchronous 28/29; independent GIC active/RWP, pixel fences, touch verification, exclusive admission, unknown-profile no effects, cancellation/provider withdrawal/stop, retained resources/pins and zero objects/maps/allocations/notifications");
+ puts("PASS: real unified lifecycle+late TCM startup single-admission/wait/timeout/cancel/stop/withdrawal+managed core/PHY/host/scanout and asynchronous 28/29; independent GIC active/RWP, pixel fences, touch verification, exclusive admission, unknown-profile no effects, cancellation/provider withdrawal/stop, retained resources/pins and zero objects/maps/allocations/notifications");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-lifecycle-') as temp:

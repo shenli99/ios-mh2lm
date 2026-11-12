@@ -1,0 +1,91 @@
+diff --git a/iokit/Kernel/arm/SweetMDSSLifecycle.inc b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+--- a/iokit/Kernel/arm/SweetMDSSLifecycle.inc
++++ b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+@@ -179,10 +179,20 @@
+      fLifecycle.phase==SweetPanelFault || fLifecycle.phase==SweetPanelStopped) return kIOReturnNotReady;
+  if (lifecycleBusy() || dsiBusy() || clockBusy() || noCBusy() || hostBusy() || linkBusy()) return kIOReturnBusy;
+  if (fLifecycleNextToken==~0ULL) return kIOReturnNoResources;
+- if (!lifecycleParticipants()) return kIOReturnNotReady;
++ if (!lifecycleParticipants()) {
++  SWEET_LOG_ERROR("SWEET PANEL: begin rejected operation=%u participant unavailable; no touch/display request\n",op);
++  return kIOReturnNotReady;
++ }
+  if (fLifecycleFull && op!=SweetPanelTakeover && !fPanelBrightnessKnown) return kIOReturnNotReady;
+  bool available=false;
+- if (fTouchPanel->copyWorkerAvailable(&available)!=kIOReturnSuccess || !available) return kIOReturnNotReady;
++ IOReturn worker=fTouchPanel->copyWorkerAvailable(&available);
++ if (worker!=kIOReturnSuccess || (!available && op!=SweetPanelTakeover)) {
++  SWEET_LOG_ERROR("SWEET PANEL: begin rejected operation=%u touch-worker rc=%#x available=%u; no display request\n",op,(unsigned)worker,available);
++  return worker ? worker : kIOReturnNotReady;
++ }
++ /* Matching the native provider precedes the asynchronous TouchComm worker.
++  * Only FIRST takeover may wait without a touch token or display effects.
++  * Power transitions still require their established worker/fence. */
+  if (op==SweetPanelTakeover) {
+   if (!pool || fLifecycle.token || fScanoutUsed || fLifecycleParked) return kIOReturnBusy;
+  } else {
+@@ -201,7 +211,7 @@
+   if (fTouchPanel->copyStatus(fTouchPanelConsumer,fLifecycle.touchToken,&t)!=kIOReturnSuccess ||
+       !t.quiesced || t.uncertain || t.result!=kIOReturnSuccess) return kIOReturnNotReady;
+   touch=t.token;
+- } else {
++ } else if (available) {
+   IOReturn rc=fTouchPanel->quiesce(fTouchPanelConsumer,&touch);
+   if (rc!=kIOReturnSuccess) return rc; /* no lifecycle token, no display effect */
+  }
+@@ -226,6 +236,12 @@
+  fLifecycle.retainedPower=fLifecycle.resourcesParked || fLifecycle.linkPoweredDown;fLifecycle.configHeld=fLifecycle.resourcesParked;
+  fLifecycleDeadline=scanout_now()+16000000000ULL;
+  fLifecycleStepDeadline=scanout_now()+(op==SweetPanelDisplayOn ? 50000000ULL : 6500000000ULL);fLifecycleIdleSamples=0;
++ if (!available) {
++  /* An initial dependency wait has its own bound. The original 16s lifecycle
++   * and 6.5s touch-pause budgets start when the worker accepts quiesce. */
++  fLifecycleDeadline=fLifecycleStepDeadline=scanout_now()+30000000000ULL;
++  SWEET_LOG_INFO("SWEET PANEL: takeover waiting for touch worker; startup bound=30000ms, no touch/display request\n");
++ }
+  if (fLifecycleSupplyCycle && op==SweetPanelDisplayOn) {
+   fLifecycle.displayDrained=true;fLifecycle.retainedPower=false;
+   lifecycleStartSupplyRestore();
+@@ -243,7 +259,7 @@
+   fLifecycleStepDeadline=scanout_now()+4000000000ULL;
+  }
+  if (pool) {pool->retain();fLifecyclePool=pool;}
+- *token=fLifecycle.token;publishLifecycle();fLifecycleTimer->setTimeoutMS(1);
++ *token=fLifecycle.token;publishLifecycle();fLifecycleTimer->setTimeoutMS(available ? 1 : 50);
+  SWEET_LOG_INFO("SWEET PANEL: begin token=%llu operation=%u; admitted, not completed\n",fLifecycle.token,op);
+  return kIOReturnSuccess;
+ }
+@@ -294,15 +310,31 @@
+  SweetMDSS *s=(SweetMDSS *)owner;
+  if (!s->lifecycleBusy()) return;
+  s->advanceLifecycle();
+- if (s->lifecycleBusy()) sender->setTimeoutMS(1);
++ if (s->lifecycleBusy()) sender->setTimeoutMS(s->fLifecycle.phase==SweetPanelTouchPause && !s->fLifecycle.touchToken ? 50 : 1);
+ }
+ void SweetMDSS::advanceLifecycle(void)
+ {
+  if (!lifecycleParticipants()) {finishLifecycle(kIOReturnNotReady,"participant unavailable");return;}
+  uint64_t now=scanout_now();
+- if (now>=fLifecycleDeadline || now>=fLifecycleStepDeadline) {finishLifecycle(kIOReturnTimeout,"lifecycle deadline");return;}
++ if (now>=fLifecycleDeadline || now>=fLifecycleStepDeadline) {
++  finishLifecycle(kIOReturnTimeout,fLifecycle.phase==SweetPanelTouchPause && !fLifecycle.touchToken ?
++      "touch worker startup deadline" : "lifecycle deadline");return;
++ }
+  if (lifecycleSupplyPhase()) {advanceLifecycleSupply();return;}
+  if (fLifecycle.phase==SweetPanelTouchPause || fLifecycle.phase==SweetPanelTouchResume) {
++  if (!fLifecycle.touchToken) {
++   if (fLifecycle.operation!=SweetPanelTakeover) {finishLifecycle(kIOReturnIOError,"touch token absent");return;}
++   bool available=false;
++   IOReturn rc=fTouchPanel->copyWorkerAvailable(&available);
++   if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"touch startup provider unavailable");return;}
++   if (!available) return; /* Software snapshot only; no transport/MMIO poll. */
++   uint64_t touch=0;rc=fTouchPanel->quiesce(fTouchPanelConsumer,&touch);
++   if (rc!=kIOReturnSuccess || !touch) {finishLifecycle(rc ? rc : kIOReturnIOError,"touch startup quiesce refused");return;}
++   fLifecycle.touchToken=touch;fLifecycleDeadline=now+16000000000ULL;
++   fLifecycleStepDeadline=now+6500000000ULL;publishLifecycle();
++   SWEET_LOG_INFO("SWEET PANEL: touch worker ready; takeover quiesce token=%llu, normal deadlines started\n",touch);
++   return;
++  }
+   SweetTouchPanelStatus t={};
+   if (fTouchPanel->copyStatus(fTouchPanelConsumer,fLifecycle.touchToken,&t)!=kIOReturnSuccess ||
+       t.uncertain || (t.result!=kIOReturnSuccess && t.result!=kIOReturnNotReady)) {
