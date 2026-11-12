@@ -1,5 +1,26 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a20 RPMh snapshot retained boot ready)
+
+**CURRENT：用户下载0121a20，0207产物/源码/boot回读通过，待实机。**
+78份实际源码与0207树字节一致，内容对应ae78f99，增量仅SweetRPMh.cpp；114 CI source/164 binary markers通过。
+含0206首次启动等待和0207四类SNAPSHOT格式。无CI run ID/build log，不声称CI提交元数据已核对。
+内核ARM64 subtype0/17723872bytes、自带SHA一致，SHA=b6f0eb607110c6b8dfcfb8c7af33ff3df837b9434e7e333053c84b49c6ef6e15。
+四档镜像header/firmware/FAT kernel+ADT+TOML通过；同ABI608固件27e7a1d1...18ea480，
+retained605字节参数及完整ADT同0121a19，旧镜像/基线保留，只交付retained。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a20-abi608-panel-retained.img**
+镜像35545088bytes，SHA=75ec4ba32e6b27675795e43331fe1254d3eac0528001ba8e09b3edc04cdcd9bf。
+启动等约90秒，导live-0121a20-abi608-panel-retained.txt或sweetlog同名bin，一种完整日志即可。
+目标waiting→worker-ready→quiesce→managed→首次RPMh SNAPSHOT+紧接token/ldoa14结果。
+phase=program/completion/cleanup，TCS/IRQ/idle/control/enable/wait、最多3cmd、operation/posted/超期量。
+这是诊断版未修复超时，仍可静帧，不承诺正常画面。触摸已ready时可无waiting。
+接管前不测亮度/OFFON/长测/反复USB；identity/旧0121a19不重测，combined/supply暂停。
+panic记PC/LR/FAR/ESR；完整接管成功先核对日志再同镜像显示测试。
+详见docs/PANEL-D1-0121A20.md，架构/两计划/RPMh页已更新；底稿scratch/artifact-0121a20/两verify脚本/JSON/packaging.txt。
+本轮仅产物核对/打包/文档，未改驱动/固件/CI，未push/触发CI/操作设备。
+CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。文档本地提交无需重编，直接测新镜像；以下NEXT均为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a19 touch wait PASS; 0207 RPMh evidence ready)
 
 **CURRENT：0121a19实测通过触摸等待/quiesce，第一笔ldoa14 RPMh事务Timeout；0207故障快照已准备。**

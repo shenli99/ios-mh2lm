@@ -1,5 +1,11 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0121a20已核对打包：** 78源码匹配0207（代码ae78f99）、114 source/164 binary markers与镜像回读通过。
+只测新ABI608 retained档，605字节参数/ADT同0121a19；等约90秒导启动日志，取首次RPMh SNAPSHOT。
+这是定位ldoa14超时阶段的诊断版，仍可能静帧；接管前不做OFFON/亮度/长测，identity不重测，combined/supply暂停。
+见[镜像路径与日志目标](PANEL-D1-0121A20.md)。以下待push/待云编译步骤已完成，实机仍待验证。
+
+
 **0121a19实测 / 0207下一步：** 0206首次触摸启动等待与quiesce已实机通过，已进入managed资源链；
 第一笔ldoa14 RPMh事务以Timeout失败，确认完成rails=0、未提交新DMA，画面仍冻结。
 未定位到编程/硬件完成/清理的具体阶段，不将超时当成PMIC拒绝或ACV票失败。
