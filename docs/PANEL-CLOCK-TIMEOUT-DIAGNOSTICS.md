@@ -1,5 +1,11 @@
 # 0211：RSC clock 超时取证
 
+**父链/halt已再次核对：** LG与Lineage均为+0x4004/bit0 enable/bit31 OFF、voted开启仍验halt；
+实际父链为PLL1 main→AHB root/8，当前实现有物理读回及typed权限检查。
+RCG safe-config启用序列和三路RSC时钟取得顺序存在参考差异，尚未证明是a23根因；
+见[父链/halt审计](PANEL-BRANCH7-PARENT-HALT-AUDIT.md)。本次未改内核，不新增编译要求。
+
+
 2026-11-12，接[0121a23实测](PANEL-D1-0121A23.md)。本轮是诊断增量，**没有宣称修复超时**。
 当前先补齐证据，再决定是否需要改硬件时序或其他前置。
 

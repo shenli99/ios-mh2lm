@@ -1,5 +1,25 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, branch7 parent/halt audit)
+
+**CURRENT：按用户要求核对branch7父链和halt；本次只补审计文档，没有新内核补丁。0211仍待用户push云编译/新日志。**
+LG与lge-lineage-kernel定义一致：branch7 NON_GDSC_AHB、enable/halt+4004、bit0使能、branch2_ops固定bit31 OFF。
+BRANCH_VOTED为软件枚举bit7，开启仍检查halt、关闭仅10us delay；默认halt_bit0不适用branch2_ops，不得错用bit0判断停止。
+提取LG真实halt函数与Lineage字节比较，64组OFF/FSM/enable/无关位ASan/UBSan通过；FSM2不能放行OFF1。
+父链XO19.2→PLL1 main600→AHB root22bc/CFG22c0/source4/HID15(/8)→branch7；source5才是even。
+实际corePLLReady/coreReady每次worker前读PLL1 LOCK/OPMODE/main output/L/alpha、root OFF/UPDATE/CFG、域和bus；
+写branch7前/等待又复核父快照与typed ARC/CN0。不是只查频率日志或软件ready，a23 Timeout不能直接归为父PLL完全未开。
+17项父/域/bus/typed故障分别写前/写后共34场景真实provider ASan/UBSan通过：NotReady/Busy，不是Timeout，无新分支写/TCS。
+发现但未定因的参考差异：LG AHB enable_safe_config经force-root/配置/clear；我们core受控CFG/UPDATE后要求rootON；
+LG DTS+解析+enable循环顺序VSYNC→NON_GDSC_AHB→RSCC_AHB，我们branch编号顺序7→8→9。
+它们不是已证明的电气依赖，不据此永久force或盲改时钟顺序；下一份0211样本先判enable/OFF/期限再收敛。
+**NEXT：沿原0211交付等待新kernel/buildtree并核对打retained；NoC/HANDOFF连锁不单独处理。**
+本轮不增加编译/镜像/旧a23测试，完整接管前其他显示测试继续暂停。
+详见docs/PANEL-BRANCH7-PARENT-HALT-AUDIT.md；底稿scratch/branch7-parent-audit/check.py/源文件/结果/report.json。
+未改CircleCI/固件/ADT/参数/生产内核，未push/触发CI/操作设备。CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+以下NEXT为历史；0211代码7d34942及交接b4f4169保持。
+
+
 ## Agent handoff / active work (2026-11-12, 0211 timeout evidence and root cause review ready)
 
 **CURRENT：0211代码/专项/实现和归因文档已提交`7d34942`，本地验证完成，待用户push云编译。**

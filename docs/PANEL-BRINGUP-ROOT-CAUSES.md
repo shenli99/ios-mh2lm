@@ -26,6 +26,10 @@
 [a23实测](PANEL-D1-0121A23.md)、[下一轮超时取证](PANEL-CLOCK-TIMEOUT-DIAGNOSTICS.md)。
 各文档保留原日志行号、哈希和离线复现底稿，不以本汇总替代原证据。
 
+父链与halt的后续专项核对见[审计记录](PANEL-BRANCH7-PARENT-HALT-AUDIT.md)：
+确认当前未漏掉PLL1 main/root的基本开启和物理检查；另有safe-config序列及RSC三路顺序差异待实证，
+不能把它们直接写成已确定根因。
+
 ## 当前首错和连锁结果
 
 a23的先后关系是：

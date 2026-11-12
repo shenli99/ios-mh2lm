@@ -1,5 +1,11 @@
 # 0210：RSC 分支自身投票与受控 AHB 父时钟
 
+**父链/halt已再次核对：** LG与Lineage均为+0x4004/bit0 enable/bit31 OFF、voted开启仍验halt；
+实际父链为PLL1 main→AHB root/8，当前实现有物理读回及typed权限检查。
+RCG safe-config启用序列和三路RSC时钟取得顺序存在参考差异，尚未证明是a23根因；
+见[父链/halt审计](PANEL-BRANCH7-PARENT-HALT-AUDIT.md)。本次未改内核，不新增编译要求。
+
+
 **当前执行点：0211已提交 `7d34942`，待用户push云编译。** a23首错仍是RSC branch7等待Timeout，
 具体enable读回/CLK_OFF/整体期限原因未定；本轮只补超时出口、写入及已有样本/时间三条ERROR，
 保留原硬件事务、完成条件、10ms/200ms期限和失败处理。14场景与0210基线MMIO/结果/timer一致，
