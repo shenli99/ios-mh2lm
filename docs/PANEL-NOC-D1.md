@@ -1,5 +1,12 @@
 # D1：显示 NoC 带宽事务与 RSC 所有权（0187）
 
+**0121a16实测阻塞（2026-11-12）：** MDSS时钟/服务已通过，managed预检在第六项ACV
+commandDB元数据失败（前五项通过），未开始本次managed投票。现日志不含失败字段，不能认定
+ACV缺失或unit/width为零。LG display逻辑节点ACV_DISPLAY的真实DB key仍是ACV；LG允许aux长度
+至少8字节，与当前恰好8字节检查存在差异，但尚无本机值支持放宽。0204只增加首次失败ERROR
+及成功INFO的名称/gate/已读字段，不加读取或改变准入；需新编译取证。
+详见[实测及LG核对](PANEL-D1-0121A16.md)。以下按原实现保留。
+
 **0198后续增量（本地通过，未实机）：** mode5现已将数据票停驻与host/PHY/PLL关闭、
 重建组合：OFF保config→放clock→关link→放DATA；ON取DATA→重建link→取clock→重建host→
 原reset/ON/亮度/pixel/touch。普通暂停接口仍拒绝改票，仅协调器指定DATA请求获得有限授权；

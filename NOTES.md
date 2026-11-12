@@ -1,5 +1,30 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a16 clocks PASS; ACV metadata blocked, 0204 diagnostics ready)
+
+**CURRENT：已定位本轮静帧到managedPreflight的BCM5=ACV metadata；不是整核死锁。**
+持久日志7d6bb833...34e912d，total282705/flush31；USB日志de1f2317...ac76a2。
+85–103行ESC0 CFG0及后续BYTE/PCLK全部通过，boot clock mask7f/owned0；109–127行
+PV/source2选择、MDSS发布及touch/RPMh/pins匹配；694 SpringBoard；887后GIC/RD_PTR，
+五个窗口约59.9Hz。1132 metadata unavailable、1133 begin NotReady；3372 lifecycle拒绝。
+软件因own handoff失败停止呈现，亮度DCS仍可成功；用户黑/亮不当作完整OFF/ON通过。
+泛化scanout warning伴CB2 FSR400，不是该次最终失败点，不清fault或绕过managed保护。
+5USB warning/2HFS clonefile-34/3BindFS ENOENT，无panic/未见group隔离；非本次静帧因果。
+LG display label ACV_DISPLAY但DB key ACV正确；LG aux读取允许>=8，XNU严格=8，
+具体本机字段未知，不能猜是长度/零unit/width/reserved或缺失，不能盲改投票语义。
+0204仅lookupBCM首次诊断：ERROR带header/address/aux/values/matches/alias及已读字段，
+成功INFO记录metadata；缓存后不重复。无新增寄存器读写/准入放宽/boot-arg/ABL fallback。
+21场景ASan/UBSan及RPMh/NoC/managed/lifecycle回归通过；前后RPMh arm64编译及warning
+集合一致；21场景前后返回值/MMIO轨迹610行一致，无额外读取；0185–0204 strict replay/
+78文件一致/114 CI marker通过。并非整核或实机修复验收。
+**NEXT：用户push本地0204提交、云编译并下载kernel/buildtree；核对后同ABI608/605参数
+打新retained档，只取启动ACV gate/字段。旧0121a16不重测；combined/supply继续暂停。**
+无需按息屏/反复USB/长测；得到元数据后按LG依据修解析或资源模型，不跳过ACV继续投票。
+未改CircleCI（blob仍da0b6c0947a66f03491b3a9023590b49665292df）/固件/USB/输入/电池；
+未push/触发CI/操作设备。详情docs/PANEL-D1-0121A16.md及PANEL-NOC-D1.md；
+底稿scratch/framebuffer-0204/，设备日志不入git。以下NEXT为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a16 verified; ESC0-fixed retained boot ready)
 
 **CURRENT：0121a16已核对0203修复并打包，待实机启动/接管日志。**

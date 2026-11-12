@@ -1,5 +1,14 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0121a16实机结果 / 0204下一步（2026-11-12）：** ESC0 CFG0及全部七路boot clock准入已通过，
+MDSS发布、RPMh/pins/touch匹配与RD_PTR约59.9Hz正常；managedPreflight在BCM5=ACV元数据
+查询失败，beginScanout返回NotReady，FB停止呈现，用户态/输入仍活跃。完整扫描接管、panel
+OFF/ON未验收。0204仅补RPMh首次解析具体gate/原字段诊断，本地通过，待用户push/编译；
+不放宽准入、不恢复ABL回退、不重复旧档。combined/supply继续暂停。
+详见[0121a16实测与后续](PANEL-D1-0121A16.md#实机结果时钟通过acv元数据阻止接管)。
+以下旧执行点按历史保留，以本段及NOTES顶部为准。
+
+
 **0121a16当前执行点：** 新产物已核对0203 ESC0旁路修复；78源码/114 marker及ABI608
 镜像回读通过。只启动`boot-16k-0121a16-abi608-panel-retained.img`，停留约一分钟导日志，
 先不按息屏；确认后续BYTE/PCLK准入、MDSS发布与接管后再安排亮度/OFFON。

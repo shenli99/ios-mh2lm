@@ -1,0 +1,68 @@
+diff --git a/iokit/Kernel/arm/SweetRPMh.cpp b/iokit/Kernel/arm/SweetRPMh.cpp
+--- a/iokit/Kernel/arm/SweetRPMh.cpp
++++ b/iokit/Kernel/arm/SweetRPMh.cpp
+@@ -143,31 +143,56 @@
+  unsigned bit=1u<<bcm;
+  if (fBCMTried&bit) return (fBCMAvailable&bit)!=0;
+  fBCMTried|=bit;
++ const char *name=displayBCMs[bcm];
+  uint32_t key[2]={};
+- for (unsigned k=0;k<8 && displayBCMs[bcm][k];++k)
+-  key[k/4]|=(uint32_t)(uint8_t)displayBCMs[bcm][k] << (8*(k%4));
++ for (unsigned k=0;k<8 && name[k];++k)
++  key[k/4]|=(uint32_t)(uint8_t)name[k] << (8*(k%4));
+  unsigned matches=0; SweetBCMInfo found;
++ /* One diagnostic per first lookup only. Log existing, range-checked reads;
++  * never inspect rejected aux data or relax metadata admission to get pixels. */
+  for (unsigned i=0;i<8;++i) {
+   uint32_t h=8+16*i; unsigned slave=db16(h);
+   if (!slave) break;
+   uint32_t entries=DBHeader+db16(h+2), aux=DBHeader+db16(h+4);
+   unsigned count=db16(h+6);
+-  if (slave<3 || slave>5 || (entries&3) || !range(entries,count*DBEntry) || !range(aux,0)) return false;
++  if (slave<3 || slave>5 || (entries&3) || !range(entries,count*DBEntry) || !range(aux,0)) {
++   SWEET_LOG_ERROR("SWEET RPMH BCM: name=%s gate=header index=%u slave=%u entries=%#x aux=%#x count=%u db-size=%#x; no votes\n",
++    name,i,slave,entries,aux,count,fDBSize); return false;
++  }
+   for (unsigned j=0;j<count;++j) {
+    uint32_t e=entries+j*DBEntry;
+    if (read(fDB,e)!=key[0] || read(fDB,e+4)!=key[1]) continue;
+    uint32_t table=aux+db16(e+22), address=read(fDB,e+16);
+-   if (slave!=5 || (address>>16)!=5 || (address&3) || db16(e+20)!=8 || (table&3) || !range(table,8)) return false;
++   if (slave!=5 || (address>>16)!=5 || (address&3)) {
++    SWEET_LOG_ERROR("SWEET RPMH BCM: name=%s gate=address entry=%#x slave=%u address=%#x table=%#x; no votes\n",
++     name,e,slave,address,table); return false;
++   }
++   unsigned bytes=db16(e+20);
++   if (bytes!=8 || (table&3) || !range(table,8)) {
++    SWEET_LOG_ERROR("SWEET RPMH BCM: name=%s gate=aux entry=%#x address=%#x table=%#x bytes=%u db-size=%#x; no votes\n",
++     name,e,address,table,bytes,fDBSize); return false;
++   }
+    uint32_t unit=read(fDB,table), packed=read(fDB,table+4);
+-   if (!unit || !(packed&0xffffu) || ((packed>>16)&255)>=16 || (packed>>24)) return false;
++   if (!unit || !(packed&0xffffu) || ((packed>>16)&255)>=16 || (packed>>24)) {
++    SWEET_LOG_ERROR("SWEET RPMH BCM: name=%s gate=values address=%#x table=%#x unit=%u packed=%#x width=%u vcd=%u reserved=%u; no votes\n",
++     name,address,table,unit,packed,packed&0xffffu,(packed>>16)&255,packed>>24); return false;
++   }
+    found.address=address; found.unit=unit; found.width=packed&0xffff;
+    found.vcd=(packed>>16)&255; ++matches;
+   }
+  }
+- if (matches!=1) return false;
++ if (matches!=1) {
++  SWEET_LOG_ERROR("SWEET RPMH BCM: name=%s gate=matches count=%u; no votes\n",name,matches); return false;
++ }
+  for (unsigned r=0;r<SweetDisplayBCMCount;++r)
+-  if ((fBCMAvailable&(1u<<r)) && fBCM[r].address==found.address) return false;
+- fBCM[bcm]=found; fBCMAvailable|=bit; return true;
++  if ((fBCMAvailable&(1u<<r)) && fBCM[r].address==found.address) {
++   SWEET_LOG_ERROR("SWEET RPMH BCM: name=%s gate=alias address=%#x other=%s; no votes\n",
++    name,found.address,displayBCMs[r]); return false;
++  }
++ fBCM[bcm]=found; fBCMAvailable|=bit;
++ SWEET_LOG_INFO("SWEET RPMH BCM: name=%s metadata ready address=%#x unit=%u width=%u vcd=%u\n",
++  name,found.address,found.unit,found.width,found.vcd);
++ return true;
+ }
+ 
+ IOReturn SweetRPMh::beginRegisterBandwidth(unsigned client,uint64_t proposal)
