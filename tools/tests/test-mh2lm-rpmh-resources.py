@@ -198,7 +198,7 @@ int main(){
   destroy(s,n);reboot();}
  // Per-register posted-write wait is timer-driven. Completion timeout, failed
  // programming, uncleared IRQ, stop before/after first write and late event.
- for(unsigned test=0;test<6;++test){fixtures();s=make(n);id=attach(s);
+ for(unsigned test=0;test<8;++test){fixtures();s=make(n);id=attach(s);messages.clear();
   token=vote(s,id,SweetRailVDDI,{true,1800,1880,62000});
   if(test==0){tick(s);tick(s,100001);}
   if(test==1){rpmhDrop=0x30;tick(s);assert(s->fBusy);tick(s,1001);}
@@ -206,12 +206,29 @@ int main(){
   if(test==3){s->stop(n);}
   if(test==4){tick(s);s->stop(n);}
   if(test==5){tick(s);regs[TCS+4]=~0u;tick(s);}
+  // A late first callback must say program (not falsely report a PMIC ACK
+  // timeout); a late cleanup callback must retain the confirmed payload.
+  if(test==6){tick(s,100001);assert(!writes());}
+  if(test==7){tick(s);regs[TCS+4]=1;tick(s);auto before=writes();tick(s,100001);assert(writes()==before);}
   if(test==2){assert(s->fBusy);tick(s,1001);}
   assert(!s->fBusy);q=s->fClients[0].status;
   assert(q.state==SweetRPMhFailed&&q.uncertain==(test!=3));
-  if(test<3||test==5)assert(s->requestVote(id,SweetRailPHY,{true,880,880,1},&denied)==kIOReturnNotReady);
+  unsigned snapshots=0;std::string diagnostic;
+  for(auto &m:messages)if(m.find("SWEET RPMH SNAPSHOT:")==0){++snapshots;diagnostic+=m;}
+  if(test==3||test==4)assert(!snapshots); // stop/cancel must not inspect hardware
+  else{
+   assert(snapshots>=5&&snapshots<=6);
+   const char*phase=(test==1||test==6)?"phase=program":((test==2||test==7)?"phase=cleanup":"phase=completion");
+   assert(diagnostic.find(phase)!=std::string::npos);
+   const char*reason=test==5?"reason=invalid-completion":((test==1||test==2)?"reason=posted-write":"reason=deadline");
+   assert(diagnostic.find(reason)!=std::string::npos);
+   assert(diagnostic.find("request=VRM rail=0 arc-stage=0 tcs=0 commands=3 mask=0x7")!=std::string::npos);
+   if(test==6)assert(diagnostic.find("executing=0 progress=0 written=0")!=std::string::npos);
+   for(auto &op:trace)assert(op.write||op.addr!=TCS+8); // no W1C register reads
+  }
+  if(test<3||test>=5)assert(s->requestVote(id,SweetRailPHY,{true,880,880,1},&denied)==kIOReturnNotReady);
   auto count=trace.size();s->fTimer->action(s,s->fTimer);assert(trace.size()==count);
-  destroy(s,n);assert(rpmhOwner==(test==3?0u:2u));reboot();}
+  destroy(s,n);assert(rpmhOwner==((test==3||test==6)?0u:2u));reboot();}
  // Malformed ABI/DB/revision/map failures never write and release all maps.
  for(unsigned test=0;test<11;++test){fixtures();
   if(test==0)regs[RSC]=0x30000;

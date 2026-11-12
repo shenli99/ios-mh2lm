@@ -1,0 +1,62 @@
+diff --git a/iokit/Kernel/arm/SweetRPMh.cpp b/iokit/Kernel/arm/SweetRPMh.cpp
+--- a/iokit/Kernel/arm/SweetRPMh.cpp
++++ b/iokit/Kernel/arm/SweetRPMh.cpp
+@@ -602,7 +602,35 @@
+   finish(kIOReturnNotReady,fExecuting || fWriteIssued || fOperation!=0); return;
+  }
+  uint64_t now=nowNS(); uint32_t b=fTCSIndex*Stride, bit=1u<<fTCSIndex;
+- if (now>=fDeadline || (fArcRequest && now>=fStageDeadline)) { finish(kIOReturnTimeout,true); return; }
++ /* Terminal failure only: bounded, read-only evidence from our selected ACTIVE
++  * slot. Sample before finish() retires the transaction; never run at stop,
++  * after participant loss, on every timer tick or against other TCS payloads.
++  * These sequential reads are evidence, not an atomic hardware snapshot. */
++ auto diagnose=[&](const char *reason) {
++  const char *phase=!fExecuting ? "program" : (fOperationCount ? "cleanup" : "completion");
++  /* The following finish() record carries the consumer token/resource name.
++   * Keep this common path independent of client/stage/payload array indexing. */
++  SWEET_LOG_ERROR("SWEET RPMH SNAPSHOT: reason=%s phase=%s request=%s rail=%u arc-stage=%u tcs=%u commands=%u mask=%#x executing=%u progress=%u written=%u operation=%u/%u posted=%u deadline-late-us=%llu stage-late-us=%llu write-late-us=%llu\n",
++   reason,phase,fArcRequest ? "ARC" : (fRegisterRequest ? "CN0" : "VRM"),
++   fRail,fArcRequest ? fArcStage : 0u,fTCSIndex,fCommandCount,fCommandMask,fExecuting,fProgress,fEverWritten,
++   fOperation,fOperationCount,fWriteIssued,now>fDeadline ? (now-fDeadline)/1000 : 0ULL,
++   fArcRequest && now>fStageDeadline ? (now-fStageDeadline)/1000 : 0ULL,
++   fWriteIssued && now>fWriteDeadline ? (now-fWriteDeadline)/1000 : 0ULL);
++  SWEET_LOG_ERROR("SWEET RPMH SNAPSHOT: irq-enable=%#x saved-irq-enable=%#x irq-status=%#x tcs-status=%#x control=%#x enable=%#x wait=%#x\n",
++   read(fTCS,IRQEnable),fSavedIRQ,read(fTCS,IRQStatus),read(fTCS,b+Status),
++   read(fTCS,b+Control),read(fTCS,b+Enable),read(fTCS,b+Wait));
++  /* VRM uses three commands, ARC/CN0 one. Refuse any diagnostic expansion
++   * beyond those slots even if future request shapes grow. No W1C reads. */
++  for (unsigned c=0;c<fCommandCount && c<3;++c) {
++   uint32_t command=b+c*CommandStride;
++   SWEET_LOG_ERROR("SWEET RPMH SNAPSHOT: command=%u msgid=%#x address=%#x data=%#x status=%#x\n",
++    c,read(fTCS,command+Message),read(fTCS,command+Address),
++    read(fTCS,command+Data),read(fTCS,command+CommandStatus));
++  }
++ };
++ if (now>=fDeadline || (fArcRequest && now>=fStageDeadline)) {
++  diagnose("deadline"); finish(kIOReturnTimeout,true); return;
++ }
+  /* Bounded fixed operation count. A posted write not yet visible resumes on
+   * the timer, never delay()/sleep or completion busy-wait inside the gate. */
+  while (fOperation<fOperationCount) {
+@@ -639,7 +667,11 @@
+   }
+   uint32_t value=read(fTCS,op.w1c ? IRQStatus : op.offset);
+   if (op.w1c ? ((value&op.value)!=0) : (value!=op.value)) {
+-   if (now>=fWriteDeadline) finish(kIOReturnIOError,true);
++   if (now>=fWriteDeadline) {
++    SWEET_LOG_ERROR("SWEET RPMH SNAPSHOT: posted offset=%#x want=%#x got=%#x w1c=%u\n",
++     op.offset,op.value,value,op.w1c);
++    diagnose("posted-write"); finish(kIOReturnIOError,true);
++   }
+    else fTimer->setTimeoutUS(100);
+    return;
+   }
+@@ -663,7 +695,7 @@
+   complete &= status!=~0u && (status&(Issued|Complete))==(Issued|Complete);
+  }
+  fProgress|=idle==0 || !complete;
+- if (irq==~0u || idle==~0u) { finish(kIOReturnIOError,true); return; }
++ if (irq==~0u || idle==~0u) { diagnose("invalid-completion"); finish(kIOReturnIOError,true); return; }
+  if (!idle || !(irq&bit || fProgress) || !complete) { fTimer->setTimeoutUS(100); return; }
+  addOperation(b+Control,AMC); addOperation(b+Control,0);
+  addOperation(b+Enable,0); addOperation(b+Wait,0); addOperation(IRQClear,bit,true);
