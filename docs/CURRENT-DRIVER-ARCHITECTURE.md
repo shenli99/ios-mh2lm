@@ -1,5 +1,10 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0121a18已核对并打包：** 78源码与0205一致、114 source/155 binary markers及镜像回读通过。
+待启动 `boot-16k-0121a18-abi608-panel-retained.img`，先取一分钟启动日志及画面，确认ACV准入
+和managed扫描接管。ABI608固件、605字节参数及ADT保持；不重测旧诊断，combined/supply暂停。
+详见[镜像、命令和日志目标](PANEL-D1-0121A18.md)。以下push/编译步骤已完成，实机尚待验收。
+
 **0205当前修复（2026-11-12）：** 按用户决定将display ACV建模为 `0x8` 开关资源；
 保留真实width0/unit1/VCD11，EBI有需求发送X0/Y8，无需求撤票。普通BCM缩放/非零width检查保留。
 本地验证通过，待push云编译及新retained镜像实测；不是再次只加诊断，也不代表面板接管已验收。

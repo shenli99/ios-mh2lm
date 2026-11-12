@@ -1,5 +1,24 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a18 ACV-fixed retained boot ready)
+
+**CURRENT：用户下载0121a18，两包校验/实际源码/打包回读均通过，待实机。**
+78源码字节一致含0205三源，内容对应433aceb；114现有CI source/155 binary markers通过。
+未提供CI run ID/build log，不声称核对CI提交元数据。内核ARM64 subtype0、自带SHA一致，
+17723824bytes，SHA=a99b3a820947319c034592452566334577ab586c484b9316be436a9464b62f0e。
+ABI608固件仍27e7a1d1...18ea480，retained605字节参数及ADT与0121a17一致；
+四档header/firmware/FAT payload回读通过，旧镜像/基线保留，只交付retained。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a18-abi608-panel-retained.img**
+镜像35545088bytes，SHA=c81fbfa2a2336ed0009bfa014fe89854fa6e7de323e8a845fa451dbce968956b。
+启动停留约一分钟，观察早期静帧是否继续到Logo/系统，导live-0121a18-abi608-panel-retained.txt
+或sweetlog同名bin，一种完整日志即可。ACV预期width0/VCD11/enable-mask8，然后看NoC/managed/
+SCANOUT/HANDOFF；不把ACV准入当全部成功。若静帧而USB活着直接取日志，若panic记PC/LR/FAR/ESR。
+先不息屏/亮度/反复USB或长测，日志通过后同镜像测亮度/OFFON；identity不重测，combined/supply暂停。
+详见docs/PANEL-D1-0121A18.md，底稿scratch/artifact-0121a18/（两verify脚本、JSON及packaging.txt）。
+本轮仅核对/打包/文档；未改驱动/固件/CI、未push/触发CI/操作设备。CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+本轮文档本地提交后无需为文档重新云编译，直接测试已打好的0121a18。以下NEXT均为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0205 ACV enable-mask fix ready for build)
 
 **CURRENT：按用户明确要求把display ACV建模为mask8开关资源，已实现，不再只做诊断。**
