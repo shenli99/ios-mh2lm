@@ -1,0 +1,118 @@
+diff --git a/iokit/Kernel/arm/SweetMDSSNoC.inc b/iokit/Kernel/arm/SweetMDSSNoC.inc
+--- a/iokit/Kernel/arm/SweetMDSSNoC.inc
++++ b/iokit/Kernel/arm/SweetMDSSNoC.inc
+@@ -128,10 +128,9 @@
+   unsigned ports=r==SweetBCMMM0 ? 2 : 4;
+   SweetBandwidth bandwidth=r==SweetBCMMM0 ? SweetBandwidth{average,peak} :
+       (r==SweetBCMSH0 ? v.llcc : v.ebi);
+-  if (!fNoCInfo[r].scale(bandwidth.average,width,ports,&x) || !fNoCInfo[r].scale(bandwidth.peak,width,1,&y)) return false;
+-  /* LG ACV_DISPLAY is distinct from apps ACV (bitmask8). Its actual display
+-   * node follows this ordinary X/Y branch; do not invent an apps mask here. */
+-  fNoCValues[r]=(x||y ? 1u<<29 : 0u)|(x<<14)|y;
++  /* Ordinary BCMs retain bandwidth scaling; ACV's typed resource policy
++   * encodes the aggregate EBI demand as an enable mask, including width=0. */
++  if (!fNoCInfo[r].encode(bandwidth.average,bandwidth.peak,width,ports,&fNoCValues[r])) return false;
+  }
+  fNoCCount=0;
+  for (unsigned r=1;r<SweetDisplayBCMCount;++r)
+diff --git a/iokit/Kernel/arm/SweetRPMh.cpp b/iokit/Kernel/arm/SweetRPMh.cpp
+--- a/iokit/Kernel/arm/SweetRPMh.cpp
++++ b/iokit/Kernel/arm/SweetRPMh.cpp
+@@ -28,7 +28,11 @@
+  {1200,1200,1,false,true},{880,880,1,false,true}};
+ static const char *const displaySupplies[]={"cx.lvl","mx.lvl","mmcx.lvl"};
+ static const unsigned displayMinimums[]={0,64,128,256,384};
+-static const char *const displayBCMs[]={"CN0","MM1","MM0","SH0","MC0","ACV"};
++/* Resource policy is independent of raw command DB width. ACV is an enable
++ * vote (LG BCM_TCS_CMD_ACV_APPS encoding X=0/Y=8), not a bandwidth ratio.
++ * Apply the same explicit mask to display ACV; never fabricate a DB width. */
++static const struct { const char *name; unsigned enableMask; } displayBCMs[]={
++ {"CN0",0},{"MM1",0},{"MM0",0},{"SH0",0},{"MC0",0},{"ACV",0x8}};
+ enum { Stride=0x2a0, CommandStride=0x14, IRQEnable=0, IRQStatus=4, IRQClear=8,
+  Wait=0x10, Control=0x14, Status=0x18, Enable=0x1c,
+  Message=0x30, Address=0x34, Data=0x38, CommandStatus=0x3c,
+@@ -46,13 +50,26 @@
+ 
+ bool SweetBCMInfo::scale(uint64_t rate,unsigned busWidth,unsigned ports,unsigned *value) const
+ {
+- if (!unit || !width || !busWidth || busWidth>32 || !ports || ports>4) return false;
++ if (enableMask || !unit || !width || !busWidth || busWidth>32 || !ports || ports>4) return false;
+  uint64_t divisor=(uint64_t)busWidth*ports*unit;
+  /* Bound before multiplying; all valid products fit 64 bits. Round upward,
+   * never silently truncate a positive vote or clamp overflow to 14 bits. */
+  if (rate>(0x3fffULL*divisor)/width) return false;
+  uint64_t numerator=rate*width;
+  *value=(unsigned)(numerator/divisor+(numerator%divisor!=0)); return true;
++}
++
++bool SweetBCMInfo::encode(uint64_t average,uint64_t peak,unsigned busWidth,unsigned ports,uint32_t *value) const
++{
++ if (!value || !busWidth || busWidth>32 || !ports || ports>4) return false;
++ unsigned x=0,y=0;
++ if (enableMask) {
++  if (enableMask>0x3fff) return false;
++  /* Any EBI demand enables ACV. Last DATA release sends zero even while a
++   * config-only lease holds CN0. Magnitude/width/unit do not scale a mask. */
++  if (average || peak) y=enableMask;
++ } else if (!scale(average,busWidth,ports,&x) || !scale(peak,busWidth,1,&y)) return false;
++ *value=(x||y ? 1u<<29 : 0u)|(x<<14)|y; return true;
+ }
+ 
+ uint32_t SweetRPMh::read(vm_offset_t base,uint32_t off)
+@@ -143,7 +160,8 @@
+  unsigned bit=1u<<bcm;
+  if (fBCMTried&bit) return (fBCMAvailable&bit)!=0;
+  fBCMTried|=bit;
+- const char *name=displayBCMs[bcm];
++ const auto &resource=displayBCMs[bcm];
++ const char *name=resource.name;
+  uint32_t key[2]={};
+  for (unsigned k=0;k<8 && name[k];++k)
+   key[k/4]|=(uint32_t)(uint8_t)name[k] << (8*(k%4));
+@@ -173,12 +191,12 @@
+      name,e,address,table,bytes,fDBSize); return false;
+    }
+    uint32_t unit=read(fDB,table), packed=read(fDB,table+4);
+-   if (!unit || !(packed&0xffffu) || ((packed>>16)&255)>=16 || (packed>>24)) {
++   if (!unit || (!(packed&0xffffu) && !resource.enableMask) || ((packed>>16)&255)>=16 || (packed>>24)) {
+     SWEET_LOG_ERROR("SWEET RPMH BCM: name=%s gate=values address=%#x table=%#x unit=%u packed=%#x width=%u vcd=%u reserved=%u; no votes\n",
+      name,address,table,unit,packed,packed&0xffffu,(packed>>16)&255,packed>>24); return false;
+    }
+    found.address=address; found.unit=unit; found.width=packed&0xffff;
+-   found.vcd=(packed>>16)&255; ++matches;
++   found.vcd=(packed>>16)&255; found.enableMask=resource.enableMask; ++matches;
+   }
+  }
+  if (matches!=1) {
+@@ -187,11 +205,11 @@
+  for (unsigned r=0;r<SweetDisplayBCMCount;++r)
+   if ((fBCMAvailable&(1u<<r)) && fBCM[r].address==found.address) {
+    SWEET_LOG_ERROR("SWEET RPMH BCM: name=%s gate=alias address=%#x other=%s; no votes\n",
+-    name,found.address,displayBCMs[r]); return false;
++    name,found.address,displayBCMs[r].name); return false;
+   }
+  fBCM[bcm]=found; fBCMAvailable|=bit;
+- SWEET_LOG_INFO("SWEET RPMH BCM: name=%s metadata ready address=%#x unit=%u width=%u vcd=%u\n",
+-  name,found.address,found.unit,found.width,found.vcd);
++ SWEET_LOG_INFO("SWEET RPMH BCM: name=%s metadata ready address=%#x unit=%u width=%u vcd=%u enable-mask=%#x\n",
++  name,found.address,found.unit,found.width,found.vcd,found.enableMask);
+  return true;
+ }
+ 
+diff --git a/iokit/Kernel/arm/SweetRPMh.h b/iokit/Kernel/arm/SweetRPMh.h
+--- a/iokit/Kernel/arm/SweetRPMh.h
++++ b/iokit/Kernel/arm/SweetRPMh.h
+@@ -55,10 +55,11 @@
+  friend class SweetRPMh;
+  friend class SweetMDSS;
+  uint32_t address, unit;
+- unsigned width, vcd;
++ unsigned width, vcd, enableMask;
++ bool encode(uint64_t,uint64_t,unsigned,unsigned,uint32_t *) const;
+  bool scale(uint64_t,unsigned,unsigned,unsigned *) const;
+ public:
+- SweetBCMInfo() : address(0), unit(0), width(0), vcd(0) {}
++ SweetBCMInfo() : address(0), unit(0), width(0), vcd(0), enableMask(0) {}
+ };
+ struct SweetRegisterBandwidthStatus {
+  uint64_t token, bytesPerSecond;

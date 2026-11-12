@@ -1,5 +1,12 @@
 # BCM width来源：设备树、Lineage与0121a17实测
 
+**0205当前修复（2026-11-12）：** 按用户决定将display ACV建模为 `0x8` 开关资源；
+保留真实width0/unit1/VCD11，EBI有需求发送X0/Y8，无需求撤票。普通BCM缩放/非零width检查保留。
+本地验证通过，待push云编译及新retained镜像实测；不是再次只加诊断，也不代表面板接管已验收。
+本地DTS无mask属性；LG apps有mask8/X0/Y8，本次显式应用到display，不搬跨BCM累计副作用。
+详见[实现、依据、验证与下一步](PANEL-ACV-ENABLE-MASK.md)。
+以下此前“不能套apps mask/继续查投票策略/无编译需求”等为历史判断，由本段取代。
+
 2026-11-12。问题：ACV `width=0`究竟来自哪里，能否用设备树里的4替换？
 
 **结论：ACV的BCM width来自固件加载到共享内存的command DB，Lineage直接读取；

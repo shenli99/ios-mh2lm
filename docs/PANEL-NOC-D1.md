@@ -1,5 +1,12 @@
 # D1：显示 NoC 带宽事务与 RSC 所有权（0187）
 
+**0205当前修复（2026-11-12）：** 按用户决定将display ACV建模为 `0x8` 开关资源；
+保留真实width0/unit1/VCD11，EBI有需求发送X0/Y8，无需求撤票。普通BCM缩放/非零width检查保留。
+本地验证通过，待push云编译及新retained镜像实测；不是再次只加诊断，也不代表面板接管已验收。
+本地DTS无mask属性；LG apps有mask8/X0/Y8，本次显式应用到display，不搬跨BCM累计副作用。
+详见[实现、依据、验证与下一步](PANEL-ACV-ENABLE-MASK.md)。
+以下此前“不能套apps mask/继续查投票策略/无编译需求”等为历史判断，由本段取代。
+
 **0121a17来源核对：** 已确认ACV width0来自固件commandDB aux；Lineage直接采用。
 DTS qcom,buswidth4是独立节点字段，不能用来覆盖BCM width。
 旧fixture/非零width统一假设需按实际资源语义修正，非改变真实元数据。
@@ -77,11 +84,10 @@ Held表示本软件事务完成，不表示实测DDR吞吐量、物理供电状�
 
 BCM按需解析，不要求只做原LDO的固件fixture必须含BCM；显式新请求则必须完整。
 要求slave5、地址高16位5且word对齐、名称/地址唯一、aux恰好8bytes且有界对齐、
-unit/width非零、VCD<16及保留字节为零。名称对应的硬件地址不硬编码。
+unit非零、普通BCM width非零（0205对显式mask资源ACV保留width0）、VCD<16及保留字节为零。名称对应的硬件地址不硬编码。
 
-**ACV_DISPLAY与apps ACV必须区分。** LG仅对apps节点ID7038走特殊bitmask8分支；
-本显示路径ID27006实际走普通X/Y带宽分支。本段按该真实调用路径实现，未把apps掩码套给display。
-这是0186文档中“ACV语义待核对”的结论，不表示所有ACV都能用同一种公式。
+**0205资源模型：** LG原apps/display分支差异仍是源码事实；本项目按用户决定将display ACV
+显式改为mask8/X0/Y8，不再按普通带宽公式编码，具体依据及范围见本文顶部链接。
 
 `SweetDisplayBandwidth`输入全部为bytes/s：两个MDP端口各AB/IB、LLCC AB/IB、EBI AB/IB，
 另有registerPeak。每个输入AB<=IB；有效票要求有MDP端口峰值、LLCC/EBI峰值及至少
@@ -94,9 +100,10 @@ registerPeak取max；所有加法/乘法与14bit上限均在写硬件前检查�
 | MM1 / display | 每端口32 / 1 | 两端口分别缩放后取max | 同左 |
 | MM0 / display | 32 / 2 | 两端口AB之和缩放，除聚合端口数 | 两端口IB取max缩放，不除端口数 |
 | SH0 / display | 16 / 4 | LLCC AB缩放，除聚合端口数 | LLCC IB缩放，不除端口数 |
-| MC0、ACV_DISPLAY / display | 4 / 4 | EBI AB缩放，除聚合端口数 | EBI IB缩放，不除端口数 |
+| MC0 / display | 4 / 4 | EBI AB缩放，除聚合端口数 | EBI IB缩放，不除端口数 |
+| ACV_DISPLAY / display（0205） | 不参与带宽缩放，保留真实width0 | 0 | EBI AB或IB非零为8，否则0 |
 
-缩放为`ceil(rate × BCMwidth / (nodeWidth × ports × unit))`。正值向上舍入，超出14bit
+普通BCM缩放为`ceil(rate × BCMwidth / (nodeWidth × ports × unit))`。正值向上舍入，超出14bit
 显式拒绝，不静默截断或饱和。各段输入代表路径不同位置的带宽，不能把它们再合成一个MM0票。
 
 ## 准入、事务和撤回

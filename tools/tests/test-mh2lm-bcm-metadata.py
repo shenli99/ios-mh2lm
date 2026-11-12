@@ -18,7 +18,7 @@ helpers = ns['helpers'] + ns['tests'].split('int main(){')[0]
 tests = r'''
 int main(){
  const uintptr_t entry=DB+400+24*5,table=DB+600;
- const char*gate[]={nullptr,"matches","aux","aux","values","values","values","values",
+ const char*gate[]={nullptr,"matches","aux","aux","values",nullptr,"values","values",
                     "address","address","aux","aux","aux","matches","alias",
                     "header","header","header","header","matches",nullptr};
  for(unsigned test=0;test<21;++test){
@@ -27,7 +27,7 @@ int main(){
   if(test==2)regs[entry+20]=7|(40<<16);
   if(test==3)regs[entry+20]=12|(40<<16); // extended aux remains rejected
   if(test==4)regs[table]=0;
-  if(test==5)regs[table+4]=0;
+  if(test==5)regs[table+4]=4|(11<<16); // nonzero width still selects mask semantics
   if(test==6)regs[table+4]=4|(16<<16);
   if(test==7)regs[table+4]=4|(1<<24);
   if(test==8)regs[entry+16]=0x40000;
@@ -42,7 +42,7 @@ int main(){
   if(test==17)regs[DB+40]=5|(900<<16);
   if(test==18)regs[DB+44]=0xffffu|(6<<16);
   if(test==19)regs[entry+4]=1; // exact eight-byte name required
-  if(test==20){regs[entry+20]=8|(456<<16);regs[DB+1016]=1000000;regs[DB+1020]=4;}
+  if(test==20){regs[entry+20]=8|(456<<16);regs[DB+1016]=1;regs[DB+1020]=11<<16;}
   trace.clear();messages.clear();auto rc=r->copyBCMInfo(SweetBCMACV,&info);
   assert(rc==(gate[test]?kIOReturnNotFound:kIOReturnSuccess));
   assert(!writes());
@@ -53,8 +53,12 @@ int main(){
   assert(messages.size()==1);
   auto msg=messages.front();assert(msg.find("name=ACV")!=std::string::npos);
   if(gate[test])assert(msg.find(std::string("gate=")+gate[test])!=std::string::npos);
-  else assert(msg.find("metadata ready address=0x50014 unit=1000000 width=4 vcd=0")!=std::string::npos);
-  if(test==4)assert(msg.find("unit=0 packed=0x4 width=4 vcd=0 reserved=0")!=std::string::npos);
+  else {
+   std::string expected="metadata ready address=0x50014 unit=1 width=";
+   expected+=test==5 ? "4" : "0";expected+=" vcd=11 enable-mask=0x8";
+   assert(msg.find(expected)!=std::string::npos);
+  }
+  if(test==4)assert(msg.find("unit=0 packed=0xb0000 width=0 vcd=11 reserved=0")!=std::string::npos);
   if(test==7)assert(msg.find("reserved=1")!=std::string::npos);
   if(test==12)assert(msg.find("table=0x3fc bytes=8 db-size=0x400")!=std::string::npos);
   if(test==14)assert(msg.find("other=MC0")!=std::string::npos);
@@ -63,7 +67,17 @@ int main(){
   destroy(r,n);dropNub(n);reboot();
   assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
  }
- puts("PASS: actual BCM diagnostics: 21 success/failure cases, bounded reads, no votes, exact gates/values, cached lookup silent");
+ // The exception is resource-specific: every ordinary BCM still rejects zero
+ // width, without votes. ACV acceptance does not relax unit/VCD/alias/bounds.
+ for(unsigned bcm=0;bcm<5;++bcm){
+  nocFixtures();regs[DB+564+8*bcm]&=0xffff0000u;
+  auto*n=nub();auto*r=make(n);SweetBCMInfo info;trace.clear();messages.clear();
+  assert(r->copyBCMInfo((SweetDisplayBCM)bcm,&info)==kIOReturnNotFound&&!writes());
+  assert(messages.size()==1&&messages[0].find("gate=values")!=std::string::npos);
+  destroy(r,n);dropNub(n);reboot();
+  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
+ }
+ puts("PASS: actual BCM diagnostics: 26 success/failure cases including ACV width0/mask8 and ordinary zero-width rejection, bounded reads, no votes, exact gates/values, cached lookup silent");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-bcm-') as temp:

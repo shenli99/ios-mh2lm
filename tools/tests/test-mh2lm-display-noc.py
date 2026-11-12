@@ -26,11 +26,11 @@ static void nocFixtures(){
  arcFixtures();resourceMode=2;clockMode=1;fakeTicks=1000000;
  regs[LOC+4]=1024;regs[DB+40]=5|(256<<16);regs[DB+44]=416|(6<<16);regs[DB+48]=0x100;
  const char*names[]={"CN0","MM1","MM0","SH0","MC0","ACV"};
- const unsigned widths[]={4,32,32,16,4,4},vcds[]={0,2,1,2,0,0};
+ const unsigned widths[]={4,32,32,16,4,0},vcds[]={0,2,1,2,0,11};
  for(unsigned r=0;r<6;++r){
   uint32_t key=0;for(unsigned k=0;names[r][k];++k)key|=uint32_t(uint8_t(names[r][k]))<<(8*k);
   uintptr_t e=DB+400+24*r;regs[e]=key;regs[e+4]=0;regs[e+16]=0x50000+4*r;regs[e+20]=8|((8*r)<<16);
-  regs[DB+560+8*r]=1000000;regs[DB+564+8*r]=widths[r]|(vcds[r]<<16);
+  regs[DB+560+8*r]=r==5 ? 1 : 1000000;regs[DB+564+8*r]=widths[r]|(vcds[r]<<16);
  }
  regs[bases[0]+0x38]=1;regs[bases[1]+0x3000]=0x80000000;
  const unsigned branches[]={0x2080,0x200c,0x2024,0x2038,0x2028,0x202c,0x2004,0x4004,0x400c,0x4008};
@@ -77,6 +77,23 @@ static void cleanup(SweetMDSS*m,IOService*d,SweetRPMh*r,IOService*n){
  m->release();queued.clear();dropNub(d);destroy(r,n);dropNub(n);
  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());rpmhOwner=mdssClockWriter=mdssNoCWriter=0;
 }
+// Decode only emitted command writes, independently of the owner's final ledger.
+static std::vector<uint32_t> acvPayloads(){
+ std::map<uintptr_t,uint32_t> seen;std::vector<uint32_t> payloads;
+ for(auto op:trace)if(op.write){
+  if(op.addr>=TCS&&op.addr<TCS+0x540){
+   unsigned off=unsigned(op.addr-TCS)%0x2a0;
+   if(off>=0x34&&(off-0x34)%0x14==0)assert(op.value!=0x50014); // no apps ACV writer
+  }
+  if(op.addr>=DT&&op.addr<DT+0xa80){
+   unsigned off=unsigned(op.addr-DT)%0x2a0;
+   if(off>=0x38&&(off-0x38)%0x14==0&&seen[op.addr-4]==0x50014)payloads.push_back(op.value);
+   seen[op.addr]=op.value;
+  }
+ }
+ return payloads;
+}
+
 int main(){
  // Metadata identity must omit the NoC extension when resource1/clock0.
  // The original lifecycle matrix declared NoC and could not reach identity
@@ -115,7 +132,8 @@ int main(){
  assert(m->fNoCValues[1]==(0x20000000u|(64<<14)|128));
  assert(m->fNoCValues[2]==(0x20000000u|(48<<14)|128));
  assert(m->fNoCValues[3]==(0x20000000u|(32<<14)|256));
- assert(m->fNoCValues[4]==(0x20000000u|(16<<14)|128)&&m->fNoCValues[5]==m->fNoCValues[4]);
+ assert(m->fNoCValues[4]==(0x20000000u|(16<<14)|128));
+ assert(m->fNoCValues[5]==0x20000008u); // ACV width=0, VCD11: X=0/Y=8
  assert(r->fClients[0].registerVote==76800000&&m->localClocksReady());
  assert(m->releaseLocalClocks(m->fNoCClockToken)==kIOReturnBusy);
  assert(regs[DT]==0x85&&regs[DT+4]==0x80);
@@ -126,7 +144,7 @@ int main(){
   assert(off/0x2a0==2||off/0x2a0==3);
   if(off%0x2a0==0x1c&&trace[i].value)groups.push_back(trace[i].value);
  }
- assert(groups==(std::vector<unsigned>{3,1,3})); // VCD0 MC0+ACV,1 MM0,2 MM1+SH0
+ assert(groups==(std::vector<unsigned>{1,1,3,1})); // VCD0 MC0,1 MM0,2 MM1+SH0,11 ACV
  // Shared average sums/max peak, and withdrawing one lease retains others.
  uint64_t second=retain(m);drive(m,r);assert(m->fNoCValues[2]==(0x20000000u|(96<<14)|128));
  assert(m->releaseBandwidth(token)==0);drive(m,r);assert(nstatus(m,token).state==SweetNoCReleased);
@@ -163,6 +181,32 @@ int main(){
  assert(m->retainBandwidth(zeroAverage,&fresh)==0&&fresh>ids[3]);drive(m,r);
  SweetNoCStatus stale{};assert(m->bandwidthStatus(ids[1],&stale)==kIOReturnNotFound);
  assert(m->releaseBandwidth(ids[1])==kIOReturnNotFound);cleanup(m,d,r,n);
+ // Actual ACV width0/unit1/VCD11, plus a nonzero-width ACV: resource
+ // identity selects mask semantics. Config floor, multiple DATA clients,
+ // magnitude changes, last DATA withdrawal and re-acquire exercise the writer.
+ for(unsigned acvWidth: {0u,4u}){
+  nocFixtures();regs[DB+604]=acvWidth|(11u<<16);
+  n=nub();r=make(n);d=displayNub();m=displayMake(d,r);
+  SweetDisplayBandwidth config={};config.registerPeak=76800000;uint64_t floor=0;
+  trace.clear();assert(m->retainBandwidth(config,&floor)==0);drive(m,r);
+  assert(acvPayloads().empty()&&!m->fNoCValues[SweetBCMACV]);
+  trace.clear();token=retain(m);drive(m,r);
+  assert(acvPayloads()==std::vector<uint32_t>{0x60000008u}); // standalone VCD11 COMMIT
+  auto other=demand();other.ebi.average*=2;other.ebi.peak*=2;second=0;
+  trace.clear();assert(m->retainBandwidth(other,&second)==0);drive(m,r);
+  assert(acvPayloads().empty()&&m->fNoCValues[SweetBCMACV]==0x20000008u);
+  trace.clear();assert(m->releaseBandwidth(token)==0);drive(m,r);
+  assert(acvPayloads().empty()&&m->fNoCValues[SweetBCMACV]==0x20000008u);
+  trace.clear();assert(m->releaseBandwidth(second)==0);drive(m,r);
+  assert(acvPayloads()==std::vector<uint32_t>{0x40000000u});
+  assert(!m->fNoCValues[SweetBCMACV]&&r->fClients[0].registerVote==76800000);
+  trace.clear();token=retain(m);drive(m,r);
+  assert(acvPayloads()==std::vector<uint32_t>{0x60000008u});
+  trace.clear();assert(m->releaseBandwidth(token)==0);drive(m,r);
+  assert(acvPayloads()==std::vector<uint32_t>{0x40000000u});
+  trace.clear();assert(m->releaseBandwidth(floor)==0);drive(m,r);
+  assert(acvPayloads().empty());cleanup(m,d,r,n);
+ }
  // RSC CBCR enable readback is not clock-on proof. No RSC access until an
  // independent CLK_OFF transition; reverse release also awaits physical OFF.
  nocFixtures();regs[bases[1]+0x4008]=0x80000000;n=nub();r=make(n);d=displayNub();m=displayMake(d,r);
@@ -250,7 +294,7 @@ int main(){
   auto count=trace.size();SweetMDSS::noCTimerAction(m,m->fNoCTimer);assert(count==trace.size());
   cleanup(m,d,r,n);
  }
- puts("PASS: actual NoC and CN0: separate owners, warm-clock admission, typed aggregate/scaling, per-VCD COMMIT/fresh ACK, ACTIVE2/3 preservation, reverse release, explicit faults/stop and zero objects");
+ puts("PASS: actual NoC and CN0: separate owners, warm-clock admission, typed aggregate/scaling + ACV mask8 width0/VCD11 on/off/reacquire, per-VCD COMMIT/fresh ACK, ACTIVE2/3 preservation, reverse release, explicit faults/stop and zero objects");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-noc-') as temp:

@@ -1,5 +1,31 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0205 ACV enable-mask fix ready for build)
+
+**CURRENT：按用户明确要求把display ACV建模为mask8开关资源，已实现，不再只做诊断。**
+本地SM8150 DTS无enable-mask/bmask属性；LG apps定义BCM_TCS_CMD_ACV_APPS=8、X0/Y8。
+用户提供Linux补丁摘录支持ACV width0/enable_mask思路，链接因环境网络限制未取得正文；
+不声称逐位复刻未读补丁或已证实所有RPMh SoC通用。原LG display普通分支是历史源码事实，
+当前按用户决定采用明确开关策略，取代下面各历史handoff的“不能套mask/仍待推导”约束。
+0205只改RPMh h/cpp及MDSSNoC：资源表ACV mask8、typed encode、保留真实width0/unit1/VCD11；
+仅mask资源允许width0，其它metadata/alias/范围校验保持。普通缩放显式拒绝mask资源；
+EBI avg/peak任一非零时X0/Y8，均零时零票；不填width、不继承MC0累计结果、不删ACV。
+MDSS唯一display RSC writer及VCD/fresh ACK/部分完成账本保持；apps无新增ACV写。
+VCD11单命令ON含COMMIT/VALID为60000008、OFF仅COMMIT为40000000。
+双DATA/保留config/最后DATA撤回/重新申请/非零width仍mask及无重复写均由实际writer测试覆盖。
+26 metadata场景、9套ASan/UBSan回归通过（含managed/core/lifecycle/parking/combined/supply）；
+RPMh/MDSS修改前后真实CI/XNU/KDK arm64单文件编译成功，无新增warning（1326→1326/1539→1538）。
+0185–0205严格累计应用无offset/fuzz，78源码字节一致，114现有CI marker通过。
+**NEXT：需要用户push本地本轮提交、云编译并下载kernel/buildtree；本代理未push/触发CI。**
+拿到新产物核对0205，再同ABI608固件/605字节参数打新retained镜像；先看ACV准入、managed
+投票/接管及画面，成功后同镜像亮度/OFFON。不要称已实机修好或完整面板已完成。
+旧0121a17无需重测，identity/combined/supply保持暂停；不额外插拔USB或半小时长测。
+详见docs/PANEL-ACV-ENABLE-MASK.md，架构/计划/width来源已加最新策略覆盖历史判断。
+底稿scratch/framebuffer-0205/{verification,tests,cumulative-replay,warning-comparison}.json及编译日志。
+未改固件/USB/按键/触摸/电池/boot参数；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+本轮未操作设备、未启动Android/扫描MMIO；源码修复本地提交，以下NEXT均为历史。
+
+
 ## Agent handoff / active work (2026-11-12, full Lineage ACV zero-width vote reproduced offline)
 
 **CURRENT：用户要求更仔细查width0，本轮已补查表公式/版本调用/实际构票原函数复现。**

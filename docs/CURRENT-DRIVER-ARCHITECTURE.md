@@ -1,5 +1,12 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0205当前修复（2026-11-12）：** 按用户决定将display ACV建模为 `0x8` 开关资源；
+保留真实width0/unit1/VCD11，EBI有需求发送X0/Y8，无需求撤票。普通BCM缩放/非零width检查保留。
+本地验证通过，待push云编译及新retained镜像实测；不是再次只加诊断，也不代表面板接管已验收。
+本地DTS无mask属性；LG apps有mask8/X0/Y8，本次显式应用到display，不搬跨BCM累计副作用。
+详见[实现、依据、验证与下一步](PANEL-ACV-ENABLE-MASK.md)。
+以下此前“不能套apps mask/继续查投票策略/无编译需求”等为历史判断，由本段取代。
+
 **0121a17诊断已取得：** USB日志867行ACV实际unit1/width0/VCD11/reserved0，当前统一
 非零width检查导致拒绝，随后managed接管失败。无需补持久日志/重测；下一步核对LG display
 ACV构票语义并修正模型，不能直接替换width或套apps mask。当前无新编译需求。
