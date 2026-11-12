@@ -3,6 +3,12 @@
 ## Agent handoff / active work (2026-11-12, 0121a14 identity panic)
 
 **CURRENT：用户报告panel-identity未进入系统即panic，暂停后三档；需要屏幕panic内容。**
+已取得首行：PC=0xfffffe0007b95478命中本轮memcpy/memmove+0x48，指令stp x12,x13,[x0]。
+LR=0xfffffe00077c8c60在HFS end_transaction附近，但call返回点为...8c68，需核对末位。
+原始caller=0xffffe0007b36a28少一个f；若补齐为fffffe0007b36a28则命中sleh_synchronous_sp1，未确认。
+当前已请求FAR/ESR、x0/x1/x2、backtrace、slide（若有）及核对PC/LR。
+无slide定位为初步结果，未确认错误地址/访问原因，不归因面板寄存器/文件系统损坏。
+证据新增scratch/artifact-0121a14/{panic-address-analysis.json,panic-memmove.txt,panic-end-transaction.txt}。
 已解码logs/sweetlog-0121a14-panel-identity.bin；它与旧0121a13-panel-resources.bin整文件
 逐字节相同，SHA256=461a537553b33b12f8740035985eaa45d7442ed62820c397085e70c48fd6e236，
 total440091/flush77。仍为旧resources参数及SpringBoard正常运行，无新identity参数/本次panic栈。
