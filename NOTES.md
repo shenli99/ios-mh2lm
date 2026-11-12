@@ -2,6 +2,20 @@
 
 ## Agent handoff / active work (2026-11-12, 0121a14 identity panic)
 
+**当前执行点更新：用户报告olduefi对照仍panic。新固件不是必要条件，本轮内核间接影响不能排除。**
+完整源码树已比对：0121a13 5274份、0121a14 5292份，31份不同（18新增13修改），全部在
+显示/资源/触摸协调与注册，不仅0201的7份。full-source-comparison/comparison.json及脚本已存。
+HFS/通用分配器不变不等于显示改动无关；初查新服务启动/匹配/分配路径未找到确证，不能称排除。
+NEXT：用户测/home/shenli/work1/out-bs/boot-16k-0121a14-kernel-control.img，
+SHA256=63c2137e7993d97e5c1bd13cccc95bb6f61d8b7a88706e6519b6c39957df432a。
+它只把0121a13原panel-resources镜像FAT内kernel替换为本轮kernel，其余UEFI/ADT/TOML逐字节
+保留，旧标题0121a13也是刻意保留；新Pins/Touch节点缺席，不启其consumer。
+回读kernel SHA7943a67e...68322f通过，原旧镜像未改。尚未实机，无需云编译。
+成功再拆新ADT/服务/参数；失败需核对原0121a13在当前设备状态下结果，不直接认定文件系统损坏。
+artifact-0121a14/make-kernel-control.py与kernel-control-verification.json为证据。
+旧UEFI档暂无独立PC/LR/FAR，按用户“同样panic”记录，不虚构逐寄存器一致。
+以下为该结果之前的逐步记录，当前NEXT以上段为准。
+
 **最新：** 用户修正ESR=0x96000045，确认FAR=0、x0=0、x1=0xfffffe205cd42040、x2=0xfe0、
 LR=0xfffffe00077c8c68。LR准确匹配实际memmove call返回，PC为stp x12,x13,[x0]，
 确认HFS end_transaction的memcpy目的地址为NULL；same-EL write level1 translation fault。
