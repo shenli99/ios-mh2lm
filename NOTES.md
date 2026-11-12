@@ -1,5 +1,21 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, ACV width provenance confirmed against Lineage/DTS)
+
+**CURRENT：已按用户要求核对旧资料、设备树及独立lge-lineage-kernel。**
+Lineage HEAD2e897dddf49a4c3e85b2ff77fdf7c70f860398dd与LG d4f335e相关五文件字节一致。
+ACV BCM width直接来自remote固件加载的commandDB aux（u32unit/u16width/u8VCD/u8reserved），
+msm_bus_fabric_rpmh.c1206直接赋值，无width0拒绝/无DTS补值。XNU字段布局一致。
+sm8150-bus.dtsi2150节点的qcom,buswidth4是分母，BCM width是分子，不能互填；
+ACV width0不是面板/DDR物理宽度0。固件为何生成0的内部实现不在公开驱动源码。
+**NEXT：继续按真实元数据设计ACV投票模型；当前无代码/编译/额外实机需求。**
+不要只删lookup gate（scale也拒绝width0），不要用DTS4/MC0的16覆盖0，不套apps mask8。
+display27006与apps7038分支不同，LG MC0→ACV循环累计值未清零仍须纳入构票分析。
+当前已闭合“值从哪里来、怎样解码、为何拒绝”，未闭合最终硬件投票意图。
+资料docs/PANEL-BCM-WIDTH-SOURCES.md；对照scratch/artifact-0121a17/bcm-width-source-review.json。
+仅文档，本轮无驱动/固件/CI改动，未push/触发编译/操作设备。以下NEXT为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a17 live ACV diagnosis complete)
 
 **CURRENT：USB日志已取得所需字段，不需补持久日志或重测。**

@@ -1,5 +1,10 @@
 # D1：显示 NoC 带宽事务与 RSC 所有权（0187）
 
+**0121a17来源核对：** 已确认ACV width0来自固件commandDB aux；Lineage直接采用。
+DTS qcom,buswidth4是独立节点字段，不能用来覆盖BCM width。
+旧fixture/非零width统一假设需按实际资源语义修正，非改变真实元数据。
+见[设备树、Lineage与字段布局证据](PANEL-BCM-WIDTH-SOURCES.md)。以下旧阶段原样保留。
+
 **0121a16实测阻塞（2026-11-12）：** MDSS时钟/服务已通过，managed预检在第六项ACV
 commandDB元数据失败（前五项通过），未开始本次managed投票。现日志不含失败字段，不能认定
 ACV缺失或unit/width为零。LG display逻辑节点ACV_DISPLAY的真实DB key仍是ACV；LG允许aux长度
