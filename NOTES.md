@@ -1,5 +1,28 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0209 NoC admission diagnostics ready)
+
+**CURRENT：0209代码/测试/实现文档已本地提交`a325219`，待用户push云编译，未实机。**
+针对0121a21新首错display NoC NotReady，补RSC clock请求/状态、clock/domain/lease/parent/branch、
+RSC layout、wrapper override/power/control、seq busy/solver的原始检查分支日志。
+终止新增一次ERROR `SWEET MDSS NOC CONTEXT:`，记录phase/clock-token/apps-token/register-acked/
+cursor/group/TCS/executing/operation/posted及clock worker；全为软件字段，Aborted无该增量。
+clock私有诊断enum区分silent/first-boot verbose/NoC failure-only，成功timer不刷屏。
+仅改SweetMDSS.cpp私有声明、Clock.inc、NoC.inc；无新增成员、MMIO读写/触发/ACK/timeout，不放宽任何保护。
+先clock可达后RSC/layout再wrapper，原short-circuit读取顺序保持，失败后不再取样，typed owner/gate不变。
+新专项29准入场景+3完整失败路径ASan/UBSan通过，0208基线与诊断版完整MMIO轨迹和返回值相同。
+另10套clock/core/noc/managed/lifecycle/link/combined/supply/parking/profile回归通过。
+MDSS真实XNU/KDK ARM64对象前后通过，warnings1538→1543（新增5数组访问提示，未屏蔽）；无新格式错误。
+0185–0209严格累计应用/78源码字节比较/114原CI marker通过。补丁SHA=e61e94601c842190b7d003d710d8c39a5302622439b38c48aa4790dc3aedd27e。
+**NEXT：需要用户push本地提交并云编译，下载新kernel/buildtree后核对0209，再打新ABI608 retained。**
+固件/ADT/605字节参数沿用0121a21，不能用旧kernel刷出新诊断。目标首条CLOCK/NOC ADMIT gate→CONTEXT→原NoC rc。
+只是取证，尚未修复NotReady/冻结；完整接管前亮度/OFFON/长测/反复USB/combined/supply暂停，旧a21/identity不重测。
+详见docs/PANEL-NOC-ADMISSION-DIAGNOSTICS.md；架构/NoC/两显示计划/总计划已同步。
+底稿scratch/framebuffer-0209/各JSON/编译日志及test-noc-admission-diagnostics.txt（基线对照）。
+无新boot；未改CircleCI/固件/USB/按键/触摸/电池/mux/apps RPMh IRQ，未push/触发CI/操作设备。
+CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。以下NEXT均为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a21 RPMh IRQ PASS; next display NoC admission)
 
 **CURRENT：0121a21日志已核对；0208 apps RPMh实测通过本轮事务，首错移到display NoC NotReady。**

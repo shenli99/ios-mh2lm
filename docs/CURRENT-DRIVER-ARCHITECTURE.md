@@ -1,5 +1,12 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0209已准备（代码`a325219`，本地通过、未实机）：** 为0121a21的display NoC NotReady补
+RSC clock/lease/parent/branch、RSC layout及wrapper/seq/solver的具体拒绝日志，失败附软件CONTEXT。
+原MMIO读写/顺序/保护/期限不变；新专项29场景+3失败路径与0208完整MMIO轨迹及结果一致，另10套回归/MDSS ARM64对象通过。
+现在需要用户push云编译；新产物核对后沿用ABI608和0121a21 ADT/参数打retained，取首个gate及CONTEXT。
+本轮用于取证，未宣称已修复；接管前OFFON/combined/supply仍暂停。
+详见[实现、分支、验证和下一步](PANEL-NOC-ADMISSION-DIAGNOSTICS.md)。以下“无新编译要求”为历史。
+
 **0121a21实测更新：** apps RPMh共10次真实完成IRQ，四LDO、ARC和CN0 ACK通过，core profile2成功。
 新首错为display NoC token1/NotReady(0xe00002d8)/data ACK mask0；后续managed/HANDOFF失败是连锁结果，未提交新DMA。
 现日志未分RSC clock lease与RSC/wrapper准入拒绝，不能认定具体寄存器或硬件拒票；下一步补NoC分支取证。
