@@ -1,5 +1,27 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, IRQ0 PASS; power0 next)
+
+**CURRENT：IRQ0日志确认进SpringBoard，下一步仅改power0。原NULL写未修复。**
+logs/sweetlog-0121a14-identity-irq0-control.bin SHA=7d8b889176125d2be695bb42c2bc270d469cf4ac6d1cef985599f572ed4e325b；
+total245020/flush9。387行power1/IRQ0/vsync0/own0吻合；89行source2/profile4，90行MDSS、
+102行RPMh、668行SpringBoard、3条touch。无F3 IRQ/FB hardware mailbox/F4 pool或handoff。
+无panic/ERROR；3USB warning、10HFS clonefile -34；关机两条signal-reason分配失败后推进unmount，
+不证明完整停机或OOM根因。本档无MDSS POWER调用，不称电源切换通过。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a14-identity-power0-control.img**
+SHA=c751f4007487950d3a36f1abe1b886dca92209a4bca95094da72977ef8e732aa。
+仅成功IRQ0档sweetfbpower1→0；其余参数/内核/固件/ADT均不变；IRQ0/vsync0/own0保留，合法准入。
+保留preserveoff1，FB软件电源状态路径；managed/lifecycle关闭，无新reset/供电周期。
+全容器/FAT回读仅TOML单参数变，原镜像保留；菜单旧0121a13刻意保留、实际内核0121a14。
+只确认进系统，成功导sweetlog-0121a14-identity-power0-control.bin；失败记录寄存器，无需其它测试。
+与原失败fix档公共参数值相同，但原档另有显式8个默认0选项及不同顺序/标题/ramdisk字节，
+不能声称原镜像原样重测。power0-versus-failed-config.json存比较。若失败聚焦power路径，
+若成功重查精确打包/参数/状态/时序，不能强行归因。后三档继续暂停，无需push/云编译。
+无内核代码修复，未改CI/操作设备/推送/触发CI。
+底稿scratch/artifact-0121a14/{identity-irq0-control-persistent.txt,identity-irq0-control-log-analysis.json,
+make-power0-control.py,identity-power0-control-verification.json,power0-versus-failed-config.json}。
+文档/计划已同步；以下NEXT均为历史，以本段为准。
+
 ## Agent handoff / active work (2026-11-12, vsync0 PASS; IRQ0 next)
 
 **CURRENT：vsync0持久日志支持正常启动，下一步只测MDSS IRQ0。原NULL写未修复。**

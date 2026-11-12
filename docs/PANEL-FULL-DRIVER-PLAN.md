@@ -1,11 +1,11 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
-**0121a14当前进展（2026-11-12）：** vsync0档日志确认power1/IRQ2/vsync0/own0进入SpringBoard，
-身份source2/profile4正常，FB硬件mailbox缺席、MDSS IRQ仍采到3598帧；无panic/ERROR。
-关闭F4及FB硬件vsync消费仍未复现原NULL写，根因未确定。
-**下一步只测`0121a14-identity-irq0-control`**：仅sweetmdssirq=2→0，保留power1/vsync0/own0。
-固件/内核/ADT及其它参数不变；若通过，再最后拆power，避免IRQ2依赖power1导致非法组合。
-无需云编译，retained/combined/supply仍暂停。详情见[0121a14排查记录](PANEL-D1-0121A14.md)。
+**0121a14当前进展（2026-11-12）：** IRQ0档日志确认power1/IRQ0/vsync0/own0进入SpringBoard，
+身份source2/profile4、MDSS/RPMh正常，无显示IRQ/FB硬件mailbox/F4记录，无panic/ERROR。
+仍有USB警告、HFS clonefile -34及关机signal-reason分配失败，不能称所有异常已解决。
+**下一步只测`0121a14-identity-power0-control`**：仅sweetfbpower=1→0，其余配置保持本轮成功状态。
+该档四项显示开关均0；与原失败minimal档公共参数一致，差别还包括原档显式列出的8个默认0选项。
+无需云编译，原NULL写未修复，retained/combined/supply仍暂停。详情见[排查记录](PANEL-D1-0121A14.md)。
 
 **0201当前增量（2026-11-12，本地通过，未实机）：** 统一协调器新增显式
 `sweetpanellifecycle=6`：完整OFF→reset实际低保持→原mode5 DATA/link停驻→VPNL/VDDI
