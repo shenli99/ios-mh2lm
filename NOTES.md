@@ -1,5 +1,34 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a19 touch wait PASS; 0207 RPMh evidence ready)
+
+**CURRENT：0121a19实测通过触摸等待/quiesce，第一笔ldoa14 RPMh事务Timeout；0207故障快照已准备。**
+日志live-0121a19-abi608-panel-retained.txt，278410bytes/3705行，SHA=c7797054e95eb4d22d42643bdd250f9196f7b582cbe60b29be709ec7b635f5d0。
+862–867六BCM通过含ACVwidth0/mask8；868waiting；1761–1766ready/IRQ/HID暂停/恢复期限；
+1767–1770显示TE/auto/IRQ暂停并进入managed。1773token1/ldoa14/0xe00002d6(Timeout)/uncertain1；
+1775rails0/NoC0/clock0，1776未提交新DMA，1780pixels冻结。确认账本0不证明没有实际写入。
+0206启动竞态实机修复通过；尚无完整managed/新扫描地址成功，不是ACV票又失败，也非整核panic。
+现日志不含TCS/编程/完成/清理细节，不能直接认定PMIC拒绝、电压错或mask是根因。
+已核对LG sm8150 DTS/mailbox/regulator：apps ACTIVE0/1、DRV2、步长/MSGID/触发及VRM偏移匹配；
+LG走已使能IRQ，当前timer/mask/fresh差异须进一步实机证据，未擅自启用未接GIC的IRQ。
+0207只改SweetRPMh::advance局部lambda：期限/posted读回失败/无效完成读时一次ERROR快照最多6条，
+program/completion/cleanup、request/index/TCS/operation、超期量、IRQ/idle/control/enable/wait、最多三cmd。
+finish原日志关联token/资源名；顺序取样非原子。无新写/未知地址/扫描其它TCS；stop/取消/退出/晚timer无快照。
+原timeout/fresh完成/IRQmask/故障保留/唯一writer与typed接口不变。不是解除冻结的修复版。
+6套实际源码ASan/UBSan通过；含首timer迟到/cleanup迟到、诊断阶段/条数、无写/W1C不读/stop/晚timer。
+RPMh真实XNU/KDK ARM64前后通过，warning1326→1326；0185–0207严格累计应用、78源码字节一致、114CI marker。
+代码/测试提交`ae78f99`（0207）；本次交接与实测文档随下一提交记录。
+**NEXT：需要用户push本轮本地提交、云编译并下载新kernel/buildtree。**
+核对0207后同ABI608/605参数打新retained；等约90秒导一份启动USB或持久日志，看SNAPSHOT和首次失败。
+旧0121a19/identity不重测；接管前不做OFFON/亮度/反复USB/长测，combined/supply继续暂停。
+本版仍可能静帧，勿宣称实机已修好。无新boot文件，等新kernel再打包。
+伴随29FG profile match0/integrity0/nominal3510、4USB WARN，未定因，不切换当前任务或称真实充电正常。
+文档PANEL-D1-0121A19/PANEL-RPMH-FIRST-VOTE-TIMEOUT/PANEL-TOUCH-STARTUP-WAIT及架构/两计划已更新。
+证据artifact-0121a19/live-retained-log-analysis.json、scratch/framebuffer-0207/各验证JSON与编译日志。
+未改CI/固件/boot参数/USB/输入/电池/mux，未push/触发CI/操作设备；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+本轮代码/测试/文档本地提交；以下NEXT均为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a19 startup-wait retained boot ready)
 
 **CURRENT：用户下载0121a19，产物/源码/boot回读通过，待实机。**

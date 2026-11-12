@@ -1,5 +1,14 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
+**0121a19实测 / 0207下一步：** 0206首次触摸启动等待与quiesce已实机通过，已进入managed资源链；
+第一笔ldoa14 RPMh事务以Timeout失败，确认完成rails=0、未提交新DMA，画面仍冻结。
+未定位到编程/硬件完成/清理的具体阶段，不将超时当成PMIC拒绝或ACV票失败。
+0207只为唯一apps-RSC provider增加终止故障快照；保留100ms期限、fresh完成、原IRQ mask与故障保留策略。
+需要push云编译后新retained启动日志；旧镜像不重测，OFFON/combined/supply仍暂停。
+详见[本轮结果](PANEL-D1-0121A19.md#实测结果2026-11-12)和[RPMh超时与诊断](PANEL-RPMH-FIRST-VOTE-TIMEOUT.md)。
+以下“0121a19待实机 / 0206待push”等为历史，以本段和NOTES为准。
+
+
 **0121a19已核对打包：** 0206首次接管等待触摸worker修复已包含；78源码、114 source/160 binary
 markers及镜像回读通过。只启动新的ABI608 retained档，等约90秒导启动日志，先不做OFFON/长测。
 参数605字节及ADT同上一轮，旧镜像保留；见[本轮步骤](PANEL-D1-0121A19.md)。
