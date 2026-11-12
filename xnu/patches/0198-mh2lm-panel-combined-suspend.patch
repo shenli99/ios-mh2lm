@@ -1,0 +1,329 @@
+diff --git a/iokit/Kernel/arm/SweetFBService.inc b/iokit/Kernel/arm/SweetFBService.inc
+--- a/iokit/Kernel/arm/SweetFBService.inc
++++ b/iokit/Kernel/arm/SweetFBService.inc
+@@ -9,8 +9,8 @@
+  if (!fStateGate || fWorkLoop->addEventSource(fStateGate)!=kIOReturnSuccess) return false;
+  fStateGateAdded=true;
+  int lifecycle=0; (void)PE_parse_boot_argn("sweetpanellifecycle",&lifecycle,sizeof(lifecycle));
+- fPanelLifecycleRequested=lifecycle>=1 && lifecycle<=4;fPanelLifecycleFull=lifecycle>=2 && lifecycle<=4;
+- fPanelLifecycleDataParking=lifecycle==3;fPanelLifecycleLinkCycle=lifecycle==4;
++ fPanelLifecycleRequested=lifecycle>=1 && lifecycle<=5;fPanelLifecycleFull=lifecycle>=2 && lifecycle<=5;
++ fPanelLifecycleDataParking=lifecycle==3 || lifecycle==5;fPanelLifecycleLinkCycle=lifecycle==4 || lifecycle==5;
+  if (fPanelLifecycleRequested && (!fHardwareVsyncRequested || !fOwnScanoutRequested)) return false;
+  if (fHardwareVsyncRequested && !setupHardwareVsync()) return false;
+  fDisplayClient=SweetDisplayClient::withOwner(this,fWorkLoop,backendChanged);
+@@ -325,12 +325,16 @@
+      v.operation==(fPanelLifecycleRequestOff ? SweetPanelDisplayOff : SweetPanelDisplayOn) &&
+      (!fPanelLifecycleFull || (v.profile>=1 && v.profile<=4 &&
+        (fPanelLifecycleRequestOff ? v.sleeping : (!v.sleeping && v.resetComplete && v.brightnessRestored)))) &&
+-     (fPanelLifecycleLinkCycle ? (v.retainedPower && v.dataToken && v.clockToken &&
++     (fPanelLifecycleLinkCycle && fPanelLifecycleDataParking ?
++       (v.retainedPower && v.configHeld && v.configToken &&
++        (fPanelLifecycleRequestOff ? (v.linkPoweredDown && v.resourcesParked && !v.resourcesHeld && !v.dataToken && !v.clockToken) :
++         (!v.linkPoweredDown && v.linkRebuilt && !v.resourcesParked && v.resourcesRestored && v.resourcesHeld && v.dataToken && v.clockToken))) :
++      (fPanelLifecycleLinkCycle ? (v.retainedPower && v.dataToken && v.clockToken &&
+        (fPanelLifecycleRequestOff ? (v.linkPoweredDown && !v.resourcesHeld) :
+         (!v.linkPoweredDown && v.linkRebuilt && v.resourcesHeld))) :
+       (fPanelLifecycleDataParking ? (v.retainedPower && v.configHeld && v.configToken &&
+        (fPanelLifecycleRequestOff ? (v.resourcesParked && !v.resourcesHeld && !v.dataToken && !v.clockToken) :
+-        (!v.resourcesParked && v.resourcesRestored && v.resourcesHeld && v.dataToken && v.clockToken))) : v.resourcesHeld)) &&
++        (!v.resourcesParked && v.resourcesRestored && v.resourcesHeld && v.dataToken && v.clockToken))) : v.resourcesHeld))) &&
+      (fPanelLifecycleRequestOff ? (v.touchQuiesced && v.displayDrained) : (v.pixelsComplete && !v.touchQuiesced));
+  if (!completed) {
+   if (rc==kIOReturnSuccess) rc=v.result==kIOReturnSuccess ? kIOReturnIOError : v.result;
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -289,7 +289,7 @@
+  enum ManagedState { ManagedIdle, ManagedRails, ManagedARC, ManagedNoC,
+      ManagedClock, ManagedReady, ManagedFault, ManagedStopped, ManagedCore, ManagedHost, ManagedLink,
+      ManagedParkConfig, ManagedParkClock, ManagedParkNoC, ManagedParked,
+-     ManagedRestoreNoC, ManagedRestoreClock };
++     ManagedRestoreNoC, ManagedRestoreClock, ManagedParkLink, ManagedRestoreLink };
+  bool fManagedEnabled, fManagedStarted;
+  unsigned fManagedState, fManagedRail, fManagedRails;
+  uint64_t fManagedToken, fManagedBandwidth, fManagedClock, fManagedWait, fManagedDeadline;
+@@ -299,6 +299,7 @@
+  bool managedRetainedResources(void);
+  IOReturn beginManagedParking(bool);
+  void advanceManagedParking(void);
++ IOReturn lifecycleDataBandwidth(bool);
+  IOReturn fManagedResult;
+  bool setupManagedResources(void);
+  IOReturn managedPreflight(void);
+diff --git a/iokit/Kernel/arm/SweetMDSSLifecycle.inc b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+--- a/iokit/Kernel/arm/SweetMDSSLifecycle.inc
++++ b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+@@ -2,7 +2,8 @@
+  * warm DisplayOff/On. Explicit mode2 uses live-ABL profile sleep/reset recovery,
+  * keeping ALL rail/ARC/clock/NoC votes. Mode3 parks managed DATA leases only;
+  * a separate config floor and all power/boot/link resources stay live. Mode4
+- * cycles host/PHY/PLL hardware while retaining ALL resource tickets. */
++ * cycles host/PHY/PLL hardware while retaining ALL resource tickets. Mode5
++ * composes data parking and link shutdown, retaining the config/power path. */
+ bool SweetMDSS::setupLifecycle(IOService *provider)
+ {
+  OSData *identity=OSDynamicCast(OSData,provider->getProperty(MH2LM_PANEL_PROPERTY));
+@@ -18,7 +19,7 @@
+  (void)PE_parse_boot_argn("sweettouchpanel",&touch,sizeof(touch));
+  (void)PE_parse_boot_argn("sweetfbown",&own,sizeof(own));
+  (void)PE_parse_boot_argn("sweetpanelpins",&pins,sizeof(pins));
+- if ((mode!=1 && mode!=2 && mode!=3 && mode!=4) || touch!=2 || own!=2 || !fTouchPanelClient || !fManagedEnabled ||
++ if ((mode!=1 && mode!=2 && mode!=3 && mode!=4 && mode!=5) || touch!=2 || own!=2 || !fTouchPanelClient || !fManagedEnabled ||
+      !fDsiEnabled || !fPanelPowerEnabled || fIrqMode!=2) return false;
+  if (mode>=2 && (!fPanelProfile || pins!=2 || !fPanelPinsClient ||
+      !sweet_dsi_sequence_valid(fPanelProfile->on,fPanelProfile->onSize,NULL) ||
+@@ -26,10 +27,10 @@
+   SWEET_LOG_ERROR("SWEET PANEL: profile lifecycle requires live-ABL profile and pins2; refused before side effects\n");
+   return false;
+  }
+- fLifecycleLinkCycle=mode==4;
++ fLifecycleLinkCycle=mode==4 || mode==5;
+  if (fLifecycleLinkCycle && (fCoreProfile!=2 || fHostProfile!=1 || fLinkProfile!=2)) return false;
+  setProperty("SweetPanelLinkCycleEnabled",fLifecycleLinkCycle);
+- fLifecycleDataParking=mode==3;
++ fLifecycleDataParking=mode==3 || mode==5;
+  if (fLifecycleDataParking && fCoreProfile!=2) return false;
+  fLifecycleFull=mode>=2;setProperty("SweetPanelSleepResetEnabled",fLifecycleFull);
+  fLifecycleTimer=IOTimerEventSource::timerEventSource(this,lifecycleTimerAction);
+@@ -58,6 +59,7 @@
+ }
+ void SweetMDSS::publishLifecycle(void)
+ {
++ setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32);
+  setProperty("SweetPanelLifecycleToken",(unsigned long long)fLifecycle.token,64);
+  setProperty("SweetPanelLifecycleOperation",(unsigned long long)fLifecycle.operation,32);
+  setProperty("SweetPanelLifecyclePhase",(unsigned long long)fLifecycle.phase,32);
+@@ -171,7 +173,7 @@
+   bool poweredDown=fLifecycleLinkCycle && op==SweetPanelDisplayOn;
+   bool parked=fLifecycleDataParking && op==SweetPanelDisplayOn;
+   if (fScanoutState!=SweetScanoutActive || !scanoutConfiguration(false) ||
+-      (poweredDown ? (!lifecycleLinkResourcesHeld() || !linkDormantConfiguration()) :
++      (poweredDown ? ((parked ? (fManagedState!=ManagedParked || !managedConfigHeld() || !managedRetainedResources()) : !lifecycleLinkResourcesHeld()) || !linkDormantConfiguration()) :
+        (parked ? (fManagedState!=ManagedParked || !managedConfigHeld() || !managedRetainedResources()) : !lifecycleResourcesHeld()))) return kIOReturnNotReady;
+   if ((op==SweetPanelDisplayOff && (fPanelState!=PanelOn || fLifecycleParked)) ||
+       (op==SweetPanelDisplayOn && (fPanelState!=PanelOff || !fLifecycleParked))) return kIOReturnNotReady;
+@@ -199,7 +201,7 @@
+  fLifecycle.retainedPower=fLifecycle.resourcesParked || fLifecycle.linkPoweredDown;fLifecycle.configHeld=fLifecycle.resourcesParked;
+  fLifecycleDeadline=scanout_now()+16000000000ULL;
+  fLifecycleStepDeadline=scanout_now()+(op==SweetPanelDisplayOn ? 50000000ULL : 6500000000ULL);fLifecycleIdleSamples=0;
+- if (fLifecycle.linkPoweredDown) {
++ if (fLifecycle.linkPoweredDown && !fLifecycle.resourcesParked) {
+   fLifecycle.phase=SweetPanelLinkRebuild;fLifecycle.displayDrained=true;
+   fLifecycleStepDeadline=scanout_now()+1000000000ULL;
+   IOReturn rc=resumeLink();
+@@ -319,9 +321,18 @@
+   if (fLifecycle.phase==SweetPanelLinkPowerDown) {
+    if (fLinkResult!=kIOReturnSuccess || !linkDormantConfiguration()) {finishLifecycle(kIOReturnIOError,"link shutdown completion absent");return;}
+    fLifecycle.linkPoweredDown=fLifecycle.retainedPower=true;
+-   finishLifecycle(kIOReturnSuccess,"host/PHY powered down; votes retained");return;
++   if (fLifecycleDataParking) {
++    if (fManagedState!=ManagedParkLink) {finishLifecycle(kIOReturnIOError,"park link handoff absent");return;}
++    fManagedState=ManagedParkNoC;fLifecycle.phase=SweetPanelResourcePark;
++    fManagedDeadline=fLifecycleStepDeadline=now+4000000000ULL;publishLifecycle();
++   } else finishLifecycle(kIOReturnSuccess,"host/PHY powered down; votes retained");
++   return;
+   }
+   if (fLinkPhase!=LinkReady || fLinkResult!=kIOReturnSuccess || !linkConfiguration()) {finishLifecycle(kIOReturnIOError,"link rebuild completion absent");return;}
++  if (fLifecycleDataParking && fManagedState==ManagedRestoreLink) {
++   fManagedState=ManagedRestoreClock;fLifecycle.phase=SweetPanelResourceRestore;
++   fManagedDeadline=fLifecycleStepDeadline=now+4000000000ULL;publishLifecycle();return;
++  }
+   if (fHostPhase==HostDormant) {
+    IOReturn rc=beginHost();if (rc!=kIOReturnSuccess) finishLifecycle(rc,"host resume admission");
+    return;
+@@ -335,14 +346,25 @@
+   advanceManagedParking();
+   if (!lifecycleBusy()) return;
+   bool restore=fLifecycle.phase==SweetPanelResourceRestore;
++  if (fLifecycleLinkCycle && fManagedState==(restore ? ManagedRestoreLink : ManagedParkLink)) {
++   fLifecycle.phase=restore ? SweetPanelLinkRebuild : SweetPanelLinkPowerDown;
++   fLifecycleStepDeadline=now+1000000000ULL;
++   IOReturn rc=restore ? resumeLink() : beginLink(true);
++   if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"resource/link handoff refused");return;}
++   publishLifecycle();return;
++  }
+   if (fManagedState!=(restore ? ManagedReady : ManagedParked)) {publishLifecycle();return;}
+   if (!managedRetainedResources() || !managedConfigHeld() ||
+-      (restore ? !lifecycleResourcesHeld() : (fManagedClock || fManagedBandwidth))) {
++      (restore ? (fLifecycleLinkCycle ? !lifecycleLinkResourcesHeld() : !lifecycleResourcesHeld()) :
++       (fManagedClock || fManagedBandwidth || (fLifecycleLinkCycle && !linkDormantConfiguration())))) {
+    finishLifecycle(kIOReturnIOError,"data resource terminal proof absent");return;
+   }
+   fLifecycle.retainedPower=fLifecycle.configHeld=true;fLifecycle.resourcesParked=!restore;
+-  fLifecycle.resourcesHeld=restore;fLifecycle.resourcesRestored=restore;
+-  if (restore) lifecycleStartReset();
++  fLifecycle.resourcesHeld=restore && !fLifecycleLinkCycle;fLifecycle.resourcesRestored=restore;
++  if (restore && fLifecycleLinkCycle) {
++   fLifecycle.phase=SweetPanelLinkRebuild;fLifecycleStepDeadline=now+1000000000ULL;
++   /* DATA and both clock tickets are Held before host reset can begin. */
++  } else if (restore) lifecycleStartReset();
+   else finishLifecycle(kIOReturnSuccess,"data leases parked; power/config retained");
+   publishLifecycle();return;
+  } else if (fLifecycle.phase==SweetPanelPinActivate || fLifecycle.phase==SweetPanelPinReset) {
+@@ -366,7 +388,7 @@
+   if (fLifecycle.operation==SweetPanelDisplayOff) {
+    fPanelState=PanelOff;fIrqDisplayOn=false;publishPanelState();
+    fLifecycle.sleeping=fLifecycleFull;
+-   if (fLifecycleLinkCycle) {
++   if (fLifecycleLinkCycle && !fLifecycleDataParking) {
+     fLifecycle.phase=SweetPanelLinkPowerDown;fLifecycleStepDeadline=now+1000000000ULL;
+     IOReturn rc=beginLink(true);
+     if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"link shutdown admission");return;}
+@@ -471,24 +493,27 @@
+  return fLifecycleLinkCycle && !fLifecycle.uncertain &&
+      fLinkPhase!=LinkFault && fLinkPhase!=LinkStopped && fHostPhase!=HostFault && fHostPhase!=HostStopped &&
+      (fLifecycle.phase==SweetPanelLinkPowerDown || fLifecycle.phase==SweetPanelLinkRebuild ||
++      (fLifecycleDataParking && (fLifecycle.phase==SweetPanelResourcePark || fLifecycle.phase==SweetPanelResourceRestore)) ||
+       (fLifecycle.phase==SweetPanelComplete && fLifecycleParked && fLinkPhase==LinkDormant));
+ }
+ bool SweetMDSS::lifecycleLinkResourcesHeld(void)
+ {
+- if (!fAccepting || isInactive() || fManagedState!=ManagedReady || fManagedRails!=15u ||
++ bool bridge=fLifecycleDataParking && (fManagedState==ManagedParkLink || fManagedState==ManagedRestoreLink);
++ if (!fAccepting || isInactive() || (!bridge && fManagedState!=ManagedReady) || fManagedRails!=15u ||
+      !fRPMh || !fRPMhConsumer || !fManagedARC || fCoreProfile!=2 || !coreReady() ||
+      fHostProfile!=1 || fLinkProfile!=2 || fClockFault || fNoCFault || clockBusy() || noCBusy() ||
+      dsiBusy() || fDsiPinned || fDsiPoisoned || linkOtherUsers()) return false;
+  SweetClockLease c={},b={};SweetNoCStatus n={};SweetDisplayPowerStatus a={};
+- if (localClockStatus(fManagedClock,&c)!=kIOReturnSuccess || c.state!=SweetClockHeld || c.uncertain || c.result!=kIOReturnSuccess ||
++ if ((!bridge && (localClockStatus(fManagedClock,&c)!=kIOReturnSuccess || c.state!=SweetClockHeld || c.uncertain || c.result!=kIOReturnSuccess ||
++      c.mask!=mdssClockMasks[SweetClockDSI0])) || (bridge && (fManagedClock || fManagedToken || !managedConfigHeld())) ||
+      localClockStatus(fClockBootToken,&b)!=kIOReturnSuccess || b.state!=SweetClockHeld || b.uncertain || b.result!=kIOReturnSuccess ||
+-     c.mask!=mdssClockMasks[SweetClockDSI0] || b.mask!=c.mask ||
++     b.mask!=mdssClockMasks[SweetClockDSI0] ||
+      bandwidthStatus(fManagedBandwidth,&n)!=kIOReturnSuccess || n.state!=SweetNoCHeld || n.uncertain || n.result!=kIOReturnSuccess ||
+      fRPMh->copyDisplayPowerStatus(fRPMhConsumer,fManagedARC,&a)!=kIOReturnSuccess ||
+      a.state!=SweetRPMhComplete || a.uncertain || a.corner!=SweetDisplayTurbo) return false;
+  /* An additional link lease is another user, not permission to override its
+   * Held promise. Only boot + managed tickets may be physically suspended. */
+- for (unsigned i=4;i<=6;++i) if (fClockReferences[i]!=2) return false;
++ for (unsigned i=4;i<=6;++i) if (fClockReferences[i]!=(bridge ? 1u : 2u)) return false;
+  for (unsigned i=0;i<4;++i) {
+   const SweetClockLease &v=fClockLeases[i];
+   if (v.state==SweetClockHeld && (v.mask&0x70u) && v.token!=fClockBootToken && v.token!=fManagedClock) return false;
+diff --git a/iokit/Kernel/arm/SweetMDSSLink.inc b/iokit/Kernel/arm/SweetMDSSLink.inc
+--- a/iokit/Kernel/arm/SweetMDSSLink.inc
++++ b/iokit/Kernel/arm/SweetMDSSLink.inc
+@@ -98,7 +98,8 @@
+ {
+  if (powerDown) {
+   if (!fLifecycleLinkCycle || fLifecycle.phase!=SweetPanelLinkPowerDown || fLinkPhase!=LinkReady ||
+-      !lifecycleResourcesHeld() || !linkConfiguration() || !lifecycleLinkStepAllowed()) return kIOReturnNotReady;
++      (!(fLifecycleDataParking && fManagedState==ManagedParkLink) && !lifecycleResourcesHeld()) ||
++      !linkConfiguration() || !lifecycleLinkStepAllowed()) return kIOReturnNotReady;
+  } else if (!linkResourcesReady() || !linkWarmAdmission()) return kIOReturnNotReady;
+  if (!setupDSI()) return kIOReturnNoResources;
+  vm_offset_t p=fMaps[12]->getVirtualAddress();
+diff --git a/iokit/Kernel/arm/SweetMDSSNoC.inc b/iokit/Kernel/arm/SweetMDSSNoC.inc
+--- a/iokit/Kernel/arm/SweetMDSSNoC.inc
++++ b/iokit/Kernel/arm/SweetMDSSNoC.inc
+@@ -8,7 +8,7 @@
+  NAMC=1<<16, NTrigger=1<<24, NIssued=1<<8, NComplete=1<<16 };
+ struct SweetNoCRequest {
+  unsigned operation; uint64_t token; const SweetDisplayBandwidth *vote;
+- uint64_t *output; SweetNoCStatus *status;
++ uint64_t *output; SweetNoCStatus *status; bool lifecycleData;
+ };
+ 
+ bool SweetMDSS::setupNoC(IOService *provider)
+@@ -90,7 +90,16 @@
+       s->fNoCLeases[n].status.state==SweetNoCReleased) { slot=n; break; }
+   if (slot==4 || s->fNoCNextToken==~0ULL) return kIOReturnNoResources;
+  }
+- if (s->fLinkSuspendedMask) return kIOReturnNotReady;
++ /* A sleeping link does not grant public clients access to its vote ledger.
++  * Only the private coordinator request may change its exact DATA lease,
++  * after revalidating the config floor, boot/RSC clocks and physical fence. */
++ if (s->fLinkSuspendedMask && (!r.lifecycleData || !s->fLifecycleLinkCycle || !s->fLifecycleDataParking ||
++     !s->lifecycleResourceStepAllowed() || s->fLinkPhase!=LinkDormant || s->fHostPhase!=HostDormant ||
++     !s->managedConfigHeld() || s->fManagedClock || s->fManagedToken ||
++     (r.operation ? (r.token!=s->fManagedBandwidth || s->fManagedState!=ManagedParkNoC ||
++       s->fLifecycle.phase!=SweetPanelResourcePark) :
++      (s->fManagedState!=ManagedRestoreNoC || s->fManagedBandwidth || r.output!=&s->fManagedBandwidth ||
++       s->fLifecycle.phase!=SweetPanelResourceRestore)))) return kIOReturnNotReady;
+  if (!s->fNoCEnabled || !s->fAccepting || s->isInactive() || s->fNoCFault || s->fLinkPhase==LinkFault || s->fLinkPhase==LinkStopped ||
+      (s->fHostTouched && (s->fHostPhase==HostFault || s->fHostPhase==HostStopped))) return kIOReturnNotReady;
+  if (s->noCBusy() || s->clockBusy() || s->linkBusy() || s->hostBusy() || s->dsiBusy()) return kIOReturnBusy;
+diff --git a/iokit/Kernel/arm/SweetMDSSResources.inc b/iokit/Kernel/arm/SweetMDSSResources.inc
+--- a/iokit/Kernel/arm/SweetMDSSResources.inc
++++ b/iokit/Kernel/arm/SweetMDSSResources.inc
+@@ -80,7 +80,8 @@
+ void SweetMDSS::advanceManagedResources(void)
+ {
+  if (!fManagedStarted || fManagedState==ManagedReady || fManagedState==ManagedFault || fManagedState==ManagedStopped ||
+-     managedParkingBusy() || fManagedState==ManagedParked) return;
++     managedParkingBusy() || fManagedState==ManagedParked ||
++     fManagedState==ManagedParkLink || fManagedState==ManagedRestoreLink) return;
+  uint64_t now=scanout_now();
+  if (now>=fManagedDeadline) { failManagedResources(kIOReturnTimeout,"resource-chain deadline"); return; }
+  /* The core timer owns transient GDSC/RCG states. Do not read a domain
+@@ -245,8 +246,9 @@
+ {
+  if (!fRPMh || !fRPMhConsumer || fManagedRails!=15u || !fManagedARC || fNoCFault || fClockFault ||
+      !clockPrerequisites() || (fCoreProfile && !coreReady()) ||
+-     (fHostProfile && fHostPhase!=HostReady) ||
+-     (fLinkProfile && (fLinkPhase!=LinkReady || !linkConfiguration()))) return false;
++     (fHostProfile && fHostPhase!=HostReady && !(fLifecycleLinkCycle && fHostPhase==HostDormant)) ||
++     (fLinkProfile && (fLinkPhase!=LinkReady || !linkConfiguration()) &&
++      !(fLifecycleLinkCycle && fLinkPhase==LinkDormant && linkDormantConfiguration()))) return false;
+  SweetDisplayPowerStatus a={};SweetClockLease boot={};
+  if (fRPMh->copyDisplayPowerStatus(fRPMhConsumer,fManagedARC,&a)!=kIOReturnSuccess ||
+      a.state!=SweetRPMhComplete || a.uncertain || a.corner!=SweetDisplayTurbo ||
+@@ -254,7 +256,15 @@
+      boot.uncertain || boot.result!=kIOReturnSuccess || boot.mask!=mdssClockMasks[SweetClockDSI0]) return false;
+  /* localClocksReady intentionally rejects an in-flight NoC operation. Here
+   * validate the independent BOOT lease/physical branches during that operation. */
+- for (unsigned n=0;n<SweetClockCount;++n) if (boot.mask&(1u<<n)) {
++ if (fLifecycleLinkCycle && fLifecycleDataParking) {
++  if (linkOtherUsers()) return false;
++  for (unsigned n=0;n<4;++n) {
++   const SweetClockLease &v=fClockLeases[n];
++   if (v.state==SweetClockHeld && (v.mask&0x70u) && v.token!=fClockBootToken && v.token!=fManagedClock) return false;
++  }
++  if (fLinkSuspendedMask) for (unsigned n=4;n<=6;++n) if (fClockReferences[n]!=1) return false;
++ }
++ for (unsigned n=0;n<SweetClockCount;++n) if ((boot.mask&(1u<<n)) && !(fLinkSuspendedMask&(1u<<n))) {
+   uint32_t parent[6]={},v=dp_rd(dp_dispcc,mdssClockBranches[n].cbcr);
+   if (!clockParent(n,parent) || memcmp(parent,fClockParents[n],sizeof(parent)) || !(v&1u) || (v&CBCR_OFF)) return false;
+  }
+@@ -287,7 +297,8 @@
+   uint64_t &token=config ? fManagedConfigBandwidth : fManagedBandwidth;
+   if (release ? !fManagedToken : !token) {
+    SweetDisplayBandwidth v={};v.registerPeak=300000000ULL;
+-   rc=release ? releaseBandwidth(token) : retainBandwidth(config ? v : managedBandwidth(),&token);
++   rc=fLifecycleLinkCycle && !config && fLinkSuspendedMask ? lifecycleDataBandwidth(release) :
++       (release ? releaseBandwidth(token) : retainBandwidth(config ? v : managedBandwidth(),&token));
+    if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"data bandwidth request refused");return;}
+    if (release) fManagedToken=token; /* retain original lease until Released */
+   }
+@@ -300,7 +311,7 @@
+   if (n.result!=kIOReturnSuccess || (config && !managedConfigHeld())) {finishLifecycle(kIOReturnIOError,"config/data ACK proof absent");return;}
+   if (config) fManagedState=ManagedParkClock;
+   else if (release) {fManagedBandwidth=fManagedToken=0;fManagedState=ManagedParked;fManagedResult=kIOReturnSuccess;}
+-  else fManagedState=ManagedRestoreClock;
++  else fManagedState=fLifecycleLinkCycle ? ManagedRestoreLink : ManagedRestoreClock;
+  } else {
+   bool release=fManagedState==ManagedParkClock;
+   if (release ? !fManagedToken : !fManagedClock) {
+@@ -316,8 +327,19 @@
+   }
+   if (c.state!=(release ? SweetClockReleased : SweetClockHeld)) return;
+   if (c.uncertain || c.result!=kIOReturnSuccess || c.mask!=mdssClockMasks[SweetClockDSI0]) {finishLifecycle(kIOReturnIOError,"data clock proof absent");return;}
+-  if (release) {fManagedClock=fManagedToken=0;fManagedState=ManagedParkNoC;}
++  if (release) {fManagedClock=fManagedToken=0;fManagedState=fLifecycleLinkCycle ? ManagedParkLink : ManagedParkNoC;}
+   else {fManagedState=ManagedReady;fManagedResult=kIOReturnSuccess;}
+  }
+  setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32);
+ }
++
++/* Private typed request: no public flag or ambient gate-wide bypass. The
++ * exact managed DATA token/output is rechecked by noCAction below. */
++IOReturn SweetMDSS::lifecycleDataBandwidth(bool release)
++{
++ if (!fLifecycleDataParking || !fLifecycleLinkCycle || fLinkSuspendedMask!=0x70u) return kIOReturnNotReady;
++ SweetDisplayBandwidth vote=managedBandwidth();SweetNoCRequest r={};
++ r.lifecycleData=true;r.operation=release ? 1u : 0u;r.token=fManagedBandwidth;
++ r.vote=&vote;r.output=release ? NULL : &fManagedBandwidth;
++ return fGate ? fGate->runAction(noCAction,&r) : kIOReturnNotReady;
++}

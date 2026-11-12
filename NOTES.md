@@ -2,6 +2,54 @@
 
 ## Agent handoff / active work (2026-11-12, latest)
 
+**CURRENT：0198数据票停驻与host/PHY/PLL硬件下电已组合，本地通过，未实机；完整驱动未完成。**
+父提交0265f05；0198-mh2lm-panel-combined-suspend.patch SHA256=
+83f012309c8f6dd4cc06cd6f5ee3722dfca3ec4bed6a502efc19ec84e2f37ba3，6份源码，
+base字节连续于0197verify；严格重放无offset/fuzz、114原CI source marker通过。
+新增显式sweetpanellifecycle=5，原0–4语义保留，要求mode4全部live身份/pins2/touch2/
+own2/power1/IRQ2/dsi1/managed1/core2/host1/link2及原resource/clock/NoC依赖，无猜PV/降档。
+OFF：touch静止/IRQDMA drain/完整OFF等待→config-only NoC floor Held→managed clock Released
+确认清旧token→ManagedParkLink→原host/PHY/PLL真实关闭并验证Dormant→managed DATA NoC
+Released确认清旧token→resourcesParked+linkPoweredDown联合完成。
+ON：同代Dormant与配置fence→新DATA NoC Held（之前不reset）→ManagedRestoreLink→原PHY/
+PLL/root/branches真实重建与snapshot提交、清暂停mask→新managed clock Held→原host reset/
+配置读回→面板activate/reset/完整ON/最新亮度/fresh像素/实际TCM恢复。没重跑一次性takeover。
+仍沿原唯一MDSS owner/gate/timer和typed执行层，新增两个内部衔接状态，无新provider/线程/映射/
+实例桥或第二套PLL/host/NoC算法。旧takeover状态机显式跳过新bridge。
+普通Clock/NoC暂停API仍拒绝改票；私有lifecycleDataBandwidth构造栈上typed标志，无全局临时
+bypass；NoC检查mode5准确phase/state/指定DATA token或输出、零managed clock/中间token、
+Dormant/config floor/完整fence。不能释放floor/boot/RSC或在PHY关闭时取得DSI0 clock。
+boot/RSC/config floor/LDO/ARC/core通路保留，config token跨周期复用，DATA/clock使用新token。
+释放本票不等于其它consumer DATA降零或PMIC rail-off；其它link票/alias仍在DDI副作用前拒绝。
+FB mode5要求两能力与两组联合证据，不能mode3/4单项或普通Complete冒充；暂停票与物理Ready
+继续区分。每子timer重查同代participants/touch/真实非link clock/core、GIC/TEauto/DSI/CTL/line/
+自有A/SMMU/期限。原总16s和资源4s/link1s及原内部期限保留。
+失败/取消/stop/provider撤回关闭本代，保留在途账本/部分硬件/DMA pin，无自动回退、复位收尾或
+清poison。已提交RPMh仍可后来ACK，不宣称取消撤回已提交事务。
+21套本地检查通过：20实际源码ASan/UBSan+PythonADT，无最终报告。四profile各4轮，验证两个
+handoff顺序、DATA ACK前不reset/PHY就绪前不取clock/clock就绪前不reset host、floor/boot/RSC/
+ARC稳定与新票、暂停公共接口拒绝、每资源/link阶段取消/stop/撤回、ACK丢失/硬件响应失败、
+子timer先运行漂移/期限、其它票保护、token耗尽、停驻漂移/取消、FB联合证据拒绝。LSan环境
+ptrace限制禁用，另检查对象/映射/通知/分配和模拟reboot DMA pin归零。
+真实XNU/KDK arm64 MDSS/FB base/final对象及关键符号通过，非整核链接/硬件结果。
+MDSS warnings1524→1527净增3数组提示（新5处/替换旧2处）已审边界，FB1397不变，无抑制。
+**NEXT：继续PD3正常rail-off/故障受控释放，先核对共享供电/偏压E8所有权，再PD4冷NoC/MDP。**
+NoC solver/sequencer与core配置仍温态保留，不宣称冷NoC；未知labibb/触摸/ABL票不盲撤，
+不启动Android、不扫描未知PMIC。live身份/E7复位触摸/E8仍未实机，完整驱动未验收。
+0195实际Mu→DarwinBoot身份补丁/ADT slot仍须合入后续FD，只有新XNU配旧UEFI没有live身份。
+无新FD/boot、push/CI/设备操作，暂不要求push或刷机；CircleCI blob仍
+ da0b6c0947a66f03491b3a9023590b49665292df，USB/按键/电池/mux/触摸IRQ策略未改。
+ABL buffer/console/panic退出与完整IOPM仍缺；A单缓冲/30Hz复制保留，旧滑动/BUG003未修复，
+不重测旧USB/BUG002/F3/半小时；完整驱动先于零拷贝。
+详见docs/PANEL-COMBINED-SUSPEND-D1.md，计划/架构/PD0/协调器/资源/Link/Clock/NoC已同步。
+底稿scratch/framebuffer-0198/{base,edited,verify,prepare-patch.py,compile.py,run-tests.py,native-checks.py,
+verification.json,base-continuity.json,tests.json,native-results.json,warning-review.json,delivery.json,
+*compile.txt,*symbols.txt}；新联测tools/tests/test-mh2lm-panel-combined-suspend.py。
+
+**以下0197按当时范围保留，当前以0198为准。**
+
+## Agent handoff / active work (2026-11-12, latest)
+
 **CURRENT：0197 host/PHY/PLL实际关闭与重建已本地通过，未实机；保留全部票，未完成rail-off/完整驱动。**
 父提交9791218；0197-mh2lm-panel-link-power-cycle.patch SHA256=
 efdca7364953775c661ed8dda2e91e3638aad3b570b132e589fd8e934bc40bb7，12份源码，base字节连续于0196verify；严格应用无offset/fuzz/114原CI marker通过。

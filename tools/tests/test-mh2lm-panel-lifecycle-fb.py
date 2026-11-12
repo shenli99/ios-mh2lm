@@ -137,6 +137,33 @@ int main(){
   if(missing==6)v.linkPoweredDown=true;if(missing==7)v.retainedPower=false;
   h.complete();assert(h.f->fPowerOff&&h.f->fPanelLifecycleFault);
  }
+ // Mode5 needs both capabilities and both sets of completion evidence.
+ lifecycleArg=5;
+ for(unsigned missing=0;missing<2;++missing){Harness h;
+  assert(h.f->fPanelLifecycleFull&&h.f->fPanelLifecycleDataParking&&h.f->fPanelLifecycleLinkCycle);
+  h.b->cap|=SweetPanelRetainedSleepReset|(missing?SweetPanelLinkPowerCycle:SweetPanelDataParking);
+  assert(h.request(true)!=0&&h.b->operations.empty());
+ }
+ for(unsigned missing=0;missing<17;++missing){Harness h;
+  h.b->cap|=SweetPanelRetainedSleepReset|SweetPanelDataParking|SweetPanelLinkPowerCycle;
+  assert(h.request(true)==0);auto&v=h.b->lifecycle;
+  v.profile=4;v.sleeping=v.retainedPower=v.configHeld=v.linkPoweredDown=v.resourcesParked=true;
+  v.configToken=6;v.phase=SweetPanelComplete;v.result=0;v.touchQuiesced=v.displayDrained=true;
+  if(missing<8){
+   if(missing==0)v.linkPoweredDown=false;if(missing==1)v.resourcesParked=false;
+   if(missing==2)v.resourcesHeld=true;if(missing==3)v.configToken=0;if(missing==4)v.configHeld=false;
+   if(missing==5)v.dataToken=1;if(missing==6)v.clockToken=1;if(missing==7)v.retainedPower=false;
+   h.tick();assert(h.f->fPanelLifecycleFault&&h.f->fPowerOff);continue;
+  }
+  h.tick();assert(!h.f->fPanelLifecycleFault&&h.f->fPowerOff&&h.request(false)==0);
+  v.profile=4;v.retainedPower=v.configHeld=v.resourcesRestored=v.linkRebuilt=true;
+  v.configToken=6;v.dataToken=7;v.clockToken=8;v.resetComplete=v.brightnessRestored=true;
+  if(missing==8)v.linkRebuilt=false;if(missing==9)v.resourcesRestored=false;if(missing==10)v.configToken=0;
+  if(missing==11)v.dataToken=0;if(missing==12)v.clockToken=0;if(missing==13)v.linkPoweredDown=true;
+  if(missing==14)v.resourcesParked=true;if(missing==15)v.configHeld=false;
+  h.complete();assert(h.f->fPanelLifecycleFault==(missing!=16));
+  assert(h.f->fPowerOff==(missing!=16));
+ }
  lifecycleArg=1;
  puts("PASS: actual FB asynchronous lifecycle requests/status, pending presentation freeze, rapid OFF/ON coalescing, no completion from frame mailbox, retained provider/token, explicit fault/withdrawal/stop, no legacy fallback and zero objects/allocations/buffers");
 }

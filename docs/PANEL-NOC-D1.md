@@ -1,5 +1,11 @@
 # D1：显示 NoC 带宽事务与 RSC 所有权（0187）
 
+**0198后续增量（本地通过，未实机）：** mode5现已将数据票停驻与host/PHY/PLL关闭、
+重建组合：OFF保config→放clock→关link→放DATA；ON取DATA→重建link→取clock→重建host→
+原reset/ON/亮度/pixel/touch。普通暂停接口仍拒绝改票，仅协调器指定DATA请求获得有限授权；
+不是rail-off或冷NoC/MDP。详见[组合事务和架构](PANEL-COMBINED-SUSPEND-D1.md)。
+以下按各原阶段范围保留，当前以0198及NOTES顶部为准。
+
 **0196后续增量（本地通过，未实机）：** 已接入mode3 managed数据票释放与重新取得，
 保留独立config floor及所有供电/boot/link/core资源；原mode1/2范围保留。
 详见[当前资源事务及边界](PANEL-RESOURCE-PARKING-D1.md)。以下按本文件原阶段范围保留。
