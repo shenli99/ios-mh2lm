@@ -98,11 +98,11 @@ tools/mk-mh2lm-event-matrix.sh W/logs/xnu-kernel-<LABEL>.gz <LABEL> --battery-ba
 
 ### 4.1 0201完整固件与面板生命周期四档
 
-**0121a16当前执行点：** 新产物已核对0203 ESC0旁路修复；78源码/114 marker及ABI608
-镜像回读通过。只启动`boot-16k-0121a16-abi608-panel-retained.img`，停留约一分钟导日志，
-先不按息屏；确认后续BYTE/PCLK准入、MDSS发布与接管后再安排亮度/OFFON。
-combined/supply继续暂停；旧0121a15不重测。见[0121a16镜像与步骤](PANEL-D1-0121A16.md)。
-以下0121a14/15记录为历史，不表示新修复已实机通过。
+**0121a17当前执行点：** 已核对0204 ACV metadata诊断：78源码字节一致、114 source/154
+binary markers及ABI608镜像回读通过。只启动`boot-16k-0121a17-abi608-panel-retained.img`，
+停留约一分钟导日志，目标取ACV具体gate/字段；这不是ACV修复版，仍可能显示静帧。
+无需息屏/插拔/长测；identity不重测，combined/supply继续暂停。
+见[0121a17镜像与步骤](PANEL-D1-0121A17.md)。以下旧执行点按历史保留，以本段及NOTES为准。
 
 0121a14已下载并核对0201补丁、SHA及实际产物，本轮ABI修正只涉及loader和本地打包，
 可复用该内核，无需push/云编译。未来内核仍需核对相应marker，不能拿不含0201的旧kernel只改参数。

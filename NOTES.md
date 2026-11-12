@@ -1,5 +1,23 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a17 verified; ACV diagnostic boot ready)
+
+**CURRENT：0121a17实际源码/内核已核对0204并打包，待实机ACV具体gate与字段。**
+78源码字节一致、114 CI source/154 binary markers通过，内容匹配61402a7；
+未提供build log/run ID，不冒称已核对CI提交元数据。
+内核a45aaac92b616d3b1a15c4d78819e782e951429d6f8b0748f49d8ef34f6ef76b，17723768bytes，ARM64 subtype0，包内SHA一致。
+ABI608固件仍blob27e7a1d1...18ea480；retained605参数/ADT与0121a16完全一致。
+四档boot header/firmware/FAT payload回读通过，旧镜像/基线保留；只交付retained。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a17-abi608-panel-retained.img**
+SHA=ef48f926cba46d7f6e6ec93b5668dc73f21e9f46a8a3f9cf1bd65c34802ae656，35545088bytes。
+启动停留约一分钟导sweetlog-0121a17-abi608-panel-retained.bin；USB流可另存live同名txt。
+只取SWEET RPMH BCM name=ACV gate/原始元数据，诊断版可能仍静帧，不是ACV修复；
+不重复息屏/亮度/USB插拔或长测；identity不重测，combined/supply暂停。若panic取寄存器。
+拿到字段再修，不能猜key/零unit/放宽aux或绕过managed准入。ESC0及七路boot时钟上轮已通过。
+本轮无驱动/固件/CI改动；未push/触发CI/操作设备。详见docs/PANEL-D1-0121A17.md；
+证据scratch/artifact-0121a17/；以下NEXT为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a16 clocks PASS; ACV metadata blocked, 0204 diagnostics ready)
 
 **CURRENT：已定位本轮静帧到managedPreflight的BCM5=ACV metadata；不是整核死锁。**
