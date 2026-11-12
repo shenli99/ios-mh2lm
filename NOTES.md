@@ -1,5 +1,28 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0211 timeout evidence and root cause review ready)
+
+**CURRENT：0211代码/专项/实现和归因文档已提交`7d34942`，本地验证完成，待用户push云编译。**
+a23首错仍是branch7 clock token2 Timeout；未Held、未display TCS/新DMA，具体原因仍未知。
+0211只改实际MDSS.cpp/Clock.inc：每次retain/release清诊断缓存；记录原CBCR/parent和实际RMW before/want/时间。
+两个原超时出口各输出TIMEOUT/WRITE/SAMPLE三条ERROR，区分overall/branch-wait、now/deadline/late、
+valid/current/样本分支/enable/OFF及缓存年龄；overall无本次CBCR时current0，不把历史值当当前。
+logger只读软件，不加MMIO/provider/timer；字段不参与控制。原10ms/200ms/100us、ready/timeout顺序和失败保票不变。
+新专项14场景ASan/UBSan通过，与0210完整MMIO轨迹、结果、所有权、timer状态/模拟时间完全一致。
+另12套显示/NoC/RSC/生命周期回归通过，共13套；实际ARM64 MDSS前后对象编译通过，warnings1547→1549，
+新增2条unsafe-buffer-usage未屏蔽、无新增格式告警；0185–0211严格累计apply无offset/fuzz，78源码字节比较，114原CI markers通过。
+matrix加三新binary marker，bash语法/实际旧a23拒绝通过，未生成boot。patch SHA=be780786c6bb91b6003fb06978297c81d76376fa651f9c01a1b954bc6f479b47。
+**NEXT：用户自行push/云编译，下载新kernel/buildtree后核对0211，沿原ABI608/ADT/605字节参数打retained。**
+只启动约90秒取完整USB或持久日志，区分enable未读回/OFF未清/overall期限与晚回调。不是硬件修复版，不能宣称已通过。
+Held/mask381后再沿NoC wrapper/solver/TCS追首错或新DMA；不延长期限/假ACK/回退ABL，不盲改硬件。
+完整接管前亮度/OFFON/长测/反复USB/combined/supply暂停，旧a23/identity不重测。无新镜像可刷。
+用户要求归因已写docs/PANEL-BRINGUP-ROOT-CAUSES.md：ABI错位/HFS溢出、XO旁路、ACV开关模型、触摸worker时序、
+apps完成IRQ、RSC voted/父权限与当前未知Timeout；区分已确认/实机越过/连锁结果/旧bug，承认诊断粒度不足增加轮次。
+详见docs/PANEL-CLOCK-TIMEOUT-DIAGNOSTICS.md；底稿scratch/framebuffer-0211/各JSON/编译测试和拒旧日志。
+未改CircleCI/固件/ADT/boot args/apps RPMh IRQ/USB/按键/触摸/电池/mux，未push/触发CI/操作设备。
+CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。以下NEXT为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a23 branch7 completion timeout)
 
 **CURRENT：a23屏幕静帧，已分析日志；a22准入拒绝已越过，branch7开启等待超时，尚未Held。**

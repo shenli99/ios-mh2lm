@@ -1,5 +1,15 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
+**当前执行点：0211已提交 `7d34942`，待用户push云编译。** a23首错仍是RSC branch7等待Timeout，
+具体enable读回/CLK_OFF/整体期限原因未定；本轮只补超时出口、写入及已有样本/时间三条ERROR，
+保留原硬件事务、完成条件、10ms/200ms期限和失败处理。14场景与0210基线MMIO/结果/timer一致，
+共13套组件回归、实际ARM64对象及0185–0211严格重放通过；尚未实机，不宣称超时已修。
+新产物核对后沿原ABI608/ADT/605字节参数打retained，启动约90秒取完整日志；旧a23不重测，
+完整接管前其他显示测试继续暂停。CircleCI、固件、USB/按键/触摸/电池/mux未改。
+见[本轮实现/判断标准](PANEL-CLOCK-TIMEOUT-DIAGNOSTICS.md)与[前几轮归因汇总](PANEL-BRINGUP-ROOT-CAUSES.md)。
+以下“仅分析/无需编译”“待实机”条目为各轮历史，当前以本段与NOTES为准。
+
+
 **0121a23实测：** a22的branch-unowned准入拒绝已越过，实际发出branch7 enable；
 随后clock token2 Timeout（原result0xe00002d6），尚无Held/mask381。NoC phase2/clock-token2/
 register-token7/executing0/clock-cursor7/waiting1，未进入display TCS；后续NotReady/HANDOFF冻结为连锁结果。
