@@ -1,5 +1,11 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
+**0121a22产物已核对并打包，待实机：** 78源码匹配0209（a325219），114 source/173 binary markers通过。
+固件ABI608、ADT和605字节retained参数保持0121a21；boot/FAT回读通过。
+本轮只启动retained约90秒取首条CLOCK/NOC gate、CONTEXT和原NoC错误；仍属诊断，未证明修复。
+镜像路径、校验值和USB命令见[0121a22交付](PANEL-D1-0121A22.md)。不需再次云编译；接管前其他显示测试继续暂停。
+
+
 **0209已准备（代码`a325219`，本地通过、未实机）：** 为0121a21的display NoC NotReady补
 RSC clock/lease/parent/branch、RSC layout及wrapper/seq/solver的具体拒绝日志，失败附软件CONTEXT。
 原MMIO读写/顺序/保护/期限不变；新专项29场景+3失败路径与0208完整MMIO轨迹及结果一致，另10套回归/MDSS ARM64对象通过。

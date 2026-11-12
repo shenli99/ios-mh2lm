@@ -1,5 +1,11 @@
 # 0209：display NoC 准入失败诊断
 
+**0121a22产物已核对并打包，待实机：** 78源码匹配0209（a325219），114 source/173 binary markers通过。
+固件ABI608、ADT和605字节retained参数保持0121a21；boot/FAT回读通过。
+本轮只启动retained约90秒取首条CLOCK/NOC gate、CONTEXT和原NoC错误；仍属诊断，未证明修复。
+镜像路径、校验值和USB命令见[0121a22交付](PANEL-D1-0121A22.md)。不需再次云编译；接管前其他显示测试继续暂停。
+
+
 2026-11-12。本地验证完成，尚未云编译或实机。接
 [0121a21实测](PANEL-D1-0121A21.md#实测结果apps-rpmh通过display-noc准入失败)：
 apps RPMh 的10次真实完成IRQ、四LDO/ARC/CN0及core profile2通过；下一步display NoC返回

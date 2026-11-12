@@ -1,5 +1,21 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a22 NoC diagnostic retained boot ready)
+
+**CURRENT：0121a22产物/源码/镜像回读通过，0209已在新kernel内，待实机。**
+78源码与0209验证树字节相同，对应a325219；相比a21仅MDSS.cpp/Clock.inc/NoC.inc变化。
+114原CI source/173 binary markers通过，新增NOC ADMIT/CONTEXT在内；无CI run ID/完整build log。
+内核17740872bytes/ARM64 subtype0，自带SHA匹配，SHA=6b085d4a741ec0f2530bcb815df426333138f1b4fef6e547f820cf03a299fab9。
+ABI608固件/BootShim/append DTB/各档ADT及参数保持a21；retained605字节，INTID37扩展保留。
+四档boot/FAT payload回读通过，只交付retained。诊断用途，未修复NotReady/冻结，未实机。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a22-abi608-panel-retained.img**
+镜像35545088bytes，SHA=5d3ccc77ef6dd4b1ae87e45eda7354ac0e0c0a73c52b385607522b6df074ca3d。
+等约90秒导live-0121a22-abi608-panel-retained.txt或同名sweetlog bin，取首条CLOCK/NOC gate→CONTEXT→NoC错误。
+即使静帧也可取USB；panic记PC/LR/FAR/ESR。接管前亮度/OFFON/长测/反复USB/combined/supply暂停，a21/identity不重测。
+详见docs/PANEL-D1-0121A22.md；底稿scratch/artifact-0121a22/。本轮仅核对打包文档，无需再次编译。
+未改驱动/固件/CI，未push/触发CI/操作设备；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。以下NEXT为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0209 NoC admission diagnostics ready)
 
 **CURRENT：0209代码/测试/实现文档已本地提交`a325219`，待用户push云编译，未实机。**
