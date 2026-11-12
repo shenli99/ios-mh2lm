@@ -1,5 +1,12 @@
 # PD3：按 ABL 选择的完整命令与保留供电的 reset 恢复（0195）
 
+**2026-11-12实机更新：** `sweetlog-0121a14-identity-slot-control.bin`第85行已取得
+`SWEET PANEL: ABL selection source=2 profile=4`，对应
+`dsi_r66456_tianmamd_pv_1080_2340_cmd_display`。本机ABL选择与Mu→DarwinBoot→ADT→XNU
+校验链已实机成功；不是物理DDIC读回。测试保留power1/IRQ2/vsync1/own2，尚未执行完整
+PV厂商表/reset或供电撤票，E7/E8仍缺。原metadata-off档仍有NULL写，当前查显示模式差异。
+详情见[0121a14实测与对照](PANEL-D1-0121A14.md)。以下为0195及后续实现的历史记录。
+
 **0197后续增量（本地通过，未实机）：** 新增mode4，保留全部票，实际关闭并重建host/PHY/PLL；
 clock状态另报物理暂停，FB核对关闭/重建证据。原0/1/2/3范围保留；未实现rail-off。
 详见[硬件关闭及恢复、架构和边界](PANEL-LINK-POWER-D1.md)。以下按原阶段范围保留。
@@ -135,7 +142,8 @@ Mu mh2平台实际消费的DarwinBoot模块编译链接成功（不是完整FD�
 
 ## 仍待完成
 
-E1本机live选择、E7实际reset后触摸恢复、E8共享供电/偏压撤销都未硬件验收。
+0195阶段E1/E7/E8均未验收；最新0121a14已取得ABL的E1选择证据，E7实际reset后触摸恢复、
+E8共享供电/偏压撤销仍未硬件验收。
 本批仅保留所有供电的DDIC恢复，不能关闭上述门槛；reset成功也不证明真实断电恢复。
 PD3完整反向释放仍缺，PD4冷NoC/MDP/host/PHY状态失效后的独立重建、ABL framebuffer/console/panic退出、
 PD5完整IOPM与停机收口仍在后续。A单缓冲/30Hz CPU复制不变；旧滑动退化与BUG003未宣称修复。

@@ -1,5 +1,28 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, live ABL identity PASS profile4)
+
+**CURRENT：identity-slot-control进系统，持久日志确认source2/profile4，下一步只测own0。**
+logs/sweetlog-0121a14-identity-slot-control.bin SHA=97217777a6fccefc2718323b1010acd73ae2ea044280544a5f74f86b5c1b3077；
+total253260/flush12。第85行真实ABL source2/profile4→PV allowlist label
+ dsi_r66456_tianmamd_pv_1080_2340_cmd_display。不是DDIC读回，E1选择交接已实机，E7/E8仍缺。
+86行MDSS、96行RPMh、392行原参数吻合、685行SpringBoard、802–803行own A接管，
+1组off/on rc0+owned resume，5条touch，无panic/[ERROR]。3scanout临时warning、3USB warning、
+2旧HFS clonefile -34；关机请求后有两条signal reason分配失败，不能据此推断OOM/HFS根因。
+新固件+身份在power1/IRQ2/vsync1/own2下成功；与失败fix身份档ADT完全相同。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a14-identity-own0-control.img**
+SHA=5263be89f8c7fc263aeb328f8f7af9b714fa965f64757679df401b8e9ae9abc3。
+仅TOML sweetfbown2→0，其他全部参数/内核/固件/ADT不变；power1/IRQ2/vsync1保留。
+own0跳过F4池及handoff，临时用ABL buffer定位；不是放弃完整接管目标。实际start准入合法，
+managed/lifecycle仍关闭。原镜像保留；header/ramdisk/固件/FAT全量回读仅TOML单参数不同。
+只确认能否进系统，成功导sweetlog-0121a14-identity-own0-control.bin；不需附加操作。
+若panic记录寄存器，查F4分配/seed/handoff/时序；若成功再拆其余显示开关组合。
+不能将关联性当源码根因，仍未修复原NULL写；retained/combined/supply继续暂停。
+无需push/编译；无新驱动/内核修复、未操作设备/推送/触发CI，CircleCI未改。
+证据scratch/artifact-0121a14/{identity-slot-control-persistent.txt,identity-slot-control-log-analysis.json,
+make-own0-control.py,identity-own0-control-verification.json,identity-own0-control.unixnu.toml}。
+文档/PD0 E1/完整计划/profile/boot-support入口已同步；以下NEXT均为历史。
+
 ## Agent handoff / active work (2026-11-12, firmware-control PASS; slot-only next)
 
 **CURRENT：用户确认firmware-control进系统，持久日志支持；下一步只测identity-slot-control。**

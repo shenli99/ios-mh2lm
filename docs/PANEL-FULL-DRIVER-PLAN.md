@@ -1,11 +1,11 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
-**0121a14产物进展（2026-11-12）：** 已取得77c7631/0201的云端链接内核，78份源码与
-本地verify逐字节一致，114 CI marker及7个新增关键方法的最终内核定义通过。
-四档identity/retained/combined/supply已打包并回读，使用新Mu固件，同kernel/ADT，无重复参数。
-**当前先测panel-identity，等待live身份与正常启动日志，尚无实机结果。**
-不再需要为0201重复push/编译；后档在本档日志通过后逐级测试。详见
-[本轮产物、路径、检查和测试步骤](PANEL-D1-0121A14.md)。以下0201“待云编译”按历史阶段保留。
+**0121a14当前进展（2026-11-12）：** identity-slot-control成功进入系统，持久日志第85行
+确认`source=2 profile=4`，即ABL选择R66456 Tianma PV；并非物理DDIC读回。
+MDSS/RPMh、SpringBoard、自有缓冲及off/on恢复成功，未采集到panic/ERROR；NULL写根因仍未定。
+**下一步只测`0121a14-identity-own0-control`**：仅将sweetfbown=2改0，保留power1/IRQ2/vsync1。
+内核/固件/ADT相同，验证关闭自有缓冲路径与原panic的关联；不启reset/供电周期。
+无需云编译，retained/combined/supply仍暂停。详情见[0121a14排查记录](PANEL-D1-0121A14.md)。
 
 **0201当前增量（2026-11-12，本地通过，未实机）：** 统一协调器新增显式
 `sweetpanellifecycle=6`：完整OFF→reset实际低保持→原mode5 DATA/link停驻→VPNL/VDDI

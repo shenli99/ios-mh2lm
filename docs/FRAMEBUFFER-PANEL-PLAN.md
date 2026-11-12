@@ -1,11 +1,11 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**0121a14当前进展（2026-11-12）：** 用户确认firmware-control进系统；持久日志核对
-MDSS/RPMh、SpringBoard、自有缓冲接管及两次off/on成功，无panic或ERROR。
-新固件在成功配置下能启动；该档无身份slot，尚未执行HOB/FDT身份读取，不能据此排除身份路径。
-**下一步只测`0121a14-identity-slot-control`**：仅增加96-byte身份slot，固件/内核/全部参数保留。
-与失败minimal身份档ADT完全一致，但保留已成功的power1/IRQ2/vsync1/own2；等待本档结果。
-暂不进入reset/供电档。无需云编译；详情见[0121a14排查记录](PANEL-D1-0121A14.md)。
+**0121a14当前进展（2026-11-12）：** identity-slot-control成功进入系统，持久日志第85行
+确认`source=2 profile=4`，即ABL选择R66456 Tianma PV；并非物理DDIC读回。
+MDSS/RPMh、SpringBoard、自有缓冲及off/on恢复成功，未采集到panic/ERROR；NULL写根因仍未定。
+**下一步只测`0121a14-identity-own0-control`**：仅将sweetfbown=2改0，保留power1/IRQ2/vsync1。
+内核/固件/ADT相同，验证关闭自有缓冲路径与原panic的关联；不启reset/供电周期。
+无需云编译，retained/combined/supply仍暂停。详情见[0121a14排查记录](PANEL-D1-0121A14.md)。
 
 **0201当前增量（2026-11-12，本地通过，未实机）：** 统一协调器新增显式
 `sweetpanellifecycle=6`：完整OFF→reset实际低保持→原mode5 DATA/link停驻→VPNL/VDDI

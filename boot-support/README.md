@@ -57,5 +57,6 @@ bit mutation is checked. Source copies in this patch and `SweetPanelIdentity.h`
 are checked for byte equality by `test-mh2lm-panel-handoff.py`.
 
 中文记录、架构与后续边界见
-[PD3供电生命周期与四档验收](../docs/PANEL-SUPPLY-LIFECYCLE-D1.md)。本机仍未读取到live label；
-不猜PV，不启动Android，不试发未知DDIC读命令，不撤共享供电。
+[PD3供电生命周期与四档验收](../docs/PANEL-SUPPLY-LIFECYCLE-D1.md)。0121a14的identity-slot-control
+已实测取得source2/profile4，对应ABL选中的PV label，详见
+[实测日志与启动对照](../docs/PANEL-D1-0121A14.md)；不是物理DDIC读回，完整reset/供电周期仍待验收。

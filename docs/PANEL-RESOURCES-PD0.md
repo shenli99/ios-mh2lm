@@ -1,5 +1,14 @@
 # PD0：完整显示/面板驱动的资源、接口与实施依赖
 
+**0121a14当前进展（2026-11-12）：** identity-slot-control成功进入系统，持久日志第85行
+确认`source=2 profile=4`，即ABL选择R66456 Tianma PV；并非物理DDIC读回。
+MDSS/RPMh、SpringBoard、自有缓冲及off/on恢复成功，未采集到panic/ERROR；NULL写根因仍未定。
+**下一步只测`0121a14-identity-own0-control`**：仅将sweetfbown=2改0，保留power1/IRQ2/vsync1。
+内核/固件/ADT相同，验证关闭自有缓冲路径与原panic的关联；不启reset/供电周期。
+无需云编译，retained/combined/supply仍暂停。详情见[0121a14排查记录](PANEL-D1-0121A14.md)。
+
+**以下为各实现阶段的历史范围，当前执行点以上段及NOTES为准。**
+
 **0201当前增量（2026-11-12，本地通过，未实机）：** 统一协调器新增显式
 `sweetpanellifecycle=6`：完整OFF→reset实际低保持→原mode5 DATA/link停驻→VPNL/VDDI
 逆序撤本panel票；ON先active-low→VDDI ACK+20ms→VPNL ACK+5ms，再恢复DATA/link/clock/
@@ -309,7 +318,7 @@ timeout当完成，也不能关闭其他consumer电源或翻回ABL来伪装成�
 
 | 编号 | 尚缺证据 | 影响阶段 | 获取方式/当前决定 |
 |---|---|---|---|
-| E1 | 实际panel/revision及对应vendor表 | PD3完整命令写入 | 优先从已有ABL/UEFI传递的选择标识或保存的原机日志取证；当前限定搜索95份logs/evidence文本未找到`msm_drm.dsi_display0`。不要求重启Android，不主动试发未知DDIC读命令 |
+| E1 | ABL实际选择profile4/PV已取得；非DDIC读回 | PD3完整命令写入 | 0121a14 identity-slot-control持久日志第85行source2/profile4，允许label为`dsi_r66456_tianmamd_pv_1080_2340_cmd_display`。身份交接/校验已实机；完整PV厂商命令/reset及供电周期仍未验收。见PANEL-D1-0121A14.md |
 | E2 | A新DMA传输、画面及唤醒已留证；B传输仍缺 | F4/PD1 | 0121a12已取得A接管/新传输/ON地址证据；0121a13再验证，用户反馈滑动改善、常用操作无新增异常。B未提交，CB2.M0/raw FSR0x400保留，不泛化为任意DMA范围可达；不依赖E1确认 |
 | E3 | autorefresh下提交、锁存与旧读者退出的对应事件 | F4后续翻页 | 0182有界暂停TE/auto，两次空闲采样，清旧PP0 DONE后提交；0121a12 frame130→131已观察新DONE/flush0/RD_PTR推进。不授予旧buffer释放权，提交池保留到重启；通用完成/撤销与A/B复用协议仍缺 |
 | E4 | 本机PHY/PLL版本、lane及频率/ready状态（DSI host版本已知） | PD2写link配置 | 0121a12已有DSI0 HW_VERSION=20030000；0183发送前复核。0184 v1 ABI已加入PHY/PLL单一受保护窗口，尚未取得clock，不读取版本或越界访问 |
