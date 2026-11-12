@@ -1,5 +1,11 @@
 # D1 本地显示时钟引用与 GDSC 准入（0185）
 
+**0121a23产物/镜像已核对，待实机：** 78源码匹配0210（7d35162），114 source/177 binary markers通过。
+ABI608固件、ADT和605字节retained参数保持a22；boot/FAT回读通过。本轮只启动retained约90秒，
+验证RSC clock Held/mask0x381，取NoC后续首错或新DMA证据；尚未证明完整接管成功。
+镜像路径和取日志命令见[0121a23交付](PANEL-D1-0121A23.md)。不需再次云编译，其他显示测试继续暂停。
+
+
 **0210已实现（代码`7d35162`，本地通过、待实机）：** RSC分支表区分voted/halt，
 NON_GDSC_AHB取得自身enable票，撤回仅确认自身票清除+异步至少10us settle，不强求共享aggregate OFF。
 两RSC AHB分支只有实际core2/PLL1 AHB和typed ARC/CN0成功凭据成立才获新开启权限；不普遍放行PLL/PHY。

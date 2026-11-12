@@ -1,5 +1,11 @@
 # 0210：RSC 分支自身投票与受控 AHB 父时钟
 
+**0121a23产物/镜像已核对，待实机：** 78源码匹配0210（7d35162），114 source/177 binary markers通过。
+ABI608固件、ADT和605字节retained参数保持a22；boot/FAT回读通过。本轮只启动retained约90秒，
+验证RSC clock Held/mask0x381，取NoC后续首错或新DMA证据；尚未证明完整接管成功。
+镜像路径和取日志命令见[0121a23交付](PANEL-D1-0121A23.md)。不需再次云编译，其他显示测试继续暂停。
+
+
 2026-11-12。接 [0121a22 实测](PANEL-D1-0121A22.md#实测首错定位到-rsc-non_gdsc_ahb-分支准入)。
 针对 `branch-unowned branch=7 cbcr=0 source=4 link=0`：原分支控制只允许从已停止的XO父源恢复，
 没有对接 core profile2 已建立的 PLL1/75MHz AHB；同时把 NON_GDSC_AHB 的共享投票状态当作独占 halt 状态。

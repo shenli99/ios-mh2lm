@@ -1,5 +1,22 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a23 RSC vote retained boot ready)
+
+**CURRENT：0121a23源码/内核/镜像核对通过，0210修复在新kernel内，待实机。**
+78源码字节匹配0210验证树，内容对应7d35162；比a22仅MDSS.cpp/Clock.inc/NoC.inc变化。
+114原CI source/177 binary markers通过，含voted branch/clock-owned-parent/worker-enable/register-token。
+内核17724560bytes/ARM64 subtype0，自带SHA匹配，SHA=91d9fd81a3f6a9e3c05a0035923e7d98cea633253e88db66ea2db364e0382342。
+无CI run ID/完整build log，不声称核对云端提交元数据。固件ABI608/BootShim/append DTB/各档ADT/参数保持a22。
+retained605/607字节，RPMh INTID37扩展保留；四档boot/FAT payload回读通过，只交付retained。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a23-abi608-panel-retained.img**
+镜像35545088bytes，SHA=2b93b4fe42d345675794e12c079e86753a4f05a8f693963741de70de41ce7e5f。
+等约90秒取live-0121a23-abi608-panel-retained.txt或同名sweetlog bin，观察branch7请求→CLOCK Held/mask381→NoC首错或新DMA。
+请求INFO不是完成证明；wrapper/solver/其他branch/TCS仍未实测，不宣称完整接管完成；静帧USB可用就取日志。
+panic记PC/LR/FAR/ESR。完整接管前亮度/OFFON/长测/反复USB/combined/supply暂停，旧a22/identity不重测。
+详见docs/PANEL-D1-0121A23.md，底稿scratch/artifact-0121a23/。本轮仅核对打包文档，无需重新编译。
+未改驱动/固件/CI，未push/触发CI/操作设备；CircleCI blob保持da0b6c0947a66f03491b3a9023590b49665292df。以下NEXT历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0210 RSC clock votes ready)
 
 **CURRENT：0210代码/专项/实现文档已提交`7d35162`，待用户push云编译，未实机。**
