@@ -98,12 +98,11 @@ tools/mk-mh2lm-event-matrix.sh W/logs/xnu-kernel-<LABEL>.gz <LABEL> --battery-ba
 
 ### 4.1 0201完整固件与面板生命周期四档
 
-**0121a15当前结论：** 诊断确认ESC0的XO整数HID=0旁路被误拒绝；GCC/GDSC及前三
-分支均通过。0203已按LG RCG2规则允许旁路0和div1编码1，保留所有其它准入、原始快照
-和漂移检查，不重写时钟。需用户push/云编译后测新retained；旧0121a15不重测，
-combined/supply继续暂停。BYTE/PCLK与完整生命周期尚未验证。
-见[读值、源码依据与修复验证](PANEL-D1-0121A15.md#实测结果esc0-的合法-xo-旁路被错误拒绝)。
-以下0121a14失败记录保留。
+**0121a16当前执行点：** 新产物已核对0203 ESC0旁路修复；78源码/114 marker及ABI608
+镜像回读通过。只启动`boot-16k-0121a16-abi608-panel-retained.img`，停留约一分钟导日志，
+先不按息屏；确认后续BYTE/PCLK准入、MDSS发布与接管后再安排亮度/OFFON。
+combined/supply继续暂停；旧0121a15不重测。见[0121a16镜像与步骤](PANEL-D1-0121A16.md)。
+以下0121a14/15记录为历史，不表示新修复已实机通过。
 
 0121a14已下载并核对0201补丁、SHA及实际产物，本轮ABI修正只涉及loader和本地打包，
 可复用该内核，无需push/云编译。未来内核仍需核对相应marker，不能拿不含0201的旧kernel只改参数。

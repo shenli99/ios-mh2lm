@@ -1,5 +1,22 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a16 verified; ESC0-fixed retained boot ready)
+
+**CURRENT：0121a16已核对0203修复并打包，待实机启动/接管日志。**
+源码包最初0字节，用户补下后重新核对通过；78源码字节一致，clockParent含xoConfig>1u，
+114 CI source marker及147二进制marker通过。未提供build log/run ID，不冒称CI提交元数据。
+内核199340fa843564a076f1ccd5e207868d9fe980f8ac35bc67466f048264d2bd67、17723760bytes，ARM64 subtype0，自带SHA一致。
+ABI608固件仍blob27e7a1d1...18ea480；retained605字节参数/ADT与0121a15完全一致。
+四档Android header/firmware/FAT payload回读通过；旧镜像/基线保留，仅retained交付。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a16-abi608-panel-retained.img**
+SHA=00c757f8cebfbc74cb7ca28e47a11fe6ee084d726b62d7534cdf2a0a1d249403，35545088bytes。
+停留约一分钟导sweetlog-0121a16-abi608-panel-retained.bin，先不按息屏/不做USB插拔或长测。
+确认ESC0后BYTE/PCLK、MDSS发布及managed自有扫描接管；日志通过后同一镜像再安排亮度/OFFON。
+若画面静帧先导持久日志；若panic记录寄存器。identity不重测，combined/supply继续暂停。
+新修复尚未实机验收，勿将打包通过当完整panel成功。详见docs/PANEL-D1-0121A16.md。
+底稿scratch/artifact-0121a16/；本轮仅核对/打包/文档，未改驱动/固件/CI、未push/触发CI/操作设备。
+以下NEXT均为历史。
+
 ## Agent handoff / active work (2026-11-12, ESC0 XO bypass bug fixed locally; needs build)
 
 **CURRENT：0121a15诊断已定位并本地修正ESC0合法旁路被拒绝，不称完整驱动已通过。**
