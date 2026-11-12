@@ -1,5 +1,11 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+**0121a21已核对并打包：** 78源码匹配0208（代码190c558）、114 source/171 binary markers及镜像回读通过。
+只启动新ABI608 retained档，等约90秒导完整启动日志，目标INTID37 configured→fresh ACTIVE completion→
+ldoa14 ACK及后续首错/新DMA。固件/605字节参数同0121a20，hardware ADT新增显式RPMh IRQ扩展，identity不变。
+接管前不测亮度/OFFON/长测/反复USB，combined/supply仍暂停；见[镜像路径与步骤](PANEL-D1-0121A21.md)。
+以下0208“待push/待云编译”为历史，实机仍待验收；CMD_STATUS delta诊断示例未接入本轮生产内核。
+
 **0208当前执行点（代码`190c558`，本地通过、未实机）：** D1首次资源获取的RPMh完成路径
 已改为真实INTID37→软件event/workloop，保留fresh/期限和唯一writer。16套回归及ARM64对象通过。
 现在需要用户push云编译；核对新产物后用带IRQ扩展的新ADT重打ABI608 retained，先取启动日志

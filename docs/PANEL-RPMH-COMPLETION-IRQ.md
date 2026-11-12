@@ -1,5 +1,11 @@
 # RPMh ACTIVE 完成中断：0208
 
+**0121a21已核对并打包：** 78源码匹配0208（代码190c558）、114 source/171 binary markers及镜像回读通过。
+只启动新ABI608 retained档，等约90秒导完整启动日志，目标INTID37 configured→fresh ACTIVE completion→
+ldoa14 ACK及后续首错/新DMA。固件/605字节参数同0121a20，hardware ADT新增显式RPMh IRQ扩展，identity不变。
+接管前不测亮度/OFFON/长测/反复USB，combined/supply仍暂停；见[镜像路径与步骤](PANEL-D1-0121A21.md)。
+以下0208“待push/待云编译”为历史，实机仍待验收；CMD_STATUS delta诊断示例未接入本轮生产内核。
+
 2026-11-12。本地实现及验证完成，尚未云编译或实机验收。
 
 提交顺序复核、CMD_STATUS delta的证据边界、IRQ_ENABLE/doorbell诊断代码见

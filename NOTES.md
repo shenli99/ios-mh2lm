@@ -1,5 +1,24 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a21 completion IRQ retained boot ready)
+
+**CURRENT：用户下载0121a21，0208产物/源码/镜像回读通过，待实机。**
+78源码与0208验证树字节一致，内容对应190c558；较a20仅RPMh.h/.cpp/sleh变化，114原CI source/171 binary markers通过。
+无CI run ID/完整build log，不声称核对云端提交元数据。内核17724392bytes/ARM64 subtype0、自带SHA匹配，
+SHA=5ab3343759ba165096b43a0fd3d4697206cfc9d4a112fe9328ff0a68500b25d8。
+四档boot header/FAT kernel+ADT+TOML/firmware通过；ABI608固件27e7a1d1...18ea480及retained605字节参数同a20。
+hardware ADT显式新增RPMh map3 GIC/irq-abi1/intid37，移除扩展即字节恢复a20；identity ADT不变。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a21-abi608-panel-retained.img**
+镜像35545088bytes，SHA=298c30a8ac6a92e9804d398085711e9241cf415b44fea052258ed887b388006d。
+等约90秒导live-0121a21-abi608-panel-retained.txt或sweetlog同名bin，一份完整启动日志即可。
+目标touch-ready/quiesce/managed→INTID37 configured→fresh ACTIVE completion→ldoa14 ACTIVE ACK及后续首错/新DMA。
+接管前不测亮度/OFFON/长测/反复USB；identity/a20不重测，combined/supply暂停。panic记PC/LR/FAR/ESR。
+CMD_STATUS delta/doorbell示例仅文档，未入生产；本轮不是接IOInterruptController，仍平台GIC callback→软件event/workloop。
+详见docs/PANEL-D1-0121A21.md，RPMh页/架构/两显示计划/总计划已同步。
+证据scratch/artifact-0121a21/两个verify脚本/JSON/packaging.txt。未改驱动/固件/CI，未push/触发CI/操作设备。
+CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。文档本地提交无需重编；以下NEXT均为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0208 RPMh ACTIVE completion IRQ ready)
 
 **补充复核：** 用户要求CMD_STATUS delta/IRQ_ENABLE/doorbell诊断，已核对0208实际路径并提供
