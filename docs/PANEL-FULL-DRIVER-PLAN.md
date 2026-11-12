@@ -1,5 +1,13 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+**0210已实现（代码`7d35162`，本地通过、待实机）：** RSC分支表区分voted/halt，
+NON_GDSC_AHB取得自身enable票，撤回仅确认自身票清除+异步至少10us settle，不强求共享aggregate OFF。
+两RSC AHB分支只有实际core2/PLL1 AHB和typed ARC/CN0成功凭据成立才获新开启权限；不普遍放行PLL/PHY。
+覆盖worker/最终核验/NoC准入及引用、撤回失败/stop；新专项43组场景+另11套回归、ARM64对象/累计补丁重放通过。
+现在需要用户push云编译，新产物核对后打原ABI608 retained；完整接管尚未实机证明。
+详见[实现、验证与下一步](PANEL-RSC-CLOCK-VOTES.md)。以下“仅分析/无需编译”为历史。
+
+
 **0121a22实测已定位首错：** 四LDO/ARC/CN0和core profile2通过，RSC clock在
 `branch-unowned branch=7 cbcr=0 source=4 link=0`拒绝；phase2/clock-token0/executing0，尚未进入display TCS。
 branch7是LG定义的NON_GDSC_AHB/BRANCH_VOTED，原warm通用策略要求关闭态+XO，未对接core已建立的PLL1 AHB父源。

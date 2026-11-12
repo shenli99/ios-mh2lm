@@ -1,5 +1,31 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0210 RSC clock votes ready)
+
+**CURRENT：0210代码/专项/实现文档已提交`7d35162`，待用户push云编译，未实机。**
+修复a22首错branch7：表显式voted/managedAHB；只有NON_GDSC_AHB(+4004)是voted，RSCC_AHB/VSYNC仍halt。
+branch7允许enable0/aggregate ON或OFF后实际取自身票；Held仍要enable读回+OFF清除，保留CBCR其他位。
+只给表声明的两RSC AHB分支新PLL1/source4/CFG40f权限：core2实际coreReady+typed ARC Turbo ACK7/成功/非uncertain/
+启用，当前typed CN0 Complete/成功/非uncertain/至少300M。XO策略及其他PLL/PHY开启限制保持。
+NoC fNoCRegisterToken保存最新已确认CN0 token，pending清旧凭据，不再借用被替换的core CN0 token。
+worker写前、等待、获取完成/NoC使用前复核父配置/票；失败关写/保不确定资源，未加fallback/timeout。
+voted撤回自身enable清除后异步至少10us settle，不要求aggregate OFF；普通halt仍需OFF。
+fClockReleaseMask最终整体复核并在撤回失败保所有权；stop只标Stopped/取消事件，不自动撤票。
+只改MDSS.cpp/Clock.inc/NoC.inc，无新映射或未知MMIO扫描；CONTEXT加register-token软件字段。
+新专项43组ASan/UBSan通过（含exact cbcr0、实际新DMA、DATA/CN0 Off及重新取得、共享/故障/stop）；
+另10套显示/生命周期+0209诊断专项通过，共12套；ARM64 MDSS前后编译通过，warnings1543→1547（4数组提示未屏蔽）。
+0185–0210累计严格apply无offset/fuzz、78源码字节比较、114原CI source marker通过。
+补丁SHA=0de3721f4b89d9c21bfc4556a29eee25205862d04d7d8e1c8b64627dc4788a61。
+matrix新增0209/0210 binary门槛，旧a22 kernel被拒且未产出镜像；bash语法通过。
+**NEXT：用户自行push并云编译，下载新kernel/buildtree后核对0210，沿原ABI608/ADT/605字节参数打retained。**
+只启动等约90秒取完整日志：voted branch7请求→CLOCK Held/mask381→NoC准入/后续首错或新DMA。
+尚未观测的wrapper/solver/TCS仍可能阻塞；本地组件通过不代表实机完整接管，无新boot不可刷旧kernel测新修复。
+OFFON/亮度/长测/反复USB/combined/supply继续暂停，旧a22/identity不重测。
+详见docs/PANEL-RSC-CLOCK-VOTES.md；架构及各计划已同步。底稿scratch/framebuffer-0210/各JSON/编译测试日志。
+未改CircleCI/固件/ADT/boot args/apps RPMh IRQ/USB/按键/触摸/电池/mux；未push/触发CI/操作设备。
+CircleCI blob保持da0b6c0947a66f03491b3a9023590b49665292df。以下NEXT为历史。
+
+
 ## Agent handoff / active work (2026-11-12, 0121a22 RSC branch admission diagnosed)
 
 **CURRENT：a22实测定位到NON_GDSC_AHB branch7准入，尚未修复。**
