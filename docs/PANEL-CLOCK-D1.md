@@ -1,5 +1,9 @@
 # D1 本地显示时钟引用与 GDSC 准入（0185）
 
+**0196后续增量（本地通过，未实机）：** 已接入mode3 managed数据票释放与重新取得，
+保留独立config floor及所有供电/boot/link/core资源；原mode1/2范围保留。
+详见[当前资源事务及边界](PANEL-RESOURCE-PARKING-D1.md)。以下按本文件原阶段范围保留。
+
 **0191后续更新：** 已将 PHY v4.0 / PLL 7nm-v2 与 BYTE/PCLK roots 的真实重建接到
 managed 链的 host 之前，沿原 owner/gate/DSI timer；独立确认停稳、失锁/新锁及更新/运行。
 本地12套检查和arm64对象编译通过，未实机；面板生命周期/整屏冷启动仍未完成。

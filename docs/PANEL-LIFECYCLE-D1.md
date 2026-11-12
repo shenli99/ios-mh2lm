@@ -1,5 +1,9 @@
 # 统一面板生命周期协调器（0194）
 
+**0196后续增量（本地通过，未实机）：** 已接入mode3 managed数据票释放与重新取得，
+保留独立config floor及所有供电/boot/link/core资源；原mode1/2范围保留。
+详见[当前资源事务及边界](PANEL-RESOURCE-PARKING-D1.md)。以下按本文件原阶段范围保留。
+
 **0195补充（本地通过，未实机）：** mode2现已接入完整厂商表、保留供电的sleep/reset恢复及亮度重放；
 引脚增加consumer/token取消。实际Mu/DarwinBoot身份传递、准入和未完成项见
 [PD3当前记录](PANEL-PROFILE-D1.md)。以下0194及更早描述按当时范围保留。

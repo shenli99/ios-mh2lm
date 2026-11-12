@@ -1,5 +1,9 @@
 # D1：显示 NoC 带宽事务与 RSC 所有权（0187）
 
+**0196后续增量（本地通过，未实机）：** 已接入mode3 managed数据票释放与重新取得，
+保留独立config floor及所有供电/boot/link/core资源；原mode1/2范围保留。
+详见[当前资源事务及边界](PANEL-RESOURCE-PARKING-D1.md)。以下按本文件原阶段范围保留。
+
 0188补充：显式managed模式已有实际扫描接管调用这些事务，见[资源生命周期首段](PANEL-MANAGED-D1.md)。
 下文按0187范围保留；单开resource/clock/NoC ABI仍不自动投票，managed1才在接管暂停后请求。
 

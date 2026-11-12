@@ -1,5 +1,49 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, latest)
+
+**CURRENT：0196协调器数据资源票反向释放/重新取得已本地通过，未实机；不等于物理断电或完整驱动。**
+父提交c675d46；XNU补丁0196-mh2lm-panel-resource-parking.patch SHA256=
+6f5e5026aa3ea655ac927ae2010452b22f4db287d615b5258b604bd382f8d32c，8份源码，base逐字节等0195verify，严格应用无offset/fuzz，114原CI marker保留。
+新增显式sweetpanellifecycle=3，默认0和原1/2语义保留；要求原full模式全部身份/pins/touch/
+managed等依赖及core2，无猜PV/静默mode2回退。start/match无硬件请求，温态takeover不变。
+实际OFF：原touch QUIESCED/TEauto停流/IRQDMA静止/完整OFF后，先config-only NoC Held，
+再managed DSI0 clock Released，再managed DATA NoC Released。旧token仅在明确Released后清。
+实际ON：同代fence与保留资源→DATA NoC新token Held→managed clock新token Held→
+原pins activate/reset/完整ON/typed最新亮度/fresh像素/实际TCM恢复。每步失败停止，无回退/自动恢复。
+新增独立CN0 300MB/s config floor复用同token，保留RSC/boot clock及LDO/ARC/core/host/PHY；
+避免最后DATA票释放时同consumer CN0被降零。NoC typed接口允许所有DATA值为零的config-only票，
+拒绝不完整路径/平均值超峰值；聚合尊重其它active票，释放本票不保证DATA BCM为零。
+boot lease仍持DSI0 branches，所以managed clock票释放通常不产生物理关钟，未宣称节电。
+managed状态新增ParkConfig/ParkClock/ParkNoC/Parked/RestoreNoC/RestoreClock；沿原MDSS
+唯一gate/MMIO owner和timer，复用typed资源接口，无新线程/映射/全局实例桥/空闲轮询。
+资源段4s，原总16s及NoC1.5s/clock200ms期限保留。协调器及clock/NoC子timer写前都复核
+同代participant/touch fence、boot分支/root/core/PHY、GIC/peripheral、TEauto、DSI/CTL/line/
+自有A和期限；子timer早于父timer也不能继续漂移后的写入。非资源阶段保持原participants检查。
+FB mode3检查SweetPanelDataParking能力及resourcesParked/resourcesRestored/retainedPower/
+configHeld/configToken/dataToken/clockToken，与原profile/reset/亮度/pixel/touch证据一起核验。
+失败保留剩余/在途账本和DMA pin。已提交RPMh CN0工作可能随后ACK，不假称取消撤销已提交事务。
+19套本地检查通过：原18+实际资源票联测，18实际源码ASan/UBSan+PythonADT无最终报告。
+四版各4轮完整释放重取/reset唤醒、wire延时/实际C TCM、DATA BCM ACK/新token/floor复用、
+其它active票保留、每资源阶段取消/stop/provider撤回、子timer先运行下的物理漂移/期限、
+OFF及ON丢ACK、token耗尽、FB能力/证据缺失；LSan ptrace限制关闭，另断言对象/映射/通知/
+分配及模拟reboot后DMA pin归零。真实XNU/KDK arm64 MDSS/FB base+final对象编译及符号核实通过；
+MDSS warnings1503→1510，净增7为数组提示（NoC原1处替换2处+资源6处）边界已审；FB1397不变。
+不是整核链接/实机。USB/按键/电池/mux/触摸IRQ策略未改，CircleCI blob仍
+ da0b6c0947a66f03491b3a9023590b49665292df，无push/CI/设备操作/新FD/boot，暂不要求push或刷机。
+**NEXT：继续PD3真实host/PHY shutdown与共享电/偏压E8、PD4冷NoC/MDP/独立重建。**
+LG完整unprepare含host/link/core/PHY关闭及panel post_unprepare，本轮只释放数据票，没有照搬或
+宣称完成该链。不得拿stopLink/stopHost软件取消当硬件off，不盲撤ABL/其它consumer或未知偏压。
+0195实际live profile与E7/E8仍未实测；后续镜像必须纳入boot-support独立DarwinBoot补丁和ADT slot，
+只新XNU配旧UEFI不能得到身份。同核先确认source/profile，再mode2/mode3分档，不为孤立接口单开CI。
+PD3正常rail-off/故障释放、PD4冷MDP/NoC及ABL buffer/console/panic退出、PD5完整IOPM仍未完成。
+A单缓冲/B未提交/30Hz CPU复制保留，旧滑动退化/BUG003未宣称修复；不重测旧USB/BUG002/F3/半小时。
+详见docs/PANEL-RESOURCE-PARKING-D1.md；计划/架构/PD0/协调器/资源/NoC/clock文档已同步。
+底稿scratch/framebuffer-0196/{base,edited,verify,prepare-patch.py,compile.py,native-checks.py,run-tests.py,
+verification.json,base-continuity.json,native-results.json,warning-review.json,tests.json,*compile.txt,*symbols.txt}。
+
+**以下0195按当时范围保留，当前以0196为准。**
+
 ## Agent handoff / active work (2026-11-11, latest)
 
 **CURRENT：0195完整profile命令/保留供电的sleep-reset恢复与实际DarwinBoot身份传递本地通过，未实机；完整驱动未完成。**

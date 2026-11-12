@@ -1,5 +1,17 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+**0196当前增量（2026-11-12，本地通过，未实机）：** 协调器增加显式`sweetpanellifecycle=3`：
+完整OFF后取得独立config-only NoC票，再释放managed clock/DATA NoC票；ON先重新取得新票，
+再执行原reset/完整ON/亮度/fresh像素/触摸恢复。CN0 300MB/s floor、boot/RSC clock、
+LDO/ARC/core/host/PHY继续保留；释放本票不等于物理关钟/断电，也不撤其它active票。
+原0/1/2语义保留，无mode2回退。资源/clock/NoC各推进点重查同代fence及硬件静止/期限，
+FB要求新能力与资源释放/恢复证据。19套本地检查及MDSS/FB真实arm64单文件编译通过，
+严格重放/114个原CI marker通过；不代表整核链接或硬件结果。
+详见[资源票释放与恢复、架构及边界](PANEL-RESOURCE-PARKING-D1.md)。
+PD3物理host/PHY/供电关闭、PD4冷NoC/MDP及独立重建、ABL退出仍缺；共享供电E8未关闭。
+启动侧仍须合入0195新DarwinBoot；本轮无新FD/boot、push/CI/设备操作，CircleCI未改。
+暂不为此单开云编译/测试，继续完整驱动优先。以下0195及更早段落保留当时范围，当前以0196为准。
+
 **0195当前增量（本地通过，未实机）：** 已把四版LG完整ON/OFF表、Sleep In/Out、typed GPIO reset
 和亮度恢复接入原协调器，新增显式`sweetpanellifecycle=2`，保留全部供电/ARC/NoC/clock票。
 原0/1语义不变；2要求经实际Mu→DarwinBoot→ADT链路传递的唯一ABL选择及pins2等依赖，

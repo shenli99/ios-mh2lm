@@ -19,7 +19,8 @@ prelude=prelude.replace('IOReturn beginPanelLifecycle(unsigned,uint64_t*){return
   operations.push_back(op);*token=next;return 0;}''')
 prelude=prelude.replace('IOReturn panelLifecycleStatus(uint64_t,SweetPanelLifecycleStatus*){return kIOReturnUnsupported;}', '''IOReturn panelLifecycleStatus(uint64_t token,SweetPanelLifecycleStatus*v){assert(token==lifecycle.token);*v=lifecycle;return queryLife;}''')
 prelude=prelude.replace('void cancelPanelLifecycle(uint64_t){}','void cancelPanelLifecycle(uint64_t token){cancelled.push_back(token);}')
-prelude=prelude.replace('else if(!strcmp(k,"sweetfbpreserveoff"))','else if(!strcmp(k,"sweetpanellifecycle"))v=1;\n else if(!strcmp(k,"sweetfbpreserveoff"))')
+prelude=prelude.replace('static int serviceArg=1,', 'static int lifecycleArg=1,serviceArg=1,')
+prelude=prelude.replace('else if(!strcmp(k,"sweetfbpreserveoff"))','else if(!strcmp(k,"sweetpanellifecycle"))v=lifecycleArg;\n else if(!strcmp(k,"sweetfbpreserveoff"))')
 helpers=ns['tests'].split('int main(){')[0]
 tests=r'''
 struct Harness{
@@ -82,6 +83,37 @@ int main(){
   if(missing==0)h.b->lifecycle.profile=0;if(missing==1)h.b->lifecycle.resetComplete=false;
   if(missing==2)h.b->lifecycle.brightnessRestored=false;if(missing==3)h.b->lifecycle.sleeping=true;
   h.complete();assert(h.f->fPanelLifecycleFault&&h.f->fPowerOff);}
+
+ // Boot mode3 selects the actual consumer path. Require explicit capability
+ // and both retained/config ownership and data release/reacquire proofs.
+ lifecycleArg=3;
+ {Harness h;assert(h.f->fPanelLifecycleFull&&h.f->fPanelLifecycleDataParking);
+  h.b->cap|=SweetPanelRetainedSleepReset;assert(h.request(true)!=0&&h.b->operations.empty());}
+ {Harness h;h.b->cap|=SweetPanelRetainedSleepReset|SweetPanelDataParking;
+  assert(h.request(true)==0);auto&v=h.b->lifecycle;v.profile=4;v.sleeping=true;
+  v.retainedPower=v.configHeld=v.resourcesParked=true;v.configToken=6;
+  v.phase=SweetPanelComplete;v.result=0;v.touchQuiesced=v.displayDrained=true;h.tick();
+  assert(!h.f->fPanelLifecycleFault&&h.f->fPowerOff&&!h.f->fPanelLifecycleBackend);
+  assert(h.request(false)==0);v.profile=4;v.retainedPower=v.configHeld=v.resourcesRestored=true;
+  v.configToken=6;v.dataToken=7;v.clockToken=8;v.resetComplete=v.brightnessRestored=true;h.complete();
+  assert(!h.f->fPanelLifecycleFault&&!h.f->fPowerOff);
+ }
+ for(unsigned missing=0;missing<9;++missing){Harness h;h.b->cap|=SweetPanelRetainedSleepReset|SweetPanelDataParking;
+  assert(h.request(true)==0);auto&v=h.b->lifecycle;v.profile=4;v.sleeping=true;
+  v.retainedPower=v.configHeld=v.resourcesParked=true;v.configToken=6;
+  v.phase=SweetPanelComplete;v.result=0;v.touchQuiesced=v.displayDrained=true;
+  if(missing<6){
+   if(missing==0)v.retainedPower=false;if(missing==1)v.configHeld=false;
+   if(missing==2)v.configToken=0;if(missing==3)v.resourcesParked=false;
+   if(missing==4)v.resourcesHeld=true;if(missing==5)v.clockToken=1;
+   h.tick();assert(h.f->fPanelLifecycleFault&&h.f->fPowerOff);continue;
+  }
+  h.tick();assert(h.request(false)==0);v.profile=4;v.retainedPower=v.configHeld=v.resourcesRestored=true;
+  v.configToken=6;v.dataToken=7;v.clockToken=8;v.resetComplete=v.brightnessRestored=true;
+  if(missing==6)v.resourcesRestored=false;if(missing==7)v.dataToken=0;if(missing==8)v.resourcesParked=true;
+  h.complete();assert(h.f->fPanelLifecycleFault&&h.f->fPowerOff);
+ }
+ lifecycleArg=1;
  puts("PASS: actual FB asynchronous lifecycle requests/status, pending presentation freeze, rapid OFF/ON coalescing, no completion from frame mailbox, retained provider/token, explicit fault/withdrawal/stop, no legacy fallback and zero objects/allocations/buffers");
 }
 '''
