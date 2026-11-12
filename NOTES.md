@@ -2,6 +2,49 @@
 
 ## Agent handoff / active work (2026-11-12, latest)
 
+**CURRENT：0200供电事务的实时Pins/Touch依赖校验已本地通过，尚未接入协调器撤票/恢复，未实机。**
+父提交2f06e93；0200-mh2lm-panel-supply-fences.patch SHA256=
+4fcde091139853f08e405c1c0dcf3eec1ebbf6021fa8d04d85b8f1c6051fa6f1，四份Pins/RPMh源码。
+base逐字节连续于0199verify；严格应用无offset/fuzz，114原CI source marker保留。
+Pins新增typed copyLowStatus，在自己的gate读取CTL/IRQ/latch及独立input，仅接受成功Parked或
+自己Parked后Active-low的同client/token，不能用缓存成功冒充当前reset低保持。旧token/pending/
+high/inactive/stop/poison拒绝；已成功低保持后发现漂移则Failed/uncertain/poison，无引脚写入/回滚。
+RPMh新增SweetPanelSupplyFence/requestPanelVote/cancelPanelVote，只接受VDDI/VPNL，沿原唯一
+TCS owner、gate/timer、聚合及fresh ACK。复制本请求的leaf refs和ID/token，不保存caller栈；
+admission、每timer入口、逐TCS写、trigger、最终cleanup完成前重查Pins实时低和真实TCM quiesced。
+请求成功/失败/no-op/拒绝/取消/stop释放两份依赖引用；取消仅本consumer/token panel请求，
+不取消普通LDO或其它请求。新请求编程前丢fence不标硬件uncertain，开始写/在途/trigger后保留
+部分TCS、旧ACK票并报uncertain，原RPMh stop保守语义保留。已trigger不能撤回，不补电/复位/重试。
+锁序consumer→RPMh→Pins/Touch，leaf无反向调用。不新增provider/workloop/线程/MMIO/全局实例桥。
+这是逐写实时校验，不是跨gate硬件原子锁，不能阻止最后一次读后硬件立刻漂移；后续协调器
+失败收口需先同步cancelPanelVote，再撤销Pins/Touch token。父timer取消不等于子事务已停止。
+普通requestVote/ARC/CN0未改，协调器尚未调用新接口；mode0–5/MDSS/FB/TouchComm源码逐字节未变，
+没有新增档位或正常VDDI/VPNL撤票时序。0199共享L3/L5最后disable保护保留，不把接口作为供电许可。
+22套检查通过：21实际源码ASan/UBSan+PythonADT，无最终报告。新检查覆盖实际Pins/RPMh/TCM，
+成功Parked/Active-low、缓存与实际输入分离、四在途阶段×12子先于父故障、单timer写间漂移、
+trigger和最后cleanup边界、取消/stop/ACK丢失/期限、begin内部拒绝/no-op/其它consumer保电/
+并发owner拒绝/refs释放，旧0–5资源/link/FB回归通过。LSan ptrace环境禁用，另查对象/映射/
+通知/分配和模拟reboot DMA pin归零。真实XNU/KDK arm64 RPMh/Pins/MDSS/FB base+final八对象及
+新方法符号通过，非整核链接或硬件验证。RPMh warnings1325→1326仅新增1处fClients[i]数组提示，
+位于i<8匹配循环，已审无抑制；Pins1171/MDSS1527/FB1397不变。
+**NEXT：将panel两票接回原统一协调器：完整OFF→reset低保持→原mode5 link/DATA停驻→
+VPNL/VDDI逆序撤本票；ON保持低→VDDI ACK+20ms→VPNL ACK→原DATA/link/clock/host/reset/
+ON/brightness/pixel/touch。补LG前后等待、部分释放账本、子取消顺序、FB联合证据，保L3/L5。**
+上面序列仍待实现，不能宣称0200已完成rail-off。E7触摸/E8物理共享偏压/本机live profile未实机，
+真实rail-off/故障释放、PD4冷NoC/MDP、ABL buffer/console/panic退出与完整IOPM仍缺。
+0195实际Mu→DarwinBoot身份/ADT slot仍待合入完整FD，仅新XNU配旧UEFI不能提供live身份。
+无新FD/boot、push/CI/设备操作，暂不要求单开云编译/刷机；CircleCI blob保持
+ da0b6c0947a66f03491b3a9023590b49665292df。USB/按键/电池/mux/触摸IRQ策略未改。
+不启动Android、不扫未知PMIC、不撤其它consumer/ABL票；完整驱动先于零拷贝，A单缓冲/30Hz保留。
+新文档docs/PANEL-SUPPLY-FENCE-D1.md，计划/架构/PD0/协调器/资源/归属文档已同步。
+底稿scratch/framebuffer-0200/{base,edited,verify,prepare-patch.py,compile.py,native-checks.py,run-tests.py,
+finalize-checks.py,verification.json,base-continuity.json,tests.json,native-results.json,warning-review.json,
+delivery.json,*compile.txt,*symbols.txt}。新联测tools/tests/test-mh2lm-panel-supply-fences.py。
+
+**以下0199按当时范围保留；当前以0200及其明确保留的0199/0198运行路径为准。**
+
+## Agent handoff / active work (2026-11-12, latest)
+
 **CURRENT：0199供电归属核对及共享L3/L5最后disable保护已本地通过，未实机；没有新增rail-off档。**
 父提交dedfe49。0199-mh2lm-shared-rail-disable-guard.patch SHA256=
 91852c738d0f5e244f3615dce2f6b46cb85bcc7b07102a375a353ee35d9da5a5，2份源码，

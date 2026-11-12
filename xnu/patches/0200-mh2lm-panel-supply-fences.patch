@@ -1,0 +1,240 @@
+diff --git a/iokit/Kernel/arm/SweetPanelPins.cpp b/iokit/Kernel/arm/SweetPanelPins.cpp
+--- a/iokit/Kernel/arm/SweetPanelPins.cpp
++++ b/iokit/Kernel/arm/SweetPanelPins.cpp
+@@ -112,6 +112,19 @@
+   if (!r.client || r.client!=s->fClient || !r.token || r.token!=s->fStatus.token) return kIOReturnNotFound;
+   *r.status=s->fStatus; return kIOReturnSuccess; /* no MMIO, even after stop */
+  }
++ if (r.op==OpQueryLow) {
++  if (!r.client || r.client!=s->fClient || !r.token || r.token!=s->fStatus.token) return kIOReturnNotFound;
++  if (!s->fAccepting || s->isInactive() || s->fPoisoned || s->fBusy ||
++      s->fStatus.result!=kIOReturnSuccess || s->fStatus.uncertain ||
++      !s->fStatus.resetKnown || s->fStatus.resetHigh ||
++      !((s->fParked && !s->fConfigured && s->fStatus.state==SweetPinsParked) ||
++        (!s->fParked && s->fConfigured && s->fStatus.state==SweetPinsActive))) return kIOReturnNotReady;
++  if (!s->sample(false) || !s->levelIs(false)) {
++   s->finish(kIOReturnNotReady,SweetPinsFailed,"low-hold fence drift");
++   return kIOReturnNotReady;
++  }
++  *r.status=s->fStatus; return kIOReturnSuccess;
++ }
+  if (r.op==OpCancel) {
+   if (!r.client || r.client!=s->fClient || !r.token || r.token!=s->fStatus.token) return kIOReturnNotFound;
+   if (s->fStatus.state!=SweetPinsStopped && s->fStatus.state!=SweetPinsFailed)
+@@ -230,6 +243,8 @@
+ { return request(OpPark,id,token); }
+ IOReturn SweetPanelPins::copyStatus(uint64_t id,uint64_t token,SweetPanelPinStatus *status)
+ { if (!status) return kIOReturnBadArgument; *status={}; PanelPinsRequest r={}; r.op=OpQuery; r.client=id; r.token=token; r.status=status; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetPanelPins::copyLowStatus(uint64_t id,uint64_t token,SweetPanelPinStatus *status)
++{ if (!status) return kIOReturnBadArgument; *status={}; PanelPinsRequest r={}; r.op=OpQueryLow; r.client=id; r.token=token; r.status=status; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+ IOReturn SweetPanelPins::cancelRequest(uint64_t id,uint64_t token)
+ { PanelPinsRequest r={};r.op=OpCancel;r.client=id;r.token=token;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+ void SweetPanelPins::shutdown(void)
+diff --git a/iokit/Kernel/arm/SweetPanelPins.h b/iokit/Kernel/arm/SweetPanelPins.h
+--- a/iokit/Kernel/arm/SweetPanelPins.h
++++ b/iokit/Kernel/arm/SweetPanelPins.h
+@@ -30,7 +30,7 @@
+  uint64_t fClient, fNextClient, fNextToken, fDeadline, fWait, fEdgeDeadline;
+  uint32_t fControl[2], fInterrupt[2], fOutput;
+  SweetPanelPinStatus fStatus;
+- enum Operation { OpAttach, OpDetach, OpQuery, OpActivate, OpReset, OpPark, OpCancel, OpStop };
++ enum Operation { OpAttach, OpDetach, OpQuery, OpActivate, OpReset, OpPark, OpCancel, OpStop, OpQueryLow };
+  enum Phase { Configure, HighConfirm, HighHold, LowConfirm, LowHold,
+   FinalHighConfirm, FinalHighHold, Settle, ParkConfirm, ParkHold };
+  static uint32_t read(vm_offset_t,uint32_t);
+@@ -57,6 +57,12 @@
+  IOReturn attachConsumer(uint64_t *);
+  IOReturn detachConsumer(uint64_t);
+  IOReturn copyStatus(uint64_t,uint64_t,SweetPanelPinStatus *);
++ /* Fresh, read-only low-hold fence under this provider's gate. Only this
++  * client's successful Parked or parked->Active-low token qualifies. Recheck
++  * full CTL/IRQ/latch snapshots AND independent GPIO input; cached success is
++  * insufficient. Hardware drift poisons the lease without a pin write.
++  * No dependency proof, physical power-off claim or permission to reset. */
++ IOReturn copyLowStatus(uint64_t,uint64_t,SweetPanelPinStatus *);
+  /* Requests only queue work on this service's loop. Mode2 explicitly permits
+   * writes. First warm activate requires GPIO6 output already high; a parked lease
+   * reactivates with reset held low. No takeover of unknown cold state.
+diff --git a/iokit/Kernel/arm/SweetRPMh.cpp b/iokit/Kernel/arm/SweetRPMh.cpp
+--- a/iokit/Kernel/arm/SweetRPMh.cpp
++++ b/iokit/Kernel/arm/SweetRPMh.cpp
+@@ -3,6 +3,8 @@
+  * on MH2LM. Completion and posted-write readback use bounded timer phases. */
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ #include "SweetRPMh.h"
++#include "SweetPanelPins.h"
++#include "SweetTouchPanel.h"
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <libkern/c++/OSData.h>
+@@ -37,9 +39,10 @@
+  uint64_t *idOut; SweetRailInfo *info; SweetRPMhStatus *status;
+  SweetDisplayPowerInfo *displayInfo; SweetDisplayPowerStatus *displayStatus;
+  SweetBCMInfo *bcmInfo; uint64_t bandwidth; SweetRegisterBandwidthStatus *registerStatus;
++ const SweetPanelSupplyFence *panelFence;
+ };
+ enum { Attach, Detach, Info, Vote, Query, Shutdown, DisplayInfo, DisplayVote, DisplayQuery,
+- BCMInfo, RegisterVote, RegisterQuery };
++ BCMInfo, RegisterVote, RegisterQuery, PanelVote, PanelCancel };
+ 
+ bool SweetBCMInfo::scale(uint64_t rate,unsigned busWidth,unsigned ports,unsigned *value) const
+ {
+@@ -422,6 +425,22 @@
+ void SweetRPMh::addOperation(uint32_t off,uint32_t value,bool w1c)
+ { fOperations[fOperationCount++]={off,value,w1c}; }
+ 
++bool SweetRPMh::panelFenceValid(const SweetPanelSupplyFence &f)
++{
++ if (!f.pins || !f.touch || !f.pinsConsumer || !f.pinsToken || !f.touchConsumer || !f.touchToken ||
++     f.pins->isInactive() || f.touch->isInactive()) return false;
++ SweetPanelPinStatus pin={}; SweetTouchPanelStatus touch={};
++ return f.pins->copyLowStatus(f.pinsConsumer,f.pinsToken,&pin)==kIOReturnSuccess &&
++     pin.token==f.pinsToken && pin.resetKnown && !pin.resetHigh && !pin.uncertain && pin.result==kIOReturnSuccess &&
++     f.touch->copyStatus(f.touchConsumer,f.touchToken,&touch)==kIOReturnSuccess &&
++     touch.token==f.touchToken && touch.quiesced && !touch.ready && !touch.uncertain && touch.result==kIOReturnSuccess;
++}
++void SweetRPMh::clearPanelFence(void)
++{
++ OSSafeReleaseNULL(fPanelFence.pins); OSSafeReleaseNULL(fPanelFence.touch);
++ fPanelFence={};
++}
++
+ IOReturn SweetRPMh::begin(unsigned client,unsigned rail,const SweetRailVote &proposal)
+ {
+  if (fMode!=2) return kIOReturnNotPermitted;
+@@ -489,6 +508,7 @@
+ 
+ void SweetRPMh::finish(IOReturn result,bool uncertain)
+ {
++ clearPanelFence();
+  if (fRegisterRequest) {
+   SweetRegisterBandwidthStatus &s=fClients[fClientIndex].registerStatus;
+   s.result=result; s.uncertain=uncertain;
+@@ -535,6 +555,9 @@
+ void SweetRPMh::advance(void)
+ {
+  if (!fAccepting || !fBusy) return;
++ if (fPanelFence.pins && (isInactive() || !panelFenceValid(fPanelFence))) {
++  finish(kIOReturnNotReady,fExecuting || fWriteIssued || fOperation!=0); return;
++ }
+  uint64_t now=nowNS(); uint32_t b=fTCSIndex*Stride, bit=1u<<fTCSIndex;
+  if (now>=fDeadline || (fArcRequest && now>=fStageDeadline)) { finish(kIOReturnTimeout,true); return; }
+  /* Bounded fixed operation count. A posted write not yet visible resumes on
+@@ -566,6 +589,9 @@
+     if (current==~0u) { finish(kIOReturnIOError,fEverWritten); return; }
+     op.value=(current&~bit) | (fExecuting ? (fSavedIRQ&bit) : 0u);
+    }
++   if (fPanelFence.pins && (isInactive() || !panelFenceValid(fPanelFence))) {
++    finish(kIOReturnNotReady,fExecuting || fWriteIssued || fOperation!=0); return;
++   }
+    fEverWritten=true; write(fTCS,op.offset,op.value); fWriteDeadline=now+1000000; fWriteIssued=true;
+   }
+   uint32_t value=read(fTCS,op.w1c ? IRQStatus : op.offset);
+@@ -577,12 +603,16 @@
+   ++fOperation; fWriteIssued=false;
+  }
+  if (!fExecuting) {
++  if (fPanelFence.pins && (isInactive() || !panelFenceValid(fPanelFence))) { finish(kIOReturnNotReady,true); return; }
+   write(fTCS,b+Control,AMC|Trigger); fExecuting=true;
+   /* Initial programming consumed; cleanup queue is constructed only after
+    * a fresh completion. No stale command status can bypass this phase. */
+   fOperation=fOperationCount=0; fTimer->setTimeoutUS(100); return;
+  }
+- if (fOperationCount) { completeTransaction(); return; }
++ if (fOperationCount) {
++  if (fPanelFence.pins && (isInactive() || !panelFenceValid(fPanelFence))) { finish(kIOReturnNotReady,true); return; }
++  completeTransaction(); return;
++ }
+  uint32_t irq=read(fTCS,IRQStatus), idle=read(fTCS,b+Status);
+  bool complete=true;
+  for (unsigned c=0;c<fCommandCount;++c) {
+@@ -664,8 +694,23 @@
+    if (result==kIOReturnSuccess) *r.idOut=self->fClients[i].registerStatus.token;
+    return result;
+   }
++  if (r.op==PanelCancel) {
++   if (!r.token || self->fClients[i].status.token!=r.token) return kIOReturnNotFound;
++   if (self->fBusy && self->fClientIndex==i && self->fPanelFence.pins)
++    self->finish(kIOReturnAborted,self->fExecuting || self->fWriteIssued || self->fOperation!=0);
++   return kIOReturnSuccess;
++  }
++  if (r.op==PanelVote) {
++   if (self->fMode!=2) return kIOReturnNotPermitted;
++   if (self->fPoisoned) return kIOReturnNotReady;
++   if (self->fBusy) return kIOReturnBusy;
++   if (!self->panelFenceValid(*r.panelFence)) return kIOReturnNotReady;
++   self->fPanelFence=*r.panelFence;
++   self->fPanelFence.pins->retain(); self->fPanelFence.touch->retain();
++  }
+   IOReturn result=self->begin(i,r.rail,r.vote);
+   if (result==kIOReturnSuccess) *r.idOut=self->fClients[i].status.token;
++  if (r.op==PanelVote && (result!=kIOReturnSuccess || !self->fBusy)) self->clearPanelFence();
+   return result;
+  }
+  return kIOReturnNotFound;
+@@ -679,6 +724,16 @@
+ { if ((unsigned)rail>=SweetRailCount || !info) return kIOReturnBadArgument; RPMhRequest r={}; r.op=Info; r.rail=rail; r.info=info; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+ IOReturn SweetRPMh::requestVote(uint64_t id,SweetRail rail,const SweetRailVote &vote,uint64_t *token)
+ { if ((unsigned)rail>=SweetRailCount || !token) return kIOReturnBadArgument; *token=0; RPMhRequest r={}; r.op=Vote; r.client=id; r.rail=rail; r.vote=vote; r.idOut=token; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
++IOReturn SweetRPMh::requestPanelVote(uint64_t id,SweetRail rail,const SweetRailVote &vote,
++    const SweetPanelSupplyFence &fence,uint64_t *token)
++{
++ if (!token) return kIOReturnBadArgument; *token=0;
++ if (rail!=SweetRailVDDI && rail!=SweetRailVPNL) return kIOReturnNotPermitted;
++ RPMhRequest r={}; r.op=PanelVote; r.client=id; r.rail=rail; r.vote=vote; r.panelFence=&fence; r.idOut=token;
++ return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady;
++}
++IOReturn SweetRPMh::cancelPanelVote(uint64_t id,uint64_t token)
++{ RPMhRequest r={}; r.op=PanelCancel; r.client=id; r.token=token; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+ IOReturn SweetRPMh::copyStatus(uint64_t id,uint64_t token,SweetRPMhStatus *status)
+ { if (!status) return kIOReturnBadArgument; RPMhRequest r={}; r.op=Query; r.client=id; r.token=token; r.status=status; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+ IOReturn SweetRPMh::displayPowerInfo(SweetDisplayPowerInfo *info)
+diff --git a/iokit/Kernel/arm/SweetRPMh.h b/iokit/Kernel/arm/SweetRPMh.h
+--- a/iokit/Kernel/arm/SweetRPMh.h
++++ b/iokit/Kernel/arm/SweetRPMh.h
+@@ -78,6 +78,19 @@
+  unsigned state, acknowledged;
+  IOReturn result;
+  bool uncertain, registerAcknowledged;
++};
++
++class SweetPanelPins;
++class SweetTouchPanel;
++/* Exact exclusive leaf-provider leases for ONE panel vote. The caller owns
++ * these references for admission; RPMh retains them only while pending.
++ * IDs/tokens are issued by the actual providers, never raw MMIO or callbacks.
++ * Lock order: consumer -> RPMh -> Pins/Touch. Neither leaf calls RPMh/consumer.
++ * Quiesced touch is a software/IRQ fence, not physical supply isolation. */
++struct SweetPanelSupplyFence {
++ SweetPanelPins *pins;
++ SweetTouchPanel *touch;
++ uint64_t pinsConsumer, pinsToken, touchConsumer, touchToken;
+ };
+ 
+ class SweetRPMh : public IOService {
+@@ -103,6 +116,9 @@
+  uint32_t fSavedIRQ, fCommandMask;
+  bool fBusy, fProgress, fWriteIssued, fExecuting;
+  SweetRailVote fProposal, fTarget;
++ SweetPanelSupplyFence fPanelFence;
++ bool panelFenceValid(const SweetPanelSupplyFence &);
++ void clearPanelFence(void);
+  struct Operation { uint32_t offset, value; bool w1c; };
+  Operation fOperations[20];
+  struct ArcResource { uint32_t address; unsigned count, levels[16]; };
+@@ -162,6 +178,15 @@
+   * all clients; Busy is explicit, no overwrite, hidden retry or fallback. */
+  IOReturn requestVote(uint64_t,SweetRail,const SweetRailVote &,uint64_t *);
+  IOReturn copyStatus(uint64_t,uint64_t,SweetRPMhStatus *);
++ /* VDDI/VPNL only: same aggregation/ACK engine, with live reset-low and
++  * quiesced-touch checks at admission and before every queued write/trigger.
++  * No-op votes also need a valid fence. This does not authorize link/DMA
++  * shutdown or prove physical isolation; caller must establish those first.
++  * Failure/cancel stops progression, retains partial TCS and last ACKed vote,
++  * never undoes an already-triggered transaction. No implicit retry/cleanup. */
++ IOReturn requestPanelVote(uint64_t,SweetRail,const SweetRailVote &,
++     const SweetPanelSupplyFence &,uint64_t *);
++ IOReturn cancelPanelVote(uint64_t,uint64_t);
+  /* Same apps-DRV owner, gate and timer as LDO votes. Metadata is lazy/read-only;
+   * missing ARC resources do not break the existing four-rail/default binding.
+   * Mode 2 permits requests but never automatically acquires a display vote.

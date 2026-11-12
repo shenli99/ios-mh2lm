@@ -91,6 +91,37 @@ int main(){
  assert(s->reset(id,&token)==0);for(unsigned i=0;i<400&&s->fBusy;++i)tick(s);assert(status(s,id,token).state==SweetPinsResetComplete);
  destroy(s,n);assert(panelPinsOwner==2);
  n=nub();s=new SweetPanelPins();assert(!s->start(n));s->release();dropNub(n);assert(!live&&!liveMaps);
+ // A low-hold fence is a live owner query, not cached Parked/Active success.
+ // Invalid/stale/pending/high/stop cases perform no MMIO; drift invalidates the
+ // lease with no write and cannot be repaired by just restoring the register.
+ for(unsigned fault=0;fault<12;++fault){fixtures();n=nub();s=make(n);id=attach(s);
+  token=active(s,id);auto before=trace.size();SweetPanelPinStatus low{};
+  assert(s->copyLowStatus(id,token,&low)==kIOReturnNotReady&&!low.token&&trace.size()==before);
+  assert(s->park(id,&token)==0);before=trace.size();
+  assert(s->copyLowStatus(id,token,&low)==kIOReturnNotReady&&!low.token&&trace.size()==before);
+  for(unsigned i=0;i<100&&s->fBusy;++i)tick(s);
+  assert(s->copyLowStatus(id,token,&low)==0&&low.state==SweetPinsParked&&!low.resetHigh);
+  if(fault==0){before=trace.size();assert(s->copyLowStatus(id+1,token,&low)==kIOReturnNotFound&&trace.size()==before);}
+  else if(fault==1){before=trace.size();assert(s->copyLowStatus(id,token+1,&low)==kIOReturnNotFound&&trace.size()==before);}
+  else if(fault==2){before=trace.size();assert(s->copyLowStatus(id,token,nullptr)==kIOReturnBadArgument&&trace.size()==before);}
+  else if(fault==3){token=active(s,id);assert(s->copyLowStatus(id,token,&low)==0&&low.state==SweetPinsActive&&!low.resetHigh);}
+  else if(fault>=4&&fault<=8){
+   if(fault==4)regs[RESET+4]=1; // input rose independently, latch still low
+   if(fault==5)regs[RESET+4]=2; // latch rose, input still low
+   if(fault==6)regs[RESET]^=1;
+   if(fault==7)regs[TE+8]^=0x10;
+   if(fault==8){token=active(s,id);regs[TE]^=1;}
+   auto count=writes();assert(s->copyLowStatus(id,token,&low)==kIOReturnNotReady&&!low.token&&writes()==count);
+   assert(s->fPoisoned&&s->fStatus.state==SweetPinsFailed&&s->fStatus.uncertain&&!s->fStatus.resetKnown);
+   before=trace.size();assert(s->copyLowStatus(id,token,&low)==kIOReturnNotReady&&!low.token&&trace.size()==before);
+  }else{
+   if(fault==9)s->cancelRequest(id,token);
+   if(fault==10)s->stop(n);
+   if(fault==11)s->inactive=true;
+   before=trace.size();assert(s->copyLowStatus(id,token,&low)==kIOReturnNotReady&&!low.token&&trace.size()==before);
+  }
+  destroy(s,n);
+ }
  // Configuration/ownership mismatches reject before any write and can detach.
  for(unsigned fault=0;fault<9;++fault){fixtures();n=nub();s=make(n);id=attach(s);
   if(fault==0)regs[RESET]|=4;if(fault==1)regs[TE]&=~4u;if(fault==2)regs[TE]|=512;
