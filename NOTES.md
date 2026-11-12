@@ -1,5 +1,25 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, own0 PASS; vsync0 next)
+
+**CURRENT：own0持久日志确认进SpringBoard，单独关闭F4未复现panic。下一步只测vsync0。**
+logs/sweetlog-0121a14-identity-own0-control.bin SHA=1ec8d2efb16f09b4dd4a7e210467b7abefd7a5542dad8ea99de90d86c554a087；
+total242064/flush12。390行参数吻合power1/IRQ2/vsync1/own0；91行source2/profile4，
+92行MDSS、105行RPMh、499/2385行hardware vsync、673行SpringBoard，3条touch。
+无pool/handoff记录，无panic/ERROR；3USB cmd warning、2HFS clonefile -34，未见signal reason失败。
+无MDSS power调用，不能称息屏恢复验收。仍不能排除组合/时序因素，原NULL写未修复。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a14-identity-vsync0-control.img**
+SHA=ea6888879198f986b10ca8e2ffffad31c566b180548cd8f6ee30eb7b0b4bb130。
+仅own0成功档TOML的sweetfbvsync1→0，power1/IRQ2/own0保留；内核/固件/ADT/其它参数不变。
+合法准入，FB不建hardware mailbox而用原timer呈现，MDSS IRQ2仍在；不混淆两个层次。
+managed/lifecycle仍关闭，不新增reset/供电周期。原镜像保留，容器/全部FAT仅TOML单参数变化。
+只确认是否进系统，成功导sweetlog-0121a14-identity-vsync0-control.bin，无需额外操作。
+若失败记录panic寄存器，查硬件消费/软件timer；若成功再拆MDSS IRQ，power0放最后，IRQ2要求power1。
+无需push/云编译；retained/combined/supply仍暂停；无内核代码修复/CI更改/设备操作/推送。
+证据scratch/artifact-0121a14/{identity-own0-control-persistent.txt,identity-own0-control-log-analysis.json,
+make-vsync0-control.py,identity-vsync0-control-verification.json,identity-vsync0-control.unixnu.toml}。
+文档/计划已同步；以下NEXT均为历史记录，以本段为准。
+
 ## Agent handoff / active work (2026-11-12, live ABL identity PASS profile4)
 
 **CURRENT：identity-slot-control进系统，持久日志确认source2/profile4，下一步只测own0。**

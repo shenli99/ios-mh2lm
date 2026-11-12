@@ -1,10 +1,10 @@
 # PD3：统一协调器的面板供电票撤销与恢复（0201）
 
-**0121a14当前进展（2026-11-12）：** identity-slot-control成功进入系统，持久日志第85行
-确认`source=2 profile=4`，即ABL选择R66456 Tianma PV；并非物理DDIC读回。
-MDSS/RPMh、SpringBoard、自有缓冲及off/on恢复成功，未采集到panic/ERROR；NULL写根因仍未定。
-**下一步只测`0121a14-identity-own0-control`**：仅将sweetfbown=2改0，保留power1/IRQ2/vsync1。
-内核/固件/ADT相同，验证关闭自有缓冲路径与原panic的关联；不启reset/供电周期。
+**0121a14当前进展（2026-11-12）：** own0日志确认power1/IRQ2/vsync1/own0进入SpringBoard，
+身份source2/profile4、MDSS/RPMh及硬件vsync正常，无panic/ERROR，也无F4池/接管记录。
+单独own0未复现原NULL写；不据此排除组合/时序问题。
+**下一步只测`0121a14-identity-vsync0-control`**：在本档仅改sweetfbvsync=1→0，保留power1/IRQ2/own0。
+固件/内核/ADT及其它参数相同，软件timer提供FB vsync，MDSS IRQ仍保留；原NULL写仍未修复。
 无需云编译，retained/combined/supply仍暂停。详情见[0121a14排查记录](PANEL-D1-0121A14.md)。
 
 2026-11-12。接父提交 `8722913` 的0200实时依赖接口，新增显式
