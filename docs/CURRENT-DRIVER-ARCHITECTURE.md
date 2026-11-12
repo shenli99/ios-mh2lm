@@ -1,5 +1,19 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**0201当前增量（2026-11-12，本地通过，未实机）：** 统一协调器新增显式
+`sweetpanellifecycle=6`：完整OFF→reset实际低保持→原mode5 DATA/link停驻→VPNL/VDDI
+逆序撤本panel票；ON先active-low→VDDI ACK+20ms→VPNL ACK+5ms，再恢复DATA/link/clock/
+host/reset/完整ON/亮度/fresh像素/触摸。共享L3/L5、ARC、config floor和boot/RSC/core通路保留。
+每ACK更新部分完成账本，失败先同步取消RPMh子事务再撤Pins/Touch token；FB核对联合证据。
+原0–5保留，模式6默认关闭。撤本票不是物理rail-off证明，E7/E8仍待实机。
+23套检查、8个真实XNU/KDK arm64单文件对象通过；**完整Mu mh2 RELEASE FD现已构建并核验**，
+包含原0195身份adapter，旧blob未改。新`--panel-lifecycle`支持同核identity/retained/combined/
+supply四档，先核对live身份，再逐级验收；缺新固件manifest或内核marker就拒绝打包。
+现在需要用户push并云编译，下载后再打实际boot；CircleCI未改，未push/触发CI/操作设备。
+详见[供电生命周期、架构、四档与证据](PANEL-SUPPLY-LIFECYCLE-D1.md)。
+PD4冷NoC/MDP、ABL首帧/console/panic退出、故障后受控释放及完整IOPM仍缺；完整驱动未完成。
+**以下0200及更早段落是各阶段历史记录，当前状态以本段及NOTES顶部为准。**
+
 **0200供电依赖校验增量（2026-11-12，本地通过，未实机）：** Pins 新增实时 reset-low
 查询，RPMh 新增仅 VDDI/VPNL 的 typed panel vote/取消接口，逐写核对同代 Pins/Touch token，
 保留依赖引用，异常停止并保留部分事务；不撤共享 L3/L5。22套检查及八个真实 arm64

@@ -96,6 +96,39 @@ tools/mk-mh2lm-event-matrix.sh W/logs/xnu-kernel-<LABEL>.gz <LABEL> --battery-ba
 
 用户测试：`fastboot boot W/out-bs/boot-16k-<LABEL>-<profile>.img`，测完导出日志（第 6 节）。
 
+### 4.1 0201完整固件与面板生命周期四档
+
+本轮代码/本地验证完成，先由用户push并跑CircleCI。下载新kernel与buildtree后，agent核对
+0201补丁、SHA及实际产物；不能拿旧kernel只改参数。
+完整Mu FD已在本地构建，包含ABL→Mu HOB→DarwinBoot→ADT身份传递adapter。
+原`out-bs/kernel-32m.blob`未改；完整FD构建成功尚不代表手机启动成功。
+
+在仓库根目录执行（将`LABEL`替换为用户实际下载编号）：
+
+```sh
+SWEET_PANEL_UEFI_MANIFEST=/home/shenli/work1/out-bs/panel-uefi-0201-final/panel-uefi.json \
+  tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-LABEL.gz LABEL --panel-lifecycle
+```
+
+脚本核验manifest ABI/full-FD与blob SHA，检查新内核marker；ADT增加NoC、Pins、Touch与
+96-byte全零身份slot，不接受静态指定panel。四档共用内核/ADT/新固件，保留USB ACM、按键与电池：
+
+| 镜像（位于`W/out-bs/`） | 测什么 |
+|---|---|
+| `boot-16k-LABEL-panel-identity.img` | lifecycle0、metadata-only；先确认新固件可启动、live source/profile有效且唯一。panel写入/接管开关为0 |
+| `boot-16k-LABEL-panel-retained.img` | lifecycle2，供电票保留；完整表、reset、亮度与实际触摸恢复（E7） |
+| `boot-16k-LABEL-panel-combined.img` | lifecycle5，DATA/clock停驻及host/PHY/PLL关闭重建 |
+| `boot-16k-LABEL-panel-supply.img` | lifecycle6，reset低保持、VPNL/VDDI撤本票及恢复、FB联合完成证据 |
+
+由用户按上述顺序`fastboot boot`，每档先导出日志并核对再进入后档。任一失败停止后档。
+后三档手动息屏/唤醒并确认画面、亮度、按键、触摸；不要求自动息屏或半小时等待，
+不重测旧USB/BUG002/F3矩阵。供电档保留共享L3/L5、ARC/config floor；RPMh ACK和本票撤销
+不证明实际rail-off。完整模式参数由脚本生成，勿手动拼接缺依赖的档位。
+
+需要重建固件时，用`tools/build-mh2lm-panel-uefi.py --output <新隔离目录>`；manifest记录
+实际Mu/DarwinBoot HEAD、命令和SHA。不要将设备DTB、FD/blob或Apple产物加入git。
+详见[供电生命周期、架构及剩余边界](PANEL-SUPPLY-LIFECYCLE-D1.md)。
+
 ## 5. 持久镜像（刷 boot_a/boot_b）
 
 规则：默认菜单项必须是 **Mass Storage**——Android 一旦启动会清空 userdata 上的 iOS 根卷，

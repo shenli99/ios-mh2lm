@@ -24,16 +24,38 @@ kernel while reusing the old UEFI blob cannot produce the record.
 Reserve the empty slot using `tools/mk-mh2lm-mdss-adt.py --panel-identity`; the
 option accepts no manual revision. Compose with `--panel-pins --panel-touch
 --display-noc` as required by the actual driver stage. Boot first with lifecycle
-mode1 to inspect the record; mode2 is the explicit retained-supply full command /
+mode0 (the metadata-only `panel-identity` profile) to inspect the record; mode2 is the explicit retained-supply full command /
 reset experiment once the selection has been checked. No default is changed.
 
-The actual Mu consumer module compiled and linked locally. This did not rebuild
-a complete firmware FD, change the existing `out-bs/kernel-32m.blob`, or validate
-booting the phone. The parser and the actual adapter also run under ASan/UBSan
+As of 0201, `tools/build-mh2lm-panel-uefi.py` has built the **complete Mu mh2
+RELEASE FD** locally, including this adapter. It copies platform/loader sources
+to an isolated output directory, strictly applies the loader patch, and verifies
+the actual PE -> FFS -> FVMAIN -> compressed guided FV -> final FD chain. It
+preserves the baseline BootShim and both appended DTBs and leaves the existing
+`out-bs/kernel-32m.blob` unchanged. This is not a device boot result.
+
+The current local manifest is
+`/home/shenli/work1/out-bs/panel-uefi-0201-final/panel-uefi.json`;
+the blob SHA256 is
+`8e1e65d891a831b6f9b9005701f339d80330378c21520ec6f6ef4159d8e9561e`.
+Source HEADs, build command and FD/module/blob hashes are in the manifest.
+Reproduce with local Mu/UniXNU sources and toolchain already installed:
+
+```sh
+python3 tools/build-mh2lm-panel-uefi.py --output /home/shenli/work1/out-bs/panel-uefi-NEW
+```
+
+Use a fresh output directory. The kernel matrix `--panel-lifecycle` requires
+`SWEET_PANEL_UEFI_MANIFEST` and checks its ABI, full-FD result and blob hash;
+it refuses to silently reuse the old firmware. Firmware binaries and board DTBs
+remain outside git. The earlier 0195 result built only the consumer module;
+that limitation is superseded by this complete-FD result, not by a phone test.
+
+The parser and the actual adapter also run under ASan/UBSan
 with HOB, memory service and allocation failures; every FDT/ADT truncation and
 bit mutation is checked. Source copies in this patch and `SweetPanelIdentity.h`
 are checked for byte equality by `test-mh2lm-panel-handoff.py`.
 
 中文记录、架构与后续边界见
-[PD3完整命令和保留供电的恢复](../docs/PANEL-PROFILE-D1.md)。本机仍未读取到live label；
+[PD3供电生命周期与四档验收](../docs/PANEL-SUPPLY-LIFECYCLE-D1.md)。本机仍未读取到live label；
 不猜PV，不启动Android，不试发未知DDIC读命令，不撤共享供电。

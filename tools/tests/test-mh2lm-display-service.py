@@ -27,6 +27,8 @@ source = source.replace('#include "SweetMDSSScanout.inc"', (arm/'SweetMDSSScanou
 source = source.replace('#include "SweetMDSSDSI.inc"', (arm/'SweetMDSSDSI.inc').read_text())
 if (arm/'SweetMDSSLifecycle.inc').exists():
     source = source.replace('#include "SweetMDSSLifecycle.inc"', (arm/'SweetMDSSLifecycle.inc').read_text())
+if (arm/'SweetMDSSPanelSupply.inc').exists():
+    source = source.replace('#include "SweetMDSSPanelSupply.inc"', (arm/'SweetMDSSPanelSupply.inc').read_text())
 if (arm/'SweetMDSSResources.inc').exists():
     source = source.replace('#include "SweetMDSSResources.inc"', (arm/'SweetMDSSResources.inc').read_text())
 if (arm/'SweetMDSSNoC.inc').exists():

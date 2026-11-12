@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Actual Pins + RPMh + TouchComm: per-write reset-low/touch fences.
-No lifecycle supply mode is implemented here; mode5 creates a stopped link,
-then tests explicitly drive the new leaf/provider API. Only OS/MMIO/wire peers
+This suite tests provider APIs independently: mode5 creates a stopped link,
+then tests explicitly drive the leaf/provider API. Only OS/MMIO/wire peers
 are fixtures. Usage: test-mh2lm-panel-supply-fences.py EXTRACTED_XNU
 """
 from pathlib import Path
@@ -176,7 +176,7 @@ int main(){
   token=vote(h.r,other,SweetRailVPNL,{});child(h);freshACK(h);child(h);child(h);
   assert(!h.r->fBusy&&!status(h.r,other,token).enabled&&h.r->detachConsumer(other)==0);
  }
- puts("PASS: actual Pins/RPMh/TCM reset-low fences; Parked/Active-low, live CTL/IRQ/latch/input, exact leaf tokens, retain/release, no-op/aggregation/fresh ACK, invalid admission, four child-before-parent phases x twelve faults, cancel/timeout/stop, competing consumers, shared L3/L5 untouched, zero objects/maps/notifications/allocations after reboot; lifecycle supply integration not yet enabled");
+ puts("PASS: actual Pins/RPMh/TCM reset-low fences; Parked/Active-low, live CTL/IRQ/latch/input, exact leaf tokens, retain/release, no-op/aggregation/fresh ACK, invalid admission, four child-before-parent phases x twelve faults, cancel/timeout/stop, competing consumers, shared L3/L5 untouched, zero objects/maps/notifications/allocations after reboot; provider APIs tested independently");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-supply-fences-') as temp:

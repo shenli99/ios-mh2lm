@@ -2,6 +2,57 @@
 
 ## Agent handoff / active work (2026-11-12, latest)
 
+**CURRENT：0201供电周期接入统一生命周期协调器、本地验证和完整Mu FD构建已完成；现在需要用户push云编译。**
+父提交8722913；0201-mh2lm-panel-supply-lifecycle.patch SHA256=
+1a79089011539675d801d09059091d9e2294ddd7268b0274dd1435618af1596e，7份源码。
+新增SweetMDSSPanelSupply.inc，复用原MDSS owner/gate/timer及typed Pins/RPMh/Touch，不建新provider/
+线程/映射/全局桥。显式sweetpanellifecycle=6，原0–5保留、默认关闭。
+OFF完整表与等待→warm引脚准备/pre5ms→reset park实际低保持>=5ms→mode5 config/clock/link/DATA
+停驻→VPNL ACK→VDDI ACK→post5ms。ON先同provider和低保持/停驻账本→active-low无reset脉冲/
+pre5ms→VDDI ACK+20ms→VPNL ACK+5ms→DATA/link/clock/host重建→reset/完整ON/最新亮度/
+fresh像素/实际TCM恢复。L3/L5共享UFS/USB保留，ARC/config floor/boot/RSC/core通路保留。
+只撤本panel consumer两票；aggregate可仍enabled，不称物理rail-off。rails15→13→12及逆序恢复，
+新增released/aggregate mask、每rail ACK token、resetHeldLow/parked/restored。FB核对联合证据。
+低保持期间MDSS子timer亦实时查Pins。父失败先关闭generation，再同步cancelPanelVote，最后撤
+Pins/Touch token；已成功ACK但父未读取的真实账本补记，未确认token/旧票/uncertain保留。
+无补电/回滚/重试或一次性takeover重跑，DMA pin故障保留至reboot。
+23套检查全过（22实际源码ASan/UBSan+PythonADT），新联测含四profile多轮/独立MMIO时间戳、
+引脚各阶段取消/stop/withdraw、两方向两rail各阶段取消、ACK先于父cancel、子先于父丢fence、
+缺ACK/posted-write/超时/重入/保电consumer/停驻漂移。LSan ptrace关闭，另查对象/映射/通知/
+分配/模拟reboot DMA pin归零。base连续0200verify、严格重放无offset/fuzz、114 CI marker保留。
+RPMh/Pins/MDSS/FB前后8个真实XNU/KDK arm64对象和符号通过；非整核链接。
+warnings RPMh1326/Pins1171不变，MDSS1527→1531、FB1397→1398，5处有界数组提示已审，无抑制。
+完整Mu mh2 RELEASE FD成功构建（隔离输出，参考仓库既有dirty未清理）；0195 loader adapter
+已纳入真实DarwinBoot PE→FFS→FVMAIN→guided压缩→最终FD，全链核验。新builder为
+ tools/build-mh2lm-panel-uefi.py。保留原BootShim112字节和两个append DTB，不改旧kernel-32m.blob。
+manifest=/home/shenli/work1/out-bs/panel-uefi-0201-final/panel-uefi.json
+blob SHA256=8e1e65d891a831b6f9b9005701f339d80330378c21520ec6f6ef4159d8e9561e
+FD SHA256=fadb5b59f3ec22f67ebac3e33babc642d372e42cdb004c5730fdaf376d43e48f
+FD构建成功不代表手机启动；不把二进制/设备DTB/Apple产物入git。
+新增matrix --panel-lifecycle，要求SWEET_PANEL_UEFI_MANIFEST并核验blobhash/ABI/fullFD；四档
+同kernel/ADT/新firmware，identity(mode0 metadata-only，所有写入/接管开关0)、retained(mode2)、
+combined(mode5)、supply(mode6)。identity只读live ABL选择，ADT预留96-byte零slot，不猜PV。
+隔离TemporaryDirectory用明确NONBOOTABLE fixture核查实际FAT/mkbootimg容器、四档参数、同源
+内核/ADT/固件、缺manifest/错误hash/旧kernel拒绝，fixture镜像已删除，无新可刷boot。
+**NEXT：用户push本地提交并在CircleCI编译；下载新kernel+buildtree后agent核对并执行：**
+ SWEET_PANEL_UEFI_MANIFEST=/home/shenli/work1/out-bs/panel-uefi-0201-final/panel-uefi.json \
+ tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-<LABEL>.gz <LABEL> --panel-lifecycle
+先identity日志确认live source/profile，再retained验E7，再combined，最后supply验E8相关证据。
+任一失败停后档，用户负责fastboot；不重测半小时/F3/旧USB或BUG002，不要求自动息屏。
+E7/E8、物理共享偏压仍未实机；PD4冷NoC/MDP、ABL首帧/default surface/console/panic退出、
+故障后受控释放与完整IOPM仍缺，不能称完整驱动完成。A单缓冲/30Hz保留，未称修复卡顿/BUG003。
+未push/触发CI/设备操作；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+USB/充电/按键/mux/TCM硬件IRQ策略未改；不启动Android、不扫未知PMIC。
+新文档docs/PANEL-SUPPLY-LIFECYCLE-D1.md，路线图/架构/计划/PD0/lifecycle/power/供电归属及
+boot-support README、BUILD-GUIDE已同步。底稿scratch/framebuffer-0201/{base,edited,verify,
+prepare-patch.py,compile.py,native-checks.py,run-tests.py,finalize-checks.py,check-packaging.py,
+verification.json,base-continuity.json,tests.json,native-results.json,warning-review.json,delivery.json,
+packaging-results.json,*compile.txt,*symbols.txt}。
+
+**以下0200及更早记录按当时范围保留；当前以0201及其保留的旧路径为准。**
+
+## Agent handoff / active work (2026-11-12, latest)
+
 **CURRENT：0200供电事务的实时Pins/Touch依赖校验已本地通过，尚未接入协调器撤票/恢复，未实机。**
 父提交2f06e93；0200-mh2lm-panel-supply-fences.patch SHA256=
 4fcde091139853f08e405c1c0dcf3eec1ebbf6021fa8d04d85b8f1c6051fa6f1，四份Pins/RPMh源码。

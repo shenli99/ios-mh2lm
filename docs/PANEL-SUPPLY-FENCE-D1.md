@@ -1,5 +1,19 @@
 # PD3：面板供电事务的实时依赖校验（0200）
 
+**0201当前增量（2026-11-12，本地通过，未实机）：** 统一协调器新增显式
+`sweetpanellifecycle=6`：完整OFF→reset实际低保持→原mode5 DATA/link停驻→VPNL/VDDI
+逆序撤本panel票；ON先active-low→VDDI ACK+20ms→VPNL ACK+5ms，再恢复DATA/link/clock/
+host/reset/完整ON/亮度/fresh像素/触摸。共享L3/L5、ARC、config floor和boot/RSC/core通路保留。
+每ACK更新部分完成账本，失败先同步取消RPMh子事务再撤Pins/Touch token；FB核对联合证据。
+原0–5保留，模式6默认关闭。撤本票不是物理rail-off证明，E7/E8仍待实机。
+23套检查、8个真实XNU/KDK arm64单文件对象通过；**完整Mu mh2 RELEASE FD现已构建并核验**，
+包含原0195身份adapter，旧blob未改。新`--panel-lifecycle`支持同核identity/retained/combined/
+supply四档，先核对live身份，再逐级验收；缺新固件manifest或内核marker就拒绝打包。
+现在需要用户push并云编译，下载后再打实际boot；CircleCI未改，未push/触发CI/操作设备。
+详见[供电生命周期、架构、四档与证据](PANEL-SUPPLY-LIFECYCLE-D1.md)。
+PD4冷NoC/MDP、ABL首帧/console/panic退出、故障后受控释放及完整IOPM仍缺；完整驱动未完成。
+**以下0200及更早段落是各阶段历史记录，当前状态以本段及NOTES顶部为准。**
+
 2026-11-12，接0199。本轮完成 Pins 的实时 reset-low 查询，以及带 Pins/Touch 依赖的
 RPMh panel vote 和取消接口。**尚未接入统一协调器的供电释放/恢复阶段，未新增运行档位。**
 原 mode0–5 的正常路径没有改动，启动、match、metadata 不请求供电或操作引脚。

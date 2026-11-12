@@ -164,6 +164,39 @@ int main(){
   h.complete();assert(h.f->fPanelLifecycleFault==(missing!=16));
   assert(h.f->fPowerOff==(missing!=16));
  }
+ // Mode6 requires explicit supply capability and all combined OFF/ON proof.
+ lifecycleArg=6;
+ for(unsigned bit:{unsigned(SweetPanelSupplyCycle),unsigned(SweetPanelDataParking),unsigned(SweetPanelLinkPowerCycle),unsigned(SweetPanelRetainedSleepReset)}){Harness h;
+  assert(h.f->fPanelLifecycleSupplyCycle&&h.f->fPanelLifecycleFull&&h.f->fPanelLifecycleDataParking&&h.f->fPanelLifecycleLinkCycle);
+  h.b->cap|=SweetPanelSupplyCycle|SweetPanelDataParking|SweetPanelLinkPowerCycle|SweetPanelRetainedSleepReset;
+  h.b->cap&=~bit;assert(h.request(true)!=0&&h.b->operations.empty());
+ }
+ for(unsigned missing=0;missing<32;++missing){Harness h;
+  h.b->cap|=SweetPanelSupplyCycle|SweetPanelDataParking|SweetPanelLinkPowerCycle|SweetPanelRetainedSleepReset;
+  assert(h.request(true)==0);auto&v=h.b->lifecycle;
+  v.phase=SweetPanelComplete;v.result=0;v.profile=4;v.sleeping=v.configHeld=v.resourcesParked=v.linkPoweredDown=v.resetHeldLow=v.panelVotesParked=true;
+  v.rails=12;v.panelReleasedMask=3;v.configToken=6;v.panelVoteTokens[0]=9;v.panelVoteTokens[1]=10;v.touchQuiesced=v.displayDrained=true;
+  if(missing<16){
+   if(missing==0)v.rails=15;if(missing==1)v.panelReleasedMask=2;if(missing==2)v.resetHeldLow=false;
+   if(missing==3)v.panelVotesParked=false;if(missing==4)v.supplyToken=99;if(missing==5)v.panelVoteTokens[0]=0;
+   if(missing==6)v.panelVoteTokens[1]=0;if(missing==7)v.retainedPower=true;if(missing==8)v.configToken=0;
+   if(missing==9)v.linkPoweredDown=false;if(missing==10)v.resourcesParked=false;if(missing==11)v.dataToken=1;
+   if(missing==12)v.clockToken=1;if(missing==13)v.panelVotesRestored=true;if(missing==14)v.resourcesHeld=true;
+   if(missing==15)v.displayDrained=false;
+   h.tick();assert(h.f->fPanelLifecycleFault&&h.f->fPowerOff);continue;
+  }
+  v.panelAggregateEnabledMask=3; // another real consumer may still keep rails on
+  h.tick();assert(!h.f->fPanelLifecycleFault&&h.f->fPowerOff&&h.request(false)==0);
+  v.profile=4;v.rails=15;v.panelVotesRestored=v.retainedPower=v.configHeld=v.resourcesRestored=v.linkRebuilt=true;
+  v.configToken=6;v.dataToken=7;v.clockToken=8;v.panelAggregateEnabledMask=3;
+  v.panelVoteTokens[0]=11;v.panelVoteTokens[1]=12;v.resetComplete=v.brightnessRestored=true;
+  if(missing==16)v.rails=12;if(missing==17)v.panelReleasedMask=1;if(missing==18)v.resetHeldLow=true;
+  if(missing==19)v.panelVotesRestored=false;if(missing==20)v.panelVotesParked=true;if(missing==21)v.supplyToken=99;
+  if(missing==22)v.panelVoteTokens[0]=0;if(missing==23)v.panelVoteTokens[1]=0;if(missing==24)v.panelAggregateEnabledMask=2;
+  if(missing==25)v.resourcesRestored=false;if(missing==26)v.linkRebuilt=false;if(missing==27)v.clockToken=0;
+  if(missing==28)v.dataToken=0;if(missing==29)v.linkPoweredDown=true;if(missing==30)v.resourcesParked=true;
+  h.complete();assert(h.f->fPanelLifecycleFault==(missing!=31));assert(h.f->fPowerOff==(missing!=31));
+ }
  lifecycleArg=1;
  puts("PASS: actual FB asynchronous lifecycle requests/status, pending presentation freeze, rapid OFF/ON coalescing, no completion from frame mailbox, retained provider/token, explicit fault/withdrawal/stop, no legacy fallback and zero objects/allocations/buffers");
 }

@@ -93,7 +93,7 @@ int main(){
   auto*record=(OSData*)d->properties[MH2LM_PANEL_PROPERTY];
   if(bad==0){record->release();d->properties.erase(MH2LM_PANEL_PROPERTY);}
   if(bad==1)record->bytes[16]=99;if(bad==2)record->bytes[24]^=1;
-  if(bad==3)record->bytes[12]=MH_PANEL_ABSENT;if(bad==4)panelPinsMode=1;if(bad==5)lifecycleMode=6;
+  if(bad==3)record->bytes[12]=MH_PANEL_ABSENT;if(bad==4)panelPinsMode=1;if(bad==5)lifecycleMode=7;
   auto*m=new SweetMDSS();assert(!m->start(d));m->release();queued.clear();dropNub(d);
   assert(!writes()&&!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());mdssClockWriter=mdssNoCWriter=0;}
  for(unsigned profile=1;profile<=4;++profile){selectedProfile=profile;Harness h;h.takeover();

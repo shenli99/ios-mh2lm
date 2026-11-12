@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service|--framebuffer-state|--framebuffer-power|--framebuffer-irq-preflight|--framebuffer-vsync|--framebuffer-scanout|--framebuffer-handoff|--panel-resources]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service|--framebuffer-state|--framebuffer-power|--framebuffer-irq-preflight|--framebuffer-vsync|--framebuffer-scanout|--framebuffer-handoff|--panel-resources|--panel-lifecycle]\n' "$0" >&2
 	exit 2
 fi
 
@@ -20,6 +20,7 @@ FRAMEBUFFER_VSYNC=0
 FRAMEBUFFER_SCANOUT=0
 FRAMEBUFFER_HANDOFF=0
 PANEL_RESOURCES=0
+PANEL_LIFECYCLE=0
 case "$KEY_IRQ_PROFILE" in
 	'')
 		;;
@@ -60,7 +61,11 @@ case "$KEY_IRQ_PROFILE" in
 		FRAMEBUFFER_VSYNC=1
 		KEY_IRQ_PROFILE='--framebuffer-service'
 		;;
-	--framebuffer-scanout|--framebuffer-handoff|--panel-resources)
+	--framebuffer-scanout|--framebuffer-handoff|--panel-resources|--panel-lifecycle)
+		if [ "$KEY_IRQ_PROFILE" = '--panel-lifecycle' ]; then
+			PANEL_LIFECYCLE=1
+			FRAMEBUFFER_HANDOFF=1
+		fi
 		if [ "$KEY_IRQ_PROFILE" = '--framebuffer-handoff' ]; then FRAMEBUFFER_HANDOFF=1; fi
 		if [ "$KEY_IRQ_PROFILE" = '--panel-resources' ]; then
 			PANEL_RESOURCES=1
@@ -104,6 +109,22 @@ RAMDISK_BASE="$OUT/ramdisk-clean"
 ADT="$OUT/adt-16k-3g.adt"
 TOML_BASE="$OUT/unixnu.toml.orig"
 KERNEL_BLOB="$OUT/kernel-32m.blob"
+
+if [ "$PANEL_LIFECYCLE" = '1' ]; then
+ if [ -z "${SWEET_PANEL_UEFI_MANIFEST:-}" ]; then
+  printf 'panel lifecycle needs SWEET_PANEL_UEFI_MANIFEST from tools/build-mh2lm-panel-uefi.py; old kernel-32m.blob cannot supply live panel identity\n' >&2
+  exit 2
+ fi
+ KERNEL_BLOB=$(python3 - "$SWEET_PANEL_UEFI_MANIFEST" <<'PYMANIFEST'
+from pathlib import Path
+import hashlib,json,sys
+p=Path(sys.argv[1]);m=json.loads(p.read_text())
+assert m.get('abi')==1 and m.get('panel_handoff') is True and m.get('full_fd_built') is True, 'expected completed panel firmware bundle'
+b=Path(m['blob']);assert b.is_absolute() and hashlib.sha256(b.read_bytes()).hexdigest()==m['blob_sha256'], 'panel firmware blob hash mismatch'
+print(b)
+PYMANIFEST
+ )
+fi
 
 for required in "$OUT" "$MU" "$RAMDISK_BASE" "$ADT" "$TOML_BASE" "$KERNEL_BLOB"; do
 	if [ ! -e "$required" ]; then
@@ -381,7 +402,16 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
    fi
   done
  fi
- if [ "$PANEL_RESOURCES" = '1' ]; then
+ if [ "$PANEL_LIFECYCLE" = '1' ]; then
+  for marker in 'SweetPanelSupplyCycleEnabled' 'SweetPanelLifecyclePanelVotesParked' \
+      'SweetPanelSelectedProfile' 'SWEET PANEL SUPPLY:' 'SweetPanelLifecycleResetHeldLow'; do
+   if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+    printf 'kernel lacks panel lifecycle marker: %s\n' "$marker" >&2
+    exit 1
+   fi
+  done
+  python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --display-noc --panel-pins --panel-touch --panel-identity "$ADT" "$TMPDIR/mdss.adt"
+ elif [ "$PANEL_RESOURCES" = '1' ]; then
   for marker in 'SweetRPMhABI' 'SweetRPMhWritesAllowed' 'SweetDisplayRPMhBound' \
       'SWEET MDSS: matched RPMh consumer=' 'SWEET RPMH: pre-v3 RSC id=' \
       'SWEET FB PERF:' 'sweetfbperf' 'sweetdisplayresources'; do
@@ -444,12 +474,23 @@ make_profile() {
 		python3 Resources/Scripts/mkbootimg.py --kernel "$KERNEL_BLOB" \
 			--ramdisk "$ramdisk" --header_version 1 -o "$image"
 	)
-	file "$image"
+	if command -v file >/dev/null 2>&1; then file "$image"; fi
 	sha256sum "$image"
 }
 
 if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
  FB_ARGS='ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 sweetusb=2 sweetusbstep=6 sweetvbus=1 sweetkeys=1 sweetbattery=1 sweetbatt=1 sweetbattirq=4 sweetbattruntime=3 sweetfbpreserveoff=1 sweetfbtrace=0 sweetdispprobe=1 sweetloglevel=2 sweetfbcontract=0 sweetfbproof=0'
+ if [ "$PANEL_LIFECYCLE" = '1' ]; then
+  PANEL_ARGS="$FB_ARGS sweetmdss=1 sweetfbservice=1 sweetmdssirqprobe=0 sweetfbperf=1"
+  make_profile panel-identity "LG G8X - XNU live ABL panel selection, metadata only (${LABEL})" \
+   "$PANEL_ARGS sweetfbpower=0 sweetmdssirq=0 sweetfbvsync=0 sweetfbown=0 sweetdsi=0 sweetdisplayresources=1 sweetdisplayclocks=0 sweetdisplaycore=0 sweetdisplaymanaged=0 sweetdsihost=0 sweetdsilink=0 sweetpanelpins=1 sweettouchpanel=1 sweetpanellifecycle=0"
+  PANEL_ARGS="$PANEL_ARGS sweetfbpower=1 sweetmdssirq=2 sweetfbvsync=1 sweetfbown=2 sweetdsi=1 sweetdisplayresources=2 sweetdisplayclocks=1 sweetdisplaycore=2 sweetdisplaymanaged=1 sweetdsihost=1 sweetdsilink=2 sweetpanelpins=2 sweettouchpanel=2"
+  make_profile panel-retained "LG G8X - XNU full panel reset, all supply votes held (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=2"
+  make_profile panel-combined "LG G8X - XNU DATA and link parking, supply votes held (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=5"
+  make_profile panel-supply "LG G8X - XNU panel-only vote withdrawal and restore (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=6"
+  printf 'kernel SHA256: %s\ncreated identity/retained/combined/supply profiles for %s; inspect live identity before vendor reset/supply tests; no shared L3/L5 withdrawal\n' "$KERNEL_SHA256" "$LABEL"
+  exit 0
+ fi
  if [ "$PANEL_RESOURCES" = '1' ]; then
   # Reuse the already tested single-buffer path. Both profiles have the same
   # v1 ADT, kernel and optional performance accounting; only resource admission

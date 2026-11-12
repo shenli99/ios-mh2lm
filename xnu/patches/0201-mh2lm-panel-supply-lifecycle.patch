@@ -1,0 +1,537 @@
+diff --git a/iokit/Kernel/arm/SweetDisplayBackend.h b/iokit/Kernel/arm/SweetDisplayBackend.h
+--- a/iokit/Kernel/arm/SweetDisplayBackend.h
++++ b/iokit/Kernel/arm/SweetDisplayBackend.h
+@@ -16,13 +16,15 @@
+  * reconstructs host/PHY/PLL, retaining all resource tickets. */
+ enum SweetPanelOperation { SweetPanelTakeover=1, SweetPanelDisplayOff,
+  SweetPanelDisplayOn, SweetPanelPrepare, SweetPanelReset, SweetPanelUnprepare };
+-enum { SweetPanelRetainedSleepReset=1u<<16, SweetPanelDataParking=1u<<17, SweetPanelLinkPowerCycle=1u<<18 };
++enum { SweetPanelRetainedSleepReset=1u<<16, SweetPanelDataParking=1u<<17, SweetPanelLinkPowerCycle=1u<<18, SweetPanelSupplyCycle=1u<<19 };
+ enum SweetPanelPhase { SweetPanelIdle, SweetPanelTouchPause, SweetPanelDrain,
+  SweetPanelTakeoverPending, SweetPanelCommand, SweetPanelFrame,
+  SweetPanelTouchResume, SweetPanelComplete, SweetPanelFault, SweetPanelStopped,
+  SweetPanelPinActivate, SweetPanelPinReset, SweetPanelBrightness,
+  SweetPanelResourcePark, SweetPanelResourceRestore,
+- SweetPanelLinkPowerDown, SweetPanelLinkRebuild };
++ SweetPanelLinkPowerDown, SweetPanelLinkRebuild,
++ SweetPanelPinParkActivate, SweetPanelPinParkWait, SweetPanelPinPark,
++ SweetPanelSupplyActivate, SweetPanelSupplyPark, SweetPanelSupplyRestore };
+ struct SweetPanelLifecycleStatus {
+  uint64_t token, touchToken, commandToken, pinToken;
+  unsigned operation, phase, rails, profile;
+@@ -34,6 +36,11 @@
+  bool resourcesParked, resourcesRestored, retainedPower, configHeld;
+  bool linkPoweredDown, linkRebuilt;
+  uint64_t configToken, dataToken, clockToken;
++ /* This consumer's ACKed withdrawals, NOT physical rail-off. Shared L3/L5
++  * stay held. Aggregate enabled may remain set because of other consumers. */
++ unsigned panelReleasedMask, panelAggregateEnabledMask, supplyRail;
++ uint64_t supplyToken, panelVoteTokens[2];
++ bool resetHeldLow, panelVotesParked, panelVotesRestored;
+ };
+ class SweetMDSS;
+ class SweetScanoutPool;
+diff --git a/iokit/Kernel/arm/SweetFBService.inc b/iokit/Kernel/arm/SweetFBService.inc
+--- a/iokit/Kernel/arm/SweetFBService.inc
++++ b/iokit/Kernel/arm/SweetFBService.inc
+@@ -9,8 +9,9 @@
+  if (!fStateGate || fWorkLoop->addEventSource(fStateGate)!=kIOReturnSuccess) return false;
+  fStateGateAdded=true;
+  int lifecycle=0; (void)PE_parse_boot_argn("sweetpanellifecycle",&lifecycle,sizeof(lifecycle));
+- fPanelLifecycleRequested=lifecycle>=1 && lifecycle<=5;fPanelLifecycleFull=lifecycle>=2 && lifecycle<=5;
+- fPanelLifecycleDataParking=lifecycle==3 || lifecycle==5;fPanelLifecycleLinkCycle=lifecycle==4 || lifecycle==5;
++ fPanelLifecycleRequested=lifecycle>=1 && lifecycle<=6;fPanelLifecycleFull=lifecycle>=2 && lifecycle<=6;
++ fPanelLifecycleDataParking=lifecycle==3 || lifecycle==5 || lifecycle==6;fPanelLifecycleLinkCycle=lifecycle==4 || lifecycle==5 || lifecycle==6;
++ fPanelLifecycleSupplyCycle=lifecycle==6;
+  if (fPanelLifecycleRequested && (!fHardwareVsyncRequested || !fOwnScanoutRequested)) return false;
+  if (fHardwareVsyncRequested && !setupHardwareVsync()) return false;
+  fDisplayClient=SweetDisplayClient::withOwner(this,fWorkLoop,backendChanged);
+@@ -285,7 +286,8 @@
+  if (off==fPanelLifecycleDisplayOff) return kIOReturnSuccess;
+  SweetDisplayBackend *b=fDisplayClient->copyBackend();
+  IOReturn rc=kIOReturnNotReady;uint64_t token=0;
+- if (b && (!fPanelLifecycleLinkCycle || (b->panelLifecycleCapabilities()&SweetPanelLinkPowerCycle)) &&
++ if (b && (!fPanelLifecycleSupplyCycle || (b->panelLifecycleCapabilities()&SweetPanelSupplyCycle)) &&
++     (!fPanelLifecycleLinkCycle || (b->panelLifecycleCapabilities()&SweetPanelLinkPowerCycle)) &&
+      (!fPanelLifecycleDataParking || (b->panelLifecycleCapabilities()&SweetPanelDataParking)) &&
+      (!fPanelLifecycleFull || (b->panelLifecycleCapabilities()&SweetPanelRetainedSleepReset)) &&
+      (b->panelLifecycleCapabilities()&(1u<<(off ? SweetPanelDisplayOff : SweetPanelDisplayOn))))
+@@ -325,7 +327,14 @@
+      v.operation==(fPanelLifecycleRequestOff ? SweetPanelDisplayOff : SweetPanelDisplayOn) &&
+      (!fPanelLifecycleFull || (v.profile>=1 && v.profile<=4 &&
+        (fPanelLifecycleRequestOff ? v.sleeping : (!v.sleeping && v.resetComplete && v.brightnessRestored)))) &&
+-     (fPanelLifecycleLinkCycle && fPanelLifecycleDataParking ?
++     (!fPanelLifecycleSupplyCycle ||
++       (v.configHeld && v.configToken && !v.supplyToken && v.panelVoteTokens[0] && v.panelVoteTokens[1] &&
++        (fPanelLifecycleRequestOff ? (v.rails==12u && v.panelReleasedMask==3u && v.resetHeldLow && v.panelVotesParked &&
++          !v.panelVotesRestored && !v.retainedPower && v.linkPoweredDown && v.resourcesParked && !v.resourcesHeld && !v.dataToken && !v.clockToken) :
++         (v.rails==15u && !v.panelReleasedMask && !v.resetHeldLow && !v.panelVotesParked && v.panelVotesRestored &&
++          v.panelAggregateEnabledMask==3u && v.retainedPower && !v.linkPoweredDown && v.linkRebuilt && !v.resourcesParked &&
++          v.resourcesRestored && v.resourcesHeld && v.dataToken && v.clockToken)))) &&
++     (fPanelLifecycleSupplyCycle ? true : (fPanelLifecycleLinkCycle && fPanelLifecycleDataParking ?
+        (v.retainedPower && v.configHeld && v.configToken &&
+         (fPanelLifecycleRequestOff ? (v.linkPoweredDown && v.resourcesParked && !v.resourcesHeld && !v.dataToken && !v.clockToken) :
+          (!v.linkPoweredDown && v.linkRebuilt && !v.resourcesParked && v.resourcesRestored && v.resourcesHeld && v.dataToken && v.clockToken))) :
+@@ -334,7 +343,7 @@
+         (!v.linkPoweredDown && v.linkRebuilt && v.resourcesHeld))) :
+       (fPanelLifecycleDataParking ? (v.retainedPower && v.configHeld && v.configToken &&
+        (fPanelLifecycleRequestOff ? (v.resourcesParked && !v.resourcesHeld && !v.dataToken && !v.clockToken) :
+-        (!v.resourcesParked && v.resourcesRestored && v.resourcesHeld && v.dataToken && v.clockToken))) : v.resourcesHeld))) &&
++        (!v.resourcesParked && v.resourcesRestored && v.resourcesHeld && v.dataToken && v.clockToken))) : v.resourcesHeld)))) &&
+      (fPanelLifecycleRequestOff ? (v.touchQuiesced && v.displayDrained) : (v.pixelsComplete && !v.touchQuiesced));
+  if (!completed) {
+   if (rc==kIOReturnSuccess) rc=v.result==kIOReturnSuccess ? kIOReturnIOError : v.result;
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -162,7 +162,7 @@
+  void shutdownHardwareVsync(void);
+  void fallbackHardwareVsync(const char *);
+  static void hardwareVsyncFired(OSObject *,IOInterruptEventSource *,int);
+- bool fPanelLifecycleRequested, fPanelLifecycleFull, fPanelLifecycleDataParking, fPanelLifecycleLinkCycle, fPanelLifecycleFault, fPanelLifecycleDisplayOff, fPanelLifecycleDesiredOff, fPanelLifecycleRequestOff;
++ bool fPanelLifecycleRequested, fPanelLifecycleFull, fPanelLifecycleDataParking, fPanelLifecycleLinkCycle, fPanelLifecycleSupplyCycle, fPanelLifecycleFault, fPanelLifecycleDisplayOff, fPanelLifecycleDesiredOff, fPanelLifecycleRequestOff;
+  SweetDisplayBackend *fPanelLifecycleBackend;
+  uint64_t fPanelLifecycleToken, fPanelLifecycleStart;
+  void servicePanelLifecycle(void);
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -401,7 +401,8 @@
+  unsigned fLifecycleIdleSamples;
+  SweetScanoutPool *fLifecyclePool;
+  const SweetPanelProfile *fPanelProfile;
+- bool fLifecycleFull, fLifecycleDataParking, fLifecycleLinkCycle, fLifecyclePinsActive, fPanelBrightnessKnown;
++ bool fLifecycleFull, fLifecycleDataParking, fLifecycleLinkCycle, fLifecycleSupplyCycle, fLifecyclePinsActive, fPanelBrightnessKnown;
++ uint64_t fLifecycleSupplyWait;
+  uint32_t fPanelBrightnessTarget;
+  bool setupLifecycle(IOService *);
+  void lifecycleCommand(bool);
+@@ -418,6 +419,15 @@
+  bool lifecycleLinkResourcesHeld(void);
+  bool lifecycleLinkStepAllowed(void);
+  void lifecycleStartReset(void);
++ void lifecycleStartPinPark(void);
++ void lifecycleStartSupplyRestore(void);
++ void lifecycleStartDataParking(bool);
++ void advanceLifecycleSupply(void);
++ bool lifecycleSupplyPhase(void) const;
++ bool lifecycleSupplySafe(void);
++ bool lifecyclePanelRailsValid(void);
++ bool lifecycleRecordSupply(const SweetRPMhStatus &);
++ void lifecycleCancelSupply(void);
+  IOReturn beginLifecycle(unsigned,SweetScanoutPool *,uint64_t *);
+  void advanceLifecycle(void);
+  void finishLifecycle(IOReturn,const char *,bool = false);
+@@ -912,6 +922,7 @@
+ #include "SweetMDSSHost.inc"
+ #include "SweetMDSSLink.inc"
+ #include "SweetMDSSLifecycle.inc"
++#include "SweetMDSSPanelSupply.inc"
+ 
+ IOReturn
+ SweetMDSS::readyAction(OSObject *owner,void *,void *,void *,void *)
+diff --git a/iokit/Kernel/arm/SweetMDSSLifecycle.inc b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+--- a/iokit/Kernel/arm/SweetMDSSLifecycle.inc
++++ b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+@@ -3,7 +3,8 @@
+  * keeping ALL rail/ARC/clock/NoC votes. Mode3 parks managed DATA leases only;
+  * a separate config floor and all power/boot/link resources stay live. Mode4
+  * cycles host/PHY/PLL hardware while retaining ALL resource tickets. Mode5
+- * composes data parking and link shutdown, retaining the config/power path. */
++ * composes data parking and link shutdown, retaining the config/power path.
++ * Mode6 adds reset-low and panel-only vote withdrawal/restore; L3/L5 stay held. */
+ bool SweetMDSS::setupLifecycle(IOService *provider)
+ {
+  OSData *identity=OSDynamicCast(OSData,provider->getProperty(MH2LM_PANEL_PROPERTY));
+@@ -19,7 +20,7 @@
+  (void)PE_parse_boot_argn("sweettouchpanel",&touch,sizeof(touch));
+  (void)PE_parse_boot_argn("sweetfbown",&own,sizeof(own));
+  (void)PE_parse_boot_argn("sweetpanelpins",&pins,sizeof(pins));
+- if ((mode!=1 && mode!=2 && mode!=3 && mode!=4 && mode!=5) || touch!=2 || own!=2 || !fTouchPanelClient || !fManagedEnabled ||
++ if ((mode!=1 && mode!=2 && mode!=3 && mode!=4 && mode!=5 && mode!=6) || touch!=2 || own!=2 || !fTouchPanelClient || !fManagedEnabled ||
+      !fDsiEnabled || !fPanelPowerEnabled || fIrqMode!=2) return false;
+  if (mode>=2 && (!fPanelProfile || pins!=2 || !fPanelPinsClient ||
+      !sweet_dsi_sequence_valid(fPanelProfile->on,fPanelProfile->onSize,NULL) ||
+@@ -27,17 +28,19 @@
+   SWEET_LOG_ERROR("SWEET PANEL: profile lifecycle requires live-ABL profile and pins2; refused before side effects\n");
+   return false;
+  }
+- fLifecycleLinkCycle=mode==4 || mode==5;
++ fLifecycleSupplyCycle=mode==6;
++ fLifecycleLinkCycle=mode==4 || mode==5 || mode==6;
+  if (fLifecycleLinkCycle && (fCoreProfile!=2 || fHostProfile!=1 || fLinkProfile!=2)) return false;
+  setProperty("SweetPanelLinkCycleEnabled",fLifecycleLinkCycle);
+- fLifecycleDataParking=mode==3 || mode==5;
++ setProperty("SweetPanelSupplyCycleEnabled",fLifecycleSupplyCycle);
++ fLifecycleDataParking=mode==3 || mode==5 || mode==6;
+  if (fLifecycleDataParking && fCoreProfile!=2) return false;
+  fLifecycleFull=mode>=2;setProperty("SweetPanelSleepResetEnabled",fLifecycleFull);
+  fLifecycleTimer=IOTimerEventSource::timerEventSource(this,lifecycleTimerAction);
+  if (!fLifecycleTimer || fLoop->addEventSource(fLifecycleTimer)!=kIOReturnSuccess) return false;
+  fLifecycleTimerAdded=true;fLifecycleEnabled=true;
+  publishLifecycle();
+- SWEET_LOG_INFO("SWEET PANEL: lifecycle mode=%u; full sleep/reset=%u data-parking=%u link-cycle=%u; physical rail-off unavailable\n",(unsigned)mode,fLifecycleFull,fLifecycleDataParking,fLifecycleLinkCycle);
++ SWEET_LOG_INFO("SWEET PANEL: lifecycle mode=%u; full sleep/reset=%u data-parking=%u link-cycle=%u panel-supply=%u; physical rail-off unverified\n",(unsigned)mode,fLifecycleFull,fLifecycleDataParking,fLifecycleLinkCycle,fLifecycleSupplyCycle);
+  return true;
+ }
+ bool SweetMDSS::lifecycleBusy(void) const
+@@ -47,7 +50,9 @@
+  case SweetPanelCommand:case SweetPanelFrame:case SweetPanelTouchResume:
+  case SweetPanelPinActivate:case SweetPanelPinReset:case SweetPanelBrightness:
+  case SweetPanelResourcePark:case SweetPanelResourceRestore:
+- case SweetPanelLinkPowerDown:case SweetPanelLinkRebuild: return true;
++ case SweetPanelLinkPowerDown:case SweetPanelLinkRebuild:
++ case SweetPanelPinParkActivate:case SweetPanelPinParkWait:case SweetPanelPinPark:
++ case SweetPanelSupplyActivate:case SweetPanelSupplyPark:case SweetPanelSupplyRestore: return true;
+  default: return false;
+  }
+ }
+@@ -55,7 +60,7 @@
+ { return fLifecycleEnabled && (lifecycleBusy() || fLifecycleParked || fLifecycle.phase==SweetPanelFault || fLifecycle.phase==SweetPanelStopped); }
+ unsigned SweetMDSS::panelLifecycleCapabilities(void)
+ {
+- return fLifecycleEnabled ? (1u<<SweetPanelTakeover)|(1u<<SweetPanelDisplayOff)|(1u<<SweetPanelDisplayOn)|(fLifecycleFull ? SweetPanelRetainedSleepReset : 0u)|(fLifecycleDataParking ? SweetPanelDataParking : 0u)|(fLifecycleLinkCycle ? SweetPanelLinkPowerCycle : 0u) : 0;
++ return fLifecycleEnabled ? (1u<<SweetPanelTakeover)|(1u<<SweetPanelDisplayOff)|(1u<<SweetPanelDisplayOn)|(fLifecycleFull ? SweetPanelRetainedSleepReset : 0u)|(fLifecycleDataParking ? SweetPanelDataParking : 0u)|(fLifecycleLinkCycle ? SweetPanelLinkPowerCycle : 0u)|(fLifecycleSupplyCycle ? SweetPanelSupplyCycle : 0u) : 0;
+ }
+ void SweetMDSS::publishLifecycle(void)
+ {
+@@ -68,6 +73,14 @@
+  setProperty("SweetPanelLifecycleSleeping",fLifecycle.sleeping);
+  setProperty("SweetPanelLifecycleResetComplete",fLifecycle.resetComplete);
+  setProperty("SweetPanelLifecycleBrightnessRestored",fLifecycle.brightnessRestored);
++ fLifecycle.rails=fManagedRails;
++ setProperty("SweetPanelLifecycleRails",(unsigned long long)fLifecycle.rails,32);
++ setProperty("SweetPanelLifecyclePanelReleasedMask",(unsigned long long)fLifecycle.panelReleasedMask,32);
++ setProperty("SweetPanelLifecyclePanelAggregateEnabledMask",(unsigned long long)fLifecycle.panelAggregateEnabledMask,32);
++ setProperty("SweetPanelLifecycleSupplyToken",(unsigned long long)fLifecycle.supplyToken,64);
++ setProperty("SweetPanelLifecycleResetHeldLow",fLifecycle.resetHeldLow);
++ setProperty("SweetPanelLifecyclePanelVotesParked",fLifecycle.panelVotesParked);
++ setProperty("SweetPanelLifecyclePanelVotesRestored",fLifecycle.panelVotesRestored);
+  fLifecycle.configToken=fManagedConfigBandwidth;fLifecycle.dataToken=fManagedBandwidth;fLifecycle.clockToken=fManagedClock;
+  setProperty("SweetPanelLifecycleDataParked",fLifecycle.resourcesParked);
+  setProperty("SweetPanelLifecycleRetainedPower",fLifecycle.retainedPower);
+@@ -95,6 +108,10 @@
+   SweetTouchPanelStatus fence={};
+   ok=t->copyStatus(fTouchPanelConsumer,fLifecycle.touchToken,&fence)==kIOReturnSuccess &&
+       fence.token==fLifecycle.touchToken && fence.quiesced && !fence.ready && !fence.uncertain && fence.result==kIOReturnSuccess;
++ }
++ if (ok && fLifecycleSupplyCycle && fLifecycle.resetHeldLow) {
++  SweetPanelPinStatus pin={};
++  ok=p && p->copyLowStatus(fPanelPinsConsumer,fLifecycle.pinToken,&pin)==kIOReturnSuccess;
+  }
+  OSSafeReleaseNULL(t);OSSafeReleaseNULL(r);OSSafeReleaseNULL(p);
+  return ok;
+@@ -188,9 +205,17 @@
+   IOReturn rc=fTouchPanel->quiesce(fTouchPanelConsumer,&touch);
+   if (rc!=kIOReturnSuccess) return rc; /* no lifecycle token, no display effect */
+  }
++ if (fLifecycleSupplyCycle && op==SweetPanelDisplayOn &&
++     (!fLifecycle.panelVotesParked || fLifecycle.panelReleasedMask!=3u || fManagedRails!=12u || !fLifecycle.resetHeldLow)) return kIOReturnNotReady;
+  uint64_t pinToken=fLifecycle.pinToken;
++ unsigned released=fLifecycleSupplyCycle && op==SweetPanelDisplayOn ? fLifecycle.panelReleasedMask : 0u;
++ unsigned aggregate=fLifecycleSupplyCycle && op==SweetPanelDisplayOn ? fLifecycle.panelAggregateEnabledMask : 3u;
++ uint64_t previousVotes[2]={fLifecycle.panelVoteTokens[0],fLifecycle.panelVoteTokens[1]};
+  fLifecycle={};fLifecycle.token=++fLifecycleNextToken;fLifecycle.operation=op;
+- fLifecycle.pinToken=pinToken;fLifecycle.profile=fPanelProfile ? fPanelProfile->id : 0;
++ fLifecycle.pinToken=pinToken;
++ fLifecycle.panelReleasedMask=released;fLifecycle.panelAggregateEnabledMask=aggregate;
++ if (released) {fLifecycle.panelVoteTokens[0]=previousVotes[0];fLifecycle.panelVoteTokens[1]=previousVotes[1];}
++ fLifecycle.panelVotesParked=released==3u;fLifecycle.resetHeldLow=released==3u;fLifecycleSupplyWait=0;fLifecycle.profile=fPanelProfile ? fPanelProfile->id : 0;
+  fLifecycle.sleeping=fLifecycleFull && op==SweetPanelDisplayOn;
+  fLifecycle.touchToken=touch;fLifecycle.result=kIOReturnNotReady;
+  fLifecycle.phase=op==SweetPanelDisplayOn ? SweetPanelDrain : SweetPanelTouchPause;
+@@ -201,7 +226,11 @@
+  fLifecycle.retainedPower=fLifecycle.resourcesParked || fLifecycle.linkPoweredDown;fLifecycle.configHeld=fLifecycle.resourcesParked;
+  fLifecycleDeadline=scanout_now()+16000000000ULL;
+  fLifecycleStepDeadline=scanout_now()+(op==SweetPanelDisplayOn ? 50000000ULL : 6500000000ULL);fLifecycleIdleSamples=0;
+- if (fLifecycle.linkPoweredDown && !fLifecycle.resourcesParked) {
++ if (fLifecycleSupplyCycle && op==SweetPanelDisplayOn) {
++  fLifecycle.displayDrained=true;fLifecycle.retainedPower=false;
++  lifecycleStartSupplyRestore();
++  if (!lifecycleBusy()) {*token=fLifecycle.token;return kIOReturnSuccess;}
++ } else if (fLifecycle.linkPoweredDown && !fLifecycle.resourcesParked) {
+   fLifecycle.phase=SweetPanelLinkRebuild;fLifecycle.displayDrained=true;
+   fLifecycleStepDeadline=scanout_now()+1000000000ULL;
+   IOReturn rc=resumeLink();
+@@ -228,6 +257,7 @@
+    * old TE replay, reset, powerdown or background transport continuation. */
+   fLifecycle.phase=stopped ? SweetPanelStopped : SweetPanelFault;
+   fLifecycle.result=result;fLifecycle.uncertain=true;fPanelState=PanelUnknown;
++  lifecycleCancelSupply(); /* synchronize child BEFORE invalidating leaf tokens */
+   if (fPanelPins && fLifecycle.pinToken)
+    (void)fPanelPins->cancelRequest(fPanelPinsConsumer,fLifecycle.pinToken);
+   if (fTouchPanel && fLifecycle.touchToken)
+@@ -242,7 +272,7 @@
+  } else {
+   fLifecycle.phase=SweetPanelComplete;fLifecycle.result=result;
+   fLifecycleParked=fLifecycle.operation==SweetPanelDisplayOff;
+-  SWEET_LOG_INFO("SWEET PANEL: token=%llu complete operation=%u parked=%u data-parked=%u data-restored=%u link-down=%u link-rebuilt=%u; power/config retained\n",fLifecycle.token,fLifecycle.operation,fLifecycleParked,fLifecycle.resourcesParked,fLifecycle.resourcesRestored,fLifecycle.linkPoweredDown,fLifecycle.linkRebuilt);
++  SWEET_LOG_INFO("SWEET PANEL: token=%llu complete operation=%u parked=%u data-parked=%u data-restored=%u link-down=%u link-rebuilt=%u own-rails=%#x panel-released=%#x; no physical rail-off claim\n",fLifecycle.token,fLifecycle.operation,fLifecycleParked,fLifecycle.resourcesParked,fLifecycle.resourcesRestored,fLifecycle.linkPoweredDown,fLifecycle.linkRebuilt,fManagedRails,fLifecycle.panelReleasedMask);
+  }
+  publishLifecycle();
+  /* Wake deferred typed clients (e.g. brightness) without a reverse gate
+@@ -271,6 +301,7 @@
+  if (!lifecycleParticipants()) {finishLifecycle(kIOReturnNotReady,"participant unavailable");return;}
+  uint64_t now=scanout_now();
+  if (now>=fLifecycleDeadline || now>=fLifecycleStepDeadline) {finishLifecycle(kIOReturnTimeout,"lifecycle deadline");return;}
++ if (lifecycleSupplyPhase()) {advanceLifecycleSupply();return;}
+  if (fLifecycle.phase==SweetPanelTouchPause || fLifecycle.phase==SweetPanelTouchResume) {
+   SweetTouchPanelStatus t={};
+   if (fTouchPanel->copyStatus(fTouchPanelConsumer,fLifecycle.touchToken,&t)!=kIOReturnSuccess ||
+@@ -365,7 +396,10 @@
+    fLifecycle.phase=SweetPanelLinkRebuild;fLifecycleStepDeadline=now+1000000000ULL;
+    /* DATA and both clock tickets are Held before host reset can begin. */
+   } else if (restore) lifecycleStartReset();
+-  else finishLifecycle(kIOReturnSuccess,"data leases parked; power/config retained");
++  else if (fLifecycleSupplyCycle) {
++   fLifecycle.phase=SweetPanelSupplyPark;fLifecycle.supplyRail=SweetRailVPNL;
++   fLifecycleStepDeadline=now+400000000ULL;fLifecycleSupplyWait=0;
++  } else finishLifecycle(kIOReturnSuccess,"data leases parked; power/config retained");
+   publishLifecycle();return;
+  } else if (fLifecycle.phase==SweetPanelPinActivate || fLifecycle.phase==SweetPanelPinReset) {
+   if (!lifecycleResourcesHeld() || !lifecycleIRQDrained() || (dp_rd(dp_dsi,8)&6u)) {
+@@ -388,7 +422,9 @@
+   if (fLifecycle.operation==SweetPanelDisplayOff) {
+    fPanelState=PanelOff;fIrqDisplayOn=false;publishPanelState();
+    fLifecycle.sleeping=fLifecycleFull;
+-   if (fLifecycleLinkCycle && !fLifecycleDataParking) {
++   if (fLifecycleSupplyCycle) {
++    lifecycleStartPinPark();publishLifecycle();
++   } else if (fLifecycleLinkCycle && !fLifecycleDataParking) {
+     fLifecycle.phase=SweetPanelLinkPowerDown;fLifecycleStepDeadline=now+1000000000ULL;
+     IOReturn rc=beginLink(true);
+     if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"link shutdown admission");return;}
+@@ -426,6 +462,7 @@
+  * touch fence; hardware operations remain in their original service owner. */
+ void SweetMDSS::lifecycleReset(void)
+ {
++ fLifecycle.resetHeldLow=false;
+  IOReturn rc=fPanelPins->reset(fPanelPinsConsumer,&fLifecycle.pinToken);
+  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"reset admission");return;}
+  fLifecycle.phase=SweetPanelPinReset;fLifecycleStepDeadline=scanout_now()+100000000ULL;
+@@ -476,7 +513,7 @@
+  if (fLifecycle.phase!=SweetPanelResourcePark && fLifecycle.phase!=SweetPanelResourceRestore) return true;
+  if (scanout_now()>=fLifecycleDeadline || scanout_now()>=fLifecycleStepDeadline ||
+      scanout_now()>=fManagedDeadline) return false;
+- if (!fLifecycleDataParking || !fLifecycle.sleeping || !fLifecycle.touchQuiesced || !fLifecycle.displayDrained ||
++ if ((fLifecycleSupplyCycle && !fLifecycle.resetHeldLow) || !fLifecycleDataParking || !fLifecycle.sleeping || !fLifecycle.touchQuiesced || !fLifecycle.displayDrained ||
+      !managedRetainedResources() || !lifecycleIRQDrained() || !clockCanGate() || !scanoutConfiguration(false) ||
+      dp_rd(dp_ctl,0x18) || dp_rd(dp_ctl,0x1c)) return false;
+  uint32_t line=dp_rd(dp_intf1,0x2b0)&0xffffu;
+@@ -493,6 +530,7 @@
+  return fLifecycleLinkCycle && !fLifecycle.uncertain &&
+      fLinkPhase!=LinkFault && fLinkPhase!=LinkStopped && fHostPhase!=HostFault && fHostPhase!=HostStopped &&
+      (fLifecycle.phase==SweetPanelLinkPowerDown || fLifecycle.phase==SweetPanelLinkRebuild ||
++      (fLifecycleSupplyCycle && (fLifecycle.phase==SweetPanelSupplyPark || fLifecycle.phase==SweetPanelSupplyRestore || fLifecycle.phase==SweetPanelSupplyActivate)) ||
+       (fLifecycleDataParking && (fLifecycle.phase==SweetPanelResourcePark || fLifecycle.phase==SweetPanelResourceRestore)) ||
+       (fLifecycle.phase==SweetPanelComplete && fLifecycleParked && fLinkPhase==LinkDormant));
+ }
+@@ -526,7 +564,7 @@
+ }
+ bool SweetMDSS::lifecycleLinkStepAllowed(void)
+ {
+- if (!fLifecycleLinkCycle || !lifecycleParticipants() || !fLifecycle.sleeping || !fLifecycle.touchQuiesced ||
++ if ((fLifecycleSupplyCycle && !fLifecycle.resetHeldLow) || !fLifecycleLinkCycle || !lifecycleParticipants() || !fLifecycle.sleeping || !fLifecycle.touchQuiesced ||
+      !fLifecycle.displayDrained || !lifecycleLinkResourcesHeld() || !lifecycleIRQDrained() ||
+      scanout_now()>=fLifecycleDeadline || scanout_now()>=fLifecycleStepDeadline ||
+      (dp_rd(dp_intf1,0x288)&(1u<<20)) || dp_rd(dp_intf1,0x2b4) ||
+diff --git a/iokit/Kernel/arm/SweetMDSSPanelSupply.inc b/iokit/Kernel/arm/SweetMDSSPanelSupply.inc
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetMDSSPanelSupply.inc
+@@ -0,0 +1,183 @@
++/* Mode6: only this panel consumer's L14/L17 votes, never shared L3/L5.
++ * Same MDSS owner/gate/timer and existing Pins/RPMh execution services.
++ * LG lge_dsi_panel.c: OFF pre-reset5ms + low5ms, reverse supply order then
++ * post-off5ms; ON active-low + pre5ms, VDDI post20ms, VPNL, post-rails5ms.
++ * ACKed withdrawal is not physical rail-off or exclusive supply ownership. */
++bool SweetMDSS::lifecycleSupplyPhase(void) const
++{
++ return fLifecycle.phase==SweetPanelPinParkActivate || fLifecycle.phase==SweetPanelPinParkWait ||
++     fLifecycle.phase==SweetPanelPinPark || fLifecycle.phase==SweetPanelSupplyActivate ||
++     fLifecycle.phase==SweetPanelSupplyPark || fLifecycle.phase==SweetPanelSupplyRestore;
++}
++bool SweetMDSS::lifecyclePanelRailsValid(void)
++{
++ if (!fLifecycleSupplyCycle) return fManagedRails==15u;
++ if ((fLifecycle.panelReleasedMask&~3u) || fManagedRails!=(15u&~fLifecycle.panelReleasedMask)) return false;
++ if (!fLifecycle.panelReleasedMask) return true;
++ /* Reduced rails are legal only AFTER DATA/link parking, before restore.
++  * Do not weaken normal resource/link admission or the one-time takeover. */
++ bool phase=fLifecycle.phase==SweetPanelSupplyPark || fLifecycle.phase==SweetPanelSupplyRestore ||
++     fLifecycle.phase==SweetPanelSupplyActivate ||
++     (fLifecycle.phase==SweetPanelComplete && fLifecycleParked && fLifecycle.operation==SweetPanelDisplayOff);
++ return phase && fManagedState==ManagedParked && !fManagedClock && !fManagedBandwidth && !fManagedToken &&
++     fLifecycle.resourcesParked && fLifecycle.linkPoweredDown && fLinkSuspendedMask==0x70u && managedConfigHeld() &&
++     fHostPhase==HostDormant && fLinkPhase==LinkDormant;
++}
++void SweetMDSS::lifecycleStartDataParking(bool restore)
++{
++ fLifecycle.phase=restore ? SweetPanelResourceRestore : SweetPanelResourcePark;
++ fManagedDeadline=fLifecycleStepDeadline=scanout_now()+4000000000ULL;
++ IOReturn rc=beginManagedParking(restore);
++ if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"panel supply/data handoff refused");return;}
++ fLifecycle.resourcesHeld=false;publishLifecycle();
++}
++void SweetMDSS::lifecycleStartPinPark(void)
++{
++ fLifecycleStepDeadline=scanout_now()+200000000ULL;
++ if (!fLifecyclePinsActive) {
++  IOReturn rc=fPanelPins->activate(fPanelPinsConsumer,&fLifecycle.pinToken);
++  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"pre-park active pin admission");return;}
++  fLifecycle.phase=SweetPanelPinParkActivate;
++ } else {
++  fLifecycle.phase=SweetPanelPinParkWait;fLifecycleSupplyWait=scanout_now()+5000000ULL;
++ }
++}
++void SweetMDSS::lifecycleStartSupplyRestore(void)
++{
++ if (!fLifecycleSupplyCycle || fLifecyclePinsActive || fManagedRails!=12u ||
++     fLifecycle.panelReleasedMask!=3u || !fLifecycle.panelVotesParked) {
++  finishLifecycle(kIOReturnNotReady,"panel supply restore ledger absent");return;
++ }
++ /* Parked -> active-low does not pulse reset. The old Parked token was
++  * checked at ON admission; the new token must complete before rail writes. */
++ fLifecycle.resetHeldLow=false;fLifecycle.phase=SweetPanelSupplyActivate;
++ fLifecycleStepDeadline=scanout_now()+100000000ULL;
++ IOReturn rc=fPanelPins->activate(fPanelPinsConsumer,&fLifecycle.pinToken);
++ if (rc!=kIOReturnSuccess) finishLifecycle(rc,"supply active-low admission");
++}
++bool SweetMDSS::lifecycleSupplySafe(void)
++{
++ if (!fLifecycleSupplyCycle || !lifecycleParticipants() || !fLifecycle.sleeping ||
++     !fLifecycle.touchQuiesced || !fLifecycle.displayDrained ||
++     !fLifecycle.resourcesParked || !fLifecycle.linkPoweredDown ||
++     fManagedState!=ManagedParked || fManagedClock || fManagedBandwidth || fManagedToken ||
++     !managedRetainedResources() || !managedConfigHeld() || !linkDormantConfiguration() ||
++     clockBusy() || noCBusy() || linkBusy() || hostBusy() ||
++     !lifecycleIRQDrained() || !clockCanGate() || !scanoutConfiguration(false) ||
++     (dp_rd(dp_dsi,8)&6u) || dp_rd(dp_ctl,0x18) || dp_rd(dp_ctl,0x1c) ||
++     dp_rd(dp_intf1,0x2b4) || (dp_rd(dp_intf1,0x288)&(1u<<20)) ||
++     scanout_now()>=fLifecycleDeadline || scanout_now()>=fLifecycleStepDeadline) return false;
++ uint32_t line=dp_rd(dp_intf1,0x2b0)&0xffffu;
++ return !(line>0 && line<2340);
++}
++bool SweetMDSS::lifecycleRecordSupply(const SweetRPMhStatus &s)
++{
++ unsigned rail=fLifecycle.supplyRail;
++ bool on=fLifecycle.operation==SweetPanelDisplayOn;
++ if (rail>SweetRailVPNL || !fLifecycle.supplyToken || s.token!=fLifecycle.supplyToken ||
++     s.rail!=rail || s.state!=SweetRPMhComplete || s.result!=kIOReturnSuccess || s.uncertain ||
++     (on && !s.enabled)) return false;
++ unsigned bit=1u<<rail;
++ if (on) {fManagedRails|=bit;fLifecycle.panelReleasedMask&=~bit;fLifecycle.panelVotesParked=false;}
++ else {fManagedRails&=~bit;fLifecycle.panelReleasedMask|=bit;}
++ if (s.enabled) fLifecycle.panelAggregateEnabledMask|=bit;
++ else fLifecycle.panelAggregateEnabledMask&=~bit;
++ fLifecycle.panelVoteTokens[rail]=s.token;fLifecycle.supplyToken=0;fLifecycle.rails=fManagedRails;
++ fLifecycle.retainedPower=fManagedRails==15u;
++ SWEET_LOG_INFO("SWEET PANEL SUPPLY: token=%llu %s rail=%u ACK=%llu own-held=%#x released=%#x aggregate=%#x; physical rail state unverified\n",
++     fLifecycle.token,on ? "restore" : "withdraw",rail,s.token,fManagedRails,fLifecycle.panelReleasedMask,fLifecycle.panelAggregateEnabledMask);
++ return true;
++}
++void SweetMDSS::lifecycleCancelSupply(void)
++{
++ if (!fLifecycleSupplyCycle || !fLifecycle.supplyToken || !fRPMh || !fRPMhConsumer) return;
++ /* Stop the child's writer under its gate BEFORE invalidating Pins/Touch.
++  * An ACK already committed by that gate is still real: reconcile it rather
++  * than preserving an obsolete mask. A triggered but unconfirmed write stays
++  * in supplyToken/rail and uncertain; cancellation cannot undo it. */
++ (void)fRPMh->cancelPanelVote(fRPMhConsumer,fLifecycle.supplyToken);
++ SweetRPMhStatus s={};
++ if (fRPMh->copyStatus(fRPMhConsumer,fLifecycle.supplyToken,&s)==kIOReturnSuccess &&
++     s.state==SweetRPMhComplete) (void)lifecycleRecordSupply(s);
++}
++void SweetMDSS::advanceLifecycleSupply(void)
++{
++ uint64_t now=scanout_now();
++ bool prePark=fLifecycle.phase==SweetPanelPinParkActivate || fLifecycle.phase==SweetPanelPinParkWait ||
++     fLifecycle.phase==SweetPanelPinPark;
++ if (prePark) {
++  if (fLifecycle.operation!=SweetPanelDisplayOff || !lifecycleResourcesHeld() || !fLifecycle.sleeping ||
++      !fLifecycle.touchQuiesced || !fLifecycle.displayDrained || !lifecycleIRQDrained() ||
++      (dp_rd(dp_dsi,8)&6u) || !clockCanGate() || !scanoutConfiguration(false) ||
++      dp_rd(dp_ctl,0x18) || dp_rd(dp_ctl,0x1c)) {finishLifecycle(kIOReturnNotReady,"pre-park dependency lost");return;}
++  if (fLifecycle.phase==SweetPanelPinParkWait) {
++   if (now<fLifecycleSupplyWait) return;
++   IOReturn rc=fPanelPins->park(fPanelPinsConsumer,&fLifecycle.pinToken);
++   if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"reset-low park admission");return;}
++   fLifecycle.phase=SweetPanelPinPark;publishLifecycle();return;
++  }
++  SweetPanelPinStatus p={};
++  if (fPanelPins->copyStatus(fPanelPinsConsumer,fLifecycle.pinToken,&p)!=kIOReturnSuccess || p.uncertain ||
++      (p.result!=kIOReturnNotReady && p.result!=kIOReturnSuccess)) {finishLifecycle(kIOReturnIOError,"pre-park pin failure");return;}
++  if (p.result==kIOReturnNotReady) return;
++  if (fLifecycle.phase==SweetPanelPinParkActivate) {
++   if (p.state!=SweetPinsActive || !p.resetKnown || !p.resetHigh) {finishLifecycle(kIOReturnNotReady,"warm pre-park pin proof absent");return;}
++   fLifecyclePinsActive=true;fLifecycle.phase=SweetPanelPinParkWait;fLifecycleSupplyWait=now+5000000ULL;
++  } else {
++   if (p.state!=SweetPinsParked || fPanelPins->copyLowStatus(fPanelPinsConsumer,fLifecycle.pinToken,&p)!=kIOReturnSuccess) {
++    finishLifecycle(kIOReturnNotReady,"reset-low hold proof absent");return;
++   }
++   fLifecyclePinsActive=false;fLifecycle.resetHeldLow=true;lifecycleStartDataParking(false);
++  }
++  publishLifecycle();return;
++ }
++ if (!lifecycleSupplySafe()) {finishLifecycle(kIOReturnNotReady,"panel supply safety/deadline lost");return;}
++ if (fLifecycle.phase==SweetPanelSupplyActivate) {
++  SweetPanelPinStatus p={};
++  if (fPanelPins->copyStatus(fPanelPinsConsumer,fLifecycle.pinToken,&p)!=kIOReturnSuccess || p.uncertain ||
++      (p.result!=kIOReturnNotReady && p.result!=kIOReturnSuccess)) {finishLifecycle(kIOReturnIOError,"active-low operation failed");return;}
++  if (p.result==kIOReturnNotReady) return;
++  if (p.state!=SweetPinsActive || fPanelPins->copyLowStatus(fPanelPinsConsumer,fLifecycle.pinToken,&p)!=kIOReturnSuccess) {
++   finishLifecycle(kIOReturnNotReady,"active-low proof absent");return;
++  }
++  fLifecyclePinsActive=fLifecycle.resetHeldLow=true;fLifecycle.phase=SweetPanelSupplyRestore;
++  fLifecycle.supplyRail=SweetRailVDDI;fLifecycleSupplyWait=now+5000000ULL;
++  fLifecycleStepDeadline=now+400000000ULL;publishLifecycle();return;
++ }
++ bool on=fLifecycle.phase==SweetPanelSupplyRestore;
++ if (!fLifecycle.resetHeldLow || (on ? fLifecycle.operation!=SweetPanelDisplayOn : fLifecycle.operation!=SweetPanelDisplayOff)) {
++  finishLifecycle(kIOReturnNotReady,"panel supply phase mismatch");return;
++ }
++ if (now<fLifecycleSupplyWait) return;
++ if (fLifecycle.supplyRail==SweetRailCount) {
++  if (fLifecycle.supplyToken || (on ? (fManagedRails!=15u || fLifecycle.panelReleasedMask) :
++      (fManagedRails!=12u || fLifecycle.panelReleasedMask!=3u))) {finishLifecycle(kIOReturnIOError,"panel vote terminal ledger absent");return;}
++  fLifecycle.panelVotesParked=!on;fLifecycle.panelVotesRestored=on;
++  if (on) lifecycleStartDataParking(true);
++  else finishLifecycle(kIOReturnSuccess,"panel votes withdrawn; shared power/config held");
++  publishLifecycle();return;
++ }
++ unsigned rail=fLifecycle.supplyRail;
++ if (rail>SweetRailVPNL) {finishLifecycle(kIOReturnBadArgument,"panel supply rail outside allowlist");return;}
++ unsigned bit=1u<<rail;
++ if (on ? (!(fLifecycle.panelReleasedMask&bit) || (fManagedRails&bit)) :
++     ((fLifecycle.panelReleasedMask&bit) || !(fManagedRails&bit))) {finishLifecycle(kIOReturnNotReady,"panel vote ledger drift");return;}
++ if (!fLifecycle.supplyToken) {
++  SweetPanelSupplyFence fence={fPanelPins,fTouchPanel,fPanelPinsConsumer,fLifecycle.pinToken,fTouchPanelConsumer,fLifecycle.touchToken};
++  SweetRailVote vote=on ? managedRailVotes[rail] : SweetRailVote{};
++  IOReturn rc=fRPMh->requestPanelVote(fRPMhConsumer,(SweetRail)rail,vote,fence,&fLifecycle.supplyToken);
++  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"panel vote admission refused");return;}
++ }
++ SweetRPMhStatus s={};
++ if (fRPMh->copyStatus(fRPMhConsumer,fLifecycle.supplyToken,&s)!=kIOReturnSuccess || s.uncertain ||
++     (s.state!=SweetRPMhPending && s.state!=SweetRPMhComplete)) {finishLifecycle(kIOReturnIOError,"panel vote completion failed");return;}
++ if (s.state==SweetRPMhPending) {publishLifecycle();return;}
++ if (!lifecycleRecordSupply(s)) {finishLifecycle(kIOReturnIOError,"panel vote ACK proof absent");return;}
++ /* No elapsed-time guess can replace ACK; waits start from the observed ACK.
++  * Final off/on5ms is separate from VDDI's post-on20ms. */
++ fLifecycleSupplyWait=now+(on && rail==SweetRailVDDI ? 20000000ULL : 0ULL);
++ fLifecycle.supplyRail=on ? (rail==SweetRailVDDI ? SweetRailVPNL : SweetRailCount) :
++     (rail==SweetRailVPNL ? SweetRailVDDI : SweetRailCount);
++ if (fLifecycle.supplyRail==SweetRailCount) fLifecycleSupplyWait=now+5000000ULL;
++ publishLifecycle();
++}
+diff --git a/iokit/Kernel/arm/SweetMDSSResources.inc b/iokit/Kernel/arm/SweetMDSSResources.inc
+--- a/iokit/Kernel/arm/SweetMDSSResources.inc
++++ b/iokit/Kernel/arm/SweetMDSSResources.inc
+@@ -244,7 +244,7 @@
+ }
+ bool SweetMDSS::managedRetainedResources(void)
+ {
+- if (!fRPMh || !fRPMhConsumer || fManagedRails!=15u || !fManagedARC || fNoCFault || fClockFault ||
++ if (!fRPMh || !fRPMhConsumer || !lifecyclePanelRailsValid() || !fManagedARC || fNoCFault || fClockFault ||
+      !clockPrerequisites() || (fCoreProfile && !coreReady()) ||
+      (fHostProfile && fHostPhase!=HostReady && !(fLifecycleLinkCycle && fHostPhase==HostDormant)) ||
+      (fLinkProfile && (fLinkPhase!=LinkReady || !linkConfiguration()) &&
