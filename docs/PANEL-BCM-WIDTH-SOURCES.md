@@ -105,3 +105,56 @@ entry的addr/len/offset字段位于16/20/22，与当前解析器常数一致。
 证据：`scratch/artifact-0121a17/lineage-bcm-layout-check.c`、
 `{lineage,xnu}-bcm-layout-check.ll`及`lineage-bcm-layout-verification.json`。
 本轮没有更改解析器、硬件准入或投票代码；不需新编译/上机。
+
+## 再复查：零width是否一定不能工作（Lineage原函数离线复现）
+
+用户指出“width不应该是0”。本轮不再只验证结构布局，而是核对查表地址公式、
+格式版本处理和零width进入Lineage完整构票路径后的结果。
+
+### 查表与版本检查的范围
+
+Lineage的条目位置为`DB+sizeof(header)+header_offset+entry_index*sizeof(entry)`，
+aux位置为`DB+sizeof(header)+data_offset+entry.offset`；当前XNU用144/24和同一组字段，
+公式一致。XNU的db16从对齐u32中按字节偏移取半字；访问h+2/h+4/e+20/e+22均为偶数，
+没有跨word误取。ARM64小端结构及字段位置已按前节核对。
+
+Lineage的slave header含aux版本，并提供`cmd_db_get_version()`，但实际
+`msm_bus_bcm_init()`不调用它，没有另一个版本分支改用高16位作为width。
+当前日志没有原始DB header/该项entry/aux逐字节独立快照，也没有该slave的aux版本；
+**所以不能宣称已独立证实设备中该条目的完整地址/版本，只能说尚未找到静态解析偏移错误。**
+未获取到外部upstream源代码：尝试只读下载固定Linux v6.12四个相关源文件，被环境网络限制拒绝；
+本结论不引用记忆中的上游实现作为证据。本地备份中没有AOP或commandDB原始dump，
+没有操作设备、启动Android或扫描未知MMIO。
+
+### Lineage原函数证明：width0仍可产生非零ACV票
+
+从Lineage原文提取以下四个函数，保持函数体不变，OS对象用最小结构替身：
+
+- `msm_bus_div64()`
+- `bcm_update_acv_req()`
+- `bcm_update_bus_req()`
+- `tcs_cmd_gen()`
+
+输入使用本机已记录元数据MC0(width16/unit2050000)、ACV(width0/unit1)，
+DTS EBI buswidth4/ports4及MC0→ACV顺序。为清楚展示计算，**带宽输入使用合成例子**：
+AB=64,000,000、IB=128,000,000 bytes/s，不是本次实机请求或实测吞吐量。
+原函数在两种context分别做ON→OFF→ON，12场景ASan/UBSan通过（LSan因运行环境关闭）。
+
+| 路径 | MC0最终X/Y | ACV自己按width缩放的AB/IB | ACV最终X/Y | 含COMMIT的ACV命令 |
+|---|---|---|---|---|
+| display ON | 31/249 | 0/0 | **31/249** | 0x6007c0f9 |
+| apps ON | 31/249 | 0/0 | **0/8** | 0x60000008 |
+| 两路径 OFF | 0/0 | 0/0 | 0/0 | 0x40000000 |
+
+原因为：max_ab/max_ib在遍历BCM列表前初始化，MC0归一化后的31/249传给后续ACV；
+ACV本项贡献虽为0，但`max(previous,0)`并不把累计值归零，除unit1仍是31/249。
+display27006进入普通vec分支保留它；apps7038进入特殊函数转成bitmask8。
+因此“width0导致最终票必为0，驱动无法工作”这个判断与所核对的Lineage源代码不符。
+
+这证明了**Lineage这条路径能处理零width并生成非零请求**；不证明其跨BCM累计行为的
+硬件设计意图、任意其它BCM width0都合法，或当前XNU应复制所有跨BCM累计副作用。
+修复需要补ACV资源特定的构票模型，与真实元数据相容；不能只改日志、放宽检查、
+填一个猜测width或直接把ACV删除。尚未改驱动，也未发送上述示例命令到设备。
+
+离线底稿：`scratch/artifact-0121a17/lineage-acv-oracle.{c,txt,json}`。
+网络取证尝试记录：`scratch/artifact-0121a17/upstream-linux-v6.12/sources.json`。

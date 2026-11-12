@@ -1,5 +1,24 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, full Lineage ACV zero-width vote reproduced offline)
+
+**CURRENT：用户要求更仔细查width0，本轮已补查表公式/版本调用/实际构票原函数复现。**
+静态DB header/entry/aux公式与Lineage一致，db16对齐半字无错位；Lineage BCM init未调用
+cmd_db_get_version，无证据存在“另一版本width取高位”分支。仍无设备DB原始独立dump/aux版本，
+不能把重建日志或fixture当成物理地址/格式已独立确认。
+新证据：原文提取Lineage div64/acv_update/bcm_update/tcs_cmd_gen四函数，不改函数体；
+本机MC0(width16/unit2050000)、ACV(width0/unit1)，DTS width4/ports4/MC0→ACV顺序。
+合成AB64MB/s/IB128MB/s下，MC0得到31/249；ACV自身width缩放0/0，但因跨BCM累计值，
+display ACV最终31/249（含COMMIT命令6007c0f9），apps ACV0/8（60000008）；OFF均0。
+两context ON/OFF/ON共12场景ASan/UBSan通过，LSan因环境关闭；并非实机发送/量测。
+**NEXT：明确ACV不能套普通非零width准入/独立缩放，需资源特定模型；不盲填width/删ACV。**
+已证实Lineage软件能在width0生成非零票；跨BCM行为硬件意图及实际XNU最终策略仍须保守推导。
+未修改驱动或打新补丁，无push/云编译需求。资料PANEL-BCM-WIDTH-SOURCES.md新复查段；
+证据artifact-0121a17/lineage-acv-oracle.{c,txt,json}。
+本地没有commandDB/AOP dump；尝试下载固定Linux v6.12相关源被网络限制拒绝，未引用未取得外部源码。
+无CI/固件/设备操作，未启动Android/扫描MMIO。以下NEXT为历史。
+
+
 ## Agent handoff / active work (2026-11-12, BCM width bit-position re-audited)
 
 **CURRENT：按用户质疑重新核对lookupBCM来源/有效位，尚无驱动修改。**
