@@ -9,6 +9,61 @@ CoreBrightness请求已到（3304–3339行），第3624行FB生命周期准入�
 不新增寄存器读取、写入或fallback。需用户push/云编译后打包新retained档取证，尚未修复硬件准入。
 **暂停旧retained复测及combined/supply；E7/E8尚未验收。** 详见[retained故障记录](PANEL-D1-0121A14.md#retained启动准入失败)。
 
+## 当前面板栈的结构与封装（2026-11-12）
+
+```text
+AppleCLCD / IOMobileFramebuffer ABI          AppleARMBacklight
+               │                                 │
+               └──────── SweetDisplayClient ─────┘
+                           │ IOKit匹配/持有实例
+                  SweetDisplayBackend（抽象接口）
+                           │ 实现
+                  SweetMDSS : IOService
+                  一个workloop / command gate；显示MMIO唯一owner
+                  ├─ Lifecycle：统一电源/复位/触摸协调、token与取消
+                  ├─ Profile：R66456 PP1/DV1/DV2/PV命令表
+                  ├─ DSI：DCS编码、FIFO/命令DMA、异步序列执行
+                  ├─ Host / Link：DSI0、PHY0、PLL及输出时钟
+                  ├─ Core / Clock / NoC：域、时钟引用、带宽票
+                  └─ Scanout / IRQ：扫描缓冲、RD_PTR/PP_DONE完成证据
+                           │ typed provider接口
+          ┌────────────────┼─────────────────┐
+     SweetRPMh        SweetPanelPins     SweetTouchPanel
+     供电/ARC/CN0      GPIO6 reset         暂停/恢复原TCM worker
+     RSC/TCS访问       GPIO8 TE配置        触摸硬件仍由原worker拥有
+```
+
+这张图表示软件组成和调用边界；内部模块并非独立IOService。显示本地NoC投票的display RSC
+由MDSS拥有，apps RSC中的供电/ARC/CN0由RPMh拥有，两者不能混成同一个writer。
+
+协议是MIPI DSI command mode、四条D-PHY数据lane、VC0、RGB888，目标1080×2340约60Hz，
+当前host profile不启用DSC。DCS 0x51调亮度，0x28/0x29控制显示，0x10/0x11控制Sleep，
+另有R66456厂商命令。序列器支持LP DCS 05/15/39写，暂不支持read/BTA/ACK和其它VC。
+DSI controller v2.3已有实机版本读数；PHY IP v4.0、PLL 7nm-v2来自LG参考及版本准入，
+不把这些IP版本称为MIPI协议版本，也不把本地配置当成本机已完成重建。
+ABL选择身份已读到profile4/PV；这不是DDIC ID读回。
+
+硬件包括SM8150 SDE/MDP（源管线、CTL、INTF/TE）、DSI0/PHY0/PLL0、GCC/DISPCC/GDSC、
+显示/配置NoC和RSC、GIC INTID115、TLMM GPIO6/8、供电PMIC以及DDR扫描内存/SMMU。
+面板供电为PM8150 L14/VDDI与L17/VPNL；DSI host用PM8150L L3，PHY用PM8150 L5。
+L3/L5与UFS/USB共享，当前保留最后disable保护。TE接mdp_vsync，帧通知由MDSS IRQ进入GIC，
+不是给面板另外注册一个GPIO IRQ。显示路径没有接入GPU渲染或零拷贝。
+
+已有两层抽象：跨服务的typed IOKit接口，以及MDSS内部按功能划分的资源/命令模块。
+上层请求亮度、电源、扫描和状态，不传寄存器地址；匹配通知只处理绑定/排队，硬件动作在
+owner的workloop内执行。异步begin返回token，status表示完成，取消和provider撤回另处理。
+底层由相应owner封装MMIO、屏障、DMA生命周期及版本/资源检查。
+
+尚无独立通用DSI总线provider、通用GPIO/pinctrl总线或完整通用clock/regulator框架；
+R66456 profile/生命周期仍在MDSS内，不是可独立匹配的panel IOService；MMIO helper也不是
+通用regmap层。现有亮度保留旧短DCS执行路径，完整表使用新异步序列器，尚未完全统一。
+面板命令走DSI，PMIC票走RPMh，显示IRQ走GIC，均不是SweetSpmiInterruptMux consumer。
+
+已实现的自有scanout池仍由CPU复制像素；先前own2档曾完成自有A接管，但当前retained档
+MDSS在首次时钟准入就失败，尚未接管或进入完整OFF/ON。启动仍依赖ABL温态配置，
+冷NoC/MDP、自有首帧/console/panic交接、完整IOPM及独立冷启动尚未闭环。
+本节是架构核对，不改变驱动、参数或下一步0202诊断安排。
+
 **以下0201及更早内容按各阶段保留，当前执行点以上段为准。**
 
 **0201当前增量（2026-11-12，本地通过，未实机）：** 统一协调器新增显式

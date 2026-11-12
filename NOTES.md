@@ -18,6 +18,8 @@ ASan/UBSan含19项时钟拒绝/准确失败门槛/短路访问/静默，core/man
 **NEXT：告知用户push本地提交并编译，下载新产物后同ABI608固件/retained参数打新名字boot。**
 新镜像先取启动准入日志；若仍报startup admission失败，无需再反复按息屏。取到具体门槛才修正。
 不把诊断叫修复；E7/E8仍未验收。不操作设备、不push或触发CI，CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+已核对并在CURRENT-DRIVER-ARCHITECTURE.md补当前面板组成、DSI协议/硬件、typed封装与
+尚无通用DSI总线/独立panel服务的边界；仅文档说明，下一步0202编译/retained取证不变。
 详见docs/PANEL-D1-0121A14.md retained段及PANEL-CLOCK-D1.md；以下NEXT均为历史。
 
 ## Agent handoff / active work (2026-11-12, abi608 identity PASS; retained next)
