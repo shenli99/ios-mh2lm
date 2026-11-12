@@ -1,5 +1,40 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, 0121a14 artifacts)
+
+**CURRENT：0121a14实际内核核对通过，四档boot已打包并回读。当前只测panel-identity，等待用户日志。**
+用户已完成77c7631/0201云编译并下载kernel/buildtree；无需为本轮再push/编译。
+78份源码逐字节匹配scratch/framebuffer-0201/verify（含7份0201变更），114原CI marker保留。
+最终Mach-O有7个供电协调器/RPMh/Pins关键方法的定义，新增运行marker及SHA256SUMS通过。
+kernel SHA256=7943a67e340c00715f1d32be891204d9e9a0c209c93d9f59d9fed70aaf68322f，
+17,740,144 bytes，区别于0121a13。未提供全量build-log/CI run ID，不宣称全量告警已查。
+四档均在/home/shenli/work1/out-bs/，共用实际kernel、NoC/Pins/Touch/identity ADT及新Mu RELEASE固件：
+ boot-16k-0121a14-panel-identity.img   lifecycle0 metadata-only
+ boot-16k-0121a14-panel-retained.img   lifecycle2 全部票保留
+ boot-16k-0121a14-panel-combined.img   lifecycle5 DATA/link组合
+ boot-16k-0121a14-panel-supply.img     lifecycle6 panel两票撤销恢复
+完整header v1/page2048、firmware/ramdisk及FAT内kernel/ADT/TOML回读一致，无重复参数；
+后三档仅lifecycle不同。identity的面板写入/接管开关0，96-byte身份slot全零，不猜PV。
+新Mu manifest=/home/shenli/work1/out-bs/panel-uefi-0201-final/panel-uefi.json，blob SHA256=
+8e1e65d891a831b6f9b9005701f339d80330378c21520ec6f6ef4159d8e9561e。
+原kernel-32m.blob/baseline ADT未改，BootShim与两个append DTB保留。USB ACM/按键/battery runtime3保留。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a14-panel-identity.img。**
+正常启动后简单确认画面/触摸/按键，导出live-0121a14-panel-identity.txt或
+sweetlog-0121a14-panel-identity.bin。只需本档，不要求息屏/充电插拔/长测。
+查SWEET PANEL: ABL selection source=2 profile=1..4；来源是ABL选择，不是物理DDIC读回。
+缺记录/无效/未知/歧义或新固件启动失败，停后档；通过后再retained→combined→supply。
+尚无设备结果，不宣称reset/供电恢复已通过；E7/E8、物理共享偏压仍缺。
+共享L3/L5保留，本panel撤票/ACK不证明物理rail-off；PD4冷NoC/MDP、ABL首帧/console/panic退出、
+故障后受控释放及完整IOPM仍缺。A单缓冲/30Hz保留，未称修复卡顿/BUG003。
+证据scratch/artifact-0121a14/{verification.json,source-compare.json,actual/xnu,kernel-symbols.txt,
+kernel-symbol-verification.json,packaging.txt,boot-verification.json,boot-verification.txt,mdss.adt,
+verify-artifacts.py,verify-boots.py,*.unixnu.toml}。二进制/设备树/Apple产物不入git。
+详见docs/PANEL-D1-0121A14.md；计划/架构/0201文档已同步。
+agent未push/触发CI/操作设备，CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+不重测旧USB/BUG002/F3/半小时，不启动Android或扫未知PMIC。
+
+**以下0201实现与旧阶段记录按当时范围保留，当前执行点以上段为准。**
+
 ## Agent handoff / active work (2026-11-12, latest)
 
 **CURRENT：0201供电周期接入统一生命周期协调器、本地验证和完整Mu FD构建已完成；现在需要用户push云编译。**

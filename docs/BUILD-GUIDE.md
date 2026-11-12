@@ -143,7 +143,7 @@ bash W/scripts/build-mh2-uefi.sh DEBUG     # 或 RELEASE
 - 源码：`ref/Mu-Silicium`（cca95b7，含 UniXNU 启动链补丁）+ `ref/UniXNU-src`（DarwinBoot 4ad0c42，32 MiB 放置）。
 - **FD_BASE 必须是 0xA0000000**（`Resources/Configs/mh2.toml`）。脚本默认值 2026-11-08 已改正，旧的
   0x9FC00000 会做出起不来的 FD。改完可用 `grep PcdFdBaseAddress Build/.../AutoGen.h` 确认。
-- 当前 `out-bs/kernel-32m.blob` 里是 10-31 编的 DEBUG FD，所有测试镜像都用它，**不要覆盖 DEBUG 构建目录**
+- 当前 `out-bs/kernel-32m.blob` 里是 10-31 编的 DEBUG FD，旧测试档使用它；4.1的面板生命周期档使用独立的新固件manifest。**不要覆盖 DEBUG 构建目录**
   （重编前先备份 `Build/mh2Pkg/DEBUG_CLANGPDB`）。同源重编的 FD 只因编译时间戳不同而不逐字节相同。
 - `make-bootimg.sh`/`build-mh2lm-uefi.sh` 是 Aloha 旧线（SurfaceDuo1Pkg），已不用。
 
