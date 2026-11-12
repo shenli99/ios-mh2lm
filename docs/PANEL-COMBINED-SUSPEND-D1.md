@@ -1,5 +1,15 @@
 # PD3：数据票停驻与 host/PHY 下电的组合事务（0198）
 
+**0199供电归属增量（2026-11-12，本地通过，未实机）：** 已确认DSI host L3/PHY L5
+与MH2LM UFS及USB PHY共用；这些驱动尚未在SweetRPMh登记依赖，不能按显示最后一票关电。
+provider新增typed `lastDisableRequiresHandoff`及mask0xc，在任何写入/token/账本修改前拒绝
+这两路最后aggregate disable，保留原票和完成状态；非最后撤票及panel两路原接口保留。
+21套检查与RPMh/MDSS/FB六个arm64单文件对象通过。没有新增档位或实际撤电，0198 mode5仍为
+当前组合休眠路径。详见[供电图、源码依据、保护与剩余项](PANEL-SUPPLY-OWNERSHIP-D1.md)。
+下一步保留L3/L5，补LG顺序的reset-low及panel VDDI/VPNL受控撤票/恢复；E7触摸与E8物理
+共享/偏压尚未验收。无新FD/boot、push/CI/设备操作，CircleCI未改，暂不单开云编译。
+以下0198及更早描述按当时范围保留；完整驱动仍未完成。
+
 2026-11-12，接0197。新增显式 `sweetpanellifecycle=5`，把0196的数据资源停驻和0197的
 host/PHY/PLL关闭、重建接到原统一协调器。默认0，原1–4语义保留，不自动降档。
 本轮仅本地验证，未实机；不等于面板rail-off、整机休眠或完整显示冷启动。

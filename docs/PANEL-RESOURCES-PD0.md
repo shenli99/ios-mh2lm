@@ -1,5 +1,15 @@
 # PD0：完整显示/面板驱动的资源、接口与实施依赖
 
+**0199供电归属增量（2026-11-12，本地通过，未实机）：** 已确认DSI host L3/PHY L5
+与MH2LM UFS及USB PHY共用；这些驱动尚未在SweetRPMh登记依赖，不能按显示最后一票关电。
+provider新增typed `lastDisableRequiresHandoff`及mask0xc，在任何写入/token/账本修改前拒绝
+这两路最后aggregate disable，保留原票和完成状态；非最后撤票及panel两路原接口保留。
+21套检查与RPMh/MDSS/FB六个arm64单文件对象通过。没有新增档位或实际撤电，0198 mode5仍为
+当前组合休眠路径。详见[供电图、源码依据、保护与剩余项](PANEL-SUPPLY-OWNERSHIP-D1.md)。
+下一步保留L3/L5，补LG顺序的reset-low及panel VDDI/VPNL受控撤票/恢复；E7触摸与E8物理
+共享/偏压尚未验收。无新FD/boot、push/CI/设备操作，CircleCI未改，暂不单开云编译。
+以下0198及更早描述按当时范围保留；完整驱动仍未完成。
+
 **0198当前增量（2026-11-12，本地通过，未实机）：** 新增显式`sweetpanellifecycle=5`，
 把数据票停驻与host/PHY下电接入同一事务。OFF：完整OFF→config floor Held→managed clock
 Released→host/PHY/PLL真实关闭→managed DATA NoC Released；ON：DATA Held→PHY/PLL/root
@@ -284,7 +294,7 @@ timeout当完成，也不能关闭其他consumer电源或翻回ABL来伪装成�
 | E5 | RPMh写权限、实际投票/撤销及物理结果仍缺 | PD2/PD3 | 0184统一provider已实现；0121a13实测ldoa14/17/c3/a5地址0x42100/0x41300/0x41e00/0x40b00，pre-v3 RSC id0x10700/config0x800c8104/ncpt16/ACTIVE2、consumer1绑定通过。mode1无投票；继承请求不覆盖，ACK不当实际掉电证明 |
 | E6 | 冷态clock/GDSC/MMCX/NoC依赖及恢复状态 | PD2/PD4 | 0185温态clock、0186 ARC、0187 NoC及0188 managed扫描获取已本地验证；未实机投票，冷GDSC/父源/NoC配置仍缺，不能用运行位替代实际票 |
 | E7 | 面板/触摸共享供电与reset后的触摸需求 | PD3 reset/PD4 | 校对生效DTS和已有板级资料，设计quiesce/resume并用分档验证；引脚不重合不等于无共享 |
-| E8 | 是否存在额外偏压电源控制、完整off后的物理状态 | PD3/PD4 | 先沿实际选定panel供电表/生效DT和板级证据核对；不得仅因use-labibb而扫描/写PMIC偏压寄存器 |
+| E8 | 是否存在额外偏压电源控制、完整off后的物理状态 | PD3/PD4 | 0199已核对四版panel表只含VDDI/VPNL、LG override/use-labibb与禁用/注释的偏压节点；L3/L5跨UFS/USB共享已设最后disable保护。物理共享/偏压仍待证，不扫描PMIC；详见PANEL-SUPPLY-OWNERSHIP-D1.md |
 
 PD0静态设计已具备继续条件，E1/E4–E8保留为对应写入阶段的门槛；不标记完整硬件资料
 已全部实证。**0181已实测取得E2的池/live配置；0182受控接管本地验证通过，0121a12接管/唤醒日志通过，用户已报告滑动卡顿加重，其它视觉项未单独确认；不能据此验收回收/双缓冲。**

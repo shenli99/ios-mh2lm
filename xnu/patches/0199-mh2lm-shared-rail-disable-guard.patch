@@ -1,0 +1,70 @@
+diff --git a/iokit/Kernel/arm/SweetRPMh.cpp b/iokit/Kernel/arm/SweetRPMh.cpp
+--- a/iokit/Kernel/arm/SweetRPMh.cpp
++++ b/iokit/Kernel/arm/SweetRPMh.cpp
+@@ -19,8 +19,11 @@
+ static unsigned rpmhOwner;
+ static const char *const railNames[]={"ldoa14","ldoa17","ldoc3","ldoa5"};
+ static const SweetRailInfo railLimits[]={
+- {1800,1880,10000,false},{2856,3008,1,false},
+- {1200,1200,1,false},{880,880,1,false}};
++ /* MH2LM LG DTS: L3/L5 also feed UFS and USB PHYs.
++  * These clients have no provider votes yet. Their inherited state cannot
++  * be represented by an empty XNU ledger or a fabricated baseline lease. */
++ {1800,1880,10000,false,false},{2856,3008,1,false,false},
++ {1200,1200,1,false,true},{880,880,1,false,true}};
+ static const char *const displaySupplies[]={"cx.lvl","mx.lvl","mmcx.lvl"};
+ static const unsigned displayMinimums[]={0,64,128,256,384};
+ static const char *const displayBCMs[]={"CN0","MM1","MM0","SH0","MC0","ACV"};
+@@ -405,6 +408,9 @@
+  if (fLoop->addEventSource(fTimer)!=kIOReturnSuccess) return false;
+  fTimerAdded=true; fAccepting=true;
+  setProperty("SweetRPMhABI",1ULL,32); setProperty("SweetRPMhWritesAllowed",fMode==2);
++ unsigned sharedMask=0;
++ for (unsigned r=0;r<SweetRailCount;++r) if (railLimits[r].lastDisableRequiresHandoff) sharedMask|=1u<<r;
++ setProperty("SweetRPMhLastDisableBlockedMask",(unsigned long long)sharedMask,32);
+  registerService(); return true;
+ }
+ 
+@@ -433,6 +439,11 @@
+   load+=v.loadUA;
+  }
+  if (target.minMV>target.maxMV || load>0xffffffffULL) return kIOReturnBadArgument;
++ /* Stopping the display link does not stop UFS/USB. Refuse BEFORE token,
++  * request state or MMIO changes. Removing one of several enabled votes is
++  * still legal; an untouched inherited rail remains the existing no-op. */
++ if (!target.enabled && fOwned[rail] && fAggregate[rail].enabled &&
++     railLimits[rail].lastDisableRequiresHandoff) return kIOReturnNotPermitted;
+  target.loadUA=(unsigned)load;
+  /* RPMh accepts millivolts, PMIC5 LDO hardware rounds by 8mV within these
+   * ranges; reject constraints that cannot contain the rounded selection. */
+diff --git a/iokit/Kernel/arm/SweetRPMh.h b/iokit/Kernel/arm/SweetRPMh.h
+--- a/iokit/Kernel/arm/SweetRPMh.h
++++ b/iokit/Kernel/arm/SweetRPMh.h
+@@ -11,7 +11,14 @@
+ 
+ enum SweetRail { SweetRailVDDI, SweetRailVPNL, SweetRailHost, SweetRailPHY, SweetRailCount };
+ struct SweetRailVote { bool enabled; unsigned minMV, maxMV, loadUA; };
+-struct SweetRailInfo { unsigned minMV, maxMV, modeThresholdUA; bool available; };
++struct SweetRailInfo {
++ unsigned minMV, maxMV, modeThresholdUA;
++ bool available;
++ /* A last XNU vote is not an exclusive physical owner. Known UFS/USB
++  * users still rely on inherited firmware state, outside this client ledger.
++  * False means no known shared-user veto, not permission/proof of rail-off. */
++ bool lastDisableRequiresHandoff;
++};
+ enum SweetRPMhState { SweetRPMhIdle, SweetRPMhPending, SweetRPMhComplete, SweetRPMhFailed };
+ struct SweetRPMhStatus {
+  uint64_t token;
+@@ -147,7 +154,10 @@
+  IOReturn attachConsumer(uint64_t *);
+  IOReturn detachConsumer(uint64_t);
+  IOReturn resourceInfo(SweetRail,SweetRailInfo *);
+- /* Caller must stop link/DMA before withdrawing its last vote. Completion is
++ /* Caller must stop link/DMA before withdrawing its last vote. Known shared
++  * rails reject a final aggregate disable until their users have a coordinated
++  * ownership handoff; rejection leaves the old vote/status/token intact.
++  * Completion is
+   * ACTIVE ACK, not physical rail voltage/off. One in-flight transaction across
+   * all clients; Busy is explicit, no overwrite, hidden retry or fallback. */
+  IOReturn requestVote(uint64_t,SweetRail,const SweetRailVote &,uint64_t *);

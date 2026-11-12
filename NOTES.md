@@ -2,6 +2,50 @@
 
 ## Agent handoff / active work (2026-11-12, latest)
 
+**CURRENT：0199供电归属核对及共享L3/L5最后disable保护已本地通过，未实机；没有新增rail-off档。**
+父提交dedfe49。0199-mh2lm-shared-rail-disable-guard.patch SHA256=
+91852c738d0f5e244f3615dce2f6b46cb85bcc7b07102a375a353ee35d9da5a5，2份源码，
+base逐字节连续于0198verify；严格重放无offset/fuzz，114原CI source marker通过。
+LG基线d4f335e13d73c4aa2af85581a6ec11b670ee5b94：MH2LM common-storage UFS的
+vdda-phy=pm8150_l5且always-on，vdda-pll=pm8150l_l3；USB HS/QMP也共用L5/L3，DP亦有同源。
+因此fManagedRails四票不能一起撤；UFS/USB尚未通过SweetRPMh登记依赖，不伪造baseline票。
+**L14的vddio映射是主/次DSI节点，不是DP；本轮曾在commentary误读，已明确更正。**
+四R66456 profile供电表仅VDDI/VPNL；use-labibb走LG原power_info，不能据日志字符串推断独立
+LAB/IBB。common-pm禁用LCDB，panel尾部PMI8998片段在注释内；未知外部偏压仍未确认。
+MH2LM touch用GPIO152/59/54/122，LG S3618独立power切GPIO；不能从不同GPIO推断物理电源隔离。
+现有touch暂停不是deep sleep/rail-off证明。旧android-mh2lm.dts UFS disabled/无最终overlay，
+来源未重新认证，不能充当当前最终DT或据此否定LG板级连接。参考源码SHA和入口见底稿reference-evidence.json。
+SweetRailInfo追加lastDisableRequiresHandoff：Host/PHY=true，VDDI/VPNL=false；false不是关闭许可。
+provider属性SweetRPMhLastDisableBlockedMask=0xc。原gate/唯一TCS owner聚合后，若已owned且
+aggregate enabled的共享rail将变disabled，在分配token/修改请求或账本/旧status/MMIO前
+返回NotPermitted、输出token0；旧票/状态不变，detach仍Busy。空历史撤票仍no-op；仍有另一
+consumer enabled则可原路径撤自己的票；panel两路typed disable/fresh ACK保留。无bypass参数，
+无自动基线consumer/降压/复位/重试；startup/metadata不投票。ADT/用户ABI未变，内部同核编译字段扩展。
+mode0–5流程未改；这不是旧USB/UFS/充电bug的修复或根因结论，也未测新硬件。
+21套检查全过：20实际源码ASan/UBSan+PythonADT，无最终报告；新断言覆盖四rail/all8consumer、
+共享最后撤票重复拒绝无副作用、非最后撤票、旧token/status保持、无历史no-op、panel disable真ACK；
+原组合mode5及全部资源/link/FB回归通过。LSan ptrace限制禁用，另查对象/映射/通知/分配归零。
+真实XNU/KDK arm64 RPMh/MDSS/FB base+final六个对象与关键符号通过，非整核链接/硬件验证。
+RPMh warnings1321→1325净增4有界数组提示，已审枚举0..3/固定数组4项；MDSS1527/FB1397不变，无抑制。
+**NEXT：保留共享L3/L5，补panel reset-low证明及VDDI/VPNL受控撤票/恢复，再衔接0198组合事务。**
+LG lp11-init完整off顺序：panel unprepare内reset_off先拉低reset并等待→停host/link/PHY/core→
+post_unprepare/power_off逆序关VPNL/VDDI，不能复制通用weak或颠倒成先断电再reset低。
+下一档需原pins服务真实低保持/同代touch fence、精确部分释放账本/失败停止、typed LDO ACK、
+恢复供电后再走既有DATA/Link/Clock/Host/reset/ON/pixel/touch；不能盲撤共享模拟电源。
+正常rail-off、E7触摸/E8物理共享偏压、PD4冷NoC/MDP、ABL buffer/console/panic退出及完整IOPM仍缺。
+0195实际Mu→DarwinBoot身份补丁和ADT slot仍须纳入后续完整FD；只新XNU配旧UEFI无live profile。
+无新FD/boot、push/CI/设备操作，暂不要求push/刷机；CircleCI blob仍
+ da0b6c0947a66f03491b3a9023590b49665292df。USB/电池/按键/mux/触摸IRQ代码未改。
+不启动Android、不扫未知PMIC、不为孤立接口开CI；A单缓冲/30Hz复制保留，完整驱动先于零拷贝。
+详见docs/PANEL-SUPPLY-OWNERSHIP-D1.md；计划/架构/PD0/power/组合文档已同步。
+底稿scratch/framebuffer-0199/{base,edited,verify,prepare-patch.py,compile.py,native-checks.py,run-tests.py,
+verification.json,base-continuity.json,reference-evidence.json,warning-review.json,native-results.json,
+tests.json,delivery.json,*compile.txt,*symbols.txt}。后续新测试若需真实断电，不能仅凭本轮软件保护证明安全。
+
+**以下0198按当时范围保留，当前以0199及其明确保留的0198运行路径为准。**
+
+## Agent handoff / active work (2026-11-12, latest)
+
 **CURRENT：0198数据票停驻与host/PHY/PLL硬件下电已组合，本地通过，未实机；完整驱动未完成。**
 父提交0265f05；0198-mh2lm-panel-combined-suspend.patch SHA256=
 83f012309c8f6dd4cc06cd6f5ee3722dfca3ec4bed6a502efc19ec84e2f37ba3，6份源码，

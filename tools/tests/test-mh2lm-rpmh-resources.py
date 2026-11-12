@@ -84,6 +84,11 @@ int main(){
  // Read-only metadata mode: no hardware writes, no automatic enable/disable.
  fixtures();resourceMode=1;s=make(n);uint64_t id=attach(s),token=0;
  SweetRailInfo info={};assert(s->resourceInfo(SweetRailVPNL,&info)==0&&info.available&&info.minMV==2856);
+ assert(!info.lastDisableRequiresHandoff);
+ assert(s->resourceInfo(SweetRailVDDI,&info)==0&&!info.lastDisableRequiresHandoff);
+ for(auto rail:{SweetRailHost,SweetRailPHY}){
+  assert(s->resourceInfo(rail,&info)==0&&info.available&&info.lastDisableRequiresHandoff);
+ }
  assert(s->requestVote(id,SweetRailVDDI,{true,1800,1880,62000},&token)==kIOReturnNotPermitted&&token==0);
  assert(s->detachConsumer(id)==0);assert(!writes());destroy(s,n);assert(rpmhOwner==0);
  // All attach slots bounded, no zero/stale handle aliasing.
@@ -113,6 +118,45 @@ int main(){
  assert(!status(s,other,token).enabled&&regs[TCS+0x34]==0x40004&&regs[TCS+0x38]==0);
  assert(s->detachConsumer(other)==0);destroy(s,n);assert(rpmhOwner==2);
  s=new SweetRPMh();assert(!s->start(n));s->release();reboot();
+ // Every known shared rail vetoes a last aggregate disable; all client
+ // slots participate. A refusal must preserve the previously completed status and ledger.
+ // Non-last removal and unowned no-op remain usable; VPNL's original disable
+ // path still requires an independent fresh ACK and is not silently pinned.
+ for(unsigned rail=0;rail<SweetRailCount;++rail){
+  fixtures();s=make(n);uint64_t clients[8];for(auto&i:clients)i=attach(s);
+  assert(s->resourceInfo((SweetRail)rail,&info)==0&&info.available);
+  SweetRailVote enabled={true,info.minMV,info.maxMV,62000};
+  token=vote(s,clients[7],(SweetRail)rail,{false,0,0,0});
+  assert(!writes()&&!s->fOwned[rail]);
+  for(unsigned client=0;client<8;++client){
+   token=vote(s,clients[client],(SweetRail)rail,enabled);
+   if(s->fBusy){tick(s);ack(s);}
+  }
+  for(unsigned client=0;client<7;++client){
+   token=vote(s,clients[client],(SweetRail)rail,{false,0,0,0});
+   if(s->fBusy){tick(s);ack(s);}
+   assert(status(s,clients[client],token).enabled&&!s->fClients[client].votes[rail].enabled);
+   assert(s->detachConsumer(clients[client])==0);
+  }
+  auto oldStatus=s->fClients[7].status;auto oldAggregate=s->fAggregate[rail];
+  auto serial=s->fNextToken;auto traceBefore=trace.size();
+  if(info.lastDisableRequiresHandoff){
+   for(unsigned retry=0;retry<3;++retry){denied=123;
+    assert(s->requestVote(clients[7],(SweetRail)rail,{false,0,0,0},&denied)==kIOReturnNotPermitted&&!denied);
+    assert(s->fNextToken==serial&&trace.size()==traceBefore&&!s->fBusy);
+    auto current=status(s,clients[7],oldStatus.token);
+    assert(current.token==oldStatus.token&&current.result==oldStatus.result&&current.state==oldStatus.state&&current.enabled&&!current.uncertain);
+    assert(s->fClients[7].votes[rail].enabled&&s->fAggregate[rail].enabled&&s->fAggregate[rail].loadUA==oldAggregate.loadUA);
+   }
+   assert(s->detachConsumer(clients[7])==kIOReturnBusy);
+  }else{
+   token=vote(s,clients[7],(SweetRail)rail,{false,0,0,0});tick(s);
+   assert(s->fBusy&&status(s,clients[7],token).state==SweetRPMhPending);
+   assert(regs[TCS+s->fTCSIndex*0x2a0+0x34]==0x40004+rail*0x100&&regs[TCS+s->fTCSIndex*0x2a0+0x38]==0);
+   ack(s);assert(!status(s,clients[7],token).enabled&&s->detachConsumer(clients[7])==0);
+  }
+  destroy(s,n);reboot();
+ }
  // Competing clients run through the same provider gate. Exactly one request
  // is admitted; the other gets Busy rather than overwriting the active slot.
  fixtures();s=make(n);id=attach(s);other=attach(s);
@@ -333,7 +377,7 @@ int main(){
  destroy(s,n);reboot();
  dropNub(n);assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
  puts("PASS: actual display ARC chain: typed corners, rounded parents, staged fresh ACK, client aggregate, reverse withdrawal, shared VRM gate, inherited conflicts, optional malformed metadata, partial-failure ledger, no rollback, stop/retirement and exhaustion");
- puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement,11 malformed resources, actual matching/termination");
+ puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement,11 malformed resources, actual matching/termination");
 }
 '''
 # ack helper normally asserts successful cleanup; uncleared IRQ deliberately

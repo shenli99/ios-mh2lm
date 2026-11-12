@@ -1,5 +1,15 @@
 # D1 资源层：RPMh provider、显示投票与资源 ABI（0184）
 
+**0199供电归属增量（2026-11-12，本地通过，未实机）：** 已确认DSI host L3/PHY L5
+与MH2LM UFS及USB PHY共用；这些驱动尚未在SweetRPMh登记依赖，不能按显示最后一票关电。
+provider新增typed `lastDisableRequiresHandoff`及mask0xc，在任何写入/token/账本修改前拒绝
+这两路最后aggregate disable，保留原票和完成状态；非最后撤票及panel两路原接口保留。
+21套检查与RPMh/MDSS/FB六个arm64单文件对象通过。没有新增档位或实际撤电，0198 mode5仍为
+当前组合休眠路径。详见[供电图、源码依据、保护与剩余项](PANEL-SUPPLY-OWNERSHIP-D1.md)。
+下一步保留L3/L5，补LG顺序的reset-low及panel VDDI/VPNL受控撤票/恢复；E7触摸与E8物理
+共享/偏压尚未验收。无新FD/boot、push/CI/设备操作，CircleCI未改，暂不单开云编译。
+以下0198及更早描述按当时范围保留；完整驱动仍未完成。
+
 0187补充：原provider已有[MMCX/MX/CX事务](PANEL-ARC-D1.md)及apps CN0带宽；MDSS拥有
 独立display RSC和[数据NoC事务](PANEL-NOC-D1.md)，实际获取RSC clock lease后才访问。
 0188已在显式managed模式下接入实际扫描资源获取，见[生命周期首段](PANEL-MANAGED-D1.md)；
