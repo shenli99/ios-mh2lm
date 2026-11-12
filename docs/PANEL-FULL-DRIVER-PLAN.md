@@ -1,13 +1,15 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
-**0121a14当前进展（2026-11-12）：** ABI修正版identity已实机进入系统，持久日志477字节
-参数匹配，source2/profile4、MDSS/RPMh/SpringBoard正常，无panic/驱动ERROR。
-原loader1024/XNU608交接错误已修正，原NULL写本轮未复现；旧USB、HFS clonefile及关机
-分配错误仍在，不扩大为所有HFS错误已解决或完整面板验收。
-**下一步只测`0121a14-abi608-panel-retained`**：lifecycle2、605字节参数、保留供电票，
-两次手动OFF/ON验证完整厂商表、面板reset、亮度/fresh像素/实际触摸恢复。
-combined/supply继续暂停，E7/E8仍待本机证据，无需云编译。详见
-[ABI修正与当前测试步骤](BOOTARGS-ABI-0121A14.md)及[历次启动对照](PANEL-D1-0121A14.md)。
+**0121a14 retained实测失败（2026-11-12）：** 可进系统，但亮度滑条不生效，按息屏后画面冻结。
+日志第85行MDSS在warm clock lease准入返回NotReady（0xe00002d8），start未完成、未发布服务；
+CoreBrightness请求已到（3304–3339行），第3624行FB生命周期准入失败后主动冻结pixels。
+冻结后仍有按键/触摸及进程活动，未证实整核死锁；完整OFF/ON、reset及触摸恢复尚未开始。
+具体GCC/GDSC/root/branch失败条件旧日志未记录，不能猜寄存器值或放宽保护。
+新增0202仅补首次准入的有界分阶段诊断，错误为ERROR、读值为INFO，运行期检查保持安静；
+不新增寄存器读取、写入或fallback。需用户push/云编译后打包新retained档取证，尚未修复硬件准入。
+**暂停旧retained复测及combined/supply；E7/E8尚未验收。** 详见[retained故障记录](PANEL-D1-0121A14.md#retained启动准入失败)。
+
+**以下0201及更早内容按各阶段保留，当前执行点以上段为准。**
 
 **0201当前增量（2026-11-12，本地通过，未实机）：** 统一协调器新增显式
 `sweetpanellifecycle=6`：完整OFF→reset实际低保持→原mode5 DATA/link停驻→VPNL/VDDI

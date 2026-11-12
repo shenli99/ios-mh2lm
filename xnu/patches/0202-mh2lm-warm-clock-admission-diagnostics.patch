@@ -1,0 +1,163 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -340,8 +340,8 @@
+  void finishCoreResources(IOReturn);
+  void stopCoreResources(void);
+  bool setupLocalClocks(void);
+- bool clockPrerequisites(void);
+- bool clockParent(unsigned,uint32_t [6],bool = true);
++ bool clockPrerequisites(bool = false);
++ bool clockParent(unsigned,uint32_t [6],bool = true,bool = false);
+  bool clockCanGate(void);
+  bool clockBusy(void) const;
+  bool localClocksReady(void);
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -24,40 +24,73 @@
+  return fClockOperation && (fClockLeases[fClockOperation-1].state==SweetClockPending ||
+      fClockLeases[fClockOperation-1].state==SweetClockReleasing);
+ }
+-bool SweetMDSS::clockPrerequisites(void)
+-{
+- if (linkBusy() || fLinkPhase==LinkFault || fLinkPhase==LinkStopped) return false;
+- if (coreBusy() || fCorePhase==CoreFault || fCorePhase==CoreStopped) return false;
+- if (fCorePhase==CoreReady && !coreReady()) return false;
+- /* GCC AHB is critical/HWCG in LG: do not rewrite its controls, nor assume
+-  * its OFF bit must stay clear. Existing MMIO admission checks its SW vote.
+-  * No GDSC read until the config path passes its existing clock checks. */
+- if (!dp_clocks_on()) return false;
++bool SweetMDSS::clockPrerequisites(bool diagnose)
++{
++ /* Diagnose only the first warm boot admission. Runtime polling stays quiet;
++  * log the sample used by each check, never a new read after a failed gate. */
++ if (linkBusy() || fLinkPhase==LinkFault || fLinkPhase==LinkStopped) {
++  if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=link-state phase=%u\n",(unsigned)fLinkPhase);
++  return false;
++ }
++ if (coreBusy() || fCorePhase==CoreFault || fCorePhase==CoreStopped) {
++  if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=core-state phase=%u\n",(unsigned)fCorePhase);
++  return false;
++ }
++ if (fCorePhase==CoreReady && !coreReady()) {
++  if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=core-ready\n");
++  return false;
++ }
++ /* Same short-circuit ordering as dp_clocks_on(): no DISPCC read without the
++  * GCC AHB software vote. GCC AHB is critical/HWCG; its OFF bit is not a gate. */
++ uint32_t ahb=dp_rd(dp_gcc,GCC_DISP_AHB);
++ if (!(ahb&CBCR_ENABLE)) {
++  if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=gcc-ahb cbcr=%#x\n",ahb);
++  return false;
++ }
++ uint32_t mahb=dp_rd(dp_dispcc,DISPCC_AHB_CBCR);
++ if (mahb&CBCR_OFF) {
++  if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=dispcc-ahb gcc=%#x cbcr=%#x\n",ahb,mahb);
++  return false;
++ }
+  uint32_t hf=dp_rd(dp_gcc,0x38);
+- if (!(hf&1u) || ((hf&0xf0000000u)!=0x20000000u && (hf&CBCR_OFF))) return false;
++ if (!(hf&1u) || ((hf&0xf0000000u)!=0x20000000u && (hf&CBCR_OFF))) {
++  if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=gcc-hf gcc-ahb=%#x dispcc-ahb=%#x hf=%#x\n",ahb,mahb,hf);
++  return false;
++ }
+  uint32_t gdsc=dp_rd(dp_dispcc,0x3000);
+- /* Match LG's refusal to enable a HW-controlled domain. SW_OVERRIDE is not
+-  * permission to force it. A TZ/HYP-only PWR_ON with SW_COLLAPSE set is not
+-  * a usable inherited HLOS vote. No cold enable/collapse exists here. */
+- return (gdsc&0x80000007u)==0x80000000u;
+-}
+-bool SweetMDSS::clockParent(unsigned i,uint32_t out[6],bool requireOn)
++ /* A running domain does not grant permission to override another owner. */
++ if ((gdsc&0x80000007u)!=0x80000000u) {
++  if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=gdsc gcc-ahb=%#x dispcc-ahb=%#x hf=%#x gdsc=%#x\n",ahb,mahb,hf,gdsc);
++  return false;
++ }
++ if (diagnose) SWEET_LOG_INFO("SWEET MDSS CLOCK: admit prerequisites gcc-ahb=%#x dispcc-ahb=%#x hf=%#x gdsc=%#x\n",ahb,mahb,hf,gdsc);
++ return true;
++}
++bool SweetMDSS::clockParent(unsigned i,uint32_t out[6],bool requireOn,bool diagnose)
+ {
+  const SweetClockBranch &b=mdssClockBranches[i];
+  uint32_t cmd=dp_rd(dp_dispcc,b.root);
+- if ((cmd&0xf1u) || (requireOn && (cmd&0x80000000u))) return false; /* update/dirty or required live root */
++ if ((cmd&0xf1u) || (requireOn && (cmd&0x80000000u))) {
++  if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=root-state branch=%u root=%#x cmd=%#x require-on=%u\n",i,b.root,cmd,(unsigned)requireOn);
++  return false;
++ }
+  out[0]=dp_rd(dp_dispcc,b.root+4);
+  unsigned source=(out[0]>>8)&7u;
+- if (!(b.sources&(1u<<source))) return false;
++ if (!(b.sources&(1u<<source))) {
++  if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=root-source branch=%u root=%#x cmd=%#x cfg=%#x source=%u allowed=%#x\n",i,b.root,cmd,out[0],source,b.sources);
++  return false;
++ }
+  out[1]=b.link ? dp_rd(dp_dispcc,b.root+8) : 0;
+  out[2]=b.link ? dp_rd(dp_dispcc,b.root+12) : 0;
+  out[3]=b.link ? dp_rd(dp_dispcc,b.root+16) : 0;
+  out[4]=i==5 ? dp_rd(dp_dispcc,0x2128) : 0;
+  out[5]=source;
+- /* XO re-enable is limited to the exact divide-by-one integer configuration.
+-  * Other roots/PHY parents may be retained, never enabled or reprogrammed.
+-  * No unversioned PHY read or PLL lock-layout guess here. */
+- if (!source && ((out[0]&0x371fu)!=1u)) return false;
++ /* Only exact XO divide-by-one integer configuration may be re-enabled. */
++ if (!source && ((out[0]&0x371fu)!=1u)) {
++  if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=xo-config branch=%u root=%#x cmd=%#x cfg=%#x\n",i,b.root,cmd,out[0]);
++  return false;
++ }
++ if (diagnose) SWEET_LOG_INFO("SWEET MDSS CLOCK: admit parent branch=%u root=%#x cmd=%#x cfg=%#x m=%#x n=%#x d=%#x intf-div=%#x\n",i,b.root,cmd,out[0],out[1],out[2],out[3],out[4]);
+  return true;
+ }
+ bool SweetMDSS::clockCanGate(void)
+@@ -119,6 +152,11 @@
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
+  unsigned use=*(SweetClockUse *)arg;
++ const bool diagnose=!s->fClockBootToken && !s->fClockNextToken;
++ if (diagnose) SWEET_LOG_INFO("SWEET MDSS CLOCK: warm admission use=%u accepting=%u inactive=%u enabled=%u fault=%u link=%u host=%u core=%u suspended=%#x\n",
++     use,(unsigned)s->fAccepting,(unsigned)s->isInactive(),(unsigned)s->fClockEnabled,
++     (unsigned)s->fClockFault,(unsigned)s->fLinkPhase,(unsigned)s->fHostPhase,
++     (unsigned)s->fCorePhase,s->fLinkSuspendedMask);
+  if (use>=SweetClockUseCount) return kIOReturnBadArgument;
+  if (s->fLinkSuspendedMask) return kIOReturnNotReady;
+  if (!s->fClockEnabled) return kIOReturnUnsupported;
+@@ -130,17 +168,30 @@
+  for (unsigned n=0;n<4;++n)
+   if (!s->fClockLeases[n].token || s->fClockLeases[n].state==SweetClockReleased) { slot=n; break; }
+  if (slot==4 || s->fClockNextToken==~(uint64_t)0) return kIOReturnNoResources;
+- if (!s->clockPrerequisites()) return kIOReturnNotReady;
++ if (!s->clockPrerequisites(diagnose)) return kIOReturnNotReady;
+  unsigned mask=mdssClockMasks[use]; uint32_t parents[SweetClockCount][6]={};
+  for (unsigned i=0;i<SweetClockCount;++i) if (mask&(1u<<i)) {
+   uint32_t v=dp_rd(s->dp_dispcc,mdssClockBranches[i].cbcr);
+-  if (!s->clockParent(i,parents[i],(v&1u)!=0)) return kIOReturnNotReady;
+-  if ((s->fClockKnownMask&(1u<<i)) && memcmp(s->fClockParents[i],parents[i],sizeof(parents[i])))
++  if (diagnose) SWEET_LOG_INFO("SWEET MDSS CLOCK: admit branch=%u cbcr-offset=%#x cbcr=%#x\n",i,mdssClockBranches[i].cbcr,v);
++  if (!s->clockParent(i,parents[i],(v&1u)!=0,diagnose)) return kIOReturnNotReady;
++  if ((s->fClockKnownMask&(1u<<i)) && memcmp(s->fClockParents[i],parents[i],sizeof(parents[i]))) {
++   if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=parent-drift branch=%u\n",i);
+    return kIOReturnNotReady;
+-  if (v&1u) { if (v&CBCR_OFF) return kIOReturnNotReady; }
+-  else {
+-   if (!(v&CBCR_OFF) || parents[i][5] || mdssClockBranches[i].link) return kIOReturnNotReady;
+-   if (!s->clockCanGate()) return kIOReturnBusy;
++  }
++  if (v&1u) {
++   if (v&CBCR_OFF) {
++    if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=branch-off branch=%u cbcr=%#x\n",i,v);
++    return kIOReturnNotReady;
++   }
++  } else {
++   if (!(v&CBCR_OFF) || parents[i][5] || mdssClockBranches[i].link) {
++    if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=branch-unowned branch=%u cbcr=%#x source=%u link=%u\n",i,v,parents[i][5],(unsigned)mdssClockBranches[i].link);
++    return kIOReturnNotReady;
++   }
++   if (!s->clockCanGate()) {
++    if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=branch-busy branch=%u\n",i);
++    return kIOReturnBusy;
++   }
+   }
+  }
+  /* Preflight is all-or-nothing: no first branch write before the last

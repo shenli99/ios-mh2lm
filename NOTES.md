@@ -1,5 +1,25 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, retained FAIL; 0202 diagnostics ready)
+
+**CURRENT：用户报告亮度不变、息屏静帧。已定位MDSS启动时钟准入失败，未修复具体硬件条件。**
+logs/sweetlog-0121a14-abi608-panel-retained.bin SHA=ca64443926f456214c14a4e41837744c7fa744f2b0183ad3c80ba4bedd0cc18d，
+total275230/flush14。第370行605字节参数完整；85行warm lease admission NotReady，
+start在setupLocalClocks早退，无MDSS发布/绑定/managed takeover，尚未执行panel OFF/ON。
+3304–3339行CoreBrightness目标变化，3624行FB admission失败主动冻结；之后仍有按键/触摸/
+进程活动，不证实整核死锁。后档combined/supply暂停，不重测旧retained。
+0202仅补首次准入software/GCC/GDSC/root/branch分阶段ERROR/INFO；取现有读值，不加读取/
+写入、不放宽检查或fallback，runtime检查静默，未增boot-arg。具体失败寄存器值仍待实机。
+基底是0121a14实际云端源码；补丁严格apply/字节一致及现有114项CI marker通过；
+ASan/UBSan含19项时钟拒绝/准确失败门槛/短路访问/静默，core/managed/link/lifecycle回归，
+修改前后MDSS真实arm64单文件编译通过；0185–0202累计严格重放/78文件一致，
+旧/新准入682行MMIO轨迹逐字一致。编译新增8条unsafe-buffer诊断，均为已检查索引的日志取值；
+无新增类型/格式警告。底稿scratch/framebuffer-0202/。
+**NEXT：告知用户push本地提交并编译，下载新产物后同ABI608固件/retained参数打新名字boot。**
+新镜像先取启动准入日志；若仍报startup admission失败，无需再反复按息屏。取到具体门槛才修正。
+不把诊断叫修复；E7/E8仍未验收。不操作设备、不push或触发CI，CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+详见docs/PANEL-D1-0121A14.md retained段及PANEL-CLOCK-D1.md；以下NEXT均为历史。
+
 ## Agent handoff / active work (2026-11-12, abi608 identity PASS; retained next)
 
 **CURRENT：用户确认ABI修正版进入系统，持久日志吻合；恢复面板生命周期分档测试。**

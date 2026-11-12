@@ -73,7 +73,7 @@ int main(){auto*n=nub();fixtures();auto*s=make(n);assert(!writes());
   s=new SweetMDSS();assert(s->start(n)&&!s->fClockTimer&&!s->fClockClaimed&&!writes());destroy(s,n);}
  // Warm mode rejects missing writable ABI, invalid modes, hardware control,
  // TZ-only vote, dead domain/bus/interface, updating or unknown roots.
- for(unsigned test=0;test<16;++test){fixtures();
+ for(unsigned test=0;test<19;++test){fixtures();messages.clear();
   if(test==0)resourceMode=1;
   if(test==1)clockMode=2;
   if(test==2)regs[bases[1]+0x3000]|=2;
@@ -90,7 +90,26 @@ int main(){auto*n=nub();fixtures();auto*s=make(n);assert(!writes());
   if(test==13)regs[bases[1]+0x2028]=0x80000000; // no PHY-parent acquisition yet
   if(test==14)regs[bases[1]+0x200c]=0x80000000; // cannot enable inherited PLL root
   if(test==15)regs[bases[1]+0x2148]=0x10; // dirty source
+  if(test==16)regs[bases[1]+0x2024]=0x80000001; // branch SW vote but OFF
+  if(test==17)regs[bases[1]+0x2024]=0; // off without a known halted state
+  if(test==18){regs[bases[1]+0x2024]=0x80000000;regs[bases[6]+8]=2;} // unsafe to enable XO
   s=new SweetMDSS();assert(!s->start(n));auto before=writes();assert(!before);
+  if(test>=2){
+   const char*gate[]={"gdsc","gdsc","gdsc","gdsc","gcc-hf","gcc-ahb","dispcc-ahb",
+    "root-state","root-state","root-source","xo-config","branch-unowned","branch-unowned",
+    "root-state","branch-off","branch-unowned","branch-busy"};
+   unsigned faults=0;std::string expected=std::string("admit gate=")+gate[test-2];
+   for(const auto&m:messages)if(m.find("admit gate=")!=std::string::npos){++faults;assert(m.find(expected)!=std::string::npos);}
+   assert(faults==1); // first failed gate must be diagnosed without speculative reads
+   for(auto op:trace){
+    if(test==7)assert(op.addr!=bases[1]+0x2080); // no DISPCC without GCC vote
+    if(test==7||test==8)assert(op.addr!=bases[0]+0x38);
+    if(test==6||test==7||test==8)assert(op.addr!=bases[1]+0x3000);
+    if(test<=8)assert(op.addr!=bases[1]+0x22bc); // no RCG before prerequisites
+    if(test==9||test==10)assert(op.addr!=bases[1]+0x2114); // bad CMD: do not read CFG
+    if(test==15)assert(op.addr!=bases[1]+0x214c);
+   }
+  }
   s->release();queued.clear();assert(!liveMaps&&!rawBlocks&&!mdssClockWriter);
  }
  // Duplicate writers and timer-allocation/add failures do not steal ownership.
@@ -174,17 +193,19 @@ int main(){auto*n=nub();fixtures();auto*s=make(n);assert(!writes());
  fixtures();s=make(n);trace.clear();assert(s->localClocksReady());
  for(auto op:trace)assert(!op.write&&!(op.addr>=bases[12]&&op.addr<bases[12]+0x760));
  assert(s->brightnessReady()==kIOReturnSuccess);
- regs[bases[1]+0x209c]^=1;assert(!s->localClocksReady());
+ messages.clear();regs[bases[1]+0x209c]^=1;assert(!s->localClocksReady());
  trace.clear();assert(s->brightnessReady()==kIOReturnNotReady);
  uint32_t word=0x80050029;assert(s->dcsWrite(&word,1)==kIOReturnNotReady);
  s->fPanelPowerEnabled=true;assert(s->setPanelPower(false)==kIOReturnNotReady);
  s->fDsiEnabled=true;uint64_t rejected=0;
  const uint8_t command[]={5,1,0,0,0,0,1,0x29};
  assert(s->beginDSISequence(command,sizeof(command),&rejected)==kIOReturnNotReady&&!rejected);
- assert(!writes());destroy(s,n);
+ assert(!writes());
+ for(const auto&m:messages)assert(m.find("admit ")==std::string::npos); // runtime checks never repeat boot diagnostics
+ destroy(s,n);
  for(auto&kv:n->properties)kv.second->release();n->properties.clear();n->release();
  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
- puts("PASS: actual warm clock leases; defaults/no writes,16 admission faults, bounded tokens/shared refs, independent ON/OFF, busy release, parent drift/deadline/posted-write faults, stop/late event/retirement, no PHY/domain writes and zero live objects");
+ puts("PASS: actual warm clock leases; defaults/no writes,19 admission faults/exact failure gate/short-circuit read safety/quiet runtime, bounded tokens/shared refs, independent ON/OFF, busy release, parent drift/deadline/posted-write faults, stop/late event/retirement, no PHY/domain writes and zero live objects");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-display-clocks-') as temp:

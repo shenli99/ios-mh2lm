@@ -1,7 +1,7 @@
 # 0121a14：DarwinBoot 与 XNU boot_args ABI 错位
 
 2026-11-12。power0成功后核对实际云端头文件，发现确定的ABI错误，并离线复现HFS默认
-缓冲大小溢出。**修正版身份档已实机进入系统，原panic本轮未复现；下一步retained。**
+缓冲大小溢出。**修正版身份档已实机进入系统，原panic本轮未复现；retained随后因MDSS时钟准入失败，详见下文。**
 
 ## 证据与影响
 
@@ -68,13 +68,10 @@ blob SHA256：`27e7a1d1a3f9421af18d02f216e4e7d651137d42f2955be775f9142f118ea480`
 仍有3USB warning、13HFS clonefile -34、3BindFS ENOENT及2signal-reason分配失败。
 无unmount记录，不据此判断完整关机或OOM。分析底稿`abi608-panel-identity-log-analysis.json`。
 
-**当前只测**`/home/shenli/work1/out-bs/boot-16k-0121a14-abi608-panel-retained.img`，
-SHA256 `a0bf30f21b2fab53bfc5fe076be45ec24d648cc74dea3eb78e961bb0dd94e828`。
-参数605字节、lifecycle2；保留供电票。进入系统后调一次亮度，手动电源息屏5–10秒再唤醒，
-做两次，确认画面/亮度/触摸/三个按键；无需USB插拔、自动息屏或长测。
-日志命名`sweetlog-0121a14-abi608-panel-retained.bin`。
-首次温态接管不自动reset；真正的完整OFF表/ON复位及触摸恢复由手动OFF/ON触发。
-本档通过后依次panel-combined、panel-supply，每档先检查日志。失败停止后档，
-若启动panic则记录PC/LR/FAR/ESR。后两档继续暂停。无需push或新云编译。
-**不再复测ABI错误的原失败镜像。**
-旧镜像全部保留用于取证，不因修正成功就认定其它路径不存在内存问题。
+**retained已测试失败，暂停后档。** 参数605字节完整，但MDSS在启动阶段的warm clock
+lease返回NotReady；亮度provider未发布，息屏触发FB冻结。该问题发生在ABI修正之后，
+不能把它误当成原HFS panic或已执行的panel OFF/ON失败。
+日志SHA与诊断见[retained故障记录](PANEL-D1-0121A14.md#retained启动准入失败)。
+
+下一步用户push/云编译0202分阶段时钟诊断，再用同一ABI608固件、同一605字节参数打新镜像。
+旧retained、combined和supply均暂停；不再复测ABI错误的原失败镜像。旧镜像保留用于取证。
