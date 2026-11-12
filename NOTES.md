@@ -1,5 +1,20 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-12, BCM width bit-position re-audited)
+
+**CURRENT：按用户质疑重新核对lookupBCM来源/有效位，尚无驱动修改。**
+lookupBCM是本项目0187新增自有代码；Lineage为msm_bus_bcm_init调用cmd_db_get_aux_data后
+直接取aux_data.width（uint16_t）。width在aux+4；是第二个u32的低16位，整个aux64的32..47位。
+从Lineage原结构提取做Linux ARM64/Darwin ARM64编译，各12静态断言通过：
+aux size8/width+4/VCD+6/reserved+7；DB header144/slave16/entry24及entry addr16/len20/offset22。
+IR确认Lineage读取u16+4、当前读取u32+4&ffff，两者小端字段值一致，未把VCD当width。
+日志重建字节得到width0/VCD11，非零对照得到1234；不冒称这是独立设备内存dump。
+**NEXT不变：依据LG/Lineage构票链修ACV模型，不能把问题改说为已证实有效位读错。**
+完整地址/aux版本实机正确性与硬件投票语义不由本次layout证明单独闭合；不猜width、不套apps掩码。
+证据artifact-0121a17/lineage-bcm-layout-*及docs/PANEL-BCM-WIDTH-SOURCES.md新复核段。
+本轮仅源码审阅/离线布局验证/文档，无CI/固件/驱动改动，无push/上机需求。以下NEXT为历史。
+
+
 ## Agent handoff / active work (2026-11-12, ACV width provenance confirmed against Lineage/DTS)
 
 **CURRENT：已按用户要求核对旧资料、设备树及独立lge-lineage-kernel。**

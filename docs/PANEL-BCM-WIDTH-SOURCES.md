@@ -79,3 +79,29 @@ Lineage的ACV apps7038与display27006查询同一个DB key；只有apps节点进
 
 本轮为静态源码/资料核对，无驱动、CI、固件改动，无push或云编译需求。
 对照证据：`scratch/artifact-0121a17/bcm-width-source-review.json`。
+
+## 对lookupBCM作者、有效位与偏移的独立复核
+
+`SweetRPMh::lookupBCM()`是本项目0187补丁新增的自有实现，不是XNU标准API，
+也不是从Lineage直接调用的同名函数。Lineage对应实现为
+`msm_bus_bcm_init()` → `cmd_db_get_aux_data()` → 结构体字段赋值。
+
+这里“低16位”特指**aux第二个32位word（aux+4）的低16位**：
+整个8字节aux视作小端64位值时，width位于bits32..47，并非整个aux的bits0..15。
+第二个word的bits0..15=width、bits16..23=clk_domain、bits24..31=reserved。
+Lineage没有给width额外加bitfield掩码：它本身就是完整uint16_t字段。
+
+将Lineage原文`bcm_db / entry_header / rsc_hdr / cmd_db_header`结构提取后，
+分别以`aarch64-linux-gnu`及`arm64-apple-darwin`编译；两目标的12项静态断言均通过：
+aux大小8，unit/width/VCD/reserved偏移0/4/6/7，DB header144、slave stride16、entry stride24，
+entry的addr/len/offset字段位于16/20/22，与当前解析器常数一致。
+
+编译器生成的Lineage式读取为`load i16 aux+4`后零扩展；当前式读取为
+`load i32 aux+4 & 65535`。两者读取宽度不同（当前使用对齐word MMIO），但小端字段值相同。
+从现有日志重建的bytes解出width0/VCD11；非零对照`34 12`解出width0x1234，
+没有将VCD11误作width。此验证是布局/解码核对，**不是设备DB原始内存的独立dump**，
+不能单独作为完整实机地址/aux版本都正确的证明。
+
+证据：`scratch/artifact-0121a17/lineage-bcm-layout-check.c`、
+`{lineage,xnu}-bcm-layout-check.ll`及`lineage-bcm-layout-verification.json`。
+本轮没有更改解析器、硬件准入或投票代码；不需新编译/上机。
