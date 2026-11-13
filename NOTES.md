@@ -1,6 +1,27 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 
+## Agent handoff / active work (2026-11-13, 0121a29 artifacts and retained ready)
+
+**CURRENT：用户已下载0121a29；产物核对和ABI608四档打包/回读通过，待retained实机USB日志。**
+本段替代下方“待push/云编译/没有0218新内核”的交接；本轮无驱动修改。
+78源码与scratch/framebuffer-0218/verify字节一致，114原CI source markers、211内核markers通过。
+相比a28仅10个预期MDSS文件改变，包含0217/0218、CONFIG和普通/voted时钟请求记录。
+内核17758808bytes，SHA256=7c3b50dc16f813aed42c1c04634fd3ee3c07628893323729e1e47ba1e9106ffd，包内自带哈希匹配，ARM64 subtype0。
+未取得独立CI run ID或完整build log，未核对云端提交元数据/全量告警。
+四档boot header/FAT kernel+ADT+TOML回读通过；ABI608固件、BootShim、两追加DTB保持。
+全部ADT和参数与a28一致，retained605/607字节，display161/apps37保持；identity独立最小ADT不变。
+**NEXT：用户 fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a29-abi608-panel-retained.img，先开USB接收并记录约90秒。**
+镜像35545088bytes，SHA256=f8e725063204dbeb5b0ea31f61ccc1eccdb05ac838b048a4e7d3ae90360d6c0a。
+USB路径 logs/live-0121a29-abi608-panel-retained.txt；双终端命令见docs/PANEL-D1-0121A29.md。
+按CLOCK Held→enter CLK→65项CONFIG→initialized/ownership→INTID161→fresh ACTIVE/ACK→PHY/host→新DMA/transfer/HANDOFF核对。
+配置mismatch只记录；若失败按首个真实等待/完成错误和此前打印值排查。尚无a29实机结果，不能认定已修好。
+a28仍是最后实机：qtimer/+2020 wantffffffff/got224cac6，未到display TCS/新DMA；原因未知。
+完整接管前亮度/OFFON/长测/combined/supply实机验证继续暂停；无需重测identity/a28。
+底稿scratch/artifact-0121a29/，两份verify脚本/输出和packaging.txt齐备；未重跑既有0218驱动回归。
+未push/触发CI/操作设备；未改CI/驱动/固件/ADT/启动参数。以下CURRENT/NEXT为历史，以本段为准。
+
+
 ## Agent handoff / active work (2026-11-13, 0218 Lineage config observation ready)
 
 **CURRENT：按用户要求扩展审计 qtimer 后续步骤；0218 已实现配置回读仅打印，相关本地验证通过，待用户 push 云编译。**
