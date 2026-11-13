@@ -1,7 +1,8 @@
 # 0211：RSC clock 超时取证
 
-**2026-11-13：包含0211的0121a24产物已核对并打包，待实机。** 无需再次云编译，
-现在启动retained约90秒取完整日志；见[镜像与命令](PANEL-D1-0121A24.md)。下文待push步骤为历史。
+**2026-11-13：0211诊断目标已由a24 USB日志取得。** branch-wait、当前enable0/OFF0，
+整体期限未到。无需补持久日志或重测a24；下一步[0212写后取证](PANEL-CLOCK-WRITE-READBACK.md)待云编译。
+见[a24实测](PANEL-D1-0121A24.md#实测使能位未读回)。下文0211待push步骤为历史。
 
 **父链/halt已再次核对：** LG与Lineage均为+0x4004/bit0 enable/bit31 OFF、voted开启仍验halt；
 实际父链为PLL1 main→AHB root/8，当前实现有物理读回及typed权限检查。

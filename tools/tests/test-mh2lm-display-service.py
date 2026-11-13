@@ -129,6 +129,8 @@ prelude = r'''
 #define OSDynamicCast(t,p) dynamic_cast<t *>(p)
 #define OSSafeReleaseNULL(x) do {if (x) {(x)->release();(x)=nullptr;}} while(0)
 using vm_offset_t=uintptr_t;
+// The fixture uses physical addresses as synthetic virtual addresses.
+static vm_offset_t ml_vtophys(vm_offset_t address){return address;}
 using IOReturn=int;
 constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4,kIOReturnBusy=5,kIOReturnNoMemory=6,kIOReturnAborted=7,kIOReturnNoResources=8,kIOReturnTimeout=9,kIOReturnNotFound=10,kIOReturnNotPermitted=11;
 using IOOptionBits=unsigned;using IOInterruptState=unsigned;

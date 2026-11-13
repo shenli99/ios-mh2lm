@@ -1,4 +1,4 @@
-# 面板接管问题归因汇总（截至 0121a23）
+# 面板接管问题归因汇总（截至 0121a24）
 
 2026-11-12。当前在完整驱动计划 PD 阶段的 retained 首次接管，还没有完成新 DMA 接管。
 相同的“屏幕停在启动文字、USB和按键仍有活动”，先后由不同的依赖项失败引起。
@@ -16,7 +16,8 @@
 | a19–a20首笔ldoa14 RPMh超时 | 原完成路径没有取得本轮fresh完成证据。a20看到IRQ_ENABLE=0、saved=1、IRQ_STATUS=0、progress=0；idle/CMD_STATUS旧值不能当新ACK。0208接入apps RSC SPI5/INTID37真实完成IRQ及清理 | a21及后续10次fresh IRQ、四LDO/ARC/CN0成功，core2通过；这证明相关事务闭合，不代替物理电压测量或后续display RSC验收 |
 | a21通用NoC NotReady | 原日志没有细分clock lease、分支、wrapper、solver准入。0209只增加具体失败分支与软件上下文 | a22将首错缩小到branch7；诊断本身不是硬件修复 |
 | a22 RSC branch7被拒 | NON_GDSC_AHB是BRANCH_VOTED，原策略按独占halt及关闭态处理，且没对接core2已建立的PLL1 AHB父源。0210明确voted/halt语义，在实际coreReady和typed ARC/CN0凭据约束下取得自身票 | a23越过原准入并发出enable RMW；尚无Held，不能称RSC时钟获取成功 |
-| a23 RSC branch7开启等待超时 | **具体原因未定。** 只知道CLOCK token2 Timeout、cursor7/waiting1。原日志没区分overall/branch-wait，也没记录使能读回与CLK_OFF样本 | 0211增加有界超时取证，待新编译/实机。不能从owned0x80推断写后读回成功，不能断言硬件持续OFF 10ms |
+| a23 RSC branch7开启等待超时 | 当时缺少超时出口/CBCR；0211补取证 | a24已取得具体分支和样本，见下一行；仍不能从owned0x80推断写后读回成功 |
+| a24 自身enable未读回 | branch-wait/current1、CBCR0/enable0/OFF0；整体期限还剩187.7ms，排除本轮overall超时。源码和实际内核store/屏障、LG/ClockDxe地址表一致 | **写入未保留原因仍未知。** 0212增加紧随写入的读回/物理翻译及原等待样本摘要，本地通过、待新编译；不能删除enable检查或宣称硬件故障已修 |
 
 原始材料：
 [ABI及HFS](BOOTARGS-ABI-0121A14.md)、[XO旁路](PANEL-D1-0121A15.md)、
@@ -68,5 +69,6 @@ CB2 FSR=0x400审计WARN仍需保留，但后续已经进入managed，不能把�
   没有证据将它们归因到branch7 Timeout；HFS -34也不同于早期NULL写panic。
 - 长时息屏掉电与整机低功耗缺失另属大目标四，不把显示DCS息屏等同于整机休眠。
 
-目前没有完整接管成功的实机证据。下一步先用0211区分enable读回、CLK_OFF和超时出口，
-再根据实际值决定硬件修正；不通过延长期限、跳过校验或回退ABL掩盖失败。
+目前没有完整接管成功的实机证据。a24已确定单分支等待时enable未读回；下一步用
+[0212](PANEL-CLOCK-WRITE-READBACK.md)区分写后立即读回与等待期间丢失，见[a24实测](PANEL-D1-0121A24.md#实测使能位未读回)。
+不通过延长期限、跳过校验或回退ABL掩盖失败。

@@ -1,0 +1,84 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -327,6 +327,10 @@
+   unsigned writeBranch, sampleBranch;
+   uint32_t writeBefore, writeWant, sampleCBCR, parentCFG, parentSource;
+   bool writeValid, sampleValid, parentValid;
++  uint64_t immediateNS, physicalAddress, firstWaitNS, lastEnabledNS;
++  uint32_t immediateCBCR, firstWaitCBCR, observedBits, rscAdmission[3];
++  unsigned waitSamples;
++  bool immediateValid, rscAdmissionValid;
+  } fClockTrace;
+  /* Core resource control shares the clock writer, gate and timer. Profile2
+   * is an explicit SM8150-v2 selection, not a hardware revision detector. */
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -190,8 +190,10 @@
+  if (slot==4 || s->fClockNextToken==~(uint64_t)0) return kIOReturnNoResources;
+  if (!s->clockPrerequisites(diagnose)) return kIOReturnNotReady;
+  unsigned mask=mdssClockMasks[use]; uint32_t parents[SweetClockCount][6]={};
++ uint32_t admittedRSC[3]={};
+  for (unsigned i=0;i<SweetClockCount;++i) if (mask&(1u<<i)) {
+   uint32_t v=dp_rd(s->dp_dispcc,mdssClockBranches[i].cbcr);
++  if (i>=7) admittedRSC[i-7]=v; /* Existing preflight reads, not fresh failure samples. */
+   if (diagnose==ClockAdmission) SWEET_LOG_INFO("SWEET MDSS CLOCK: admit branch=%u cbcr-offset=%#x cbcr=%#x\n",i,mdssClockBranches[i].cbcr,v);
+   if (!s->clockParent(i,parents[i],(v&1u)!=0,diagnose)) return kIOReturnNotReady;
+   if ((s->fClockKnownMask&(1u<<i)) && memcmp(s->fClockParents[i],parents[i],sizeof(parents[i]))) {
+@@ -225,6 +227,8 @@
+  s->fClockOperation=slot+1; s->fClockCursor=0; s->fClockReleaseMask=0;
+  s->fClockReleasing=false; s->fClockWaiting=false; s->fClockVoteSettleAt=0;
+  s->fClockTrace={};
++ memcpy(s->fClockTrace.rscAdmission,admittedRSC,sizeof(admittedRSC));
++ s->fClockTrace.rscAdmissionValid=use==SweetClockRSC;
+  s->fClockDeadline=scanout_now()+200000000ULL;
+  *(uint64_t *)output=lease.token; s->fClockTimer->setTimeoutUS(100);
+  return kIOReturnSuccess;
+@@ -301,6 +305,14 @@
+      t.sampleBranch,t.sampleCBCR,(t.sampleCBCR&1u)!=0,(t.sampleCBCR&CBCR_OFF)!=0,
+      t.sampleNS,t.sampleValid && now>=t.sampleNS ? now-t.sampleNS : 0,
+      (unsigned)t.parentValid,t.parentCFG,t.parentSource);
++ SWEET_LOG_ERROR("SWEET MDSS CLOCK READBACK: valid=%u branch=%u pa=%#llx cbcr=%#x enable=%u off=%u sampled-ns=%llu\n",
++     (unsigned)t.immediateValid,t.writeBranch,t.physicalAddress,t.immediateCBCR,
++     (t.immediateCBCR&1u)!=0,(t.immediateCBCR&CBCR_OFF)!=0,t.immediateNS);
++ SWEET_LOG_ERROR("SWEET MDSS CLOCK OBSERVED: branch=%u wait-samples=%u first=%#x first-ns=%llu seen-enable=%u seen-off=%u last-enabled-ns=%llu\n",
++     t.writeBranch,t.waitSamples,t.firstWaitCBCR,t.firstWaitNS,
++     (t.observedBits&1u)!=0,(t.observedBits&CBCR_OFF)!=0,t.lastEnabledNS);
++ SWEET_LOG_ERROR("SWEET MDSS CLOCK RSC PREFLIGHT: valid=%u non-gdsc=%#x rscc-ahb=%#x rscc-vsync=%#x; admission samples only\n",
++     (unsigned)t.rscAdmissionValid,t.rscAdmission[0],t.rscAdmission[1],t.rscAdmission[2]);
+ }
+ void SweetMDSS::advanceLocalClocks(void)
+ {
+@@ -317,6 +329,12 @@
+   fClockTrace.sampleValid=true; fClockTrace.sampleBranch=i; fClockTrace.sampleCBCR=v;
+   fClockTrace.sampleNS=scanout_now(); fClockTrace.parentValid=false;
+   fClockTrace.parentCFG=fClockTrace.parentSource=0;
++  if (fClockWaiting && fClockTrace.writeValid && fClockTrace.writeBranch==i) {
++   if (!fClockTrace.waitSamples) { fClockTrace.firstWaitCBCR=v; fClockTrace.firstWaitNS=fClockTrace.sampleNS; }
++   if (fClockTrace.waitSamples!=~0u) ++fClockTrace.waitSamples;
++   fClockTrace.observedBits|=v&(1u|CBCR_OFF);
++   if (v&1u) fClockTrace.lastEnabledNS=fClockTrace.sampleNS;
++  }
+   bool rootNeeded=!fClockReleasing && (v&1u) && !(v&CBCR_OFF);
+   if (!clockParent(i,parent,rootNeeded,diagnose) || memcmp(parent,fClockParents[i],sizeof(parent))) {
+    if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: NoC gate=worker-parent branch=%u cbcr=%#x\n",i,v);
+@@ -360,6 +378,18 @@
+    fClockTrace.writeValid=true; fClockTrace.writeBranch=i;
+    fClockTrace.writeBefore=v; fClockTrace.writeWant=fClockReleasing ? v&~1u : v|1u;
+    fClockTrace.writeEntryNS=now; fClockTrace.writeIssuedNS=scanout_now();
++   fClockTrace.immediateValid=false; fClockTrace.immediateCBCR=0;
++   fClockTrace.immediateNS=fClockTrace.physicalAddress=0;
++   fClockTrace.waitSamples=0; fClockTrace.firstWaitCBCR=fClockTrace.observedBits=0;
++   fClockTrace.firstWaitNS=fClockTrace.lastEnabledNS=0;
++   if (b.voted && b.managedAHB) {
++    /* One read of the same known CBCR after dp_wr's DSB; no retry or control
++     * decision. Translation reports the CPU's mapping, not device ownership. */
++    fClockTrace.immediateCBCR=dp_rd(dp_dispcc,b.cbcr);
++    fClockTrace.immediateNS=scanout_now();
++    fClockTrace.physicalAddress=(uint64_t)ml_vtophys(dp_dispcc+b.cbcr);
++    fClockTrace.immediateValid=true;
++   }
+    fClockWaiting=true; fClockWaitDeadline=now+10000000ULL;
+    fClockVoteSettleAt=0;
+    if (b.voted) SWEET_LOG_INFO("SWEET MDSS CLOCK: voted branch=%u enable=%u; awaiting own vote readback%s\n",

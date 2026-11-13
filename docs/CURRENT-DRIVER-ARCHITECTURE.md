@@ -1,12 +1,13 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
-**当前执行点（2026-11-13）：0121a24 已核对并打包，0211 在新内核内，待实机。**
-78 份源码匹配0211（7d34942），114 source/180 binary markers通过；相比a23仅MDSS.cpp/Clock.inc变化。
-ABI608固件、ADT和605字节retained参数保持a23，boot/FAT payload回读通过。
-现在只启动新retained约90秒取完整日志，重点CLOCK TIMEOUT/WRITE/SAMPLE，区分enable/OFF及两个期限出口。
-这是诊断版，尚未证明branch7 Timeout已修复；完整接管前亮度/OFFON/长测及其他显示档继续暂停。
-镜像与命令见[0121a24交付](PANEL-D1-0121A24.md)，[0211判断标准](PANEL-CLOCK-TIMEOUT-DIAGNOSTICS.md)。
-本轮无需再次云编译；以下各轮执行点按历史保留，当前以本段与NOTES为准。
+**当前执行点（2026-11-13）：a24已分析，0212写后取证本地通过，待用户push云编译。**
+a24 USB已取得branch-wait/当前CBCR0/enable0/OFF0，整体期限还剩187.7ms；无需补持久日志。
+实际store/屏障、LG和ClockDxe地址表已核对；尚不知自身票从未读回还是置位后丢失。
+0212只对branch7实际写后增加一次同CBCR读取/物理翻译，并汇总原有等待和RSC准入读值；不参与控制。
+19场景与0211比较仅差允许的写后读取，14套回归/ARM64对象/严格补丁重放通过。
+新kernel/buildtree到齐后核对打原ABI608/ADT/605字节retained；旧a24不重测，其他显示测试继续暂停。
+见[a24实测](PANEL-D1-0121A24.md#实测使能位未读回)、[0212实现与判断标准](PANEL-CLOCK-WRITE-READBACK.md)。
+本轮尚未修复/验证硬件接管；以下各轮执行点按历史保留，当前以本段与NOTES为准。
 
 
 **0121a23实测：** a22的branch-unowned准入拒绝已越过，实际发出branch7 enable；
