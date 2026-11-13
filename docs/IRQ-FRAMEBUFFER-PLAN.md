@@ -1,13 +1,13 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
-**当前执行点（2026-11-13）：a24已分析，0212写后取证本地通过，待用户push云编译。**
-a24 USB已取得branch-wait/当前CBCR0/enable0/OFF0，整体期限还剩187.7ms；无需补持久日志。
-实际store/屏障、LG和ClockDxe地址表已核对；尚不知自身票从未读回还是置位后丢失。
-0212只对branch7实际写后增加一次同CBCR读取/物理翻译，并汇总原有等待和RSC准入读值；不参与控制。
-19场景与0211比较仅差允许的写后读取，14套回归/ARM64对象/严格补丁重放通过。
-新kernel/buildtree到齐后核对打原ABI608/ADT/605字节retained；旧a24不重测，其他显示测试继续暂停。
-见[a24实测](PANEL-D1-0121A24.md#实测使能位未读回)、[0212实现与判断标准](PANEL-CLOCK-WRITE-READBACK.md)。
-本轮尚未修复/验证硬件接管；以下各轮执行点按历史保留，当前以本段与NOTES为准。
+**当前执行点（2026-11-13）：0121a25已核对包含0212，retained镜像回读通过，待实机日志。**
+78源码字节匹配0212验证树（代码25d8fbc），相比a24仅MDSS.cpp/Clock.inc变化；114 source/183 binary markers通过。
+内核自带SHA匹配；ABI608固件/BootShim/两个append DTB、ADT及605字节retained参数保持a24，INTID37扩展保留。
+四档boot/FAT中kernel/ADT/TOML回读通过，本轮只启动retained约90秒并取完整USB日志，无需再次云编译。
+a24首错为branch-wait/当前enable0/OFF0；a25新增READBACK/OBSERVED/RSC PREFLIGHT，区分写后读回和后续丢失。
+READBACK PA预期0x0af04004；正确翻译不证明总线写入权限，原准入值不当作失败现场值。
+见[a25镜像与操作](PANEL-D1-0121A25.md)、[0212实现与判断标准](PANEL-CLOCK-WRITE-READBACK.md)。
+本轮仍为定位版，尚未证明硬件接管；亮度/OFFON/长测和其他显示档暂停。以下执行点为历史。
 
 
 **0121a23实测：** a22的branch-unowned准入拒绝已越过，实际发出branch7 enable；

@@ -1,5 +1,26 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-13, 0121a25 write-readback boot ready)
+
+**CURRENT：用户下载的0121a25已确认包含0212，retained镜像打包/回读通过，待实机USB日志。**
+78源码字节匹配scratch/framebuffer-0212/verify，代码内容对应25d8fbc；比a24仅MDSS.cpp/Clock.inc变化。
+114原CI source/183 binary markers通过，新增CLOCK READBACK/OBSERVED/RSC PREFLIGHT，原三条0211记录保留。
+内核17740976bytes/ARM64 subtype0，自带SHA匹配，SHA=7a487e640d37213cbf5fb92eda4f1c3d43101150ffec9cfe808def81a24fa612。
+无CI run ID/完整build log，不声称核对云端提交元数据或全量告警。原0212本地验证记录保持，本轮未重复驱动测试。
+ABI608固件/BootShim/两个append DTB/各档ADT和启动参数保持a24，RPMh INTID37扩展保留；retained605/607字节。
+四档boot header/FAT中kernel+ADT+TOML回读通过，只交付retained；无需再次云编译。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a25-abi608-panel-retained.img。**
+镜像35545088bytes，SHA=a2d95471e8aac5a90aa87eadf5a4388613d3856d31286fc49329f5d0014e5b71。
+先启动USB接收脚本，启动约90秒，保存logs/live-0121a25-abi608-panel-retained.txt；具体双终端命令见交付文档。
+若仍Timeout取TIMEOUT/WRITE/SAMPLE及READBACK/OBSERVED/RSC PREFLIGHT；区分写后enable1再丢失、等待中才出现、均未观察到。
+READBACK PA预期0x0af04004，正确翻译不证明总线权限；OBSERVED不含立即读回，valid0/样本0不能当硬件值。
+RSC PREFLIGHT为历史准入样本；若CLOCK Held/state2/mask381，则追NoC首错或新DMA。
+仍为定位版，未证明硬件修复/完整接管；亮度/OFFON/长测/其他显示档暂停，旧a24无需补持久日志或重测。
+详见docs/PANEL-D1-0121A25.md、PANEL-CLOCK-WRITE-READBACK.md；底稿scratch/artifact-0121a25/两验证脚本、JSON及输出。
+本轮仅产物核对/打包/文档，未改驱动/固件/CI，未push/触发CI/操作设备。无需为本轮文档提交重编译。
+CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。以下NEXT为历史，以本段为准。
+
+
 ## Agent handoff / active work (2026-11-13, a24 enable absent; 0212 ready)
 
 **CURRENT：a24 USB日志足够，首错为branch-wait且自身enable未读回；0212已提交`25d8fbc`，待用户push云编译。**

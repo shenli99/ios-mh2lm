@@ -1,5 +1,7 @@
 # 0212：branch7 写后读回与观测历史
 
+**交付状态：** [0121a25产物与retained镜像](PANEL-D1-0121A25.md)已核对并回读通过，待实机USB日志，无需再次云编译。
+
 2026-11-13。a24 的 USB 日志已取得所需证据，无需补持久日志。首错为单分支等待超时，
 当前 CBCR=0，尚未看到自身 enable；具体原因仍未确定。本轮继续定位写入未保留的原因，未宣称硬件修复。
 实测时间及原始行号见 [a24](PANEL-D1-0121A24.md#实测使能位未读回)。
@@ -70,5 +72,6 @@
 test-clock-write-readback-baseline.txt、write-path-audit.json、a24-dp-wr-disassembly.txt、matrix-rejection.json。
 USB 原始日志不入 git。本轮不修改 CircleCI、固件、ADT、boot args、USB/输入/电池及 apps RPMh IRQ。
 
-现在需要用户 push 云编译，下载新 kernel/buildtree（建议0121a25）；agent 核对后打同参数 retained。
-启动约90秒取完整 USB 日志。a24无需重测，完整接管前亮度/OFFON/长测及其他显示档继续暂停。
+0121a25 已确认包含本补丁：78源码字节匹配，114 source/183 binary markers通过，同参数retained已打包回读。
+下一步按[交付命令](PANEL-D1-0121A25.md#本轮操作)启动约90秒取完整USB日志；本版尚未实测。
+a24无需重测，完整接管前亮度/OFFON/长测及其他显示档继续暂停。
