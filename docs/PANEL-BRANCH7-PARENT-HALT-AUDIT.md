@@ -1,5 +1,9 @@
 # branch7：父时钟链和 halt 语义核对
 
+**a26后续：** 三阶段BCR均0，core转换前后局部CBCR不变；额外enable门槛仍直接触发超时。
+现已实现[0214](PANEL-VOTED-HALT-COMPLETION.md)，对自身已发出的voted请求按halt完成，统一租约消费者检查；
+本地验证通过，待云编译/实机。下文“先执行0213、保留门槛”为取得a26证据前的选择。
+
 **2026-11-13更新：a25的OFF已经为0；当前超时由XNU额外的enable读回条件触发，
 不能称为已证实的Linux halt握手超时。** [0213局部取证](PANEL-RSC-LOCAL-RESET-EVIDENCE.md)
 已经实现并验证，待用户云编译；本次不再追加一个内核诊断版本。

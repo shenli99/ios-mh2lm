@@ -1,5 +1,32 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-13, a26 analyzed; 0214 voted halt completion ready)
+
+**CURRENT：a26 USB证据完整；0214修正额外enable完成门槛，已提交55cab80并本地通过，待用户push云编译。**
+日志live-0121a26-abi608-panel-retained.txt为224475bytes/3115行，SHA=f03f15d930e0d2264d47535c5ee27be86960aba6af66d2e3512c504280143c32。
+10次apps fresh IRQ/四LDO/ARC/CN0与core2成功；1711首错branch-wait/+4004；1713CBCR0/enable0/OFF0/current1。
+立即读回PAaf04004/CBCR0；42次等待未见enable/OFF置位。整体期限余188.321354ms，write记时至立即样本677ns、至最终样本10.044584ms。
+1717warm-entry：BCR0/NON_GDSC0/RSCC_AHB1/RSCC_VSYNC1/AHB CMD0 CFG1；1718pre-write除CFG40f外相同；1719timeout BCR0。
+未支持reset一直未释放；branch7读零在core转换前已存在，未观察到core转换关掉该分支；父源按计划切换。
+三个采样时刻不排除中间瞬变/未知依赖；OFF0符合Linux halt，直接拒绝为XNU额外enable条件，硬件读零原因仍未解释。
+1720–1730clock→NoC/managed/lifecycle/HANDOFF连锁失败，phase2/executing0，明确未提交新DMA；后续用户态活动，无kernel panic签名。
+0214基于实际a26：新issuedMask只在enable写+屏障返回后记账，区别于写前owned账本；自身voted按issued+OFF0完成，bit0仅诊断。
+统一Clock准入/worker/final、NoC、Link/Lifecycle；继承票与普通HALT仍要enable，BOOT mask7f检查保持。
+共享retain不重写，最后引用释放仍clear读回+异步10us settle，完成清issued、重新获取需再写；故障保票/stop无MMIO保持。
+父源/core/ARC/CN0/idle/域/期限/Held准入不变，无复位或顺序修改。新日志voted halt complete仅表示分支等待完成，不是DMA成功。
+18场景新专项+15套既有回归共16套通过；4个a26基线读零场景复现Timeout，修改版推进到模拟managed scanout。
+新增持续读零的完整mode4 PHY关/开生命周期回归通过；34项写前/写后父链/域/权限故障仍拒绝，无多余leaf/TCS写。
+真实ARM64对象通过，warnings1552→1553（新增1固定表索引unsafe-buffer-usage，未屏蔽）；0185–0214共30patch严格重放/78源码/114原CI markers通过。
+matrix新增voted halt complete门槛，实际旧a26被拒绝且无boot输出；补丁SHA=7ec98ca1d2015cb12719b436582d4cd0f53256b0b2897a0c3fc9a76cdd3ef25f。
+**NEXT：用户git push origin main并云编译，下载新kernel/buildtree（建议0121a27），agent核对后打原ABI608 retained。**
+预计比a26仅MDSS.cpp/Clock.inc/NoC.inc/Link.inc/Lifecycle.inc五文件变化，186 binary markers；原固件/ADT/605字节参数保持。
+启动约90秒保存完整USB：先voted halt complete→CLOCK Held/state2/mask381→NoC本轮完成→新DMA/HANDOFF；若失败按新首错定位。
+尚未证明实机修复，当前无新boot；a26无需重测或补持久日志。完整接管前亮度/OFFON/长测和其他显示档继续暂停。
+详见PANEL-D1-0121A26.md实测及PANEL-VOTED-HALT-COMPLETION.md；底稿scratch/framebuffer-0214/验证脚本/JSON/输出，a26日志分析JSON。
+未push/触发CI/操作设备，未改固件/CI/参数/USB/输入/电池/apps IRQ；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+以下NEXT为历史，以本段为准。
+
+
 ## Agent handoff / active work (2026-11-13, 0121a26 local/reset evidence boot ready)
 
 **CURRENT：用户下载的0121a26已确认包含0213，retained启动镜像打包/回读通过，待实机USB日志。**

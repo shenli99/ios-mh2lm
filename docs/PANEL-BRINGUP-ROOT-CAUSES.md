@@ -1,4 +1,4 @@
-# 面板接管问题归因汇总（截至 0121a25）
+# 面板接管问题归因汇总（截至 0121a26）
 
 2026-11-13。当前在完整驱动计划 PD 阶段的 retained 首次接管，还没有完成新 DMA 接管。
 相同的“屏幕停在启动文字、USB和按键仍有活动”，先后由不同的依赖项失败引起。
@@ -19,6 +19,7 @@
 | a23 RSC branch7开启等待超时 | 当时缺少超时出口/CBCR；0211补取证 | a24已取得具体分支和样本，见下一行；仍不能从owned0x80推断写后读回成功 |
 | a24 自身enable未读回 | branch-wait/current1、CBCR0/enable0/OFF0；整体期限还剩187.7ms，排除本轮overall超时。源码和实际内核store/屏障、LG/ClockDxe地址表一致 | 0212增加写后立即读回/物理翻译及等待样本摘要；结果见a25 |
 | a25 enable门槛导致超时 | 正确PA下立即读回CBCR0，39次等待均未见enable或OFF置位；整体期限仍余188.3ms。**OFF0已满足Lineage开启检查，直接阻塞为XNU额外enable1条件** | enable读零的硬件原因仍未知，不能称已证实的halt握手失败。额外条件是本地策略差异，需连同最终/NoC/生命周期和租约语义评审；0213先补BCR和局部状态证据，已本地验证，待云编译 |
+| a26复位取证及软件修正 | BCR在core转换前、enable写前、超时均0；局部三CBCR前后相同，AHB CFG1→40f；enable0/OFF0持续被软件门槛拒绝 | 未支持reset一直未释放或core转换关掉branch7。[0214](PANEL-VOTED-HALT-COMPLETION.md)按已发出请求+halt完成，并同步NoC/Link/Lifecycle；16套回归及ARM64编译通过，待实机。仍未解释硬件读零原因 |
 
 原始材料：
 [ABI及HFS](BOOTARGS-ABI-0121A14.md)、[XO旁路](PANEL-D1-0121A15.md)、
@@ -71,8 +72,6 @@ CB2 FSR=0x400审计WARN仍需保留，但后续已经进入managed，不能把�
   没有证据将它们归因到branch7 Timeout；HFS -34也不同于早期NULL写panic。
 - 长时息屏掉电与整机低功耗缺失另属大目标四，不把显示DCS息屏等同于整机休眠。
 
-目前没有完整接管成功的实机证据。a25未观察到enable先置位后丢失；下一步执行已就绪的
-[0213](PANEL-RSC-LOCAL-RESET-EVIDENCE.md)，取得复位和core转换前后局部状态。
-复位未释放尚无样本支持；HALT/VOTED的完整leaf执行核对及本地额外门槛的评审范围见
-[语义审计](PANEL-BRANCH7-PARENT-HALT-AUDIT.md)。后续若调整完成语义，应统一处理租约和消费者检查，
-不能只改worker后便称完整接管已修复。
+目前没有完整接管成功的实机证据。a26已取得三阶段BCR0及前后局部CBCR不变的样本；
+[0214](PANEL-VOTED-HALT-COMPLETION.md)已统一修正自身voted请求的开启完成和消费者检查，待云编译验证。
+HALT/VOTED依据见[语义审计](PANEL-BRANCH7-PARENT-HALT-AUDIT.md)；本地模拟越过超时不等于实机新DMA成功。

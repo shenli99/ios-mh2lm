@@ -1,5 +1,13 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+**当前执行点（2026-11-13）：a26已分析，0214完成语义修正已提交55cab80，待用户push云编译。**
+BCR三阶段均0，局部CBCR前后不变，AHB CFG1→40f；仍enable0/OFF0，直接拒绝为额外enable门槛。
+0214对自身已发出的voted请求按halt完成，同步Clock/NoC/Link/Lifecycle；保留父权限、继承票、普通HALT及撤票检查。
+18场景专项+15套既有回归、4个基线复现、34父链故障、ARM64对象及30补丁重放通过；未证明实机接管成功。
+下一份产物建议0121a27，预计五文件变化/186 binary markers，核对后打原ABI608 retained。
+见[a26实测](PANEL-D1-0121A26.md#实测复位位清除仍由enable门槛超时)和[0214实现](PANEL-VOTED-HALT-COMPLETION.md)。
+a26日志完整，无需重测/补持久日志；其他显示测试暂停。以下a26待测及保留enable门槛为历史。
+
 **当前执行点（2026-11-13）：0121a26包含0213已核对，retained镜像已打包并回读通过，待用户临时启动取日志。**
 78源码、114 source/185 binary markers通过；ABI608固件/ADT/605字节参数保持a25。
 若仍超时，比较新增LOCAL warm-entry/pre-write与RESET的BCR/局部状态及时间，原六条诊断保留。
