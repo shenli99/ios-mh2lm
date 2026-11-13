@@ -1,0 +1,228 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -467,13 +467,14 @@
+  SweetPanelLifecycleStatus fLifecycle;
+  uint64_t fLifecycleNextToken, fLifecycleDeadline, fLifecycleStepDeadline, fLifecycleFrame;
+  uint32_t fLifecycleTE, fLifecycleAuto;
+- unsigned fLifecycleIdleSamples;
++ unsigned fLifecycleIdleSamples, fWakeTraceCount;
+  SweetScanoutPool *fLifecyclePool;
+  const SweetPanelProfile *fPanelProfile;
+  bool fLifecycleFull, fLifecycleDataParking, fLifecycleLinkCycle, fLifecycleSupplyCycle, fLifecyclePinsActive, fPanelBrightnessKnown;
+  uint64_t fLifecycleSupplyWait;
+  uint32_t fPanelBrightnessTarget;
+  bool setupLifecycle(IOService *);
++ void traceWake(const char *,unsigned = 0);
+  void lifecycleCommand(bool);
+  void lifecycleReset(void);
+  void lifecycleBrightness(void);
+diff --git a/iokit/Kernel/arm/SweetMDSSDSI.inc b/iokit/Kernel/arm/SweetMDSSDSI.inc
+--- a/iokit/Kernel/arm/SweetMDSSDSI.inc
++++ b/iokit/Kernel/arm/SweetMDSSDSI.inc
+@@ -15,8 +15,10 @@
+   * with SDE. 0x801 in the DTS is the SECURE domain, not a DSI stream ID.
+   * Validate the known unsecure route, never invent a new SID/IOVA mapping.
+   * The first new DSI DMA still needs real transfer evidence on the device. */
++ traceWake("dma-route-enter");
+  SweetScanoutSnapshot v={};
+  if (scanoutInspectAction(this,&v,NULL,NULL,NULL)!=kIOReturnSuccess) return false;
++ traceWake("dma-route-snapshot",v.cbFault);
+  return v.knownSmmu && v.matches==1 && v.cb2Observed && !v.secure &&
+      v.smmuCR0==0x2b0406u && !v.smmuFault && v.smr==0x84200800u && v.s2cr==2u &&
+      v.streamIndex==3 && !(v.cbFault&~0x400u) && v.sctlr==0xe0u &&
+@@ -56,10 +58,13 @@
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
+  OSData *data=(OSData *)arg;
++ s->traceWake("dsi-admission-enter");
+  if (!s->fLifecycleInternal && s->lifecycleBlocked()) return kIOReturnBusy;
+  if (!s->fAccepting || s->isInactive() || s->fDsiPoisoned) return kIOReturnNotReady;
+  if (!s->fDsiEnabled) return kIOReturnUnsupported;
++ s->traceWake("dsi-managed-enter");
+  if (!s->managedAccessReady()) return kIOReturnNotReady;
++ s->traceWake("dsi-managed-return");
+  if (s->dsiBusy() || s->fScanoutState==SweetScanoutQuiescing ||
+      s->fScanoutState==SweetScanoutSubmitted) return kIOReturnBusy;
+  /* Full ON/OFF tables can exceed the250ms RD_PTR watchdog. The panel
+@@ -71,6 +76,7 @@
+  if (!s->dp_clocks_on() || (s->fClockEnabled && !s->localClocksReady())) return kIOReturnNotReady;
+  /* This revision is already observed in 0121a12 (+0=20030000).
+   * Recheck live before writes; DT compatible alone does not authorize them. */
++ s->traceWake("dsi-registers-enter");
+  s->observeLineage("dsi-command-control",s->dp_dsi,4,5u,7u);
+  if (dp_rd(s->dp_dsi,0)!=0x20030000u ||
+      dp_rd(s->dp_dsi,0x15c) || (dp_rd(s->dp_dsi,0x110)&(1u<<24)) ||
+@@ -84,27 +90,37 @@
+   if (!sweet_dsi_next(bytes,data->getLength(),&off,&m)) return kIOReturnBadArgument;
+   if (m.type==0x39 && m.length+4>SweetDSIFifoBytes) needsDMA=true;
+  }
++ s->traceWake("dsi-sequence-ready",commands);
+  if (needsDMA && !s->dsiDMAReady()) return kIOReturnNotReady;
++ s->traceWake("dsi-timer-enter",needsDMA);
+  if (s->fDsiNextToken==~(uint64_t)0 || !s->setupDSI()) return kIOReturnNoResources;
++ s->traceWake("dsi-timer-return");
+  if (needsDMA && !s->fDsiBuffer) {
++  s->traceWake("dma-allocate-enter");
+   s->fDsiBuffer=IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+       kIODirectionOut | kIOMemoryPhysicallyContiguous | kIOMemoryMapperNone |
+       kIOMapWriteCombineCache,4096,0xffffffffULL);
++  s->traceWake("dma-allocate-return",s->fDsiBuffer!=NULL);
+   if (!s->fDsiBuffer) return kIOReturnNoMemory;
++  s->traceWake("dma-prepare-enter");
+   if (!s->fDsiBuffer->getBytesNoCopy() || s->fDsiBuffer->getLength()<4096 ||
+       s->fDsiBuffer->prepare(kIODirectionOut)!=kIOReturnSuccess) {
+    OSSafeReleaseNULL(s->fDsiBuffer); return kIOReturnNoMemory;
+   }
+   s->fDsiPrepared=true;
++  s->traceWake("dma-prepare-return");
+   IOByteCount contiguous=0;
++  s->traceWake("dma-physical-enter");
+   s->fDsiPhysical=s->fDsiBuffer->getPhysicalSegment(0,&contiguous,kIOMemoryMapperNone);
+   uint64_t pa=s->fDsiPhysical;
++  s->traceWake("dma-physical-return",(uint32_t)pa);
+   if (!pa || (pa&7u) || pa>=0x100000000ULL || 4096>0x100000000ULL-pa || contiguous<4096 ||
+       (pa<0x9e400000ULL && 0x9d200000ULL<pa+4096)) {
+    (void)s->fDsiBuffer->complete(kIODirectionOut); s->fDsiPrepared=false;
+    OSSafeReleaseNULL(s->fDsiBuffer); return kIOReturnBadArgument;
+   }
+  }
++ s->traceWake("dsi-arm-enter");
+  data->retain(); s->fDsiSequence=data; s->fDsiOffset=0;
+  s->fDsiStatus={}; s->fDsiStatus.token=++s->fDsiNextToken;
+  s->fDsiStatus.total=commands; s->fDsiStatus.state=SweetDSIQuiescing;
+@@ -225,6 +241,7 @@
+   if ((fDsiStatus.irq&1u) && !(fDsiStatus.hardwareStatus&6u)) {
+    /* Only a fresh done PLUS DMA/MDP idle grants command memory reuse. */
+    if (fDsiPinned) { fDsiPinned=false; fDsiBuffer->release(); }
++   traceWake("packet-done",fDsiStatus.completed+1);
+    restoreDSICommand(); ++fDsiStatus.completed;
+    fDsiStatus.state=SweetDSIDelay; fDsiDeadline=now+(uint64_t)fDsiWaitMS*1000000ULL;
+    fDsiTimer->setTimeoutMS(fDsiWaitMS ? fDsiWaitMS : 1); return;
+@@ -241,12 +258,14 @@
+  SweetDSIMessage m={}; size_t next=fDsiOffset;
+  if (!fDsiSequence || !sweet_dsi_next((const uint8_t *)fDsiSequence->getBytesNoCopy(),
+      fDsiSequence->getLength(),&next,&m)) { finishDSI(kIOReturnBadArgument,SweetDSIFailed); return; }
++ traceWake("packet-encode-enter",(unsigned)m.length);
+  uint32_t words[SweetDSIEmbeddedBytes/4]={};
+  size_t bytes=sweet_dsi_encode(m,(uint8_t *)words,sizeof(words));
+  bool memory=bytes>SweetDSIFifoBytes;
+  if (!bytes || (memory && (!fDsiBuffer || !dsiDMAReady()))) {
+   finishDSI(kIOReturnNotReady,SweetDSIFailed); return;
+  }
++ traceWake("packet-registers-enter",m.type);
+  fDsiDMA=dp_rd(dp_dsi,0x3c); fDsiLength=dp_rd(dp_dsi,0x4c);
+  fDsiTrigger=dp_rd(dp_dsi,0x84); fDsiFIFO=dp_rd(dp_dsi,0x50);
+  fDsiAddress=dp_rd(dp_dsi,0x48); fDsiSaved=true;
+@@ -273,5 +292,7 @@
+  __asm__ volatile("dsb oshst" ::: "memory");
+  fDsiOffset=next; fDsiWaitMS=m.waitMS;
+  fDsiStatus.state=SweetDSITransferring; fDsiDeadline=now+200000000ULL;
++ traceWake("packet-trigger-enter",memory);
+  dp_wr(dp_dsi,0x90,1); fDsiTimer->setTimeoutMS(1);
+-}
++ traceWake("packet-trigger-return");
++}
+diff --git a/iokit/Kernel/arm/SweetMDSSLifecycle.inc b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+--- a/iokit/Kernel/arm/SweetMDSSLifecycle.inc
++++ b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+@@ -5,6 +5,19 @@
+  * cycles host/PHY/PLL hardware while retaining ALL resource tickets. Mode5
+  * composes data parking and link shutdown, retaining the config/power path.
+  * Mode6 adds reset-low and panel-only vote withdrawal/restore; L3/L5 stay held. */
++/* Software-only breadcrumbs around potentially blocking calls. A printed entry
++ * never proves return/completion. Keep real resource, pin and DMA fences intact.
++ * Pin phases are short (100ms); trace each poll so a post-reset stall cannot be
++ * hidden by a first-poll-only marker. Other phases log only their milestones. */
++void SweetMDSS::traceWake(const char *stage,unsigned value)
++{
++ if (!fLifecycleEnabled || fLifecycle.operation!=SweetPanelDisplayOn || !lifecycleBusy()) return;
++ if (fWakeTraceCount>=1024) return;
++ ++fWakeTraceCount;
++ SWEET_LOG_INFO("SWEET PANEL WAKE: token=%llu phase=%u step=%s value=%#x command=%llu dsi=%llu completed=%u/%u; diagnostic only\n",
++     fLifecycle.token,fLifecycle.phase,stage,value,fLifecycle.commandToken,fDsiStatus.token,fDsiStatus.completed,fDsiStatus.total);
++ if (fWakeTraceCount==1024) SWEET_LOG_INFO("SWEET PANEL WAKE: token=%llu trace limit reached\n",fLifecycle.token);
++}
+ bool SweetMDSS::setupLifecycle(IOService *provider)
+ {
+  OSData *identity=OSDynamicCast(OSData,provider->getProperty(MH2LM_PANEL_PROPERTY));
+@@ -127,15 +140,20 @@
+ }
+ bool SweetMDSS::lifecycleResourcesHeld(void)
+ {
++ bool tracePin=fLifecycle.phase==SweetPanelPinActivate || fLifecycle.phase==SweetPanelPinReset;
++ if (tracePin) traceWake("resources-local-enter");
+  if (fManagedState!=ManagedReady || fManagedRails!=15 || !fManagedARC || !fManagedBandwidth ||
+      !fManagedClock || fNoCFault || fClockFault || !localClocksReady() ||
+      (fCoreProfile && !coreReady()) || (fHostProfile && fHostPhase!=HostReady) ||
+      (fLinkProfile && (fLinkPhase!=LinkReady || !linkConfiguration()))) return false;
+  SweetClockLease c={};SweetNoCStatus n={};SweetDisplayPowerStatus a={};
+- return localClockStatus(fManagedClock,&c)==kIOReturnSuccess && c.state==SweetClockHeld &&
++ if (tracePin) traceWake("resources-providers-enter");
++ bool held=localClockStatus(fManagedClock,&c)==kIOReturnSuccess && c.state==SweetClockHeld &&
+      c.mask==mdssClockMasks[SweetClockDSI0] && bandwidthStatus(fManagedBandwidth,&n)==kIOReturnSuccess &&
+      n.state==SweetNoCHeld && fRPMh->copyDisplayPowerStatus(fRPMhConsumer,fManagedARC,&a)==kIOReturnSuccess &&
+      a.state==SweetRPMhComplete && !a.uncertain && a.corner==SweetDisplayTurbo;
++ if (tracePin) traceWake("resources-return",held);
++ return held;
+ }
+ struct SweetLifecycleRequest { unsigned action,operation; uint64_t token,*out; SweetPanelLifecycleStatus *status; };
+ IOReturn SweetMDSS::beginPanelLifecycle(unsigned op,uint64_t *token)
+@@ -221,7 +239,7 @@
+  unsigned released=fLifecycleSupplyCycle && op==SweetPanelDisplayOn ? fLifecycle.panelReleasedMask : 0u;
+  unsigned aggregate=fLifecycleSupplyCycle && op==SweetPanelDisplayOn ? fLifecycle.panelAggregateEnabledMask : 3u;
+  uint64_t previousVotes[2]={fLifecycle.panelVoteTokens[0],fLifecycle.panelVoteTokens[1]};
+- fLifecycle={};fLifecycle.token=++fLifecycleNextToken;fLifecycle.operation=op;
++ fLifecycle={};fWakeTraceCount=0;fLifecycle.token=++fLifecycleNextToken;fLifecycle.operation=op;
+  fLifecycle.pinToken=pinToken;
+  fLifecycle.panelReleasedMask=released;fLifecycle.panelAggregateEnabledMask=aggregate;
+  if (released) {fLifecycle.panelVoteTokens[0]=previousVotes[0];fLifecycle.panelVoteTokens[1]=previousVotes[1];}
+@@ -314,9 +332,14 @@
+ }
+ void SweetMDSS::advanceLifecycle(void)
+ {
++ bool pinPhase=fLifecycle.phase==SweetPanelPinActivate || fLifecycle.phase==SweetPanelPinReset;
++ if (pinPhase) traceWake("participants-enter");
+  if (!lifecycleParticipants()) {finishLifecycle(kIOReturnNotReady,"participant unavailable");return;}
++ if (pinPhase) traceWake("participants-return");
+  uint64_t now=scanout_now();
+  if (now>=fLifecycleDeadline || now>=fLifecycleStepDeadline) {
++  SWEET_LOG_ERROR("SWEET PANEL: deadline token=%llu operation=%u phase=%u command=%llu completed=%u/%u\n",
++      fLifecycle.token,fLifecycle.operation,fLifecycle.phase,fLifecycle.commandToken,fDsiStatus.completed,fDsiStatus.total);
+   finishLifecycle(kIOReturnTimeout,fLifecycle.phase==SweetPanelTouchPause && !fLifecycle.touchToken ?
+       "touch worker startup deadline" : "lifecycle deadline");return;
+  }
+@@ -434,17 +457,20 @@
+   } else finishLifecycle(kIOReturnSuccess,"data leases parked; power/config retained");
+   publishLifecycle();return;
+  } else if (fLifecycle.phase==SweetPanelPinActivate || fLifecycle.phase==SweetPanelPinReset) {
++  traceWake("reset-dependencies-enter");
+   if (!lifecycleResourcesHeld() || !lifecycleIRQDrained() || (dp_rd(dp_dsi,8)&6u)) {
+    finishLifecycle(kIOReturnNotReady,"reset dependency lost");return;
+   }
++  traceWake("pin-status-enter");
+   SweetPanelPinStatus pin={};
+   if (fPanelPins->copyStatus(fPanelPinsConsumer,fLifecycle.pinToken,&pin)!=kIOReturnSuccess || pin.uncertain ||
+       (pin.result!=kIOReturnNotReady && pin.result!=kIOReturnSuccess)) {finishLifecycle(kIOReturnIOError,"pin operation failed");return;}
++  traceWake("pin-status-return",pin.state);
+   if (pin.result==kIOReturnNotReady) return;
+   unsigned expected=fLifecycle.phase==SweetPanelPinActivate ? SweetPinsActive : SweetPinsResetComplete;
+   if (pin.state!=expected || !pin.resetKnown || !pin.resetHigh) {finishLifecycle(kIOReturnIOError,"reset proof absent");return;}
+   if (fLifecycle.phase==SweetPanelPinActivate) {fLifecyclePinsActive=true;lifecycleReset();}
+-  else {fLifecycle.resetComplete=true;lifecycleCommand(true);}
++  else {fLifecycle.resetComplete=true;traceWake("reset-proof-ready");lifecycleCommand(true);}
+   publishLifecycle();return;
+  } else if (fLifecycle.phase==SweetPanelCommand || fLifecycle.phase==SweetPanelBrightness) {
+   if (!lifecycleResourcesHeld()) {finishLifecycle(kIOReturnNotReady,"command resource lease lost");return;}
+@@ -508,9 +534,11 @@
+   bytes=on ? fPanelProfile->on : fPanelProfile->off;
+   length=on ? fPanelProfile->onSize : fPanelProfile->offSize;
+  }
++ traceWake("command-enter",(unsigned)length);
+  fLifecycleInternal=true;
+  IOReturn rc=beginDSISequence(bytes,length,&fLifecycle.commandToken);
+  fLifecycleInternal=false;
++ traceWake("command-return",(unsigned)rc);
+  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"display command admission");return;}
+  fPanelState=on ? PanelOnPending : PanelOffPending;publishPanelState();
+  fLifecycle.phase=SweetPanelCommand;

@@ -29,8 +29,9 @@ boot.img（Android header v1, page 2048）
 已实现功能在后续使用中暴露的独立问题统一记入 [Bug 台账](BUGS.md)，
 不自动作为当前主计划的新步骤或前置测试。
 
-当前显示修复要求新产物包含 0218 的 `SWEET MDSS CONFIG:` 标记；只有 0217 的内核也须重新编译。
-沿原 ABI608/retained 打包，详见 [配置观察修改](PANEL-LINEAGE-CONFIG-OBSERVATION.md)。
+a29已实机完成显示接管，当前排查息屏后唤醒。新产物须包含0219的 `SWEET PANEL WAKE:`、
+`reset-proof-ready`、`dma-allocate-enter`（并保留0218 CONFIG）；打包门会拒绝旧a29。
+沿原 ABI608/ADT/retained 参数打包，详见 [实测与下一轮取证](PANEL-D1-0121A29.md)。
 
 ## 1. 写补丁（agent）
 

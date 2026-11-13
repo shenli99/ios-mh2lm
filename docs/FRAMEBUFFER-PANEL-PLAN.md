@@ -1,5 +1,13 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
+**当前执行点（2026-11-13）：0121a29 retained 实机已完成接管，进入正常桌面；OFF 完成但 ON 复位后日志中断。**
+USB 1981 新DMA/fresh PP_DONE、1989 HANDOFF active；3725 OFF complete、3726 ON begin、3728 reset complete后无记录。
+持久日志 flush16 停在按键前，未补上后续。根因未定；0219只补唤醒依赖/命令准入/DMA准备及逐包进度日志。
+九套相关 ASan/UBSan回归、ARM64对象编译及35patch/78文件严格重放通过；待用户push/云编译新内核（建议a30）。
+仍用ABI608/原ADT/retained605字节参数，下一次只验证一次OFF/ON；combined/supply/长测暂不展开。
+见[a29实测和0219取证说明](PANEL-D1-0121A29.md#实测接管和-off-完成on-复位后记录中断)、[当前交接](../NOTES.md)。
+以下旧“待首次接管”状态为历史，以本段为准。
+
 **当前执行点（2026-11-13）：a25已分析；0213局部状态/复位取证已提交7f4f55a，待用户push云编译。**
 a25首错仍为branch7/+4004 branch-wait，PA正确，立即及39次等待均未见enable，整体期限仍余188.3ms。
 RSC准入为NON_GDSC0/RSCC_AHB1/RSCC_VSYNC1；十次apps IRQ和core2通过，未display TCS/新DMA。

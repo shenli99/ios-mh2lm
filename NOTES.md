@@ -1,6 +1,36 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 
+## Agent handoff / active work (2026-11-13, a29 desktop works; 0219 wake evidence ready)
+
+**CURRENT：用户实测0121a29 retained进入桌面且画面正常；首次完整接管成功。OFF完成，ON在pin复位完成后无后续日志；根因未定。**
+本段替代下方“待a29实机/完整接管前暂停”的旧交接；本轮0219仅补诊断，不得宣称已修复黑屏。
+USB logs/live-0121a29-abi608-panel-retained.txt：300909bytes/3728行，SHA256=9d285907d505db553ee2ea30c85d9c12b3f72178ec1331420debcda8e96068a9。
+1981新DMA A=c3be4000/fresh PP_DONE100/frame925/flush0，1987touch verified，1988takeover complete，1989HANDOFF active。
+3642 RD_PTR约59.9Hz/dropped0；3706OFF begin，3724四条FIFO命令fresh DMA_DONE+idle，3725OFF complete/票保留。
+第二次power down在OFF执行期间已到达；3726ON begin，3727pins active，3728reset complete/input1为USB末行。
+未见ON D1 admitted、错误码或panic；最后打印不能证明具体函数挂死/整机死机，亦不能排除USB记录中断。
+持久日志sweetlog-0121a29-abi608-panel-retained.bin：4198400bytes，SHA256=4a897038731c4cf5e2b29c57f071216bc3db72aaf7f055d243e93ce598839547。
+version1/ring4194304/total309220/flush16/未绕回，解码3826行；sample12时间戳与USB同次启动，但落盘停在按键前，无OFF/ON。
+底稿scratch/artifact-0121a29/persistent.txt、wake-log-review.json；不必再次导同份日志。
+0219补丁xnu/patches/0219-mh2lm-panel-wake-admission-evidence.patch，SHA256=e3b29c7e5dce11c27f1b79bd63bc7fc9f7f186bb4fd18f601a76f2811704f8f6。
+修改MDSS.cpp/DSI.inc/Lifecycle.inc：WAKE token/phase/step/value/command/dsi-token/completed；pin阶段每轮依赖和状态查询进出；
+ON准入、SMMU snapshot、首次DMA allocate/prepare/physical、逐包encode/registers/trigger和真实done；超时附phase/进度。
+PV ON含长包需要DMA，OFF全FIFO；这是新经过的路径，但未证明DMA分配/SMMU是根因。
+仅已有gate内软件打印，无新外围MMIO/写入/延时；每次ON1024条+上限提示，新lifecycle重置，终态不继续。
+entry/return不是完成证明，command0时completed可能属于旧OFF，必须按DSI token区分；真实IRQ/idle/pixel/touch/权限/SMMU/pin不变。
+0218 Lineage配置观察策略保持；未新增自动重试/复位/票变化/放宽完成条件。日志可能影响短阶段调度，实机须核对期限。
+九套既有ASan/UBSan通过：四profile retained各三轮与故障退出、DSI host/link、lifecycle/FB、resource parking/link/combined/supply。
+ARM64 MDSS对象通过，当前同条件基线/修改均1585告警，类别计数一致；0185–0219共35patch严格无offset/fuzz、78文件一致、114原CI markers通过。
+CI配置不变；matrix新门WAKE/reset-proof-ready/dma-allocate-enter；真实旧a29被拒绝且无boot输出，bash语法通过。
+底稿scratch/framebuffer-0219/（base/edited/verify、compile/replay/prepare脚本和final-review.json）。prepare-patch会重建verify，不得在测试/编译读取时运行。
+**NEXT：用户push最新main并云编译，下载kernel/buildtree（建议0121a30）；agent核对含0219后沿原ABI608/ADT/retained605字节打包。**
+用户保持USB接收，进入桌面后做一次OFF/ON；黑屏后继续收约30秒，按最后WAKE step/return/真实首错定位；USB中断再补持久日志。
+不重测a29/identity，不用combined/supply绕过当前问题；亮度遍历/长测暂不展开。
+详见docs/PANEL-D1-0121A29.md实测和0219章节；docs/FRAMEBUFFER-PANEL-PLAN.md、BUILD-GUIDE.md及workspace PLAN已同步。
+当前没有0219新云端内核/boot或实机结果；未push/触发CI/操作设备，未改固件/ADT/启动参数。以下交接为历史。
+
+
 ## Agent handoff / active work (2026-11-13, 0121a29 artifacts and retained ready)
 
 **CURRENT：用户已下载0121a29；产物核对和ABI608四档打包/回读通过，待retained实机USB日志。**
