@@ -1,5 +1,24 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-13, 0211 cloud build requested)
+
+**CURRENT：用户确认 agent 改代码/本地验证，用户负责 push 云编译和下载产物；现在需要编译已提交的0211。**
+本轮复核实际Clock worker、两个Timeout出口、日志字段、打包门槛和父链/halt审计。
+生产补丁仍为`7d34942`的0211，父链审计为`fb9ad82`；没有追加猜测性硬件修正。
+核对补丁SHA仍为be780786c6bb91b6003fb06978297c81d76376fa651f9c01a1b954bc6f479b47，
+两份修改源码edited/verify字节一致，打包入口包含TIMEOUT/WRITE/SAMPLE三项新binary marker，bash语法通过。
+既有13套测试、14场景与0210基线MMIO/结果/timer一致及ARM64编译记录已核对；本轮未重复跑这些测试。
+a23仍是本地最新实机样本，branch7使能后Timeout原因未定，未Held、未进入display TCS/新DMA。
+**NEXT：用户在本仓库执行`git push origin main`，由CircleCI编译；不能直接`git push`到跟踪的upstream。**
+下载`xnu-kernel`与`xnu-buildtree`到工作区logs，建议新标签0121a24：
+`logs/xnu-kernel-0121a24.gz`、`logs/xnu-buildtree-0121a24.gz`；若有build log一并保留。
+产物到齐后agent核对实际0211源码/新markers/SHA，再沿原ABI608固件/ADT/605字节参数打retained。
+用户启动约90秒取完整日志，先区分enable读回、CLK_OFF、overall/branch-wait与采样时间，再决定修正。
+这次编译用于取得缺失的硬件现场，不代表超时已修；旧a23与其他显示档继续不重测。
+本轮仅更新交接和总计划；无新boot，未push/触发CI/操作设备。CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+以下NEXT为历史，以本段为准。
+
+
 ## Agent handoff / active work (2026-11-12, branch7 parent/halt audit)
 
 **CURRENT：按用户要求核对branch7父链和halt；本次只补审计文档，没有新内核补丁。0211仍待用户push云编译/新日志。**
