@@ -1,5 +1,22 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Lineage flow audit (2026-11-13, no new driver changes)
+
+用户要求对比LG G8X逻辑流程/硬件控制，已对Lineage@2e897dd的MH2LM公共PV配置、DRM/DSI/LG override、RSC v2、RPMh/mailbox/bus调用链审计。
+详见docs/PANEL-LINEAGE-PATH-COMPARISON.md。两边同DSI0/PHY0/R66456A PV与RSC硬件；Lineage也有continuous splash，不能说只有XNU依赖ABL。
+主要缺口：Lineage probe初始化RSC计时/wrapper/seq/solver/PDC，显式CLK/CMD/VID/IDLE切换与VSYNC协调；XNU仅读继承状态，无对应初始化/模式交接。
+Lineage带宽更新有TCS_USE_OK/SEQ_BUSY握手；XNU只查当时idle。不能把几项准入读数当完整硬件交接，也不能认定所有solver/PDC初始化都为ACTIVE必需。
+Lineage非solver走ACTIVE；solver状态实际check_ctrlr_state拒ACTIVE/awake，bus对display EBUSY特判、继续维护sleep/wake并配合flush。
+rpmh_mode_solver_set的上方注释与实际拒绝条件相矛盾，按代码分支判断；不能笼统说Lineage任意状态都向TCS2发同样命令。
+display INTID161与apps37不同；Lineage先handler再ACTIVE source enable，XNU本槽屏蔽+timer/fresh判据仍是当前直接差异，真实IRQ_STATUS门控未知。
+Lineage ACTIVE成功清理保留AMC，XNU撤AMC；a27首组尚未成功，此后续差异不能解释当前首错。
+RSC clock表顺序Lineage VSYNC→NON_GDSC→AHB，XNU common AHB→NON_GDSC→AHB→VSYNC；a26后两路已继承ON，a27 mask381 Held，不能仅凭顺序定因。
+retained参数link2/host1：XNU温接管后计划重建PHY/host而保留panel；Lineage continuous splash跳过PHY reset/hw enable/面板ON。
+这段XNU尚未走到，非a27首错；MDP/SMMU仍固定继承管线/CB2 bypass和物理源，与完整DRM地址空间/管线配置不同。
+LG LABIBB文本所调power_info在本profile只有VDDI/VPNL，不能据名字推断漏独立偏压外设；共享L3/L5最后撤票及板级偏压仍有边界。
+排查优先级是明确非solver提交状态/使用权交接/完成通知，再到PHY/host/新DMA；不是只补一个IRQ就宣称与Lineage等价。
+本轮仅审计文档，无生产改动/新测试/额外编译要求；0215代码2ffc1a4与下面a28云编译交接保持，未push/操作设备。
+
 ## Agent handoff / active work (2026-11-13, a27 clock Held; 0215 NoC evidence ready)
 
 **CURRENT：a27已实测越过branch7，首错推进到NoC ACTIVE2执行等待超时；0215已提交2ffc1a4，本地通过，待用户push云编译。**
