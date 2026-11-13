@@ -1,5 +1,28 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-13, a28 init failure; 0217 ready)
+
+**CURRENT：a28仍静帧，首错为RSC qtimer初始化index4读回不相等；0217已实现并本地验证通过，待用户push云编译。**
+日志 logs/live-0121a28-abi608-panel-retained.txt：208507bytes/2957行，SHA256=30b45bb8a9b0844e439f4391da637002bebd6a3766a86395ebc94253260864f4。
+10次apps fresh IRQ/LDO/ARC/CN0和core2成功；1781 CLOCK Held/state2/mask381；1782 RSC enter CLK。
+1783 init index4/wrapper1/+2020 wantffffffff/got224cac6，随后NoC IOError e00002ca；group-valid0/trigger-issued0。
+尚未走到INTID161配置、display ACTIVE或新DMA；1788/1791为SCANOUT/HANDOFF连锁失败，用户态继续。
+不能据此判定完成中断失败，也不能认定CVAL只读/硬件改写/拒写；本次USB足够，无需补持久日志或重测a28。
+0217参照Lineage qtimer初始化不要求回显：仅六项CNTP CVAL/CTL取消全值相等等待，保留原写/屏障及一次诊断读。
+每项新增qtimer write issued/observed，明确非硬件ACK；其余59项读回和真实IRQ+本槽+ISSUED/COMPLETE判据保持。
+65项写数值/顺序、CNTACR bit0、资源准入、失败保票/stop保持；不添加RWPT权限、reset或其他硬件改动。
+16既有回归+37完成专项+16新qtimer场景ASan/UBSan通过，实际旧a28源码复现7组失败，含实测224cac6。
+真实ARM64 MDSS对象通过，warnings1573→1573；0185–0217共33patch严格重放/78文件一致/114原CI source markers通过。
+动态执行Lineage五个初始化函数，65项逐项逐序一致；matrix新增qtimer marker，实际拒旧a28且无boot输出。
+补丁 xnu/patches/0217-mh2lm-rsc-qtimer-init.patch，SHA256=ae19f9864a6896b3fa9b4c3c9e6a92456cccb86b866067081463dbe626d5ceff。
+**NEXT：用户push最新main并云编译，下载新kernel/buildtree（建议0121a29），agent核对后沿原ABI608/ADT/605字节retained打包。**
+先查六条qtimer实际读值→init完成→TCS ownership/INTID161→fresh ACTIVE/NoC ACK→新DMA/transfer/HANDOFF；按新首错继续。
+当前没有0217新boot或实机结果；亮度/OFFON/长测/combined/supply在完整接管前继续暂停。
+详见docs/PANEL-RSC-QTIMER-INIT.md和PANEL-D1-0121A28.md；底稿scratch/framebuffer-0217/。
+未push/触发CI/操作设备；未改CI/ADT/固件/启动参数/其他provider；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+以下NEXT/待实机/未打包等为历史，以本段为准。
+
+
 ## Agent handoff / active work (2026-11-13, a28 retained boot reverified)
 
 **CURRENT：已接手继续屏幕修复；0121a28 retained 镜像已就绪并重新核对通过，待实机 USB 日志。**

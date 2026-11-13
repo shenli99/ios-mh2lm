@@ -1,7 +1,9 @@
 # 0216：按 Lineage 补齐当前 RSC / ACTIVE 接管路径
 
 2026-11-13。实现提交 `eb72381`。基于 0215，参照 LG G8X Lineage
-`2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`。这是驱动流程修改，尚无新实机结果。
+`2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`。a28 实机在 qtimer 初始化 index4 的全值相等检查失败；
+后续 [0217](PANEL-RSC-QTIMER-INIT.md) 将六项 CNTP 读回改为诊断，其他检查保持。
+下文是 0216 实现与本地验证的原始记录，最新执行点见 NOTES。
 a27 已经取得 RSC 时钟，但首组 display NoC ACTIVE2 超时；未提交新 DMA。
 本补丁替代“继续只加诊断”的交接，云端应编译包含 0216 的最新提交。
 

@@ -1,0 +1,32 @@
+diff --git a/iokit/Kernel/arm/SweetMDSSNoC.inc b/iokit/Kernel/arm/SweetMDSSNoC.inc
+--- a/iokit/Kernel/arm/SweetMDSSNoC.inc
++++ b/iokit/Kernel/arm/SweetMDSSNoC.inc
+@@ -228,7 +228,18 @@
+    fNoCRSCDeadline=scanout_now()+1000000ULL;
+   }
+   uint32_t value=dp_rd(base,op.offset);
+-  if (value!=op.value) {
++  /* Lineage rsc_hw_qtimer_init issues the CNTP compare/control writes
++   * without requiring a stored-value echo. Its CNTACR setup is retained
++   * verbatim (bit0 only); do not invent RWPT access or timer reset here.
++   * a28 observed CVAL_LO != written value. The hardware reason remains
++   * unknown, so these six observations are diagnostics, never an ACK.
++   * All access/frame config and other RSC init checks stay strict. */
++  bool cntp=op.wrapper && (op.offset==0x2020 || op.offset==0x2024 || op.offset==0x202c ||
++                          op.offset==0x3020 || op.offset==0x3024 || op.offset==0x302c);
++  if (cntp) {
++   SWEET_LOG_INFO("SWEET MDSS RSC: qtimer write issued offset=%#x value=%#x observed=%#x; no echo requirement, not hardware ACK\n",
++       op.offset,op.value,value);
++  } else if (value!=op.value) {
+    if (scanout_now()<fNoCRSCDeadline) return kIOReturnNotReady;
+    SWEET_LOG_ERROR("SWEET MDSS RSC: init readback index=%u wrapper=%u offset=%#x want=%#x got=%#x\n",
+        fNoCRSCInitCursor,op.wrapper,op.offset,op.value,value);
+@@ -237,7 +248,7 @@
+   fNoCRSCWriteIssued=false; ++fNoCRSCInitCursor;
+  }
+  fNoCRSCInitialized=true;
+- SWEET_LOG_INFO("SWEET MDSS RSC: v2 qtimer/wrapper/sequencer/solver/PDC initialized; CLK/AMC path\n");
++ SWEET_LOG_INFO("SWEET MDSS RSC: v2 qtimer/wrapper/sequencer/solver/PDC initialized; CLK/AMC path; write sequence issued, not timer hardware ACK\n");
+  return kIOReturnSuccess;
+ }
+ IOReturn SweetMDSS::takeNoCRSC(void)
