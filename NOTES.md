@@ -5,7 +5,7 @@
 
 **CURRENT：按用户要求扩展审计 qtimer 后续步骤；0218 已实现配置回读仅打印，相关本地验证通过，待用户 push 云编译。**
 本段替代下方“0217 仅六项/其余59项仍严格回读”的交接；新产物必须包含 0217+0218。
-补丁 xnu/patches/0218-mh2lm-lineage-config-observation.patch；实现提交见本段后续记录/git log。
+补丁 xnu/patches/0218-mh2lm-lineage-config-observation.patch；实现提交 **b349072**（b3490728dd5fad4a597cb83b6b2c6dbd46daa3ae），push 最新 main 即可包含本轮修正。
 SHA256=9fc779ee9781c6546f34ef45a175819cc85729af5cdedf6cc29af4c206178658。
 参考 Lineage@2e897dd：RSC65项初始化普通写、TCS_USE_OK/override回显、NoC payload/WAIT/ENABLE/IRQ配置/清理、
 父时钟原始快照和自有PLL/RCG/branch配置、PHY/PLL/host reset/config、休眠恢复快照及自有scanout source/stride/crop改为打印。
