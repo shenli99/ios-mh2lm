@@ -1,5 +1,9 @@
 # 0214：以 halt 状态完成本地 voted 时钟请求
 
+**0121a27已核对并打包，待实机：** 78源码/186 binary markers通过，包含本补丁；
+原ABI608 retained镜像回读通过。用户临时启动约90秒取完整USB日志，详见[0121a27交付](PANEL-D1-0121A27.md)。
+无需再次云编译，下文下一次云编译步骤为历史。
+
 2026-11-13。[a26日志](PANEL-D1-0121A26.md#实测复位位清除仍由enable门槛超时)显示
 RSCC_BCR在warm-entry、pre-write和timeout均为0，三路局部CBCR在core转换前后不变；
 AHB从XO配置0x1切到PLL1配置0x40f。branch7仍为enable0/OFF0，42次等待未见两位置位。

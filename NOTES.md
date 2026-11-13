@@ -1,5 +1,27 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-13, 0121a27 voted halt completion boot ready)
+
+**CURRENT：用户下载的0121a27已核对，0214在新kernel内，retained启动镜像打包/回读通过，待实机日志。**
+78源码字节匹配scratch/framebuffer-0214/verify，内容对应55cab80；比a26仅MDSS.cpp/Clock.inc/NoC.inc/Link.inc/Lifecycle.inc变化。
+114原CI source/186 binary markers通过，包含新voted halt complete及原所有CLOCK取证。
+内核17757712bytes/ARM64 subtype0，自带SHA匹配，SHA=fccfc817949806d84dc986c19f2f59a0ed545b668781597be478d49e74573f5d。
+无独立CI run ID/完整build log；仅验证下载内容，不声称云端提交元数据或全量告警核对。
+ABI608固件/BootShim/两个追加DTB/各档ADT与参数保持a26，RPMh INTID37扩展保留；retained605/607字节。
+四档boot header/FAT内kernel+ADT+TOML回读通过，只交付retained测试，无需再次编译。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a27-abi608-panel-retained.img。**
+镜像35545088bytes，SHA=db97076fb455f2a6f7d62e82b20918bff4efe7bf26575241692c6a0ddc2f73be。
+先开USB接收脚本，启动约90秒保存logs/live-0121a27-abi608-panel-retained.txt；双终端命令见PANEL-D1-0121A27.md。
+先voted halt complete branch7→CLOCK Held/state2/mask381→NoC本轮完成或新首错→新DMA/HANDOFF。
+分支cbcr0/request-issued1可以成功；issued只证明软件已发出请求，不是硬件ACK或DMA验收。成功时无超时LOCAL ERROR属预期。
+本版修正自身voted开启判据，同步消费者；继承票/普通HALT/父权限/撤票检查保持。尚未证明实机完整接管。
+本轮没有驱动改动，未重复0214已有16套回归/4基线复现/34父链故障/ARM64对象/累计重放，原验证保持有效。
+完整接管前亮度/OFFON/长测和其他显示档继续暂停，a26不用重测或补日志；本次USB不足时才补本次持久日志。
+底稿scratch/artifact-0121a27/两验证脚本/JSON/输出和packaging.txt；原始日志与二进制未入git。
+未改固件/CI/参数，未push/触发CI/操作设备；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+以下NEXT为历史，以本段为准。
+
+
 ## Agent handoff / active work (2026-11-13, a26 analyzed; 0214 voted halt completion ready)
 
 **CURRENT：a26 USB证据完整；0214修正额外enable完成门槛，已提交55cab80并本地通过，待用户push云编译。**
