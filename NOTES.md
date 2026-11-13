@@ -3,6 +3,11 @@
 ## Agent handoff / active work (2026-11-13, a25 analyzed; 0213 local reset evidence ready)
 
 **CURRENT：a25 USB证据完整，立即及39次等待均未见enable；0213已提交7f4f55a并本地验证，待用户push云编译。**
+用户询问面板型号/手册；已复核docs/panel.md与Lineage@2e897dd（7份相关文件与LG字节一致）。
+实机既有ABL source2/profile4对应TIANMAMD PV、1080x2340@60；DTS明确DDIC r66456a，软件名R66456 MD cmd mode dsi panel。
+完整模组料号和物理DDIC读回尚无；旧文档Renesas品牌归属本次未独立确认。当前+0xaf04004属于SM8150 DISPCC，不是面板DSI寄存器。
+手册优先找SM8150/msmnile NON_GDSC_AHB_CBCR与RSCC_BCR语义，其次R66456A/R66456及天马模组规格。
+详见docs/PANEL-HARDWARE-MANUALS.md；本轮只核对文档，无新代码/编译增量，0213交接保持。
 logs/live-0121a25-abi608-panel-retained.txt为301264bytes/3942行，SHA=de38a819d1df09802a7bb292b16f356a4dd3949f889164ffd3c9679d41289fcb。
 1752–1769十次fresh apps IRQ/四LDO/ARC/CN0完成；1770core2成功，1771CN0 token7，1772branch7请求。
 1773首错branch-wait/+4004；1774WRITE before0/want1；1775SAMPLE valid1/current1/CBCR0/enable0/OFF0/CFG40f/source4。
