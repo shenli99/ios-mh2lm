@@ -1,20 +1,23 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-11-13, a28 artifact inspection)
+## Agent handoff / active work (2026-11-13, a28 retained boot reverified)
 
-**CURRENT：接手查看屏幕修复进度；本地已有0121a28产物，已确认包含0216，尚未打包或实机验证。**
-`logs/xnu-buildtree-0121a28.gz` 内78份对应源码与 `scratch/framebuffer-0216/verify` 逐字节一致，无缺失/差异。
-`logs/xnu-kernel-0121a28.gz` 内核17758560bytes，SHA256为
-`368c0511a5dee824d33667104478a744a44f583e10de375f71cd678e6eff37f4`，与包内SHA256SUMS一致。
-内核包含0215 EVIDENCE及0216新增四条RSC/IRQ marker：INTID161 configured、fresh ACTIVE completion、
-v2 qtimer/wrapper/sequencer/solver/PDC initialized、CLK state and TCS ownership ready。
-本轮为产物初核，没有核对独立CI run ID/完整build log，没有重跑原回归或完成全部matrix marker与boot/FAT回读。
-a27原日志确认CLOCK state2/mask381后display NoC ACTIVE2超时，未提交新DMA，HANDOFF失败并冻结画面；
-不能把a28源码/二进制检查通过当作真机修复。未修改驱动、触发CI或操作设备。
-**NEXT：完成a28打包校验，重新生成带NoC IRQ ABI=1/INTID161的ADT，沿ABI608固件和原605字节retained参数打包。**
-随后用户临时fastboot boot并采集USB日志，验证RSC交接→各组fresh ACTIVE→NoC ACK→新DMA/HANDOFF。
-当前不需要仅因下方历史交接再次云编译；亮度/OFFON/长测/combined/supply仍待完整接管后再测。
-以下“待push/待云编译”为历史；0216实现和本地验证细节仍见下一段及 `docs/PANEL-RSC-TAKEOVER.md`。
+**CURRENT：已接手继续屏幕修复；0121a28 retained 镜像已就绪并重新核对通过，待实机 USB 日志。**
+纠正上一版“尚未打包”：目录已有四档 ABI608 镜像及回读底稿，本轮复跑两份核对脚本均通过。
+78 份源码与 scratch/framebuffer-0216/verify 字节一致，114 项原 CI source markers、195 项内核 markers 通过；
+相比 a27 只变更 SweetMDSS.cpp、SweetMDSSNoC.inc、sleh.c，含 0215/0216。
+内核 17758560 bytes，SHA256=368c0511a5dee824d33667104478a744a44f583e10de375f71cd678e6eff37f4，自带哈希匹配。
+四档 boot header/FAT 中 kernel+ADT+TOML 回读通过；hardware ADT 仅比 a27 增加 NoC IRQ ABI1/INTID161，apps37 保留。
+identity ADT、ABI608 固件、BootShim、两个追加 DTB 和原参数保持；retained 605/607 字节。
+**NEXT：用户 fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a28-abi608-panel-retained.img，先开 USB 接收并记录约90秒。**
+镜像 35545088 bytes，SHA256=b350530af92e7a9aec646219a73af6481f5112a284a4867fe4a535f6a3dc4f36。
+日志路径 logs/live-0121a28-abi608-panel-retained.txt；双终端命令和验收见 docs/PANEL-D1-0121A28.md。
+按 CLOCK Held→RSC CLK/初始化/使用权→INTID161→各组 fresh ACTIVE→NoC ACK→新DMA/transfer/HANDOFF 检查；失败按新首错定位。
+a27 仍为最后一次实机：NoC ACTIVE2 超时、未提交新DMA、HANDOFF失败；a28本地通过不等于硬件修好。
+无需重新云编译或重测a27；亮度/OFFON/长测/combined/supply在完整接管前继续暂停。
+底稿 scratch/artifact-0121a28/，本轮复跑 verify-artifacts.py 和 verify-boots-abi608.py；未重跑原0216驱动回归。
+未核对独立CI run ID/完整build log；未改驱动/固件/参数/CI，未push/触发CI/操作设备。
+以下待push/待云编译/未打包等 NEXT 为历史，以本段为准。
 
 
 ## Agent handoff / active work (2026-11-13, 0216 RSC/ACTIVE flow implemented)
