@@ -4,6 +4,7 @@
 ## Agent handoff / active work (2026-11-13, 0216 RSC/ACTIVE flow implemented)
 
 **CURRENT：用户要求补齐 Lineage 流程；0216 已落实真实驱动修改，本地验证通过，待用户 push 云编译。**
+实现提交 **eb72381**（完整 eb7238167d28a7e34647c5b0ffddc98108d186d3），工作树已提交；用户 push 最新 main 即可。
 本段替代下方 0215 仅诊断的编译交接。a27 首错仍为 display NoC ACTIVE2 等待超时，尚无 0216 实机结果。
 按 Lineage@2e897dd 的 RSC v2：CLK 清 wrapper override.bit0；TCS_USE_OK 写0/忙则写1让出200us/再写0等待；
 持有使用权后首次 qtimer→wrapper→seq→solver→PDC 65 项初始化，后续实例请求不重写表；握手超时未改表/投票则交还use_ok。
