@@ -60,6 +60,8 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
         mdss.props.append(('sweet,panel-identity', 0, bytes(96)))
     if display_noc:
         mdss.props.append(('sweet,display-noc-abi', 0, struct.pack('<I', 1)))
+        mdss.props.append(('sweet,display-noc-irq-abi', 0, struct.pack('<I', 1)))
+        mdss.props.append(('sweet,display-noc-intid', 0, struct.pack('<I', 161)))
     if display_resources:
         mdss.props.append(('sweet,display-resource-abi', 0, struct.pack('<I', 1)))
         rpmh = adt.Node()

@@ -114,6 +114,8 @@ assert end == len(noc)
 arm = r.children[1]
 mdss, rpmh = arm.children[-2:]
 assert mdss.prop('sweet,display-noc-abi') == struct.pack('<I', 1)
+assert mdss.prop('sweet,display-noc-irq-abi') == struct.pack('<I', 1)
+assert mdss.prop('sweet,display-noc-intid') == struct.pack('<I', 161)
 assert len(mdss.prop('reg')) == 16*16
 translations = list(struct.iter_unpack('<QQQ', arm.prop('ranges')))
 all_windows = expected+list(m.NOC_WINDOWS)
@@ -124,7 +126,7 @@ for i, (pa, size) in enumerate(all_windows):
     assert all(pa+size <= q or q+n <= pa for q, n in all_windows[i+1:])
 assert list(struct.iter_unpack('<QQ', rpmh.prop('reg'))) == [
     (pa-m.SOC_BASE if pa >= m.SOC_BASE else m.LOW_ALIAS+pa, length) for pa, length in m.RPMH_WINDOWS]
-mdss.props = [(k, f, v[:13*16] if k == 'reg' else v) for k, f, v in mdss.props if k != 'sweet,display-noc-abi']
+mdss.props = [(k, f, v[:13*16] if k == 'reg' else v) for k, f, v in mdss.props if k not in ('sweet,display-noc-abi', 'sweet,display-noc-irq-abi', 'sweet,display-noc-intid')]
 assert adt.serialize(r) == full
 print('PASS: sixteen disjoint MDSS windows, display RSC/TCS/wrapper split, unchanged v1 apps nub and removable NoC extension')
 

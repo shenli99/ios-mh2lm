@@ -44,10 +44,12 @@ static void nocFixtures(){
  regs[DW]=regs[DW+4]=regs[DW+0x24]=0;
  for(unsigned t=0;t<4;++t){regs[DT+t*0x2a0+0x18]=1;
   for(unsigned c=0;c<16;++c)regs[DT+t*0x2a0+0x3c+c*0x14]=(1<<8)|(1<<16);}
- regs[DT]=0x85;regs[DT+4]=0x80;
+ regs[DT]=0x01;regs[DT+4]=0x80;
 }
 static void clocks(SweetMDSS*m){for(unsigned n=0;n<32&&m->clockBusy();++n){fakeTicks+=100000;SweetMDSS::clockTimerAction(m,m->fClockTimer);}assert(!m->clockBusy());}
-static IOService*displayNub(){auto*n=nub(false);uint32_t one=1;n->properties["sweet,display-noc-abi"]=OSData::withBytes(&one,4);return n;}
+static IOService*displayNub(){auto*n=nub(false);uint32_t one=1;n->properties["sweet,display-noc-abi"]=OSData::withBytes(&one,4);
+ n->properties["sweet,display-noc-irq-abi"]=OSData::withBytes(&one,4);uint32_t intid=161;
+ n->properties["sweet,display-noc-intid"]=OSData::withBytes(&intid,4);return n;}
 static SweetMDSS*displayMake(IOService*n,SweetRPMh*r){
  auto*m=new SweetMDSS();assert(m->start(n));clocks(m);assert(m->fNoCEnabled&&!writes());
  for(auto op:trace)assert(!(op.addr>=DR&&op.addr<DW+0x4000)); // maps/boot lease never read RSC
@@ -55,6 +57,11 @@ static SweetMDSS*displayMake(IOService*n,SweetRPMh*r){
  return m;
 }
 static SweetDisplayBandwidth demand(){return {{{64000000,128000000},{32000000,96000000}},{128000000,256000000},{64000000,128000000},76800000};}
+static bool deliverNoCIRQ(){
+ if((regs[0x17a00114]&2u)&&(regs[DT]&regs[DT+4])){
+  regs[0x17a00314]|=2u;assert(sweet_mdss_noc_irq(161));regs[0x17a00314]&=~2u;pump();return true;
+ }return false;
+}
 static void step(SweetMDSS*m,SweetRPMh*r,bool apps=true,bool data=true){
  fakeTicks+=100000;
  if(apps&&r->fBusy&&r->fExecuting&&!r->fOperationCount){
@@ -66,6 +73,7 @@ static void step(SweetMDSS*m,SweetRPMh*r,bool apps=true,bool data=true){
   for(unsigned c=0;c<m->fNoCGroup;++c)
    regs[DT+m->fNoCTCS*0x2a0+0x3c+c*0x14]=(1<<8)|(c+1==m->fNoCGroup ? 1<<16 : 0);
  }
+ deliverNoCIRQ();
  if(!deliverRPMhIRQ()){std::lock_guard<std::recursive_mutex>l(r->fLoop->gate);r->advance();}
  {std::lock_guard<std::recursive_mutex>l(m->fLoop->gate);SweetMDSS::clockTimerAction(m,m->fClockTimer);SweetMDSS::noCTimerAction(m,m->fNoCTimer);}
 }
@@ -136,7 +144,7 @@ int main(){
  assert(m->fNoCValues[5]==0x20000008u); // ACV width=0, VCD11: X=0/Y=8
  assert(r->fClients[0].registerVote==76800000&&m->localClocksReady());
  assert(m->releaseLocalClocks(m->fNoCClockToken)==kIOReturnBusy);
- assert(regs[DT]==0x85&&regs[DT+4]==0x80);
+ assert(regs[DT]==0x05&&regs[DT+4]==0x80);
  // Only ACTIVE2/3; each VCD ends in COMMIT+response, no ACK on other entries.
  std::vector<unsigned> groups;
  for(unsigned i=0;i<trace.size();++i)if(trace[i].write&&trace[i].addr>=DT&&trace[i].addr<DT+0x3000){
@@ -175,7 +183,7 @@ int main(){
  auto zeroAverage=demand();zeroAverage.port[0].average=zeroAverage.port[1].average=zeroAverage.llcc.average=zeroAverage.ebi.average=0;
  uint64_t ids[4];
  for(unsigned i=0;i<4;++i){trace.clear();assert(m->retainBandwidth(zeroAverage,&ids[i])==0);drive(m,r);
-  if(i)assert(!writes());}
+  if(i)for(auto op:trace)if(op.write)assert(op.addr<DT||op.addr>=DT+0x3000);}
  denied=123;assert(m->retainBandwidth(zeroAverage,&denied)==kIOReturnNoResources&&!denied);
  assert(m->releaseBandwidth(ids[1])==0);drive(m,r);uint64_t fresh=0;
  assert(m->retainBandwidth(zeroAverage,&fresh)==0&&fresh>ids[3]);drive(m,r);
@@ -262,7 +270,7 @@ int main(){
   if(fault==7)regs[DR+0xd0]=1;
   token=retain(m);
   for(unsigned k=0;k<256&&m->noCBusy();++k)step(m,r);
-  if(fault==5)assert(nstatus(m,token).state==SweetNoCHeld);
+  if(fault==1||fault==5)assert(nstatus(m,token).state==SweetNoCHeld);
   else{assert(nstatus(m,token).state==SweetNoCFailed&&m->fNoCFault);
    for(auto op:trace)if(op.write)assert(!(op.addr>=DT&&op.addr<DT+0x3000));
    if(fault==0)for(auto op:trace)assert(!(op.addr>=DR&&op.addr<DW+0x4000));
@@ -285,7 +293,7 @@ int main(){
  for(unsigned fault=0;fault<5;++fault){nocFixtures();n=nub();r=make(n);d=displayNub();m=displayMake(d,r);token=retain(m);
   while(!(m->fNoCPhase==NData&&m->fNoCExecuting))step(m,r,true,false);
   if(fault==0)fakeTicks+=100001000;
-  if(fault==1){regs[DT+4]|=1u<<m->fNoCTCS;step(m,r,true,false);rpmhDrop=m->fNoCTCS*0x2a0+0x14;regs[DT+rpmhDrop]=0x1010000;}
+  if(fault==1){regs[DT+4]|=1u<<m->fNoCTCS;step(m,r,true,false);rpmhDrop=m->fNoCTCS*0x2a0+0x1c;regs[DT+rpmhDrop]=1;}
   if(fault==2)rpmhKeepIRQ=true;
   if(fault==3)m->stop(d);
   if(fault==4)regs[bases[1]+0x4008]=0x80000001;

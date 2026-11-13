@@ -415,7 +415,10 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
       'SWEET MDSS CLOCK LOCAL:' 'SWEET MDSS CLOCK RESET:' \
       'SWEET MDSS CLOCK: voted halt complete' \
       'SWEET MDSS NOC EVIDENCE:' 'SWEET MDSS NOC REGISTERS:' \
-      'SWEET MDSS NOC POLL:' 'SWEET MDSS NOC READBACK:' 'SWEET MDSS NOC COMMAND:'; do
+      'SWEET MDSS NOC POLL:' 'SWEET MDSS NOC READBACK:' 'SWEET MDSS NOC COMMAND:' \
+      'SWEET MDSS NOC IRQ: INTID161 configured' 'SWEET MDSS NOC IRQ: fresh ACTIVE completion' \
+      'SWEET MDSS RSC: v2 qtimer/wrapper/sequencer/solver/PDC initialized' \
+      'SWEET MDSS RSC: CLK state and TCS ownership ready'; do
    if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
     printf 'kernel lacks panel lifecycle marker: %s\n' "$marker" >&2
     exit 1

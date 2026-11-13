@@ -1,5 +1,8 @@
 # 0215：display NoC 完成等待取证
 
+> 后续：0216 已将此处的 timer 完成判据替换为 INTID161 真实事件，并补齐 RSC/CLK/TCS 交接。
+> 本文保留 0215 诊断补丁的历史语义；当前实现和编译交接见 [PANEL-RSC-TAKEOVER.md](PANEL-RSC-TAKEOVER.md)。
+
 2026-11-13。a27 已越过 branch7 的额外 enable 门槛，RSC 时钟租约 Held，
 新首错是 display NoC 的第一个 ACTIVE TCS2 请求超时。0215 补齐判断这个超时所需的证据；
 它没有修复或证明硬件完成路径，仍需新产物实机验证。

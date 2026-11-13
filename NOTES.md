@@ -1,5 +1,36 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+
+## Agent handoff / active work (2026-11-13, 0216 RSC/ACTIVE flow implemented)
+
+**CURRENT：用户要求补齐 Lineage 流程；0216 已落实真实驱动修改，本地验证通过，待用户 push 云编译。**
+本段替代下方 0215 仅诊断的编译交接。a27 首错仍为 display NoC ACTIVE2 等待超时，尚无 0216 实机结果。
+按 Lineage@2e897dd 的 RSC v2：CLK 清 wrapper override.bit0；TCS_USE_OK 写0/忙则写1让出200us/再写0等待；
+持有使用权后首次 qtimer→wrapper→seq→solver→PDC 65 项初始化，后续实例请求不重写表；握手超时未改表/投票则交还use_ok。
+真实 solver override/modes/status0/1/2 采样，+d0 日志纠正为 error-irq-status；模式历史值不等于“必须全零”。
+独立 INTID161 顶半部/软件事件/sleh 分发，先handler→source enable→trigger→GIC enable；极快完成保留pending。
+只有真实 IRQ 事件+本槽源+ISSUED/必要COMPLETE 可确认；timer仅期限/读回/EOI等，不再用busy或裸CMD_STATUS伪造ACK。
+ACTIVE成功仅清ENABLE/WAIT/本槽IRQ，保留AMC/control/source；自身槽账本允许trigger保持/自清，复用按clear-trigger→clear-AMC→AMC→trigger。
+初次空槽前两次control写0，自身已完成槽首写保留AMC；新专项核对两种精确顺序。
+完成后use_ok1再按既有引用账本保留/释放RSC时钟/CN0；失败保票，stop/失权只屏蔽GIC，不访问无权限外围；dispatch lock保护free。
+16既有provider/clock/core/NoC/managed/lifecycle回归通过；完成专项37场景ASan/UBSan覆盖ABI/maps、握手/初始化失败、快/旧/外来/部分IRQ、EOI/RWP、邻位、stop并发/迟到。
+新增 audit-mh2lm-lineage-rsc.py 动态执行Lineage实际计时和五个init函数，65项逐项逐序一致；默认60fps/vtotal505/prefill25限制成35。
+staticWake298299/threshold17938/slot0=35771/slot1=320512/backoff17886/PDC186020，保留源码单位和整数运算顺序。
+真实ARM64 SweetMDSS.cpp/sleh.c编译通过，C未解析回调与C++导出符号匹配；MDSS warnings1561→1573（12固定表/数组unsafe-buffer），sleh1条既有告警。
+0185–0216共32patch严格重放/78源码字节一致/114原CI markers通过；ADT全组合/CLI通过；实际旧a27被matrix拒绝且无boot输出。
+改动源文件为MDSS.cpp/NoC.inc/sleh.c；0216补丁SHA=403fbaea29ca77d277052a075650387e7947f0e3fcc3eec1b1f2517222f10eb2。
+**NEXT：用户git push origin main并云编译，下载kernel/buildtree（可继续编号0121a28），agent核对后重新打retained。**
+硬件档ADT增加sweet,display-noc-irq-abi=1和sweet,display-noc-intid=161，复用map11；必须重生成ADT，不能照搬a27。
+ABI608固件和605字节retained参数保持，identity档无NoC声明不变；matrix新增四个RSC/IRQ marker。当前没有新boot镜像。
+下一轮USB顺序：CLOCK Held→enter CLK→v2 initialized→TCS ownership ready→INTID161 configured→每组fresh ACTIVE→NoC ACK→新DMA/transfer/HANDOFF。
+POLL日志名保留兼容，但现在只记录IRQ后的完成检查；没有IRQ时samples0/status-valid0是未采样，不是硬件零。
+本轮只对齐已上电/持钟的当前CLK/ACTIVE资源接管；mode2 collapsed/失电仍拒绝，无完整CMD/VID/IDLE与VSYNC/sleep-wake管理。
+后续retained PHY/host重建仍与Lineage continuous splash不同；MDP/SMMU独立配置也未补。本地成功不等于真实完整接管或整套驱动等价。
+完整接管前亮度/OFFON/长测/combined/supply实机测试继续暂停；不必补a27持久日志。
+详见docs/PANEL-RSC-TAKEOVER.md与更新的流程对照；scratch/framebuffer-0216保存编译/重放/测试底稿。
+未push/触发CI/操作设备；未改固件/bootargs/其他provider/CI。CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+以下CURRENT/NEXT及“本轮仅文档”均为历史，以本段为准。
+
 ## Resource takeover missing-step review (2026-11-13)
 
 用户追问当前接管流程缺项，再次核对Lineage RSC v2寄存器定义/状态机/带宽触发/IRQ与实际0215源码。

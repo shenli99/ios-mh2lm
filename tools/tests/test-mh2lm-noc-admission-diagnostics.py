@@ -18,7 +18,7 @@ int main(){
   "link-state","core-state","core-ready","gcc-ahb","dispcc-ahb","gcc-hf","gdsc",
   "clock-lease","clock-lease","clock-lease","root-state","root-source","clock-parent-drift",
   "clock-branch","rsc-layout","rsc-layout","rsc-layout","rsc-layout","wrapper-override",
-  "wrapper-override","wrapper-power","wrapper-control","sequencer-busy","solver-status"};
+  "wrapper-override","wrapper-power","wrapper-control","sequencer-busy","error-irq-status"};
  for(unsigned fault=0;fault<29;++fault){
   nocFixtures();auto*n=nub();auto*r=make(n);auto*d=displayNub();auto*m=displayMake(d,r);
   auto token=retain(m);drive(m,r);auto clockToken=m->fNoCClockToken;
@@ -56,12 +56,12 @@ int main(){
  for(unsigned fault=0;fault<3;++fault){
   nocFixtures();auto*n=nub();auto*r=make(n);auto*d=displayNub();auto*m=displayMake(d,r);
   if(fault==0)regs[bases[1]+0x400c]=0x80000000;
-  if(fault==1)regs[DW+4]=1;if(fault==2)regs[DR+0xd0]=1;
+  if(fault==1)regs[DW+4]=~0u;if(fault==2)regs[DR+0xd0]=1;
   messages.clear();trace.clear();auto token=retain(m);
   for(unsigned i=0;i<256&&m->noCBusy();++i)step(m,r);
   assert(nstatus(m,token).state==SweetNoCFailed&&!nstatus(m,token).acknowledged);
   if(DIAG_CHECK){assert(has("SWEET MDSS NOC CONTEXT: phase=")&&has("register-acked=1"));
-   assert(has(fault==0?"gate=clock-retain":(fault==1?"gate=wrapper-override":"gate=solver-status")));
+   assert(has(fault==0?"gate=clock-retain":(fault==1?"gate=wrapper-override":"gate=error-irq-status")));
    unsigned diagnostics=0;for(auto&msg:messages)
     diagnostics+=msg.find("SWEET MDSS NOC ADMIT:")!=std::string::npos||
                  msg.find("SWEET MDSS NOC CONTEXT:")!=std::string::npos||

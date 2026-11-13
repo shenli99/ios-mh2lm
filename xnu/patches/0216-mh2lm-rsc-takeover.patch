@@ -1,0 +1,591 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -419,12 +419,27 @@
+  } fNoCEvidence;
+  vm_offset_t fNoCRSC, fNoCTCSBase, fNoCWrapper;
+  unsigned fNoCNCPT;
++ IOInterruptEventSource *fNoCIRQEvent;
++ bool fNoCIRQEventAdded, fNoCIRQClaimed, fNoCIRQTouched, fNoCIRQConfigured, fNoCIRQObserved;
++ unsigned fNoCIRQOnline, fNoCIRQArmed, fNoCIRQPosted, fNoCIRQEntries, fNoCSlotsOwned;
++ uint64_t fNoCIRQDeadline, fNoCRSCDeadline, fNoCRSCRetryAt;
++ unsigned fNoCRSCStage, fNoCRSCInitCursor;
++ bool fNoCRSCInitialized, fNoCTCSOwned, fNoCRSCWriteIssued;
++ bool setupNoCIRQ(IOService *);
++ IOReturn prepareNoCIRQ(void);
++ void quietNoCIRQ(void);
++ void stopNoCIRQ(void);
++ void waitNoCCompletion(void);
++ static void noCIRQAction(OSObject *,IOInterruptEventSource *,int);
++ IOReturn takeNoCRSC(void);
++ IOReturn initNoCRSC(void);
++
+  bool setupNoC(IOService *);
+  bool noCBusy(void) const;
+  bool noCClockDiagnostics(void) const;
+  bool noCClocksReady(void);
+  bool noCCanReleaseClock(void) const;
+- bool noCAdmission(void);
++ bool noCAdmission(bool = false);
+  IOReturn retainBandwidth(const SweetDisplayBandwidth &,uint64_t *);
+  IOReturn releaseBandwidth(uint64_t);
+  IOReturn bandwidthStatus(uint64_t,SweetNoCStatus *);
+@@ -531,6 +546,7 @@
+  bool start(IOService *) APPLE_KEXT_OVERRIDE;
+  bool willTerminate(IOService *,IOOptionBits) APPLE_KEXT_OVERRIDE;
+  bool handleIRQ(void);
++ bool handleNoCIRQ(void);
+  IOReturn attachVsync(SweetVsyncChannel *) APPLE_KEXT_OVERRIDE;
+  void detachVsync(SweetVsyncChannel *) APPLE_KEXT_OVERRIDE;
+  void requestVsyncFallback(void) APPLE_KEXT_OVERRIDE;
+@@ -1074,6 +1090,7 @@
+ SweetMDSS::stop(IOService *provider)
+ {
+  if (fGateAdded) (void)fGate->runAction(stopAction);
++ stopNoCIRQ();
+  closeDisplayResources();
+  if (fLifecycleTimerAdded) { fLoop->removeEventSource(fLifecycleTimer); fLifecycleTimerAdded=false; }
+  if (fScanoutTimerAdded) { fLoop->removeEventSource(fScanoutTimer); fScanoutTimerAdded=false; }
+@@ -1094,6 +1111,7 @@
+ {
+  /* Covers partial start too; any hardware-reachable pool has its own pin. */
+  if (fGateAdded) (void)fGate->runAction(stopAction);
++ stopNoCIRQ();
+  closeDisplayResources();
+  if (fLifecycleTimerAdded) { fLoop->removeEventSource(fLifecycleTimer); fLifecycleTimerAdded=false; }
+  if (fScanoutTimerAdded) { fLoop->removeEventSource(fScanoutTimer); fScanoutTimerAdded=false; }
+@@ -1106,6 +1124,7 @@
+  OSSafeReleaseNULL(fClockTimer);
+  if (fNoCTimerAdded) { fLoop->removeEventSource(fNoCTimer); fNoCTimerAdded=false; }
+  OSSafeReleaseNULL(fNoCTimer);
++ OSSafeReleaseNULL(fNoCIRQEvent);
+  if (fNoCClaimed) { __atomic_store_n(&mdssNoCWriter,fNoCTouched ? 2u : 0u,__ATOMIC_RELEASE); fNoCClaimed=false; }
+  if (fClockClaimed) { __atomic_store_n(&mdssClockWriter,fClockTouched ? 2u : 0u,__ATOMIC_RELEASE); fClockClaimed=false; }
+  OSSafeReleaseNULL(fDsiTimer); OSSafeReleaseNULL(fDsiSequence);
+diff --git a/iokit/Kernel/arm/SweetMDSSNoC.inc b/iokit/Kernel/arm/SweetMDSSNoC.inc
+--- a/iokit/Kernel/arm/SweetMDSSNoC.inc
++++ b/iokit/Kernel/arm/SweetMDSSNoC.inc
+@@ -1,7 +1,7 @@
+ /* Display-data RSC lives with the actual MDSS clock/GDSC owner. Config CN0
+  * stays in SweetRPMh/apps-DRV. No reverse synchronous provider callback. */
+ static unsigned mdssNoCWriter; /* Ownership state only, never an instance. */
+-enum { NIdle, NAppsRaise, NClock, NData, NClockRelease, NAppsLower };
++enum { NIdle, NAppsRaise, NClock, NData, NClockRelease, NAppsLower, NRSC };
+ enum { NStride=0x2a0, NCommandStride=0x14, NIRQEnable=0, NIRQStatus=4, NIRQClear=8,
+  NWait=0x10, NControl=0x14, NStatus=0x18, NEnable=0x1c, NMessage=0x30,
+  NAddress=0x34, NDataRegister=0x38, NCommandStatus=0x3c,
+@@ -10,6 +10,299 @@
+  unsigned operation; uint64_t token; const SweetDisplayBandwidth *vote;
+  uint64_t *output; SweetNoCStatus *status; bool lifecycleData;
+ };
++
++/* LG G8X display RSC: DTS SPI129 -> GIC INTID161, level high. The
++ * permanent dispatch lock fences event/map destruction against the top half. */
++extern "C" bool sweet_mdss_noc_irq(unsigned int intid);
++static IOSimpleLock *mdssNoCIRQDispatch;
++static SweetMDSS *mdssNoCIRQService;
++static IOSimpleLock *mdss_noc_irq_lock(void)
++{
++ IOSimpleLock *lock=__atomic_load_n(&mdssNoCIRQDispatch,__ATOMIC_ACQUIRE);
++ if (!lock) {
++  IOSimpleLock *candidate=IOSimpleLockAlloc();
++  if (!candidate) return NULL;
++  if (__atomic_compare_exchange_n(&mdssNoCIRQDispatch,&lock,candidate,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) lock=candidate;
++  else IOSimpleLockFree(candidate);
++ }
++ return lock;
++}
++bool SweetMDSS::setupNoCIRQ(IOService *provider)
++{
++ OSData *abi=OSDynamicCast(OSData,provider->getProperty("sweet,display-noc-irq-abi"));
++ OSData *intid=OSDynamicCast(OSData,provider->getProperty("sweet,display-noc-intid"));
++ const uint32_t one=1, expected=161;
++ if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),&one,4) ||
++     !intid || intid->getLength()!=4 || memcmp(intid->getBytesNoCopy(),&expected,4)) return false;
++ if (!fMaps[11]) fMaps[11]=provider->mapDeviceMemoryWithIndex(11);
++ if (!fMaps[11] || fMaps[11]->getPhysicalAddress()!=0x17a00000 || fMaps[11]->getLength()!=0x10000) return false;
++ vm_offset_t gic=fMaps[11]->getVirtualAddress();
++ if ((dp_rd(gic,0xffe8)&0xf0u)!=0x30u || ((dp_rd(gic,4)&31u)+1u)*32u<=161u ||
++     !(dp_rd(gic,0)&2u) || ((dp_rd(gic,0x114)|dp_rd(gic,0x214)|dp_rd(gic,0x314))&2u)) return false;
++ fNoCIRQEvent=IOInterruptEventSource::interruptEventSource(this,noCIRQAction);
++ if (!fNoCIRQEvent || fLoop->addEventSource(fNoCIRQEvent)!=kIOReturnSuccess) return false;
++ fNoCIRQEventAdded=true;
++ IOSimpleLock *lock=mdss_noc_irq_lock();
++ if (!lock) return false;
++ IOInterruptState saved=IOSimpleLockLockDisableInterrupt(lock);
++ if (!mdssNoCIRQService) { mdssNoCIRQService=this; fNoCIRQClaimed=true; }
++ IOSimpleLockUnlockEnableInterrupt(lock,saved);
++ return fNoCIRQClaimed;
++}
++IOReturn SweetMDSS::prepareNoCIRQ(void)
++{
++ vm_offset_t gic=fMaps[11]->getVirtualAddress();
++ if (!fNoCIRQTouched) {
++  uint32_t irq=dp_rd(fNoCTCSBase,NIRQStatus), enabled=dp_rd(fNoCTCSBase,NIRQEnable);
++  if (irq==~0u || enabled==~0u || (irq&enabled) ||
++      ((dp_rd(gic,0x114)|dp_rd(gic,0x214)|dp_rd(gic,0x314))&2u)) return kIOReturnBusy;
++  fNoCIRQTouched=true;
++  dp_wr(gic,0x194,2);
++  dp_wr(gic,0x94,dp_rd(gic,0x94)|2u);
++  dp_wr(gic,0xc28,dp_rd(gic,0xc28)&~0xcu);
++  dp_wr(gic,0x4a0,(dp_rd(gic,0x4a0)&~0xff00u)|0xa000u);
++  dp_wr64(gic,0x6508,0);
++  fNoCIRQDeadline=scanout_now()+1000000ULL;
++ }
++ if (!fNoCIRQConfigured && (dp_rd(gic,0)&(1u<<31)))
++  return scanout_now()<fNoCIRQDeadline ? kIOReturnNotReady : kIOReturnIOError;
++ if ((dp_rd(gic,0xc28)&0xcu) || (dp_rd(gic,0x4a0)&0xff00u)!=0xa000u ||
++     dp_rd(gic,0x6508) || dp_rd(gic,0x650c)) return kIOReturnIOError;
++ if (!fNoCIRQConfigured) {
++  fNoCIRQConfigured=true; __atomic_store_n(&fNoCIRQOnline,1u,__ATOMIC_RELEASE);
++  SWEET_LOG_INFO("SWEET MDSS NOC IRQ: INTID161 configured; workloop completion, timer watchdog only\n");
++ }
++ return kIOReturnSuccess;
++}
++bool SweetMDSS::handleNoCIRQ(void)
++{
++ /* Dispatch lock held; no peripheral access, workloop wait or ACK here. */
++ if (!__atomic_load_n(&fNoCIRQOnline,__ATOMIC_ACQUIRE)) return true;
++ dp_wr(fMaps[11]->getVirtualAddress(),0x194,2);
++ __atomic_add_fetch(&fNoCIRQEntries,1u,__ATOMIC_RELAXED);
++ if (!__atomic_exchange_n(&fNoCIRQArmed,0u,__ATOMIC_ACQ_REL)) return true;
++ __atomic_store_n(&fNoCIRQPosted,1u,__ATOMIC_RELEASE);
++ fNoCIRQEvent->interruptOccurred(NULL,NULL,0);
++ return true;
++}
++extern "C" bool sweet_mdss_noc_irq(unsigned int intid)
++{
++ if (intid!=161u) return false;
++ IOSimpleLock *lock=__atomic_load_n(&mdssNoCIRQDispatch,__ATOMIC_ACQUIRE);
++ if (lock) {
++  IOInterruptState saved=IOSimpleLockLockDisableInterrupt(lock);
++  if (mdssNoCIRQService) (void)mdssNoCIRQService->handleNoCIRQ();
++  IOSimpleLockUnlockEnableInterrupt(lock,saved);
++ }
++ return true;
++}
++void SweetMDSS::noCIRQAction(OSObject *owner,IOInterruptEventSource *,int)
++{
++ SweetMDSS *s=(SweetMDSS *)owner;
++ if (!__atomic_exchange_n(&s->fNoCIRQPosted,0u,__ATOMIC_ACQ_REL) || !s->fAccepting || s->isInactive()) return;
++ if (!s->noCBusy()) return;
++ /* Completion follows the same resource participant checks as timer work. */
++ if (s->fLifecycleEnabled && s->lifecycleBusy() && !s->lifecycleResourceStepAllowed()) {
++  s->finishLifecycle(kIOReturnNotReady,"resource participant lost"); return;
++ }
++ if (s->fNoCPhase!=NData || !s->fNoCExecuting || s->fNoCOps || !s->noCAdmission()) {
++  s->finishNoC(kIOReturnNotReady,true,"irq-owner"); return;
++ }
++ uint32_t irq=s->dp_rd(s->fNoCTCSBase,NIRQStatus);
++ uint32_t enabled=s->dp_rd(s->fNoCTCSBase,NIRQEnable), bit=1u<<s->fNoCTCS;
++ if (irq==~0u || enabled==~0u || !(enabled&bit) || (irq&enabled)!=bit) {
++  s->finishNoC(kIOReturnIOError,true,"irq-source"); return;
++ }
++ s->fNoCIRQObserved=true;
++ s->advanceNoC();
++}
++void SweetMDSS::quietNoCIRQ(void)
++{
++ __atomic_store_n(&fNoCIRQArmed,0u,__ATOMIC_RELEASE);
++ /* GIC is independent of the display domain. Never read/clear a possibly
++  * inaccessible RSC source on failure/stop; retain its outstanding payload. */
++ if (fNoCIRQTouched) dp_wr(fMaps[11]->getVirtualAddress(),0x194,2);
++}
++void SweetMDSS::stopNoCIRQ(void)
++{
++ __atomic_store_n(&fNoCIRQOnline,0u,__ATOMIC_RELEASE);
++ if (fNoCIRQClaimed) {
++  IOSimpleLock *lock=__atomic_load_n(&mdssNoCIRQDispatch,__ATOMIC_ACQUIRE);
++  IOInterruptState saved=IOSimpleLockLockDisableInterrupt(lock);
++  if (mdssNoCIRQService==this) mdssNoCIRQService=NULL;
++  fNoCIRQClaimed=false;
++  IOSimpleLockUnlockEnableInterrupt(lock,saved);
++ }
++ if (fNoCIRQEventAdded) { fNoCIRQEvent->disable(); fLoop->removeEventSource(fNoCIRQEvent); fNoCIRQEventAdded=false; }
++}
++void SweetMDSS::waitNoCCompletion(void)
++{
++ uint64_t now=scanout_now(), deadline=fNoCStepDeadline<fNoCDeadline ? fNoCStepDeadline : fNoCDeadline;
++ fNoCTimer->setTimeoutUS((unsigned)(deadline>now ? (deadline-now+999)/1000 : 1));
++}
++
++/* Register facts and ordering from LG/Lineage sde_rsc_hw.c v2 init and
++ * sde_rsc.c timer_calculate(NULL, IDLE). Defaults clamp prefill 25 to 35
++ * with vtotal 505, 60 Hz and XO period 52 ns. All times use the source's
++ * integer division order, including the PDC backoff's different unit. */
++struct MDSSRSCInit { uint32_t wrapper, offset, value; };
++static const MDSSRSCInit mdssRSCV2Init[]={
++ /* rsc_hw_qtimer_init */
++ {1,0x1fe0,0xffffffffu},
++ {1,0x1ff0,0xffffffffu},
++ {1,0x1040,0x00000001u},
++ {1,0x1044,0x00000001u},
++ {1,0x2020,0xffffffffu},
++ {1,0x2024,0xffffffffu},
++ {1,0x3020,0xffffffffu},
++ {1,0x3024,0xffffffffu},
++ {1,0x202c,0x00000001u},
++ {1,0x302c,0x00000001u},
++ /* rsc_hw_wrapper_init */
++ {1,0x0008,0x00048d3bu},
++ {1,0x000c,0x00004612u},
++ {1,0x0004,0x00000100u},
++ /* rsc_hw_seq_memory_init_v2 */
++ {0,0x0600,0xe0bb9ebeu},
++ {0,0x0604,0x9ebeff39u},
++ {0,0x0608,0x2020209bu},
++ {0,0x060c,0x38bb9ebeu},
++ {0,0x0610,0xbeff39e0u},
++ {0,0x0614,0x20209b9eu},
++ {0,0x0618,0xb9bae5a0u},
++ {0,0x061c,0xbdbbf9fau},
++ {0,0x0620,0x38999afeu},
++ {0,0x0624,0xac81e1a1u},
++ {0,0x0628,0x82e2a2e0u},
++ {0,0x062c,0x8cfd9d39u},
++ {0,0x0630,0xbc20209bu},
++ {0,0x0634,0xe601a6fcu},
++ {0,0x0638,0xbc20209cu},
++ {0,0x063c,0xe701a7fcu},
++ {0,0x0640,0x0000209cu},
++ {0,0x0410,0x00000033u},
++ {0,0x0414,0x0000003bu},
++ {0,0x0c14,0x00000000u},
++ {0,0x0c30,0x00000000u},
++ {0,0x0c4c,0x0000000cu},
++ {0,0x0c68,0x00000018u},
++ /* rsc_hw_solver_init */
++ {0,0x0c04,0xffffffffu},
++ {0,0x0c08,0xffffffffu},
++ {0,0x0c0c,0xefffffffu},
++ {0,0x1000,0x00000000u},
++ {0,0x1004,0x00008bbbu},
++ {0,0x1008,0x0004e400u},
++ {0,0x100c,0xffffffffu},
++ {0,0x0c20,0x00000007u},
++ {0,0x1080,0x00000000u},
++ {0,0x1100,0x00000001u},
++ {0,0x110c,0x00000001u},
++ {0,0x1180,0x00000002u},
++ {0,0x118c,0x00000002u},
++ {0,0x0c18,0x00000000u},
++ {0,0x0c00,0x00000001u},
++ {0,0x0c1c,0x01000010u},
++ {0,0x0c34,0x80000000u},
++ {0,0x0c38,0x000045deu},
++ {0,0x0c40,0x0002d6a4u},
++ {0,0x0c50,0x80000000u},
++ {0,0x0c54,0x000045deu},
++ {0,0x0c5c,0x0002d6a4u},
++ {0,0x0c6c,0x80000000u},
++ {0,0x0c70,0x00000000u},
++ {0,0x0c78,0x0002d6a4u},
++ /* rsc_hw_pdc_init */
++ {0,0x0020,0x00004520u},
++ {0,0x0024,0x00004510u},
++ {0,0x0028,0x00004514u},
++ {0,0x002c,0x00000001u},
++};
++IOReturn SweetMDSS::initNoCRSC(void)
++{
++ while (fNoCRSCInitCursor<sizeof(mdssRSCV2Init)/sizeof(mdssRSCV2Init[0])) {
++  const MDSSRSCInit &op=mdssRSCV2Init[fNoCRSCInitCursor];
++  vm_offset_t base=op.wrapper ? fNoCWrapper : fNoCRSC;
++  if (!fNoCRSCWriteIssued) {
++   dp_wr(base,op.offset,op.value); fNoCRSCWriteIssued=true;
++   fNoCRSCDeadline=scanout_now()+1000000ULL;
++  }
++  uint32_t value=dp_rd(base,op.offset);
++  if (value!=op.value) {
++   if (scanout_now()<fNoCRSCDeadline) return kIOReturnNotReady;
++   SWEET_LOG_ERROR("SWEET MDSS RSC: init readback index=%u wrapper=%u offset=%#x want=%#x got=%#x\n",
++       fNoCRSCInitCursor,op.wrapper,op.offset,op.value,value);
++   return kIOReturnIOError;
++  }
++  fNoCRSCWriteIssued=false; ++fNoCRSCInitCursor;
++ }
++ fNoCRSCInitialized=true;
++ SWEET_LOG_INFO("SWEET MDSS RSC: v2 qtimer/wrapper/sequencer/solver/PDC initialized; CLK/AMC path\n");
++ return kIOReturnSuccess;
++}
++IOReturn SweetMDSS::takeNoCRSC(void)
++{
++ if (!noCAdmission(true)) return kIOReturnNotPermitted;
++ uint64_t now=scanout_now();
++ if (!fNoCRSCStage) {
++  /* RSC init must not replace sequences used by inherited ACTIVE traffic.
++   * Sleep/wake payloads remain untouched and solver stays disabled. */
++  uint32_t irq=dp_rd(fNoCTCSBase,NIRQStatus), enabled=dp_rd(fNoCTCSBase,NIRQEnable);
++  if (irq==~0u || enabled==~0u || (irq&enabled)) return kIOReturnBusy;
++  for (unsigned t=2;t<4;++t) {
++   uint32_t b=t*NStride, idle=dp_rd(fNoCTCSBase,b+NStatus);
++   if (!idle || idle==~0u || dp_rd(fNoCTCSBase,b+NEnable)) return kIOReturnBusy;
++  }
++  uint32_t override=dp_rd(fNoCWrapper,4);
++  uint32_t solverOverride=dp_rd(fNoCRSC,0xc14), modes=dp_rd(fNoCRSC,0xc20);
++  uint32_t status0=dp_rd(fNoCRSC,0xc24), status1=dp_rd(fNoCRSC,0xc28), status2=dp_rd(fNoCRSC,0xc2c);
++  SWEET_LOG_INFO("SWEET MDSS RSC: enter CLK override=%#x solver-override=%#x modes=%#x status0=%#x status1=%#x status2=%#x\n",
++      override,solverOverride,modes,status0,status1,status2);
++  /* Status2 is the last selected mode, not an all-zero idle predicate. */
++  if (override==~0u || solverOverride==~0u || modes==~0u || status0==~0u || status1==~0u || status2==~0u) return kIOReturnIOError;
++  fNoCTouched=true;
++  dp_wr(fNoCWrapper,4,override&~1u); /* sde_rsc_state_update(CLK) + dp_wr barrier */
++  fNoCRSCDeadline=now+1000000ULL; fNoCRSCStage=1;
++ }
++ if (fNoCRSCStage==1) {
++  if (dp_rd(fNoCWrapper,4)&1u) return now<fNoCRSCDeadline ? kIOReturnNotReady : kIOReturnTimeout;
++  dp_wr(fNoCWrapper,0,0); /* tcs_wait: withhold TCS_USE_OK before checking SEQ_BUSY */
++  if (dp_rd(fNoCWrapper,0)&2u) {
++   dp_wr(fNoCWrapper,0,1);
++   fNoCRSCRetryAt=now+200000ULL; fNoCRSCStage=2;
++   return kIOReturnNotReady;
++  }
++  fNoCRSCDeadline=now+1000000ULL; fNoCRSCStage=3;
++ }
++ if (fNoCRSCStage==2) {
++  if (now<fNoCRSCRetryAt) return kIOReturnNotReady;
++  dp_wr(fNoCWrapper,0,0);
++  fNoCRSCDeadline=now+1000000ULL; fNoCRSCStage=3;
++ }
++ if (fNoCRSCStage==3) {
++  uint32_t ctrl=dp_rd(fNoCWrapper,0), busy=dp_rd(fNoCRSC,0x404);
++  if (ctrl==~0u || busy==~0u) return kIOReturnIOError;
++  if ((ctrl&3u) || busy) {
++   if (now<fNoCRSCDeadline) return kIOReturnNotReady;
++   /* Like Lineage trigger_vote failure: no payload/init has been written
++    * during this handoff, so return TCS_USE_OK to the sequencer. */
++   dp_wr(fNoCWrapper,0,1);
++   SWEET_LOG_ERROR("SWEET MDSS RSC: TCS handoff timeout ctrl=%#x seq-busy=%#x\n",ctrl,busy);
++   return kIOReturnTimeout;
++  }
++  fNoCTCSOwned=true; fNoCRSCStage=4;
++ }
++ if (fNoCRSCStage==4) {
++  if (!noCAdmission()) return kIOReturnNotPermitted;
++  if (!fNoCRSCInitialized) {
++   IOReturn result=initNoCRSC();
++   if (result!=kIOReturnSuccess) return result;
++  }
++  fNoCRSCStage=5;
++  SWEET_LOG_INFO("SWEET MDSS RSC: CLK state and TCS ownership ready\n");
++ }
++ return noCAdmission() ? kIOReturnSuccess : kIOReturnNotPermitted;
++}
+ 
+ bool SweetMDSS::setupNoC(IOService *provider)
+ {
+@@ -27,7 +320,9 @@
+  fNoCWrapper=fMaps[15]->getVirtualAddress();
+  fNoCTimer=IOTimerEventSource::timerEventSource(this,noCTimerAction);
+  if (!fNoCTimer || fLoop->addEventSource(fNoCTimer)!=kIOReturnSuccess) return false;
+- fNoCTimerAdded=true; fNoCEnabled=true;
++ fNoCTimerAdded=true;
++ if (!setupNoCIRQ(provider)) return false;
++ fNoCEnabled=true;
+  setProperty("SweetDisplayNoCOwnership","MDSS display RSC; RPMh apps CN0; explicit warm requests only");
+  return true; /* Mapping never reads RSC, enables clocks or sends a vote. */
+ }
+@@ -71,7 +366,7 @@
+  }
+  return true;
+ }
+-bool SweetMDSS::noCAdmission(void)
++bool SweetMDSS::noCAdmission(bool takeover)
+ {
+  if (!noCClocksReady()) return false; /* No RSC access before clock/domain lease. */
+  uint32_t id=dp_rd(fNoCRSC,0), config=dp_rd(fNoCRSC,12);
+@@ -84,22 +379,22 @@
+  uint32_t override=dp_rd(fNoCWrapper,4), power=dp_rd(fNoCWrapper,0x24), ctrl=dp_rd(fNoCWrapper,0);
+  /* Preserve the original read/check order. These are the samples used by
+   * the failed gate, not a post-failure rescan of RSC/TCS/wrapper. */
+- if (override==~0u || (override&1u)) {
++ if (override==~0u || (!takeover && (override&1u))) {
+   SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=wrapper-override override=%#x power=%#x ctrl=%#x\n",override,power,ctrl); return false;
+  }
+  if (power==~0u || (power&(1u<<12))) {
+   SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=wrapper-power override=%#x power=%#x ctrl=%#x\n",override,power,ctrl); return false;
+  }
+- if (ctrl==~0u || (ctrl&2u)) {
++ if (ctrl==~0u || (!takeover && ((ctrl&2u) || (fNoCTCSOwned && (ctrl&1u))))) {
+   SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=wrapper-control override=%#x power=%#x ctrl=%#x\n",override,power,ctrl); return false;
+  }
+  uint32_t busy=dp_rd(fNoCRSC,0x404);
+- if (busy) {
++ if (busy==~0u || (!takeover && busy)) {
+   SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=sequencer-busy value=%#x\n",busy); return false;
+  }
+- uint32_t solver=dp_rd(fNoCRSC,0xd0);
+- if (solver) {
+-  SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=solver-status value=%#x\n",solver); return false;
++ uint32_t error=dp_rd(fNoCRSC,0xd0);
++ if (error) {
++  SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=error-irq-status value=%#x\n",error); return false;
+  }
+  return true;
+ }
+@@ -231,6 +526,7 @@
+  }
+  fNoCSlot=slot; fNoCTarget=target; fNoCReleasing=release;
+  fNoCCursor=0; fNoCExecuting=false; fNoCAppsToken=0;
++ fNoCRSCStage=0; fNoCRSCWriteIssued=false;
+  fNoCAppsLower=target.registerPeak<fNoCAggregate.registerPeak;
+  NoCLease &lease=fNoCLeases[slot];
+  if (!release) { lease={}; lease.vote=proposal; lease.status.token=++fNoCNextToken; }
+@@ -256,7 +552,7 @@
+   }
+   uint32_t idle=dp_rd(fNoCTCSBase,b+NStatus);
+   if (chosen<0 && idle && idle!=~0u && irq!=~0u && !(irq&(1u<<t)) && !enabled &&
+-      !dp_rd(fNoCTCSBase,b+NControl) && !dp_rd(fNoCTCSBase,b+NWait)) chosen=(int)t;
++      (dp_rd(fNoCTCSBase,b+NControl)&~((fNoCSlotsOwned&(1u<<t)) ? NTrigger : 0u))==((fNoCSlotsOwned&(1u<<t)) ? NAMC : 0u) && !dp_rd(fNoCTCSBase,b+NWait)) chosen=(int)t;
+  }
+  if (chosen<0) return kIOReturnBusy;
+  fNoCGroup=1;
+@@ -276,7 +572,9 @@
+   noCAdd(b+NDataRegister+c*NCommandStride,fNoCValues[r]|(last ? 1u<<30 : 0u));
+  }
+  noCAdd(b+NWait,fNoCWait); noCAdd(b+NEnable,fNoCEnable);
++ noCAdd(b+NControl,(fNoCSlotsOwned&bit) ? NAMC : 0u);
+  noCAdd(b+NControl,0); noCAdd(b+NControl,NAMC);
++ noCAdd(NIRQEnable,0);
+  fNoCStepDeadline=scanout_now()+100000000ULL;
+  uint64_t requestAt=fNoCEvidence.requestAt;
+  fNoCEvidence={}; fNoCEvidence.requestAt=requestAt;
+@@ -381,6 +679,15 @@
+    if (fNoCAppsLower) { fNoCPhase=NAppsLower; fNoCTimer->setTimeoutUS(1); return; }
+    finishNoC(kIOReturnSuccess,false); return;
+   }
++  fNoCPhase=NRSC;
++ }
++ if (fNoCPhase==NRSC) {
++  IOReturn rc=takeNoCRSC();
++  if (rc==kIOReturnNotReady) { fNoCTimer->setTimeoutUS(2); return; }
++  if (rc!=kIOReturnSuccess) { finishNoC(rc,fNoCTouched,"rsc-takeover"); return; }
++  rc=prepareNoCIRQ();
++  if (rc==kIOReturnNotReady) { fNoCTimer->setTimeoutUS(100); return; }
++  if (rc!=kIOReturnSuccess) { finishNoC(rc,fNoCTouched,"irq-admission"); return; }
+   fNoCPhase=NData;
+   if (fNoCCount) {
+    rc=noCQueueGroup();
+@@ -390,6 +697,11 @@
+  if (fNoCPhase!=NData) return;
+  if (!noCAdmission()) { finishNoC(kIOReturnNotReady,fNoCTouched); return; }
+  if (fNoCCursor==fNoCCount) {
++  if (fNoCTCSOwned) {
++   /* Lineage tcs_use_ok, after every VCD completed and before clock put. */
++   dp_wr(fNoCWrapper,0,1); fNoCTCSOwned=false;
++   SWEET_LOG_INFO("SWEET MDSS RSC: TCS_USE_OK returned; CLK state retained\n");
++  }
+   if (!fNoCTarget.registerPeak) {
+    IOReturn rc=releaseLocalClocks(fNoCClockToken);
+    if (rc!=kIOReturnSuccess) { finishNoC(rc,fNoCTouched); return; }
+@@ -403,6 +715,17 @@
+   finishNoC(kIOReturnTimeout,true,"group-deadline"); return;
+  }
+  uint32_t base=fNoCTCS*NStride, bit=1u<<fNoCTCS;
++ if (!fNoCExecuting && !fNoCOp && !fNoCWriteIssued) {
++  /* Drain the previous GIC EOI before reusing its slot/generation. */
++  vm_offset_t gic=fMaps[11]->getVirtualAddress();
++  if ((dp_rd(gic,0)&(1u<<31)) || (dp_rd(gic,0x314)&2u)) { fNoCTimer->setTimeoutUS(100); return; }
++  if (dp_rd(gic,0x214)&2u) {
++   if (dp_rd(fNoCTCSBase,NIRQStatus)&dp_rd(fNoCTCSBase,NIRQEnable)) { finishNoC(kIOReturnBusy,true); return; }
++   dp_wr(gic,0x294,2);
++   if (dp_rd(gic,0x214)&2u) { fNoCTimer->setTimeoutUS(100); return; }
++  }
++  __atomic_store_n(&fNoCIRQPosted,0u,__ATOMIC_RELEASE);
++ }
+  while (fNoCOp<fNoCOps) {
+   NoCOperation &op=fNoCOperations[fNoCOp];
+   if (!fNoCWriteIssued) {
+@@ -412,7 +735,7 @@
+      uint32_t enabled=dp_rd(fNoCTCSBase,t*NStride+NEnable);
+      if (enabled&~((1u<<fNoCNCPT)-1u)) { finishNoC(kIOReturnIOError,true); return; }
+      uint32_t idle=dp_rd(fNoCTCSBase,t*NStride+NStatus);
+-     if (t==fNoCTCS && (enabled || dp_rd(fNoCTCSBase,base+NControl) || dp_rd(fNoCTCSBase,base+NWait) ||
++     if (t==fNoCTCS && (enabled || (dp_rd(fNoCTCSBase,base+NControl)&~((fNoCSlotsOwned&bit) ? NTrigger : 0u))!=((fNoCSlotsOwned&bit) ? NAMC : 0u) || dp_rd(fNoCTCSBase,base+NWait) ||
+          !idle || idle==~0u || (dp_rd(fNoCTCSBase,NIRQStatus)&bit))) { finishNoC(kIOReturnBusy,true); return; }
+      for (unsigned c=0;c<fNoCNCPT;++c) if (enabled&(1u<<c))
+       for (unsigned r=1;r<SweetDisplayBCMCount;++r)
+@@ -422,7 +745,7 @@
+    if (op.offset==NIRQEnable) {
+     uint32_t current=dp_rd(fNoCTCSBase,NIRQEnable);
+     if (current==~0u) { finishNoC(kIOReturnIOError,true); return; }
+-    op.value=(current&~bit)|(fNoCExecuting ? fNoCSavedIRQ&bit : 0u);
++    op.value=fNoCOp ? current|bit : current&~bit;
+    }
+    fNoCTouched=true; dp_wr(fNoCTCSBase,op.offset,op.value);
+    fNoCWriteDeadline=now+1000000ULL; fNoCWriteIssued=true;
+@@ -439,12 +762,20 @@
+   ++fNoCOp; fNoCWriteIssued=false;
+  }
+  if (!fNoCExecuting) {
+-  dp_wr(fNoCTCSBase,base+NControl,NAMC|NTrigger); fNoCExecuting=true;
++  uint32_t irq=dp_rd(fNoCTCSBase,NIRQStatus), enabled=dp_rd(fNoCTCSBase,NIRQEnable);
++  if (irq==~0u || enabled==~0u || (irq&enabled)) { finishNoC(kIOReturnIOError,true,"stale-before-trigger"); return; }
++  fNoCIRQObserved=false; fNoCExecuting=true;
++  fNoCOp=fNoCOps=0;
++  __atomic_store_n(&fNoCIRQArmed,1u,__ATOMIC_RELEASE);
++  dp_wr(fNoCTCSBase,base+NControl,NAMC|NTrigger);
++  /* Level IRQ latched during trigger must survive until GIC unmask. */
++  dp_wr(fMaps[11]->getVirtualAddress(),0x114,2);
+   fNoCEvidence.triggerAt=scanout_now(); /* MMIO write returned, not an ACK. */
+   captureNoCRegisters(fNoCEvidence.trigger);
+-  fNoCOp=fNoCOps=0; fNoCTimer->setTimeoutUS(100); return;
++  waitNoCCompletion(); return;
+  }
+  if (fNoCOps) {
++  fNoCSlotsOwned|=bit;
+   for (unsigned c=0;c<fNoCGroup;++c) {
+    unsigned r=fNoCOrder[fNoCCursor+c];
+    fNoCApplied[r]=fNoCValues[r]; fNoCOwned|=1u<<r; status.acknowledged|=1u<<r;
+@@ -455,6 +786,7 @@
+   }
+   fNoCTimer->setTimeoutUS(1); return;
+  }
++ if (!fNoCIRQObserved) { waitNoCCompletion(); return; }
+  uint32_t irq=dp_rd(fNoCTCSBase,NIRQStatus), idle=dp_rd(fNoCTCSBase,base+NStatus);
+  bool complete=true;
+  for (unsigned c=0;c<fNoCGroup;++c) {
+@@ -473,14 +805,18 @@
+  fNoCEvidence.seenIRQ|=irq!=~0u && (irq&bit)!=0; fNoCEvidence.lastComplete=complete;
+  fNoCProgress|=idle==0 || !complete;
+  if (irq==~0u || idle==~0u) { finishNoC(kIOReturnIOError,true,"invalid-status"); return; }
+- if (!idle || !complete || !((irq&bit)||fNoCProgress)) { fNoCTimer->setTimeoutUS(100); return; }
+- noCAdd(base+NControl,NAMC); noCAdd(base+NControl,0);
++ if (!idle || !complete || !(irq&bit)) { finishNoC(kIOReturnIOError,true,"incomplete-irq"); return; }
++ SWEET_LOG_INFO("SWEET MDSS NOC IRQ: fresh ACTIVE completion tcs=%u commands=%u entries=%u; cleanup pending\n",
++     fNoCTCS,fNoCGroup,__atomic_load_n(&fNoCIRQEntries,__ATOMIC_ACQUIRE));
++ /* Lineage ACTIVE completion preserves control (AMC + trigger). The next
++  * reuse clears trigger, clears AMC, then sets AMC and triggers again. */
+  noCAdd(base+NEnable,0); noCAdd(base+NWait,0); noCAdd(NIRQClear,bit,true);
+- noCAdd(NIRQEnable,0); fNoCTimer->setTimeoutUS(1);
++ fNoCTimer->setTimeoutUS(1);
+ }
+ 
+ void SweetMDSS::finishNoC(IOReturn result,bool uncertain,const char *reason)
+ {
++ quietNoCIRQ();
+  NoCLease &lease=fNoCLeases[fNoCSlot];
+  lease.status.result=result; lease.status.uncertain=uncertain;
+  if (result==kIOReturnSuccess) {
+@@ -505,6 +841,7 @@
+ }
+ void SweetMDSS::stopNoC(void)
+ {
++ quietNoCIRQ();
+  if (noCBusy()) finishNoC(kIOReturnAborted,fNoCTouched);
+  if (fNoCTimer) fNoCTimer->cancelTimeout();
+  /* No implicit CN0/BCM withdrawal or clock/domain collapse during teardown. */
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1899,6 +1899,10 @@
+ 			sweet_handled = sweet_rpmh_irq(intid);
+ 		}
+ 		if (!sweet_handled) {
++			extern bool sweet_mdss_noc_irq(unsigned int intid);
++			sweet_handled = sweet_mdss_noc_irq(intid);
++		}
++		if (!sweet_handled) {
+ 			extern bool sweet_mdss_irq(unsigned int intid);
+ 			sweet_handled = sweet_mdss_irq(intid);
+ 		}

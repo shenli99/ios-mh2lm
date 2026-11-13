@@ -5,6 +5,17 @@
 0215（`2ffc1a4`）只增加取证，不改变下述工作路径。
 Lineage 一侧是源码所定义的路径，未取得本次同机 Android 寄存器轨迹；不能把它写成实机测量结果。
 
+## 0216 实施进展（同日后续）
+
+以下原对照表记录 a27/0215 的状态。用户授权补缺后，0216 已实现当前 CLK/ACTIVE 路径的
+RSC v2 初始化、CLK 状态交接、TCS_USE_OK 握手、INTID161 真实完成事件，以及 Lineage
+ACTIVE 的控制寄存器保留/槽位复用流程；`+0xd0` 生产日志已改正为 error-irq-status。
+65 项初始化写入与执行 Lineage 实际函数所得结果逐序一致，相关本地回归通过，尚待实机。
+
+这不等于补齐了完整 mode2 进出、CMD solver/VSYNC/sleep-wake、continuous-splash PHY/host
+路径或独立 MDP/SMMU 配置。当前先验证资源接管能否越过 NoC，再继续对齐后续阶段。
+详见 [0216 实现与验证](PANEL-RSC-TAKEOVER.md)。
+
 ## 首次资源接管的缺项复核（同日补充）
 
 再次逐项核对到 TCS 提交/完成，明确存在下面的缺项。需要区分“XNU 没有实现该能力”

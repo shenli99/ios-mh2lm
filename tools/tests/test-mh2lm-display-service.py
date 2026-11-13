@@ -293,10 +293,14 @@ static bool irqMMIO=false,injectLateFrame=false,dropSourceWrite=false,keepPPDone
 static uint32_t rpmhDrop=~0u;static bool rpmhKeepIRQ=false;
 static void writeReg(uintptr_t b,uint32_t o,uint32_t v){trace.push_back({true,b+o,v});
  if(b==0x17a00000){
+  if(o==0x114){regs[b+o]|=v;return;}
+  if(o==0x194){regs[b+0x114]&=~v;return;}
+  if(o==0x294){regs[b+0x214]&=~v;return;}
   if(o==0x104){regs[b+o]|=v;return;}
   if(o==0x184){regs[b+0x104]&=~v;return;}
   if(o==0x284){regs[b+0x204]&=~v;return;}
  }
+ if(b==0x0af30000&&o==0){regs[b]=(regs[b]&2u)|(v&~2u);return;}
  if(b==0x18220d00||b==0x0af21c00){if(o==rpmhDrop)return;if(o==8){if(!rpmhKeepIRQ)regs[b+4]&=~v;return;}}
  if(irqMMIO&&b==0x0ae00000&&o==0x1018){if(!keepPPDone)regs[b+0x1014]&=~v;return;}
  if(dropSourceWrite&&b==bases[2]&&o==0x14)return;

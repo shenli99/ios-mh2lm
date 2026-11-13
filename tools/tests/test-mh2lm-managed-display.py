@@ -114,7 +114,7 @@ int main(){
   if(fault==0){for(unsigned j=0;j<1200&&h.m->fManagedState!=SweetMDSS::ManagedFault;++j)h.step(false);}
   if(fault==1){while(h.m->fManagedRail<1)h.step();rpmhDrop=0x34;}
   if(fault==2){h.until(SweetMDSS::ManagedARC);rpmhDrop=0x38;}
-  if(fault==3){h.until(SweetMDSS::ManagedNoC);regs[DW+4]=1;}
+  if(fault==3){h.until(SweetMDSS::ManagedNoC);regs[DW+4]=~0u;}
   if(fault==4){h.until(SweetMDSS::ManagedClock);regs[bases[1]+0x209c]^=1;}
   if(fault==5){while(h.m->fManagedRail<1)h.step();regs[bases[6]+8]=2;}
   if(fault==6){h.until(SweetMDSS::ManagedNoC);h.step();h.m->stop(h.d);}
