@@ -1,11 +1,32 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 
+## Agent handoff / active work (2026-11-13, audit wake against Lineage before more diagnostics)
+
+**CURRENT：用户要求先比较唤醒流程，暂缓上一段0219 push/云编译/诊断实测安排；本轮只审计和更新文档，没有新增驱动修改。**
+比较Lineage@2e897dd与actual0121a29/0218的PV普通OFF→ON；0219只打印，硬件路径相同。
+直接抽取DTS与SweetPanelProfile数组逐字节比对：ON694bytes/17条、OFF35bytes/4条完全相等；
+ON末尾29→11→150ms，OFF51=0后90ms、10后150ms；reset高10/低2/高10+settle5ms相同。
+关键差异：retained2 OFF后reset高/四rails+host/PHY/PLL/clock/NoC全保留；ON仅DDIC reset+ON表，没对应Lineage正常OFF/ON的reset低/供电请求周期、host关闭/配置/soft reset和ULPS/clamp/clock恢复状态机。
+PV启用LP11/suspendULPS/allowPHYpoweroff，Lineage不能简化为每次完整PHYreset；v4 PHY有ULPS ops，正常host disable硬件分支可走。
+Lineage dsi_display_wake_up是空函数；普通传输统一FETCH_MEMORY/GEM/IOVA、200ms CMD_DMA_DONE；XNU短包FIFO/长包物理DMA+固定CB2，DMA_DONE+idle轮询。
+ON第3/6/7/10条>64-byte编码，最大payload149；a29 OFF全FIFO及MDP像素DMA不证明DSI命令DMA已经工作。
+Lineage通过DRM管线/flush/kickoff恢复；autorefresh本来就不发CTL_START，不能据XNU未写START简单判漏。
+PV无DSC/PPS、无PRE/POST表、无first-frame亮度flag；不能照搬其他面板规则，亮度先于首帧不是已证实错序。
+额外强制检查仍有SweetPanelPins input/latch/pinctrl、1ms跟随/100ms总期限；0218没有覆盖该provider，a29已reset complete说明本次已通过。
+XNU还额外依赖触摸token/fresh pixel完成和固定SMMU/ownership合同；这些与配置回显不同，不能一起删掉。
+**NEXT：以docs/PANEL-LINEAGE-PATH-COMPARISON.md顶部a29专项为依据，先对齐OFF/ON状态配对和host/LP11/ULPS/供电reset顺序，再决定后续实机验证。**
+不能只切已有4/5/6档就称为Lineage，也不能把源码差异直接当作a29复位后记录中断的根因。
+0219提交d4ffb3d保留，不撤销、不增加诊断。本轮无新内核/镜像/设备操作，不重跑驱动回归（无生产变更）。
+对照字节/命令/延时证据：workspace scratch/wake-lineage-a29/command-comparison.json；PLAN、BUILD-GUIDE、a29及显示计划已同步。
+以下“立即push/云编译a30”NEXT是本次用户纠正前的历史，不要自动执行。
+
+
 ## Agent handoff / active work (2026-11-13, a29 desktop works; 0219 wake evidence ready)
 
 **CURRENT：用户实测0121a29 retained进入桌面且画面正常；首次完整接管成功。OFF完成，ON在pin复位完成后无后续日志；根因未定。**
 本段替代下方“待a29实机/完整接管前暂停”的旧交接；本轮0219仅补诊断，不得宣称已修复黑屏。
-实现与实测记录提交 **d4ffb3d**（d4ffb3d），用户push最新main即可包含0219。
+实现与实测记录提交 **d4ffb3d**，用户push最新main即可包含0219。
 USB logs/live-0121a29-abi608-panel-retained.txt：300909bytes/3728行，SHA256=9d285907d505db553ee2ea30c85d9c12b3f72178ec1331420debcda8e96068a9。
 1981新DMA A=c3be4000/fresh PP_DONE100/frame925/flush0，1987touch verified，1988takeover complete，1989HANDOFF active。
 3642 RD_PTR约59.9Hz/dropped0；3706OFF begin，3724四条FIFO命令fresh DMA_DONE+idle，3725OFF complete/票保留。

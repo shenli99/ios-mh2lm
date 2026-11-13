@@ -1,9 +1,97 @@
 # LG G8X：Lineage 与当前 XNU 的显示流程和硬件控制对照
 
 2026-11-13。比较对象是 Lineage `android_kernel_lge_sm8150` 的
-`2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`，以及实际 a27 源码/retained 参数。
-0215（`2ffc1a4`）只增加取证，不改变下述工作路径。
+`2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`。顶部新增专项使用实际a29源码/retained参数；
+后半保留原a27/0215（`2ffc1a4`）首次接管审计作为历史。
 Lineage 一侧是源码所定义的路径，未取得本次同机 Android 寄存器轨迹；不能把它写成实机测量结果。
+
+## a29 息屏/唤醒专项对照（当前，以此为准）
+
+用户要求先比较流程，**暂缓0219云编译/下一轮诊断实测**。本节比较实际0121a29/0218源码与上述Lineage提交，
+聚焦已选定的 PV / R66456A 普通 OFF→ON。0219只加打印，下面的硬件流程与它相同。
+不把 continuous splash 首次接管、AOD 的 LP1/LP2→NOLP、ESD recovery、普通 OFF→ON 混作一条路径。
+以下均为源码比较；没有本次同机Lineage实测寄存器轨迹，差异本身不是黑屏根因证明。
+a29正常桌面和HANDOFF已实机确认，故下文a27“尚未走到PHY/新DMA”等为历史。
+
+### 先核对具体面板与命令
+
+PV DTS 和 common panel override 定义：四lane RGB888 command mode、1080×2340、60Hz、DSI0/PHY0；
+`lp11-init`、`ulps-enabled`、`suspend-ulps-enabled`、`panel-allow-phy-poweroff`、
+`lge,use-labibb`、`lge,reset-after-ddvd` 均启用。LG解析器还会按 lane0-state 设置lp11_init，此处仍为true。
+本PV节点未配置`lge,incell-panel`、额外panel-pins、压缩/DSC、pre/post ON/OFF命令、`qcom,bl-update-flag`。
+因此不能套用其他LG OLED/DSC面板的PPS、AOD退出表或“亮度必须等首帧”的规则。
+
+直接从Lineage DTS抽取字节，与a29 `SweetPanelProfile.h` 的PV数组比较：
+
+| 项目 | 两边实际相同的内容 |
+|---|---|
+| ON表 | 694 bytes / 17条，LP模式，整表逐字节相等；末尾`0x29 → 0x11 → 等150ms` |
+| OFF表 | 35 bytes / 4条，LP模式，`B0 03 → 51 00 00/等90ms → 28 → 10/等150ms`，逐字节相等 |
+| reset脉冲 | 高10ms→低2ms→高10ms；LG额外settle5ms，XNU也有5ms |
+| 命令格式 | 此ON/OFF每条last=1、VC0、不请求ACK，均在XNU已有编码支持范围；没有为适配FIFO拆包 |
+| DSC/PPS | PV没有压缩配置，Lineage的条件PPS分支不适用；不能把XNU没发PPS算成当前缺项 |
+| PRE/POST命令 | 普通框架有这些阶段，但此PV未定义相应命令；不能说漏发了不存在的表 |
+
+ON的第3/6/7/10条编码长度超过64-byte FIFO容量，最大payload149 bytes。
+对照脚本输出在workspace `scratch/wake-lineage-a29/command-comparison.json`，
+ON SHA256=`902b3fd5b869e6304df3c9459a55b6c6da0afdc8162126cc2d4e6086b6c24a5f`，
+OFF SHA256=`8b0def2d5a08f9534d8c9efdbbdbbba584387d1cfaecf9bdff50a3c0d71a5b95`。
+
+### 外层OFF/ON状态机没有对齐
+
+| 环节 | Lineage普通OFF/ON | a29 retained（lifecycle2） | 差异的含义 |
+|---|---|---|---|
+| OFF后引脚/面板供电 | OFF表之后，LG unprepare按lp11_init执行reset_off；普通full-power分支将reset拉低、切suspend pinctrl；power_off撤销panel regulator请求 | OFF表后完成，reset保持高，面板VDDI/VPNL票一直保留 | 我们执行了DDIC sleep-in，却没有建立Lineage的OFF引脚/供电状态；有reset脉冲不等于两边整个reset生命周期相同 |
+| host与链路关闭 | disable关闭command timing engine；unprepare关闭host、撤LINK/CORE请求、deinit控制器并配置ISR；PHY的实际保留/恢复受ULPS-suspend和时钟回调控制 | 只停MDP的TE/autorefresh/RD_PTR，host command engine/PHY/PLL/时钟保持；HostReady/LinkReady延续 | retained是一条保留host的恢复路径，不能称为Lineage普通OFF/ON |
+| 唤醒到LP11与reset | pre_prepare激活pinctrl，取得panel regulator请求；CORE上电/控制器和PHY恢复、HOST enable、LINK打开并处理ULPS退出；display soft reset后，panel prepare才执行DDIC reset（LP11分支） | 票与host/PHY已经常开；检查资源/MDP与DSI空闲后直接DDIC reset，再准备ON表 | XNU没有对应的ULPS/clamp/LP11恢复状态机；DSI DMA/MDP idle也不等于显式确认lane的LP11/ULPS状态 |
+| 面板电源次序 | reset-after-ddvd使panel供电请求在DDIC reset前完成；供电表VDDI有20ms post-on，LG前后各有适用5ms等待 | retained没有撤票，因此唤醒不重新投票/不执行供电恢复延时 | 不能孤立称为“漏20ms”：票没撤与撤了再恢复是两条不同路径；也不能把regulator撤票等同实测物理断电 |
+| ON后host | dsi_panel_enable发送完整ON；display_enable建立command timing engine状态；通用host_transfer还会按每次传输引用使能command engine | ON之前command engine一直保持使能；ON后没有相应host重新enable阶段 | 与前面的host保留策略相连，是流程差异；不能只照抄一个reset调用解决 |
+| RSC/带宽/时钟 | DRM、clock manager和RSC管理动态请求及sleep/wake/工作模式 | retained保留ARC Turbo、全部clock/NoC/rails；现有RSC只建立当前CLK/ACTIVE路径 | 当前策略更接近常开资源；既有初始化/ACK成功不等于完整低功耗状态机已实现 |
+
+这里的Lineage不是“每次必定把PHY全部reset再开”：PV启用了suspend-ULPS。
+`dsi_display_prepare()` 在 `ulps_suspend_enabled && ulps_enabled` 时跳过普通PHY reset/enable；
+`dsi_display_ctrl_init()` 也会避免重复配置已经由clock callback恢复的控制器。
+实际clkon callback负责必要的controller setup、PHY idle_on、clamp解除、resync FIFO、ULPS退出。
+7nm v4 PHY在`dsi_catalog.c:265`提供ulps_request，因此host_disable不走“无PHY ULPS ops时只更新软件状态”的特殊分支。
+同样，`dsi_display_wake_up()` 在此版本是空函数返回0，不能把调用这个函数本身说成补齐了唤醒。
+
+### 命令传输、恢复扫描与额外检查
+
+| 项目 | Lineage | 当前XNU | 判断 |
+|---|---|---|---|
+| 命令缓冲区 | 普通host_transfer使用FETCH_MEMORY，短包也走非安全GEM/IOVA；首次需要时分配4KiB，后续复用 | ≤64 bytes用FIFO，其余用已prepare的物理连续缓冲；固定继承SMMU CB2 bypass；ON准入先准备整表所需DMA | 路径确有差异。正常Lineage此前的亮度/OFF也可已使用DMA；XNU成功OFF全是FIFO，首次像素DMA来自MDP，不验证DSI命令DMA |
+| DSI命令完成 | CMD_DMA_DONE中断/completion，200ms；IRQ未到但真实done status存在时有读状态补偿 | timer读取fresh DMA_DONE并同时要求DMA/MDP idle，200ms，命令延时异步执行 | 调度/完成通道不同；两边都依赖真实done，不能用配置回显当完成。没有证据说明当前需删除DMA完成检查 |
+| 恢复像素 | DRM重新提交管线/flush/kickoff，配置tearcheck；autorefresh路径本来就不发CTL_START，其他路径发start | 沿用固定MDP配置与原物理源，重开IRQ，恢复保存的autorefresh/TE，再等flush0+fresh PP_DONE+RD_PTR | XNU恢复的是已有扫描管线，尚不是DRM重新配置提交。不能仅因没写CTL_START就断言遗漏，Lineage自身有autorefresh分支 |
+| 亮度 | 普通bridge enable解除blank并更新背光；只有指定bl-update-flag的面板才先等TX_COMPLETE。本PV无该flag | 完整ON结束后先恢复最新0x51，再恢复扫描 | 时机受不同框架安排；**不能说Lineage对本PV强制先出一帧再开亮度**。大端12bit亮度格式相同 |
+| touch协作 | LG reset/blank通知touch，触摸驱动自行排队resume/init | reset前worker/IRQ/HID必须quiesced；新像素完成后才TCM app/format校验并恢复 | XNU有更强的跨provider完成依赖，Lineage不是用同样的token/PP_DONE门槛 |
+| GPIO复位验证 | gpio_direction_output返回值检查，然后gpio_set_value+usleep；未逐边沿要求独立input回读 | latch/pinctrl/owner与reset input均强制检查，input需在1ms内跟随，reset操作整体100ms | **0218没有把SweetPanelPins的这些额外强制检查改成打印**。不过a29已经打印reset complete，它们本次已通过，不是已知报错点 |
+| 地址空间/资源检查 | 由GEM/IOMMU、clock/regulator/DRM的软件对象管理 | 每轮验证touch/provider票据，以及固定SMMU/geometry等继承合同 | 不应把这些所有权/地址路由合同与普通寄存器配置回显等同，也不能据“Lineage没做同样memcmp”直接删除 |
+| 错误处理 | OFF发送失败会警告但继续关闭，源码理由是后续enable会完整reset控制器 | 任一生命周期失败会poison、保票、禁止自动恢复 | 依赖的恢复能力不同。当前OFF成功，不能用它解释本次黑屏；尚无完整恢复能力时直接复制忽略错误不成立 |
+
+### 后续按流程对齐的顺序
+
+优先补齐的是OFF/ON的**状态配对**：选择明确的host/PHY/ULPS策略，确定OFF时reset低与panel票的状态，
+让ON的供电/LP11/host恢复→DDIC reset→同源ON表→扫描提交彼此对应。
+不能只把当前模式从2切到已有4/5/6就称为Lineage：这些档分别增加link/data/panel票周期，
+仍没有完整的ULPS/clamp/RSC/DRM状态机，且尚未做本轮实机验证。
+也不应照搬其他DSC/AOD面板的PPS/NOLP，或重排已与PV逐字节相等的ON/OFF表。
+
+0219诊断提交d4ffb3d保留，本轮不新增生产补丁、不要求立即push/云编译、不操作设备。
+目前尚不能从源码差异判定a29复位之后无日志的具体根因；特别是host/扫描差异不自动解释“为何没有ON admitted”。
+本轮完成的是流程审计与记录，后续以本节为实现对照依据。
+
+具体来源（Lineage目录相对路径，行号对应2e897dd）：
+
+- `arch/arm64/boot/dts/lge/sm8150_common/settings_panel/dsi-panel-r66456-pv-tianmamd-fhd-cmd.dtsi:34,40,393,414`：reset、LP11/ULPS和同源ON/OFF。
+- `arch/arm64/boot/dts/lge/sm8150_common/sm8150_common-panel.dtsi:37,533`：VDDI/VPNL供电、PV override。
+- `drivers/gpu/drm/msm/lge/lge_dsi_panel.c:180,689,778,837,881,981,1014,1047,1104,1134,1675`：完整电源条件、reset、LP11与touch通知。
+- `drivers/gpu/drm/msm/dsi-staging/dsi_display.c:519,2589,2884,2985,3388,3466,3610,7286,7791,8031,8092`：DMA、空wake_up、ULPS/clamp/clock与正常OFF/ON。
+- `drivers/gpu/drm/msm/dsi-staging/dsi_panel.c:525,2342,4383,4454`：发送与延时、亮度flag、ON/OFF错误处理。
+- `drivers/gpu/drm/msm/dsi-staging/dsi_ctrl.c:41,1088,1156,1305`：FETCH_MEMORY/FIFO选择与200ms中断/状态完成。
+- `drivers/gpu/drm/msm/sde/sde_encoder_phys_cmd.c:1107,1629,1677`：TE、autorefresh/CTL_START分支。
+- `drivers/gpu/drm/msm/sde/sde_connector.c:719`；`drivers/input/touchscreen/lge/touch_core.c:940`：亮度和触摸通知。
+- XNU：`scratch/artifact-0121a29/actual/xnu/iokit/Kernel/arm/` 的 `SweetMDSSLifecycle.inc:298,368,436,449,504`、
+  `SweetMDSSDSI.inc:12,56,214`、`SweetMDSSHost.inc:111`、`SweetPanelPins.cpp:162`；参数 `sweetpanellifecycle=2`。
 
 ## 0218 配置回读规则（同日后续，以此为准）
 
@@ -12,7 +100,7 @@ scanout 和休眠/恢复，将已审计的额外配置相等/快照检查改为 
 Lineage 本身的三个 CONTROL 同步写、busy/UPDATE/CLK_OFF/REFGEN/LOCK、真实 IRQ 和命令/像素完成保留。
 详细源码依据、仍保留的继承合同和本地验证见 [0218 配置观察](PANEL-LINEAGE-CONFIG-OBSERVATION.md)。
 下方 a27/0215 表格为历史；不能继续把其中“无 RSC 初始化”等描述当作当前源码状态。
-当前仍待新内核实机验证，也仍未实现整套 Lineage 的状态机/continuous splash 路径。
+a29已实机完成首次显示接管；仍未实现整套 Lineage 的休眠/唤醒状态机及continuous splash路径。
 
 ## 0216 实施进展（同日后续）
 

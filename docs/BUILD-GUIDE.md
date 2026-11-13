@@ -29,7 +29,8 @@ boot.img（Android header v1, page 2048）
 已实现功能在后续使用中暴露的独立问题统一记入 [Bug 台账](BUGS.md)，
 不自动作为当前主计划的新步骤或前置测试。
 
-a29已实机完成显示接管，当前排查息屏后唤醒。新产物须包含0219的 `SWEET PANEL WAKE:`、
+a29已实机完成显示接管，当前按用户要求先[对照Lineage唤醒流程](PANEL-LINEAGE-PATH-COMPARISON.md)，
+暂缓0219云编译/诊断实测。之后若构建含0219的诊断产物，须包含 `SWEET PANEL WAKE:`、
 `reset-proof-ready`、`dma-allocate-enter`（并保留0218 CONFIG）；打包门会拒绝旧a29。
 沿原 ABI608/ADT/retained 参数打包，详见 [实测与下一轮取证](PANEL-D1-0121A29.md)。
 
