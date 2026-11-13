@@ -70,4 +70,5 @@ Pins告警1171→1171。Lineage软复位按其保留setup、恢复clock/control�
 **下一步：用户push最新main并云编译，下载新kernel/buildtree（建议0121a30）；agent核对含0219+0220后，
 沿ABI608、原ADT/retained参数打包。** 进入桌面后先做一次OFF/ON，保留USB完整日志；
 先看ULPS/供电/soft reset/ON表，再看flush与fresh像素/触摸完成。不要求重测a29。
-当前无新云端内核、boot或本轮实机结果；a29最后实测仍是桌面正常、息屏不能唤醒，根因尚未确认。
+2026-11-14补充：[0121a30内核和ABI608镜像](PANEL-D1-0121A30.md)已核对就绪，下一步直接实测；
+a29仍是最后实测，根因尚未确认。

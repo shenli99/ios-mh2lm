@@ -29,12 +29,11 @@ boot.img（Android header v1, page 2048）
 已实现功能在后续使用中暴露的独立问题统一记入 [Bug 台账](BUGS.md)，
 不自动作为当前主计划的新步骤或前置测试。
 
-a29已实机完成显示接管。用户授权后，已实现[0220 Lineage息屏/唤醒对齐](PANEL-LINEAGE-SUSPEND-RESUME.md)，
-本地验证通过；下一轮应编译最新main，含0219+0220（建议标签0121a30）。
-打包门新增 `SWEET PANEL LINEAGE:`、`SweetPanelLineageSuspendULPS`、`SWEET PANEL PINS CONFIG:` 和
-`owned source recommitted/flush issued`，并保留WAKE/CONFIG；旧a29会被拒绝。
-沿ABI608/原ADT/retained参数打包；`panel-retained`是历史文件名，mode2现会撤销本panel票并恢复ULPS链路。
-当前没有这轮新kernel/boot或实机结果；下载后由agent核对打包，再做一次OFF/ON。
+[0121a30产物](PANEL-D1-0121A30.md)已核对包含0219+0220，并完成ABI608四档镜像打包与回读。
+78源码匹配0220验证树、114原CI source markers和222内核markers通过；全部ADT/启动参数与a29相同。
+下一步直接按a30文档启动`boot-16k-0121a30-abi608-panel-retained.img`，进入桌面后测一次OFF/ON并保留USB日志。
+`panel-retained`是历史文件名，mode2会执行[0220 Lineage息屏/唤醒流程](PANEL-LINEAGE-SUSPEND-RESUME.md)，
+撤销本panel票并恢复ULPS链路；菜单标题已更正。当前待实机，不需要再编同一内核或重测a29。
 
 ## 1. 写补丁（agent）
 

@@ -512,7 +512,7 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
   make_profile panel-identity "LG G8X - XNU live ABL panel selection, metadata only (${LABEL})" \
    "$PANEL_ARGS sweetfbpower=0 sweetmdssirq=0 sweetfbvsync=0 sweetfbown=0 sweetdsi=0 sweetdisplayresources=1 sweetdisplayclocks=0 sweetdisplaycore=0 sweetdisplaymanaged=0 sweetdsihost=0 sweetdsilink=0 sweetpanelpins=0 sweettouchpanel=0 sweetpanellifecycle=0" "$TMPDIR/identity.adt"
   PANEL_ARGS="$PANEL_ARGS sweetfbpower=1 sweetmdssirq=2 sweetfbvsync=1 sweetfbown=2 sweetdsi=1 sweetdisplayresources=2 sweetdisplayclocks=1 sweetdisplaycore=2 sweetdisplaymanaged=1 sweetdsihost=1 sweetdsilink=2 sweetpanelpins=2 sweettouchpanel=2"
-  make_profile panel-retained "LG G8X - XNU full panel reset, all supply votes held (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=2"
+  make_profile panel-retained "LG G8X - XNU panel sleep and wake (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=2"
   make_profile panel-combined "LG G8X - XNU DATA and link parking, supply votes held (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=5"
   make_profile panel-supply "LG G8X - XNU panel-only vote withdrawal and restore (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=6"
   printf 'kernel SHA256: %s\ncreated identity/retained/combined/supply profiles for %s; inspect live identity before vendor reset/supply tests; no shared L3/L5 withdrawal\n' "$KERNEL_SHA256" "$LABEL"

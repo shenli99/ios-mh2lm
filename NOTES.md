@@ -1,6 +1,27 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 
+## Agent handoff / active work (2026-11-14, 0121a30 artifacts and ABI608 wake test ready)
+
+**CURRENT：用户已下载0121a30；核对含0219+0220并完成ABI608四档打包/回读，待retained一次OFF/ON实测。**
+本段替代下方“待push/云编译/无新产物”的NEXT。0220实现提交9244ec1；本轮无驱动修改或实机结果。
+78源码与scratch/framebuffer-0220/verify逐字节一致；相比a29仅0219+0220预期8份源码变化。
+原114项CI source markers、222内核markers通过；WAKE/LINEAGE/ULPS/PINS CONFIG/owned recommit齐备。
+内核17775352bytes，SHA256=ccf487de8262681d1e0b9d8ace58274d553ed76af8bf6e935eda90c45fa88315；包内SHA256SUMS匹配，ARM64 subtype0。
+没有独立CI run ID/完整build log，未核对云端提交元数据和全量告警。
+四档boot header/FAT kernel+ADT+TOML回读一致；ABI608固件/BootShim/两个追加DTB保持，全部ADT和args与a29相同。
+retained605/607bytes，display161/apps37保持，identity最小ADT不变；panel-retained是历史文件名，mode2采用0220 panel票周期/ULPS恢复。
+菜单标题更正为panel sleep and wake，去掉错误的all supply votes held；仅标题修改，不需重编内核。
+**NEXT：用户先开USB接收，然后fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a30-abi608-panel-retained.img。**
+镜像35545088bytes，SHA256=4bda150aa066c3cd4bcdfe2c49f292f98d56e08f95b5a90a787b54713bf0714a。
+日志logs/live-0121a30-abi608-panel-retained.txt；进入桌面确认更新，息屏等约5秒再唤醒，无论结果继续接收至少30秒。
+按OFF表done→reset低/ULPS entry/link停/撤票→ON供电ACK/ULPS reentry/PLL/exit/host soft reset→DDIC/ON→owned flush/fresh pixels/touch核对。
+配置mismatch只观察；GPIOcommanded不是电压证明，票撤销不是物理断电。若USB缺关键记录再补持久日志。
+不需重测a29/identity，不切combined/supply；本地产物核对不等于已修复黑屏，a29仍是最后实测。
+底稿scratch/artifact-0121a30/，两份verify脚本和输出、source/changes/verification/boot-verification JSON、packaging.txt；详见docs/PANEL-D1-0121A30.md。
+未push/触发CI/操作设备；未改驱动/固件/ADT/args/CI，未重跑既有0220驱动回归；workspace PLAN/编译指南/显示计划已同步。以下交接为历史。
+
+
 ## Agent handoff / active work (2026-11-13, 0220 Lineage suspend/resume implemented)
 
 **CURRENT：用户已授权对齐息屏后状态、host/PHY、恢复画面、复位检查；0220已实现，本地验证通过，待云编译实测。**
