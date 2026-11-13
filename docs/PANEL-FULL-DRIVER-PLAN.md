@@ -1,9 +1,9 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
-**父链/halt已再次核对：** LG与Lineage均为+0x4004/bit0 enable/bit31 OFF、voted开启仍验halt；
-实际父链为PLL1 main→AHB root/8，当前实现有物理读回及typed权限检查。
-RCG safe-config启用序列和三路RSC时钟取得顺序存在参考差异，尚未证明是a23根因；
-见[父链/halt审计](PANEL-BRANCH7-PARENT-HALT-AUDIT.md)。本次未改内核，不新增编译要求。
+**最新语义核对：a25 OFF=0已满足Lineage的开启判据，直接阻塞为XNU额外enable读回门槛。**
+不能称硬件halt握手未返回；VOTED开启仍本地RMW并验halt，关闭延时10us，不是等待voted位或改走RPMh。
+LG/Lineage实际leaf调用链24场景ASan/UBSan通过；父链及准确寄存器地址、enable门槛影响范围见
+[父链/halt审计](PANEL-BRANCH7-PARENT-HALT-AUDIT.md)。本轮保留已就绪0213取证，无新生产补丁或额外云编译轮次。
 
 
 **当前执行点（2026-11-13）：a25已分析；0213局部状态/复位取证已提交7f4f55a，待用户push云编译。**

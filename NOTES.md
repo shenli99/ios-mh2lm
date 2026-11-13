@@ -3,11 +3,20 @@
 ## Agent handoff / active work (2026-11-13, a25 analyzed; 0213 local reset evidence ready)
 
 **CURRENT：a25 USB证据完整，立即及39次等待均未见enable；0213已提交7f4f55a并本地验证，待用户push云编译。**
+最新外部分析核对：a25 OFF=0已满足Lineage开启halt判据；直接阻塞为XNU额外enable1条件，不能称硬件握手未返回。
+BRANCH_VOTED是软件bit7策略，enable仍本地RMW并验halt，disable延时10us，不是等voted位或改走RPMh。
+动态提取LG/Lineage实际leaf enable/toggle/wait/disable/is_enabled，字节一致，24场景ASan/UBSan通过。
+新增tools/tests/audit-mh2lm-lineage-branch.py；不含CCF父递归/真实总线，不是新实机结果。
+外部分析地址需纠正：AHB CMD/CFG=af022bc/af022c0，MDSS GDSC=af03000；af06000是SPDM BCR。
+BCR=af04000/bit0，但a25无样本，reset最可能/必然使写失效均未证实。不能照抄外部地址或复位建议。
+enable门槛覆盖Clock worker/final、NoC和Link/Lifecycle knownMask；BOOT localClocksReady仅mask7f不含branch7。
+已审查单点删门槛不足：需连同请求/完成租约、继承票、共享引用及撤回语义评审；额外门槛是本地策略，非Linux要求。
+本轮保留0213取证选择，无新生产补丁；需要的是已经交付的同一次云编译。详细核对见PANEL-BRANCH7-PARENT-HALT-AUDIT.md。
 用户询问面板型号/手册；已复核docs/panel.md与Lineage@2e897dd（7份相关文件与LG字节一致）。
 实机既有ABL source2/profile4对应TIANMAMD PV、1080x2340@60；DTS明确DDIC r66456a，软件名R66456 MD cmd mode dsi panel。
 完整模组料号和物理DDIC读回尚无；旧文档Renesas品牌归属本次未独立确认。当前+0xaf04004属于SM8150 DISPCC，不是面板DSI寄存器。
 手册优先找SM8150/msmnile NON_GDSC_AHB_CBCR与RSCC_BCR语义，其次R66456A/R66456及天马模组规格。
-详见docs/PANEL-HARDWARE-MANUALS.md；本轮只核对文档，无新代码/编译增量，0213交接保持。
+详见docs/PANEL-HARDWARE-MANUALS.md；型号核对未改生产代码，本轮仅新增leaf离线审计，0213交接保持。
 logs/live-0121a25-abi608-panel-retained.txt为301264bytes/3942行，SHA=de38a819d1df09802a7bb292b16f356a4dd3949f889164ffd3c9679d41289fcb。
 1752–1769十次fresh apps IRQ/四LDO/ARC/CN0完成；1770core2成功，1771CN0 token7，1772branch7请求。
 1773首错branch-wait/+4004；1774WRITE before0/want1；1775SAMPLE valid1/current1/CBCR0/enable0/OFF0/CFG40f/source4。

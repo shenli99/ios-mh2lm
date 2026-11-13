@@ -1,6 +1,6 @@
-# 面板接管问题归因汇总（截至 0121a24）
+# 面板接管问题归因汇总（截至 0121a25）
 
-2026-11-12。当前在完整驱动计划 PD 阶段的 retained 首次接管，还没有完成新 DMA 接管。
+2026-11-13。当前在完整驱动计划 PD 阶段的 retained 首次接管，还没有完成新 DMA 接管。
 相同的“屏幕停在启动文字、USB和按键仍有活动”，先后由不同的依赖项失败引起。
 不能把几轮静帧认成一个硬件故障反复出现，也不能把修复某项前置说成整个驱动已完成。
 
@@ -17,14 +17,16 @@
 | a21通用NoC NotReady | 原日志没有细分clock lease、分支、wrapper、solver准入。0209只增加具体失败分支与软件上下文 | a22将首错缩小到branch7；诊断本身不是硬件修复 |
 | a22 RSC branch7被拒 | NON_GDSC_AHB是BRANCH_VOTED，原策略按独占halt及关闭态处理，且没对接core2已建立的PLL1 AHB父源。0210明确voted/halt语义，在实际coreReady和typed ARC/CN0凭据约束下取得自身票 | a23越过原准入并发出enable RMW；尚无Held，不能称RSC时钟获取成功 |
 | a23 RSC branch7开启等待超时 | 当时缺少超时出口/CBCR；0211补取证 | a24已取得具体分支和样本，见下一行；仍不能从owned0x80推断写后读回成功 |
-| a24 自身enable未读回 | branch-wait/current1、CBCR0/enable0/OFF0；整体期限还剩187.7ms，排除本轮overall超时。源码和实际内核store/屏障、LG/ClockDxe地址表一致 | **写入未保留原因仍未知。** 0212增加紧随写入的读回/物理翻译及原等待样本摘要，本地通过、待新编译；不能删除enable检查或宣称硬件故障已修 |
+| a24 自身enable未读回 | branch-wait/current1、CBCR0/enable0/OFF0；整体期限还剩187.7ms，排除本轮overall超时。源码和实际内核store/屏障、LG/ClockDxe地址表一致 | 0212增加写后立即读回/物理翻译及等待样本摘要；结果见a25 |
+| a25 enable门槛导致超时 | 正确PA下立即读回CBCR0，39次等待均未见enable或OFF置位；整体期限仍余188.3ms。**OFF0已满足Lineage开启检查，直接阻塞为XNU额外enable1条件** | enable读零的硬件原因仍未知，不能称已证实的halt握手失败。额外条件是本地策略差异，需连同最终/NoC/生命周期和租约语义评审；0213先补BCR和局部状态证据，已本地验证，待云编译 |
 
 原始材料：
 [ABI及HFS](BOOTARGS-ABI-0121A14.md)、[XO旁路](PANEL-D1-0121A15.md)、
 [ACV建模](PANEL-ACV-ENABLE-MASK.md)、[触摸就绪](PANEL-TOUCH-STARTUP-WAIT.md)、
 [RPMh超时快照](PANEL-RPMH-FIRST-VOTE-TIMEOUT.md)、[真实完成IRQ](PANEL-RPMH-COMPLETION-IRQ.md)、
 [NoC取证](PANEL-NOC-ADMISSION-DIAGNOSTICS.md)、[RSC投票](PANEL-RSC-CLOCK-VOTES.md)、
-[a23实测](PANEL-D1-0121A23.md)、[下一轮超时取证](PANEL-CLOCK-TIMEOUT-DIAGNOSTICS.md)。
+[a23实测](PANEL-D1-0121A23.md)、[超时取证](PANEL-CLOCK-TIMEOUT-DIAGNOSTICS.md)、
+[a25实测](PANEL-D1-0121A25.md)、[0213取证](PANEL-RSC-LOCAL-RESET-EVIDENCE.md)。
 各文档保留原日志行号、哈希和离线复现底稿，不以本汇总替代原证据。
 
 父链与halt的后续专项核对见[审计记录](PANEL-BRANCH7-PARENT-HALT-AUDIT.md)：
@@ -33,10 +35,10 @@
 
 ## 当前首错和连锁结果
 
-a23的先后关系是：
+a25的先后关系是：
 
 1. apps RPMh fresh完成，四LDO/ARC/CN0、core2成功，当前CN0 token7确认。
-2. RSC branch7发出enable，CLOCK token2在等待中Timeout，是本轮第一条ERROR。
+2. RSC branch7发出enable，CLOCK token2因enable未读回在等待中Timeout，是本轮第一条ERROR；OFF已为0。
 3. NoC查询到clock失败，返回NotReady；尚未进入display TCS命令组。
 4. managed/scanout/lifecycle/HANDOFF随之失败，保持资源不确定账本，拒绝新DMA；画面留在旧帧。
 5. 后续按键触发生命周期准入失败，是失败状态的延续，不是新的独立首错。
@@ -69,6 +71,8 @@ CB2 FSR=0x400审计WARN仍需保留，但后续已经进入managed，不能把�
   没有证据将它们归因到branch7 Timeout；HFS -34也不同于早期NULL写panic。
 - 长时息屏掉电与整机低功耗缺失另属大目标四，不把显示DCS息屏等同于整机休眠。
 
-目前没有完整接管成功的实机证据。a24已确定单分支等待时enable未读回；下一步用
-[0212](PANEL-CLOCK-WRITE-READBACK.md)区分写后立即读回与等待期间丢失，见[a24实测](PANEL-D1-0121A24.md#实测使能位未读回)。
-不通过延长期限、跳过校验或回退ABL掩盖失败。
+目前没有完整接管成功的实机证据。a25未观察到enable先置位后丢失；下一步执行已就绪的
+[0213](PANEL-RSC-LOCAL-RESET-EVIDENCE.md)，取得复位和core转换前后局部状态。
+复位未释放尚无样本支持；HALT/VOTED的完整leaf执行核对及本地额外门槛的评审范围见
+[语义审计](PANEL-BRANCH7-PARENT-HALT-AUDIT.md)。后续若调整完成语义，应统一处理租约和消费者检查，
+不能只改worker后便称完整接管已修复。

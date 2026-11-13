@@ -1,7 +1,77 @@
 # branch7：父时钟链和 halt 语义核对
 
-**后续a24已取得enable0/OFF0的当前样本；整体期限未到。** 0212继续核对写后读回/物理翻译/等待历史，
-见[实现与证据](PANEL-CLOCK-WRITE-READBACK.md)。以下为a23时点的父链/halt审计。
+**2026-11-13更新：a25的OFF已经为0；当前超时由XNU额外的enable读回条件触发，
+不能称为已证实的Linux halt握手超时。** [0213局部取证](PANEL-RSC-LOCAL-RESET-EVIDENCE.md)
+已经实现并验证，待用户云编译；本次不再追加一个内核诊断版本。
+
+## a25之后：核对外部分析与完整leaf调用链
+
+Lineage `2e897dddf49a4c3e85b2ff77fdf7c70f860398dd` 的实际调用链为
+`clk_branch2_enable → clk_branch_toggle → clk_enable_regmap → mb → clk_branch_wait`。
+`regmap_update_bits`提交bit0后，wait调用`clk_branch2_check_halt`；没有再次要求bit0为1。
+它检查当前电平，不要求先观察OFF=1再观察OFF=0。**CBCR0会直接通过这个开启检查。**
+`clk_is_enabled_regmap`是单独的操作，仍读取bit0；因此enable读回有诊断价值，
+但不能把我们附加的读回门槛称为Linux的完成判据，也不能因Linux返回成功就断言写入一定被硬件接受。
+
+`BRANCH_VOTED=BIT(7)`是软件策略标志，不是CBCR中的状态位。这个leaf依旧本地RMW，
+开启时检查halt，关闭时只延时10us，不等其他投票者的共享时钟关闭。
+它不表示“等待voted位置位”，也不表示“用RPMh替换本地enable写入”。
+ARC/CN0上游投票是另一层依赖。
+
+外部分析中的地址需改为：
+
+| 寄存器 | 本机物理地址 | 定义依据 |
+|---|---|---|
+| RSCC_BCR | `0x0af04000`，bit0 | dispcc-sm8150.c reset表 |
+| NON_GDSC_AHB CBCR | `0x0af04004`，enable bit0 / OFF bit31 | 同文件branch定义 |
+| AHB CMD_RCGR / CFG | `0x0af022bc` / `0x0af022c0` | 同文件ahb_clk_src；CFG为CMD+4 |
+| MDSS GDSC | `0x0af03000` | sm8150-gdsc.dtsi |
+
+`0x0af04150/4154`不是本机AHB root；`0x0af03000+0x3000`得到SPDM BCR所在的
+`0x0af06000`，不能作为MDSS GDSC读取。a25的source4是PLL1 main，不是GPLL0；
+CFG=0也不能普遍判为未配置，XO旁路存在合法零配置。
+
+a25没有BCR样本，`sde_rsc_clk_enable()`及其所在sde_rsc源码中未发现RSCC reset操作。
+因此“reset最可能未释放”以及“reset必然使enable写入被忽略”尚无本机证据。
+父源已经经过coreReady的PLL输出、频率、root与域检查；这不覆盖未知电气依赖，
+但也不能说父源根本没有被开启或核验。OFF0是状态位报告，不是独立的物理时钟测量。
+
+本次新增可复现核对：
+
+```sh
+python3 tools/tests/audit-mh2lm-lineage-branch.py \
+  ../lge-lineage-kernel ../android_kernel_lge_sm8150
+```
+
+脚本动态提取上述实际函数及branch2 disable/is_enabled，核对LG/Lineage内容字节一致，
+在mock regmap与时间接口上执行24场景，ASan/UBSan通过：HALT/VOTED的六种CBCR组合、
+延后OFF清除、update返回错误、四种关闭状态；检查RMW→屏障→状态读取顺序。
+CBCR0时enable返回0而is_enabled返回0；OFF1持续500次读后WARN/-EBUSY；
+VOTED disable不读halt，只延时10us。这是leaf函数执行验证，不含CCF父递归、真实总线或实机时钟。
+
+## enable门槛的影响与下一步选择
+
+当前软件门槛和硬件根因需分开处理。检查实际0213树后，影响范围为：
+
+| 代码 | enable检查覆盖范围 |
+|---|---|
+| Clock.inc | retain准入/是否写票、worker等待、最终校验；ownedMask在写前置位，仅表示保守账本 |
+| NoC.inc | noCClocksReady在访问RSC/TCS前复查branch7 enable/OFF和父权限 |
+| Link.inc / Lifecycle.inc | 遍历knownMask中非PHY分支，可能包含branch7 |
+| Clock.inc localClocksReady / Resources.inc managedRetainedResources | 当前只验证BOOT的DSI0 mask0x7f，不含branch7；不应全局替换这些位检查 |
+
+仅删除worker的enable条件会在最终校验或NoC准入被再次拒绝。
+若后续改为Linux式完成语义，需要同时定义已发出请求与已完成租约的区别、继承票、
+共享引用和最后一次撤回，并覆盖Held后enable消失的处理；不能用写前ownedMask直接宣称已完成。
+额外enable检查是我们的策略选择，**不是Linux硬件规范要求**；它本身属于待评审的实现差异。
+
+本轮选择先执行已就绪的0213，取得warm-entry / pre-write / timeout的BCR和局部状态，
+帮助判断是否存在复位或core转换相关变化，再选择局部控制修正或统一修改完成语义。
+不凭当前读零直接复位正在继承的RSC，也不混入未经验证的地址、顺序或RPMh替代操作。
+0213保持现有判据，所以仍可能在同一处失败；其目的只是补缺失证据，并非握手修复。
+用户push一次包含0213的代码即可，a25日志无需重提，文档/离线核对不增加另一次云编译。
+
+以下保留2026-11-12的a23时点审计。
 
 2026-11-12。用户要求先核对父依赖和状态语义，不为NoC/HANDOFF连锁报错另开修复。
 本次对照LG、Lineage及实际0211源码，未改变生产内核；0211仍用于取得a23缺失的现场读回。
