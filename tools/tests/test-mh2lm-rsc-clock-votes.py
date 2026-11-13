@@ -124,9 +124,10 @@ int main(){
   auto count=leafWrites();clockTick(h);
   assert(clockStatus(h,h.m->fNoCClockToken).state==SweetClockFailed&&leafWrites()==count);
   fault(h);}
- // Register readback and independent physical completion both matter.
+ // CLK_OFF and parent authority must still reject failed acquisition.
+ // Issued voted requests with enable0/OFF0 are covered by voted-halt-completion.
  for(unsigned bad=0;bad<4;++bad){Harness h;offLeaves();configReady(h);trace.clear();
-  if(bad==0)dropClockWrite=bases[1]+0x4004; // aggregate ON cannot mask lost own vote
+  if(bad==0){dropClockWrite=bases[1]+0x4004;regs[bases[1]+0x4004]|=0x80000000u;} // no readback and CLK_OFF
   if(bad==1){regs[bases[1]+0x4004]|=0x80000000u;} // own vote is not physical ON
   untilWrite(h,7);
   auto token=h.m->fNoCClockToken;assert(clockStatus(h,token).state==SweetClockPending);
@@ -140,13 +141,13 @@ int main(){
  }
  // Every branch must still be valid at final acquisition and while using RSC.
  for(unsigned bad=0;bad<3;++bad){Harness h;offLeaves();configReady(h);heldRSC(h);trace.clear();
-  if(bad==0)regs[bases[1]+0x4004]&=~1u;
+  if(bad==0)regs[bases[1]+0x4004]|=0x80000000u;
   if(bad==1)h.r->fClients[0].registerStatus.uncertain=true;
   if(bad==2)h.r->fClients[0].displayStatus.uncertain=true;
   assert(!h.m->noCAdmission());noPayload();
  }
  {Harness h;offLeaves();configReady(h);untilWrite(h,9,true);externalClocks();
-  regs[bases[1]+0x4004]&=~1u;clockTick(h);
+  regs[bases[1]+0x4004]|=0x80000000u;clockTick(h);
   assert(clockStatus(h,h.m->fNoCClockToken).state==SweetClockFailed);fault(h);}
  // Complete DATA Off -> RSC release -> CN0 Off, then reacquire using the new
  // actual CN0 status token. The former core CN0 token was replaced long ago.

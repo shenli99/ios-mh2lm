@@ -1,0 +1,161 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -317,7 +317,7 @@
+  bool fClockTimerAdded, fClockEnabled, fClockClaimed, fClockTouched, fClockFault;
+  uint64_t fClockNextToken, fClockBootToken, fClockDeadline, fClockWaitDeadline, fClockVoteSettleAt;
+  SweetClockLease fClockLeases[4];
+- unsigned fClockReferences[SweetClockCount], fClockOwnedMask, fClockKnownMask;
++ unsigned fClockReferences[SweetClockCount], fClockOwnedMask, fClockKnownMask, fClockIssuedMask;
+  uint32_t fClockParents[SweetClockCount][6];
+  unsigned fClockOperation, fClockCursor, fClockReleaseMask;
+  bool fClockReleasing, fClockWaiting;
+@@ -364,6 +364,8 @@
+  bool clockPrerequisites(ClockDiagnostics = ClockSilent);
+  bool clockParent(unsigned,uint32_t [6],bool = true,ClockDiagnostics = ClockSilent);
+  bool clockEnableParentReady(unsigned,const uint32_t [6]);
++ bool clockBranchRequested(unsigned,uint32_t) const;
++ bool clockBranchRunning(unsigned,uint32_t) const;
+  bool clockCanGate(void);
+  bool clockBusy(void) const;
+  void captureClockLocal(ClockLocalSnapshot &);
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -19,6 +19,21 @@
+ };
+ static const unsigned mdssClockMasks[SweetClockUseCount]={0x07u,0x7fu,0x381u};
+ 
++bool SweetMDSS::clockBranchRequested(unsigned i,uint32_t value) const
++{
++ /* An inherited enable still needs readback. For our voted request, record
++  * submission after dp_wr's barrier, separately from the pre-write failure
++  * ownership ledger. This is software request state, not a hardware ACK. */
++ return (value&1u) || (mdssClockBranches[i].voted &&
++     (fClockOwnedMask&fClockIssuedMask&(1u<<i)));
++}
++bool SweetMDSS::clockBranchRunning(unsigned i,uint32_t value) const
++{
++ /* LG branch2 enable completion checks CLK_OFF, not enable readback. The
++  * caller must also validate the parent and its Pending/Held lease. Only
++  * voted leaves with our issued request may run without bit0 readback. */
++ return clockBranchRequested(i,value) && !(value&CBCR_OFF);
++}
+ bool SweetMDSS::clockBusy(void) const
+ {
+  return fClockOperation && (fClockLeases[fClockOperation-1].state==SweetClockPending ||
+@@ -195,12 +210,13 @@
+   uint32_t v=dp_rd(s->dp_dispcc,mdssClockBranches[i].cbcr);
+   if (i>=7) admittedRSC[i-7]=v; /* Existing preflight reads, not fresh failure samples. */
+   if (diagnose==ClockAdmission) SWEET_LOG_INFO("SWEET MDSS CLOCK: admit branch=%u cbcr-offset=%#x cbcr=%#x\n",i,mdssClockBranches[i].cbcr,v);
+-  if (!s->clockParent(i,parents[i],(v&1u)!=0,diagnose)) return kIOReturnNotReady;
++  bool requested=s->clockBranchRequested(i,v);
++  if (!s->clockParent(i,parents[i],requested,diagnose)) return kIOReturnNotReady;
+   if ((s->fClockKnownMask&(1u<<i)) && memcmp(s->fClockParents[i],parents[i],sizeof(parents[i]))) {
+    if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=parent-drift branch=%u\n",i);
+    return kIOReturnNotReady;
+   }
+-  if (v&1u) {
++  if (requested) {
+    if (v&CBCR_OFF) {
+     if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=branch-off branch=%u cbcr=%#x\n",i,v);
+     return kIOReturnNotReady;
+@@ -369,7 +385,7 @@
+    fClockTrace.observedBits|=v&(1u|CBCR_OFF);
+    if (v&1u) fClockTrace.lastEnabledNS=fClockTrace.sampleNS;
+   }
+-  bool rootNeeded=!fClockReleasing && (v&1u) && !(v&CBCR_OFF);
++  bool rootNeeded=!fClockReleasing && clockBranchRunning(i,v);
+   if (!clockParent(i,parent,rootNeeded,diagnose) || memcmp(parent,fClockParents[i],sizeof(parent))) {
+    if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: NoC gate=worker-parent branch=%u cbcr=%#x\n",i,v);
+    finishLocalClocks(kIOReturnNotReady); return;
+@@ -379,9 +395,9 @@
+    if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: NoC gate=owned-parent branch=%u cbcr=%#x\n",i,v);
+    finishLocalClocks(kIOReturnNotReady); return;
+   }
+-  bool toggle=fClockReleasing ? ((fClockOwnedMask&bit) && fClockReferences[i]==1) : !(v&1u);
++  bool toggle=fClockReleasing ? ((fClockOwnedMask&bit) && fClockReferences[i]==1) : !clockBranchRequested(i,v);
+   if (fClockWaiting) {
+-   bool ready=fClockReleasing ? !(v&1u) && (v&CBCR_OFF) : (v&1u) && !(v&CBCR_OFF);
++   bool ready=fClockReleasing ? !(v&1u) && (v&CBCR_OFF) : clockBranchRunning(i,v);
+    if (fClockReleasing && b.voted) {
+     /* LG BRANCH_VOTED: release our SW vote, not the aggregate clock.
+      * Start the 10us settle only after observing our enable bit clear. */
+@@ -396,7 +412,9 @@
+     }
+     fClockTimer->setTimeoutUS(100); return;
+    }
+-   if (fClockReleasing) fClockOwnedMask&=~bit;
++   if (fClockReleasing) { fClockOwnedMask&=~bit; fClockIssuedMask&=~bit; }
++   else if (b.voted) SWEET_LOG_INFO("SWEET MDSS CLOCK: voted halt complete branch=%u cbcr=%#x request-issued=%u; enable readback diagnostic only\n",
++       i,v,(unsigned)((fClockIssuedMask&bit)!=0));
+    fClockWaiting=false;
+   } else if (toggle) {
+    bool idle=clockCanGate();
+@@ -411,6 +429,7 @@
+    if (!fClockReleasing) fClockOwnedMask|=bit; /* retain even if posted write fails */
+    if (!fClockReleasing && i==7 && noCClockDiagnostics()) captureClockLocal(fClockTrace.writeLocal);
+    dp_wr(dp_dispcc,b.cbcr,fClockReleasing ? v&~1u : v|1u);
++   if (!fClockReleasing && b.voted) fClockIssuedMask|=bit;
+    fClockTrace.writeValid=true; fClockTrace.writeBranch=i;
+    fClockTrace.writeBefore=v; fClockTrace.writeWant=fClockReleasing ? v&~1u : v|1u;
+    fClockTrace.writeEntryNS=now; fClockTrace.writeIssuedNS=scanout_now();
+@@ -428,10 +447,10 @@
+    }
+    fClockWaiting=true; fClockWaitDeadline=now+10000000ULL;
+    fClockVoteSettleAt=0;
+-   if (b.voted) SWEET_LOG_INFO("SWEET MDSS CLOCK: voted branch=%u enable=%u; awaiting own vote readback%s\n",
+-       i,(unsigned)!fClockReleasing,fClockReleasing ? " and settle; aggregate OFF not required" : " and clock ON");
++   if (b.voted) SWEET_LOG_INFO("SWEET MDSS CLOCK: voted branch=%u enable=%u; awaiting %s\n",
++       i,(unsigned)!fClockReleasing,fClockReleasing ? "own vote clear and settle; aggregate OFF not required" : "CLK_OFF clear after issued request");
+    fClockTimer->setTimeoutUS(100); return;
+-  } else if (!fClockReleasing && (!(v&1u) || (v&CBCR_OFF))) {
++  } else if (!fClockReleasing && !clockBranchRunning(i,v)) {
+    if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: NoC gate=worker-branch branch=%u cbcr=%#x\n",i,v);
+    finishLocalClocks(kIOReturnNotReady); return;
+   }
+@@ -452,7 +471,7 @@
+   for (unsigned i=0;i<SweetClockCount;++i) if (lease.mask&(1u<<i)) {
+    uint32_t parent[6]={}, v=dp_rd(dp_dispcc,mdssClockBranches[i].cbcr);
+    bool released=fClockReleasing && (fClockReleaseMask&(1u<<i));
+-   bool ready=released ? !(v&1u) && (mdssClockBranches[i].voted || (v&CBCR_OFF)) : (v&1u) && !(v&CBCR_OFF);
++   bool ready=released ? !(v&1u) && (mdssClockBranches[i].voted || (v&CBCR_OFF)) : clockBranchRunning(i,v);
+    if (!clockParent(i,parent,!released,noCClockDiagnostics() ? ClockFailure : ClockSilent) ||
+        memcmp(parent,fClockParents[i],sizeof(parent)) || !ready ||
+        (!fClockReleasing && (fClockOwnedMask&(1u<<i)) && !clockEnableParentReady(i,parent))) {
+diff --git a/iokit/Kernel/arm/SweetMDSSLifecycle.inc b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+--- a/iokit/Kernel/arm/SweetMDSSLifecycle.inc
++++ b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+@@ -590,7 +590,7 @@
+  }
+  for (unsigned i=0;i<SweetClockCount;++i) if ((fClockKnownMask&(1u<<i)) && !(0x70u&(1u<<i))) {
+   uint32_t parent[6]={},value=dp_rd(dp_dispcc,mdssClockBranches[i].cbcr);
+-  if (!clockParent(i,parent,true) || memcmp(parent,fClockParents[i],sizeof(parent)) || !(value&1u) || (value&CBCR_OFF)) return false;
++  if (!clockParent(i,parent,true) || memcmp(parent,fClockParents[i],sizeof(parent)) || !clockBranchRunning(i,value)) return false;
+  }
+  return true;
+ }
+diff --git a/iokit/Kernel/arm/SweetMDSSLink.inc b/iokit/Kernel/arm/SweetMDSSLink.inc
+--- a/iokit/Kernel/arm/SweetMDSSLink.inc
++++ b/iokit/Kernel/arm/SweetMDSSLink.inc
+@@ -67,7 +67,7 @@
+  for (unsigned n=0;n<SweetClockCount;++n) if ((fClockKnownMask&(1u<<n)) && !(0x70u&(1u<<n))) {
+   uint32_t p[6]={}; uint32_t branch=dp_rd(dp_dispcc,mdssClockBranches[n].cbcr);
+   if (!clockParent(n,p,true) || memcmp(p,fClockParents[n],sizeof(p)) ||
+-      !(branch&1u) || (branch&CBCR_OFF)) return false;
++      !clockBranchRunning(n,branch)) return false;
+  }
+  return !(dp_rd(dp_intf1,0x288)&(1u<<20)) && !dp_rd(dp_intf1,0x2b4);
+ }
+diff --git a/iokit/Kernel/arm/SweetMDSSNoC.inc b/iokit/Kernel/arm/SweetMDSSNoC.inc
+--- a/iokit/Kernel/arm/SweetMDSSNoC.inc
++++ b/iokit/Kernel/arm/SweetMDSSNoC.inc
+@@ -64,7 +64,7 @@
+   if ((fClockOwnedMask&(1u<<i)) && !clockEnableParentReady(i,parent)) {
+    SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=clock-owned-parent branch=%u cbcr=%#x\n",i,v); return false;
+   }
+-  if (!(v&1u) || (v&CBCR_OFF)) {
++  if (!clockBranchRunning(i,v)) {
+    SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=clock-branch branch=%u offset=%#x cbcr=%#x\n",
+        i,mdssClockBranches[i].cbcr,v); return false;
+   }

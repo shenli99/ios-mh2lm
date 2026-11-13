@@ -80,10 +80,12 @@ int main(){
  for(unsigned late=0;late<2;++late){Harness h;offLeaves();configReady(h);untilWrite(h,7);
   if(late){externalClocks();fakeTicks=h.m->fClockWaitDeadline;clockTick(h,0);}
   heldRSC(h);h.finish();diagnostics(false);report(scenario++,h,h.m->fNoCClockToken);}
- // Lost own vote with aggregate ON, own vote with CLK_OFF, and both missing.
+ // CLK_OFF stuck with enable absent/present, including FSM=2 with OFF=1.
+ // Enable=0/OFF=0 completion is covered by the voted-halt regression.
  for(unsigned bad=0;bad<3;++bad){Harness h;offLeaves();configReady(h);
   if(bad!=1)dropClockWrite=bases[1]+0x4004;
-  if(bad)regs[bases[1]+0x4004]|=0x80000000u;
+  regs[bases[1]+0x4004]|=0x80000000u;
+  if(bad==2)regs[bases[1]+0x4004]|=0x20000000u;
   auto before=regs[bases[1]+0x4004];writeWithoutPhysicalTransition(h);
   auto token=h.m->fNoCClockToken;auto n=trace.size();auto expectedSample=regs[bases[1]+0x4004];
   messages.clear();fakeTicks=h.m->fClockWaitDeadline;
@@ -142,27 +144,27 @@ int main(){
   diagnostics(false);lateSilent(h);report(scenario++,h,token);}
  assert(scenario==14);
  // Separate never observed, immediate readback then lost, and a late latch
- // during CLK_OFF followed by loss. Same final cbcr=0 in all three cases.
+ // during CLK_OFF followed by loss. Final CLK_OFF=1 keeps all cases pending.
  for(unsigned mode=0;mode<3;++mode){Harness h;offLeaves();regs[bases[1]+0x4004]=0;
   configReady(h);if(mode!=1)dropClockWrite=bases[1]+0x4004;
   untilWrite(h,7);auto token=h.m->fNoCClockToken;
   if(mode==2){regs[bases[1]+0x4004]=0x80000001u;clockTick(h,100,false);assert(h.m->fClockWaiting);}
-  regs[bases[1]+0x4004]=0;clockTick(h,100,false);messages.clear();fakeTicks=h.m->fClockWaitDeadline;
-  clockTick(h,0,false);assert(clockStatus(h,token).result==int(kIOReturnTimeout));
+  regs[bases[1]+0x4004]=0x80000000u;clockTick(h,100,false,false,false);messages.clear();fakeTicks=h.m->fClockWaitDeadline;
+  clockTick(h,0,false,false,false);assert(clockStatus(h,token).result==int(kIOReturnTimeout));
   if(DIAG_CHECK){auto p=message("SWEET MDSS CLOCK READBACK:"),o=message("SWEET MDSS CLOCK OBSERVED:"),a=message("SWEET MDSS CLOCK RSC PREFLIGHT:");
    assert(field(p,"valid")==1&&field(p,"cbcr")==unsigned(mode==1)&&field(p,"pa")==bases[1]+0x4004);
    assert(field(o,"wait-samples")== (mode==2?3u:2u));
-   assert(field(o,"seen-enable")==unsigned(mode==2)&&field(o,"seen-off")==unsigned(mode==2));
-   assert(field(o,"first")== (mode==2?0x80000001u:0u));
+   assert(field(o,"seen-enable")==unsigned(mode==2)&&field(o,"seen-off")==1u);
+   assert(field(o,"first")== (mode==2?0x80000001u:0x80000000u));
    assert((field(o,"last-enabled-ns")!=0)==(mode==2));
    assert(field(a,"valid")==1&&field(a,"non-gdsc")==0&&field(a,"rscc-ahb")==0x80004000u&&field(a,"rscc-vsync")==0x80008000u);
   }
   noPayload();lateSilent(h);report(scenario++,h,token);dropClockWrite=0;
  }
  // Translation is diagnostic, including an unavailable or unexpected PA;
- // it never creates a successful lease from a missing clock vote.
+ // it never creates a successful lease when CLK_OFF remains asserted.
  for(vm_offset_t pa:{vm_offset_t(0),vm_offset_t(0xaf08004)}){Harness h;offLeaves();configReady(h);
-  translatedAddress=pa;dropClockWrite=bases[1]+0x4004;untilWrite(h,7);
+  translatedAddress=pa;dropClockWrite=bases[1]+0x4004;untilWrite(h,7);regs[bases[1]+0x4004]|=0x80000000u;
   auto token=h.m->fNoCClockToken;messages.clear();fakeTicks=h.m->fClockWaitDeadline;clockTick(h,0,false);
   assert(clockStatus(h,token).result==int(kIOReturnTimeout));
   if(DIAG_CHECK){auto p=message("SWEET MDSS CLOCK READBACK:");assert(field(p,"valid")==1&&field(p,"pa")==pa);}
@@ -183,7 +185,7 @@ int main(){
   regs[bases[1]+0x4004]=0x2000;
   regs[bases[1]+0x400c]|=0x200;regs[bases[1]+0x4008]|=0x400;
   dropClockWrite=bases[1]+0x4004;untilWrite(h,7);auto token=h.m->fNoCClockToken;
-  regs[bases[1]+0x4000]=0x100u|failed;
+  regs[bases[1]+0x4000]=0x100u|failed;regs[bases[1]+0x4004]|=0x80000000u;
   messages.clear();fakeTicks=h.m->fClockWaitDeadline;clockTick(h,0,false);
   assert(clockStatus(h,token).result==int(kIOReturnTimeout));
   if(DIAG_CHECK){

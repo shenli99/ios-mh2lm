@@ -65,10 +65,12 @@ int main(){
  for(unsigned late=0;late<2;++late){Harness h;offLeaves();configReady(h);untilWrite(h,7);
   if(late){externalClocks();fakeTicks=h.m->fClockWaitDeadline;clockTick(h,0);}
   heldRSC(h);h.finish();diagnostics(false);report(scenario++,h,h.m->fNoCClockToken);}
- // Lost own vote with aggregate ON, own vote with CLK_OFF, and both missing.
+ // CLK_OFF stuck with enable absent/present, including FSM=2 with OFF=1.
+ // Enable=0/OFF=0 completion is covered by the voted-halt regression.
  for(unsigned bad=0;bad<3;++bad){Harness h;offLeaves();configReady(h);
   if(bad!=1)dropClockWrite=bases[1]+0x4004;
-  if(bad)regs[bases[1]+0x4004]|=0x80000000u;
+  regs[bases[1]+0x4004]|=0x80000000u;
+  if(bad==2)regs[bases[1]+0x4004]|=0x20000000u;
   auto before=regs[bases[1]+0x4004];writeWithoutPhysicalTransition(h);
   auto token=h.m->fNoCClockToken;auto n=trace.size();auto expectedSample=regs[bases[1]+0x4004];
   messages.clear();fakeTicks=h.m->fClockWaitDeadline;

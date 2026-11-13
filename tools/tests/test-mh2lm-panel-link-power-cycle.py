@@ -81,6 +81,17 @@ int main(){
   }
  }
  selectedProfile=4;
+ // The a26-style voted request must survive the Link and Lifecycle consumers
+ // with enable still reading zero, including a complete PHY shutdown/rebuild.
+ {Harness h;regs[bases[1]+0x4004]=0;dropClockWrite=bases[1]+0x4004;ready(h);
+  assert(h.m->fClockIssuedMask==0x80&&regs[bases[1]+0x4004]==0);
+  panelPackets.clear();sleepCycle(h);assert(h.m->lifecycleLinkResourcesHeld());
+  panelPackets.clear();h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelPinReset);
+  assert(h.m->fLifecycle.linkRebuilt&&h.m->lifecycleResourcesHeld());
+  h.wakePixels();checkPackets(4,true,0x345);
+  assert(h.m->fClockIssuedMask==0x80&&regs[bases[1]+0x4004]==0);
+  dropClockWrite=0;
+ }
  // Extra software link users and a hardware DSI1 alias prevent suspension.
  for(unsigned other=0;other<2;++other){Harness h;ready(h);uint64_t token=0;
   if(!other){assert(h.m->retainLocalClocks(SweetClockDSI0,&token)==0);for(unsigned i=0;i<100&&h.m->clockBusy();++i)h.step();}
