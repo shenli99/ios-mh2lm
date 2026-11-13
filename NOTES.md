@@ -4,6 +4,7 @@
 ## Agent handoff / active work (2026-11-13, 0220 Lineage suspend/resume implemented)
 
 **CURRENT：用户已授权对齐息屏后状态、host/PHY、恢复画面、复位检查；0220已实现，本地验证通过，待云编译实测。**
+实现提交 **9244ec1**（0220及回归/文档/打包门），用户push最新main即可包含本轮修改。
 本段替代下方“仅审计/暂缓0219构建”的执行点。a29最后实测仍是桌面正常、OFF完成、ON reset complete之后无记录；根因未确认。
 补丁xnu/patches/0220-mh2lm-lineage-panel-suspend-resume.patch，SHA256=2d6c31f88189915ee0e0a068ad3f95d32f92fa8503ff99278de25014f55d5e71。
 参考Lineage@2e897dd；四种R66456 DTS均启用lp11/suspendULPS/allowPHYpoweroff。mode2不再保留所有资源常开，镜像名/启动参数仍沿用retained历史名称。
