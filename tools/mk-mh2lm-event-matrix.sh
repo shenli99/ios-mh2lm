@@ -405,7 +405,9 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
   done
  fi
  if [ "$PANEL_LIFECYCLE" = '1' ]; then
-  for marker in 'SWEET PANEL WAKE:' 'reset-proof-ready' 'dma-allocate-enter' \
+  for marker in 'SWEET PANEL LINEAGE:' 'SweetPanelLineageSuspendULPS' \
+      'SWEET PANEL PINS CONFIG:' 'owned source recommitted/flush issued' \
+      'SWEET PANEL WAKE:' 'reset-proof-ready' 'dma-allocate-enter' \
       'SWEET MDSS CONFIG:' 'SweetPanelSupplyCycleEnabled' 'SweetPanelLifecyclePanelVotesParked' \
       'SweetPanelSelectedProfile' 'SWEET PANEL SUPPLY:' 'SweetPanelLifecycleResetHeldLow' \
       'SWEET RPMH IRQ: INTID37 configured' 'SWEET RPMH IRQ: fresh ACTIVE completion' \

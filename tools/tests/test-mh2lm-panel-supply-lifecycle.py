@@ -137,7 +137,7 @@ int main(){
   if(restore){supplyPark(h);h.power(SweetPanelDisplayOn);}else h.power(SweetPanelDisplayOff);
   h.untilLife(link ? (restore ? SweetPanelLinkRebuild : SweetPanelLinkPowerDown) :
                     (restore ? SweetPanelResourceRestore : SweetPanelResourcePark));
-  regs[0x03d06004]|=1;auto begin=trace.size();
+  regs[0x03d06000]|=1u<<12;auto begin=trace.size();
   SweetMDSS::dsiTimerAction(h.m,h.m->fDsiTimer);SweetMDSS::clockTimerAction(h.m,h.m->fClockTimer);SweetMDSS::noCTimerAction(h.m,h.m->fNoCTimer);
   for(unsigned i=begin;i<trace.size();++i)if(trace[i].write){auto addr=trace[i].addr;
    assert(!(addr>=DT&&addr<DT+0x3000));assert(!(addr>=TCS&&addr<TCS+0x3000));assert(!(addr>=bases[12]&&addr<bases[12]+0x760));
@@ -156,11 +156,11 @@ int main(){
   assert(h.m->fManagedRails==(on ? (expected|(1u<<rail)) : (expected&~(1u<<rail)))&&!h.m->fLifecycle.supplyToken);
   assert(h.m->fLifecycle.panelVoteTokens[rail]==token);
  }
- // Stop/invalid low-hold before the child timer must prevent ANY new TCS
+ // Stop/invalid low-owner before the child timer must prevent ANY new TCS
  // write; the parent is deliberately not scheduled until after the child.
  for(bool on:{false,true})for(unsigned fault=0;fault<8;++fault){Harness h;ready(h);reachVote(h,on,0,false);
-  if(fault==0)regs[0x03d06004]|=1;
-  if(fault==1)regs[0x03908008]^=0x10;
+  if(fault==0)regs[0x03d06000]|=1u<<12;
+  if(fault==1)regs[0x03908008]|=1;
   if(fault==2)h.p->stop(h.pn);
   if(fault==3)h.t->stop(h.tn);
   if(fault==4)tcFixtureOnline(0);
@@ -170,12 +170,12 @@ int main(){
   auto from=trace.size();auto oldEnable=regs[TCS];{std::lock_guard<std::recursive_mutex>l(h.r->fLoop->gate);h.r->advance();}
   assert(!h.r->fBusy);irqQuiesceOnly(from,oldEnable);h.life();supplyFailed(h);
  }
- // Missing ACK, posted-write failure and pin input loss never bypass the
+ // Missing ACK, posted-write failure and pin ownership loss never bypass the
  // dependency. A retry cannot adopt a partly released supply generation.
  for(bool on:{false,true})for(unsigned fault=0;fault<3;++fault){Harness h;ready(h);reachVote(h,on,0,false);
   if(fault==0){for(unsigned i=0;i<1100&&h.m->fLifecycle.phase!=SweetPanelFault;++i)h.step(false);}
   if(fault==1){rpmhDrop=0x34;supplyFailed(h);rpmhDrop=~0u;}
-  if(fault==2){regs[0x03d06004]|=1;h.life();}
+  if(fault==2){regs[0x03d06000]|=1u<<12;h.life();}
   supplyFailed(h);uint64_t token=99;auto before=writes();assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)!=0&&!token&&writes()==before);
  }
  // Aggregate enabled is allowed when an actual second consumer holds the
@@ -189,7 +189,7 @@ int main(){
  }
  // Parked config drift is diagnostic; dependency/ownership loss still rejects ON.
  for(unsigned fault=0;fault<4;++fault){Harness h;ready(h);supplyPark(h);
-  if(fault==0)regs[0x03d06004]=1;
+  if(fault==0)regs[0x03d06000]|=1u<<12;
   if(fault==1)regs[bases[1]+0x2114]^=1u<<14;
   if(fault==2)h.m->fLifecycle.panelReleasedMask=1;
   if(fault==3)h.m->fLifecycle.panelVotesParked=false;
@@ -197,7 +197,7 @@ int main(){
   if(fault==1){assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)==0&&token);h.wakePixels();}
   else assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)!=0&&!token&&writes()==before);
  }
- puts("PASS: actual mode6 four profiles x three supply cycles; reset-low before link shutdown, VDDI/VPNL typed votes, shared L3/L5/ARC/config/boot retained, resource/link/host/reset/ON/pixel/TCM recovery, no fallback and zero objects/maps/allocations/notifications after reboot");
+ puts("PASS: actual mode6 four profiles x three supply cycles; suspend pinctrl/reset-low before link shutdown, VDDI/VPNL typed votes, shared L3/L5/ARC/config/boot retained, resource/link/host/reset/ON/pixel/TCM recovery, no fallback and zero objects/maps/allocations/notifications after reboot");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-supply-lifecycle-') as temp:

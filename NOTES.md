@@ -1,6 +1,33 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
 
+## Agent handoff / active work (2026-11-13, 0220 Lineage suspend/resume implemented)
+
+**CURRENT：用户已授权对齐息屏后状态、host/PHY、恢复画面、复位检查；0220已实现，本地验证通过，待云编译实测。**
+本段替代下方“仅审计/暂缓0219构建”的执行点。a29最后实测仍是桌面正常、OFF完成、ON reset complete之后无记录；根因未确认。
+补丁xnu/patches/0220-mh2lm-lineage-panel-suspend-resume.patch，SHA256=2d6c31f88189915ee0e0a068ad3f95d32f92fa8503ff99278de25014f55d5e71。
+参考Lineage@2e897dd；四种R66456 DTS均启用lp11/suspendULPS/allowPHYpoweroff。mode2不再保留所有资源常开，镜像名/启动参数仍沿用retained历史名称。
+OFF：原表完成→前5ms→suspend pinctrl→reset低5ms→host disable→PHY ULPS100us/状态→gating/link/PLL停→PHY idle-off→reset mask→VPNL/VDDI撤票→5ms。
+ON：active-low→前5ms→VDDI ACK+20ms→VPNL ACK+5ms→DATA/host setup/REFGEN/PHY config→ULPS reentry100us/状态→unmask→PLL/roots/branches真实完成→resync→ULPS exit1000us/stop pulse100us/状态→host soft reset≥1us→DDIC10/2/10+5ms→原ON/亮度。
+v2.3 DISPCC+8000.bit0是false置1/true清0；v4/controller硬件clamp ops是NULL，不写猜测clamp寄存器，仍配对状态/ULPS。
+唤醒跳过DSI+12c冷PHY reset，但PHY idle_on仍重新配置PHY；不能说PHY完全保留不动。初次温接管路径保持。
+恢复像素重新提交已pin自有source/stride/crop并flush；按低16位frame_count决定autorefresh或CTL_START，等fresh PP_DONE/flush0/RD_PTR再恢复touch。
+GPIO普通CTL/IRQ快照/mux/pull/drive/latch/input差异变SWEET PANEL PINS CONFIG打印，每token最多64条；取消1ms输入跟随门槛。
+resetKnown/resetHigh和copyLowStatus明确为已命令状态/有效owner token，不是物理电压证明；eGPIO/IRQ竞争、ABI/provider/排他owner、总调度期限仍检查。
+命令表/短FIFO/长prepared物理DMA/200ms fresh done+idle/SMMU边界未修改；PV仍ON694bytes17条、OFF35bytes4条、29先于11；不加PPS/强制首帧亮度延迟。
+共享L3/L5/ARC Turbo/boot/config与MDP/SMMU主体仍保留；本轮不是完整CORE collapse、DRM或RSC sleep/wake移植。panel撤票不保证物理断电。
+12套ASan/UBSan通过：新增Lineage wake、profile、pins、supply fences，及host/link/lifecycle/FB/resource/link-cycle/combined/supply。
+新增四profile各三轮、寄存器与ULPS最小延时/bit极性/无冷reset、framecount0分支、flush完成门槛、真实状态失败、每新增等待cancel/stop/provider-loss。
+普通GPIO回显/输入不符继续，实际eGPIO/IRQ owner失去停止；旧故障用例对应更新。Lineage soft reset测试按其保留setup、恢复clock/control合同，低层host另测破坏性上下文重建。
+实际抽取执行Lineage六个底层函数，寄存器/等待轨迹与回归oracle一致。ARM64 MDSS/Pins对象通过；MDSS告警1585→1587，净增两项为固定边界host/gates数组索引；Pins1171→1171。
+0185–0220共36patch严格无offset/fuzz重放、78文件一致、114原CI markers通过；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+打包门新要求LINEAGE/LineageSuspendULPS/PINS CONFIG/owned recommit标识，真实旧a29被拒绝，未产生boot输出；0219 WAKE打印保留。
+底稿scratch/framebuffer-0220/，prepare-patch会重建verify，不可在编译/测试读它时运行；细节docs/PANEL-LINEAGE-SUSPEND-RESUME.md，工作区PLAN已同步。
+**NEXT：用户push最新main并云编译，下载kernel/buildtree（建议0121a30）；agent核对含0219+0220后，沿ABI608/原ADT/retained605字节参数打包。**
+进入桌面后先一次OFF/ON，USB保持收取；按ULPS entry/reentry/exit、供电ACK、host soft reset、DDIC/ON、owned flush/fresh pixels/touch顺序看。
+当前没有新云端内核/boot/本轮实机结果；未push/触发CI/操作设备，未改固件/ADT/bootargs。以下交接为历史。
+
+
 ## Agent handoff / active work (2026-11-13, audit wake against Lineage before more diagnostics)
 
 **CURRENT：用户要求先比较唤醒流程，暂缓上一段0219 push/云编译/诊断实测安排；本轮只审计和更新文档，没有新增驱动修改。**

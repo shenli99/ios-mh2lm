@@ -5,7 +5,15 @@
 后半保留原a27/0215（`2ffc1a4`）首次接管审计作为历史。
 Lineage 一侧是源码所定义的路径，未取得本次同机 Android 寄存器轨迹；不能把它写成实机测量结果。
 
-## a29 息屏/唤醒专项对照（当前，以此为准）
+## 0220 实现进展（当前）
+
+用户随后授权对齐息屏后状态、host/PHY、画面恢复和复位检查；已实现
+[0220 Lineage suspend/resume](PANEL-LINEAGE-SUSPEND-RESUME.md)。mode2采用panel票周期、
+PHY v4 suspend ULPS/idle-off/on和host soft reset，重新提交自有source/flush，普通GPIO回显改为打印。
+命令传输与表保持原样；共享核心电源和固定MDP/SMMU布局仍保留，尚非完整DRM/CORE collapse移植。
+本地验证通过，待云编译与实机；以下a29表格是修改前差异审计，不能当成0220当前实现。
+
+## a29 息屏/唤醒专项对照（修改前审计）
 
 用户要求先比较流程，**暂缓0219云编译/下一轮诊断实测**。本节比较实际0121a29/0218源码与上述Lineage提交，
 聚焦已选定的 PV / R66456A 普通 OFF→ON。0219只加打印，下面的硬件流程与它相同。

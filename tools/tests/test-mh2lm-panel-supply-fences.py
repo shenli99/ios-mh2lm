@@ -12,12 +12,12 @@ here=Path(__file__).resolve().parent;fixture=here/'test-mh2lm-panel-combined-sus
 ns={'__file__':str(fixture),'__name__':'panel_supply_fixture'}
 exec(compile(fixture.read_text().rsplit('\nwith tempfile.TemporaryDirectory(',1)[0],str(fixture),'exec'),ns)
 root=ns['root'];prelude=ns['prelude'];actual=ns['actual'];helpers=ns['helpers'];touch=ns['touch']
-# Independent electrical drift immediately after a selected TCS write. This
+# Independent ownership loss immediately after a selected TCS write. This
 # exercises two writes within ONE provider timer, not only inter-timer loss.
 prelude=prelude.replace('static void writeReg(uintptr_t b',
  'static unsigned fenceDropOffset=~0u,fenceDropOccurrence=0;\nstatic void writeReg(uintptr_t b')
 prelude=prelude.replace('trace.push_back({true,b+o,v});',
- 'trace.push_back({true,b+o,v});if(b==0x18220d00&&o==fenceDropOffset&&!--fenceDropOccurrence){regs[0x03d06004]|=1;fenceDropOffset=~0u;}')
+ 'trace.push_back({true,b+o,v});if(b==0x18220d00&&o==fenceDropOffset&&!--fenceDropOccurrence){regs[0x03d06000]|=1u<<12;fenceDropOffset=~0u;}')
 tests=ns['tests'].split('int main(){')[0]+r'''
 static void pinTick(Harness&h){
  fakeTicks+=100000;regs[0x03d06004]=(regs[0x03d06004]&~1u)|((regs[0x03d06004]>>1)&1u);
@@ -82,7 +82,7 @@ int main(){
   if(fault==6)h.p->inactive=true;if(fault==7)h.t->inactive=true;
   if(fault==8)h.p->cancelRequest(f.pinsConsumer,f.pinsToken);
   if(fault==9)h.t->cancelRequest(f.touchConsumer,f.touchToken);
-  if(fault==10)regs[0x03d06004]=1;
+  if(fault==10)regs[0x03d06000]|=1u<<12;
   if(fault==11){uint64_t t;assert(h.p->activate(f.pinsConsumer,&t)==0);pinTick(h);}
   if(fault==12){uint64_t t;assert(h.t->resume(f.touchConsumer,&t)==0);}
   if(fault==13)h.r->fMode=1;
@@ -98,10 +98,10 @@ int main(){
   if(phase==1){child(h);assert(h.r->fExecuting);}
   if(phase==2){child(h);freshACK(h);child(h);assert(h.r->fExecuting&&h.r->fOperationCount);}
   if(phase==3){rpmhDrop=0x34;child(h);assert(h.r->fWriteIssued&&!h.r->fExecuting);}
-  if(fault==0)regs[0x03d06004]=1;
-  if(fault==1)regs[0x03d06004]=2;
-  if(fault==2)regs[0x03d06000]^=1;
-  if(fault==3)regs[0x03908008]^=0x10;
+  if(fault==0)regs[0x03d06000]|=1u<<12;
+  if(fault==1)regs[0x03908000]|=1u<<12;
+  if(fault==2)regs[0x03d06008]|=1;
+  if(fault==3)regs[0x03908008]|=1;
   if(fault==4)h.p->cancelRequest(f.pinsConsumer,f.pinsToken);
   if(fault==5)h.p->stop(h.pn);
   if(fault==6)h.t->cancelRequest(f.touchConsumer,f.touchToken);
@@ -176,7 +176,7 @@ int main(){
   token=vote(h.r,other,SweetRailVPNL,{});child(h);freshACK(h);child(h);child(h);
   assert(!h.r->fBusy&&!status(h.r,other,token).enabled&&h.r->detachConsumer(other)==0);
  }
- puts("PASS: actual Pins/RPMh/TCM reset-low fences; Parked/Active-low, live CTL/IRQ/latch/input, exact leaf tokens, retain/release, no-op/aggregation/fresh ACK, invalid admission, four child-before-parent phases x twelve faults, cancel/timeout/stop, competing consumers, shared L3/L5 untouched, zero objects/maps/notifications/allocations after reboot; provider APIs tested independently");
+ puts("PASS: actual Pins/RPMh/TCM reset-low fences; Parked/Active-low, live provider/eGPIO/IRQ ownership, diagnostic CTL/latch/input, exact leaf tokens, retain/release, no-op/aggregation/fresh ACK, invalid admission, four child-before-parent phases x twelve faults, cancel/timeout/stop, competing consumers, shared L3/L5 untouched, zero objects/maps/notifications/allocations after reboot; provider APIs tested independently");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-supply-fences-') as temp:

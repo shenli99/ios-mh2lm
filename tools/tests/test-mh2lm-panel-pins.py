@@ -77,9 +77,9 @@ int main(){
  tick(s);assert(s->fPhase==SweetPanelPins::HighConfirm);tick(s);assert(s->fPhase==SweetPanelPins::HighHold);
  auto confirmed=fakeTicks;tick(s,9999);assert(s->fPhase==SweetPanelPins::HighHold&&fakeTicks-confirmed==9999000);
  tick(s,1);assert(s->fPhase==SweetPanelPins::LowConfirm&&regs[RESET+4]==1); // latch low, input still high
- tick(s,100,false);assert(s->fPhase==SweetPanelPins::LowConfirm);tick(s);assert(s->fPhase==SweetPanelPins::LowHold);
+ tick(s,100,false);assert(s->fPhase==SweetPanelPins::LowHold);
  tick(s,1999);assert(s->fPhase==SweetPanelPins::LowHold);tick(s,1);assert(s->fPhase==SweetPanelPins::FinalHighConfirm&&regs[RESET+4]==2);
- tick(s,100,false);assert(s->fPhase==SweetPanelPins::FinalHighConfirm);tick(s);assert(s->fPhase==SweetPanelPins::FinalHighHold);
+ tick(s,100,false);assert(s->fPhase==SweetPanelPins::FinalHighHold);
  tick(s,9999);assert(s->fPhase==SweetPanelPins::FinalHighHold);tick(s,1);assert(s->fPhase==SweetPanelPins::Settle);
  tick(s,4999);assert(s->fBusy);tick(s,1);auto p=status(s,id,token);assert(p.state==SweetPinsResetComplete&&p.resetKnown&&p.resetHigh&&!p.uncertain);
  assert(s->copyStatus(id,initial,&p)==kIOReturnNotFound&&!p.token);
@@ -106,11 +106,11 @@ int main(){
   else if(fault==2){before=trace.size();assert(s->copyLowStatus(id,token,nullptr)==kIOReturnBadArgument&&trace.size()==before);}
   else if(fault==3){token=active(s,id);assert(s->copyLowStatus(id,token,&low)==0&&low.state==SweetPinsActive&&!low.resetHigh);}
   else if(fault>=4&&fault<=8){
-   if(fault==4)regs[RESET+4]=1; // input rose independently, latch still low
-   if(fault==5)regs[RESET+4]=2; // latch rose, input still low
-   if(fault==6)regs[RESET]^=1;
-   if(fault==7)regs[TE+8]^=0x10;
-   if(fault==8){token=active(s,id);regs[TE]^=1;}
+   if(fault==4)regs[RESET]|=1u<<12; // input rose independently, latch still low
+   if(fault==5)regs[TE]|=1u<<12; // latch rose, input still low
+   if(fault==6)regs[RESET+8]|=1;
+   if(fault==7)regs[TE+8]|=1;
+   if(fault==8){token=active(s,id);regs[TE]|=1u<<12;}
    auto count=writes();assert(s->copyLowStatus(id,token,&low)==kIOReturnNotReady&&!low.token&&writes()==count);
    assert(s->fPoisoned&&s->fStatus.state==SweetPinsFailed&&s->fStatus.uncertain&&!s->fStatus.resetKnown);
    before=trace.size();assert(s->copyLowStatus(id,token,&low)==kIOReturnNotReady&&!low.token&&trace.size()==before);
@@ -127,26 +127,29 @@ int main(){
   if(fault==0)regs[RESET]|=4;if(fault==1)regs[TE]&=~4u;if(fault==2)regs[TE]|=512;
   if(fault==3)regs[RESET]|=1<<12;if(fault==4)regs[TE]|=1<<12;if(fault==5)regs[RESET+8]|=1;
   if(fault==6)regs[TE+8]|=1;if(fault==7)regs[RESET+4]=2;if(fault==8)regs[RESET]&=~512u;
-  assert(s->activate(id,&token)==0);tick(s,100,false);p=status(s,id,token);assert(p.state==SweetPinsFailed&&!p.uncertain&&!writes());
-  assert(s->detachConsumer(id)==0);destroy(s,n);assert(panelPinsOwner==0);
+  assert(s->activate(id,&token)==0);tick(s,100,false);p=status(s,id,token);
+  if(fault>=3&&fault<=6){assert(p.state==SweetPinsFailed&&!p.uncertain&&!writes());assert(s->detachConsumer(id)==0);destroy(s,n);assert(panelPinsOwner==0);}
+  else{assert(p.state==SweetPinsActive&&!p.uncertain&&writes()==2);destroy(s,n);assert(panelPinsOwner==2);}
  }
- // Dropped config/output writes, independent input timeout, hold-level loss,
- // configuration/IRQ drift and total timeout never retry/rollback/detach.
- for(unsigned fault=0;fault<8;++fault){fixtures();n=nub();s=make(n);id=attach(s);
-  if(fault==0){regs[RESET]=(regs[RESET]&~0x3ffu)|0x200;pinDrop=RESET;assert(s->activate(id,&token)==0);tick(s);}
-  else if(fault==1){regs[TE]=(regs[TE]&~0x3ffu)|4;pinDrop=TE;assert(s->activate(id,&token)==0);tick(s);}
-  else{active(s,id);trace.clear();assert(s->park(id,&token)==0);
-   if(fault==2)pinDrop=RESET+4;tick(s);
-   if(fault==3)tick(s,1001,false);
-   if(fault==4){tick(s);regs[RESET+4]|=1;tick(s,100,false);}
-   if(fault==5){regs[RESET]^=1;tick(s);}
-   if(fault==6){regs[TE+8]^=0x10;tick(s);}
-   if(fault==7)tick(s,100001);
-  }
-  p=status(s,id,token);assert(p.state==SweetPinsFailed&&p.uncertain&&s->fPoisoned&&!s->fBusy);
-  assert(s->detachConsumer(id)==kIOReturnBusy);trace.clear();tick(s);assert(trace.empty());
-  assert(s->reset(id,&other)==kIOReturnNotReady&&!other&&trace.empty());destroy(s,n);assert(panelPinsOwner==2);
+ // Configuration and electrical echo mismatches print but never turn a
+ // successfully commanded GPIO sequence into an extra hardware ACK gate.
+ for(unsigned fault=0;fault<7;++fault){fixtures();n=nub();s=make(n);id=attach(s);
+  if(fault==0){regs[RESET]=(regs[RESET]&~0x3ffu)|0x200;pinDrop=RESET;}
+  if(fault==1){regs[TE]=(regs[TE]&~0x3ffu)|4;pinDrop=TE;}
+  active(s,id);assert(s->park(id,&token)==0);
+  if(fault==2)pinDrop=RESET+4;
+  if(fault==4)regs[RESET]^=1;
+  if(fault==5)regs[TE+8]^=0x10;
+  for(unsigned i=0;i<100&&s->fBusy;++i)tick(s,100,fault!=3);
+  assert(status(s,id,token).state==SweetPinsParked);
+  if(fault==6)regs[RESET+4]=3;
+  assert(s->copyLowStatus(id,token,&p)==0&&p.resetKnown&&!p.resetHigh&&!p.uncertain);
+  assert(s->fDiagnosticCount>0);destroy(s,n);
  }
+ // A real scheduling deadline still stops the writer without cleanup.
+ fixtures();n=nub();s=make(n);id=attach(s);active(s,id);assert(s->park(id,&token)==0);
+ tick(s);tick(s,100001);p=status(s,id,token);assert(p.state==SweetPinsFailed&&p.uncertain&&s->fPoisoned&&!s->fBusy);
+ assert(s->detachConsumer(id)==kIOReturnBusy);trace.clear();tick(s);assert(trace.empty());destroy(s,n);
  // Stop at every reset/park phase, including before the first write. Late
  // callbacks and status queries perform no MMIO; partial pins stay as-is.
  for(unsigned phase=0;phase<11;++phase){fixtures();n=nub();s=make(n);id=attach(s);
@@ -176,7 +179,7 @@ int main(){
  assert(s->fClient==client&&m->fPanelPins==s&&trace.size()==count);pump();assert(!s->fClient&&!m->fPanelPins&&trace.size()==count);
  SweetPanelPinsClient::matched(m->fPanelPinsClient,nullptr,s,nullptr);pump();assert(m->fPanelPins==s);
  m->stop(d);assert(!s->fClient);m->release();dropNub(d);destroy(s,n);assert(panelPinsOwner==0);
- puts("PASS: actual pin provider+MDSS registry binding; default/metadata no-MMIO, exact SOUTH/NORTH ABI, exclusive IDs/tokens, queued work, independent latch/input,10/2/10/5ms minimum holds, park/reactivate, readback/input/drift/timeouts, partial-failure retention, every-phase stop/late event, concurrent gate stop, ownership retirement and zero objects/maps/notifications");
+ puts("PASS: actual pin provider+MDSS registry binding; default/metadata no-MMIO, exact SOUTH/NORTH ABI, exclusive IDs/tokens, queued work, independent latch/input,10/2/10/5ms minimum holds, park/reactivate, diagnostic readback/input, real owner loss/deadlines, partial-failure retention, every-phase stop/late event, concurrent gate stop, ownership retirement and zero objects/maps/notifications");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-panel-pins-') as temp:

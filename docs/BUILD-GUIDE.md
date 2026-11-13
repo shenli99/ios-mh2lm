@@ -29,10 +29,12 @@ boot.img（Android header v1, page 2048）
 已实现功能在后续使用中暴露的独立问题统一记入 [Bug 台账](BUGS.md)，
 不自动作为当前主计划的新步骤或前置测试。
 
-a29已实机完成显示接管，当前按用户要求先[对照Lineage唤醒流程](PANEL-LINEAGE-PATH-COMPARISON.md)，
-暂缓0219云编译/诊断实测。之后若构建含0219的诊断产物，须包含 `SWEET PANEL WAKE:`、
-`reset-proof-ready`、`dma-allocate-enter`（并保留0218 CONFIG）；打包门会拒绝旧a29。
-沿原 ABI608/ADT/retained 参数打包，详见 [实测与下一轮取证](PANEL-D1-0121A29.md)。
+a29已实机完成显示接管。用户授权后，已实现[0220 Lineage息屏/唤醒对齐](PANEL-LINEAGE-SUSPEND-RESUME.md)，
+本地验证通过；下一轮应编译最新main，含0219+0220（建议标签0121a30）。
+打包门新增 `SWEET PANEL LINEAGE:`、`SweetPanelLineageSuspendULPS`、`SWEET PANEL PINS CONFIG:` 和
+`owned source recommitted/flush issued`，并保留WAKE/CONFIG；旧a29会被拒绝。
+沿ABI608/原ADT/retained参数打包；`panel-retained`是历史文件名，mode2现会撤销本panel票并恢复ULPS链路。
+当前没有这轮新kernel/boot或实机结果；下载后由agent核对打包，再做一次OFF/ON。
 
 ## 1. 写补丁（agent）
 

@@ -1,11 +1,12 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**当前执行点（2026-11-13）：按用户要求先审计Lineage的普通OFF/ON，暂缓0219云编译和下一轮诊断实测。**
-a29已实机进入正常桌面并完成接管；OFF完成，ON在reset complete后无后续记录，根因未定。
-PV ON/OFF字节、17/4条命令和reset10/2/10+5ms均一致；主要差异在retained保留host/PHY/供电而仅复位DDIC，
-没有Lineage的OFF引脚/供电状态及ON的host soft reset、LP11/ULPS/clamp/clock恢复过程。
-还存在FIFO/物理DMA与GEM/IOVA、扫描提交、触摸协调和GPIO额外强制检查差异；均未证明是本次根因。
-见[完整唤醒对照](PANEL-LINEAGE-PATH-COMPARISON.md#a29-息屏唤醒专项对照当前以此为准)。本轮只文档，没有新生产补丁。以下旧执行点为历史，以本段为准。
+**当前执行点（2026-11-13）：0220已按用户选择实现Lineage息屏/唤醒对齐，本地验证通过，待云编译实测。**
+a29已实机正常桌面/完整接管；息屏后不能唤醒，根因未定。mode2现采用reset-low/面板票周期、
+PHY v4 suspend ULPS/idle恢复、host soft reset、自有source/flush/kickoff；普通GPIO回显与输入跟随改打印。
+命令表/FIFO/物理DMA不变；共享core/config/USB/UFS电源仍保留，不宣称整套DRM/RSC低功耗已移植。
+12套ASan/UBSan、ARM64对象、36patch/78文件/114原CI markers通过；旧a29被新打包门拒绝。
+下一步用户push最新main云编译并下载kernel/buildtree（建议0121a30），agent核对0219+0220并沿ABI608原参数打包，
+然后用户先测一次OFF/ON。见[实现与验证](PANEL-LINEAGE-SUSPEND-RESUME.md)。以下旧执行点为历史。
 
 **历史执行点（2026-11-13）：a25已分析；0213局部状态/复位取证已提交7f4f55a，待用户push云编译。**
 a25首错仍为branch7/+4004 branch-wait，PA正确，立即及39次等待均未见enable，整体期限仍余188.3ms。

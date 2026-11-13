@@ -11,14 +11,26 @@ here=Path(__file__).resolve().parent;existing=here/'test-mh2lm-panel-lifecycle.p
 ns={'__file__':str(existing),'__name__':'profile_lifecycle_fixture'}
 exec(compile(existing.read_text().rsplit('\nwith tempfile.TemporaryDirectory(',1)[0],str(existing),'exec'),ns)
 root=ns['root'];prelude=ns['prelude'];helpers=ns['helpers'];touch=ns['touch'];actual=ns['actual']
+# The cold-context-loss host fixture deliberately destroys setup registers.
+# Normal Lineage resume uses cmn_soft_reset AFTER setup and restores only
+# clocks/control: model that soft-reset contract independently of driver phases.
+# The lower-level dsi-host suite still tests destructive context reconstruction.
+prelude=prelude.replace('for(unsigned off=4;off<0x400;off+=4)if(off!=8&&off!=12)regs[b+off]=0;',
+ 'regs[b+4]=0;regs[b+0x11c]=0;regs[b+0x118]=0;')
 prelude=prelude.replace('static void writeReg(uintptr_t b',r'''
 struct WirePacket {uint64_t time;unsigned type;std::vector<uint8_t>payload;bool memory;};
 static std::vector<WirePacket>panelPackets;
 static std::vector<uint8_t>panelFIFO,*commandMemory=nullptr;
 static std::vector<std::pair<uint64_t,unsigned>>pinEdges;
+static bool ulpsEnterOK=true,ulpsExitOK=true;static uint64_t ulpsRequestAt=0,ulpsExitAt=0;
 static bool followPins=true;static uintptr_t pinDrop=0;static unsigned selectedProfile=4;
 static void writeReg(uintptr_t b''')
 prelude=prelude.replace('trace.push_back({true,b+o,v});',r'''trace.push_back({true,b+o,v});
+ if(b==bases[12]){
+  if(o==0xa4&&v==0x1f)ulpsRequestAt=fakeTicks;
+  if(o==0xa8&&v==0x1f)ulpsExitAt=fakeTicks;
+  if(o==0x24&&(v==0||v==0x60))regs[b+0x148]=0x1f;
+ }
  if(b==0x03d06000||b==0x03908000){
   assert(o==0||(b==0x03d06000&&o==4));if(b+o==pinDrop)return;
   if(o==4){assert(!(v&~2u));pinEdges.push_back({fakeTicks,v&2u});regs[b+o]=(regs[b+o]&~2u)|(v&2u);return;}
@@ -39,7 +51,7 @@ prelude=prelude.replace('trace.push_back({true,b+o,v});',r'''trace.push_back({tr
 actual=dict(actual);actual['DSI_MEMORY_FIXTURE']=actual['DSI_MEMORY_FIXTURE'].replace('p->bytes.resize(4096,0xab);','p->bytes.resize(4096,0xab);commandMemory=&p->bytes;')
 touch=touch.replace('touchPanelMode=2;panelPinsMode=0;lifecycleMode=1;',r'''
  touchPanelMode=2;panelPinsMode=2;lifecycleMode=2;panelPinsOwner=0;
- panelPackets.clear();panelFIFO.clear();pinEdges.clear();commandMemory=nullptr;followPins=true;pinDrop=0;
+ panelPackets.clear();panelFIFO.clear();pinEdges.clear();commandMemory=nullptr;followPins=true;pinDrop=0;ulpsEnterOK=ulpsExitOK=true;ulpsRequestAt=ulpsExitAt=0;regs[bases[12]+0x148]=0x1f;
  regs[0x03d06000]=0x40002c0;regs[0x03d06004]=3;regs[0x03d06008]=0x600;
  regs[0x03908000]=0x2000005;regs[0x03908008]=0x200;
 ''')
@@ -52,9 +64,14 @@ helpers=helpers.replace('tn=touchNub();',r'''pn=new IOService;pn->pinsNub=true;u
 helpers=helpers.replace('assert(m->fTouchPanel==t);',r'''assert(m->fTouchPanel==t);
   SweetPanelPinsClient::matched(m->fPanelPinsClient,nullptr,p,nullptr);pump();assert(m->fPanelPins==p);''')
 helpers=helpers.replace('physical(m);linkPhysical(m);',r'''physical(m);linkPhysical(m);
+  // Electrical ULPS peer: independent status from elapsed physical requests,
+  // never from driver phases, software results or expected test outcome.
+  if(regs[bases[12]+0xa4]==0x1f&&ulpsEnterOK&&fakeTicks-ulpsRequestAt>=100000)regs[bases[12]+0x148]=0;
+  if(regs[bases[12]+0xa8]==0x1f&&ulpsExitOK&&fakeTicks-ulpsExitAt>=1000000)regs[bases[12]+0x148]=0x1f;
   if(followPins)regs[0x03d06004]=(regs[0x03d06004]&~1u)|((regs[0x03d06004]>>1)&1u);
   {std::lock_guard<std::recursive_mutex>l(p->fLoop->gate);SweetPanelPins::timerAction(p,p->fTimer);}
 ''')
+helpers=helpers.replace('void wakePixels(){untilLife(SweetPanelFrame);', 'void wakePixels(){untilLife(SweetPanelFrame);regs[bases[3]+0x18]=0;')
 helpers=helpers.replace('bool pinned=pool->pinned;m->release();', 'bool pinned=pool->pinned;auto*buffer=m->fDsiPinned?m->fDsiBuffer:nullptr;m->release();if(buffer){buffer->complete(kIODirectionOut);buffer->release();}')
 helpers=helpers.replace('t->stop(tn);t->release();dropNub(tn);', 't->stop(tn);t->release();dropNub(tn);p->stop(pn);p->release();dropNub(pn);')
 # Independent immutable LG fixtures used only as a wire oracle.
@@ -111,12 +128,14 @@ int main(){
   uint64_t rejected=99;auto before=trace.size();assert(h.m->beginPanelLifecycle(SweetPanelDisplayOff,&rejected)==kIOReturnNotReady&&!rejected&&trace.size()==before);
   SweetDisplayBackend*b=h.m;assert(b->setBrightness(0x345)==0);panelPackets.clear();panelFIFO.clear();
   for(unsigned round=0;round<3;++round){
-   pinEdges.clear();sleep(h);checkPackets(profile,false);assert(pinEdges.empty());
-   assert(h.m->fManagedRails==15&&h.m->fManagedARC&&h.m->fManagedBandwidth&&h.m->fManagedClock);
+   pinEdges.clear();sleep(h);checkPackets(profile,false);assert(pinEdges.size()==1&&pinEdges[0].second==0);
+   auto resets=phyResets,host=hostResets;pinEdges.clear();
+   assert(h.m->fManagedRails==12&&h.m->fManagedARC&&!h.m->fManagedBandwidth&&!h.m->fManagedClock);
+   assert(h.m->fLifecycle.panelVotesParked&&h.m->linkDormantConfiguration()&&(regs[bases[1]+0x8000]&1));
    panelPackets.clear();h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelPinReset);
    assert(h.m->lifecycleBusy()&&!h.m->fLifecycle.commandToken);
    auto wrong=h.m->fLifecycle.pinToken+1;auto n=trace.size();assert(h.p->cancelRequest(h.m->fPanelPinsConsumer,wrong)==kIOReturnNotFound&&trace.size()==n);
-   h.wakePixels();assert(h.m->fLifecycle.resetComplete&&h.m->fLifecycle.brightnessRestored&&!h.m->fLifecycle.sleeping&&h.t->fStatus.ready);
+   assert(phyResets==resets&&hostResets==host+1);h.wakePixels();assert(h.m->fLifecycle.resetComplete&&h.m->fLifecycle.brightnessRestored&&!h.m->fLifecycle.sleeping&&h.t->fStatus.ready);
    checkPackets(profile,true,0x345);assert(pinEdges.size()==3&&pinEdges[0].second==2&&pinEdges[1].second==0&&pinEdges[2].second==2);
    assert(pinEdges[1].first-pinEdges[0].first>=10000000&&pinEdges[2].first-pinEdges[1].first>=2000000);
    assert(panelPackets.front().time-pinEdges[2].first>=15000000); // high10 + LG settle5
@@ -126,18 +145,18 @@ int main(){
  selectedProfile=4;
  // Cancellation during active/reset phases leaves no more pin edges, no rail drop.
  for(unsigned point=0;point<9;++point){Harness h;ready(h);sleep(h);h.power(SweetPanelDisplayOn);
-  if(point==0)h.untilLife(SweetPanelPinActivate);
+  if(point==0){h.untilLife(SweetPanelPinReset);}
   else{h.untilLife(SweetPanelPinReset);
    unsigned phases[]={SweetPanelPins::Configure,SweetPanelPins::HighConfirm,SweetPanelPins::HighHold,SweetPanelPins::LowConfirm,SweetPanelPins::LowHold,SweetPanelPins::FinalHighConfirm,SweetPanelPins::FinalHighHold,SweetPanelPins::Settle};
    unsigned target=phases[point-1];for(unsigned i=0;i<2000&&h.p->fPhase!=target;++i)h.step();assert(h.p->fPhase==target);}
   h.m->cancelPanelLifecycle(h.m->fLifecycle.token);dead(h);}
- // Stop, queued withdrawal, lost input/readback, command DMA and brightness failure.
+ // Stop, queued withdrawal, diagnostic input/readback, real ownership, command DMA and brightness failure.
  for(unsigned bad=0;bad<10;++bad){Harness h;ready(h);sleep(h);panelPackets.clear();h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelPinReset);
   if(bad==0){h.m->stop(h.d);dead(h);}
   if(bad==1){SweetPanelPinsClient::terminated(h.m->fPanelPinsClient,nullptr,h.p,nullptr);h.life();dead(h);pump();}
-  if(bad==2){pinDrop=0x03d06004;dead(h);}
-  if(bad==3){followPins=false;dead(h);}
-  if(bad==4){regs[0x03908008]^=0x10;dead(h);}
+  if(bad==2){pinDrop=0x03d06004;h.wakePixels();assert(h.m->fLifecycle.resetComplete);}
+  if(bad==3){followPins=false;h.wakePixels();assert(h.m->fLifecycle.resetComplete);}
+  if(bad==4){regs[0x03908008]|=1;dead(h);}
   if(bad==5){fakeTicks+=100000000;h.life();dead(h);}
   if(bad>=6){
    if(bad==6){while(!h.m->fDsiPinned)h.step();dmaDone=false;dead(h);assert(h.m->fDsiPinned);}
@@ -149,7 +168,7 @@ int main(){
  // Latest target on Busy is preserved; backlight retries any change arriving later.
  {Harness h;ready(h);sleep(h);h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelPinReset);
   SweetDisplayBackend*b=h.m;assert(b->setBrightness(0x678)==kIOReturnBusy);panelPackets.clear();h.wakePixels();checkPackets(4,true,0x678);}
- puts("PASS: actual mode2 four profiles late-worker single-takeover, LG profile tables over FIFO/prepared DMA; three sleep/reset/wake cycles each, exact wire/delay/reset+settle and brightness recovery, physical touch reinit/pixel completion, live identity/dependency rejection, cancel every pin phase, provider loss/stop/input/ACK/timeout/DMA/brightness/touch faults, retained votes and zero objects/maps/allocations/notifications after simulated reboot");
+ puts("PASS: actual mode2 four profiles late-worker single-takeover, LG profile tables over FIFO/prepared DMA; three sleep/reset/wake cycles each, exact wire/delay/reset+settle and brightness recovery, physical touch reinit/pixel completion, live identity/dependency rejection, cancel every pin phase, provider loss/stop/input/ACK/timeout/DMA/brightness/touch faults, suspend ULPS/panel votes and zero objects/maps/allocations/notifications after simulated reboot");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-profile-lifecycle-') as temp:

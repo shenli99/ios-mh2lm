@@ -1,0 +1,543 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -247,7 +247,9 @@
+   * Profile1 is the common R66456 link format, not DDIC identification. */
+  enum HostPhase { HostIdle, HostResetHold, HostConfigure, HostReady, HostFault, HostStopped, HostDormant };
+  unsigned fHostProfile, fHostPhase;
+- bool fHostTouched;
++ bool fHostTouched, fHostLineageReset;
++ uint32_t fHostSavedControl, fHostSavedClocks;
++ void configureHostForULPS(void);
+  uint64_t fHostDeadline, fHostWait;
+  IOReturn fHostResult;
+  bool setupHost(void);
+@@ -264,6 +266,7 @@
+  enum LinkPhase { LinkIdle, LinkLaneIdle, LinkGatesOff, LinkPLLStop, LinkBiasOff,
+      LinkResetHold, LinkResetSettle, LinkRefgen, LinkPHYConfig, LinkPLLConfig,
+      LinkBiasOn, LinkLock, LinkRoots, LinkRootWait, LinkGatesOn, LinkResync,
++     LinkULPSEntry, LinkULPSReentry, LinkULPSExit, LinkULPSStop, LinkResumeComplete,
+      LinkReady, LinkFault, LinkStopped, LinkDormant };
+  unsigned fLinkProfile, fLinkPhase, fLinkCursor, fLinkRoot;
+  uint32_t fLinkMisc;
+@@ -470,7 +473,7 @@
+  unsigned fLifecycleIdleSamples, fWakeTraceCount;
+  SweetScanoutPool *fLifecyclePool;
+  const SweetPanelProfile *fPanelProfile;
+- bool fLifecycleFull, fLifecycleDataParking, fLifecycleLinkCycle, fLifecycleSupplyCycle, fLifecyclePinsActive, fPanelBrightnessKnown;
++ bool fLifecycleLineage, fLifecycleFull, fLifecycleDataParking, fLifecycleLinkCycle, fLifecycleSupplyCycle, fLifecyclePinsActive, fPanelBrightnessKnown;
+  uint64_t fLifecycleSupplyWait;
+  uint32_t fPanelBrightnessTarget;
+  bool setupLifecycle(IOService *);
+diff --git a/iokit/Kernel/arm/SweetMDSSHost.inc b/iokit/Kernel/arm/SweetMDSSHost.inc
+--- a/iokit/Kernel/arm/SweetMDSSHost.inc
++++ b/iokit/Kernel/arm/SweetMDSSHost.inc
+@@ -22,6 +22,19 @@
+  {0x10c,0}, {0x15c,0}, {0x180,0}, {0x1b8,1u<<16},
+  {0x2a8,0}, {0x2ac,0}, {0x2b4,0}, {0x2d8,0}, {0x330,0}
+ };
++void SweetMDSS::configureHostForULPS(void)
++{
++ /* dsi_display_ctrl_setup before phy_idle_on. No soft reset here; the
++  * display prepare soft reset belongs AFTER HS clocks and ULPS exit. */
++ fHostTouched=fClockTouched=true;
++ dp_wr(dp_dsi,0x110,0);
++ for (unsigned n=0;n<sizeof(hostCommandProfile)/sizeof(hostCommandProfile[0]);++n) {
++  const SweetHostRegister &r=hostCommandProfile[n];
++  dp_wr(dp_dsi,r.offset,r.value);
++  observeLineage("ulps-host-setup",dp_dsi,r.offset,r.value,~0u,true);
++ }
++ dp_wr(dp_dsi,0x11c,0x23f);dp_wr(dp_dsi,4,0x1f1);
++}
+ bool SweetMDSS::setupHost(void)
+ {
+  int mode=0; (void)PE_parse_boot_argn("sweetdsihost",&mode,sizeof(mode));
+@@ -76,12 +89,15 @@
+  /* Claim/retire the existing writer ledger before the first effective write.
+   * No second mapping, singleton or independent reset owner is introduced. */
+  fHostTouched=true; fClockTouched=true;
++ fHostLineageReset=resume && fLifecycleLineage;
++ fHostSavedControl=dp_rd(dp_dsi,4);fHostSavedClocks=dp_rd(dp_dsi,0x11c);
+  dp_wr(dp_dsi,0x110,0); /* disables only enables; zero never ACKs W1C status */
+  observeLineage("host-irq-disable",dp_dsi,0x110,0,hostInterruptEnables,true);
+  dp_wr(dp_dsi,4,dp_rd(dp_dsi,4)&~7u);
+  observeLineage("host-disable",dp_dsi,4,0,7u,true);
+- dp_wr(dp_dsi,0x11c,hostForceClocks);
+- observeLineage("host-force-clocks",dp_dsi,0x11c,hostForceClocks,~0u,true);
++ uint32_t force=fHostLineageReset ? fHostSavedClocks|hostForceClocks : hostForceClocks;
++ dp_wr(dp_dsi,0x11c,force);
++ observeLineage("host-force-clocks",dp_dsi,0x11c,force,~0u,true);
+  dp_wr(dp_dsi,0x118,1);
+  __asm__ volatile("dsb oshst" ::: "memory");
+  fHostWait=scanout_now()+1000ULL; /* >=1us; timer may schedule later */
+@@ -119,6 +135,13 @@
+    finishHost(kIOReturnIOError,"reset exit/idle/error"); return;
+   }
+   fHostPhase=HostConfigure;
++  if (fHostLineageReset) {
++   /* cmn_soft_reset restores previous clocks/control. Retain the existing
++    * command-engine policy used by our unchanged FIFO/DMA transport. */
++   dp_wr(dp_dsi,0x11c,fHostSavedClocks);dp_wr(dp_dsi,4,fHostSavedControl|4u);
++   SWEET_LOG_INFO("SWEET PANEL LINEAGE: host soft reset after ULPS exit; DDIC reset pending\n");
++   fDsiTimer->setTimeoutUS(1);return;
++  }
+   /* Explicit target configuration, never replay an ABL host snapshot. */
+   dp_wr(dp_dsi,0x11c,hostForceClocks);
+   for (unsigned n=0;n<sizeof(hostCommandProfile)/sizeof(hostCommandProfile[0]);++n) {
+diff --git a/iokit/Kernel/arm/SweetMDSSLifecycle.inc b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+--- a/iokit/Kernel/arm/SweetMDSSLifecycle.inc
++++ b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+@@ -1,6 +1,6 @@
+ /* One MDSS gate, no cross-gate waits or reverse callbacks. Mode1 preserves
+- * warm DisplayOff/On. Explicit mode2 uses live-ABL profile sleep/reset recovery,
+- * keeping ALL rail/ARC/clock/NoC votes. Mode3 parks managed DATA leases only;
++ * warm DisplayOff/On. Mode2 follows R66456 Lineage suspend-ULPS, PHY idle,
++ * reset/pinctrl and panel supply requests. Shared core/config power stays held. Mode3 parks managed DATA leases only;
+  * a separate config floor and all power/boot/link resources stay live. Mode4
+  * cycles host/PHY/PLL hardware while retaining ALL resource tickets. Mode5
+  * composes data parking and link shutdown, retaining the config/power path.
+@@ -41,12 +41,15 @@
+   SWEET_LOG_ERROR("SWEET PANEL: profile lifecycle requires live-ABL profile and pins2; refused before side effects\n");
+   return false;
+  }
+- fLifecycleSupplyCycle=mode==6;
+- fLifecycleLinkCycle=mode==4 || mode==5 || mode==6;
++ fLifecycleLineage=mode==2;
++ fLifecycleSupplyCycle=mode==6 || fLifecycleLineage;
++ fLifecycleLinkCycle=mode==4 || mode==5 || mode==6 || fLifecycleLineage;
+  if (fLifecycleLinkCycle && (fCoreProfile!=2 || fHostProfile!=1 || fLinkProfile!=2)) return false;
+  setProperty("SweetPanelLinkCycleEnabled",fLifecycleLinkCycle);
+  setProperty("SweetPanelSupplyCycleEnabled",fLifecycleSupplyCycle);
+- fLifecycleDataParking=mode==3 || mode==5 || mode==6;
++ fLifecycleDataParking=mode==3 || mode==5 || mode==6 || fLifecycleLineage;
++ setProperty("SweetPanelLineageSuspendULPS",fLifecycleLineage);
++ if (fLifecycleLineage) SWEET_LOG_INFO("SWEET PANEL LINEAGE: suspend-ULPS/PHY-idle panel supply and scanout lifecycle enabled; shared core/config power retained\n");
+  if (fLifecycleDataParking && fCoreProfile!=2) return false;
+  fLifecycleFull=mode>=2;setProperty("SweetPanelSleepResetEnabled",fLifecycleFull);
+  fLifecycleTimer=IOTimerEventSource::timerEventSource(this,lifecycleTimerAction);
+@@ -320,7 +323,25 @@
+  if (dp_rd(top,0x1014)&(1u<<8)) { finishLifecycle(kIOReturnIOError,"stale pixel done did not clear");return; }
+  fLifecycleFrame=fFrameCount;fPanelState=PanelOn;fIrqDisplayOn=true;publishPanelState();
+  if (!armIRQ()) { finishLifecycle(kIOReturnIOError,"pixel IRQ rearm");return; }
+- dp_wr(dp_intf1,0x2b4,fLifecycleAuto);dp_wr(dp_intf1,0x288,fLifecycleTE);
++ if (fLifecycleLineage) {
++  if (!fHardwarePool || !fHardwarePool->hardwarePinned() || !scanoutConfiguration(false) ||
++      dp_rd(dp_ctl,0x18) || dp_rd(dp_ctl,0x1c)) {
++   finishLifecycle(kIOReturnNotReady,"owned pipeline wake admission");return;
++  }
++  /* Recommit the lifetime-pinned owned source, then flush before kickoff.
++   * Command-mode autorefresh is the kickoff: Lineage does not CTL_START it. */
++  dp_wr(dp_sspp,8,0x00300016u);dp_wr(dp_sspp,0x24,4608);
++  dp_wr(dp_sspp,0x14,(uint32_t)fHardwarePool->physical(0));
++  dp_wr(dp_ctl,0x18,1u);
++  uint32_t frameCount=fLifecycleAuto&0xffffu;
++  fLifecycleAuto=frameCount ? (1u<<31)|frameCount : 0u;
++  dp_wr(dp_intf1,0x288,fLifecycleTE);
++  dp_wr(dp_intf1,0x2b4,fLifecycleAuto);
++  if (!frameCount) dp_wr(dp_ctl,0x1c,1u);
++  SWEET_LOG_INFO("SWEET PANEL LINEAGE: owned source recommitted/flush issued; auto=%#x, fresh pixels pending\n",fLifecycleAuto);
++ } else {
++  dp_wr(dp_intf1,0x2b4,fLifecycleAuto);dp_wr(dp_intf1,0x288,fLifecycleTE);
++ }
+  fLifecycle.phase=SweetPanelFrame;fLifecycleStepDeadline=scanout_now()+100000000ULL;
+ }
+ void SweetMDSS::lifecycleTimerAction(OSObject *owner,IOTimerEventSource *sender)
+diff --git a/iokit/Kernel/arm/SweetMDSSLink.inc b/iokit/Kernel/arm/SweetMDSSLink.inc
+--- a/iokit/Kernel/arm/SweetMDSSLink.inc
++++ b/iokit/Kernel/arm/SweetMDSSLink.inc
+@@ -13,7 +13,7 @@
+ static const uint8_t linkTiming[14]={0,0x21,8,8,0x25,0x22,9,8,6,3,4,0,0x1b,0x18};
+ static const uint32_t linkGates[3]={0x2004,0x202c,0x2028}; /* off: pixel,intf,byte */
+ static const uint32_t linkRoots[2]={0x2110,0x2098};
+-/* LG v2.2 ops used by v2.3: wrapper bit0=0 masks AHB reset propagation;
++/* LG v2.2 ops used by v2.3: wrapper bit0=1 masks PHY reset propagation;
+  * bits5/7/9 permit PHY0 pixel/byte/PHY dynamic gating. PHY1 bits untouched. */
+ static const uint32_t linkMiscMask=0x2a1u;
+ bool SweetMDSS::setupLink(void)
+@@ -109,8 +109,9 @@
+  fLinkPowerDown=powerDown;fLinkResume=false;fLinkWait=0;
+  fLinkMisc=dp_rd(dp_dispcc,0x8000);
+  fLinkTouched=fClockTouched=true;
+- dp_wr(dp_dispcc,0x8000,fLinkMisc&~linkMiscMask);
+- observeLineage("phy-reset-mask",dp_dispcc,0x8000,fLinkMisc&~linkMiscMask,~0u,true);
++ uint32_t misc=fLifecycleLineage && powerDown ? fLinkMisc : fLinkMisc&~linkMiscMask;
++ dp_wr(dp_dispcc,0x8000,misc);
++ observeLineage("link-wrapper-request",dp_dispcc,0x8000,misc,~0u,true);
+  if (powerDown) {
+   IOReturn rc=disableHostForLink();
+   if (rc!=kIOReturnSuccess) {finishLink(rc,"host shutdown");return rc;}
+@@ -166,6 +167,10 @@
+    if (now>=fLinkStepDeadline) { finishLink(kIOReturnTimeout,"lane/engine stop state"); return; }
+    break;
+   }
++  if (fLifecycleLineage && fLinkPowerDown) {
++   linkWrite(0xa4,0x1f); /* v4 ULPS request, four data + clock lanes */
++   fLinkPhase=LinkULPSEntry;fLinkWait=scanout_now()+100000ULL;break;
++  }
+   if (fLinkPowerDown) {
+    fLinkSuspendedMask=0x70u;
+    setProperty("SweetDisplaySuspendedClockMask",(unsigned long long)fLinkSuspendedMask,32);
+@@ -175,6 +180,22 @@
+    observeLineage("link-gate-disable",dp_dispcc,b,0,1u,true);
+   }
+   fLinkPhase=LinkGatesOff; fLinkStepDeadline=now+10000000ULL; break;
++ case LinkULPSEntry:
++  linkWrite(0x214,0); /* LPRX/CDRX off after >=100us */
++  {
++   uint32_t status=dp_rd(p,0x148);
++   SWEET_LOG_INFO("SWEET PANEL LINEAGE: ULPS entry lane-status=%#x mask=0x1f want=0\n",status);
++   if (status&0x1fu) {finishLink(kIOReturnIOError,"ULPS entry status");return;}
++  }
++  fLinkSuspendedMask=0x70u;
++  setProperty("SweetDisplaySuspendedClockMask",(unsigned long long)fLinkSuspendedMask,32);
++  dp_wr(dp_dispcc,0x8000,dp_rd(dp_dispcc,0x8000)&~0x2a0u);
++  for (unsigned n=0;n<3;++n) {
++   uint32_t b=linkGates[n];dp_wr(dp_dispcc,b,dp_rd(dp_dispcc,b)&~1u);
++   observeLineage("ulps-gate-disable",dp_dispcc,b,0,1u,true);
++  }
++  SWEET_LOG_INFO("SWEET PANEL LINEAGE: ULPS entered; link clocks stopping\n");
++  fLinkPhase=LinkGatesOff;fLinkStepDeadline=scanout_now()+10000000ULL;break;
+  case LinkGatesOff: {
+   bool off=true;
+   for (unsigned n=0;n<3;++n) if (!(dp_rd(dp_dispcc,linkGates[n])&CBCR_OFF)) off=false;
+@@ -210,6 +231,12 @@
+   if (!linkWrite(0xa0,0) || !linkWrite(0x24,0)) { finishLink(kIOReturnIOError,"PHY disable"); return; }
+   if (fLinkPowerDown) {
+    __asm__ volatile("dsb oshst" ::: "memory");
++   if (fLifecycleLineage) {
++    /* v2.3 reset_config(false) SETS bit0. v4 clamp callbacks are NULL:
++     * no invented clamp register. Paired resume still re-enters ULPS. */
++    dp_wr(dp_dispcc,0x8000,dp_rd(dp_dispcc,0x8000)|1u);
++    observeLineage("ulps-reset-mask",dp_dispcc,0x8000,1u,1u,true);
++   }
+    fLinkPhase=LinkDormant;fLinkResult=kIOReturnSuccess;
+    if (!linkDormantConfiguration()) {finishLink(kIOReturnIOError,"PHY shutdown proof");return;}
+    if (fDsiTimer) fDsiTimer->cancelTimeout();
+@@ -247,7 +274,24 @@
+        !linkWrite(b+0x14,n ? 0 : 3) || !linkWrite(b+0x18,n==4 ? 1 : (n==3 ? 4 : 0)) ||
+        !linkWrite(b+0x10,0)) { finishLink(kIOReturnIOError,"PHY lane config"); return; }
+   }
+-  fLinkCursor=0; fLinkPhase=LinkPLLConfig; break;
++  fLinkCursor=0;
++  if (fLifecycleLineage && fLinkResume) {
++   /* idle_on reconfigured PHY. Synchronize ULPS while the display's clamp
++    * state is still set; Lineage skips the lane-idle poll on this entry. */
++   linkWrite(0xa4,0x1f);fLinkPhase=LinkULPSReentry;fLinkWait=scanout_now()+100000ULL;
++  } else fLinkPhase=LinkPLLConfig;
++  break;
++ case LinkULPSReentry:
++  linkWrite(0x214,0);
++  {
++   uint32_t status=dp_rd(p,0x148);
++   SWEET_LOG_INFO("SWEET PANEL LINEAGE: ULPS wake reentry lane-status=%#x mask=0x1f want=0\n",status);
++   if (status&0x1fu) {finishLink(kIOReturnIOError,"ULPS wake reentry status");return;}
++  }
++  /* reset_config(true); software clamp state is now released. */
++  dp_wr(dp_dispcc,0x8000,dp_rd(dp_dispcc,0x8000)&~1u);
++  observeLineage("ulps-reset-unmask",dp_dispcc,0x8000,0,1u,true);
++  fLinkPhase=LinkPLLConfig;break;
+  case LinkPLLConfig: {
+   unsigned count=(unsigned)(sizeof(linkPLLInitial)/sizeof(linkPLLInitial[0])),end=fLinkCursor+8;
+   if (end>count) end=count;
+@@ -331,6 +375,27 @@
+   if (!linkWrite(0x1c,0) || !linkWrite(0x1c,1) || !linkWrite(0x14,0x20)) {
+    finishLink(kIOReturnIOError,"PHY resync"); return;
+   }
++  if (fLifecycleLineage && fLinkResume) {
++   if (dp_rd(p,0x148)&0x1fu) {finishLink(kIOReturnIOError,"ULPS pre-exit status");return;}
++   linkWrite(0x214,3);linkWrite(0xa8,0x1f);
++   fLinkPhase=LinkULPSExit;fLinkWait=scanout_now()+1000000ULL;break;
++  }
++  fLinkPhase=LinkResumeComplete;break;
++ }
++ case LinkULPSExit:
++  linkWrite(0xa4,0);linkWrite(0xa8,0);
++  linkWrite(0xac,0x1f);linkWrite(0xac,0);
++  fLinkPhase=LinkULPSStop;fLinkWait=scanout_now()+100000ULL;break;
++ case LinkULPSStop:
++  /* Same predicate as dsi_phy_disable_ulps: zero means still in ULPS. */
++  {
++   uint32_t status=dp_rd(p,0x148);
++   SWEET_LOG_INFO("SWEET PANEL LINEAGE: ULPS exit lane-status=%#x mask=0x1f want=nonzero\n",status);
++   if (!(status&0x1fu)) {finishLink(kIOReturnIOError,"lanes stuck in ULPS");return;}
++  }
++  SWEET_LOG_INFO("SWEET PANEL LINEAGE: ULPS exited; resync complete, host soft reset pending\n");
++  fLinkPhase=LinkResumeComplete;break;
++ case LinkResumeComplete: {
+   /* Retain requested root fields; diagnose snapshot differences while
+    * preserving actual parent availability and branch completion checks. */
+   uint32_t expected[3][6]={};
+@@ -411,7 +476,7 @@
+   if (!clockParent(n,parent,false)) return false;
+   observeClockParent(n,parent,fClockParents[n]);
+  }
+- observeLineage("dormant-misc",dp_dispcc,0x8000,0,linkMiscMask);
++ observeLineage("dormant-misc",dp_dispcc,0x8000,fLifecycleLineage ? 1u : 0u,linkMiscMask);
+  return !linkOtherUsers();
+ }
+ IOReturn SweetMDSS::resumeLink(void)
+@@ -422,6 +487,9 @@
+   * Fault/Stopped/poison, no adoption of an unknown cold PHY. Reuse the actual
+   * reset/config/rate/lock/root execution tail; never copy old PHY registers. */
+  fLinkPowerDown=false;fLinkResume=true;fLinkCursor=fLinkRoot=0;fLinkWait=0;
+- fLinkPhase=LinkBiasOff;fLinkDeadline=scanout_now()+250000000ULL;
++ if (fLifecycleLineage) configureHostForULPS();
++ fLinkPhase=fLifecycleLineage ? LinkRefgen : LinkBiasOff;
++ fLinkStepDeadline=scanout_now()+1000000ULL;
++ fLinkDeadline=scanout_now()+250000000ULL;
+  fDsiTimer->setTimeoutUS(10);return kIOReturnSuccess;
+ }
+diff --git a/iokit/Kernel/arm/SweetPanelPins.cpp b/iokit/Kernel/arm/SweetPanelPins.cpp
+--- a/iokit/Kernel/arm/SweetPanelPins.cpp
++++ b/iokit/Kernel/arm/SweetPanelPins.cpp
+@@ -62,41 +62,50 @@
+  SWEET_LOG_INFO("SWEET PANEL PINS: GPIO6/SOUTH reset, GPIO8/NORTH TE; mode=%u, no automatic pin access\n",fMode);
+  registerService(); return true;
+ }
++void SweetPanelPins::observe(unsigned pin,uint32_t offset,uint32_t want,uint32_t got,uint32_t mask,bool always)
++{
++ if ((!always && !((want^got)&mask)) || fDiagnosticCount>=64u) return;
++ ++fDiagnosticCount;
++ SWEET_LOG_INFO("SWEET PANEL PINS CONFIG: token=%llu phase=%u gpio=%u offset=%#x want=%#x got=%#x mask=%#x; observation only\n",
++     fStatus.token,fPhase,pin ? 8u : 6u,offset,want,got,mask);
++}
+ bool SweetPanelPins::sample(bool capture)
+ {
+  for (unsigned n=0;n<2;++n) {
+   uint32_t ctl=read(fBase[n],0),irq=read(fBase[n],8);
+-  /* No eGPIO ownership, GPIO IRQ or competing alternate reset/TE mux.
+-   * Preserve upper fields; compare IRQ/CTL snapshots on every timer step.
+-   * TE must already be mdp_vsync input. Never steal a GPIO IRQ owner. */
+-  if (ctl==~0u || irq==~0u || (ctl&(1u<<12)) || (irq&1u) ||
+-      (ctl&0x3cu)!=(n ? 4u : 0u) || (n && (ctl&(1u<<9)))) return false;
+-  if (capture) { fControl[n]=ctl; fInterrupt[n]=irq; }
+-  else if (ctl!=fControl[n] || irq!=fInterrupt[n]) return false;
++  /* Preserve actual owner exclusions. Other CTL/IRQ echoes, including mux,
++   * pull/drive and reserved fields, are diagnostic like Lineage pinctrl. */
++  if (ctl==~0u || irq==~0u || (ctl&(1u<<12)) || (irq&1u)) return false;
++  if (capture) {fControl[n]=ctl;fInterrupt[n]=irq;}
++  else {observe(n,0,fControl[n],ctl,~0u);observe(n,8,fInterrupt[n],irq,~0u);}
+  }
+  uint32_t io=read(fBase[0],4);
+- if (io==~0u || (capture ? !(fControl[0]&(1u<<9)) : (io&pinOutput)!=fOutput)) return false;
+  if (capture) fOutput=io&pinOutput;
++ else observe(0,4,fOutput,io,pinOutput);
+  return true;
+ }
+ bool SweetPanelPins::writeControl(unsigned n,uint32_t bits)
+ {
+- uint32_t value=(fControl[n]&~pinControlMask)|bits;
+- fTouched=true; write(fBase[n],0,value);
+- if (read(fBase[n],0)!=value) return false;
+- fControl[n]=value; return true;
++ /* RMW the current upper fields, as pinctrl-msm does. Do not replay an old
++  * snapshot over unrelated fields that hardware may legitimately update. */
++ uint32_t value=(read(fBase[n],0)&~pinControlMask)|bits;
++ fTouched=true;write(fBase[n],0,value);
++ observe(n,0,value,read(fBase[n],0),~0u,true);
++ fControl[n]=value;return true;
+ }
+ bool SweetPanelPins::writeReset(bool high)
+ {
+- /* Do not write back the independent read-only input bit or reserved IO bits. */
+- fTouched=true; write(fBase[0],4,high ? pinOutput : 0);
+- if ((read(fBase[0],4)&pinOutput)!=(high ? pinOutput : 0u)) return false;
+- fOutput=high ? pinOutput : 0u; fStatus.resetKnown=false; return true;
+-}
+-bool SweetPanelPins::levelIs(bool high)
+-{
+- uint32_t io=read(fBase[0],4);
+- return io!=~0u && (io&3u)==(high ? 3u : 0u);
++ /* Lineage gpio_set_value has no latch/input echo gate. Record commanded
++  * level separately from the raw observation; success is not voltage proof. */
++ fTouched=true;write(fBase[0],4,high ? pinOutput : 0);
++ fOutput=high ? pinOutput : 0u;
++ observe(0,4,high ? 3u : 0u,read(fBase[0],4),3u,true);
++ fStatus.resetKnown=false;return true;
++}
++void SweetPanelPins::observeLevel(bool high)
++{
++ observe(0,4,high ? 3u : 0u,read(fBase[0],4),3u);
++ /* Input/latch samples never impose an extra follow deadline. */
+ }
+ IOReturn SweetPanelPins::action(OSObject *owner,void *arg,void *,void *,void *)
+ {
+@@ -119,10 +128,11 @@
+       !s->fStatus.resetKnown || s->fStatus.resetHigh ||
+       !((s->fParked && !s->fConfigured && s->fStatus.state==SweetPinsParked) ||
+         (!s->fParked && s->fConfigured && s->fStatus.state==SweetPinsActive))) return kIOReturnNotReady;
+-  if (!s->sample(false) || !s->levelIs(false)) {
+-   s->finish(kIOReturnNotReady,SweetPinsFailed,"low-hold fence drift");
++  if (!s->sample(false)) {
++   s->finish(kIOReturnNotReady,SweetPinsFailed,"low-hold owner lost");
+    return kIOReturnNotReady;
+   }
++  s->observeLevel(false);
+   *r.status=s->fStatus; return kIOReturnSuccess;
+  }
+  if (r.op==OpCancel) {
+@@ -153,7 +163,7 @@
+   if (!s->fConfigured) return kIOReturnNotReady;
+  } else return kIOReturnBadArgument;
+  /* Admission only queues; pin sampling/writes execute on this workloop. */
+- s->fOperation=r.op; s->fPhase=Configure; s->fBusy=true;
++ s->fOperation=r.op;s->fPhase=Configure;s->fBusy=true;s->fDiagnosticCount=0;
+  s->fDeadline=nowNS()+100000000ULL; s->fWait=0;
+  s->fStatus={}; s->fStatus.token=++s->fNextToken;
+  s->fStatus.state=SweetPinsPending; s->fStatus.result=kIOReturnNotReady;
+@@ -166,14 +176,12 @@
+  if (now>=fDeadline) { finish(kIOReturnTimeout,SweetPinsFailed,"operation deadline"); return; }
+  bool capture=fOperation==OpActivate && fPhase==Configure && !fTouched;
+  if (!sample(capture)) { finish(kIOReturnNotReady,SweetPinsFailed,"pin owner/configuration changed"); return; }
+- if ((fPhase==HighHold || fPhase==LowHold || fPhase==FinalHighHold || fPhase==Settle || fPhase==ParkHold) &&
+-     !levelIs(fPhase!=LowHold && fPhase!=ParkHold)) {
+-  finish(kIOReturnIOError,SweetPinsFailed,"reset input changed during hold"); return;
+- }
++ if (fPhase==HighHold || fPhase==LowHold || fPhase==FinalHighHold || fPhase==Settle || fPhase==ParkHold)
++  observeLevel(fPhase!=LowHold && fPhase!=ParkHold);
+  if (now<fWait) { fTimer->setTimeoutUS(100); return; }
+  if (fPhase==Configure) {
+   if (fOperation==OpActivate) {
+-   if (!levelIs(!fParked)) { finish(kIOReturnNotReady,SweetPinsFailed,"warm/parked reset level mismatch"); return; }
++   observeLevel(!fParked);
+    if (!writeControl(0,0x2c0) || !writeControl(1,5)) {
+     finish(kIOReturnIOError,SweetPinsFailed,"active pinctrl readback"); return;
+    }
+@@ -181,32 +189,32 @@
+    finish(kIOReturnSuccess,SweetPinsActive,"active"); return;
+   }
+   bool high=fOperation==OpReset;
++  /* LG reset_off selects suspend pinctrl before driving reset low. */
++  if (!high && (!writeControl(0,0x201) || !writeControl(1,5))) {
++   finish(kIOReturnIOError,SweetPinsFailed,"suspend pinctrl");return;
++  }
+   if (!writeReset(high)) { finish(kIOReturnIOError,SweetPinsFailed,"reset output latch"); return; }
+-  fPhase=high ? HighConfirm : ParkConfirm; fEdgeDeadline=nowNS()+1000000ULL;
++  fPhase=high ? HighConfirm : ParkConfirm;
+  } else if (fPhase==HighConfirm || fPhase==LowConfirm || fPhase==FinalHighConfirm || fPhase==ParkConfirm) {
+   bool high=fPhase==HighConfirm || fPhase==FinalHighConfirm;
+-  if (!levelIs(high)) {
+-   if (now>=fEdgeDeadline) { finish(kIOReturnTimeout,SweetPinsFailed,"reset input did not follow latch"); return; }
+-  } else {
+-   fStatus.resetKnown=true; fStatus.resetHigh=high;
+-   fWait=now+(high ? 10000000ULL : (fPhase==ParkConfirm ? 5000000ULL : 2000000ULL));
+-   fPhase=fPhase==HighConfirm ? HighHold : (fPhase==LowConfirm ? LowHold :
+-       (fPhase==FinalHighConfirm ? FinalHighHold : ParkHold));
+-  }
++  observeLevel(high);
++  fStatus.resetKnown=true;fStatus.resetHigh=high;
++  fWait=now+(high ? 10000000ULL : (fPhase==ParkConfirm ? 5000000ULL : 2000000ULL));
++  fPhase=fPhase==HighConfirm ? HighHold : (fPhase==LowConfirm ? LowHold :
++      (fPhase==FinalHighConfirm ? FinalHighHold : ParkHold));
+  } else if (fPhase==HighHold || fPhase==LowHold) {
+   bool high=fPhase==LowHold;
+-  if (!levelIs(!high) || !writeReset(high)) { finish(kIOReturnIOError,SweetPinsFailed,"reset hold/output latch"); return; }
+-  fPhase=high ? FinalHighConfirm : LowConfirm; fEdgeDeadline=nowNS()+1000000ULL;
++  observeLevel(!high);
++  if (!writeReset(high)) { finish(kIOReturnIOError,SweetPinsFailed,"reset hold/output latch"); return; }
++  fPhase=high ? FinalHighConfirm : LowConfirm;
+  } else if (fPhase==FinalHighHold) {
+-  if (!levelIs(true)) { finish(kIOReturnIOError,SweetPinsFailed,"reset high hold"); return; }
++  observeLevel(true);
+   fPhase=Settle; fWait=now+5000000ULL;
+  } else if (fPhase==Settle) {
+-  if (!levelIs(true)) { finish(kIOReturnIOError,SweetPinsFailed,"reset settle"); return; }
++  observeLevel(true);
+   finish(kIOReturnSuccess,SweetPinsResetComplete,"reset complete"); return;
+  } else if (fPhase==ParkHold) {
+-  if (!levelIs(false) || !writeControl(0,0x201) || !writeControl(1,5)) {
+-   finish(kIOReturnIOError,SweetPinsFailed,"park level/pinctrl readback"); return;
+-  }
++  observeLevel(false);
+   fConfigured=false; fParked=true; finish(kIOReturnSuccess,SweetPinsParked,"parked"); return;
+  } else { finish(kIOReturnIOError,SweetPinsFailed,"invalid phase"); return; }
+  fStatus.phase=fPhase; fTimer->setTimeoutUS(100);
+@@ -224,7 +232,7 @@
+   if (rc==kIOReturnAborted) SWEET_LOG_INFO("SWEET PANEL PINS: stopped phase=%u touched=%u; pins retained\n",fPhase,fTouched);
+   else SWEET_LOG_ERROR("SWEET PANEL PINS: FAILED %s rc=%#x phase=%u touched=%u; pins retained, no rollback/retry\n",
+       reason,(unsigned)rc,fPhase,fTouched);
+- } else SWEET_LOG_INFO("SWEET PANEL PINS: token=%llu %s; reset input=%u, no DSI/power implication\n",
++ } else SWEET_LOG_INFO("SWEET PANEL PINS: token=%llu %s; reset commanded=%u, input/latch diagnostic only; no voltage/DSI/power proof\n",
+       fStatus.token,reason,fStatus.resetHigh);
+  setProperty("SweetPanelPinsState",(unsigned long long)state,32);
+  setProperty("SweetPanelPinsUncertain",fStatus.uncertain);
+diff --git a/iokit/Kernel/arm/SweetPanelPins.h b/iokit/Kernel/arm/SweetPanelPins.h
+--- a/iokit/Kernel/arm/SweetPanelPins.h
++++ b/iokit/Kernel/arm/SweetPanelPins.h
+@@ -15,6 +15,7 @@
+  uint64_t token;
+  unsigned state, phase;
+  IOReturn result;
++ /* resetKnown/resetHigh describe the commanded sequence, not measured voltage. */
+  bool uncertain, resetKnown, resetHigh;
+ };
+ class SweetPanelPins : public IOService {
+@@ -26,8 +27,9 @@
+  vm_offset_t fBase[2];
+  bool fGateAdded, fTimerAdded, fAccepting, fClaimed, fTouched, fPoisoned, fBusy;
+  bool fConfigured, fParked;
+- unsigned fMode, fOperation, fPhase;
+- uint64_t fClient, fNextClient, fNextToken, fDeadline, fWait, fEdgeDeadline;
++ unsigned fMode, fOperation, fPhase, fDiagnosticCount;
++ void observe(unsigned,uint32_t,uint32_t,uint32_t,uint32_t,bool = false);
++ uint64_t fClient, fNextClient, fNextToken, fDeadline, fWait;
+  uint32_t fControl[2], fInterrupt[2], fOutput;
+  SweetPanelPinStatus fStatus;
+  enum Operation { OpAttach, OpDetach, OpQuery, OpActivate, OpReset, OpPark, OpCancel, OpStop, OpQueryLow };
+@@ -41,7 +43,7 @@
+  bool sample(bool);
+  bool writeControl(unsigned,uint32_t);
+  bool writeReset(bool);
+- bool levelIs(bool);
++ void observeLevel(bool);
+  void advance(void);
+  void finish(IOReturn,unsigned,const char *);
+  void shutdown(void);
+@@ -57,20 +59,18 @@
+  IOReturn attachConsumer(uint64_t *);
+  IOReturn detachConsumer(uint64_t);
+  IOReturn copyStatus(uint64_t,uint64_t,SweetPanelPinStatus *);
+- /* Fresh, read-only low-hold fence under this provider's gate. Only this
+-  * client's successful Parked or parked->Active-low token qualifies. Recheck
+-  * full CTL/IRQ/latch snapshots AND independent GPIO input; cached success is
+-  * insufficient. Hardware drift poisons the lease without a pin write.
+-  * No dependency proof, physical power-off claim or permission to reset. */
++ /* Live owner/commanded-low fence under this provider's gate. Successful
++  * same-client Parked or Active-low token required. CTL/IRQ/latch/input raw
++  * values are diagnostic; eGPIO/IRQ ownership and provider loss still reject.
++  * This does not prove physical reset voltage or physical rail-off. */
+  IOReturn copyLowStatus(uint64_t,uint64_t,SweetPanelPinStatus *);
+  /* Requests only queue work on this service's loop. Mode2 explicitly permits
+-  * writes. First warm activate requires GPIO6 output already high; a parked lease
++  * writes. First warm activate records the inherited level; a parked lease
+   * reactivates with reset held low. No takeover of unknown cold state.
+   * Caller must authorize panel identity, own rails and quiesce DMA/IRQ/touch
+   * before activate/reset/park. This provider cannot prove those dependencies.
+-  * reset: high10ms -> low2ms -> high10ms -> settle5ms. Output latch readback
+-  * is separate from input level confirmation; no rail/DSI/consumer callbacks.
+-  * park: reset low confirmed, >=5ms, suspend pull/drive; TE stays mdp_vsync.
++  * reset: high10ms -> low2ms -> high10ms -> settle5ms. Latch/input readback is diagnostic, with no additional follow deadline; no rail/DSI/consumer callbacks.
++  * park: suspend pull/drive, command reset low, >=5ms; TE stays mdp_vsync.
+   * Detach cannot silently release an active/uncertain pin. No automatic reset,
+   * park, rollback, retry or pin transition on termination. */
+  IOReturn activate(uint64_t,uint64_t *);
+diff --git a/iokit/Kernel/arm/SweetRPMh.h b/iokit/Kernel/arm/SweetRPMh.h
+--- a/iokit/Kernel/arm/SweetRPMh.h
++++ b/iokit/Kernel/arm/SweetRPMh.h
+@@ -87,6 +87,7 @@
+  * these references for admission; RPMh retains them only while pending.
+  * IDs/tokens are issued by the actual providers, never raw MMIO or callbacks.
+  * Lock order: consumer -> RPMh -> Pins/Touch. Neither leaf calls RPMh/consumer.
++ * Reset-low is the commanded GPIO ledger; raw electrical echoes are diagnostic.
+  * Quiesced touch is a software/IRQ fence, not physical supply isolation. */
+ struct SweetPanelSupplyFence {
+  SweetPanelPins *pins;
+@@ -196,7 +197,7 @@
+   * all clients; Busy is explicit, no overwrite, hidden retry or fallback. */
+  IOReturn requestVote(uint64_t,SweetRail,const SweetRailVote &,uint64_t *);
+  IOReturn copyStatus(uint64_t,uint64_t,SweetRPMhStatus *);
+- /* VDDI/VPNL only: same aggregation/ACK engine, with live reset-low and
++ /* VDDI/VPNL only: same aggregation/ACK engine, with live commanded-reset-low and
+   * quiesced-touch checks at admission and before every queued write/trigger.
+   * No-op votes also need a valid fence. This does not authorize link/DMA
+   * shutdown or prove physical isolation; caller must establish those first.
