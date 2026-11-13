@@ -1,0 +1,195 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -400,6 +400,23 @@
+  unsigned fNoCOrder[5];
+  struct NoCOperation { uint32_t offset, value; bool clear; };
+  NoCOperation fNoCOperations[24];
++ /* Evidence only: never consumed by admission, completion or cleanup. */
++ struct NoCRegisterSample {
++  bool valid; uint64_t at;
++  uint32_t irqEnable, control, enable, wait;
++ };
++ struct NoCCommandEvidence {
++  unsigned resource, vcd;
++  uint32_t address, message, data, required, first, last;
++ };
++ struct NoCEvidence {
++  uint64_t requestAt, groupAt, groupDeadline, triggerAt, firstAt, lastAt, readAt;
++  unsigned cursor, count, tcs, polls;
++  bool groupValid, readValid, seenBusy, seenIncomplete, seenIRQ, lastComplete;
++  uint32_t firstIRQ, lastIRQ, firstIdle, lastIdle, writeOffset, readOffset, want, got;
++  NoCRegisterSample trigger, timeout;
++  NoCCommandEvidence commands[5];
++ } fNoCEvidence;
+  vm_offset_t fNoCRSC, fNoCTCSBase, fNoCWrapper;
+  unsigned fNoCNCPT;
+  bool setupNoC(IOService *);
+@@ -415,8 +432,10 @@
+  bool noCPlan(const SweetDisplayBandwidth &);
+  IOReturn noCQueueGroup(void);
+  void noCAdd(uint32_t,uint32_t,bool = false);
++ void captureNoCRegisters(NoCRegisterSample &);
++ void logNoCEvidence(const char *);
+  void advanceNoC(void);
+- void finishNoC(IOReturn,bool);
++ void finishNoC(IOReturn,bool,const char * = "provider");
+  void stopNoC(void);
+  static IOReturn noCAction(OSObject *,void *,void *,void *,void *);
+  static void noCTimerAction(OSObject *,IOTimerEventSource *);
+diff --git a/iokit/Kernel/arm/SweetMDSSNoC.inc b/iokit/Kernel/arm/SweetMDSSNoC.inc
+--- a/iokit/Kernel/arm/SweetMDSSNoC.inc
++++ b/iokit/Kernel/arm/SweetMDSSNoC.inc
+@@ -237,6 +237,7 @@
+  lease.status.state=release ? SweetNoCReleasing : SweetNoCPending;
+  lease.status.acknowledged=0; lease.status.registerAcknowledged=false; lease.status.uncertain=false;
+  fNoCPhase=NAppsRaise; fNoCDeadline=scanout_now()+1500000000ULL;
++ fNoCEvidence={}; fNoCEvidence.requestAt=fNoCDeadline-1500000000ULL;
+  fNoCTimer->setTimeoutUS(1); return kIOReturnSuccess;
+ }
+ void SweetMDSS::noCAdd(uint32_t offset,uint32_t value,bool clear)
+@@ -276,7 +277,56 @@
+  }
+  noCAdd(b+NWait,fNoCWait); noCAdd(b+NEnable,fNoCEnable);
+  noCAdd(b+NControl,0); noCAdd(b+NControl,NAMC);
+- fNoCStepDeadline=scanout_now()+100000000ULL; return kIOReturnSuccess;
++ fNoCStepDeadline=scanout_now()+100000000ULL;
++ uint64_t requestAt=fNoCEvidence.requestAt;
++ fNoCEvidence={}; fNoCEvidence.requestAt=requestAt;
++ fNoCEvidence.groupValid=true; fNoCEvidence.groupAt=fNoCStepDeadline-100000000ULL;
++ fNoCEvidence.groupDeadline=fNoCStepDeadline;
++ fNoCEvidence.cursor=fNoCCursor; fNoCEvidence.count=fNoCGroup; fNoCEvidence.tcs=fNoCTCS;
++ for (unsigned c=0;c<fNoCGroup;++c) {
++  unsigned r=fNoCOrder[fNoCCursor+c]; bool last=c+1==fNoCGroup;
++  fNoCEvidence.commands[c]={r,fNoCInfo[r].vcd,fNoCInfo[r].address,
++      8u|(1u<<16)|(last ? 1u<<8 : 0u),fNoCValues[r]|(last ? 1u<<30 : 0u),
++      NIssued|(last ? NComplete : 0u),0,0};
++ }
++ return kIOReturnSuccess;
++}
++
++void SweetMDSS::captureNoCRegisters(NoCRegisterSample &sample)
++{
++ /* Only after this tick's normal noCAdmission(), for the selected ACTIVE
++  * slot. Sequential, non-atomic reads; no IRQ clear or additional status
++  * polling. Never called by the logger, overall deadline or stop path. */
++ uint32_t base=fNoCTCS*NStride;
++ sample.irqEnable=dp_rd(fNoCTCSBase,NIRQEnable);
++ sample.control=dp_rd(fNoCTCSBase,base+NControl);
++ sample.enable=dp_rd(fNoCTCSBase,base+NEnable);
++ sample.wait=dp_rd(fNoCTCSBase,base+NWait);
++ sample.at=scanout_now(); sample.valid=true;
++}
++void SweetMDSS::logNoCEvidence(const char *reason)
++{
++ /* Cached evidence only. In particular, the overall deadline precedes
++  * admission and may run after clocks or the provider have been lost. */
++ const NoCEvidence &e=fNoCEvidence;
++ SWEET_LOG_ERROR("SWEET MDSS NOC EVIDENCE: reason=%s now-ns=%llu phase=%u request-ns=%llu deadline-ns=%llu group-valid=%u group-ns=%llu group-deadline-ns=%llu group-cursor=%u group-count=%u tcs=%u trigger-issued-ns=%llu; software times, not hardware ACK\n",
++     reason,scanout_now(),fNoCPhase,e.requestAt,fNoCDeadline,(unsigned)e.groupValid,e.groupAt,e.groupDeadline,
++     e.cursor,e.count,e.tcs,e.triggerAt);
++ if (!e.groupValid) return;
++ SWEET_LOG_ERROR("SWEET MDSS NOC REGISTERS: stage=trigger valid=%u sampled-ns=%llu irq-enable=%#x control=%#x cmd-enable=%#x wait=%#x; cached sequential reads\n",
++     (unsigned)e.trigger.valid,e.trigger.at,e.trigger.irqEnable,e.trigger.control,e.trigger.enable,e.trigger.wait);
++ SWEET_LOG_ERROR("SWEET MDSS NOC REGISTERS: stage=group-timeout valid=%u sampled-ns=%llu irq-enable=%#x control=%#x cmd-enable=%#x wait=%#x; cached sequential reads\n",
++     (unsigned)e.timeout.valid,e.timeout.at,e.timeout.irqEnable,e.timeout.control,e.timeout.enable,e.timeout.wait);
++ SWEET_LOG_ERROR("SWEET MDSS NOC POLL: samples=%u first-ns=%llu last-ns=%llu first-irq=%#x last-irq=%#x first-idle=%#x last-idle=%#x seen-busy=%u seen-incomplete=%u seen-irq=%u last-complete=%u progress=%u; cached completion checks\n",
++     e.polls,e.firstAt,e.lastAt,e.firstIRQ,e.lastIRQ,e.firstIdle,e.lastIdle,(unsigned)e.seenBusy,
++     (unsigned)e.seenIncomplete,(unsigned)e.seenIRQ,(unsigned)e.lastComplete,(unsigned)fNoCProgress);
++ SWEET_LOG_ERROR("SWEET MDSS NOC READBACK: valid=%u sampled-ns=%llu write-offset=%#x read-offset=%#x want=%#x got=%#x posted=%u deadline-ns=%llu; cached programming or cleanup check\n",
++     (unsigned)e.readValid,e.readAt,e.writeOffset,e.readOffset,e.want,e.got,(unsigned)fNoCWriteIssued,fNoCWriteDeadline);
++ for (unsigned c=0;c<e.count;++c) {
++  const NoCCommandEvidence &cmd=e.commands[c];
++  SWEET_LOG_ERROR("SWEET MDSS NOC COMMAND: index=%u resource=%u vcd=%u address=%#x planned-msg=%#x planned-data=%#x required=%#x first-status=%#x last-status=%#x status-valid=%u\n",
++      c,cmd.resource,cmd.vcd,cmd.address,cmd.message,cmd.data,cmd.required,cmd.first,cmd.last,(unsigned)(e.polls!=0));
++ }
+ }
+ 
+ void SweetMDSS::noCTimerAction(OSObject *owner,IOTimerEventSource *)
+@@ -288,7 +338,7 @@
+ void SweetMDSS::advanceNoC(void)
+ {
+  uint64_t now=scanout_now();
+- if (now>=fNoCDeadline) { finishNoC(kIOReturnTimeout,fNoCTouched); return; }
++ if (now>=fNoCDeadline) { finishNoC(kIOReturnTimeout,fNoCTouched,"overall-deadline"); return; }
+  if (!fRPMh || !fRPMhConsumer) { finishNoC(kIOReturnNotReady,fNoCTouched); return; }
+  SweetNoCStatus &status=fNoCLeases[fNoCSlot].status;
+  if (fNoCPhase==NAppsRaise || fNoCPhase==NAppsLower) {
+@@ -348,7 +398,10 @@
+   else { finishNoC(kIOReturnSuccess,false); return; }
+   fNoCTimer->setTimeoutUS(100); return;
+  }
+- if (now>=fNoCStepDeadline) { finishNoC(kIOReturnTimeout,true); return; }
++ if (now>=fNoCStepDeadline) {
++  captureNoCRegisters(fNoCEvidence.timeout);
++  finishNoC(kIOReturnTimeout,true,"group-deadline"); return;
++ }
+  uint32_t base=fNoCTCS*NStride, bit=1u<<fNoCTCS;
+  while (fNoCOp<fNoCOps) {
+   NoCOperation &op=fNoCOperations[fNoCOp];
+@@ -375,8 +428,11 @@
+    fNoCWriteDeadline=now+1000000ULL; fNoCWriteIssued=true;
+   }
+   uint32_t value=dp_rd(fNoCTCSBase,op.clear ? NIRQStatus : op.offset);
++  fNoCEvidence.readValid=true; fNoCEvidence.readAt=scanout_now();
++  fNoCEvidence.writeOffset=op.offset; fNoCEvidence.readOffset=op.clear ? NIRQStatus : op.offset;
++  fNoCEvidence.want=op.value; fNoCEvidence.got=value;
+   if (op.clear ? (value&op.value)!=0 : value!=op.value) {
+-   if (now>=fNoCWriteDeadline) finishNoC(kIOReturnIOError,true);
++   if (now>=fNoCWriteDeadline) finishNoC(kIOReturnIOError,true,"write-readback");
+    else fNoCTimer->setTimeoutUS(100);
+    return;
+   }
+@@ -384,6 +440,8 @@
+  }
+  if (!fNoCExecuting) {
+   dp_wr(fNoCTCSBase,base+NControl,NAMC|NTrigger); fNoCExecuting=true;
++  fNoCEvidence.triggerAt=scanout_now(); /* MMIO write returned, not an ACK. */
++  captureNoCRegisters(fNoCEvidence.trigger);
+   fNoCOp=fNoCOps=0; fNoCTimer->setTimeoutUS(100); return;
+  }
+  if (fNoCOps) {
+@@ -403,16 +461,25 @@
+   uint32_t cmd=dp_rd(fNoCTCSBase,base+NCommandStatus+c*NCommandStride);
+   unsigned required=NIssued|(c+1==fNoCGroup ? NComplete : 0u);
+   complete&=cmd!=~0u && (cmd&required)==required;
+- }
++  if (!fNoCEvidence.polls) fNoCEvidence.commands[c].first=cmd;
++  fNoCEvidence.commands[c].last=cmd;
++ }
++ fNoCEvidence.lastAt=scanout_now();
++ if (!fNoCEvidence.polls) {
++  fNoCEvidence.firstAt=fNoCEvidence.lastAt; fNoCEvidence.firstIRQ=irq; fNoCEvidence.firstIdle=idle;
++ }
++ ++fNoCEvidence.polls; fNoCEvidence.lastIRQ=irq; fNoCEvidence.lastIdle=idle;
++ fNoCEvidence.seenBusy|=idle==0; fNoCEvidence.seenIncomplete|=!complete;
++ fNoCEvidence.seenIRQ|=irq!=~0u && (irq&bit)!=0; fNoCEvidence.lastComplete=complete;
+  fNoCProgress|=idle==0 || !complete;
+- if (irq==~0u || idle==~0u) { finishNoC(kIOReturnIOError,true); return; }
++ if (irq==~0u || idle==~0u) { finishNoC(kIOReturnIOError,true,"invalid-status"); return; }
+  if (!idle || !complete || !((irq&bit)||fNoCProgress)) { fNoCTimer->setTimeoutUS(100); return; }
+  noCAdd(base+NControl,NAMC); noCAdd(base+NControl,0);
+  noCAdd(base+NEnable,0); noCAdd(base+NWait,0); noCAdd(NIRQClear,bit,true);
+  noCAdd(NIRQEnable,0); fNoCTimer->setTimeoutUS(1);
+ }
+ 
+-void SweetMDSS::finishNoC(IOReturn result,bool uncertain)
++void SweetMDSS::finishNoC(IOReturn result,bool uncertain,const char *reason)
+ {
+  NoCLease &lease=fNoCLeases[fNoCSlot];
+  lease.status.result=result; lease.status.uncertain=uncertain;
+@@ -424,11 +491,13 @@
+       lease.status.token,lease.status.state,lease.status.acknowledged);
+  } else {
+   lease.status.state=SweetNoCFailed; fNoCFault=true;
+-  if (result!=kIOReturnAborted)
++  if (result!=kIOReturnAborted) {
++   logNoCEvidence(reason);
+    SWEET_LOG_ERROR("SWEET MDSS NOC CONTEXT: phase=%u clock-token=%llu apps-token=%llu register-token=%llu register-acked=%u cursor=%u/%u group=%u tcs=%u executing=%u operation=%u/%u posted=%u clock-fault=%u clock-operation=%u clock-cursor=%u clock-waiting=%u\n",
+        fNoCPhase,fNoCClockToken,fNoCAppsToken,fNoCRegisterToken,(unsigned)lease.status.registerAcknowledged,
+        fNoCCursor,fNoCCount,fNoCGroup,fNoCTCS,(unsigned)fNoCExecuting,fNoCOp,fNoCOps,(unsigned)fNoCWriteIssued,
+        (unsigned)fClockFault,fClockOperation,fClockCursor,(unsigned)fClockWaiting);
++  }
+   SWEET_LOG_ERROR("SWEET MDSS NOC: token=%llu rc=%#x ACK mask=%#x uncertain=%u; votes/clocks retained, no fallback\n",
+       lease.status.token,(unsigned)result,lease.status.acknowledged,uncertain);
+  }
