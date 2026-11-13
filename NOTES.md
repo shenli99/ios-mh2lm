@@ -5,6 +5,7 @@
 
 **CURRENT：用户实测0121a29 retained进入桌面且画面正常；首次完整接管成功。OFF完成，ON在pin复位完成后无后续日志；根因未定。**
 本段替代下方“待a29实机/完整接管前暂停”的旧交接；本轮0219仅补诊断，不得宣称已修复黑屏。
+实现与实测记录提交 **d4ffb3d**（d4ffb3d），用户push最新main即可包含0219。
 USB logs/live-0121a29-abi608-panel-retained.txt：300909bytes/3728行，SHA256=9d285907d505db553ee2ea30c85d9c12b3f72178ec1331420debcda8e96068a9。
 1981新DMA A=c3be4000/fresh PP_DONE100/frame925/flush0，1987touch verified，1988takeover complete，1989HANDOFF active。
 3642 RD_PTR约59.9Hz/dropped0；3706OFF begin，3724四条FIFO命令fresh DMA_DONE+idle，3725OFF complete/票保留。
