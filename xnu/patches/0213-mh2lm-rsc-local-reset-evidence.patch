@@ -1,0 +1,132 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -322,6 +322,11 @@
+  unsigned fClockOperation, fClockCursor, fClockReleaseMask;
+  bool fClockReleasing, fClockWaiting;
+  /* Diagnostic samples only; never authorize writes or complete a lease. */
++ struct ClockLocalSnapshot {
++  uint64_t sampledNS;
++  uint32_t bcr, nonGDSC, rsccAHB, rsccVsync, ahbCMD, ahbCFG;
++  bool valid;
++ } fClockWarmLocal;
+  struct ClockTrace {
+   uint64_t writeEntryNS, writeIssuedNS, sampleNS;
+   unsigned writeBranch, sampleBranch;
+@@ -331,6 +336,10 @@
+   uint32_t immediateCBCR, firstWaitCBCR, observedBits, rscAdmission[3];
+   unsigned waitSamples;
+   bool immediateValid, rscAdmissionValid;
++  ClockLocalSnapshot warmLocal, writeLocal;
++  uint64_t resetSampleNS;
++  uint32_t resetAtTimeout;
++  bool resetValid;
+  } fClockTrace;
+  /* Core resource control shares the clock writer, gate and timer. Profile2
+   * is an explicit SM8150-v2 selection, not a hardware revision detector. */
+@@ -357,6 +366,9 @@
+  bool clockEnableParentReady(unsigned,const uint32_t [6]);
+  bool clockCanGate(void);
+  bool clockBusy(void) const;
++ void captureClockLocal(ClockLocalSnapshot &);
++ void captureClockTimeoutReset(void);
++ void logClockLocal(const char *,const ClockLocalSnapshot &);
+  bool localClocksReady(void);
+  IOReturn retainLocalClocks(SweetClockUse,uint64_t *);
+  IOReturn releaseLocalClocks(uint64_t);
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -227,6 +227,7 @@
+  s->fClockOperation=slot+1; s->fClockCursor=0; s->fClockReleaseMask=0;
+  s->fClockReleasing=false; s->fClockWaiting=false; s->fClockVoteSettleAt=0;
+  s->fClockTrace={};
++ if (use==SweetClockRSC) s->fClockTrace.warmLocal=s->fClockWarmLocal;
+  memcpy(s->fClockTrace.rscAdmission,admittedRSC,sizeof(admittedRSC));
+  s->fClockTrace.rscAdmissionValid=use==SweetClockRSC;
+  s->fClockDeadline=scanout_now()+200000000ULL;
+@@ -285,6 +286,34 @@
+  if (!s->fAccepting || s->isInactive()) return;
+  if (s->coreBusy()) s->advanceCoreResources();
+  else if (s->clockBusy()) s->advanceLocalClocks();
++}
++void SweetMDSS::captureClockLocal(ClockLocalSnapshot &out)
++{
++ /* Callers hold the owner gate after warm/core/clock access admission.
++  * LG RSCC_BCR +4000 and the three CBCRs are in the mapped DISPCC window;
++  * this is not a read of the display RSC/TCS/wrapper behind its clock lease. */
++ out={};
++ out.bcr=dp_rd(dp_dispcc,0x4000);
++ out.nonGDSC=dp_rd(dp_dispcc,0x4004);
++ out.rsccAHB=dp_rd(dp_dispcc,0x400c);
++ out.rsccVsync=dp_rd(dp_dispcc,0x4008);
++ out.ahbCMD=dp_rd(dp_dispcc,0x22bc);
++ out.ahbCFG=dp_rd(dp_dispcc,0x22c0);
++ out.sampledNS=scanout_now(); out.valid=true;
++}
++void SweetMDSS::captureClockTimeoutReset(void)
++{
++ /* Both timeout callers just passed clockPrerequisites(). Limit this one
++  * read to the actual branch7 retain write in the NoC clock phase. Overall
++  * expiry still does not invent a new CBCR sample for CLOCK SAMPLE. */
++ if (fClockReleasing || fClockCursor!=7 || !noCClockDiagnostics() || !fClockTrace.writeLocal.valid) return;
++ fClockTrace.resetAtTimeout=dp_rd(dp_dispcc,0x4000);
++ fClockTrace.resetSampleNS=scanout_now(); fClockTrace.resetValid=true;
++}
++void SweetMDSS::logClockLocal(const char *stage,const ClockLocalSnapshot &v)
++{
++ SWEET_LOG_ERROR("SWEET MDSS CLOCK LOCAL: stage=%s valid=%u bcr=%#x non-gdsc=%#x rscc-ahb=%#x rscc-vsync=%#x ahb-cmd=%#x ahb-cfg=%#x sampled-ns=%llu; ordered context reads, not atomic\n",
++     stage,(unsigned)v.valid,v.bcr,v.nonGDSC,v.rsccAHB,v.rsccVsync,v.ahbCMD,v.ahbCFG,v.sampledNS);
+ }
+ void SweetMDSS::logClockTimeout(const char *reason,uint64_t now,bool currentSample)
+ {
+@@ -313,6 +342,10 @@
+      (t.observedBits&1u)!=0,(t.observedBits&CBCR_OFF)!=0,t.lastEnabledNS);
+  SWEET_LOG_ERROR("SWEET MDSS CLOCK RSC PREFLIGHT: valid=%u non-gdsc=%#x rscc-ahb=%#x rscc-vsync=%#x; admission samples only\n",
+      (unsigned)t.rscAdmissionValid,t.rscAdmission[0],t.rscAdmission[1],t.rscAdmission[2]);
++ logClockLocal("warm-entry",t.warmLocal);
++ logClockLocal("pre-write",t.writeLocal);
++ SWEET_LOG_ERROR("SWEET MDSS CLOCK RESET: valid=%u bcr=%#x sampled-ns=%llu; timeout reset sample only\n",
++     (unsigned)t.resetValid,t.resetAtTimeout,t.resetSampleNS);
+ }
+ void SweetMDSS::advanceLocalClocks(void)
+ {
+@@ -320,6 +353,7 @@
+  if (!clockPrerequisites(diagnose)) { finishLocalClocks(kIOReturnNotReady); return; }
+  uint64_t now=scanout_now();
+  if (now>=fClockDeadline) {
++  captureClockTimeoutReset();
+   logClockTimeout("overall",now,false); finishLocalClocks(kIOReturnTimeout); return;
+  }
+  SweetClockLease &lease=fClockLeases[fClockOperation-1]; unsigned i=fClockCursor;
+@@ -357,6 +391,7 @@
+    }
+    if (!ready) {
+     if (now>=fClockWaitDeadline) {
++     captureClockTimeoutReset();
+      logClockTimeout("branch-wait",now,true); finishLocalClocks(kIOReturnTimeout); return;
+     }
+     fClockTimer->setTimeoutUS(100); return;
+@@ -374,6 +409,7 @@
+    }
+    fClockTouched=true; lease.uncertain=true;
+    if (!fClockReleasing) fClockOwnedMask|=bit; /* retain even if posted write fails */
++   if (!fClockReleasing && i==7 && noCClockDiagnostics()) captureClockLocal(fClockTrace.writeLocal);
+    dp_wr(dp_dispcc,b.cbcr,fClockReleasing ? v&~1u : v|1u);
+    fClockTrace.writeValid=true; fClockTrace.writeBranch=i;
+    fClockTrace.writeBefore=v; fClockTrace.writeWant=fClockReleasing ? v&~1u : v|1u;
+diff --git a/iokit/Kernel/arm/SweetMDSSCore.inc b/iokit/Kernel/arm/SweetMDSSCore.inc
+--- a/iokit/Kernel/arm/SweetMDSSCore.inc
++++ b/iokit/Kernel/arm/SweetMDSSCore.inc
+@@ -85,6 +85,11 @@
+   if (!corePreflight()) return kIOReturnNotReady;
+   if ((dp_rd(dp_dispcc,0x3000)&0x80000007u)!=0x80000000u || !clockCanGate()) return kIOReturnBusy;
+  }
++ /* Warm admission already checked GCC access, domain and idle. Read only
++  * the DISPCC local context before this operation changes core resources.
++  * Never add this diagnostic register access to the cold-domain path. */
++ fClockWarmLocal={};
++ if (!cold) captureClockLocal(fClockWarmLocal);
+  fCoreCold=cold; fCorePhase=CoreConfigVote;
+  fCoreDeadline=scanout_now()+500000000ULL; fCoreResult=kIOReturnSuccess;
+  fCoreWait=0; fCorePLL=fCoreCursor=fCoreRoot=0;
