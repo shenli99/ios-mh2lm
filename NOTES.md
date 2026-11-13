@@ -1,5 +1,21 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-13, a28 artifact inspection)
+
+**CURRENT：接手查看屏幕修复进度；本地已有0121a28产物，已确认包含0216，尚未打包或实机验证。**
+`logs/xnu-buildtree-0121a28.gz` 内78份对应源码与 `scratch/framebuffer-0216/verify` 逐字节一致，无缺失/差异。
+`logs/xnu-kernel-0121a28.gz` 内核17758560bytes，SHA256为
+`368c0511a5dee824d33667104478a744a44f583e10de375f71cd678e6eff37f4`，与包内SHA256SUMS一致。
+内核包含0215 EVIDENCE及0216新增四条RSC/IRQ marker：INTID161 configured、fresh ACTIVE completion、
+v2 qtimer/wrapper/sequencer/solver/PDC initialized、CLK state and TCS ownership ready。
+本轮为产物初核，没有核对独立CI run ID/完整build log，没有重跑原回归或完成全部matrix marker与boot/FAT回读。
+a27原日志确认CLOCK state2/mask381后display NoC ACTIVE2超时，未提交新DMA，HANDOFF失败并冻结画面；
+不能把a28源码/二进制检查通过当作真机修复。未修改驱动、触发CI或操作设备。
+**NEXT：完成a28打包校验，重新生成带NoC IRQ ABI=1/INTID161的ADT，沿ABI608固件和原605字节retained参数打包。**
+随后用户临时fastboot boot并采集USB日志，验证RSC交接→各组fresh ACTIVE→NoC ACK→新DMA/HANDOFF。
+当前不需要仅因下方历史交接再次云编译；亮度/OFFON/长测/combined/supply仍待完整接管后再测。
+以下“待push/待云编译”为历史；0216实现和本地验证细节仍见下一段及 `docs/PANEL-RSC-TAKEOVER.md`。
+
 
 ## Agent handoff / active work (2026-11-13, 0216 RSC/ACTIVE flow implemented)
 
