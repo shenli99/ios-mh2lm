@@ -1,5 +1,35 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-13, a27 clock Held; 0215 NoC evidence ready)
+
+**CURRENT：a27已实测越过branch7，首错推进到NoC ACTIVE2执行等待超时；0215已提交2ffc1a4，本地通过，待用户push云编译。**
+日志live-0121a27-abi608-panel-retained.txt为220191bytes/3044行，SHA=f4c689092c5e8ab227069017b0768675341d37b2fe09155b6e3f9548553219c7。
+10次apps fresh IRQ、四LDO/ARC/CN0和core2成功；1746voted halt complete branch7/cbcr0/request-issued1。
+1747CLOCK token2/state2/mask381/owned80，RSC lease已Held；0214额外enable门槛修正已实机越过，读零硬件原因仍未解释。
+1763NOC phase3/cursor0of5/group1/tcs2/executing1/op0of0/posted0/register-token7/acked1；1764Timeout e00002d6/ACK0/uncertain1。
+1767明确no new DMA，1769/1772生命周期/HANDOFF连锁失败；后续用户态/电池/USB继续，无kernel panic签名。
+executing只表示软件已写trigger；无TCS样本/时间，不能区分100ms组与1.5s整体期限，不能认定硬件拒票或丢IRQ。
+Lineage@2e897dd的drivers/mailbox/qcom-rpmh-mailbox.c：ACTIVE IRQ在trigger前启用，handler核对ISSUED/COMPLETE。
+DTS disp_rsc SPI129=INTID161，ACTIVE2/3；apps INTID37修复不能代替display中断接入。
+XNU先屏蔽本槽IRQ，等待irq或曾见busy/不完整；如果IRQ_STATUS受mask影响且快速完成，可能缺fresh证据。
+模拟已复现该条件，但实际IRQ_STATUS门控/本轮根因尚未证明；不直接启用未接handler的IRQ或放宽完成判据。
+0215仅改MDSS.cpp/NoC.inc，新增请求/组/trigger时间、原轮询首末状态、命令计划与原写读回缓存。
+trigger后及正常准入通过的group-timeout各额外四读IRQ_ENABLE/CONTROL/ENABLE/WAIT；overall/权限丢失/stop不新增MMIO。
+日志只读缓存，valid0不是硬件0，组cursor标明缓存归属；最多10条新ERROR，成功/Aborted不输出，原期限/完成/写入/保票保持。
+22真实provider场景ASan/UBSan通过，与实际a27基线仅差38组四读，其余MMIO/结果/账本/timer/模拟时间一致。
+16套既有回归通过，共17套；真实ARM64对象通过，warnings1553→1561（8个有界数组unsafe-buffer-usage，未屏蔽）。
+0185–0215共31patch严格重放/78源码字节一致/114原CI markers通过；新matrix五marker门槛实际拒旧a27，无boot输出。
+补丁SHA=454174e71caf1631373c6deac1ce412e955e771cbb80ff2f5219479cddd40351。
+**NEXT：用户git push origin main后云编译，下载新kernel/buildtree（建议0121a28），agent核对后打原ABI608 retained。**
+预计比a27仅MDSS.cpp/NoC.inc两文件变化、191 binary markers；原固件/ADT/605字节参数保持。现在无0215新boot。
+沿用fastboot boot，启动约90秒完整USB，先CLOCK Held再NoC EVIDENCE/REGISTERS/POLL/READBACK/COMMAND与CONTEXT。
+按group/overall/readback出口及idle/required/fresh证据分流；若成功再追新DMA/transfer/HANDOFF，不用branch成功替代接管验收。
+a27 USB足够，无需补持久日志/重测；完整接管前亮度/OFFON/长测/其他显示档继续暂停。
+详见PANEL-D1-0121A27.md实测与PANEL-NOC-COMPLETION-EVIDENCE.md；scratch/framebuffer-0215验证底稿、a27分析JSON。
+原始日志/内核/Apple二进制未入git。未push/触发CI/操作设备，未改固件/ADT/参数/其他provider/CI。
+CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。以下NEXT为历史，以本段为准。
+
+
 ## Agent handoff / active work (2026-11-13, 0121a27 voted halt completion boot ready)
 
 **CURRENT：用户下载的0121a27已核对，0214在新kernel内，retained启动镜像打包/回读通过，待实机日志。**

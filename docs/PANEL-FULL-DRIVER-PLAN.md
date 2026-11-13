@@ -1,5 +1,14 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+**当前执行点（2026-11-13）：a27已实测越过branch7，0215完成取证已提交2ffc1a4，待用户push云编译。**
+CLOCK token2/state2/mask381已Held；NoC首组ACTIVE2处phase3/executing1超时，ACK0、无新DMA。
+Lineage ACTIVE IRQ预先启用，XNU屏蔽本槽后轮询，存在快速完成无fresh证据的候选路径；实机原因未证实。
+0215仅补NoC缓存/两处有界四读，原完成/期限/保票保持；overall/访问丢失/stop不新增MMIO。
+22场景与a27仅差38组四读，其余轨迹/结果/资源账本/timer/模拟时间相同；16套既有回归、ARM64对象、31补丁重放通过。
+新产物建议0121a28，预计MDSS.cpp/NoC.inc两文件变化、191 binary markers；沿原ABI608 retained取新首错。
+详见[a27实测](PANEL-D1-0121A27.md#实测branch7-已越过首个-noc-tcs2-请求超时)及[0215实现](PANEL-NOC-COMPLETION-EVIDENCE.md)。
+a27 USB足够，无需补持久日志/重测；完整接管前其他显示测试暂停。以下a27待实机为历史。
+
 **当前执行点（2026-11-13）：0121a27包含0214已核对，retained启动镜像回读通过，待实机日志。**
 78源码/114 source/186 binary markers通过；五份变化与55cab80一致，ABI608固件/ADT/605字节参数保持a26。
 本轮先验证voted halt complete→CLOCK Held→NoC→新DMA/HANDOFF；尚未证明实机接管成功。
