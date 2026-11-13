@@ -21,7 +21,7 @@ The panel (1080x2340) is letterboxed (1125x2436 canvas centred with side bars).*
 
 MH2LM development: [handoff](NOTES.md), [build guide](docs/BUILD-GUIDE.md),
 [known bugs](docs/BUGS.md), [display plan](docs/FRAMEBUFFER-PANEL-PLAN.md),
-[current panel work: 0121a25 / 0212](docs/PANEL-D1-0121A25.md).
+[current panel work: 0213](docs/PANEL-RSC-LOCAL-RESET-EVIDENCE.md).
 
 > Experimental bring-up, not a usable phone OS. Many things are missing or stubbed
 > (see below), and Apple's security model is mostly switched off. It installs into

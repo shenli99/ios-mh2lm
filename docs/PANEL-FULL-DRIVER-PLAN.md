@@ -6,14 +6,15 @@ RCG safe-config启用序列和三路RSC时钟取得顺序存在参考差异，�
 见[父链/halt审计](PANEL-BRANCH7-PARENT-HALT-AUDIT.md)。本次未改内核，不新增编译要求。
 
 
-**当前执行点（2026-11-13）：0121a25已核对包含0212，retained镜像回读通过，待实机日志。**
-78源码字节匹配0212验证树（代码25d8fbc），相比a24仅MDSS.cpp/Clock.inc变化；114 source/183 binary markers通过。
-内核自带SHA匹配；ABI608固件/BootShim/两个append DTB、ADT及605字节retained参数保持a24，INTID37扩展保留。
-四档boot/FAT中kernel/ADT/TOML回读通过，本轮只启动retained约90秒并取完整USB日志，无需再次云编译。
-a24首错为branch-wait/当前enable0/OFF0；a25新增READBACK/OBSERVED/RSC PREFLIGHT，区分写后读回和后续丢失。
-READBACK PA预期0x0af04004；正确翻译不证明总线写入权限，原准入值不当作失败现场值。
-见[a25镜像与操作](PANEL-D1-0121A25.md)、[0212实现与判断标准](PANEL-CLOCK-WRITE-READBACK.md)。
-本轮仍为定位版，尚未证明硬件接管；亮度/OFFON/长测和其他显示档暂停。以下执行点为历史。
+**当前执行点（2026-11-13）：a25已分析；0213局部状态/复位取证已提交7f4f55a，待用户push云编译。**
+a25首错仍为branch7/+4004 branch-wait，PA正确，立即及39次等待均未见enable，整体期限仍余188.3ms。
+RSC准入为NON_GDSC0/RSCC_AHB1/RSCC_VSYNC1；十次apps IRQ和core2通过，未display TCS/新DMA。
+实际store/load及ClockDxe静态直接CBCR路径已核对；LG halt等待与XNU额外enable验证须区分，根因未定。
+0213补warm core入口/branch7写前各六项局部读取，超时仅再读BCR(+4000)；无新写入或控制条件修改。
+27场景ASan/UBSan与0212基线仅差允许采样，其余MMIO/结果/所有权/timer/模拟时间相同；15套回归通过。
+ARM64对象编译告警1552→1552；0185–0213严格重放/78源码/114原CI markers通过，旧a25被新LOCAL门槛拒绝。
+见[a25实测](PANEL-D1-0121A25.md#实测写后及等待均未观察到使能)、[0213实现与交付](PANEL-RSC-LOCAL-RESET-EVIDENCE.md)。
+新kernel/buildtree建议0121a26，核对后沿原ABI608 retained取完整日志；当前无新镜像。a25不用补日志或重测，其他显示测试暂停。
 
 
 **0121a23实测：** a22的branch-unowned准入拒绝已越过，实际发出branch7 enable；

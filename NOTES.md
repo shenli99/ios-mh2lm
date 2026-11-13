@@ -1,5 +1,37 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-13, a25 analyzed; 0213 local reset evidence ready)
+
+**CURRENT：a25 USB证据完整，立即及39次等待均未见enable；0213已提交7f4f55a并本地验证，待用户push云编译。**
+logs/live-0121a25-abi608-panel-retained.txt为301264bytes/3942行，SHA=de38a819d1df09802a7bb292b16f356a4dd3949f889164ffd3c9679d41289fcb。
+1752–1769十次fresh apps IRQ/四LDO/ARC/CN0完成；1770core2成功，1771CN0 token7，1772branch7请求。
+1773首错branch-wait/+4004；1774WRITE before0/want1；1775SAMPLE valid1/current1/CBCR0/enable0/OFF0/CFG40f/source4。
+1776READBACK valid1/PA0x0af04004/CBCR0；1777OBSERVED wait-samples39/first0/seen-enable0/seen-off0；
+1778RSC PREFLIGHT valid1/non-gdsc0/rscc-ahb1/rscc-vsync1（历史准入，非失败现场的新读值）。
+写后记时至立即样本729ns，至最终样本10.043490ms；整体期限余188.273334ms，wait-late65364ns。
+没有观察到enable置位再丢失；不能排除采样间短暂置位。PA匹配不证明总线写权限或实际物理时钟状态。
+1779–1788clock→NoC→managed/lifecycle/HANDOFF失败；仍phase2/executing0，明确未提交新DMA；后续用户态继续，无kernel panic签名。
+实际a25内联store/DSB/同地址load已核对；ClockDxe PE表及14个callback指令校验通过。
+三路静态表alternate vote地址均0，enable/is-enabled callback用CBCR bit0；未发现另一套应写的vote地址。
+LG RSCC_BCR与ClockDxe reset地址均+4000/bit0，a25没有BCR样本，不能直接归因或操作复位。
+重要边界：LG开启等待只验halt，XNU额外要求enable1。CBCR0满足LG halt，当前拒绝不等于物理时钟已证实停止；
+但LG/固件is-enabled仍读bit0，未找到只写/自清依据，也不能据此盲删自身票验证。
+0213仅改MDSS.cpp/Clock.inc/Core.inc：warm入口/branch7写前各六项读取（BCR/三CBCR/AHB CMD+CFG），超时仅再读BCR。
+新增LOCAL warm-entry/pre-write及RESET三条，valid/时间明确，按序采样非原子；原SAMPLE overall仍为历史值。
+原写入/完成条件/期限/失败保票不变，cold无warm采样，release/其他分支/无写入/访问丢失/stop不触发新超时读取。
+27真实provider场景ASan/UBSan通过；与0212基线仅差44组六读及16次BCR（全部场景合计），其余MMIO/结果/所有权/timer/时间相同。
+15套回归通过；真实ARM64对象编译告警1552→1552；0185–0213严格重放/78源码字节比较/114原CI markers通过。
+matrix增加LOCAL/RESET二门槛，旧a25实际被拒绝且无boot输出。补丁SHA=06bcc6dce23f4b376ea40422655c7894ee56cf301f1d328d054414bf28786083。
+**NEXT：用户git push origin main并云编译，下载新kernel/buildtree（建议0121a26），agent核对后打原ABI608 retained。**
+新产物应比a25仅上述三文件变化，预计185 binary markers；原固件/ADT/605字节参数保持。当前没有新boot镜像。
+启动约90秒取完整USB，保留原六条和新LOCAL/RESET。a25无需重测或补持久日志；仍未证明硬件修复。
+完整接管前亮度/OFFON/长测和其他显示档继续暂停。详见docs/PANEL-RSC-LOCAL-RESET-EVIDENCE.md及PANEL-D1-0121A25.md实测。
+底稿scratch/artifact-0121a25/live-retained-log-analysis.json、rsc-write-path-audit.json及实际内核/固件反汇编；原始日志/二进制未入git。
+代码底稿scratch/framebuffer-0213/各验证JSON、编译/回归/基线轨迹比较、拒旧日志及base/edited/verify/replay源码。
+未改固件/ADT/参数/CI/USB/输入/电池/apps IRQ，未push/触发CI/操作设备。CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+以下NEXT为历史，以本段为准。
+
+
 ## Agent handoff / active work (2026-11-13, 0121a25 write-readback boot ready)
 
 **CURRENT：用户下载的0121a25已确认包含0212，retained镜像打包/回读通过，待实机USB日志。**
