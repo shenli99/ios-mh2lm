@@ -1,5 +1,9 @@
 # 0217：按 Lineage 修正 qtimer 初始化的读回条件
 
+后续更新：0218 已按用户要求把审计范围扩展至后续配置路径，云编译应包含 0217+0218。
+以 [0218 配置观察与验证](PANEL-LINEAGE-CONFIG-OBSERVATION.md) 和 NOTES 顶部交接为准。
+
+
 2026-11-13。a28 实机首错是 RSC 初始化 index4：wrapper `+0x2020`
 （物理地址 `0x0af32020`，Lineage 名称 `F0_QTMR_V1_CNTP_CVAL_LO`）
 写入 `0xffffffff`，读回 `0x224cac6`。0216 的逐项全值相等检查在这里报 IOError。

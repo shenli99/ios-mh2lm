@@ -130,6 +130,10 @@ int main(){
    if(fault==0)physicalHalt=false;if(fault==1)physicalRootHalt=false;if(fault==2)physicalUnlock=false;
    if(fault==3)dropLinkWrite=bases[12]+0x214;if(fault==4)dropLinkWrite=bases[12]+0x24;if(fault==5)dropLinkWrite=bases[12]+0x528;
   }
+  if((restore&&fault==4)||(!restore&&fault>=1)){
+   if(restore){h.wakePixels();assert(h.m->fLifecycle.resetComplete);}
+   else{h.untilLife(SweetPanelComplete);assert(h.m->fLifecycle.resourcesParked);}continue;
+  }
   failed(h);if(restore)assert(panelPackets.empty()&&!h.m->fLifecycle.linkRebuilt&&!h.m->fLifecycle.resetComplete);
   else assert(h.m->fManagedBandwidth&&!h.m->fLifecycle.resourcesParked);
  }
@@ -146,6 +150,8 @@ int main(){
   if(drift==5)fakeTicks+=4000000000ULL;
   if(drift==6){regs[bases[1]+0x212c]=0;regs[bases[1]+0x2130]=0x101;} // another hardware link user
   auto before=trace.size();SweetMDSS::noCTimerAction(h.m,h.m->fNoCTimer);
+  if(drift==2||drift==3){assert(h.m->fLifecycle.phase!=SweetPanelFault);
+   if(restore)h.wakePixels();else h.untilLife(SweetPanelComplete);continue;}
   if(h.m->fLifecycle.phase!=SweetPanelFault)fprintf(stderr,"drift restore=%u drift=%u failed to fault; life=%u noc=%u\n",restore,drift,h.m->fLifecycle.phase,h.m->fNoCPhase);
   assert(h.m->fLifecycle.phase==SweetPanelFault);
   for(unsigned i=before;i<trace.size();++i)assert(!trace[i].write||trace[i].addr<DT||trace[i].addr>=DT+0x3000);
@@ -173,13 +179,13 @@ int main(){
   if(clock)h.m->fClockNextToken=~0ULL;else h.m->fNoCNextToken=~0ULL;
   failed(h);assert(panelPackets.empty()&&!h.m->fLifecycle.resetComplete);
  }
- // Re-admission never adopts changed dormant state, and parked cancellation
+ // Re-admission logs dormant snapshots; parked cancellation
  // must not acquire DATA or issue reset packets in a later timer.
  for(unsigned fault=0;fault<5;++fault){Harness h;ready(h);parked(h);panelPackets.clear();
   if(fault<2){
    if(fault==0)regs[bases[1]+0x2114]^=1u<<14;else regs[bases[1]+0x2128]^=1u<<4;
    auto before=writes();uint64_t token=99;
-   assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)!=0&&!token&&writes()==before);
+   assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)==0&&token);h.wakePixels();continue;
   }else{
    if(fault==2)h.m->cancelPanelLifecycle(h.m->fLifecycle.token);
    if(fault==3)h.m->stop(h.d);

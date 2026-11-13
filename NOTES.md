@@ -1,5 +1,35 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+
+## Agent handoff / active work (2026-11-13, 0218 Lineage config observation ready)
+
+**CURRENT：按用户要求扩展审计 qtimer 后续步骤；0218 已实现配置回读仅打印，相关本地验证通过，待用户 push 云编译。**
+本段替代下方“0217 仅六项/其余59项仍严格回读”的交接；新产物必须包含 0217+0218。
+补丁 xnu/patches/0218-mh2lm-lineage-config-observation.patch；实现提交见本段后续记录/git log。
+SHA256=9fc779ee9781c6546f34ef45a175819cc85729af5cdedf6cc29af4c206178658。
+参考 Lineage@2e897dd：RSC65项初始化普通写、TCS_USE_OK/override回显、NoC payload/WAIT/ENABLE/IRQ配置/清理、
+父时钟原始快照和自有PLL/RCG/branch配置、PHY/PLL/host reset/config、休眠恢复快照及自有scanout source/stride/crop改为打印。
+取消 Lineage 未额外要求的 ACTIVE 完成 STATUS idle、PLL关闭unlock、branch关闭ROOT_OFF快照门槛。
+CONTROL按读值RMW保留无关位；三个 pre-trigger 同步 CONTROL 回读仍保留，和 Lineage write_tcs_reg_sync 一致。
+自己的已完成槽不再要求旧CONTROL/WAIT模板或cleanup ENABLE回显；外来冲突、实际槽可用/本次IRQ关联仍检查。
+IRQ_ENABLE回显只打印，本槽真实IRQ+ISSUED/必要COMPLETE仍必需；同时外来源不否决本槽。
+真实SEQ_BUSY/UPDATE/CLK_OFF/REFGEN/PLL锁定、命令/像素完成、票据/权限/ABI/maps/版本/生命周期/physical pin保留。
+继承的未知源/不支持频率、CPHY/别名消费者、固定geometry/SMMU合同仍拒绝，不能说全部驱动等价Lineage。
+统一 SWEET MDSS CONFIG: stage/offset/want/got/mask/mismatch；父时钟branch/field；最多1024条，匹配记录最多768。
+配置观察不是ACK，不证明目标频率/带宽/地址生效；stop/失权不为打印补读外围MMIO。
+16既有回归+DSI link/host+36完成专项+16qtimer+78新配置场景，共21套ASan/UBSan通过。
+ARM64 SweetMDSS对象编译通过；warnings1573→1585，净增12条均为既有unsafe-buffer类别的固定边界诊断数组/表索引。
+Lineage动态五helper输出65项值/顺序一致；0185–0218共34patch严格无offset/fuzz重放/78文件一致/114原CI markers通过。
+matrix新增CONFIG marker；真实旧a28被拒绝，无boot输出；bash语法通过。底稿 scratch/framebuffer-0218/。
+a28仍为最后实机：RSC qtimer index4/+2020 wantffffffff/got224cac6，未到INTID161或display TCS/新DMA。
+读值不同原因仍未知；当前没有0218新内核/boot或实机结果，不能认定静帧已修复。
+**NEXT：用户 push 最新 main 云编译，下载 kernel/buildtree（建议0121a29）；agent核对包含0218后沿原ABI608/ADT/605字节retained打包。**
+先看65项配置→TCS ownership/INTID161→fresh ACTIVE/ACK→PHY/host→新DMA/transfer/HANDOFF；失败按新首错及之前打印值排查。
+完整接管前亮度/OFFON/长测/combined/supply实机验证继续暂停。
+详见 docs/PANEL-LINEAGE-CONFIG-OBSERVATION.md；已更新流程对照/编译指南/a28和0217文档及workspace PLAN。
+未push/触发CI/操作设备；未改CI/ADT/固件/bootargs/其他provider；CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+以下CURRENT/NEXT和旧验证要求均为历史，以本段为准。
+
 ## Agent handoff / active work (2026-11-13, a28 init failure; 0217 ready)
 
 **CURRENT：a28仍静帧，首错为RSC qtimer初始化index4读回不相等；0217已实现并本地验证通过，待用户push云编译。**

@@ -111,9 +111,9 @@ int main(){
   clockTick(h,100,false);auto token=h.m->fNoCClockToken;messages.clear();fakeTicks=h.m->fClockDeadline;
   clockTick(h,0,false);diagnostics(true,"overall",false,true,true,7,0x80002001,0x80002000,0x80002001);
   lateSilent(h);report(scenario++,h,token);}
- // Ordinary HALT release must observe OFF; voted release must read our own
- // enable clear. Both timeout paths preserve ownership and produce evidence.
- for(unsigned voted=0;voted<2;++voted){Harness h;offLeaves();configReady(h);heldRSC(h);
+ // HALT release must observe OFF. Voted release uses a fixed settle delay
+ // without an enable-echo condition, covered by the clock-vote suite.
+ for(unsigned voted=0;voted<1;++voted){Harness h;offLeaves();configReady(h);heldRSC(h);
   auto token=h.m->fNoCClockToken;h.m->fNoCTarget.registerPeak=0;h.m->fNoCCursor=h.m->fNoCCount;
   assert(h.m->releaseLocalClocks(token)==0);if(voted)dropClockWrite=bases[1]+0x4004;
   unsigned branch=voted?7:9;
@@ -134,9 +134,9 @@ int main(){
  // Parent drift and stop are not Timeout, so no new timeout records appear.
  for(unsigned stop=0;stop<2;++stop){Harness h;offLeaves();configReady(h);untilWrite(h,7);
   auto token=h.m->fNoCClockToken;messages.clear();
-  if(stop)h.m->stop(h.d);else {regs[bases[1]+0x22c0]^=0x80000000u;clockTick(h);}
+  if(stop)h.m->stop(h.d);else {regs[bases[1]+0x22bc]|=1u;clockTick(h);}
   diagnostics(false);lateSilent(h);report(scenario++,h,token);}
- assert(scenario==14);
+ assert(scenario==13);
  // Separate never observed, immediate readback then lost, and a late latch
  // during CLK_OFF followed by loss. Final CLK_OFF=1 keeps all cases pending.
  for(unsigned mode=0;mode<3;++mode){Harness h;offLeaves();regs[bases[1]+0x4004]=0;
@@ -164,7 +164,7 @@ int main(){
   if(DIAG_CHECK){auto p=message("SWEET MDSS CLOCK READBACK:");assert(field(p,"valid")==1&&field(p,"pa")==pa);}
   noPayload();lateSilent(h);report(scenario++,h,token);dropClockWrite=0;translatedAddress=~vm_offset_t(0);
  }
- assert(scenario==19);
+ assert(scenario==18);
 }
 '''
 
@@ -217,6 +217,6 @@ if baseline:
             skip = True
     assert not skip and removed > 0
     assert b''.join(filtered) == run(baseline, False), 'unexpected MMIO, result, ownership or timer changes'
-print('PASS: 19 actual clock worker scenarios; immediate same-CBCR read, never-seen/lost/delayed vote, '
+print('PASS: 18 actual clock worker scenarios; immediate same-CBCR read, never-seen/lost/delayed vote, '
       'wait history, admission-only sibling samples, translation unavailable/mismatch, cache reset and stop; '
       'ASan/UBSan; ' + ('only the allowed post-write reads differ from 0211' if baseline else 'no baseline supplied'))

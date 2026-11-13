@@ -135,7 +135,7 @@ int main(){
   }
   auto resets=phyResets;assert(h.m->setPanelPower(false)==0&&h.m->setPanelPower(true)==0&&resets==phyResets);
  }
- // Warm malformed/alias/ULPS/CPHY/PN routes reject before the first host/link write.
+ // Unknown identity, CPHY and live aliases reject; inherited configuration differences log.
  for(unsigned f=0;f<9;++f){Harness h;h.begin();h.until(SweetMDSS::ManagedLink);
   if(f==0)regs[bases[12]+4]=0xffffffff;if(f==1)regs[bases[12]+0x34]=0x10;
   if(f==2)regs[bases[12]+0x18]=0x40;if(f==3)regs[bases[12]+0xa4]=1;
@@ -143,12 +143,13 @@ int main(){
   if(f==6){regs[bases[1]+0x2130]=0x101;regs[bases[1]+0x212c]=0;}
   if(f==7){regs[bases[1]+0x20b4]=0x101;regs[bases[1]+0x2008]=1;}
   if(f==8)regs[bases[12]+0x14]=4;
+  if(f==1||f==3||f==4||f==8){h.finish();assert(h.m->fLinkPhase==SweetMDSS::LinkReady);continue;}
   h.step();assert(!h.m->fLinkTouched&&!phyResets);
   for(unsigned n=0;n<trace.size();++n)if(trace[n].write)assert(trace[n].addr<bases[12]||trace[n].addr>=bases[12]+0x760);failed(h);
  }
- // A halted branch does not substitute for independently stopped roots.
+ // ROOT_OFF is diagnostic; a pending RCG UPDATE still blocks reconfiguration.
  for(unsigned f=0;f<2;++f){Harness h;h.begin();untilLink(h,SweetMDSS::LinkLaneIdle);
-  if(!f)physicalRootHalt=false;
+  if(!f){physicalRootHalt=false;h.finish();assert(h.m->fLinkPhase==SweetMDSS::LinkReady);continue;}
   else {physicalRCG=false;regs[bases[1]+0x2110]|=1u;}
   for(unsigned n=0;n<8;++n)h.step();
   assert(h.m->fLinkPhase==SweetMDSS::LinkGatesOff&&regs[bases[12]+0x3c]==1&&!phyResets);
@@ -157,20 +158,20 @@ int main(){
  // A successful RCG write and running branches do not substitute for ROOT_ON.
  {Harness h;h.begin();untilLink(h,SweetMDSS::LinkRootWait);physicalRootRun=false;
   failed(h);assert(h.m->fLinkPhase==SweetMDSS::LinkFault&&!hostResets);}
- // Real independent status deadlines: no halt/unlock/refgen/relock/update/run.
+ // Real halt/refgen/relock/update/run deadlines remain; unlock is diagnostic.
  for(unsigned f=0;f<6;++f){Harness h;h.begin();
   if(f==0){untilLink(h,SweetMDSS::LinkLaneIdle);physicalHalt=false;}
-  if(f==1){untilLink(h,SweetMDSS::LinkGatesOff);physicalUnlock=false;}
+  if(f==1){untilLink(h,SweetMDSS::LinkGatesOff);physicalUnlock=false;h.finish();assert(h.m->fLinkPhase==SweetMDSS::LinkReady);continue;}
   if(f==2){untilLink(h,SweetMDSS::LinkResetHold);physicalRefgen=false;}
   if(f==3){untilLink(h,SweetMDSS::LinkPLLConfig);physicalRelock=false;}
   if(f==4){untilLink(h,SweetMDSS::LinkRoots);physicalRCG=false;}
   if(f==5){untilLink(h,SweetMDSS::LinkRootWait);physicalRun=false;}
   failed(h);assert(h.m->fLinkPhase==SweetMDSS::LinkFault&&h.m->fDsiPoisoned&&!hostResets);
  }
- // Partial writes and drift must not be adopted as successful configuration.
+ // Configuration non-echo can reach LinkReady, then still needs fresh pixels.
  const uintptr_t drop[]={0x20,0xb8,0x418,0x6a4,0x5e4,0x620,0x10,0x528,0x128};
  for(auto off:drop){Harness h;h.begin();untilLink(h,SweetMDSS::LinkResetHold);dropLinkWrite=bases[12]+off;
-  failed(h);assert(h.m->fLinkPhase==SweetMDSS::LinkFault&&!hostResets);}
+  untilLink(h,SweetMDSS::LinkReady);assert(h.m->fScanoutState!=SweetScanoutActive);h.finish();assert(h.m->fScanoutState==SweetScanoutActive);}
  // Losing the reconstructed PLL during host reset closes that next stage too.
  {Harness h;h.begin();untilLink(h,SweetMDSS::LinkReady);
   for(unsigned n=0;n<16&&h.m->fHostPhase!=SweetMDSS::HostResetHold;++n)h.step();
@@ -187,9 +188,10 @@ int main(){
   if(f==3){regs[bases[1]+0x2130]=0x101;regs[bases[1]+0x212c]=0;}
   if(f==4)regs[bases[1]+0x2118]^=1; // noncontrolled BYTE MND snapshot drift
   if(f==5)dropPHYResetExit=true;if(f==6)regs[bases[1]+0x8000]^=1u<<6;
-  failed(h);
+  if(f>=4){h.finish();assert(h.m->fLinkPhase==SweetMDSS::LinkReady);}
+  else failed(h);
  }
- puts("PASS: real managed PHY/PLL/DSI host/scanout; destructive reset, independent branch+root halt/unlock/REFGEN/fresh lock/RCG/branch+root run, fractional+DOWN-SSC oracle, guarded topology, serialized lease suspension, controlled snapshot updates, new pixel fence, partial-write/drift/alias/resource/timeout/stop/provider loss, no PHY1/vendor and zero objects");
+ puts("PASS: real managed PHY/PLL/DSI host/scanout; destructive reset, independent branch halt/REFGEN/lock/UPDATE/run with configuration diagnostics, fractional+DOWN-SSC oracle, guarded topology, serialized lease suspension, controlled snapshot updates, new pixel fence, partial-write/drift/alias/resource/timeout/stop/provider loss, no PHY1/vendor and zero objects");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-link-') as temp:

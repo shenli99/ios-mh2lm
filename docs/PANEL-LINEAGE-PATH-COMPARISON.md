@@ -5,6 +5,15 @@
 0215（`2ffc1a4`）只增加取证，不改变下述工作路径。
 Lineage 一侧是源码所定义的路径，未取得本次同机 Android 寄存器轨迹；不能把它写成实机测量结果。
 
+## 0218 配置回读规则（同日后续，以此为准）
+
+0217 先取消六项 CNTP 回显门槛；0218 继续核对 RSC→NoC→clock/core→PHY/PLL→host→
+scanout 和休眠/恢复，将已审计的额外配置相等/快照检查改为 `SWEET MDSS CONFIG:` 打印。
+Lineage 本身的三个 CONTROL 同步写、busy/UPDATE/CLK_OFF/REFGEN/LOCK、真实 IRQ 和命令/像素完成保留。
+详细源码依据、仍保留的继承合同和本地验证见 [0218 配置观察](PANEL-LINEAGE-CONFIG-OBSERVATION.md)。
+下方 a27/0215 表格为历史；不能继续把其中“无 RSC 初始化”等描述当作当前源码状态。
+当前仍待新内核实机验证，也仍未实现整套 Lineage 的状态机/continuous splash 路径。
+
 ## 0216 实施进展（同日后续）
 
 以下原对照表记录 a27/0215 的状态。用户授权补缺后，0216 已实现当前 CLK/ACTIVE 路径的

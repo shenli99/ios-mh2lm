@@ -118,9 +118,10 @@ int main(){auto*n=nub();fixtures();auto*s=make(n);assert(!writes());
  regs[bases[1]+0x3000]=0xf822f000;regs[bases[1]+0x200c]=0x221;
  regs[bases[1]+0x22c0]=1;regs[bases[1]+0x20cc]=0x100107;regs[bases[1]+0x214c]=0;
  s=make(n);assert(s->fClockParents[3][0]==0&&s->localClocksReady()&&!writes());
- // Equivalent frequency must not weaken the raw-parent drift guard.
- regs[bases[1]+0x214c]=1;assert(!s->localClocksReady());uint64_t driftToken=999;
- assert(s->retainLocalClocks(SweetClockDSI0,&driftToken)==kIOReturnNotReady&&!driftToken&&!writes());
+ // Equivalent-rate snapshot differences are diagnostic only.
+ regs[bases[1]+0x214c]=1;assert(s->localClocksReady());uint64_t driftToken=999;
+ assert(s->retainLocalClocks(SweetClockDSI0,&driftToken)==0&&driftToken&&!writes());complete(s);
+ assert(status(s,driftToken).state==SweetClockHeld);
  destroy(s,n);
  // All combinations of bypass/div1 on AHB/MDP/VSYNC/ESC0 are warm-retainable.
  for(unsigned config=0;config<16;++config){fixtures();
@@ -154,6 +155,23 @@ int main(){auto*n=nub();fixtures();auto*s=make(n);assert(!writes());
  assert(s->fClockWaiting&&writes()==2);tick(s);assert(status(s,bypass).state==SweetClockReleasing);
  regs[bases[1]+0x2038]|=0x80000000u;regs[bases[1]+0x2148]=0x80000000;complete(s);
  assert(status(s,bypass).state==SweetClockReleased&&!s->fClockOwnedMask&&regs[bases[1]+0x214c]==0);
+ destroy(s,n,true);
+ // Ordinary (non-voted) branch: issued request + real CLK_OFF completion
+ // survives enable=0. Neither acquisition nor release uses enable echo.
+ fixtures();s=make(n);releaseBoot(s);
+ regs[bases[1]+0x2024]=0x80000000;regs[bases[1]+0x20f8]=0x80000000;
+ dropClockWrite=bases[1]+0x2024;auto plain=acquireCore(s);
+ for(unsigned j=0;j<SweetClockCount&&!s->fClockWaiting;++j)tick(s);
+ assert(s->fClockWaiting&&s->fClockIssuedMask==4);tick(s);
+ assert(status(s,plain).state==SweetClockPending);
+ regs[bases[1]+0x2024]=0;regs[bases[1]+0x20f8]=0;complete(s);
+ assert(status(s,plain).state==SweetClockHeld&&s->clockBranchRunning(2,regs[bases[1]+0x2024]));
+ bool logged=false;for(auto&m:messages)logged|=m.find("stage=clock-branch-request")!=std::string::npos;assert(logged);
+ // Independently stopped hardware completes release even if enable reads 1.
+ regs[bases[1]+0x2024]=1;assert(s->releaseLocalClocks(plain)==0);
+ for(unsigned j=0;j<SweetClockCount&&!s->fClockWaiting;++j)tick(s);
+ regs[bases[1]+0x2024]=0x80000001;regs[bases[1]+0x20f8]=0x80000000;complete(s);
+ assert(status(s,plain).state==SweetClockReleased&&!s->fClockIssuedMask);
  destroy(s,n,true);
  // Duplicate writers and timer-allocation/add failures do not steal ownership.
  fixtures();s=make(n);auto*other=new SweetMDSS();assert(!other->start(n));other->release();
@@ -236,7 +254,7 @@ int main(){auto*n=nub();fixtures();auto*s=make(n);assert(!writes());
  fixtures();s=make(n);trace.clear();assert(s->localClocksReady());
  for(auto op:trace)assert(!op.write&&!(op.addr>=bases[12]&&op.addr<bases[12]+0x760));
  assert(s->brightnessReady()==kIOReturnSuccess);
- messages.clear();regs[bases[1]+0x209c]^=1;assert(!s->localClocksReady());
+ messages.clear();regs[bases[1]+0x2098]|=1;assert(!s->localClocksReady());
  trace.clear();assert(s->brightnessReady()==kIOReturnNotReady);
  uint32_t word=0x80050029;assert(s->dcsWrite(&word,1)==kIOReturnNotReady);
  s->fPanelPowerEnabled=true;assert(s->setPanelPower(false)==kIOReturnNotReady);

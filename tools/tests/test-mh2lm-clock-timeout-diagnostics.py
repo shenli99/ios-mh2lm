@@ -102,9 +102,9 @@ int main(){
   clockTick(h,100,false);auto token=h.m->fNoCClockToken;messages.clear();fakeTicks=h.m->fClockDeadline;
   clockTick(h,0,false);diagnostics(true,"overall",false,true,true,7,0x80002001,0x80002000,0x80002001);
   lateSilent(h);report(scenario++,h,token);}
- // Ordinary HALT release must observe OFF; voted release must read our own
- // enable clear. Both timeout paths preserve ownership and produce evidence.
- for(unsigned voted=0;voted<2;++voted){Harness h;offLeaves();configReady(h);heldRSC(h);
+ // HALT release must observe OFF. Voted release uses a fixed settle delay
+ // without an enable-echo condition, covered by the clock-vote suite.
+ for(unsigned voted=0;voted<1;++voted){Harness h;offLeaves();configReady(h);heldRSC(h);
   auto token=h.m->fNoCClockToken;h.m->fNoCTarget.registerPeak=0;h.m->fNoCCursor=h.m->fNoCCount;
   assert(h.m->releaseLocalClocks(token)==0);if(voted)dropClockWrite=bases[1]+0x4004;
   unsigned branch=voted?7:9;
@@ -125,9 +125,9 @@ int main(){
  // Parent drift and stop are not Timeout, so no new timeout records appear.
  for(unsigned stop=0;stop<2;++stop){Harness h;offLeaves();configReady(h);untilWrite(h,7);
   auto token=h.m->fNoCClockToken;messages.clear();
-  if(stop)h.m->stop(h.d);else {regs[bases[1]+0x22c0]^=0x80000000u;clockTick(h);}
+  if(stop)h.m->stop(h.d);else {regs[bases[1]+0x22bc]|=1u;clockTick(h);}
   diagnostics(false);lateSilent(h);report(scenario++,h,token);}
- assert(scenario==14);
+ assert(scenario==13);
 }
 '''
 
@@ -157,7 +157,7 @@ baseline = Path(sys.argv[2]) if len(sys.argv) == 3 else None
 result = run(target, True)
 if baseline:
     assert result == run(baseline, False), 'diagnostics changed MMIO, result, ownership or timer state'
-print('PASS: 14 actual clock worker scenarios; bounded timeout/write/sample records, '
+print('PASS: 13 actual clock worker scenarios; bounded timeout/write/sample records, '
       'own-enable/CLK_OFF evidence, deadline precedence, historical/unavailable samples, '
       'request reset, voted/HALT release, parent drift, stop/late silence; ' +
       ('baseline MMIO/results/timer state identical' if baseline else 'ASan/UBSan'))

@@ -59,19 +59,19 @@ int main(){unsigned cases=0;
   nonEcho=-1;++cases;
  }
  if(BASELINE){printf("PASS: %u a28 non-echo initialization failures reproduced before TCS submission\n",cases);return 0;}
- // Access selection and the other configuration blocks retain strict
- // write verification. Corrupted writes still stop before any payload.
+ // The other initialization blocks also use plain writes in Lineage.
+ // Corruption is logged, then fresh IRQ/completion is still required.
  const uintptr_t stable[]={DW+0x1fe0,DW+0x1ff0,DW+0x1040,DW+0x1044,DW+8,DR+0x600,DR+0x1004,DR+0x20};
  for(auto address:stable){Harness h;corruptInit=address;
-  for(unsigned n=0;n<256&&h.m->noCBusy();++n)h.poll();
-  h.failed(kIOReturnIOError);assert(!h.m->fNoCRSCInitialized&&!tcsWrites()&&!nstatus(h.m,h.token).acknowledged);
+  h.triggered();assert(h.m->fNoCRSCInitialized&&!nstatus(h.m,h.token).acknowledged);
+  assert(count("mismatch=1")>0);drive(h.m,h.r);assert(nstatus(h.m,h.token).state==SweetNoCHeld);
   corruptInit=0;++cases;
  }
  // Loss of the clock lease before initialization must never reach CNTP.
  {Harness h;h.m->fClockFault=true;auto before=trace.size();h.poll();
   assert(!h.m->fNoCRSCInitialized&&!tcsWrites());
   for(size_t i=before;i<trace.size();++i)assert(!(trace[i].addr>=DW&&trace[i].addr<DW+0x4000));++cases;}
- printf("PASS: %u real-provider qtimer scenarios; non-echo writes, strict config faults, IRQ-only ACK and access loss\n",cases);
+ printf("PASS: %u real-provider qtimer scenarios; non-echo writes, configuration diagnostics, IRQ-only ACK and access loss\n",cases);
 }
 '''
 source = (prelude + actual['DSI_MEMORY_FIXTURE'] + actual['pool_fixture'] +

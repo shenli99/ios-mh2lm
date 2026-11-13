@@ -43,20 +43,20 @@ int main(){
   if(fault==23)regs[DW+4]=1;if(fault==24)regs[DW+4]=~0u;
   if(fault==25)regs[DW+0x24]=1u<<12;if(fault==26)regs[DW]=2;
   if(fault==27)regs[DR+0x404]=1;if(fault==28)regs[DR+0xd0]=1;
-  trace.clear();messages.clear();bool ok=m->noCAdmission();assert(ok==(fault==0));
-  if(DIAG_CHECK){if(fault)assert(has(gates[fault]));else assert(messages.empty());assert(messages.size()<=3);}
+  trace.clear();messages.clear();bool ok=m->noCAdmission();bool diagnostic=fault==17||fault==23||fault==28;assert(ok==(fault==0||diagnostic));
+  if(DIAG_CHECK){if(fault&&!diagnostic)assert(has(gates[fault]));else if(diagnostic)assert(has("SWEET MDSS CONFIG:"));else assert(messages.empty());assert(messages.size()<=12);}
   for(auto&o:trace)assert(!o.write);
-  if(fault&&fault<=18)for(auto&o:trace)assert(!(o.addr>=DR&&o.addr<DW+0x4000));
+  if(fault&&fault<=18&&!diagnostic)for(auto&o:trace)assert(!(o.addr>=DR&&o.addr<DW+0x4000));
   // Samples consumed by checks only. No read past a failed short circuit.
-  if(fault>=23&&fault<=26)for(auto&o:trace)assert(o.addr!=DR+0x404&&o.addr!=DR+0xd0);
+  if(fault>=24&&fault<=26)for(auto&o:trace)assert(o.addr!=DR+0x404&&o.addr!=DR+0xd0);
   if(fault==27)for(auto&o:trace)assert(o.addr!=DR+0xd0);
   report(fault,ok);m->fAccepting=true;m->inactive=false;cleanup(m,d,r,n);
  }
  // Real state-machine failure context and no repeated/later diagnostics.
- for(unsigned fault=0;fault<3;++fault){
+ for(unsigned fault=0;fault<2;++fault){
   nocFixtures();auto*n=nub();auto*r=make(n);auto*d=displayNub();auto*m=displayMake(d,r);
   if(fault==0)regs[bases[1]+0x400c]=0x80000000;
-  if(fault==1)regs[DW+4]=~0u;if(fault==2)regs[DR+0xd0]=1;
+  if(fault==1)regs[DW+4]=~0u;
   messages.clear();trace.clear();auto token=retain(m);
   for(unsigned i=0;i<256&&m->noCBusy();++i)step(m,r);
   assert(nstatus(m,token).state==SweetNoCFailed&&!nstatus(m,token).acknowledged);
@@ -92,4 +92,4 @@ actual=run(target,True)
 if baseline:
     old=run(baseline,False)
     assert actual==old,'diagnostics changed MMIO/read order or admission result'
-print('PASS: 29 admission cases + 3 actual failure paths; precise clock/RSC/wrapper/solver gates, software context, bounded logs, no post-failure RSC/solver reads or payload writes, late timer silence;'+(' identical baseline/diagnostic MMIO traces and results' if baseline else ' actual provider code'))
+print('PASS: 29 admission cases + 2 actual failure paths; precise clock/RSC/wrapper/solver gates, software context, bounded logs, no post-failure RSC/solver reads or payload writes, late timer silence;'+(' identical baseline/diagnostic MMIO traces and results' if baseline else ' actual provider code'))

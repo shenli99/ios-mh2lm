@@ -79,7 +79,7 @@ int main(){
  for(unsigned fault=0;fault<5;++fault){Harness h;
   if(fault==0)regs[bases[6]]=0x20020000;if(fault==1)regs[bases[6]+0x15c]=1;
   if(fault==2)regs[bases[6]+0x110]|=1u<<24;if(fault==3)regs[bases[6]+0x68]=1;
-  if(fault==4)regs[bases[6]+4]=3;
+  if(fault==4)h.m->fDsiPoisoned=true;
   assert(h.m->beginScanout(h.pool,h.channel)==kIOReturnNotReady&&!writes()&&!h.m->fScanoutUsed);
  }
  {
@@ -115,10 +115,11 @@ int main(){
   auto count=hostResets;assert(h.m->setPanelPower(false)==0&&h.m->setPanelPower(true)==0);
   assert(hostResets==count); // ordinary DCS lifecycle does not reset host/withdraw votes
  }
- // Each target register must be rebuilt; dropping a write cannot be called Ready.
+ // Plain configuration write observations do not gate Ready; real pixel completion does.
  const unsigned drop[]={0x40,0x44,0x58,0x5c,0x60,0x64,0x84,0xb0,0xbc,0xc4,0xcc,0x1b8};
  for(auto offset:drop){Harness h;h.begin();untilHost(h,SweetMDSS::HostResetHold);
-  dropHostWrite=bases[6]+offset;fail(h);assert(h.m->fHostPhase==SweetMDSS::HostFault&&h.m->fDsiPoisoned);}
+  dropHostWrite=bases[6]+offset;untilHost(h,SweetMDSS::HostReady);
+  assert(h.m->fScanoutState!=SweetScanoutActive);h.finish();assert(h.m->fScanoutState==SweetScanoutActive);}
  // Pre-reset checks, resource loss, errors, stuck reset, timeout, and stop in every phase.
  for(unsigned fault=0;fault<10;++fault){Harness h;h.begin();
   if(fault<3){h.until(SweetMDSS::ManagedHost);
@@ -132,7 +133,8 @@ int main(){
    if(fault==8){assert(h.r->willTerminate(h.n,0));emit(gIOTerminatedNotification,h.r);pump();}
    if(fault==9)regs[bases[4]+0x2b4]=1;
   }
-  fail(h,fault==9 ? 1 : 0);
+  if(fault<4){h.finish();assert(h.m->fHostPhase==SweetMDSS::HostReady);}
+  else fail(h,fault==9 ? 1 : 0);
  }
  for(unsigned phase: {unsigned(SweetMDSS::HostResetHold),unsigned(SweetMDSS::HostConfigure)}){
   Harness h;h.begin();untilHost(h,phase);h.m->stop(h.d);
@@ -140,7 +142,7 @@ int main(){
   assert(before==trace.size()&&h.m->fHostPhase==SweetMDSS::HostStopped&&!sourceWritten()&&!h.pool->pinned);
   assert(h.m->fDsiPoisoned);
  }
- puts("PASS: real host reset/config + managed core/NoC/clock chain, destructive reset fixture, >=1us pulse, mixed W1C/enables, lane map/TE profile, busy admission, independent fresh pixel completion, readback/resource/error/timeout/provider/stop failures, no PHY/vendor writes, zero objects");
+ puts("PASS: real host reset/config + managed core/NoC/clock chain, destructive reset fixture, >=1us pulse, mixed W1C/enables, lane map/TE profile, busy admission, independent fresh pixel completion, configuration diagnostics and real resource/error/timeout/provider/stop failures, no PHY/vendor writes, zero objects");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-host-') as temp:

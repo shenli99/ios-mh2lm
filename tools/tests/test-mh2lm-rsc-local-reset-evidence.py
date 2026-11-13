@@ -117,9 +117,9 @@ int main(){
   clockTick(h,100,false);auto token=h.m->fNoCClockToken;messages.clear();fakeTicks=h.m->fClockDeadline;
   clockTick(h,0,false);diagnostics(true,"overall",false,true,true,7,0x80002001,0x80002000,0x80002001);
   lateSilent(h);report(scenario++,h,token);}
- // Ordinary HALT release must observe OFF; voted release must read our own
- // enable clear. Both timeout paths preserve ownership and produce evidence.
- for(unsigned voted=0;voted<2;++voted){Harness h;offLeaves();configReady(h);heldRSC(h);
+ // HALT release must observe OFF. Voted release uses a fixed settle delay
+ // without an enable-echo condition, covered by the clock-vote suite.
+ for(unsigned voted=0;voted<1;++voted){Harness h;offLeaves();configReady(h);heldRSC(h);
   auto token=h.m->fNoCClockToken;h.m->fNoCTarget.registerPeak=0;h.m->fNoCCursor=h.m->fNoCCount;
   assert(h.m->releaseLocalClocks(token)==0);if(voted)dropClockWrite=bases[1]+0x4004;
   unsigned branch=voted?7:9;
@@ -140,9 +140,9 @@ int main(){
  // Parent drift and stop are not Timeout, so no new timeout records appear.
  for(unsigned stop=0;stop<2;++stop){Harness h;offLeaves();configReady(h);untilWrite(h,7);
   auto token=h.m->fNoCClockToken;messages.clear();
-  if(stop)h.m->stop(h.d);else {regs[bases[1]+0x22c0]^=0x80000000u;clockTick(h);}
+  if(stop)h.m->stop(h.d);else {regs[bases[1]+0x22bc]|=1u;clockTick(h);}
   diagnostics(false);lateSilent(h);report(scenario++,h,token);}
- assert(scenario==14);
+ assert(scenario==13);
  // Separate never observed, immediate readback then lost, and a late latch
  // during CLK_OFF followed by loss. Final CLK_OFF=1 keeps all cases pending.
  for(unsigned mode=0;mode<3;++mode){Harness h;offLeaves();regs[bases[1]+0x4004]=0;
@@ -170,7 +170,7 @@ int main(){
   if(DIAG_CHECK){auto p=message("SWEET MDSS CLOCK READBACK:");assert(field(p,"valid")==1&&field(p,"pa")==pa);}
   noPayload();lateSilent(h);report(scenario++,h,token);dropClockWrite=0;translatedAddress=~vm_offset_t(0);
  }
- assert(scenario==19);
+ assert(scenario==18);
 
  // Distinct stage values expose inherited state, cleared reset and reset
  // appearing after the write. These are diagnostic inputs, not a model that
@@ -224,7 +224,7 @@ int main(){
   printf("cold %u core %u now %llu\n",scenario++,c.m->fCorePhase,(unsigned long long)fakeTicks);
   for(auto&o:trace)printf("%c %llx %x\n",o.write?'W':'R',(unsigned long long)o.addr,o.value);
  }
- assert(scenario==27);
+ assert(scenario==26);
 
 }
 '''
@@ -278,6 +278,6 @@ if baseline:
     assert full > 0 and single > 0
     assert b''.join(filtered) == run(baseline, False), 'unexpected MMIO, result, ownership, timer or simulated time change'
     print(f'Allowed additional evidence reads: {full} full contexts and {single} timeout BCR samples')
-print('PASS: 27 actual provider scenarios; inherited/changed/reset-stage context, branch/overall timeout, '
+print('PASS: 26 actual provider scenarios; inherited/changed/reset-stage context, branch/overall timeout, '
       'no early/cold/release/failed-access reads, cache-only logger, stop/late silence; ASan/UBSan; '
       + ('all other MMIO/results/ownership/timers/time match 0212' if baseline else 'no baseline supplied'))

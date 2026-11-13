@@ -22,7 +22,7 @@ struct Harness{
  IOService*n,*d;SweetRPMh*r;SweetMDSS*m;uint64_t token;
  Harness(bool together=false,bool useThird=false){
   nocFixtures();if(together)for(unsigned b=1;b<6;++b)regs[DB+564+8*b]&=0xffff;
-  if(useThird)regs[DT+2*0x2a0+0x14]=1; // occupied but no conflicting payload
+  if(useThird)regs[DT+2*0x2a0+0x14]=1; // unrelated CONTROL bit must survive RMW
   n=nub();r=make(n);d=displayNub();m=displayMake(d,r);messages.clear();trace.clear();token=retain(m);
  }
  ~Harness(){cleanup(m,d,r,n);}
@@ -35,7 +35,8 @@ struct Harness{
   for(unsigned c=0;c<m->fNoCGroup;++c)regs[b+0x3c+c*0x14]=cmd;
   if(irq)regs[DT+4]|=1u<<m->fNoCTCS;
  }
- void failed(IOReturn result=kIOReturnTimeout){auto s=nstatus(m,token);assert(s.state==SweetNoCFailed&&s.result==result&&s.uncertain);
+ void failed(IOReturn result=kIOReturnTimeout){auto s=nstatus(m,token);if(!(s.state==SweetNoCFailed&&s.result==result&&s.uncertain)){fprintf(stderr,"state=%u rc=%#x want=%#x stage=%u\n",s.state,unsigned(s.result),unsigned(result),m->fNoCRSCStage);for(auto&msg:messages)fputs(msg.c_str(),stderr);}
+  assert(s.state==SweetNoCFailed&&s.result==result&&s.uncertain);
   assert(m->fNoCFault&&m->fNoCClockToken&&m->fNoCRegisterToken);
   auto n=trace.size(),logs=messages.size();SweetMDSS::noCTimerAction(m,m->fNoCTimer);assert(trace.size()==n&&messages.size()==logs);}
  void report(unsigned id){auto s=nstatus(m,token);
@@ -121,27 +122,28 @@ int main(){unsigned cases=0;
  // Enabling source reveals an old masked IRQ: stop before trigger, preserve it.
  {Harness h;staleNoC=true;for(unsigned i=0;i<256&&h.m->noCBusy();++i)h.poll();staleNoC=false;
   h.failed(kIOReturnIOError);assert(!h.m->fNoCExecuting&&regs[DT+4]&4&&!clears());++cases;}
- // Partial response, non-idle, invalid status and foreign source cannot ACK.
+ // Partial command/foreign source cannot ACK; STATUS idle is diagnostic.
  for(unsigned fault=0;fault<4;++fault){Harness h;h.triggered();h.hardware(fault==1?0:1,fault==0?0:0x10100,true);
   if(fault==2)regs[DT+h.m->fNoCTCS*0x2a0+0x18]=~0u;
   if(fault==3){regs[DT]|=8;regs[DT+4]=8;}
-  h.poll();h.failed(kIOReturnIOError);assert(!nstatus(h.m,h.token).acknowledged&&!clears());++cases;}
+  h.poll();if(fault==1||fault==2){drive(h.m,h.r);assert(nstatus(h.m,h.token).state==SweetNoCHeld);}
+  else{h.failed(kIOReturnIOError);assert(!nstatus(h.m,h.token).acknowledged&&!clears());}++cases;}
  // Lost access: no RSC accesses at the overall deadline or in stop.
  {Harness h;h.triggered();h.m->fClockFault=true;regs[bases[1]+0x3000]=0;
   auto before=trace.size();h.expire(true);onlyGICSince(before);h.failed();evidence(h,"overall-deadline",0,true,false);++cases;}
  for(unsigned gate=0;gate<3;++gate){Harness h;h.triggered();
-  if(gate==0)h.m->fClockFault=true;if(gate==1)regs[bases[1]+0x3000]=0;if(gate==2)regs[DW+4]=1;
+  if(gate==0)h.m->fClockFault=true;if(gate==1)regs[bases[1]+0x3000]=0;if(gate==2)regs[DW+0x24]=1u<<12;
   auto before=trace.size();h.expire();h.failed(kIOReturnNotReady);evidence(h,"provider",0,true,false);
   for(size_t i=before;i<trace.size();++i)assert(!(trace[i].addr>=DT&&trace[i].addr<DT+0x3000));++cases;}
- for(unsigned failure=0;failure<3;++failure){Harness h;
-  if(failure==1){h.triggered();rpmhDrop=h.m->fNoCTCS*0x2a0+0x1c;h.hardware(1,0x10100,true);h.poll();}
-  else{rpmhDrop=2*0x2a0+0x30;for(unsigned i=0;i<256&&!h.m->fNoCWriteIssued;++i)h.poll();}
-  assert(h.m->fNoCWriteIssued);if(failure==2)h.expire();else{fakeTicks=h.m->fNoCWriteDeadline;SweetMDSS::noCTimerAction(h.m,h.m->fNoCTimer);}
-  h.failed(failure==2?kIOReturnTimeout:kIOReturnIOError);evidence(h,failure==2?"group-deadline":"write-readback",failure==1?1:0,failure==1,failure==2);++cases;}
+ for(unsigned failure=0;failure<2;++failure){Harness h;
+  rpmhDrop=2*0x2a0+0x14;
+  for(unsigned i=0;i<256&&!(h.m->fNoCWriteIssued&&h.m->fNoCOperations[h.m->fNoCOp].value==0x10000);++i)h.poll();
+  assert(h.m->fNoCWriteIssued);if(failure==1)h.expire();else{fakeTicks=h.m->fNoCWriteDeadline;SweetMDSS::noCTimerAction(h.m,h.m->fNoCTimer);}
+  h.failed(failure==1?kIOReturnTimeout:kIOReturnIOError);evidence(h,failure==1?"group-deadline":"write-readback",0,false,failure==1);++cases;}
  {Harness h;h.triggered();auto before=trace.size();messages.clear();h.m->stopNoC();onlyGICSince(before);
   h.failed(kIOReturnAborted);assert(!count("SWEET MDSS NOC EVIDENCE:"));++cases;}
  for(unsigned mode=0;mode<2;++mode){Harness h(mode==0,mode==1);h.triggered();h.expire();h.failed();evidence(h,"group-deadline",0,true,true,mode==0?5:1);
-  assert(h.m->fNoCTCS==(mode==0?2u:3u));if(mode==1)assert(regs[DT+2*0x2a0+0x14]==1);++cases;}
+  assert(h.m->fNoCTCS==2u);if(mode==1)assert(regs[DT+2*0x2a0+0x14]==0x1010001u);++cases;}
  {Harness h;h.triggered();h.hardware(1,0x10100,true);h.poll();assert(h.m->fNoCCursor==1);
   h.triggered();h.expire();h.failed();evidence(h,"group-deadline",0,true,true);
   assert(field(message("SWEET MDSS NOC EVIDENCE:"),"group-cursor")==1);
@@ -161,9 +163,10 @@ int main(){unsigned cases=0;
    assert(h.m->releaseBandwidth(h.token)==0);drive(h.m,h.r);
    init=0;for(auto&o:trace)if(o.write&&o.addr==DR+0x600)++init;assert(init==1);}
   ++cases;}
- // A dropped initialization write cannot proceed to payload/trigger.
+ // A dropped plain initialization write logs and continues to real completion.
  {Harness h;dropNoCInit=true;for(unsigned i=0;i<256&&h.m->noCBusy();++i)h.poll();dropNoCInit=false;
-  h.failed(kIOReturnIOError);assert(!h.m->fNoCRSCInitialized&&!tcsWrites());++cases;}
+  assert(h.m->fNoCRSCInitialized&&nstatus(h.m,h.token).state==SweetNoCPending);
+  assert(count("mismatch=1")>0);drive(h.m,h.r);assert(nstatus(h.m,h.token).state==SweetNoCHeld);++cases;}
  // Prior EOI and GIC RWP must drain asynchronously before a new generation.
  {Harness h;while(!h.m->fNoCClockToken&&h.m->noCBusy())h.poll();regs[0x17a00000]|=1u<<31;for(unsigned i=0;i<256&&!h.m->fNoCIRQTouched;++i)h.poll();
   assert(h.m->fNoCIRQTouched&&!tcsWrites());fakeTicks=h.m->fNoCIRQDeadline;SweetMDSS::noCTimerAction(h.m,h.m->fNoCTimer);

@@ -29,6 +29,9 @@ boot.img（Android header v1, page 2048）
 已实现功能在后续使用中暴露的独立问题统一记入 [Bug 台账](BUGS.md)，
 不自动作为当前主计划的新步骤或前置测试。
 
+当前显示修复要求新产物包含 0218 的 `SWEET MDSS CONFIG:` 标记；只有 0217 的内核也须重新编译。
+沿原 ABI608/retained 打包，详见 [配置观察修改](PANEL-LINEAGE-CONFIG-OBSERVATION.md)。
+
 ## 1. 写补丁（agent）
 
 1. 基线：从最新 `logs/xnu-buildtree-<最新LABEL>.gz` 解出相关文件当 `base/`，复制一份为 `edited/`，

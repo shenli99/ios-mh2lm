@@ -102,6 +102,8 @@ int main(){
   if(drift==6)regs[bases[12]+0x6b0]=0;
   if(drift==7)regs[bases[2]+0x14]=0x9d200000u;
   auto count=writes();auto start=trace.size();SweetMDSS::noCTimerAction(h.m,h.m->fNoCTimer);
+  if(drift==7){assert(h.m->fLifecycle.phase!=SweetPanelFault);bool logged=false;
+   for(auto&s:messages)logged|=s.find("scanout-source")!=std::string::npos;assert(logged);continue;}
   assert(h.m->fLifecycle.phase==SweetPanelFault);
   // Failure may mask the owned IRQ, but never issues another data TCS command.
   for(unsigned i=start;i<trace.size();++i)assert(!trace[i].write||trace[i].addr<DT||trace[i].addr>=DT+0x3000);

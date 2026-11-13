@@ -187,13 +187,15 @@ int main(){
   for(unsigned rail=0;rail<2;++rail){vote(h.r,other,(SweetRail)rail,{});assert(!h.r->fBusy);}
   assert(h.r->detachConsumer(other)==0);
  }
- // Parked hardware drift rejects ON before a new token or rail request.
+ // Parked config drift is diagnostic; dependency/ownership loss still rejects ON.
  for(unsigned fault=0;fault<4;++fault){Harness h;ready(h);supplyPark(h);
   if(fault==0)regs[0x03d06004]=1;
   if(fault==1)regs[bases[1]+0x2114]^=1u<<14;
   if(fault==2)h.m->fLifecycle.panelReleasedMask=1;
   if(fault==3)h.m->fLifecycle.panelVotesParked=false;
-  uint64_t token=99;auto before=writes();assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)!=0&&!token&&writes()==before);
+  uint64_t token=99;auto before=writes();
+  if(fault==1){assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)==0&&token);h.wakePixels();}
+  else assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)!=0&&!token&&writes()==before);
  }
  puts("PASS: actual mode6 four profiles x three supply cycles; reset-low before link shutdown, VDDI/VPNL typed votes, shared L3/L5/ARC/config/boot retained, resource/link/host/reset/ON/pixel/TCM recovery, no fallback and zero objects/maps/allocations/notifications after reboot");
 }

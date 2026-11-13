@@ -270,7 +270,7 @@ int main(){
   if(fault==7)regs[DR+0xd0]=1;
   token=retain(m);
   for(unsigned k=0;k<256&&m->noCBusy();++k)step(m,r);
-  if(fault==1||fault==5)assert(nstatus(m,token).state==SweetNoCHeld);
+  if(fault==1||fault==5||fault==7)assert(nstatus(m,token).state==SweetNoCHeld);
   else{assert(nstatus(m,token).state==SweetNoCFailed&&m->fNoCFault);
    for(auto op:trace)if(op.write)assert(!(op.addr>=DT&&op.addr<DT+0x3000));
    if(fault==0)for(auto op:trace)assert(!(op.addr>=DR&&op.addr<DW+0x4000));
@@ -298,7 +298,9 @@ int main(){
   if(fault==3)m->stop(d);
   if(fault==4)regs[bases[1]+0x4008]=0x80000001;
   for(unsigned k=0;k<32&&m->noCBusy();++k)step(m,r);
-  q=nstatus(m,token);assert(q.state==SweetNoCFailed&&q.uncertain&&m->fNoCFault);
+  q=nstatus(m,token);
+  if(fault==1){drive(m,r);q=nstatus(m,token);assert(q.state==SweetNoCHeld&&!m->fNoCFault);}
+  else assert(q.state==SweetNoCFailed&&q.uncertain&&m->fNoCFault);
   auto count=trace.size();SweetMDSS::noCTimerAction(m,m->fNoCTimer);assert(count==trace.size());
   cleanup(m,d,r,n);
  }

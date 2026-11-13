@@ -157,7 +157,7 @@ int main(){
  for(unsigned fault=0;fault<5;++fault){Harness h;h.begin();untilCore(h,CoreDomain);
   if(fault==0)regs[bases[0]+0xc]=0;
   if(fault==1)regs[bases[1]+0x3000]|=4;
-  if(fault==2)dropCoreWrite=bases[1]+0x22c0;
+  if(fault==2){dropCoreWrite=bases[1]+0x22c0;h.finish();assert(h.m->coreReady());continue;}
   if(fault==3){h.m->stop(h.d);auto before=trace.size();SweetMDSS::clockTimerAction(h.m,h.m->fClockTimer);assert(trace.size()==before);}
   if(fault==4){h.r->willTerminate(h.n,0);emit(gIOTerminatedNotification,h.r);pump();}
   for(unsigned i=0;i<2000&&h.m->fScanoutState!=SweetScanoutFailed;++i)h.step();

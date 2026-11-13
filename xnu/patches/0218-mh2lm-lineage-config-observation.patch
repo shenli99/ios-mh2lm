@@ -1,0 +1,1061 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -345,6 +345,7 @@
+   * is an explicit SM8150-v2 selection, not a hardware revision detector. */
+  unsigned fCoreProfile, fCorePhase, fCorePLL, fCoreCursor, fCoreRoot;
+  unsigned fCoreInheritedPLL, fCoreOwnedBranches;
++ unsigned fCoreProgrammedPLL;
+  uint64_t fCoreCN0, fCoreDeadline, fCoreStepDeadline, fCoreWait;
+  uint32_t fCoreRootCFG;
+  bool fCoreCold;
+@@ -433,6 +434,11 @@
+  static void noCIRQAction(OSObject *,IOInterruptEventSource *,int);
+  IOReturn takeNoCRSC(void);
+  IOReturn initNoCRSC(void);
++ unsigned fLineageObservations;
++ unsigned fLineageMatches;
++ void observeClockParent(unsigned,const uint32_t *,const uint32_t *);
++ void observeLineageValue(const char *,uint32_t,uint32_t,uint32_t,uint32_t,bool);
++ void observeLineage(const char *,vm_offset_t,uint32_t,uint32_t,uint32_t mask=~0u,bool always=false);
+ 
+  bool setupNoC(IOService *);
+  bool noCBusy(void) const;
+@@ -977,6 +983,27 @@
+  return fGate ? fGate->runAction(panelAction,(void *)(uintptr_t)on) : kIOReturnNotReady;
+ }
+ 
++/* Configuration writes follow Lineage; observations never authorize DMA or
++ * substitute for a hardware completion. Called only under the existing gate
++ * and resource admission. Bound repeated diagnostics across provider lifetime. */
++void SweetMDSS::observeLineage(const char *stage,vm_offset_t base,uint32_t offset,
++    uint32_t wanted,uint32_t mask,bool always)
++{
++ observeLineageValue(stage,offset,wanted,dp_rd(base,offset),mask,always);
++}
++void SweetMDSS::observeLineageValue(const char *stage,uint32_t offset,uint32_t wanted,
++    uint32_t observed,uint32_t mask,bool always)
++{
++ bool mismatch=((observed^wanted)&mask)!=0;
++ if (!mismatch && (!always || fLineageMatches>=768u)) return;
++ if (!mismatch) ++fLineageMatches;
++ if (fLineageObservations>=1024u) return;
++ ++fLineageObservations;
++ SWEET_LOG_INFO("SWEET MDSS CONFIG: stage=%s offset=%#x want=%#x got=%#x mask=%#x mismatch=%u; diagnostic only\n",
++     stage,offset,wanted,observed,mask,(unsigned)(((observed^wanted)&mask)!=0));
++ if (fLineageObservations==1024u) SWEET_LOG_INFO("SWEET MDSS CONFIG: observation limit reached\n");
++}
++
+ #include "SweetMDSSScanout.inc"
+ #include "SweetMDSSClock.inc"
+ #include "SweetMDSSCore.inc"
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -19,19 +19,26 @@
+ };
+ static const unsigned mdssClockMasks[SweetClockUseCount]={0x07u,0x7fu,0x381u};
+ 
++void SweetMDSS::observeClockParent(unsigned branch,const uint32_t *got,const uint32_t *wanted)
++{
++ for (unsigned n=0;n<6;++n) if (got[n]!=wanted[n] && fLineageObservations<1024u) {
++  ++fLineageObservations;
++  SWEET_LOG_INFO("SWEET MDSS CONFIG: stage=clock-parent branch=%u field=%u want=%#x got=%#x; diagnostic only\n",
++      branch,n,wanted[n],got[n]);
++ }
++}
+ bool SweetMDSS::clockBranchRequested(unsigned i,uint32_t value) const
+ {
+- /* An inherited enable still needs readback. For our voted request, record
++ /* An inherited enable still needs readback. For our own request, record
+   * submission after dp_wr's barrier, separately from the pre-write failure
+   * ownership ledger. This is software request state, not a hardware ACK. */
+- return (value&1u) || (mdssClockBranches[i].voted &&
+-     (fClockOwnedMask&fClockIssuedMask&(1u<<i)));
++ return (value&1u) || (fClockOwnedMask&fClockIssuedMask&(1u<<i));
+ }
+ bool SweetMDSS::clockBranchRunning(unsigned i,uint32_t value) const
+ {
+  /* LG branch2 enable completion checks CLK_OFF, not enable readback. The
+-  * caller must also validate the parent and its Pending/Held lease. Only
+-  * voted leaves with our issued request may run without bit0 readback. */
++  * caller must also validate the parent and its Pending/Held lease. Our
++  * issued requests may run without bit0 readback. */
+  return clockBranchRequested(i,value) && !(value&CBCR_OFF);
+ }
+ bool SweetMDSS::clockBusy(void) const
+@@ -102,7 +109,7 @@
+  out[5]=source;
+  /* LG clk_rcg2_calc_rate(): HID=0 bypasses the divider, HID=1 gives
+   * parent*2/(1+1). Both are exact XO rate in integer mode. Keep the raw
+-  * parent snapshot: equivalent rates do not authorize configuration drift. */
++  * parent snapshot for diagnostics, including equivalent-rate changes. */
+  uint32_t xoConfig=out[0]&0x371fu;
+  if (!source && xoConfig>1u) {
+   if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=xo-config branch=%u root=%#x cmd=%#x cfg=%#x\n",i,b.root,cmd,out[0]);
+@@ -117,7 +124,7 @@
+  if (!parent[5]) return true; /* Existing exact-XO policy. */
+  /* Only the two RSC AHB leaves may use the controlled PLL1 AHB parent.
+   * A live inherited PLL or a requested corner is not an ownership proof. */
+- if (!mdssClockBranches[i].managedAHB || parent[5]!=4 || (parent[0]&0x10371fu)!=0x40fu ||
++ if (!mdssClockBranches[i].managedAHB || parent[5]!=4 ||
+      fCoreProfile!=2 || !fRPMh || !fRPMhConsumer || !fManagedARC || !fNoCRegisterToken || !coreReady()) return false;
+  SweetDisplayPowerStatus power={}; SweetRegisterBandwidthStatus config={};
+  return fRPMh->copyDisplayPowerStatus(fRPMhConsumer,fManagedARC,&power)==kIOReturnSuccess &&
+@@ -212,10 +219,7 @@
+   if (diagnose==ClockAdmission) SWEET_LOG_INFO("SWEET MDSS CLOCK: admit branch=%u cbcr-offset=%#x cbcr=%#x\n",i,mdssClockBranches[i].cbcr,v);
+   bool requested=s->clockBranchRequested(i,v);
+   if (!s->clockParent(i,parents[i],requested,diagnose)) return kIOReturnNotReady;
+-  if ((s->fClockKnownMask&(1u<<i)) && memcmp(s->fClockParents[i],parents[i],sizeof(parents[i]))) {
+-   if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=parent-drift branch=%u\n",i);
+-   return kIOReturnNotReady;
+-  }
++  if (s->fClockKnownMask&(1u<<i)) s->observeClockParent(i,parents[i],s->fClockParents[i]);
+   if (requested) {
+    if (v&CBCR_OFF) {
+     if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: admit gate=branch-off branch=%u cbcr=%#x\n",i,v);
+@@ -386,10 +390,11 @@
+    if (v&1u) fClockTrace.lastEnabledNS=fClockTrace.sampleNS;
+   }
+   bool rootNeeded=!fClockReleasing && clockBranchRunning(i,v);
+-  if (!clockParent(i,parent,rootNeeded,diagnose) || memcmp(parent,fClockParents[i],sizeof(parent))) {
++  if (!clockParent(i,parent,rootNeeded,diagnose)) {
+    if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: NoC gate=worker-parent branch=%u cbcr=%#x\n",i,v);
+    finishLocalClocks(kIOReturnNotReady); return;
+   }
++  observeClockParent(i,parent,fClockParents[i]);
+   fClockTrace.parentValid=true; fClockTrace.parentCFG=parent[0]; fClockTrace.parentSource=parent[5];
+   if (!fClockReleasing && (fClockOwnedMask&bit) && !clockEnableParentReady(i,parent)) {
+    if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: NoC gate=owned-parent branch=%u cbcr=%#x\n",i,v);
+@@ -397,13 +402,14 @@
+   }
+   bool toggle=fClockReleasing ? ((fClockOwnedMask&bit) && fClockReferences[i]==1) : !clockBranchRequested(i,v);
+   if (fClockWaiting) {
+-   bool ready=fClockReleasing ? !(v&1u) && (v&CBCR_OFF) : clockBranchRunning(i,v);
++   observeLineageValue("clock-branch-request",b.cbcr,fClockReleasing ? 0u : 1u,v,1u,false);
++   bool ready=fClockReleasing ? (v&CBCR_OFF) : clockBranchRunning(i,v);
+    if (fClockReleasing && b.voted) {
+     /* LG BRANCH_VOTED: release our SW vote, not the aggregate clock.
+-     * Start the 10us settle only after observing our enable bit clear. */
+-    if (v&1u) fClockVoteSettleAt=0;
+-    else if (!fClockVoteSettleAt) fClockVoteSettleAt=now+10000ULL;
+-    ready=!(v&1u) && fClockVoteSettleAt && now>=fClockVoteSettleAt;
++     * Retain the Lineage 10us settle; enable echo is diagnostic. */
++    if (!fClockVoteSettleAt) fClockVoteSettleAt=now+10000ULL;
++    observeLineageValue("clock-vote-release",b.cbcr,0,v,1u,false);
++    ready=fClockVoteSettleAt && now>=fClockVoteSettleAt;
+    }
+    if (!ready) {
+     if (now>=fClockWaitDeadline) {
+@@ -429,7 +435,7 @@
+    if (!fClockReleasing) fClockOwnedMask|=bit; /* retain even if posted write fails */
+    if (!fClockReleasing && i==7 && noCClockDiagnostics()) captureClockLocal(fClockTrace.writeLocal);
+    dp_wr(dp_dispcc,b.cbcr,fClockReleasing ? v&~1u : v|1u);
+-   if (!fClockReleasing && b.voted) fClockIssuedMask|=bit;
++   if (!fClockReleasing) fClockIssuedMask|=bit;
+    fClockTrace.writeValid=true; fClockTrace.writeBranch=i;
+    fClockTrace.writeBefore=v; fClockTrace.writeWant=fClockReleasing ? v&~1u : v|1u;
+    fClockTrace.writeEntryNS=now; fClockTrace.writeIssuedNS=scanout_now();
+@@ -448,7 +454,7 @@
+    fClockWaiting=true; fClockWaitDeadline=now+10000000ULL;
+    fClockVoteSettleAt=0;
+    if (b.voted) SWEET_LOG_INFO("SWEET MDSS CLOCK: voted branch=%u enable=%u; awaiting %s\n",
+-       i,(unsigned)!fClockReleasing,fClockReleasing ? "own vote clear and settle; aggregate OFF not required" : "CLK_OFF clear after issued request");
++       i,(unsigned)!fClockReleasing,fClockReleasing ? "vote clear issued and settle; aggregate OFF not required" : "CLK_OFF clear after issued request");
+    fClockTimer->setTimeoutUS(100); return;
+   } else if (!fClockReleasing && !clockBranchRunning(i,v)) {
+    if (diagnose) SWEET_LOG_ERROR("SWEET MDSS CLOCK: NoC gate=worker-branch branch=%u cbcr=%#x\n",i,v);
+@@ -471,13 +477,16 @@
+   for (unsigned i=0;i<SweetClockCount;++i) if (lease.mask&(1u<<i)) {
+    uint32_t parent[6]={}, v=dp_rd(dp_dispcc,mdssClockBranches[i].cbcr);
+    bool released=fClockReleasing && (fClockReleaseMask&(1u<<i));
+-   bool ready=released ? !(v&1u) && (mdssClockBranches[i].voted || (v&CBCR_OFF)) : clockBranchRunning(i,v);
++   bool ready=released ? (mdssClockBranches[i].voted || (v&CBCR_OFF)) : clockBranchRunning(i,v);
+    if (!clockParent(i,parent,!released,noCClockDiagnostics() ? ClockFailure : ClockSilent) ||
+-       memcmp(parent,fClockParents[i],sizeof(parent)) || !ready ||
++       !ready ||
+        (!fClockReleasing && (fClockOwnedMask&(1u<<i)) && !clockEnableParentReady(i,parent))) {
+     if (noCClockDiagnostics()) SWEET_LOG_ERROR("SWEET MDSS CLOCK: NoC gate=final-branch branch=%u cbcr=%#x\n",i,v);
+     rc=kIOReturnNotReady; break;
+    }
++   observeClockParent(i,parent,fClockParents[i]);
++   if (released || (fClockOwnedMask&(1u<<i)))
++    observeLineageValue("clock-final-request",mdssClockBranches[i].cbcr,released ? 0u : 1u,v,1u,false);
+   }
+  }
+  if (rc==kIOReturnSuccess) {
+@@ -509,7 +518,8 @@
+   return false;
+  for (unsigned i=0;i<SweetClockCount;++i) if (status.mask&(1u<<i)) {
+   uint32_t parent[6]={}, v=dp_rd(dp_dispcc,mdssClockBranches[i].cbcr);
+-  if (!clockParent(i,parent) || memcmp(parent,fClockParents[i],sizeof(parent)) || !(v&1u) || (v&CBCR_OFF)) return false;
++  if (!clockParent(i,parent) || !clockBranchRunning(i,v)) return false;
++  observeClockParent(i,parent,fClockParents[i]);
+  }
+  return true;
+ }
+diff --git a/iokit/Kernel/arm/SweetMDSSCore.inc b/iokit/Kernel/arm/SweetMDSSCore.inc
+--- a/iokit/Kernel/arm/SweetMDSSCore.inc
++++ b/iokit/Kernel/arm/SweetMDSSCore.inc
+@@ -16,10 +16,18 @@
+ {
+  if (pll>1) return false;
+  uint32_t b=pll*0x1000u, mode=dp_rd(dp_dispcc,b);
+- return !(mode&0x00700080u) && (mode&0x80000005u)==0x80000005u &&
+-     dp_rd(dp_dispcc,b+0x38)==1u && (dp_rd(dp_dispcc,b+0xc)&1u) &&
+-     dp_rd(dp_dispcc,b+4)==(pll ? 0x1fu : 0x47u) &&
+-     dp_rd(dp_dispcc,b+0x40)==(pll ? 0x4000u : 0xe000u);
++ bool configured=(fCoreProgrammedPLL&(1u<<pll))!=0;
++ if (!(mode&0x80000000u) || (mode&0x00700080u)) return false;
++ if (configured) {
++  observeLineage("core-pll-mode",dp_dispcc,b,5u,5u);
++  observeLineage("core-pll-opmode",dp_dispcc,b+0x38,1u);
++  observeLineage("core-pll-output",dp_dispcc,b+0xc,1u,1u);
++  observeLineage("core-pll-L",dp_dispcc,b+4,pll ? 0x1fu : 0x47u);
++  observeLineage("core-pll-alpha",dp_dispcc,b+0x40,pll ? 0x4000u : 0xe000u);
++  return true;
++ }
++ return (mode&5u)==5u && dp_rd(dp_dispcc,b+0x38)==1u && (dp_rd(dp_dispcc,b+0xc)&1u) &&
++     dp_rd(dp_dispcc,b+4)==(pll ? 0x1fu : 0x47u) && dp_rd(dp_dispcc,b+0x40)==(pll ? 0x4000u : 0xe000u);
+ }
+ bool SweetMDSS::corePLLAdmissible(unsigned pll)
+ {
+@@ -54,13 +62,15 @@
+      (dp_rd(dp_dispcc,0x3000)&0x80000007u)!=0x80000000u ||
+      !corePLLReady(0) || !corePLLReady(1)) return false;
+  const uint32_t roots[]={0x22bc,0x20c8}, cfg[]={0x40fu,0x100105u};
+- for (unsigned i=0;i<2;++i)
+-  if ((dp_rd(dp_dispcc,roots[i])&0x800000f1u) ||
+-      (dp_rd(dp_dispcc,roots[i]+4)&0x10371fu)!=cfg[i]) return false;
++ for (unsigned i=0;i<2;++i) {
++  if (dp_rd(dp_dispcc,roots[i])&0x800000f1u) return false;
++  observeLineage("core-ready-root",dp_dispcc,roots[i]+4,cfg[i],0x10371fu);
++ }
+  const uint32_t branches[]={0x2080,0x200c};
+  for (unsigned i=0;i<2;++i) {
+   uint32_t v=dp_rd(dp_dispcc,branches[i]);
+-  if (!(v&1u) || (v&CBCR_OFF)) return false;
++  if (v&CBCR_OFF) return false;
++  observeLineage("core-branch-request",dp_dispcc,branches[i],1u,1u);
+  }
+  return true;
+ }
+@@ -164,7 +174,7 @@
+      fCoreInheritedPLL|=1u<<fCorePLL;
+      if (++fCorePLL==2) { fCorePLL=0; fCorePhase=CoreRoot; }
+     } else if (!corePLLAdmissible(fCorePLL)) { finishCoreResources(kIOReturnNotReady); return; }
+-    else { fCorePhase=CorePLLConfig; fCoreCursor=0; }
++    else { fCoreProgrammedPLL|=1u<<fCorePLL; fCorePhase=CorePLLConfig; fCoreCursor=0; }
+     break;
+    case CorePLLConfig: {
+     /* TRION v2: no v1 TEST_CTL_HI=2 write. One bounded write per timer.
+@@ -177,16 +187,15 @@
+     if (c==9) value=dp_rd(dp_dispcc,b)&~1u;
+     if (c==11) value=dp_rd(dp_dispcc,b)|4u;
+     fClockTouched=true; dp_wr(dp_dispcc,b+offsets[c],value);
+-    /* MODE contains autonomous status bits; verify only the control just
+-     * written, not an old LOCK/PCAL snapshot which hardware may update. */
++    /* Configuration readback is diagnostic; LOCK remains the completion. */
+     uint32_t mask=c==8 ? 1u<<23 : (c==9 ? 1u : (c==11 ? 4u : ~0u));
+-    if ((dp_rd(dp_dispcc,b+offsets[c])&mask)!=(value&mask)) { finishCoreResources(kIOReturnIOError); return; }
++    observeLineage("core-pll-write",dp_dispcc,b+offsets[c],value,mask,true);
+     if (++fCoreCursor==12) fCorePhase=CorePLLRun;
+     break;
+    }
+    case CorePLLRun:
+     fClockTouched=true; dp_wr(dp_dispcc,b+0x38,1u);
+-    if (dp_rd(dp_dispcc,b+0x38)!=1u) { finishCoreResources(kIOReturnIOError); return; }
++    observeLineage("core-pll-run",dp_dispcc,b+0x38,1u,~0u,true);
+     fCorePhase=CorePLLLock; fCoreStepDeadline=now+1000000ULL; break;
+    case CorePLLLock:
+     if (dp_rd(dp_dispcc,b)&0x80000000u) fCorePhase=CorePLLOut;
+@@ -211,7 +220,7 @@
+     uint32_t cfg=dp_rd(dp_dispcc,root+4);
+     fCoreRootCFG=(cfg&~0x10371fu)|(fCoreRoot ? 0x100105u : 0x40fu);
+     fClockTouched=true; dp_wr(dp_dispcc,root+4,fCoreRootCFG);
+-    if (dp_rd(dp_dispcc,root+4)!=fCoreRootCFG) { finishCoreResources(kIOReturnIOError); return; }
++    observeLineage("core-rcg-config",dp_dispcc,root+4,fCoreRootCFG,~0u,true);
+     fCorePhase=CoreRootUpdate; break;
+    }
+    case CoreRootUpdate: {
+@@ -225,11 +234,12 @@
+      if (now>=fCoreStepDeadline) { finishCoreResources(kIOReturnTimeout); return; }
+      break;
+     }
+-    if (dp_rd(dp_dispcc,root+4)!=fCoreRootCFG || (!fCoreCold && (cmd&0x80000000u))) {
++    observeLineage("core-rcg-updated",dp_dispcc,root+4,fCoreRootCFG);
++    if (!fCoreCold && (cmd&0x80000000u)) {
+      finishCoreResources(kIOReturnNotReady); return;
+     }
+     /* Deliberately commit ONLY this controlled root to existing leases.
+-     * Other parent drift remains an error; never blindly resnapshot all. */
++     * Other parent changes are diagnosed; retain each requested snapshot. */
+     for (unsigned i=0;i<SweetClockCount;++i)
+      if ((fClockKnownMask&(1u<<i)) && mdssClockBranches[i].root==root) {
+       fClockParents[i][0]=fCoreRootCFG; fClockParents[i][5]=(fCoreRootCFG>>8)&7u;
+@@ -249,7 +259,7 @@
+      ++fCoreCursor; fCoreStepDeadline=now+10000000ULL;
+     } else {
+      uint32_t root=i ? 0x20c8u : 0x22bcu;
+-     if (!(v&1u) || (v&CBCR_OFF) || (dp_rd(dp_dispcc,root)&0x800000f1u)) {
++     if ((v&CBCR_OFF) || (dp_rd(dp_dispcc,root)&0x800000f1u)) {
+       if (now>=fCoreStepDeadline) { finishCoreResources(kIOReturnTimeout); return; }
+       break;
+      }
+diff --git a/iokit/Kernel/arm/SweetMDSSDSI.inc b/iokit/Kernel/arm/SweetMDSSDSI.inc
+--- a/iokit/Kernel/arm/SweetMDSSDSI.inc
++++ b/iokit/Kernel/arm/SweetMDSSDSI.inc
+@@ -71,7 +71,8 @@
+  if (!s->dp_clocks_on() || (s->fClockEnabled && !s->localClocksReady())) return kIOReturnNotReady;
+  /* This revision is already observed in 0121a12 (+0=20030000).
+   * Recheck live before writes; DT compatible alone does not authorize them. */
+- if (dp_rd(s->dp_dsi,0)!=0x20030000u || (dp_rd(s->dp_dsi,4)&7u)!=5u ||
++ s->observeLineage("dsi-command-control",s->dp_dsi,4,5u,7u);
++ if (dp_rd(s->dp_dsi,0)!=0x20030000u ||
+      dp_rd(s->dp_dsi,0x15c) || (dp_rd(s->dp_dsi,0x110)&(1u<<24)) ||
+      dp_rd(s->dp_dsi,0x68)) return kIOReturnNotReady;
+  unsigned commands=0;
+diff --git a/iokit/Kernel/arm/SweetMDSSHost.inc b/iokit/Kernel/arm/SweetMDSSHost.inc
+--- a/iokit/Kernel/arm/SweetMDSSHost.inc
++++ b/iokit/Kernel/arm/SweetMDSSHost.inc
+@@ -41,11 +41,12 @@
+ {
+  /* Warm admission while inherited scanout may still run; this is not an
+   * idle fence. The real beginHost repeats it after resource ACK/quiesce. */
+- return fHostProfile==1 && (fHostPhase==HostIdle ||
+-     (fLifecycleLinkCycle && fLifecycle.phase==SweetPanelLinkRebuild && fHostPhase==HostDormant)) && !dsiBusy() && !fDsiPinned &&
+-     !fDsiPoisoned && dp_rd(dp_dsi,0)==0x20030000u &&
+-     (dp_rd(dp_dsi,4)&7u)==(fLinkPhase==LinkReady ? 0u : 5u) && !dp_rd(dp_dsi,0x15c) &&
+-     !(dp_rd(dp_dsi,0x110)&(1u<<24)) && !dp_rd(dp_dsi,0x68);
++ if (fHostProfile!=1 || (fHostPhase!=HostIdle &&
++     !(fLifecycleLinkCycle && fLifecycle.phase==SweetPanelLinkRebuild && fHostPhase==HostDormant)) || dsiBusy() || fDsiPinned ||
++     fDsiPoisoned || dp_rd(dp_dsi,0)!=0x20030000u || dp_rd(dp_dsi,0x15c) ||
++     (dp_rd(dp_dsi,0x110)&(1u<<24)) || dp_rd(dp_dsi,0x68)) return false;
++ observeLineage("host-prior-control",dp_dsi,4,fLinkPhase==LinkReady ? 0u : 5u,7u);
++ return true;
+ }
+ bool SweetMDSS::hostResourcesReady(void)
+ {
+@@ -76,15 +77,11 @@
+   * No second mapping, singleton or independent reset owner is introduced. */
+  fHostTouched=true; fClockTouched=true;
+  dp_wr(dp_dsi,0x110,0); /* disables only enables; zero never ACKs W1C status */
+- if (dp_rd(dp_dsi,0x110)&hostInterruptEnables) {
+-  finishHost(kIOReturnIOError,"interrupt enable readback"); return kIOReturnIOError;
+- }
++ observeLineage("host-irq-disable",dp_dsi,0x110,0,hostInterruptEnables,true);
+  dp_wr(dp_dsi,4,dp_rd(dp_dsi,4)&~7u);
+- if (dp_rd(dp_dsi,4)&7u) { finishHost(kIOReturnIOError,"engine disable readback"); return kIOReturnIOError; }
++ observeLineage("host-disable",dp_dsi,4,0,7u,true);
+  dp_wr(dp_dsi,0x11c,hostForceClocks);
+- if (dp_rd(dp_dsi,0x11c)!=hostForceClocks) {
+-  finishHost(kIOReturnIOError,"force clock readback"); return kIOReturnIOError;
+- }
++ observeLineage("host-force-clocks",dp_dsi,0x11c,hostForceClocks,~0u,true);
+  dp_wr(dp_dsi,0x118,1);
+  __asm__ volatile("dsb oshst" ::: "memory");
+  fHostWait=scanout_now()+1000ULL; /* >=1us; timer may schedule later */
+@@ -95,15 +92,16 @@
+ }
+ bool SweetMDSS::hostConfiguration(void)
+ {
+- if (dp_rd(dp_dsi,0)!=0x20030000u || dp_rd(dp_dsi,0x118) ||
+-     dp_rd(dp_dsi,0x11c)!=0x23fu || (dp_rd(dp_dsi,8)&6u) ||
+-     (dp_rd(dp_dsi,0x110)&(hostInterruptEnables|(1u<<24))) || dp_rd(dp_dsi,0x68)) return false;
++ if (dp_rd(dp_dsi,0)!=0x20030000u || (dp_rd(dp_dsi,8)&6u) ||
++     (dp_rd(dp_dsi,0x110)&(1u<<24)) || dp_rd(dp_dsi,0x68)) return false;
++ observeLineage("host-ready-reset",dp_dsi,0x118,0);
++ observeLineage("host-ready-clocks",dp_dsi,0x11c,0x23fu);
++ observeLineage("host-ready-irq",dp_dsi,0x110,0,hostInterruptEnables);
+  for (unsigned n=0;n<sizeof(hostCommandProfile)/sizeof(hostCommandProfile[0]);++n) {
+   const SweetHostRegister &r=hostCommandProfile[n];
+-  uint32_t expected=r.offset==4 ? r.value|5u : r.value;
+-  if (dp_rd(dp_dsi,r.offset)!=expected) return false;
++  observeLineage("host-ready-config",dp_dsi,r.offset,r.offset==4 ? r.value|5u : r.value);
+  }
+- return true; /* Host readback/idle is not pixel transfer completion. */
++ return true; /* Real transfer completion remains independent. */
+ }
+ void SweetMDSS::advanceHost(void)
+ {
+@@ -115,15 +113,19 @@
+  if (fHostPhase==HostResetHold) {
+   dp_wr(dp_dsi,0x118,0);
+   __asm__ volatile("dsb oshst" ::: "memory");
+-  if (dp_rd(dp_dsi,0x118) || dp_rd(dp_dsi,0)!=0x20030000u ||
++  observeLineage("host-reset-release",dp_dsi,0x118,0,~0u,true);
++  if (dp_rd(dp_dsi,0)!=0x20030000u ||
+       (dp_rd(dp_dsi,8)&6u) || (dp_rd(dp_dsi,0x110)&(1u<<24)) || dp_rd(dp_dsi,0x68)) {
+    finishHost(kIOReturnIOError,"reset exit/idle/error"); return;
+   }
+   fHostPhase=HostConfigure;
+   /* Explicit target configuration, never replay an ABL host snapshot. */
+   dp_wr(dp_dsi,0x11c,hostForceClocks);
+-  for (unsigned n=0;n<sizeof(hostCommandProfile)/sizeof(hostCommandProfile[0]);++n)
+-   dp_wr(dp_dsi,hostCommandProfile[n].offset,hostCommandProfile[n].value);
++  for (unsigned n=0;n<sizeof(hostCommandProfile)/sizeof(hostCommandProfile[0]);++n) {
++   const SweetHostRegister &op=hostCommandProfile[n];
++   dp_wr(dp_dsi,op.offset,op.value);
++   observeLineage("host-config-write",dp_dsi,op.offset,op.value,~0u,true);
++  }
+   dp_wr(dp_dsi,0x110,0); /* no DSI IRQ owner yet, including ERROR mask */
+   __asm__ volatile("dsb oshst" ::: "memory");
+   dp_wr(dp_dsi,4,0x1f1); /* controller enabled under forced clocks */
+@@ -134,7 +136,7 @@
+   setProperty("SweetDSIHostState",(unsigned long long)fHostPhase,32);
+   fDsiTimer->setTimeoutUS(1); return; /* independent final observation */
+  }
+- if (!hostConfiguration()) { finishHost(kIOReturnIOError,"configuration/idle readback"); return; }
++ if (!hostConfiguration()) { finishHost(kIOReturnIOError,"host idle/error validation"); return; }
+  finishHost(kIOReturnSuccess,"configured");
+ }
+ void SweetMDSS::finishHost(IOReturn rc,const char *reason)
+@@ -146,7 +148,7 @@
+   SWEET_LOG_ERROR("SWEET MDSS HOST: FAILED %s rc=%#x touched=%u; partial host state/resources retained, no rollback/retry/PHY reset\n",
+       reason,(unsigned)rc,fHostTouched);
+  } else {
+-  SWEET_LOG_INFO("SWEET MDSS HOST: v2.3 soft-reset/rebuilt RGB888 1080x2340 VC0 lane-map8421 TE-ext; readback+idle only, fresh pixels pending; link-profile=%u panel state retained\n",fLinkProfile);
++  SWEET_LOG_INFO("SWEET MDSS HOST: v2.3 soft-reset/rebuilt RGB888 1080x2340 VC0 lane-map8421 TE-ext; writes issued/idle observed, echo diagnostic; fresh pixels pending; link-profile=%u panel state retained\n",fLinkProfile);
+  }
+  setProperty("SweetDSIHostState",(unsigned long long)fHostPhase,32);
+  setProperty("SweetDSIHostFault",rc!=kIOReturnSuccess);
+@@ -164,23 +166,28 @@
+ IOReturn SweetMDSS::disableHostForLink(void)
+ {
+  if (!fLifecycleLinkCycle || fLifecycle.phase!=SweetPanelLinkPowerDown || fHostPhase!=HostReady ||
+-     !lifecycleLinkStepAllowed() || dp_rd(dp_dsi,0x118) || dp_rd(dp_dsi,0x12c)) return kIOReturnNotReady;
++     !lifecycleLinkStepAllowed()) return kIOReturnNotReady;
++ observeLineage("host-stop-prior-reset",dp_dsi,0x118,0);
++ observeLineage("host-stop-prior-phy-reset",dp_dsi,0x12c,0);
+  uint32_t clocks=dp_rd(dp_dsi,0x11c),ctrl=dp_rd(dp_dsi,4);
+- if (clocks!=0x23fu || (ctrl&7u)!=5u) return kIOReturnNotReady;
++ observeLineage("host-stop-prior-clocks",dp_dsi,0x11c,0x23fu);
++ observeLineage("host-stop-prior-control",dp_dsi,4,5u,7u);
+  fHostTouched=fClockTouched=true;
+  dp_wr(dp_dsi,0x110,0); /* disable enables; never W1C stale status by replay */
+- if (dp_rd(dp_dsi,0x110)&(hostInterruptEnables|(1u<<24))) {finishHost(kIOReturnIOError,"host shutdown readback");return kIOReturnIOError;}
++ observeLineage("host-stop-irq",dp_dsi,0x110,0,hostInterruptEnables,true);
++ if (dp_rd(dp_dsi,0x110)&(1u<<24)) {finishHost(kIOReturnIOError,"host shutdown error");return kIOReturnIOError;}
+  dp_wr(dp_dsi,4,ctrl&~4u); /* command engine before controller */
+- if (dp_rd(dp_dsi,4)!=(ctrl&~4u)) {finishHost(kIOReturnIOError,"host shutdown readback");return kIOReturnIOError;}
++ observeLineage("host-stop-command",dp_dsi,4,ctrl&~4u,~0u,true);
+  dp_wr(dp_dsi,0x11c,clocks|hostForceClocks);
+  __asm__ volatile("dsb oshst" ::: "memory");
+- if (dp_rd(dp_dsi,0x11c)!=(clocks|hostForceClocks)) {finishHost(kIOReturnIOError,"host shutdown readback");return kIOReturnIOError;}
++ observeLineage("host-stop-force-clocks",dp_dsi,0x11c,clocks|hostForceClocks,~0u,true);
+  dp_wr(dp_dsi,4,ctrl&~7u);
+  __asm__ volatile("dsb oshst" ::: "memory");
+- if (dp_rd(dp_dsi,4)!=(ctrl&~7u)) {finishHost(kIOReturnIOError,"host shutdown readback");return kIOReturnIOError;}
++ observeLineage("host-stop-controller",dp_dsi,4,ctrl&~7u,~0u,true);
+  dp_wr(dp_dsi,0x11c,clocks);
+  __asm__ volatile("dsb oshst" ::: "memory");
+- if (dp_rd(dp_dsi,0x11c)!=clocks || (dp_rd(dp_dsi,8)&6u)) {finishHost(kIOReturnIOError,"host shutdown readback");return kIOReturnIOError;}
++ observeLineage("host-stop-clocks",dp_dsi,0x11c,clocks,~0u,true);
++ if (dp_rd(dp_dsi,8)&6u) {finishHost(kIOReturnIOError,"host shutdown busy");return kIOReturnIOError;}
+  fHostPhase=HostDormant;fHostResult=kIOReturnSuccess;
+  setProperty("SweetDSIHostState",(unsigned long long)fHostPhase,32);
+  return kIOReturnSuccess;
+diff --git a/iokit/Kernel/arm/SweetMDSSLifecycle.inc b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+--- a/iokit/Kernel/arm/SweetMDSSLifecycle.inc
++++ b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+@@ -477,8 +477,9 @@
+   restoreLifecycleStream();publishLifecycle();return;
+  } else if (fLifecycle.phase==SweetPanelFrame) {
+   unsigned irq=__atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE);
+-  if (!lifecycleResourcesHeld() || !scanoutConfiguration(false) || (irq!=IrqArmed && irq!=IrqPending) ||
+-      dp_rd(dp_intf1,0x2b4)!=fLifecycleAuto || dp_rd(dp_intf1,0x288)!=fLifecycleTE) {finishLifecycle(kIOReturnNotReady,"resumed pixel configuration lost");return;}
++  if (!lifecycleResourcesHeld() || !scanoutConfiguration(false) || (irq!=IrqArmed && irq!=IrqPending)) {finishLifecycle(kIOReturnNotReady,"resumed pixel participants lost");return;}
++  observeLineage("lifecycle-auto",dp_intf1,0x2b4,fLifecycleAuto);
++  observeLineage("lifecycle-te",dp_intf1,0x288,fLifecycleTE);
+   if (dp_rd(dp_ctl,0x18) || !(dp_rd(fMaps[9]->getVirtualAddress(),0x1014)&(1u<<8)) || fFrameCount<=fLifecycleFrame) return;
+   fLifecycle.pixelsComplete=true;
+  } else return;
+@@ -590,7 +591,8 @@
+  }
+  for (unsigned i=0;i<SweetClockCount;++i) if ((fClockKnownMask&(1u<<i)) && !(0x70u&(1u<<i))) {
+   uint32_t parent[6]={},value=dp_rd(dp_dispcc,mdssClockBranches[i].cbcr);
+-  if (!clockParent(i,parent,true) || memcmp(parent,fClockParents[i],sizeof(parent)) || !clockBranchRunning(i,value)) return false;
++  if (!clockParent(i,parent,true) || !clockBranchRunning(i,value)) return false;
++  observeClockParent(i,parent,fClockParents[i]);
+  }
+  return true;
+ }
+@@ -603,6 +605,6 @@
+      (dp_rd(dp_dsi,8)&6u) || dp_rd(dp_ctl,0x18) || dp_rd(dp_ctl,0x1c) || !scanoutConfiguration(false)) return false;
+  uint32_t line=dp_rd(dp_intf1,0x2b0)&0xffffu;
+  if (line>0 && line<2340) return false;
+- if (fLinkTouched && (dp_rd(dp_dispcc,0x8000)&~linkMiscMask)!=(fLinkMisc&~linkMiscMask)) return false;
++ if (fLinkTouched) observeLineage("lifecycle-misc-preserved",dp_dispcc,0x8000,fLinkMisc,~linkMiscMask);
+  return true;
+ }
+diff --git a/iokit/Kernel/arm/SweetMDSSLink.inc b/iokit/Kernel/arm/SweetMDSSLink.inc
+--- a/iokit/Kernel/arm/SweetMDSSLink.inc
++++ b/iokit/Kernel/arm/SweetMDSSLink.inc
+@@ -53,7 +53,7 @@
+      fClockFault || fNoCFault || clockBusy() || noCBusy() || dsiBusy() || hostBusy() ||
+      fDsiPinned || fDsiPoisoned || fHostPhase!=HostIdle ||
+      __atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE)!=IrqIdle || linkOtherUsers()) return false;
+- if (fLinkTouched && (dp_rd(dp_dispcc,0x8000)&~linkMiscMask)!=(fLinkMisc&~linkMiscMask)) return false;
++ if (fLinkTouched) observeLineage("link-misc-preserved",dp_dispcc,0x8000,fLinkMisc,~linkMiscMask);
+  SweetClockLease clock={}; SweetNoCStatus noc={}; SweetDisplayPowerStatus power={};
+  if (!fManagedClock || localClockStatus(fManagedClock,&clock)!=kIOReturnSuccess ||
+      clock.state!=SweetClockHeld || clock.mask!=mdssClockMasks[SweetClockDSI0] ||
+@@ -66,8 +66,8 @@
+   * that these physically run. Their snapshots are updated only at completion. */
+  for (unsigned n=0;n<SweetClockCount;++n) if ((fClockKnownMask&(1u<<n)) && !(0x70u&(1u<<n))) {
+   uint32_t p[6]={}; uint32_t branch=dp_rd(dp_dispcc,mdssClockBranches[n].cbcr);
+-  if (!clockParent(n,p,true) || memcmp(p,fClockParents[n],sizeof(p)) ||
+-      !clockBranchRunning(n,branch)) return false;
++  if (!clockParent(n,p,true) || !clockBranchRunning(n,branch)) return false;
++  observeClockParent(n,p,fClockParents[n]);
+  }
+  return !(dp_rd(dp_intf1,0x288)&(1u<<20)) && !dp_rd(dp_intf1,0x2b4);
+ }
+@@ -80,19 +80,20 @@
+   * Linux also selects this driver by compatible. This mode is an explicit
+   * board-profile experiment, not automatic authorization on unknown boards. */
+  for (unsigned n=0;n<4;++n) if (dp_rd(p,4*n)>255u) return false;
+- if (dp_rd(dp_dispcc,0x8000)==~0u || (dp_rd(p,0x24)&0x7fu)!=0x7fu || (dp_rd(p,0xa0)&0x1fu)!=0x1fu ||
+-     !(dp_rd(p,0x3c)&1u) || !(dp_rd(p,0x6b0)&1u) || !(dp_rd(p,0x140)&1u) ||
+-     (dp_rd(p,0x18)&(1u<<6)) || (dp_rd(p,0x14)&~0x33u) ||
+-     dp_rd(p,0x34)!=0x21u || dp_rd(p,0x38)!=0x84u ||
+-     dp_rd(p,0xa4) || dp_rd(p,0xa8) || dp_rd(p,0xac)) return false;
+- for (unsigned n=0;n<5;++n) if (dp_rd(p,0x210+0x80*n)) return false; /* no PN swap */
++ if (dp_rd(dp_dispcc,0x8000)==~0u || !(dp_rd(p,0x6b0)&1u) || !(dp_rd(p,0x140)&1u) ||
++     (dp_rd(p,0x18)&(1u<<6))) return false; /* Known DPHY, powered/locked. */
++ const SweetLinkRegister inherited[]={{0x24,0x7f},{0xa0,0x1f},{0x3c,1},{0x14,0x20},
++     {0x34,0x21},{0x38,0x84},{0xa4,0},{0xa8,0},{0xac,0}};
++ for (unsigned n=0;n<sizeof(inherited)/sizeof(inherited[0]);++n)
++  observeLineage("link-inherited",p,inherited[n].offset,inherited[n].value,~0u,true);
++ for (unsigned n=0;n<5;++n) observeLineage("link-inherited-swap",p,0x210+0x80*n,0,~0u,true);
+  return true;
+ }
+ bool SweetMDSS::linkWrite(uint32_t offset,uint32_t value)
+ {
+  if (offset>=0x760 || (offset&3u)) return false;
+  vm_offset_t p=fMaps[12]->getVirtualAddress();
+- dp_wr(p,offset,value); return dp_rd(p,offset)==value;
++ dp_wr(p,offset,value); observeLineage("phy-pll-write",p,offset,value,~0u,true); return true;
+ }
+ IOReturn SweetMDSS::beginLink(bool powerDown)
+ {
+@@ -109,9 +110,7 @@
+  fLinkMisc=dp_rd(dp_dispcc,0x8000);
+  fLinkTouched=fClockTouched=true;
+  dp_wr(dp_dispcc,0x8000,fLinkMisc&~linkMiscMask);
+- if (dp_rd(dp_dispcc,0x8000)!=(fLinkMisc&~linkMiscMask)) {
+-  finishLink(kIOReturnIOError,"PHY reset mask/dynamic gating disable"); return kIOReturnIOError;
+- }
++ observeLineage("phy-reset-mask",dp_dispcc,0x8000,fLinkMisc&~linkMiscMask,~0u,true);
+  if (powerDown) {
+   IOReturn rc=disableHostForLink();
+   if (rc!=kIOReturnSuccess) {finishLink(rc,"host shutdown");return rc;}
+@@ -119,9 +118,8 @@
+   dp_wr(dp_dsi,0x110,0); /* enable bits only, no W1C acknowledgements */
+   dp_wr(dp_dsi,4,dp_rd(dp_dsi,4)&~7u);
+  }
+- if ((dp_rd(dp_dsi,0x110)&hostInterruptEnables) || (dp_rd(dp_dsi,4)&7u)) {
+-  finishLink(kIOReturnIOError,"host disable"); return kIOReturnIOError;
+- }
++ observeLineage("link-host-irq-disable",dp_dsi,0x110,0,hostInterruptEnables,true);
++ observeLineage("link-host-disable",dp_dsi,4,0,7u,true);
+  fLinkDeadline=scanout_now()+250000000ULL;
+  fLinkPhase=LinkLaneIdle; fLinkStepDeadline=scanout_now()+100000ULL;
+  setProperty("SweetDSILinkState",(unsigned long long)fLinkPhase,32);
+@@ -129,27 +127,30 @@
+ }
+ bool SweetMDSS::linkConfiguration(void)
+ {
+- vm_offset_t p=fMaps[12]->getVirtualAddress();
+- if (!fLinkProfile || fLinkPhase!=LinkReady ||
+-     dp_rd(dp_dispcc,0x8000)!=((fLinkMisc&~linkMiscMask)|0x2a0u) || !(dp_rd(p,0x140)&1u) ||
+-     !(dp_rd(p,0x6b0)&1u) || dp_rd(p,0x3c)!=1 || dp_rd(p,0x24)!=0x7f ||
+-     dp_rd(p,0x14)!=0x20 || dp_rd(p,0x10)!=0x62 || dp_rd(p,0x30)!=4 ||
+-     dp_rd(p,0x1c)!=1 || dp_rd(p,0x34)!=0x21 || dp_rd(p,0x38)!=0x84 ||
+-     dp_rd(p,0x5e0)!=fLinkPlan.decimal ||
+-     dp_rd(p,0x5e4)!=(fLinkPlan.fraction&255u) ||
+-     dp_rd(p,0x5e8)!=((fLinkPlan.fraction>>8)&255u) ||
+-     dp_rd(p,0x5ec)!=(fLinkPlan.fraction>>16) || dp_rd(p,0x654) ||
+-     dp_rd(p,0x650)!=2 || dp_rd(p,0x620)!=(fLinkPlan.sscStep&255u) ||
+-     dp_rd(p,0x624)!=(fLinkPlan.sscStep>>8) || dp_rd(p,0x628)!=(fLinkPlan.sscPeriod&255u) ||
+-     dp_rd(p,0x62c)!=(fLinkPlan.sscPeriod>>8) || dp_rd(p,0x630)!=2 || dp_rd(p,0x634)) return false;
+- for (unsigned n=0;n<14;++n) if (dp_rd(p,0xb4+4*n)!=linkTiming[n]) return false;
++ if (!fLinkProfile || fLinkPhase!=LinkReady) return false;
++ vm_offset_t p=fMaps[12]->getVirtualAddress();
++ /* REFGEN and PLL lock are real Lineage status checks. Configuration
++  * echoes are observations, including when revalidated by host/lifecycle. */
++ if (!(dp_rd(p,0x140)&1u) || !(dp_rd(p,0x6b0)&1u)) return false;
++ observeLineage("link-ready-misc",dp_dispcc,0x8000,(fLinkMisc&~linkMiscMask)|0x2a0u);
++ const SweetLinkRegister expected[]={
++  {0x3c,1},{0x24,0x7f},{0x14,0x20},{0x10,0x62},{0x30,4},
++  {0x1c,1},{0x34,0x21},{0x38,0x84},{0x5e0,fLinkPlan.decimal},
++  {0x5e4,fLinkPlan.fraction&255u},{0x5e8,(fLinkPlan.fraction>>8)&255u},{0x5ec,fLinkPlan.fraction>>16},
++  {0x654,0},{0x650,2},{0x620,fLinkPlan.sscStep&255u},{0x624,fLinkPlan.sscStep>>8},
++  {0x628,fLinkPlan.sscPeriod&255u},{0x62c,fLinkPlan.sscPeriod>>8},{0x630,2},{0x634,0}
++ };
++ for (unsigned n=0;n<sizeof(expected)/sizeof(expected[0]);++n)
++  observeLineage("link-ready",p,expected[n].offset,expected[n].value);
++ for (unsigned n=0;n<14;++n) observeLineage("link-timing",p,0xb4+4*n,linkTiming[n]);
+  for (unsigned n=0;n<5;++n) {
+   uint32_t b=0x200+0x80*n;
+-  if (dp_rd(p,b) || dp_rd(p,b+4) || dp_rd(p,b+8)!=(n==4 ? 0x8au : 0xau) ||
+-      dp_rd(p,b+0x10) || dp_rd(p,b+0x14)!=(n ? 0u : 3u) ||
+-      dp_rd(p,b+0x18)!=(n==4 ? 1u : (n==3 ? 4u : 0u))) return false;
+- }
+- return true; /* independent fresh pixels still required */
++  const SweetLinkRegister lane[]={{b,0},{b+4,0},{b+8,n==4 ? 0x8au : 0xau},
++      {b+0x10,0},{b+0x14,n ? 0u : 3u},{b+0x18,n==4 ? 1u : (n==3 ? 4u : 0u)}};
++  for (unsigned i=0;i<sizeof(lane)/sizeof(lane[0]);++i)
++   observeLineage("link-lane",p,lane[i].offset,lane[i].value);
++ }
++ return true; /* Configuration echoes never prove fresh pixels. */
+ }
+ void SweetMDSS::advanceLink(void)
+ {
+@@ -171,17 +172,19 @@
+   }
+   for (unsigned n=0;n<3;++n) {
+    uint32_t b=linkGates[n]; dp_wr(dp_dispcc,b,dp_rd(dp_dispcc,b)&~1u);
+-   if (dp_rd(dp_dispcc,b)&1u) { finishLink(kIOReturnIOError,"link gate disable"); return; }
++   observeLineage("link-gate-disable",dp_dispcc,b,0,1u,true);
+   }
+   fLinkPhase=LinkGatesOff; fLinkStepDeadline=now+10000000ULL; break;
+  case LinkGatesOff: {
+   bool off=true;
+   for (unsigned n=0;n<3;++n) if (!(dp_rd(dp_dispcc,linkGates[n])&CBCR_OFF)) off=false;
+-  /* Branch halt alone does not prove that a root has stopped consuming the
+-   * old PLL. Require ROOT_OFF and no pending UPDATE/dirty state before any
+-   * PLL stop, PHY reset or parent/divider change. */
+-  for (unsigned n=0;n<2;++n)
+-   if ((dp_rd(dp_dispcc,linkRoots[n])&0x800000f1u)!=0x80000000u) off=false;
++  /* Retain the real UPDATE/dirty exclusion. ROOT_OFF is an additional
++   * snapshot condition absent from Lineage branch disable, so log it. */
++  for (unsigned n=0;n<2;++n) {
++   uint32_t cmd=dp_rd(dp_dispcc,linkRoots[n]);
++   if (cmd&0xf1u) off=false;
++   observeLineageValue("link-root-stopped",linkRoots[n],0x80000000u,cmd,0x800000f1u,false);
++  }
+   if (!off) {
+    if (now>=fLinkStepDeadline) { finishLink(kIOReturnTimeout,"link gates/roots did not halt"); return; }
+    break;
+@@ -194,10 +197,8 @@
+   fLinkPhase=LinkPLLStop; fLinkStepDeadline=now+5000000ULL; break;
+  }
+  case LinkPLLStop:
+-  if (dp_rd(p,0x6b0)&1u) {
+-   if (now>=fLinkStepDeadline) { finishLink(kIOReturnTimeout,"PLL lock did not clear"); return; }
+-   break;
+-  }
++  /* Lineage 7nm disable writes PLL/bias off without polling unlock. */
++  observeLineage("link-pll-stop-lock",p,0x6b0,0,1u,true);
+   if (!linkWrite(0x528,0) || !linkWrite(0x24,dp_rd(p,0x24)&~(1u<<5))) {
+    finishLink(kIOReturnIOError,"PLL bias off"); return;
+   }
+@@ -213,17 +214,17 @@
+    if (!linkDormantConfiguration()) {finishLink(kIOReturnIOError,"PHY shutdown proof");return;}
+    if (fDsiTimer) fDsiTimer->cancelTimeout();
+    setProperty("SweetDSILinkState",(unsigned long long)fLinkPhase,32);
+-   SWEET_LOG_INFO("SWEET MDSS LINK: host/branches/roots/PLL/PHY shut down; votes retained, not rail-off\n");
++   SWEET_LOG_INFO("SWEET MDSS LINK: shutdown writes issued and branches halted; configuration echoes diagnostic; votes retained, not rail-off\n");
+    return;
+   }
+   dp_wr(dp_dsi,0x12c,0x01000001u);
+   __asm__ volatile("dsb oshst" ::: "memory");
+-  if (dp_rd(dp_dsi,0x12c)!=0x01000001u) { finishLink(kIOReturnIOError,"PHY reset assert"); return; }
++  observeLineage("phy-reset-assert",dp_dsi,0x12c,0x01000001u,~0u,true);
+   fLinkPhase=LinkResetHold; fLinkWait=scanout_now()+1000000ULL; break;
+  case LinkResetHold:
+   dp_wr(dp_dsi,0x12c,0);
+   __asm__ volatile("dsb oshst" ::: "memory");
+-  if (dp_rd(dp_dsi,0x12c)) { finishLink(kIOReturnIOError,"PHY reset exit"); return; }
++  observeLineage("phy-reset-release",dp_dsi,0x12c,0,~0u,true);
+   fLinkPhase=LinkResetSettle; fLinkWait=scanout_now()+100000ULL; break;
+  case LinkResetSettle:
+   fLinkPhase=LinkRefgen; fLinkStepDeadline=now+1000000ULL; break;
+@@ -289,13 +290,14 @@
+   uint32_t root=linkRoots[fLinkRoot],cmd=dp_rd(dp_dispcc,root);
+   if (cmd&0xf1u) { finishLink(kIOReturnBusy,"DSI RCG already updating"); return; }
+   uint32_t previous[6]={};unsigned parent=fLinkRoot ? 6u : 4u;
+-  if (!clockParent(parent,previous,false) || memcmp(previous,fClockParents[parent],sizeof(previous))) {
+-   finishLink(kIOReturnNotReady,"DSI root drift before update");return;
+-  }
++  if (!clockParent(parent,previous,false)) {
++   finishLink(kIOReturnNotReady,"DSI root unavailable before update");return;
++  }
++  observeClockParent(parent,previous,fClockParents[parent]);
+   uint32_t cfg=(fClockParents[parent][0]&~0x10371fu)|0x101u;
+   dp_wr(dp_dispcc,root+4,cfg);
+   if (fLinkRoot) { dp_wr(dp_dispcc,root+8,0); dp_wr(dp_dispcc,root+12,0); dp_wr(dp_dispcc,root+16,0); }
+-  if (dp_rd(dp_dispcc,root+4)!=cfg) { finishLink(kIOReturnIOError,"DSI RCG config readback"); return; }
++  observeLineage("link-rcg-config",dp_dispcc,root+4,cfg,~0u,true);
+   dp_wr(dp_dispcc,root,cmd|1u); fLinkPhase=LinkRootWait; fLinkStepDeadline=now+500000ULL; break;
+  }
+  case LinkRootWait: {
+@@ -305,20 +307,20 @@
+    break;
+   }
+   if (++fLinkRoot<2) { fLinkPhase=LinkRoots; break; }
+-  if (dp_rd(dp_dispcc,0x2128)!=fClockParents[5][4]) {finishLink(kIOReturnNotReady,"BYTE_INTF divider drift");return;}
++  observeLineage("link-byte-prior-divider",dp_dispcc,0x2128,fClockParents[5][4]);
+   uint32_t divider=(fClockParents[5][4]&~3u)|1u; /* DPHY byte_intf = byte / 2 */ dp_wr(dp_dispcc,0x2128,divider);
+-  if (dp_rd(dp_dispcc,0x2128)!=divider) { finishLink(kIOReturnIOError,"BYTE_INTF divider"); return; }
++  observeLineage("link-byte-divider",dp_dispcc,0x2128,divider,~0u,true);
+   /* Reverse gate order: byte -> intf -> pixel. Check actual CLK_OFF below. */
+   for (unsigned n=3;n>0;--n) {
+    uint32_t b=linkGates[n-1]; dp_wr(dp_dispcc,b,dp_rd(dp_dispcc,b)|1u);
+-   if (!(dp_rd(dp_dispcc,b)&1u)) { finishLink(kIOReturnIOError,"link gate enable"); return; }
++   observeLineage("link-gate-enable",dp_dispcc,b,1u,1u,true);
+   }
+   fLinkPhase=LinkGatesOn; fLinkStepDeadline=now+10000000ULL; break;
+  }
+  case LinkGatesOn: {
+   bool on=true;
+   for (unsigned n=0;n<3;++n) if (dp_rd(dp_dispcc,linkGates[n])&CBCR_OFF) on=false;
+-  for (unsigned n=0;n<2;++n) if (dp_rd(dp_dispcc,linkRoots[n])&0x800000f1u) on=false;
++  for (unsigned n=0;n<2;++n) observeLineage("link-root-running",dp_dispcc,linkRoots[n],0,0x800000f1u);
+   if (!on) {
+    if (now>=fLinkStepDeadline) { finishLink(kIOReturnTimeout,"link gates/root not running"); return; }
+    break;
+@@ -329,8 +331,8 @@
+   if (!linkWrite(0x1c,0) || !linkWrite(0x1c,1) || !linkWrite(0x14,0x20)) {
+    finishLink(kIOReturnIOError,"PHY resync"); return;
+   }
+-  /* Update only controlled root fields. Non-controlled MND, source, branch
+-   * and other-parent drift must still be caught; never recapture all clocks. */
++  /* Retain requested root fields; diagnose snapshot differences while
++   * preserving actual parent availability and branch completion checks. */
+   uint32_t expected[3][6]={};
+   for (unsigned n=0;n<3;++n) {
+    unsigned i=4+n; memcpy(expected[n],fClockParents[i],sizeof(expected[n]));
+@@ -338,9 +340,10 @@
+    if (i==5) expected[n][4]=(expected[n][4]&~3u)|1u;
+    if (i==6) expected[n][1]=expected[n][2]=expected[n][3]=0;
+    uint32_t actual[6]={};
+-   if (!clockParent(i,actual,true) || memcmp(actual,expected[n],sizeof(actual))) {
+-    finishLink(kIOReturnIOError,"controlled root/parent drift"); return;
++   if (!clockParent(i,actual,true)) {
++    finishLink(kIOReturnIOError,"controlled root/parent unavailable"); return;
+    }
++   observeClockParent(i,actual,expected[n]);
+   }
+   dp_wr(dp_dispcc,0x8000,(fLinkMisc&~linkMiscMask)|0x2a0u);
+   fLinkPhase=LinkReady;
+@@ -367,7 +370,7 @@
+   SWEET_LOG_ERROR("SWEET MDSS LINK: FAILED %s phase=%u rc=%#x touched=%u; votes/partial link retained, no rollback/retry/panel reset\n",
+       reason,phase,(unsigned)rc,fLinkTouched);
+  } else {
+-  SWEET_LOG_INFO("SWEET MDSS LINK: v4.0/7nm-v2 configured VCO=%llu bit=%llu byte=%llu byte-intf=%llu pixel=%llu DOWN-SSC; fresh unlock/lock and running roots observed; host rebuild/fresh pixels pending\n",
++  SWEET_LOG_INFO("SWEET MDSS LINK: v4.0/7nm-v2 configured VCO=%llu bit=%llu byte=%llu byte-intf=%llu pixel=%llu DOWN-SSC; lock/branch completion observed; configuration echoes diagnostic; host rebuild/fresh pixels pending\n",
+       fLinkPlan.actualVcoHz,fLinkPlan.actualVcoHz/2,fLinkPlan.actualVcoHz/16,fLinkPlan.actualVcoHz/32,fLinkPlan.actualVcoHz/12);
+  }
+  setProperty("SweetDSILinkState",(unsigned long long)fLinkPhase,32);
+@@ -386,20 +389,30 @@
+ bool SweetMDSS::linkDormantConfiguration(void)
+ {
+  if (!fMaps[12] || fLinkPhase!=LinkDormant || fHostPhase!=HostDormant || fLinkSuspendedMask!=0x70u ||
+-     (dp_rd(dp_dsi,4)&7u) || (dp_rd(dp_dsi,8)&6u) || dp_rd(dp_dsi,0x118) || dp_rd(dp_dsi,0x12c) ||
+-     dp_rd(dp_dsi,0x11c)!=0x23fu || (dp_rd(dp_dsi,0x110)&(hostInterruptEnables|(1u<<24)))) return false;
+- vm_offset_t p=fMaps[12]->getVirtualAddress();
+- if ((dp_rd(p,0x14)&(1u<<5)) || dp_rd(p,0x3c) || (dp_rd(p,0x6b0)&1u) ||
+-     dp_rd(p,0x528) || dp_rd(p,0x24) || dp_rd(p,0xa0) || dp_rd(p,0x214)) return false;
+- for (unsigned n=0;n<3;++n)
+-  if ((dp_rd(dp_dispcc,linkGates[n])&(CBCR_OFF|1u))!=CBCR_OFF) return false;
++     (dp_rd(dp_dsi,8)&6u) || (dp_rd(dp_dsi,0x110)&(1u<<24))) return false;
++ observeLineage("dormant-host-control",dp_dsi,4,0,7u);
++ observeLineage("dormant-host-reset",dp_dsi,0x118,0);
++ observeLineage("dormant-phy-reset",dp_dsi,0x12c,0);
++ observeLineage("dormant-host-clocks",dp_dsi,0x11c,0x23fu);
++ observeLineage("dormant-host-irq",dp_dsi,0x110,0,hostInterruptEnables);
++ vm_offset_t p=fMaps[12]->getVirtualAddress();
++ const SweetLinkRegister off[]={{0x14,0},{0x3c,0},{0x528,0},{0x24,0},{0xa0,0},{0x214,0}};
++ for (unsigned n=0;n<sizeof(off)/sizeof(off[0]);++n)
++  observeLineage("dormant-phy",p,off[n].offset,off[n].value,off[n].offset==0x14 ? 1u<<5 : ~0u);
++ observeLineage("dormant-pll-lock",p,0x6b0,0,1u);
++ for (unsigned n=0;n<3;++n) {
++  if (!(dp_rd(dp_dispcc,linkGates[n])&CBCR_OFF)) return false;
++  observeLineage("dormant-gate-enable",dp_dispcc,linkGates[n],0,1u);
++ }
+  for (unsigned n=0;n<2;++n)
+-  if ((dp_rd(dp_dispcc,linkRoots[n])&0x800000f1u)!=0x80000000u) return false;
++  observeLineage("dormant-root",dp_dispcc,linkRoots[n],0x80000000u,0x800000f1u);
+  for (unsigned n=4;n<=6;++n) {
+   uint32_t parent[6]={};
+-  if (!clockParent(n,parent,false) || memcmp(parent,fClockParents[n],sizeof(parent))) return false;
+- }
+- return (dp_rd(dp_dispcc,0x8000)&linkMiscMask)==0 && !linkOtherUsers();
++  if (!clockParent(n,parent,false)) return false;
++  observeClockParent(n,parent,fClockParents[n]);
++ }
++ observeLineage("dormant-misc",dp_dispcc,0x8000,0,linkMiscMask);
++ return !linkOtherUsers();
+ }
+ IOReturn SweetMDSS::resumeLink(void)
+ {
+diff --git a/iokit/Kernel/arm/SweetMDSSNoC.inc b/iokit/Kernel/arm/SweetMDSSNoC.inc
+--- a/iokit/Kernel/arm/SweetMDSSNoC.inc
++++ b/iokit/Kernel/arm/SweetMDSSNoC.inc
+@@ -66,8 +66,12 @@
+  }
+  if (!fNoCIRQConfigured && (dp_rd(gic,0)&(1u<<31)))
+   return scanout_now()<fNoCIRQDeadline ? kIOReturnNotReady : kIOReturnIOError;
+- if ((dp_rd(gic,0xc28)&0xcu) || (dp_rd(gic,0x4a0)&0xff00u)!=0xa000u ||
+-     dp_rd(gic,0x6508) || dp_rd(gic,0x650c)) return kIOReturnIOError;
++ if (!fNoCIRQConfigured) {
++  observeLineage("gic-trigger",gic,0xc28,0,0xcu,true);
++  observeLineage("gic-priority",gic,0x4a0,0xa000u,0xff00u,true);
++  observeLineage("gic-route-lo",gic,0x6508,0,~0u,true);
++  observeLineage("gic-route-hi",gic,0x650c,0,~0u,true);
++ }
+  if (!fNoCIRQConfigured) {
+   fNoCIRQConfigured=true; __atomic_store_n(&fNoCIRQOnline,1u,__ATOMIC_RELEASE);
+   SWEET_LOG_INFO("SWEET MDSS NOC IRQ: INTID161 configured; workloop completion, timer watchdog only\n");
+@@ -110,9 +114,10 @@
+  }
+  uint32_t irq=s->dp_rd(s->fNoCTCSBase,NIRQStatus);
+  uint32_t enabled=s->dp_rd(s->fNoCTCSBase,NIRQEnable), bit=1u<<s->fNoCTCS;
+- if (irq==~0u || enabled==~0u || !(enabled&bit) || (irq&enabled)!=bit) {
++ if (irq==~0u || enabled==~0u || !(irq&bit)) {
+   s->finishNoC(kIOReturnIOError,true,"irq-source"); return;
+  }
++ s->observeLineageValue("noc-irq-enable",NIRQEnable,bit,enabled,bit,false);
+  s->fNoCIRQObserved=true;
+  s->advanceNoC();
+ }
+@@ -223,28 +228,12 @@
+  while (fNoCRSCInitCursor<sizeof(mdssRSCV2Init)/sizeof(mdssRSCV2Init[0])) {
+   const MDSSRSCInit &op=mdssRSCV2Init[fNoCRSCInitCursor];
+   vm_offset_t base=op.wrapper ? fNoCWrapper : fNoCRSC;
+-  if (!fNoCRSCWriteIssued) {
+-   dp_wr(base,op.offset,op.value); fNoCRSCWriteIssued=true;
+-   fNoCRSCDeadline=scanout_now()+1000000ULL;
+-  }
+-  uint32_t value=dp_rd(base,op.offset);
+-  /* Lineage rsc_hw_qtimer_init issues the CNTP compare/control writes
+-   * without requiring a stored-value echo. Its CNTACR setup is retained
+-   * verbatim (bit0 only); do not invent RWPT access or timer reset here.
+-   * a28 observed CVAL_LO != written value. The hardware reason remains
+-   * unknown, so these six observations are diagnostics, never an ACK.
+-   * All access/frame config and other RSC init checks stay strict. */
+-  bool cntp=op.wrapper && (op.offset==0x2020 || op.offset==0x2024 || op.offset==0x202c ||
+-                          op.offset==0x3020 || op.offset==0x3024 || op.offset==0x302c);
+-  if (cntp) {
+-   SWEET_LOG_INFO("SWEET MDSS RSC: qtimer write issued offset=%#x value=%#x observed=%#x; no echo requirement, not hardware ACK\n",
+-       op.offset,op.value,value);
+-  } else if (value!=op.value) {
+-   if (scanout_now()<fNoCRSCDeadline) return kIOReturnNotReady;
+-   SWEET_LOG_ERROR("SWEET MDSS RSC: init readback index=%u wrapper=%u offset=%#x want=%#x got=%#x\n",
+-       fNoCRSCInitCursor,op.wrapper,op.offset,op.value,value);
+-   return kIOReturnIOError;
+-  }
++  /* sde_rsc_hw_init's five helpers use dss_reg_w, not echo polling. */
++  dp_wr(base,op.offset,op.value);
++  observeLineage(op.wrapper ? "rsc-wrapper-init" : "rsc-drv-init",base,op.offset,op.value,~0u,true);
++  if (op.wrapper && (op.offset==0x2020 || op.offset==0x2024 || op.offset==0x202c ||
++                     op.offset==0x3020 || op.offset==0x3024 || op.offset==0x302c))
++   SWEET_LOG_INFO("SWEET MDSS RSC: qtimer write issued offset=%#x value=%#x; observation above, not hardware ACK\n",op.offset,op.value);
+   fNoCRSCWriteIssued=false; ++fNoCRSCInitCursor;
+  }
+  fNoCRSCInitialized=true;
+@@ -262,7 +251,7 @@
+   if (irq==~0u || enabled==~0u || (irq&enabled)) return kIOReturnBusy;
+   for (unsigned t=2;t<4;++t) {
+    uint32_t b=t*NStride, idle=dp_rd(fNoCTCSBase,b+NStatus);
+-   if (!idle || idle==~0u || dp_rd(fNoCTCSBase,b+NEnable)) return kIOReturnBusy;
++   if (!idle || idle==~0u || (!(fNoCSlotsOwned&(1u<<t)) && dp_rd(fNoCTCSBase,b+NEnable))) return kIOReturnBusy;
+   }
+   uint32_t override=dp_rd(fNoCWrapper,4);
+   uint32_t solverOverride=dp_rd(fNoCRSC,0xc14), modes=dp_rd(fNoCRSC,0xc20);
+@@ -276,7 +265,7 @@
+   fNoCRSCDeadline=now+1000000ULL; fNoCRSCStage=1;
+  }
+  if (fNoCRSCStage==1) {
+-  if (dp_rd(fNoCWrapper,4)&1u) return now<fNoCRSCDeadline ? kIOReturnNotReady : kIOReturnTimeout;
++  observeLineage("rsc-clk-request",fNoCWrapper,4,0,1u,true);
+   dp_wr(fNoCWrapper,0,0); /* tcs_wait: withhold TCS_USE_OK before checking SEQ_BUSY */
+   if (dp_rd(fNoCWrapper,0)&2u) {
+    dp_wr(fNoCWrapper,0,1);
+@@ -293,7 +282,7 @@
+  if (fNoCRSCStage==3) {
+   uint32_t ctrl=dp_rd(fNoCWrapper,0), busy=dp_rd(fNoCRSC,0x404);
+   if (ctrl==~0u || busy==~0u) return kIOReturnIOError;
+-  if ((ctrl&3u) || busy) {
++  if ((ctrl&2u) || busy) {
+    if (now<fNoCRSCDeadline) return kIOReturnNotReady;
+    /* Like Lineage trigger_vote failure: no payload/init has been written
+     * during this handoff, so return TCS_USE_OK to the sequencer. */
+@@ -301,6 +290,7 @@
+    SWEET_LOG_ERROR("SWEET MDSS RSC: TCS handoff timeout ctrl=%#x seq-busy=%#x\n",ctrl,busy);
+    return kIOReturnTimeout;
+   }
++  observeLineageValue("rsc-tcs-use-ok",0,0,ctrl,1u,true);
+   fNoCTCSOwned=true; fNoCRSCStage=4;
+  }
+  if (fNoCRSCStage==4) {
+@@ -363,10 +353,7 @@
+   if (!clockParent(i,parent,true,ClockFailure)) {
+    SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=clock-parent branch=%u cbcr=%#x\n",i,v); return false;
+   }
+-  if (memcmp(parent,fClockParents[i],sizeof(parent))) {
+-   SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=clock-parent-drift branch=%u cfg=%#x expected-cfg=%#x source=%u expected-source=%u\n",
+-       i,parent[0],fClockParents[i][0],parent[5],fClockParents[i][5]); return false;
+-  }
++  observeClockParent(i,parent,fClockParents[i]);
+   if ((fClockOwnedMask&(1u<<i)) && !clockEnableParentReady(i,parent)) {
+    SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=clock-owned-parent branch=%u cbcr=%#x\n",i,v); return false;
+   }
+@@ -390,23 +377,22 @@
+  uint32_t override=dp_rd(fNoCWrapper,4), power=dp_rd(fNoCWrapper,0x24), ctrl=dp_rd(fNoCWrapper,0);
+  /* Preserve the original read/check order. These are the samples used by
+   * the failed gate, not a post-failure rescan of RSC/TCS/wrapper. */
+- if (override==~0u || (!takeover && (override&1u))) {
++ if (override==~0u) {
+   SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=wrapper-override override=%#x power=%#x ctrl=%#x\n",override,power,ctrl); return false;
+  }
+  if (power==~0u || (power&(1u<<12))) {
+   SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=wrapper-power override=%#x power=%#x ctrl=%#x\n",override,power,ctrl); return false;
+  }
+- if (ctrl==~0u || (!takeover && ((ctrl&2u) || (fNoCTCSOwned && (ctrl&1u))))) {
++ if (ctrl==~0u || (!takeover && (ctrl&2u))) {
+   SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=wrapper-control override=%#x power=%#x ctrl=%#x\n",override,power,ctrl); return false;
+  }
+  uint32_t busy=dp_rd(fNoCRSC,0x404);
+  if (busy==~0u || (!takeover && busy)) {
+   SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=sequencer-busy value=%#x\n",busy); return false;
+  }
++ observeLineageValue("rsc-clk-override",4,0,override,1u,false);
+  uint32_t error=dp_rd(fNoCRSC,0xd0);
+- if (error) {
+-  SWEET_LOG_ERROR("SWEET MDSS NOC ADMIT: gate=error-irq-status value=%#x\n",error); return false;
+- }
++ if (error) observeLineageValue("rsc-error-status",0xd0,0,error,~0u,false);
+  return true;
+ }
+ 
+@@ -557,13 +543,12 @@
+  for (unsigned t=2;t<4;++t) {
+   uint32_t b=t*NStride, enabled=dp_rd(fNoCTCSBase,b+NEnable), irq=dp_rd(fNoCTCSBase,NIRQStatus);
+   if (enabled&~((1u<<fNoCNCPT)-1u)) return kIOReturnIOError;
+-  for (unsigned c=0;c<fNoCNCPT;++c) if (enabled&(1u<<c)) {
++  for (unsigned c=0;c<fNoCNCPT;++c) if (!(fNoCSlotsOwned&(1u<<t)) && (enabled&(1u<<c))) {
+    uint32_t address=dp_rd(fNoCTCSBase,b+NAddress+c*NCommandStride);
+    for (unsigned r=1;r<SweetDisplayBCMCount;++r) if (address==fNoCInfo[r].address) return kIOReturnBusy;
+   }
+   uint32_t idle=dp_rd(fNoCTCSBase,b+NStatus);
+-  if (chosen<0 && idle && idle!=~0u && irq!=~0u && !(irq&(1u<<t)) && !enabled &&
+-      (dp_rd(fNoCTCSBase,b+NControl)&~((fNoCSlotsOwned&(1u<<t)) ? NTrigger : 0u))==((fNoCSlotsOwned&(1u<<t)) ? NAMC : 0u) && !dp_rd(fNoCTCSBase,b+NWait)) chosen=(int)t;
++  if (chosen<0 && idle && idle!=~0u && irq!=~0u && !(irq&(1u<<t)) && (!enabled || (fNoCSlotsOwned&(1u<<t)))) chosen=(int)t;
+  }
+  if (chosen<0) return kIOReturnBusy;
+  fNoCGroup=1;
+@@ -583,8 +568,9 @@
+   noCAdd(b+NDataRegister+c*NCommandStride,fNoCValues[r]|(last ? 1u<<30 : 0u));
+  }
+  noCAdd(b+NWait,fNoCWait); noCAdd(b+NEnable,fNoCEnable);
+- noCAdd(b+NControl,(fNoCSlotsOwned&bit) ? NAMC : 0u);
+- noCAdd(b+NControl,0); noCAdd(b+NControl,NAMC);
++ uint32_t control=dp_rd(fNoCTCSBase,b+NControl)&~NTrigger;
++ noCAdd(b+NControl,control);
++ noCAdd(b+NControl,control&~NAMC); noCAdd(b+NControl,control|NAMC);
+  noCAdd(NIRQEnable,0);
+  fNoCStepDeadline=scanout_now()+100000000ULL;
+  uint64_t requestAt=fNoCEvidence.requestAt;
+@@ -746,9 +732,9 @@
+      uint32_t enabled=dp_rd(fNoCTCSBase,t*NStride+NEnable);
+      if (enabled&~((1u<<fNoCNCPT)-1u)) { finishNoC(kIOReturnIOError,true); return; }
+      uint32_t idle=dp_rd(fNoCTCSBase,t*NStride+NStatus);
+-     if (t==fNoCTCS && (enabled || (dp_rd(fNoCTCSBase,base+NControl)&~((fNoCSlotsOwned&bit) ? NTrigger : 0u))!=((fNoCSlotsOwned&bit) ? NAMC : 0u) || dp_rd(fNoCTCSBase,base+NWait) ||
++     if (t==fNoCTCS && ((enabled && !(fNoCSlotsOwned&bit)) ||
+          !idle || idle==~0u || (dp_rd(fNoCTCSBase,NIRQStatus)&bit))) { finishNoC(kIOReturnBusy,true); return; }
+-     for (unsigned c=0;c<fNoCNCPT;++c) if (enabled&(1u<<c))
++     for (unsigned c=0;c<fNoCNCPT;++c) if (!(fNoCSlotsOwned&(1u<<t)) && (enabled&(1u<<c)))
+       for (unsigned r=1;r<SweetDisplayBCMCount;++r)
+        if (dp_rd(fNoCTCSBase,t*NStride+NAddress+c*NCommandStride)==fNoCInfo[r].address) { finishNoC(kIOReturnBusy,true); return; }
+     }
+@@ -765,11 +751,16 @@
+   fNoCEvidence.readValid=true; fNoCEvidence.readAt=scanout_now();
+   fNoCEvidence.writeOffset=op.offset; fNoCEvidence.readOffset=op.clear ? NIRQStatus : op.offset;
+   fNoCEvidence.want=op.value; fNoCEvidence.got=value;
+-  if (op.clear ? (value&op.value)!=0 : value!=op.value) {
++  /* Lineage synchronizes only the three pre-trigger CONTROL writes.
++   * Payload, WAIT/ENABLE, IRQ source and ACTIVE cleanup are plain writes. */
++  bool sync=!op.clear && op.offset==base+NControl;
++  if (sync && value!=op.value) {
+    if (now>=fNoCWriteDeadline) finishNoC(kIOReturnIOError,true,"write-readback");
+    else fNoCTimer->setTimeoutUS(100);
+    return;
+   }
++  if (!sync) observeLineageValue(op.clear ? "noc-irq-clear" : "noc-write",
++      op.clear ? NIRQStatus : op.offset,op.clear ? 0u : op.value,value,op.clear ? op.value : ~0u,true);
+   ++fNoCOp; fNoCWriteIssued=false;
+  }
+  if (!fNoCExecuting) {
+@@ -778,7 +769,7 @@
+   fNoCIRQObserved=false; fNoCExecuting=true;
+   fNoCOp=fNoCOps=0;
+   __atomic_store_n(&fNoCIRQArmed,1u,__ATOMIC_RELEASE);
+-  dp_wr(fNoCTCSBase,base+NControl,NAMC|NTrigger);
++  dp_wr(fNoCTCSBase,base+NControl,dp_rd(fNoCTCSBase,base+NControl)|NAMC|NTrigger);
+   /* Level IRQ latched during trigger must survive until GIC unmask. */
+   dp_wr(fMaps[11]->getVirtualAddress(),0x114,2);
+   fNoCEvidence.triggerAt=scanout_now(); /* MMIO write returned, not an ACK. */
+@@ -815,8 +806,9 @@
+  fNoCEvidence.seenBusy|=idle==0; fNoCEvidence.seenIncomplete|=!complete;
+  fNoCEvidence.seenIRQ|=irq!=~0u && (irq&bit)!=0; fNoCEvidence.lastComplete=complete;
+  fNoCProgress|=idle==0 || !complete;
+- if (irq==~0u || idle==~0u) { finishNoC(kIOReturnIOError,true,"invalid-status"); return; }
+- if (!idle || !complete || !(irq&bit)) { finishNoC(kIOReturnIOError,true,"incomplete-irq"); return; }
++ if (irq==~0u) { finishNoC(kIOReturnIOError,true,"invalid-status"); return; }
++ if (!complete || !(irq&bit)) { finishNoC(kIOReturnIOError,true,"incomplete-irq"); return; }
++ observeLineageValue("noc-completion-idle",base+NStatus,1,idle,~0u,false);
+  SWEET_LOG_INFO("SWEET MDSS NOC IRQ: fresh ACTIVE completion tcs=%u commands=%u entries=%u; cleanup pending\n",
+      fNoCTCS,fNoCGroup,__atomic_load_n(&fNoCIRQEntries,__ATOMIC_ACQUIRE));
+  /* Lineage ACTIVE completion preserves control (AMC + trigger). The next
+diff --git a/iokit/Kernel/arm/SweetMDSSResources.inc b/iokit/Kernel/arm/SweetMDSSResources.inc
+--- a/iokit/Kernel/arm/SweetMDSSResources.inc
++++ b/iokit/Kernel/arm/SweetMDSSResources.inc
+@@ -266,7 +266,8 @@
+  }
+  for (unsigned n=0;n<SweetClockCount;++n) if ((boot.mask&(1u<<n)) && !(fLinkSuspendedMask&(1u<<n))) {
+   uint32_t parent[6]={},v=dp_rd(dp_dispcc,mdssClockBranches[n].cbcr);
+-  if (!clockParent(n,parent) || memcmp(parent,fClockParents[n],sizeof(parent)) || !(v&1u) || (v&CBCR_OFF)) return false;
++  if (!clockParent(n,parent) || !clockBranchRunning(n,v)) return false;
++  observeClockParent(n,parent,fClockParents[n]);
+  }
+  return true;
+ }
+diff --git a/iokit/Kernel/arm/SweetMDSSScanout.inc b/iokit/Kernel/arm/SweetMDSSScanout.inc
+--- a/iokit/Kernel/arm/SweetMDSSScanout.inc
++++ b/iokit/Kernel/arm/SweetMDSSScanout.inc
+@@ -84,7 +84,11 @@
+      v.ctlTop!=0x20000u || v.start || v.te!=1u) return false;
+  fScanoutStatus.fsr=v.cbFault; /* raw bit10 is retained, never silently cleared */
+  if (inherited) return v.address==0x9d200000u && v.stride==4320u && !v.xy && !v.flush;
+- return fHardwarePool && v.address==fHardwarePool->physical(0) && v.stride==4608u && v.xy==0x00300016u;
++ if (!fHardwarePool || !fScanoutTouched || !fScanoutStatus.hardwareReachable) return false;
++ observeLineageValue("scanout-source",0x14,(uint32_t)fHardwarePool->physical(0),v.address,~0u,false);
++ observeLineageValue("scanout-stride",0x24,4608,v.stride,~0u,false);
++ observeLineageValue("scanout-crop",8,0x00300016u,v.xy,~0u,false);
++ return true; /* SMMU/layout and real frame completion remain checked. */
+ }
+ IOReturn
+ SweetMDSS::beginScanout(SweetScanoutPool *pool,SweetVsyncChannel *channel)
+@@ -239,15 +243,16 @@
+       s->fScanoutStatus.address,line,s->fScanoutSubmitFrame);
+   sender->setTimeoutMS(1); return;
+  }
+- if (!s->scanoutConfiguration(false) || dp_rd(s->dp_intf1,0x288)!=s->fScanoutTE ||
+-     dp_rd(s->dp_intf1,0x2b4)!=s->fScanoutAuto) { s->cancelScanout("submitted configuration changed"); return; }
++ if (!s->scanoutConfiguration(false)) { s->cancelScanout("submitted SMMU/layout changed"); return; }
++ s->observeLineage("scanout-te",s->dp_intf1,0x288,s->fScanoutTE);
++ s->observeLineage("scanout-auto",s->dp_intf1,0x2b4,s->fScanoutAuto);
+  s->fScanoutStatus.flush=dp_rd(s->dp_ctl,0x18);
+  s->fScanoutStatus.done=dp_rd(top,0x1014)&(1u<<8);
+  s->fScanoutStatus.frame=s->fFrameCount;
+  if (!s->fScanoutStatus.flush && s->fScanoutStatus.done && s->fFrameCount>s->fScanoutSubmitFrame) {
+   s->fScanoutState=SweetScanoutActive;
+   s->setProperty("SweetScanoutHandoffState",(unsigned long long)s->fScanoutState,32);
+-  SWEET_LOG_INFO("SWEET MDSS SCANOUT: transfer observed A=%#llx frame=%llu flush=%#x fresh-pp-done=%#x raw-fsr=%#x; lifetime pin remains\n",
++  SWEET_LOG_INFO("SWEET MDSS SCANOUT: transfer observed A=%#llx frame=%llu flush=%#x fresh-pp-done=%#x raw-fsr=%#x; requested source, echo diagnostic; lifetime pin remains\n",
+       s->fScanoutStatus.address,s->fFrameCount,s->fScanoutStatus.flush,s->fScanoutStatus.done,s->fScanoutStatus.fsr);
+   return;
+  }

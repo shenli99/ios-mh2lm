@@ -131,7 +131,7 @@ int main(){
   if(bad==1){regs[bases[1]+0x4004]|=0x80000000u;} // own vote is not physical ON
   untilWrite(h,7);
   auto token=h.m->fNoCClockToken;assert(clockStatus(h,token).state==SweetClockPending);
-  if(bad==2)regs[bases[1]+0x22c0]^=0x80000000u; // raw drift, same masked rate
+  if(bad==2)regs[bases[1]+0x22bc]|=1u; // actual UPDATE remains pending
   if(bad==3)h.r->fClients[0].registerStatus.uncertain=true;
   for(unsigned j=0;j<150&&h.m->clockBusy();++j)clockTick(h,100,false);
   assert(clockStatus(h,token).state==SweetClockFailed&&h.m->fClockFault);
@@ -177,7 +177,7 @@ int main(){
   assert(h.m->releaseLocalClocks(token)==0);
   while(!(h.m->fClockCursor==7&&h.m->fClockWaiting))clockTick(h);
   assert(!(regs[bases[1]+0x4004]&1)&&!(regs[bases[1]+0x4004]&0x80000000u));
-  // Enforce asynchronous settle from observed clear, even on an early callback.
+  // Enforce asynchronous settle after the write, even on an early callback.
   clockTick(h,0);auto readyAt=h.m->fClockVoteSettleAt;assert(readyAt>fakeTicks);
   clockTick(h,0);assert(h.m->fClockWaiting&&h.m->fClockVoteSettleAt==readyAt);
   clockTick(h,9);assert(h.m->fClockWaiting);
@@ -187,8 +187,8 @@ int main(){
   assert(regs[bases[1]+0x4004]==0x2000&&regs[bases[1]+0x400c]==0x80004000u&&regs[bases[1]+0x4008]==0x80008000u);
   assert(leafWrites()==3);
  }
- // Ordinary HALT branches must still actually stop. Lost disable readback,
- // reasserted own vote, raw parent drift, or stop never fabricate Released.
+ // HALT must stop and stop cancels. Voted release non-echo and raw
+ // snapshot differences are diagnostic and still honor the settle delay.
  for(unsigned bad=0;bad<5;++bad){Harness h;offLeaves();configReady(h);heldRSC(h);
   auto token=h.m->fNoCClockToken;h.m->fNoCTarget.registerPeak=0;h.m->fNoCCursor=h.m->fNoCCount;
   assert(h.m->releaseLocalClocks(token)==0);
@@ -203,8 +203,10 @@ int main(){
    }
    if(bad==4&&h.m->fClockCursor<7)regs[bases[1]+0x4004]|=1;
   }
-  auto q=clockStatus(h,token);assert(q.state==(bad==3?SweetClockStopped:SweetClockFailed));
-  if(bad!=3)assert(h.m->fClockFault&&(h.m->fClockOwnedMask&0x380)==0x380);
+  auto q=clockStatus(h,token);
+  if(bad==0||bad==2||bad==4){assert(q.state==SweetClockReleased&&!h.m->fClockFault);}
+  else{assert(q.state==(bad==3?SweetClockStopped:SweetClockFailed));
+   if(bad!=3)assert(h.m->fClockFault&&(h.m->fClockOwnedMask&0x380)==0x380);}
   auto size=trace.size();SweetMDSS::clockTimerAction(h.m,h.m->fClockTimer);assert(size==trace.size());
   dropClockWrite=0;
  }
