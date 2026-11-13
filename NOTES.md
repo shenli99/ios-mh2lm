@@ -3,6 +3,7 @@
 ## Agent handoff / active work (2026-11-13, a28 init failure; 0217 ready)
 
 **CURRENT：a28仍静帧，首错为RSC qtimer初始化index4读回不相等；0217已实现并本地验证通过，待用户push云编译。**
+实现提交 **75f5846**（75f5846719086befc0d0d98ca18287bb9f26bb49）；push最新main即可包含本轮修正。
 日志 logs/live-0121a28-abi608-panel-retained.txt：208507bytes/2957行，SHA256=30b45bb8a9b0844e439f4391da637002bebd6a3766a86395ebc94253260864f4。
 10次apps fresh IRQ/LDO/ARC/CN0和core2成功；1781 CLOCK Held/state2/mask381；1782 RSC enter CLK。
 1783 init index4/wrapper1/+2020 wantffffffff/got224cac6，随后NoC IOError e00002ca；group-valid0/trigger-issued0。
