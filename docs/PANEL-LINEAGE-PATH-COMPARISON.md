@@ -5,6 +5,37 @@
 0215（`2ffc1a4`）只增加取证，不改变下述工作路径。
 Lineage 一侧是源码所定义的路径，未取得本次同机 Android 寄存器轨迹；不能把它写成实机测量结果。
 
+## 首次资源接管的缺项复核（同日补充）
+
+再次逐项核对到 TCS 提交/完成，明确存在下面的缺项。需要区分“XNU 没有实现该能力”
+与“硬件此刻必然缺少该配置”：温接管的固件遗留状态可能已经满足部分条件。
+
+| 缺项 | 当前实际实现 | 对当前问题的意义 |
+|---|---|---|
+| 显示 RSC 完成中断及本次完成通道 | 只有 NoC timer，未接 INTID161；编程时清本槽 IRQ_ENABLE，执行等待时继续屏蔽 | 与当前完成等待直接相关；需要可靠的本次完成证据，不能单靠曾观测 busy。现有模拟风险成立，真机是否触发仍未知 |
+| TCS 使用权交接 | 读 wrapper 的 SEQ_BUSY 和 DRV 的 SEQ_BUSY，但不写 TCS_USE_OK 协调硬件执行器 | 相比 Lineage 带宽更新流程，缺少“请求停止使用→等待空闲→修改→交还”的步骤；单次读空闲不等同交接完成 |
+| RSC 工作状态的完整确认/转换 | 有 wrapper override bit0、power bit12、busy 与错误检查；无完整模式切换/退出低功耗流程 | 只能接受有限的继承状态，不能证明从任意固件状态建立了 Lineage 的软件触发条件 |
+| RSC 首次/失电后完整初始化 | 未建立 Lineage 的计时、wrapper、序列内存、solver、PDC 配置 | 完整独立启动确实缺；其中哪些为当前 warm ACTIVE 所必需仍需判断，不能全当作本次超时原因 |
+| 自动调度和资源完整撤回 | 未实现 display sleep/wake 表与对应模式管理，保留若干共享资源 | 属于后续低功耗/冷恢复能力；当前常开 ACTIVE 路径不必先实现全部内容 |
+
+**新增确认：现有 `gate=solver-status` 的寄存器名称错误。**
+
+- XNU `noCAdmission()` 读 `fNoCRSC + 0xd0`，变量叫 solver，失败日志叫 solver-status。
+- Lineage `sde_rsc_hw.h:31` 明确把 `+0xd0` 定义为 `ERROR_IRQ_STATUS_DRV0`；
+  `sde_rsc_debug_show()` 也按 error irq status 输出它。LG 原厂参考头文件定义相同。
+- 真正的 `SOLVER_STATUS0/1/2` 在 `+0xc24/+0xc28/+0xc2c`，solver override 在 `+0xc14`。
+  当前 NoC 模块没有读取这些状态寄存器。
+
+因此，`+0xd0 == 0` 只说明这次读到的错误中断状态为零，不能用它证明 solver 空闲。
+原 wrapper override bit0 检查仍然存在，不能反过来说完全没有 solver 模式相关保护。
+本次纠正的是审计结论和文档；生产代码的旧标签及真实状态采样尚未修改。
+0215 仍只采集 TCS 完成证据，也没有补齐这组 solver 状态。
+
+没有发现漏掉本次 payload、WAIT、CMD_ENABLE、AMC、TRIGGER 这些基本提交步骤。
+成功后的 AMC 撤回与 Lineage 不同，属于已有动作的差异；它尚未执行，不能解释 a27 首组等待超时。
+branch7 旧 enable 门槛已修正，四 LDO/ARC/CN0/core/RSC clocks 也已有 a27 成功证据。
+修复优先级应聚焦已知 RSC 状态、TCS 交接和可靠完成通道；现有 0215 尚未补上这些流程能力。
+
 ## 硬件对象一致，接管范围不同
 
 本机已知 ABL 选择是 TIANMAMD PV / R66456A，1080×2340、60Hz、RGB888、四 lane command mode。
@@ -19,7 +50,7 @@ MM1/MM0/SH0/MC0/ACV 属于显示数据通路。不能把 apps 的 ACK 当成 dis
 |---|---|---|---|
 | 启动画面交接 | 支持 continuous splash：接管资源和引擎状态，跳过面板 ON、PHY reset/重复硬件 enable；也有正常 prepare/enable 路径 | 入口要求既有 splash、固定扫描/SMMU 状态；在接管过程中逐层建立自己的控制 | 仍依赖 ABL/Mu 留下的显示状态 |
 | 电源与频率 | regulator/时钟/性能路径按消费者聚合、负载和模式调整，执行对应时序 | 固定取得 VDDI 1.8V、VPNL 3.0V、host 1.2V、PHY 0.88V；ARC Turbo、AHB75MHz、MDP460MHz 和引导带宽 | a27 四路供电请求、ARC、CN0、core profile2 已完成；这些不是电压/频率实测 |
-| RSC 自身初始化 | probe 阶段取得 GDSC 和三路时钟，初始化计时、wrapper、sequence memory、solver、PDC 接口 | 没有对应的 RSC 初始化/状态切换序列；检查继承的 wrapper、sequencer/solver、clock 状态后才使用 TCS | 只通过局部准入，不能证明具备 Lineage 的全部初始化条件 |
+| RSC 自身初始化 | probe 阶段取得 GDSC 和三路时钟，初始化计时、wrapper、sequence memory、solver、PDC 接口 | 没有对应的 RSC 初始化/状态切换序列；检查继承的 wrapper、sequencer busy、错误状态与 clock 后才使用 TCS | 只通过局部准入，未读取真正的 solver status，不能证明具备 Lineage 的全部初始化条件 |
 | RSC 工作模式 | CLK/AMC、CMD、VID、IDLE 分支；模式切换与客户端和必要的 VSYNC 完成协调 | 仅允许检查结果符合软件触发条件的继承状态，不主动从任意状态切换到 CLK/AMC | 不能把“空闲样本”视为已完成模式交接 |
 | 带宽提交 | 软件触发 ACTIVE，以及硬件自动执行的 sleep/wake 两条路径；更新前协调 sequencer 的 TCS 使用权，更新后恢复 | 只发送 ACTIVE2/3，按 VCD 分组、尾命令 COMMIT；不编程 sleep/wake，不做 TCS_USE_OK 写握手 | 第一个 ACTIVE2 请求正在这里超时 |
 | ACTIVE 完成 | 注册 display IRQ，再启用 ACTIVE source mask；IRQ 到达后检查命令 ISSUED/COMPLETE | 整个执行期间屏蔽自己选中的槽 IRQ，timer 轮询 idle/命令位，并要求本槽 IRQ 或曾观测 busy/不完整 | 快速完成漏判是可复现候选条件，尚未证明为真机根因 |
@@ -67,7 +98,8 @@ Lineage 的 RSC v2 初始化会写计时器、wrapper 配置、sequencer 指令�
 此外，Lineage 更新显示带宽会先通过 wrapper 的 TCS_USE_OK/SEQ_BUSY 协调硬件 sequencer，
 再 invalidate/更新/flush 请求，之后恢复许可；XNU 只检查当时的 busy 状态。
 “检查空闲”与“禁止硬件在本次修改期间使用 TCS”是不同的硬件动作。
-当前 XNU 拒绝已观察到 solver 活跃的状态，但没有证明所有遗留状态和后续变化都已被接管。
+当前 XNU 拒绝 wrapper override bit0 置位的状态，并检查 busy/错误位，
+但没有读取真正的 solver status，也没有证明所有遗留状态和后续变化都已被接管。
 
 这是真实的功能缺口，但并非“缺少任意一个 solver/PDC 初始化写，ACTIVE 就必定失败”的证明。
 其中一些机制用于自动低功耗，不应未经分析整批搬入首次 ACTIVE 诊断。

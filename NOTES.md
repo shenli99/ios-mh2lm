@@ -1,5 +1,17 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Resource takeover missing-step review (2026-11-13)
+
+用户追问当前接管流程缺项，再次核对Lineage RSC v2寄存器定义/状态机/带宽触发/IRQ与实际0215源码。
+新发现：NoC的fNoCRSC+0xd0是ERROR_IRQ_STATUS，代码变量/日志solver-status命名错误；Lineage和LG原厂头文件及debug_show一致。
+真正SOLVER_STATUS0/1/2在+c24/+c28/+c2c，override在+c14，当前NoC未读取；不能再说+d0=0证明solver已空闲。
+仍有wrapper override bit0/power bit12/SEQ_BUSY保护，不能说没有任何模式相关检查。已纠正对照文档和旧准入诊断说明。
+明确缺项：display INTID161与本次可靠完成通道；TCS_USE_OK/SEQ_BUSY硬件交接；完整RSC工作状态确认/转换。
+完整RSC计时/序列/solver/PDC初始化和sleep/wake低功耗表亦未实现，但未证明这些全部为当前warm ACTIVE所必需。
+payload/WAIT/ENABLE/AMC/TRIGGER基本提交步骤存在；成功后撤AMC是差异，尚未执行，非a27首组超时直接原因。
+本轮仅复核/文档，无生产改动；旧solver-status标签及真实solver采样尚未修正，0215也尚未补这些流程能力。
+详见PANEL-LINEAGE-PATH-COMPARISON.md新增缺项表；原0215代码2ffc1a4/a28云编译交接保持，无额外编译/设备操作。
+
 ## Lineage flow audit (2026-11-13, no new driver changes)
 
 用户要求对比LG G8X逻辑流程/硬件控制，已对Lineage@2e897dd的MH2LM公共PV配置、DRM/DSI/LG override、RSC v2、RPMh/mailbox/bus调用链审计。

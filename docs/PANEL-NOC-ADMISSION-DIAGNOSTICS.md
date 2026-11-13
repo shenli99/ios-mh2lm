@@ -40,7 +40,7 @@ NotReady/data ACK mask0，但原日志没有区分RSC clock与RSC/wrapper条件�
 | `gate=clock-parent / clock-parent-drift / clock-branch` | root状态/来源、父配置变化或分支enable/OFF不符合，含branch及当次值 |
 | `gate=rsc-layout` | 原始RSC id/config与major/count/NCPT不符合 |
 | `gate=wrapper-override / wrapper-power / wrapper-control` | wrapper override/电源/控制保护触发，记录三个既有读值 |
-| `gate=sequencer-busy / solver-status` | 对应RSC +0x404或+0xd0非零，记录当次值 |
+| `gate=sequencer-busy / solver-status` | 对应RSC +0x404或+0xd0非零，记录当次值；2026-11-13复核：后者实际是ERROR_IRQ_STATUS，旧日志名称错误，不是真正solver状态 |
 | `SWEET MDSS NOC CONTEXT:` | 失败时软件上下文，关联原token/rc/ACK错误记录 |
 
 clock helper新增内部`ClockDiagnostics`枚举：Silent保持运行时默认安静，Admission保留首次warm
@@ -60,7 +60,11 @@ register-acked=1表示配置CN0已完成，不能代替display-data ACK。
 NoC原有复合判断拆成相同顺序的条件，仅记录原检查已取得的值，不在失败后重新取样。
 
 依旧先通过clock/domain/lease/parent/branch，再访问display RSC；RSC layout通过才读wrapper。
-wrapper gate拒绝后不读sequencer/solver，sequencer busy拒绝后不读solver。
+wrapper gate拒绝后不读sequencer busy/ERROR_IRQ_STATUS，sequencer busy拒绝后不读ERROR_IRQ_STATUS。
+2026-11-13寄存器复核：原文和代码的“solver-status”实际上是RSC +0xd0错误中断状态；
+真正solver状态为+0xc24/+0xc28/+0xc2c，当前未采样。详情见
+[首次接管缺项复核](PANEL-LINEAGE-PATH-COMPARISON.md#首次资源接管的缺项复核同日补充)。
+本次文档纠正没有更改原补丁/生产日志标签，也不能将原模拟通过视为solver语义验证。
 Failure模式复用原clock helper，因此不为详细日志越过原short-circuit边界。
 失败收尾新增一次CONTEXT（Aborted不输出该增量），晚timer保持静默；无自动恢复、降档或清状态。
 
