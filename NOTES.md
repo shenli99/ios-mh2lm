@@ -1,5 +1,28 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-13, 0121a26 local/reset evidence boot ready)
+
+**CURRENT：用户下载的0121a26已确认包含0213，retained启动镜像打包/回读通过，待实机USB日志。**
+78份源码匹配scratch/framebuffer-0213/verify，内容对应7f4f55a；比a25仅MDSS.cpp/Clock.inc/Core.inc变化。
+114原CI source/185 binary markers通过，包含新增CLOCK LOCAL/RESET及原六条诊断。
+内核17741200bytes/ARM64 subtype0，自带SHA匹配，SHA=f0af1e7c2bc22e5a852b448bdf986a4e2fbfe84e278bdcbf647cfad86ff0a0ee。
+无独立CI run ID/完整build log；仅验证下载内容，不声称云端提交元数据或全量告警已核对。
+ABI608固件/BootShim/两个追加DTB/各档ADT和参数保持a25，RPMh INTID37扩展保留；retained605/607字节。
+四档boot header/FAT内kernel+ADT+TOML回读通过，只交付retained测试，无需再次编译。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a26-abi608-panel-retained.img。**
+镜像35545088bytes，SHA=ab69d8473d75dfebd60d8e675422e03dc59a37d2d5c8c53f551751c8615e01d1。
+先开USB接收脚本，启动约90秒，保存logs/live-0121a26-abi608-panel-retained.txt；双终端命令见PANEL-D1-0121A26.md。
+若仍超时，取原六条及LOCAL warm-entry/pre-write、RESET；比较BCR/三路CBCR/AHB CMD+CFG及时间。
+LOCAL在阶段入口采集、超时时输出，按序非原子；valid0不是硬件零，RESET仅BCR，overall SAMPLE可能历史。
+若CLOCK Held/state2/mask381，则追后续NoC/新DMA/HANDOFF；成功时没有超时LOCAL ERROR属预期。
+本版保留enable判据，仍可能同处失败。a25 OFF0已满足Linux halt，不能称已证实的硬件握手失败。
+尚未证明修复/完整接管；完整接管前亮度/OFFON/长测及其他显示档暂停，a25不用重测或补持久日志。
+本轮没有驱动改动，未重复0213已有27场景/15套回归/ARM64编译/累计重放，原验证保持有效。
+底稿scratch/artifact-0121a26/两验证脚本/JSON/输出和packaging.txt；原始日志与二进制未入git。
+未改固件/CI/参数，未push/触发CI/操作设备。CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df。
+以下NEXT为历史，以本段为准。
+
+
 ## Agent handoff / active work (2026-11-13, a25 analyzed; 0213 local reset evidence ready)
 
 **CURRENT：a25 USB证据完整，立即及39次等待均未见enable；0213已提交7f4f55a并本地验证，待用户push云编译。**

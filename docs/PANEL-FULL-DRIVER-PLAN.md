@@ -1,5 +1,11 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+**当前执行点（2026-11-13）：0121a26包含0213已核对，retained镜像已打包并回读通过，待用户临时启动取日志。**
+78源码、114 source/185 binary markers通过；ABI608固件/ADT/605字节参数保持a25。
+若仍超时，比较新增LOCAL warm-entry/pre-write与RESET的BCR/局部状态及时间，原六条诊断保留。
+本版没有修改额外enable门槛，尚未证明根因或接管成功；a25无需补日志，其他显示测试暂停。
+启动命令及证据见[0121a26交付](PANEL-D1-0121A26.md)。无需为本轮文档提交重编译，以下待云编译为历史。
+
 **最新语义核对：a25 OFF=0已满足Lineage的开启判据，直接阻塞为XNU额外enable读回门槛。**
 不能称硬件halt握手未返回；VOTED开启仍本地RMW并验halt，关闭延时10us，不是等待voted位或改走RPMh。
 LG/Lineage实际leaf调用链24场景ASan/UBSan通过；父链及准确寄存器地址、enable门槛影响范围见
