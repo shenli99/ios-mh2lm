@@ -1,5 +1,25 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-13, 0121a24 timeout diagnostics boot ready)
+
+**CURRENT：用户下载的0121a24已核对，0211在新kernel内；retained镜像回读通过，待实机。**
+78源码字节匹配0211验证树，代码内容对应7d34942；比a23仅SweetMDSS.cpp/Clock.inc变化。
+114原CI source/180 binary markers通过，包含CLOCK TIMEOUT/WRITE/SAMPLE三条。
+内核17740976bytes/ARM64 subtype0，自带SHA匹配，SHA=ce771b8a2b4751971f592f1b9a39d16b7f248c970ebd4c5f9bb49fb2f50029a5。
+无CI run ID/完整build log，不声称核对云端提交元数据或全量警告。
+ABI608固件/BootShim/两个append DTB/各档ADT及参数保持a23，INTID37扩展保留；retained605/607字节。
+四档boot/FAT内kernel+ADT+TOML回读通过，只交付retained；本轮无需再次云编译。
+**NEXT：用户fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a24-abi608-panel-retained.img**
+镜像35545088bytes，SHA=0c6fb213855559b4da7fe7ea95e2359b9b38b9a4b06f43a2b4b237c1f9073126。
+先开USB等待接收脚本，启动后约90秒存live-0121a24-abi608-panel-retained.txt或同名sweetlog bin。
+重点首条CLOCK TIMEOUT/WRITE/SAMPLE：overall或branch-wait、valid/current/enable/OFF及时间。
+current0不是当前CBCR读值，before/want不是写后读回；Held/state2/mask381后再追NoC首错/新DMA。
+诊断版未证明修复；完整接管前亮度/OFFON/长测/反复USB/combined/supply暂停，旧a23/identity不重测。
+详见docs/PANEL-D1-0121A24.md；底稿scratch/artifact-0121a24/两verify脚本及JSON/packaging日志。
+本轮仅产物核对/打包/文档，未改驱动/固件/CI、未push/触发CI/操作设备。
+CircleCI blob仍da0b6c0947a66f03491b3a9023590b49665292df；以下NEXT为历史。
+
+
 ## Agent handoff / active work (2026-11-13, 0211 cloud build requested)
 
 **CURRENT：用户确认 agent 改代码/本地验证，用户负责 push 云编译和下载产物；现在需要编译已提交的0211。**
