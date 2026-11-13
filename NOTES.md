@@ -1,5 +1,32 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-13, a24 enable absent; 0212 ready)
+
+**CURRENT：a24 USB日志足够，首错为branch-wait且自身enable未读回；0212已提交`25d8fbc`，待用户push云编译。**
+日志222873bytes/3099行，SHA=df160b8bed570227a7c3b8dfc3356362c86439a549fd764ffea594fbaf954abb。
+1727–1744十次fresh IRQ/四LDO/ARC/CN0确认，1745core2成功，1746CN0 token7成功。
+1748 TIMEOUT reason=branch-wait/+4004/wait-late103906ns；1749 WRITE before0/want1；
+1750 SAMPLE valid1/current1/cbcr0/enable0/OFF0/parent-valid1/CFG40f/source4。
+写后记时到采样10.081510ms，整体期限余187.727396ms；不是overall超时，也非等待OFF清除。
+后续NoC/managed/lifecycle失败及pixels冻结为连锁结果，尚未display TCS/新DMA，无kernel panic签名。
+静态复核：v1 DISPCC PAaf00000/长度20000，LG/Lineage/v2定义及本机ClockDxe三路CBCR地址表一致；
+实际内核dp_wr具备dmb oshst/str w2/dsb sy。未证明实时翻译/写入接受/是否被其他主体清除。
+0212仅在branch7实际写后读同一CBCR一次、记录ml_vtophys，并汇总原等待及RSC准入样本。
+Timeout增加READBACK/OBSERVED/RSC PREFLIGHT，字段不参与控制；原期限/ready/失败保票/写入序列保持。
+新专项19场景ASan/UBSan，与0211仅差允许的写后读取，其余MMIO/结果/所有权/timer/模拟时间一致。
+14套回归通过；真实ARM64 MDSS前后对象通过，warnings1549→1552（三数组提示未屏蔽）；
+0185–0212严格累计重放/78源码字节比较/114原CI source markers通过，旧a24被READBACK门槛拒绝且无boot输出。
+补丁SHA=58c3076bb016b038ba7f4001f42f5735332b6898eadcba912233334e7a9ed326。
+**NEXT：用户`git push origin main`并云编译，下载新kernel/buildtree（建议0121a25）后agent核对并打原ABI608 retained。**
+启动约90秒取完整USB日志，区分立即读回1后丢失、延后出现后丢失、各次样本均未见enable；
+READBACK PA预期af04004，PA0/异常需查映射；正确PA仍不证明总线写入权限。RSC PREFLIGHT只是原准入值。
+这仍是定位补丁，尚未修复/证明接管；a24无需补持久日志或重测，其他显示档/亮度/OFFON/长测继续暂停。
+详见docs/PANEL-CLOCK-WRITE-READBACK.md及PANEL-D1-0121A24.md实测节。
+底稿scratch/framebuffer-0212/与scratch/artifact-0121a24/live-retained-log-analysis.json。
+未改CircleCI/固件/ADT/参数/USB/输入/电池/apps RPMh IRQ；未push/触发CI/操作设备，无新镜像。
+CircleCI blob保持da0b6c0947a66f03491b3a9023590b49665292df。以下NEXT为历史。
+
+
 ## Agent handoff / active work (2026-11-13, 0121a24 timeout diagnostics boot ready)
 
 **CURRENT：用户下载的0121a24已核对，0211在新kernel内；retained镜像回读通过，待实机。**
