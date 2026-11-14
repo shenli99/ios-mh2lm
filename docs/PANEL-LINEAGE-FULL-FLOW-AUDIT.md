@@ -2,11 +2,11 @@
 
 2026-11-14。用户要求整体、全面检查。**当前实现仍是局部对齐，不能称为与 Lineage 全流程一致。** 本文统一记录目标选择、首次接管、普通 OFF/ON、亮度与其他命令、持续刷新、资源、跨层完成和异常退出，以及目标面板已有但 XNU 未实现的功能。旧专项文档保留历史，当前范围和结论以本文为入口。
 
-本审计未修改驱动、构建内核或操作设备。后续[0121a33/0223两次OFF/ON](PANEL-D1-0121A33.md)已实测通过，现为mode7成功基线，a31/mode2保留；矩阵中的剩余源码差异仍存在，不因唤醒通过改判为全流程一致。a32黑屏的单项根因尚未确定。
+原始0223审计未修改驱动、构建内核或操作设备。随后[0121a33/0223两次OFF/ON](PANEL-D1-0121A33.md)通过并成为当时mode7成功基线；最新0224/a34结果见下方更新。a33及a31/mode2保留，剩余源码差异不因唤醒通过改判为全流程一致。a32黑屏的单项根因尚未确定。
 
 ## 0224 更新
 
-[HS/ULPS顺序修正与C08审计](PANEL-LINEAGE-CLOCK-ULPS.md)已本地实现/验证，[0121a34镜像](PANEL-D1-0121A34.md)已核对打包，待实机。D03收口HS→ULPS先后，D04收口分支顺序；C08明确wake_up为空、时钟票聚合与停扫适配边界，完整资源周期仍未对齐。下面固定对象/底稿中0223指原审计基线；标0224的行使用scratch/framebuffer-0224/verify，其他判定保持。
+[HS/ULPS顺序修正与C08审计](PANEL-LINEAGE-CLOCK-ULPS.md)已本地实现/验证，[0121a34三轮OFF/ON](PANEL-D1-0121A34.md)实测通过，generation1→2→3→4，现为最新成功基线。D03收口HS→ULPS先后，D04收口分支顺序；C08明确wake_up为空、时钟票聚合与停扫适配边界，完整资源周期仍未对齐。下面固定对象/底稿中0223指原审计基线；标0224的行使用scratch/framebuffer-0224/verify，其他判定保持。
 
 ## 固定对象与判定方法
 
@@ -93,8 +93,8 @@ DMA 包数按当前≤64bytes编码走 FIFO 的规则统计；不是 Lineage 的
 |---|---|---|
 | D01 | 排空、tearcheck、OFF 表 | **同/关键先后**。完成扫描排空后关闭 tearcheck，再释放显示引擎并发 OFF；`L:sde/sde_encoder_phys_cmd.c:1335`、`dsi_display.c:8031`；`X:SweetMDSSLifecycle.inc:425`。RSC PRE_STOP/触摸/TE暂停跨度仍不同，不把整段称为等价。 |
 | D02 | reset/pinctrl/供电延时 | **同/限定动作**。OFF 前5ms、suspend pinctrl→reset low及5ms hold；ON reset高10/低2/高10+settle5ms，VDDI post20ms、rails后5ms。`L:lge/lge_dsi_panel.c:689/837/881`；`X:SweetPanelPins.cpp:172`、PanelSupply.inc:103。GPIO输出/ACK凭据不是电压实测。 |
-| D03 | OFF 的 HS/ULPS | **同/0224局部顺序，待实机；差/LP与CORE外层**。已改HS pre-off停gating→HS分支真halt→PLL/FIFO/bias stop→重新lane-idle→ULPS→PHY。参考manager先HS再LP callback；不是按callback if书写顺序。XNU仍保留共享LP/ESC/core/config，不声称完整clock manager/collapse等价。见[0224](PANEL-LINEAGE-CLOCK-ULPS.md)。 |
-| D04 | HS 内部开关顺序 | **同/0224源码与本地执行，待实机**。开byte→pixel→byte_intf，关byte_intf→pixel→byte；DISPCC分支2028/2004/202c。真实Lineage manager/HS函数和XNU mode2/7回归均验证。不是旧黑屏单项因果证据。 |
+| D03 | OFF 的 HS/ULPS | **同/0224局部顺序，a34三轮普通路径通过；差/LP与CORE外层**。已改HS pre-off停gating→HS分支真halt→PLL/FIFO/bias stop→重新lane-idle→ULPS→PHY。参考manager先HS再LP callback；不是按callback if书写顺序。XNU仍保留共享LP/ESC/core/config，不声称完整clock manager/collapse等价。见[0224](PANEL-LINEAGE-CLOCK-ULPS.md)。 |
+| D04 | HS 内部开关顺序 | **同/0224源码与本地执行，a34三轮普通路径无回归**。开byte→pixel→byte_intf，关byte_intf→pixel→byte；DISPCC分支2028/2004/202c。真实Lineage manager/HS函数和XNU mode2/7回归均验证。不是旧黑屏单项因果证据。 |
 | D05 | ULPS idle/重入/退出 | **同/局部；差/资源外层**。普通唤醒不做 cold PHY reset；controller setup→PHY idle_on重新配置→ULPS重入→reset unmask→HS→resync→ULPS exit→gating，已具备。`L:dsi_display.c:3475`、`dsi_phy.c:1046`；`X:SweetMDSSLink.inc:265/482`。不重置不等于不配置PHY；完整 LP/CORE vote仍缺。 |
 | D06 | clamp/host soft reset | **同/局部**。v2.3 ctrl clamp和v4 PHY clamp未提供硬件回调；不能发明clamp寄存器。软件clamp状态仍参与ULPS重入，reset_config false置mask。host soft reset在ULPS退出后保存/恢复clock/control。`L:dsi_catalog.c`、`dsi_ctrl_hw_cmn.c:172/602`；`X:SweetMDSSHost.inc:25/82`。host enable/disable force clocks在Lineage也存在。 |
 | D07 | 亮度恢复时机 | **差**。XNU ON表→亮度→像素；LG电源OFF使panel allow_bl_update=false，bridge enable记录pending，complete_commit/post_kickoff恢复。`L:sde/sde_kms.c:1200`→`dsi_drm.c:1035`→`dsi_display.c:7666`→`lge/brightness/lge_brightness.c:167`；`X:SweetMDSSLifecycle.inc:544`。无bl-update-flag只表示无额外first-frame等待选项，不取消LG pending机制。 |
@@ -160,7 +160,7 @@ workspace `scratch/framebuffer-0223/full-flow-audit.py` 已运行，输出 `full
 
 ## 后续对齐的明确范围
 
-1. 0224的D03/D04顺序已本地修正，a34已交付，先完成实机验证；再推进D07/D08亮度时机与HS、D09色彩/锐度。C08审计已细化，完整逐命令资源/动态票周期仍随显示资源工作处理；先从真实caller和条件建立期望。
+1. 0224的D03/D04顺序已本地修正且a34三轮实机通过，本批收口；下一步D07/D08亮度时机与HS、D09色彩/锐度。C08审计已细化，完整逐命令资源/动态票周期仍随显示资源工作处理；先从真实caller和条件建立期望。
 2. 首次接管与持续刷新：B01的splash、E04–E06的autorefresh/提交/帧同步，不能靠更改一个寄存器值宣布整段一致。
 3. 完整显示驱动：B04–B08、E07、F05/F06、G组中的缺项继续作为独立实现范围；不能用“普通OFF/ON通过”销项。
 4. 用户指定FIFO/物理DMA、prepared buffer与真实完成/独立pin、SMMU/IRQ/资源归属保护继续保留；跨OS亮度政策等适配要显式记录，不机械复制Linux错误清理。

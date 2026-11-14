@@ -1,6 +1,6 @@
 # 0224：普通 OFF/ON 的 HS 时钟与 ULPS 顺序
 
-2026-11-14。在 a33/0223 两次普通唤醒成功基线上，按全流程矩阵推进 D03/D04，并审计 C08。**本地实现与验证完成；后续[0121a34产物](PANEL-D1-0121A34.md)已核对打包，待实机，a33仍是成功实机基线。** 没有改亮度/色彩、固件、ADT、启动参数或日志环。
+2026-11-14。在 a33/0223 两次普通唤醒成功基线上，按全流程矩阵推进 D03/D04，并审计 C08。**本地实现与验证完成；[0121a34三轮OFF/ON](PANEL-D1-0121A34.md)已实测通过，a34成为最新成功基线，a33保留。** 没有改亮度/色彩、固件、ADT、启动参数或日志环。
 
 ## 实现范围
 
@@ -56,10 +56,12 @@ python3 tools/tests/test-mh2lm-panel-lineage-wake.py /home/shenli/work1/scratch/
 python3 tools/tests/test-mh2lm-panel-pipeline.py /home/shenli/work1/scratch/framebuffer-0224/verify
 ```
 
-## 下一步
+## 实机收口与下一步
 
-0121a34已提供，agent核对0224和产物并沿原ABI608打包mode7完成；用户临时启动，先看首次generation1，再验证两次普通OFF/ON和generation2/3、触摸/持续更新。
+a34三轮HS→ULPS/OFF及ON通过，generation1→2→3→4，缓冲复用、命令真完成、触摸/新帧保持；前两轮各有完整60s/dropped0硬件统计，第三轮无完整60s窗口。详见上方实机记录。本批普通顺序验证收口，完整LP/core/C08/PD4范围不变。
+
+下列为保留的故障定位判据：
 
 OFF 预期先出现 `HS branches halted; PLL/bias stop issued; checking ULPS lane idle`，再出现 `ULPS entered after HS stop; PHY shutdown next`，最终 OFF complete。ON 沿原 true-completion/generation/pixels/touch 验收。若卡在新 idle 检查，保留完整 USB 与持久日志；不放宽判据绕过。
 
-实机通过后继续 D07/D08 亮度时机及 HS、D09 色彩/锐度，再推进其余 PD4。完整 LP/core/SMMU/QoS、首次接管/持续帧与其他矩阵项保持；不把它们标成全流程已一致。
+下一步继续 D07/D08 亮度时机及 HS、D09 色彩/锐度，再推进其余 PD4。完整 LP/core/SMMU/QoS、首次接管/持续帧与其他矩阵项保持；不把它们标成全流程已一致。

@@ -1,5 +1,16 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, a34 three ordinary wake cycles passed)
+
+**CURRENT：用户反馈日志已导出、无异常；USB/持久均确认三轮OFF/ON，generation1→2→3→4。a34/mode7为最新成功实机基线，a33/mode7与a31/mode2保留。**
+USB589791bytes/6714行到SYSTEM_OFF；持久4198400bytes，v1/total605807/flush79、6775行，未绕环，仅header有效区。USB209–6509=持久475–6775；持久末25行=USB6485–6509，USB还有205行后段。host8行无时间戳；此次两份有效日志无NUL，BUG-006未修复。
+USB三次HS停/ULPS entry/OFF完成：4086/4089/4167、5166/5167/5193、5935/5936/5955；均先HS真实halt+PLL/bias stop请求，再ULPS。ULPS entry/reentry为0、exit为1f；不额外宣称PLL unlock或LP/core断电。
+三次ON begin/表完成/generation/ON完成：4275/4880/4898/4913、5278/5591/5610/5628、6100/6415/6433/6443；每次17packet-done/4physical DMA、display引用0→1、触摸恢复、后续vsync/HID/CPU呈现。持久138–139启动prepared4096/PAc3b9c000，活动周期无再分配。
+前两轮各完整60100ms/59.916Hz及60001ms/59.914Hz、dropped0；第三轮有后续输入/呈现但无完整60s窗口。不是60Hz UI/长时耐久/全档亮度。第二三轮owned resume打印缺失由既有audit4次上限解释，不是完成失败。
+首次OFF起无WARN/ERROR/panic(cpu/cancel/lifecycle deadline；全局仍有OFF前配置预检/USB endpoint告警及hfs clone -34（含第三轮后），不宣称全系统无报错，hfs原因本轮未诊断。
+**NEXT：D03/D04本批普通路径验证收口；保留a34，按矩阵继续D07/D08亮度时机与HS，再D09色彩/锐度及其余PD4。** C08完整动态时钟/MDP票周期、共享LP/core/SMMU/QoS及首帧等仍未完成。无需重编/重测同版。
+实现e09ffe0/0224，产物交付f76f109；实机证据scratch/artifact-0121a34/audit-wake.py、wake-log-review.json及persistent-log.txt，日志SHA/行号见docs/PANEL-D1-0121A34.md。镜像SHA保持`f8554f0a21c2d3f1ae14d8c45e2ac3837c381a3d883145324b7736ec8533fadd`。本轮仅日志/文档，无驱动/固件/镜像修改、测试重跑、push/CI或设备操作。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, 0121a34 ABI608 mode7 artifacts ready)
 
 **CURRENT：用户提供0121a34；kernel/buildtree核对和identity/pipeline两档打包/回读通过，待用户实机。实现e09ffe0/0224，a33仍成功基线。**
