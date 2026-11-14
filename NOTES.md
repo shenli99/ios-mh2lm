@@ -3,6 +3,7 @@
 ## Agent handoff / active work (2026-11-14, 0223 Lineage command lifecycle implemented)
 
 **CURRENT：用户授权连命令缓冲准备一起对齐；0223已实现/本地验证，待用户push云编译及新实机。**
+实现提交`6ff3085`；最终证据scratch/framebuffer-0223/final-review.json，13份最终测试日志通过。
 补丁0223 SHA256=946daee753f31c81669b5a47b23e4f33330f59b9583bf6126bb177d89853fc83；修改七份MDSS源码。
 mode7取消正常首次/ON的CTL reset，保留固定管线重配/代数/新帧验证；mode2/7在flush前连接external TE，OFF清tearcheck，ON恢复。
 命令引擎分display/transfer两引用：OFF表前释放display、每条FIFO/DMA独立获取/真实完成后释放、DDIC reset期间command关闭、ON整表后获取display；同步亮度也使用同一引用和完成规则。

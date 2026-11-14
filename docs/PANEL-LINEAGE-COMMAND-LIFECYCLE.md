@@ -2,7 +2,7 @@
 
 2026-11-14。用户授权将驱动逻辑及命令缓冲准备一起对齐。0223 已实现并完成本地验证，待新 CircleCI 内核和实机。a31/mode2 保留为最后成功实机基线；a32/mode7 首次接管成功、息屏后无法唤醒，不能把本次逻辑修正先记为实机修复。
 
-补丁：`xnu/patches/0223-mh2lm-lineage-command-lifecycle.patch`；SHA256：`946daee753f31c81669b5a47b23e4f33330f59b9583bf6126bb177d89853fc83`。
+实现提交：`6ff3085`。补丁：`xnu/patches/0223-mh2lm-lineage-command-lifecycle.patch`；SHA256：`946daee753f31c81669b5a47b23e4f33330f59b9583bf6126bb177d89853fc83`。
 在 0222 后修改七份 MDSS 源文件，无新 ADT 映射、boot arg、固件或 framebuffer ABI。
 参考仍是 LG Lineage `2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`，不是本机 Android 寄存器实测。
 
