@@ -2,10 +2,10 @@
 
 ## 0223 当前进展（2026-11-14）
 
-用户已提供0121a33；[0223实现](PANEL-LINEAGE-COMMAND-LIFECYCLE.md)的[产物核对及ABI608镜像打包/回读](PANEL-D1-0121A33.md)已完成，待mode7实机。79份受检源码、132项source markers和243项kernel markers通过。
+用户确认0121a33亮屏成功；[0223实现](PANEL-LINEAGE-COMMAND-LIFECYCLE.md)的[两次OFF/ON实机与日志审计](PANEL-D1-0121A33.md)通过，generation1→2→3，启动prepared缓冲跨唤醒复用。a33/mode7为当前成功基线；完整PD4及全流程一致仍未完成。
 正常mode7不再CTL reset；mode2/7的TE在flush前连接、OFF关闭tearcheck、命令引擎按display/transfer引用启停。4KiB物理缓冲在服务发布前准备并复用，明确早于Lineage首次命令懒分配；短FIFO/长物理DMA和真实完成/pin保持。
 mode2/7循环/缓冲引用与故障/实际MDSS→FB、ARM64对象、39patch/79文件/132项source markers通过；ABI608/ADT/参数不变，旧a32打新档被拒绝。
-下一步直接启动a33 panel-pipeline：先确认启动command buffer ready与generation1，再一次OFF/ON验证generation2；a31保留为成功基线。尚未证实a32黑屏根因或0223实机恢复，完整PD4及共享域/核心/QoS/色彩/ABL首帧余项继续保留。
+本轮唤醒症状在a33两次OFF/ON中消失；移出gate的首次分配是最直接改善解释，但CTL/TE/引擎引用同时变化，未唯一确定a32根因。下一步保留a33基线，按全流程矩阵推进HS/ULPS、亮度/色彩等余项及PD4；a31仍保留，不重复旧版验证。
 
 以下0222/a32及更早记录均为历史阶段，不作为“没有新代码待编译”的当前结论。
 

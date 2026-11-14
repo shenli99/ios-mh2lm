@@ -29,11 +29,11 @@ boot.img（Android header v1, page 2048）
 已实现功能在后续使用中暴露的独立问题统一记入 [Bug 台账](BUGS.md)，
 不自动作为当前主计划的新步骤或前置测试。
 
-**当前待实机：[0121a33/0223](PANEL-D1-0121A33.md)已完成产物核对和ABI608 identity/pipeline两档打包、回读。**
-79份受检源码匹配0223验证树；相比a32恰好七份预期变化，132项source/243项kernel markers通过。
-直接测试`boot-16k-0121a33-abi608-panel-pipeline.img`：启动command buffer ready、generation1，再一次OFF/ON及generation2。pipeline605/607bytes参数、ADT和ABI608固件与a32一致，无需重编。
-最新已测仍是[a32](PANEL-D1-0121A32.md)：首次mode7接管成功，唤醒失败；两次USB均止于dma-allocate-enter。pipeline1确认等待超过一分钟，持久覆盖OFF完成但早于ON，根因未证实。
-[0223实现](PANEL-LINEAGE-COMMAND-LIFECYCLE.md)修正CTL/TE/tearcheck、命令引擎引用与提前prepared缓冲，短FIFO/长物理DMA保持；效果待实机，剩余差异以[全流程矩阵](PANEL-LINEAGE-FULL-FLOW-AUDIT.md)为准。a31保留为成功基线。
+**最新实测：[0121a33/0223](PANEL-D1-0121A33.md)两次普通OFF/ON通过，generation1→2→3，用户确认亮屏成功。**
+持久日志确认启动command buffer ready，之后无再次分配；两次各17条ON命令/4条物理DMA完成，触摸、vsync及后续CPU呈现运行。
+USB已保存441450bytes/5164行并到SYSTEM_OFF；此前命令重定向stdout/stderr，终端安静是预期。另开`tail -n 40 -F /home/shenli/work1/logs/live-0121a33-abi608-panel-pipeline.txt`即可查看，不需重启采集。
+产物79源码/132项source/243项kernel markers和ABI608回读已通过，ADT/参数/固件与a32相同。保留a33/mode7成功基线及a31/mode2，无需重编/重打或重复a32。
+a32分配入口停滞在本轮未复现；0223是多项修正，旧allocator死锁和单项因果未证实。完整PD4及[全流程差异](PANEL-LINEAGE-FULL-FLOW-AUDIT.md)仍未完成；USB单行NUL/console ring发布竞态单列BUG-006。
 
 [0121a31实测与产物](PANEL-D1-0121A31.md)：包含0221，ABI608四档镜像打包与回读通过，retained普通息屏唤醒已实测通过。
 78份受检源码匹配0221验证树、118项CI source markers和223项内核markers通过；全部ADT/启动参数与a30相同。

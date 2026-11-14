@@ -1,5 +1,19 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, a33 two wake cycles passed and logs audited)
+
+**CURRENT：用户反馈亮屏成功；USB441450bytes/5164行已采集，两次OFF/ON均完成，generation1→2→3。a33/mode7成为当前成功实机基线，a31/mode2保留。**
+用户因终端静默不确定采集；原因是此前命令stdout→/dev/null、stderr→host，脚本独立append写USB文件。可另开tail -n40 -F查看文件，不需重新开机。USB已到正常SYSTEM_OFF；host8行有读取/断开/等待，无时间戳，不精确对齐断开。
+持久4198400bytes，v1/total459512/flush17，解码5274行，覆盖两次ON；末25行对齐USB4968–4992，USB还含172行后段至关机。只取header有效区。
+持久114–115启动buffer ready4096/PAc463c000；首次generation1/HANDOFF，后续两次各17packet-done/4physical DMA；display引用0→1各两次，无再次分配。
+USB3659/4293第一次OFF/ON complete、4283generation2、4308owned resume；4426/4796第二次OFF/ON complete、4786generation3、4804vsync及后续HID/CPU presents。第二次不打印owned resume因诊断audit上限4，第一次已耗尽，不是completion失败。
+首次OFF起无WARN/ERROR/panic(cpu/cancel/lifecycle deadline。两次之间14.985s硬件59.925Hz/dropped0，不代表一分钟耐久或60Hz UI；用户未另确认全档亮度等。
+最直接改善解释是移出活动gate的首次同步缓冲分配，已被启动prepared及两轮复用证实；0223同时改CTL/TE/引擎引用，不能唯一归因为allocator死锁/内存碎片，无旧线程栈。
+USB4196含16NUL，持久4478完整；sweet_ufs.c先发布total后填ring可让并发读者看到未写字节。源码竞态已识别，实际16字节唯一归因待定，登记BUG-006；不混同USB终端重定向或显示恢复。
+**NEXT：保留a33基线，按全流程矩阵继续普通HS/ULPS、亮度协议/时机及色彩等剩余显示项。** 本轮故障验证收口，不重复a32、不重编同一版本；完整PD4/全流程一致仍未完成，日志问题单列。
+实现6ff3085/0223，产物交付177006a；本轮证据scratch/artifact-0121a33/audit-wake.py、wake-log-review.json、persistent-log.txt，完整日志SHA及行号见docs/PANEL-D1-0121A33.md。仅分析/文档，无驱动改动、重跑驱动回归、push/CI或设备操作。以下为历史。
+
+
 ## Agent handoff / active work (2026-11-14, 0121a33 ABI608 mode7 artifacts ready)
 
 **CURRENT：已接手codex-session-11.md末尾“产物0121a33”；kernel/buildtree核对及两档镜像打包/回读完成，待用户实机。**

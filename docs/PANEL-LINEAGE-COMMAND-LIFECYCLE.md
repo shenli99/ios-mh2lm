@@ -1,6 +1,6 @@
 # 0223：Lineage 命令生命周期与缓冲准备
 
-2026-11-14。用户授权将驱动逻辑及命令缓冲准备一起对齐。0223 已实现并完成本地验证；[0121a33产物和ABI608镜像](PANEL-D1-0121A33.md)已核对/打包，待实机。a31/mode2 保留为最后成功实机基线；a32/mode7 首次接管成功、息屏后无法唤醒，不能把本次逻辑修正先记为实机修复。
+2026-11-14。用户授权将驱动逻辑及命令缓冲准备一起对齐。0223 已实现并完成本地验证；[0121a33两次OFF/ON实机](PANEL-D1-0121A33.md)通过，generation1→2→3，用户确认亮屏成功。a33/mode7为当前成功基线，a31/mode2保留；a32黑屏的单项因果仍未确定。
 
 实现提交：`6ff3085`。补丁：`xnu/patches/0223-mh2lm-lineage-command-lifecycle.patch`；SHA256：`946daee753f31c81669b5a47b23e4f33330f59b9583bf6126bb177d89853fc83`。
 在 0222 后修改七份 MDSS 源文件，无新 ADT 映射、boot arg、固件或 framebuffer ABI。
@@ -43,10 +43,7 @@ Lineage 的 `dsi_host_transfer` 对每次普通命令（包括短命令）都会
 
 底稿：workspace `scratch/framebuffer-0223/`，含 base/edited/verify/replay、对象与告警比较、回归日志、两档 bridge 状态、补丁与打包拒绝证据。
 
-## 下一步
+## 实机验证与下一步
 
-用户已提供0121a33两个归档，79份源码/132项source markers/243项kernel markers及ABI608两档镜像回读通过。直接测试[0121a33 panel-pipeline](PANEL-D1-0121A33.md)；ADT/启动参数与a32一致，无需再编内核或固件。
-
-实机先确认启动时 `command buffer ready bytes=4096`、generation1 和桌面更新，再做一次 OFF/ON。检查显示引用0、OFF complete、host/DDIC reset、ON逐包完成、显示引用1、generation2/fresh pixels、触摸及 FB owned resume；保存 USB 和持久日志。
-
-a32最新pipeline1复测已确认尝试唤醒后等待超过一分钟，USB仍止于`dma-allocate-enter`；持久日志覆盖OFF完成，但仍早于ON。该事实不能证明分配死锁，也不能证明0223已经消除黑屏，详见[a32审计](PANEL-D1-0121A32.md)。
+0121a33受检源码/内核及ABI608镜像回读通过。持久日志114–115确认启动prepared4KiB缓冲；两次OFF/ON无再次分配，各17条命令含4长包DMA真实完成，generation2/3、触摸及后续呈现通过。用户确认亮屏成功，完整证据见[a33实机审计](PANEL-D1-0121A33.md)。
+本轮支持0223这组改动解决了可观察的唤醒症状；移出gate的首次分配是最直接改善解释，尚未唯一证明a32 allocator死锁。无需重测a32或重编同一版本，保留a33基线并按[全流程矩阵](PANEL-LINEAGE-FULL-FLOW-AUDIT.md)推进普通路径HS/ULPS、亮度/色彩及其他剩余项。
