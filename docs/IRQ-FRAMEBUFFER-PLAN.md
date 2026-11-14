@@ -1,5 +1,11 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
+## 0121a37 当前进展（2026-11-14，ESC0停启镜像已交付，待实机）
+
+[a37镜像与验收](PANEL-D1-0121A37.md)：补下载后的kernel/buildtree完整，80份源码与71da5dc/0227一致，相比a36六份预期修改，146source/253kernel markers通过。初始buildtree尾部截断已解决，kernel与受检源码未变，历史副本保留。沿原ABI608打包identity/pipeline并回读通过，ADT/605与477byte参数同a36，a31–a36旧镜像保持。
+**下一步先USB采集，再用户fastboot boot a37/mode7：首次接管/调光正常后，两轮息屏约5秒/唤醒，各保持亮屏至少60秒，比较亮度、色彩、触摸和持续刷新。** 新OFF为HS→ULPS→ESC真halt→PHY关，ON先ESC真运行→host/PHY→原ON表/色彩/亮度/触摸完成。BUG-007只记录、继续暂缓。
+a37尚无实机结果，a36仍最新实机基线；完整C08动态资源、shared core/SMMU/RSC/QoS及其余PD4未完成。证据scratch/artifact-0121a37/final-review.json。本轮无驱动/CI/固件修改、驱动回归重跑、push/CI触发或设备操作。以下为历史。
+
 ## 0227 当前进展（2026-11-14，ESC0低速时钟停启本地通过）
 
 [C08普通OFF/ON ESC0子项](PANEL-LINEAGE-LP-CLOCK.md)已实现，提交71da5dc。mode2/7在原HS停/ULPS进入后关闭ESC0并等真实halt，再关PHY；ON先启动ESC0、确认CLK_OFF清除及XO父源可用，再host setup/PHY与原色彩/亮度/触摸流程。物理暂停mask0x70→0x78→0x70→0，额外引用、供电/DATA门槛、失败保资源/pin保持。

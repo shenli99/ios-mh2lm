@@ -6,7 +6,7 @@
 
 ## 0227 更新
 
-[C08普通OFF/ON的ESC0低速时钟子项](PANEL-LINEAGE-LP-CLOCK.md)已实现，提交71da5dc，本地16组驱动回归、16个Lineage原函数、ARM64及43patch/80文件重放通过，待新产物/实机（建议a37）。HS停/ULPS进入后停ESC0并等CLK_OFF，再PHY关；ON先ESC0运行及XO父源验证，再host/PHY。暂停mask加入ESC，额外使用者拒绝、失败保留资源/pin；普通逐包DSI/MDP引用和共享core collapse仍未实现。SDE FRAME_DONE在autorefresh开启时不安排常规idle-off、connector走MDP client的结论是固定caller静态核对；不能把本批叶子停启当成动态资源全流程完成。a36仍最新实机基线，BUG-006/007保持。证据scratch/framebuffer-0227/final-review.json。
+[C08普通OFF/ON的ESC0低速时钟子项](PANEL-LINEAGE-LP-CLOCK.md)已实现，提交71da5dc，本地16组驱动回归、16个Lineage原函数、ARM64及43patch/80文件重放通过；[a37产物与两档镜像](PANEL-D1-0121A37.md)已核对打包回读，待实机。HS停/ULPS进入后停ESC0并等CLK_OFF，再PHY关；ON先ESC0运行及XO父源验证，再host/PHY。暂停mask加入ESC，额外使用者拒绝、失败保留资源/pin；普通逐包DSI/MDP引用和共享core collapse仍未实现。SDE FRAME_DONE在autorefresh开启时不安排常规idle-off、connector走MDP client的结论是固定caller静态核对；不能把本批叶子停启当成动态资源全流程完成。a36仍最新实机基线，BUG-006/007保持。证据scratch/framebuffer-0227/final-review.json。
 
 ## 0226 更新
 
@@ -172,7 +172,7 @@ workspace `scratch/framebuffer-0223/full-flow-audit.py` 已运行，输出 `full
 
 ## 后续对齐的明确范围
 
-1. 0224 D03/D04已有a34实机，0225 D07/D08已有a35普通路径证据；0226 D09默认SDR恢复已有a36 mode7/PV四轮实机普通功能证据。0227已补C08的普通ESC0停启，下一步新CI/实机（建议a37）；之后继续完整逐命令资源/显示引擎动态票及其余PD4。D09动态策略仍保留；各批从真实caller和条件建立期望。
+1. 0224 D03/D04已有a34实机，0225 D07/D08已有a35普通路径证据；0226 D09默认SDR恢复已有a36 mode7/PV四轮实机普通功能证据。0227已补C08的普通ESC0停启，a37已核对打包，下一步实机；之后继续完整逐命令资源/显示引擎动态票及其余PD4。D09动态策略仍保留；各批从真实caller和条件建立期望。
 2. 首次接管与持续刷新：B01的splash、E04–E06的autorefresh/提交/帧同步，不能靠更改一个寄存器值宣布整段一致。
 3. 完整显示驱动：B04–B08、E07、F05/F06、G组中的缺项继续作为独立实现范围；不能用“普通OFF/ON通过”销项。
 4. 用户指定FIFO/物理DMA、prepared buffer与真实完成/独立pin、SMMU/IRQ/资源归属保护继续保留；跨OS亮度政策等适配要显式记录，不机械复制Linux错误清理。

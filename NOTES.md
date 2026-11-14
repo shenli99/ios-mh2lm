@@ -1,5 +1,14 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0121a37 ABI608 ESC0 images ready)
+
+**CURRENT：用户提供0121a37并补下载buildtree；最终两包完整，80份源码匹配71da5dc/0227，identity/pipeline打包回读通过，待实机。** 相比a36六份预期修改（含DisplayClock.h仅注释），146source/253kernel markers通过，旧ULPS后直接PHY关标记消失。a36/mode7仍最新实机基线，BUG-006/007保持。
+内核17776448bytes，SHA256 `6a557defb0c0ee4a231382c541a183cbbd877d1076134cacb709876c034611af`，包内清单一致、ARM64 subtype0。初始buildtree尾部截断，已保存副本；补下载后23343691bytes、SHA64435190ee75295c6d0caa79f50c95021caee30fb9046901487d5e7da78d8d97，gzip/tar完整且80源码仍匹配，kernel未变，无需重打。问题已解决；无独立CI run ID/完整build log，不宣称核对云端提交元数据或全量告警。
+两镜像均35545088bytes，boot header/FAT的kernel+ADT+TOML回读通过。原ABI608固件/BootShim/追加DTB保持，pipeline605byte与identity477byte参数/ADT与a36相同（上限607）；a31–a36旧镜像SHA保持。证据scratch/artifact-0121a37/final-review.json、redownload.json及核对/回读脚本。
+**NEXT：用户先开USB采集，再fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a37-abi608-panel-pipeline.img。** SHA256 `ec7a22ab2f62af9a00b5937e5724725b5f750eed61dac57d1461c803cae89366`。完整命令见docs/PANEL-D1-0121A37.md；采集终端静默是重定向预期，可另开tail -F看文件。
+首次桌面/触摸/按键/调光正常后，两轮息屏约5秒/唤醒，**每轮正常后各保持亮屏至少60秒**；比较同一画面的亮度、色彩及刷新有无新异常。OFF新增ULPS→ESC0 halt pending→halted→PHY关；ON先ESC0 running before host→原ULPS/ON表/色彩/首帧/亮度/第二帧/触摸。新请求标记不算完成，保留完整完成门槛。
+日志live-0121a37-abi608-panel-pipeline.txt、-host.txt及sweetlog-0121a37-abi608-panel-pipeline.bin；尚无a37实机。BUG-007旧画面闪现只记录，不要求消失；BUG-006也未修。C08仅ESC子项待验，完整动态DSI/MDP票/core/SMMU/RSC/QoS、D09动态色彩/首次接管及其余PD4仍保留。本轮仅核对/打包/文档/本地提交，无驱动/CI/固件修改、驱动回归重跑、push或设备操作。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, 0227 ESC0 ordinary power cycle locally passed)
 
 **CURRENT：用户授权继续C08；0227普通OFF/ON的ESC0低速时钟子项已实现，提交71da5dc，本地验证通过，待新CI/实机。** a36/mode7仍最新普通SDR唤醒实机基线；BUG-006/007未修，完整C08和PD4未完成。
