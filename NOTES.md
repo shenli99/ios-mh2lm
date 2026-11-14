@@ -1,5 +1,15 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, a35 persistent wake/brightness audited, BUG-007 deferred)
+
+**CURRENT：a35/mode7两轮普通OFF/ON及首帧后HS亮度完成，用户确认滑条调光正常；另报唤醒先闪现息屏前画面，登记BUG-007并按用户要求暂缓修复。** a35为普通唤醒/亮度最新验证基线，带已知视觉问题；a34/a33/a31保留，不写“本轮无异常”。
+用户忘开USB采集，只审计持久；不是USB失败，不要求为此重测。原日志4198400bytes、v1/total580034/flush32、6996行，未绕环，只取header有效区；无NUL，不关闭BUG-006。SHA256 `dda873da25c51f3082c9ec3e6a41f6627e203822c8cbfb9a75154d8f9340c31f`。有效尾部无SYSTEM_OFF，不宣称完整关机覆盖。
+两轮OFF均HS停→ULPS；ON各17包LP/4物理DMA→generation2/3首帧→排空→1包HS亮度target1真实完成→同generation再kickoff/IRQ arm→触摸/ON完成，后续vsync/HID/CPU呈现。启动prepared4096/PAc50d8000，首次generation1及HANDOFF完成；活动期无再分配。
+第一轮统计33913ms/59.888Hz，未满60秒；第二轮有60051/60030ms、59.848/59.869Hz两窗口，均dropped0。不是两轮各60秒、全档亮度或60Hz UI。OFF后无显示生命周期WARN/ERROR/panic/超时；全局启动WARN/hfs及后段AppleM2ScalerCSCDriver匹配失败未诊断，不宣称全系统无报错。
+BUG-007根因未知；复用A=`0xc3b68000`直到用户态锁屏更新仅是假设。fresh PP_DONE/RD_PTR不证明锁屏像素已就绪；没有精确时长/视觉复现次数/旧版本对照，不归因0225。本轮仅留证，不改唤醒/亮度或放宽完成门槛。
+实现005e2ed/0225，CI修复389ac6e，交付e3f6509。镜像SHA保持`34a35e7d1bc4e39fccf05502a4472aee800c1712c19126a2b3675a8260454280`；证据scratch/artifact-0121a35/audit-wake.py、wake-log-review.json、wake-user-input.json，行号/范围见docs/PANEL-D1-0121A35.md及docs/BUGS.md。
+**NEXT：D07/D08本批mode7普通路径验证收口，后续计划D09色彩/锐度，再其余PD4；本轮未开始D09或修BUG-007。** 完整C08动态票/LP/core/SMMU/QoS、首次/持续提交与BUG-006仍保留。本轮仅日志审计/文档/本地提交，无驱动/CI/镜像修改、驱动回归重跑、push或设备操作。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, 0121a35 ABI608 brightness images ready)
 
 **CURRENT：用户已下载0121a35；kernel/buildtree核对和identity/pipeline两档打包/回读通过，待实机。** 内容匹配005e2ed/0225；此前CI模板修复389ac6e。a34/mode7仍最新成功实机基线，a33与a31保留。

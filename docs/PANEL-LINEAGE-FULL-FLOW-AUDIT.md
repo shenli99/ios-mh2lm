@@ -2,13 +2,13 @@
 
 2026-11-14。用户要求整体、全面检查。**当前实现仍是局部对齐，不能称为与 Lineage 全流程一致。** 本文统一记录目标选择、首次接管、普通 OFF/ON、亮度与其他命令、持续刷新、资源、跨层完成和异常退出，以及目标面板已有但 XNU 未实现的功能。旧专项文档保留历史，当前范围和结论以本文为入口。
 
-原始0223审计未修改驱动、构建内核或操作设备。随后[0121a33/0223两次OFF/ON](PANEL-D1-0121A33.md)通过并成为当时mode7成功基线；最新0224/a34结果见下方更新。a33及a31/mode2保留，剩余源码差异不因唤醒通过改判为全流程一致。a32黑屏的单项根因尚未确定。
+原始0223审计未修改驱动、构建内核或操作设备。随后a33/0223、a34/0224普通OFF/ON通过；最新a35/0225结果见下方更新。旧基线保留，剩余源码差异不因唤醒通过改判为全流程一致。a32黑屏的单项根因尚未确定。
 
 ## 0225 更新
 
-[D07/D08首帧后亮度与HS](PANEL-LINEAGE-BRIGHTNESS.md)已实现并通过本地12组驱动回归、固定Lineage九函数执行、ARM64及41patch严格重放。mode2/7改为首帧→限时排空→HS亮度→同generation重启/新帧→触摸完成。晚到target保留/补发、失败关闭是显式XNU适配；D09、完整C08/PD4仍未完成。**[a35产物](PANEL-D1-0121A35.md)已核对打包，待实机，a34仍为最新成功基线。** 本节及D07/D08使用scratch/framebuffer-0225/verify；旧审计基线和未修改项证据保持。
+[D07/D08首帧后亮度与HS](PANEL-LINEAGE-BRIGHTNESS.md)已实现并通过本地12组驱动回归、固定Lineage九函数执行、ARM64及41patch严格重放。mode2/7改为首帧→限时排空→HS亮度→同generation重启/新帧→触摸完成。**[a35持久日志](PANEL-D1-0121A35.md)确认mode7两轮普通路径，用户确认滑条调光正常；a35成为带BUG-007的最新普通唤醒/亮度基线。** 第一轮约33.9秒，第二轮两个完整60秒IRQ窗口，dropped0。USB忘开，不是传输失败。BUG-007为唤醒闪现旧画面，按用户要求暂缓；硬件fresh frame不证明锁屏内容就绪。晚到target保留/补发、失败关闭仍为XNU适配，本次未获得这些边界的实机证据。D09、完整C08/PD4、首次/持续提交差异仍保留；本轮未实施D09。本节及D07/D08使用scratch/framebuffer-0225/verify；旧审计基线和未修改项证据保持。
 
-## 0224 更新
+## 0224 更新（历史基线）
 
 [HS/ULPS顺序修正与C08审计](PANEL-LINEAGE-CLOCK-ULPS.md)已本地实现/验证，[0121a34三轮OFF/ON](PANEL-D1-0121A34.md)实测通过，generation1→2→3→4，现为最新成功基线。D03收口HS→ULPS先后，D04收口分支顺序；C08明确wake_up为空、时钟票聚合与停扫适配边界，完整资源周期仍未对齐。下面固定对象/底稿中0223指原审计基线；标0224的行使用scratch/framebuffer-0224/verify，其他判定保持。
 
@@ -101,8 +101,8 @@ DMA 包数按当前≤64bytes编码走 FIFO 的规则统计；不是 Lineage 的
 | D04 | HS 内部开关顺序 | **同/0224源码与本地执行，a34三轮普通路径无回归**。开byte→pixel→byte_intf，关byte_intf→pixel→byte；DISPCC分支2028/2004/202c。真实Lineage manager/HS函数和XNU mode2/7回归均验证。不是旧黑屏单项因果证据。 |
 | D05 | ULPS idle/重入/退出 | **同/局部；差/资源外层**。普通唤醒不做 cold PHY reset；controller setup→PHY idle_on重新配置→ULPS重入→reset unmask→HS→resync→ULPS exit→gating，已具备。`L:dsi_display.c:3475`、`dsi_phy.c:1046`；`X:SweetMDSSLink.inc:265/482`。不重置不等于不配置PHY；完整 LP/CORE vote仍缺。 |
 | D06 | clamp/host soft reset | **同/局部**。v2.3 ctrl clamp和v4 PHY clamp未提供硬件回调；不能发明clamp寄存器。软件clamp状态仍参与ULPS重入，reset_config false置mask。host soft reset在ULPS退出后保存/恢复clock/control。`L:dsi_catalog.c`、`dsi_ctrl_hw_cmn.c:172/602`；`X:SweetMDSSHost.inc:25/82`。host enable/disable force clocks在Lineage也存在。 |
-| D07 | 亮度恢复时机 | **同/0225普通成功路径先后，本地通过、实机待验；适/XNU排空与失败保护**。ON表后先kickoff并取得真实首帧，再限时暂停/排空、发送待恢复亮度，最后同generation重启/验证新帧再恢复触摸。LG `msm_atomic:complete_commit`→wait_done→KMS complete→connector post→`lge_update_backlight`；真实caller/九函数执行及中间静态绑定已核对。target发送中变化补发且不延长预算；触摸恢复期间请求由客户端完成后重试。无bl-update-flag不取消LG pending。不是完整DRM或错误语义等价；见[0225](PANEL-LINEAGE-BRIGHTNESS.md)。 |
-| D08 | 普通亮度 HS/LP | **同/0225 mode2/7 typed亮度，本地通过、实机待验**。同步typed入口及异步恢复明确清DMA bit26，long DCS仍51 high low；普通DCS/公开sequence和ON/OFF表保留LP。参考panel kzalloc、目标无mode_flags写入，通用transfer仅MODE_LPM时加USE_LPM，普通亮度默认HS。真实MIPI链/四DTS与实际wire控制验证；旧模式继续LP，不能扩展为全部vendor命令HS已支持。 |
+| D07 | 亮度恢复时机 | **同/0225普通成功路径先后，本地通过，a35/mode7两轮实机先后已确认；适/XNU排空与失败保护**。ON表后先kickoff并取得真实首帧，再限时暂停/排空、发送待恢复亮度，最后同generation重启/验证新帧再恢复触摸。LG `msm_atomic:complete_commit`→wait_done→KMS complete→connector post→`lge_update_backlight`；真实caller/九函数执行及中间静态绑定已核对。target发送中变化补发且不延长预算；触摸恢复期间请求由客户端完成后重试。无bl-update-flag不取消LG pending。不是完整DRM或错误语义等价；见[0225](PANEL-LINEAGE-BRIGHTNESS.md)。 |
+| D08 | 普通亮度 HS/LP | **同/0225 mode2/7 typed亮度，本地通过；a35/mode7两轮恢复HS完成及用户调光响应已确认**。同步typed入口及异步恢复明确清DMA bit26，long DCS仍51 high low；普通DCS/公开sequence和ON/OFF表保留LP。参考panel kzalloc、目标无mode_flags写入，通用transfer仅MODE_LPM时加USE_LPM，普通亮度默认HS。真实MIPI链/四DTS与实际wire控制验证；旧模式继续LP，不能扩展为全部vendor命令HS已支持。 |
 | D09 | ON 表外色彩/锐度恢复 | **差**。四份DTS均有use-color-manager，均未启用ddic-register-backup；正常初值backup=false/complete=false使 `!(backup ^ complete)` 为true。ON电源属性→set_nolp的OFF→ON分支→mode_set→r66456 screen_mode→display_control，发送CM dummy与sharpness两组 **HS** 命令。`L:lge/lge_dsi_panel.c:112/634`、`lge/lge_ddic_ops_r66456_tianma_md.c:316/575/796`、PV:191/227。当前XNU只恢复ON表/亮度，没有此步骤。payload按screen/HDR/RGB状态修改，不能直接硬拷一份默认vendor表就宣称全部支持。 |
 | D10 | 亮度数值/0/default | **适/行为不同**。LG UI max365/default158经blmap映射至12位DCS，允许0且OFF另外发送0；XNU Apple backlight使用0..4095，backend将0夹到1，OFF表内才包含51=0。`L:lge/brightness/lge_brightness.c:207`、common-panel；`X:SweetFramebuffer.cpp:330`、SweetMDSS.cpp:35。UI刻度/渐变政策应适配iOS，不能把Android UI值直接用作DCS值。 |
 | D11 | 首次亮度未知时准入 | **适/限制**。XNU full lifecycle要求已有成功typed brightness，初始未知时拒绝；Lineage有default brightness状态。`X:SweetMDSSLifecycle.inc:197`、SweetMDSS.cpp:1056；失败或Busy时target保存规则不同于LG pending。 |

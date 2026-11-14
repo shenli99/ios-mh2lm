@@ -1,10 +1,10 @@
 # 0225：普通唤醒首帧后的亮度恢复与 HS 传输
 
-2026-11-14。实现提交 `005e2ed`。D07/D08 已在 mode2/7 实现并通过本地验证，**待新 CI 和实机**。最新成功实机基线仍为 [0121a34/0224](PANEL-D1-0121A34.md)，不把本地测试当作面板响应证据。补丁：`xnu/patches/0225-mh2lm-lineage-post-frame-brightness.patch`。
+2026-11-14。实现提交 `005e2ed`。D07/D08已在mode2/7实现并通过本地验证；**[0121a35](PANEL-D1-0121A35.md)的mode7两轮普通路径取得实机证据，用户确认滑条调光正常，唤醒闪现旧画面另记BUG-007暂缓修复。** 补丁：`xnu/patches/0225-mh2lm-lineage-post-frame-brightness.patch`。
 
-## 0121a35 产物交付
+## 0121a35 实机结果
 
-[0121a35镜像与验收](PANEL-D1-0121A35.md)已核对源码/内核并沿原ABI608打包、回读通过，等待实机。a34仍最新成功基线；下方“待新CI”及启动修正记录为实现时历史。
+[0121a35持久日志](PANEL-D1-0121A35.md)确认generation1→2→3，两轮均首帧→排空→1包typed HS亮度真实完成→同generation重新kickoff/新帧门槛→触摸/ON完成。第一轮约33.9秒，第二轮两个完整60秒IRQ窗口，dropped0；不能写两轮各60秒。两个恢复target均为1，滑条响应由用户观察确认，未逐档对齐或实机验证发送中target变化。USB未开是用户遗漏；本轮不补测。a35为带[BUG-007](BUGS.md)的普通唤醒/亮度最新基线，a34等旧基线保留；fresh frame不证明像素已是锁屏，视觉问题原因未知。D09及其余PD4仍待后续。下方CI启动修正和原实机安排为历史。
 
 ## CircleCI 启动修正（2026-11-14）
 
@@ -75,7 +75,7 @@ python3 tools/tests/test-mh2lm-panel-lineage-fb.py /home/shenli/work1/scratch/fr
 
 其余命令使用 `final-review.json` 对应的tests脚本与同一verify目录；`prepare-patch.py`、`replay.py`、`compile.py`、`final-review.py` 位于该scratch目录。
 
-## 下一步实机
+## 原实机安排（历史，结果见顶部）
 
 用户 push main 触发 CircleCI，下载新 kernel/buildtree，建议命名 **0121a35**。agent 核对源码/marker后沿原 ABI608 打包mode7；没有新kernel时不能提供新boot镜像。a34保留，不重复同版验证。
 
