@@ -142,7 +142,7 @@ DMA 包数按当前≤64bytes编码走 FIFO 的规则统计；不是 Lineage 的
 |---|---|---|
 | H01 | Android实际选择/属性 | **待**。没有本轮同机Android寄存器/提交轨迹、autorefresh值及screen/HDR/RGB/FP运行时状态。源码默认值和条件能确定，实机各请求值不能猜。 |
 | H02 | 时钟/rail聚合后的物理结果 | **待**。共享consumer与固件投票影响真实关钟/断电，typed ACK、clk_disable与GPIO输出记录都不是示波器测量。 |
-| H03 | a32 USB与持久日志 | **待/根因未证实**。已读两者：持久日志末段对齐USB5832–5841，早于6044的OFF；USB最后为dma-allocate-enter，无return，用户不确定后续接收时长。不能认定allocator死锁，也不能据此排除日志采集停止。详见PANEL-D1-0121A32及scratch/artifact-0121a32/wake-log-review.json。 |
+| H03 | a32 USB与持久日志 | **待/根因未证实；已有复测**。首次持久日志早于OFF、接收时长不确定。最新pipeline1用户确认唤醒后等待超过1分钟；USB4315仍为dma-allocate-enter，末12行与首次相同，无return。新持久日志flush19覆盖OFF完成，末25行对齐USB3770–3794，早于3817 ON。优先定位分配调用附近，未证明allocator死锁；不再重复同条件a32。详见[PANEL-D1-0121A32](PANEL-D1-0121A32.md)与scratch/artifact-0121a32/pipeline1-wake-log-review.json。 |
 | H04 | 0223原有回归 | **局部有效**。既有13份通过日志、ARM64对象、39patch/79文件/132markers证据见final-review.json。本轮未重跑驱动回归；其夹具未验证本次确认的clock manager、LG亮度/色彩、splash、持续提交全链。 |
 | H05 | 0223实机效果 | **待**。无新内核/镜像/启动结果，不能写成a32已修好或全流程已对齐。单次新帧通过也不验证AOD/ESD/系统suspend/并发故障恢复。 |
 

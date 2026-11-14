@@ -1,5 +1,16 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, a32 pipeline1 repeat audited)
+
+**CURRENT：用户提供pipeline1 USB/持久日志，并明确尝试唤醒后等待超过1分钟；复测仍以dma-allocate-enter结束。不要再要求同条件重复a32。**
+USB `logs/live-0121a32-abi608-panel-pipeline1.txt`：363130bytes/4315行，SHA256 `a89d0e0573394e376ad71054c2f22cc1a619e75afc86897cf3e6cffc23aaa119`。
+3760 OFF complete，3817 ON begin，4119 ULPS exit，4126 host soft reset，4295 panel reset complete；4315最后dma-allocate-enter。最后12行与上次完全一致，无allocate-return/ON表受理/generation2/ON complete或lifecycle超时。180条WAKE，未触及1024条限额。
+持久 `logs/sweetlog-0121a32-abi608-panel-pipeline1.bin`：4198400bytes，SHA256 `ec01e1be2a7552258587136858012d66f10fa0e5ce7aae7c1359e6b9d8098ec0`；v1/total330300/flush19，解码4080行。末25行精确对应USB3770–3794，**这次覆盖OFF完成，仍不覆盖ON**，不同于上次止于OFF前。header有效区外旧字节不作本次记录。
+已证实电源键触发ON，排除用户等待不足；优先定位分配调用附近的可重复停滞，但无线程栈，未证实allocator死锁。源码默认UFS每10s落盘；超过60s仍缺ON不能仅由正常落盘周期解释。USB/UFS消费同一console ring，不能当两个独立现场；MDSS gate阻塞可解释其自身timer无法推进，不单独解释所有日志worker的状态。
+核对a32 buildtree精确IOBuffer/IOLib/VM/console源：构造器包括低地址页分配及descriptor/cache初始化；4KiB请求按page_size取整，不能仅凭PhysicallyContiguous标志认定多页连续扫描卡死。USB4121有16个NUL，尾部12行完整；记录为日志完整性现象，未归因驱动内存损坏。
+**NEXT：验证既有0223/6ff3085，先取得新CircleCI kernel/buildtree（建议a33），核对并沿原ABI608/mode7打包。看启动command buffer ready，再首次generation1及OFF/ON generation2；不把本轮全部Lineage差异混入首个验证版本。** 0223已提前prepare/保留缓冲，无新内核/实机，不能宣称修复；其他全流程差异继续按矩阵保留。
+证据 `scratch/artifact-0121a32/audit-pipeline1.py`、`pipeline1-wake-log-review.json`、`persistent-log-pipeline1.txt`，只读源码摘取在pipeline1-source。未改驱动/重跑驱动测试/生成镜像/push/CI/操作设备；旧a31/a32与新日志均保留。以下历史中“接收时长未知”只对应第一次采集。
+
 ## Agent handoff / active work (2026-11-14, diagnosis and repair order recommended)
 
 用户询问下一步修复顺序，以及是否先重复采集故障日志。**建议先用原a32/mode7补采一次，再验证已有0223；这是建议，尚无用户重试/新日志/新实机结果。**
