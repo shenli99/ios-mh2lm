@@ -1,5 +1,11 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, fix CircleCI template parsing before build)
+
+**CURRENT：用户报告推送0225后编译根本未启动；005e2ed新增的CircleCI marker有模板语法冲突，本轮已本地修复。** `.github/workflows/circleci.yml:107` 的 `fDsiHS ? 0u : (1u<<26)` 含未转义的 `<<`，会进入CircleCI模板解析；shell单引号不能保护此处。改为同源唯一前缀 `fDsiHS ? 0u :`，保留141项source检查。是agent上轮修改引入的配置缺陷；此前源码marker通过/ARM64单文件编译不证明CircleCI配置可启动。
+本地逐项确认：旧配置只有该1处非法模板起始符，修复后仅4个合法pipeline.parameters标签；YAML解析和6个run步骤bash语法通过；141条实际grep检查针对0225 verify源码全部通过。executor/resource/workflows/参数及0225驱动补丁未变，补丁SHA仍2a9a0242d7530c2b413222da62508b7c7cb4975fd8f40e18a0dba95ca5e2a698。证据scratch/framebuffer-0225/ci-template-fix/verify.py、verification.json。未重跑无关驱动测试。
+**NEXT：用户push本轮修复后的main，再触发CircleCI；新kernel/buildtree仍建议0121a35，之后核对/打包/实机。** 本环境无gh/CircleCI CLI；未取得云端run ID/原始错误详情，也未执行CircleCI服务器验证或触发构建，不能写成云端恢复已证实。a34仍最新成功实机基线。以下0225“本地通过”是驱动/补丁验证历史，本轮补充CI模板检查遗漏。
+
 ## Agent handoff / active work (2026-11-14, 0225 D07/D08 local implementation passed)
 
 **CURRENT：用户“好继续”；D07/D08已实现、本地验证通过，待新CI和实机。a34/mode7仍最新成功实机基线，a33/mode7与a31/mode2保留。**

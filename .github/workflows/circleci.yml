@@ -104,7 +104,7 @@ jobs:
             require_marker xnu/iokit/Kernel/arm/SweetMDSSLifecycle.inc 'fresh frame before brightness; draining IRQ/MDP'
             require_marker xnu/iokit/Kernel/arm/SweetMDSSLifecycle.inc 'post-frame HS brightness complete'
             require_marker xnu/iokit/Kernel/arm/SweetDisplayBackend.h 'SweetPanelBrightnessDrain'
-            require_marker xnu/iokit/Kernel/arm/SweetMDSSDSI.inc 'fDsiHS ? 0u : (1u<<26)'
+            require_marker xnu/iokit/Kernel/arm/SweetMDSSDSI.inc 'fDsiHS ? 0u :'
             require_marker xnu/iokit/Kernel/arm/SweetMDSS.cpp 'typedBrightness && self->fLifecycleLineage'
             require_marker xnu/iokit/Kernel/arm/SweetMDSSHost.inc 'dp_wr(dp_dsi,4,fHostSavedControl);'
             require_marker xnu/iokit/Kernel/arm/SweetMDSSPipeline.inc 'TE connected before flush/kickoff'

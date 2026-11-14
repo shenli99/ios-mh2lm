@@ -2,6 +2,12 @@
 
 2026-11-14。实现提交 `005e2ed`。D07/D08 已在 mode2/7 实现并通过本地验证，**待新 CI 和实机**。最新成功实机基线仍为 [0121a34/0224](PANEL-D1-0121A34.md)，不把本地测试当作面板响应证据。补丁：`xnu/patches/0225-mh2lm-lineage-post-frame-brightness.patch`。
 
+## CircleCI 启动修正（2026-11-14）
+
+用户报告编译未启动。实现提交005e2ed在CircleCI YAML的源码检查字符串中加入 `1u<<26`，未转义的 `<<` 与平台模板语法冲突；该解析发生在shell/编译之前，shell单引号不能避免。现将marker改为仍存在于源文件的唯一前缀 `fDsiHS ? 0u :`。驱动、执行器、资源规格、工作流和参数均不变，141项检查保留。
+
+上轮141项source markers及ARM64通过的结论不涵盖CircleCI配置解析，这是遗漏。本轮本地验证旧配置1处非法模板起始符、修复后仅4个合法参数标签；YAML与6个run步骤的bash语法通过，141条实际grep全部通过。证据 `scratch/framebuffer-0225/ci-template-fix/verification.json`。未取得云端错误原文/run ID，未运行CircleCI CLI/服务器验证，待用户push修复后确认云端启动。
+
 ## 行为与范围
 
 原顺序为 ON 表→亮度→管线/首帧。现在为：
