@@ -3,6 +3,7 @@
 ## Agent handoff / active work (2026-11-14, 0225 D07/D08 local implementation passed)
 
 **CURRENT：用户“好继续”；D07/D08已实现、本地验证通过，待新CI和实机。a34/mode7仍最新成功实机基线，a33/mode7与a31/mode2保留。**
+实现已本地提交 `005e2ed`（Restore Lineage brightness after fresh pixels using typed HS commands），尚未push。
 0225：mode2/7 ON表→display引用→管线/真实首帧→新增BrightnessDrain（50ms、真实IRQ/MDP/CTL/line排空）→最新typed亮度HS（500ms）→同generation重启、再次新帧（100ms）→触摸/FB完成。发送中target变化补发不延长预算；第二帧前target变化再按首帧后的流程发送，总16s不变；触摸恢复期更新由原backlight完成通知重试。普通typed同步也HS；ON/OFF表/通用DCS/旧模式保持LP，51 high low不变。
 只变四份生产源码SweetDisplayBackend.h、SweetMDSS.cpp、DSI.inc、Lifecycle.inc；enum尾部追加，状态布局/ABI608/ADT/605byte参数不变。a34 prepared4KiB缓冲、FIFO/物理DMA/真实完成/引用/pin与clock/link/supply/IRQ归属保持。新等待失败关闭、资源保留、无自动恢复。
 12组驱动回归通过（mode2/7四profile三轮、两模式亮度专属、命令生命周期、实际MDSS→FB各108状态、mode6供电/host/sequence/旧DCS）；新边界含六排空条件、五阶段×五种cancel/stop/provider/deadline/resource失败、五种command失败、实际backlight延迟重试。Lineage固定2e897dd九个未改写函数执行，实际complete_commit与pending/post/MIPI链，KMS/connector中间层和DTS静态审计；不是完整DRM或硬件执行。LG失败会清pending，XNU保留更严格保护。

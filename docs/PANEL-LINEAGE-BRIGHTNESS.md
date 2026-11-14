@@ -1,6 +1,6 @@
 # 0225：普通唤醒首帧后的亮度恢复与 HS 传输
 
-2026-11-14。D07/D08 已在 mode2/7 实现并通过本地验证，**待新 CI 和实机**。最新成功实机基线仍为 [0121a34/0224](PANEL-D1-0121A34.md)，不把本地测试当作面板响应证据。补丁：`xnu/patches/0225-mh2lm-lineage-post-frame-brightness.patch`。
+2026-11-14。实现提交 `005e2ed`。D07/D08 已在 mode2/7 实现并通过本地验证，**待新 CI 和实机**。最新成功实机基线仍为 [0121a34/0224](PANEL-D1-0121A34.md)，不把本地测试当作面板响应证据。补丁：`xnu/patches/0225-mh2lm-lineage-post-frame-brightness.patch`。
 
 ## 行为与范围
 
