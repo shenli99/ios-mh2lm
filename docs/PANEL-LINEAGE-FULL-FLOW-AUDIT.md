@@ -1,8 +1,12 @@
-# 目标显示驱动全流程审计（更新至0226）
+# 目标显示驱动全流程审计（更新至0227）
 
 2026-11-14。用户要求整体、全面检查。**当前实现仍是局部对齐，不能称为与 Lineage 全流程一致。** 本文统一记录目标选择、首次接管、普通 OFF/ON、亮度与其他命令、持续刷新、资源、跨层完成和异常退出，以及目标面板已有但 XNU 未实现的功能。旧专项文档保留历史，当前范围和结论以本文为入口。
 
 原始0223审计未修改驱动、构建内核或操作设备。随后a33/0223、a34/0224普通OFF/ON通过；最新a35/0225结果见下方更新。旧基线保留，剩余源码差异不因唤醒通过改判为全流程一致。a32黑屏的单项根因尚未确定。
+
+## 0227 更新
+
+[C08普通OFF/ON的ESC0低速时钟子项](PANEL-LINEAGE-LP-CLOCK.md)已实现，提交71da5dc，本地16组驱动回归、16个Lineage原函数、ARM64及43patch/80文件重放通过，待新产物/实机（建议a37）。HS停/ULPS进入后停ESC0并等CLK_OFF，再PHY关；ON先ESC0运行及XO父源验证，再host/PHY。暂停mask加入ESC，额外使用者拒绝、失败保留资源/pin；普通逐包DSI/MDP引用和共享core collapse仍未实现。SDE FRAME_DONE在autorefresh开启时不安排常规idle-off、connector走MDP client的结论是固定caller静态核对；不能把本批叶子停启当成动态资源全流程完成。a36仍最新实机基线，BUG-006/007保持。证据scratch/framebuffer-0227/final-review.json。
 
 ## 0226 更新
 
@@ -82,7 +86,7 @@
 | C05 | 缓冲准备/寿命 | **适**。0223 mode2/7 发布服务前 prepare4KiB，跨 OFF/ON 保留；Lineage `L:dsi-staging/dsi_display.c:3000/519` 首 transfer 懒分配4KiB。目的为移出活动 gate 首次分配，不是照搬分配时机；也未证明启动分配可被 deadline 打断。 |
 | C06 | 每包软件内存 | **适**。Lineage `L:dsi-staging/dsi_ctrl.c:986` 每包另有 copy/pad 临时分配，不能说 Lineage 从无逐包 allocation。XNU 栈编码、保留 DMA descriptor；真实完成前不复用/释放。 |
 | C07 | command engine 引用 | **同/限定语义**。OFF 表前释放 display，每 transfer 获取/完成后释放，ON 整表后持有 display；wake reset 恢复旧 control，DDIC reset 时 command bit 关闭。`L:dsi-staging/dsi_display.c:289/333/3000/7791/8031`；`X:SweetMDSSDSI.inc:75`、Lifecycle.inc:544、Host.inc:134。 |
-| C08 | 每包 clock/wake 与停扫 | **差；0224已细化审计**。host_transfer为ALL_CLKS→wake_up→engine→transfer→engine/clock release；固定版本wake_up仅return0，真实clock vote按DSI/MDP引用聚合，ON/OFF表可嵌套于外层票。XNU仍依赖已持资源、整表/同步亮度停TE/autorefresh；post_enable/pre_disable资源周期及动态聚合未整体复制。见[0224依据和边界](PANEL-LINEAGE-CLOCK-ULPS.md)。 |
+| C08 | 每包 clock/wake 与停扫 | **差/完整动态资源仍缺；局部/0227 ESC0普通停启本地通过、待实机**。host_transfer的ALL_CLKS→wake_up（固定版为空）→engine→transfer→engine/clock release按DSI/MDP引用聚合。post_enable撤长期DSI票、pre_disable重取；SDE autorefresh时不安排常规idle-off。XNU仍依赖BOOT/managed资源及停扫适配，0227仅补HS→ULPS→ESC halt→PHY关及ON先ESC运行→host/PHY；完整外层票、core/SMMU/RSC/QoS仍保留。见[0227实现及边界](PANEL-LINEAGE-LP-CLOCK.md)。 |
 | C09 | 完成、延时与 IRQ | **同+适**。均要求真实完成再做表内 delay；Lineage `dsi_ctrl.c:1304` DMA_DONE IRQ/completion、200ms超时后读状态补漏 IRQ；XNU timer1ms查询，同步亮度最长200ms轮询，fresh DONE+MDP/DMA idle+ACK/error 检查。不是相同通知/调度模型。 |
 | C10 | 失败/取消后的缓冲与引擎 | **适**。XNU uncertain 传输保留引擎引用，DMA另保留独立 pin；poison 后禁止继续或撤资源。Lineage有 FIFO reset、释放引用和部分 OFF 错误继续清理，见 `dsi_ctrl.c:1304`、`dsi_panel.c:4454`。不能通过“超时就当完成”获得表面相同的退出。 |
 
@@ -103,7 +107,7 @@ DMA 包数按当前≤64bytes编码走 FIFO 的规则统计；不是 Lineage 的
 | D02 | reset/pinctrl/供电延时 | **同/限定动作**。OFF 前5ms、suspend pinctrl→reset low及5ms hold；ON reset高10/低2/高10+settle5ms，VDDI post20ms、rails后5ms。`L:lge/lge_dsi_panel.c:689/837/881`；`X:SweetPanelPins.cpp:172`、PanelSupply.inc:103。GPIO输出/ACK凭据不是电压实测。 |
 | D03 | OFF 的 HS/ULPS | **同/0224局部顺序，a34三轮普通路径通过；差/LP与CORE外层**。已改HS pre-off停gating→HS分支真halt→PLL/FIFO/bias stop→重新lane-idle→ULPS→PHY。参考manager先HS再LP callback；不是按callback if书写顺序。XNU仍保留共享LP/ESC/core/config，不声称完整clock manager/collapse等价。见[0224](PANEL-LINEAGE-CLOCK-ULPS.md)。 |
 | D04 | HS 内部开关顺序 | **同/0224源码与本地执行，a34三轮普通路径无回归**。开byte→pixel→byte_intf，关byte_intf→pixel→byte；DISPCC分支2028/2004/202c。真实Lineage manager/HS函数和XNU mode2/7回归均验证。不是旧黑屏单项因果证据。 |
-| D05 | ULPS idle/重入/退出 | **同/局部；差/资源外层**。普通唤醒不做 cold PHY reset；controller setup→PHY idle_on重新配置→ULPS重入→reset unmask→HS→resync→ULPS exit→gating，已具备。`L:dsi_display.c:3475`、`dsi_phy.c:1046`；`X:SweetMDSSLink.inc:265/482`。不重置不等于不配置PHY；完整 LP/CORE vote仍缺。 |
+| D05 | ULPS idle/重入/退出 | **同/局部；差/资源外层**。普通唤醒不做 cold PHY reset；controller setup→PHY idle_on重新配置→ULPS重入→reset unmask→HS→resync→ULPS exit→gating，已具备。`L:dsi_display.c:3475`、`dsi_phy.c:1046`；`X:SweetMDSSLink.inc:265/482`。不重置不等于不配置PHY；0227补普通ESC停启（本地通过），完整LP/CORE client vote仍缺。 |
 | D06 | clamp/host soft reset | **同/局部**。v2.3 ctrl clamp和v4 PHY clamp未提供硬件回调；不能发明clamp寄存器。软件clamp状态仍参与ULPS重入，reset_config false置mask。host soft reset在ULPS退出后保存/恢复clock/control。`L:dsi_catalog.c`、`dsi_ctrl_hw_cmn.c:172/602`；`X:SweetMDSSHost.inc:25/82`。host enable/disable force clocks在Lineage也存在。 |
 | D07 | 亮度恢复时机 | **同/0225普通成功路径先后，本地通过，a35/mode7两轮实机先后已确认；适/XNU排空与失败保护**。ON表后先kickoff并取得真实首帧，再限时暂停/排空、发送待恢复亮度，最后同generation重启/验证新帧再恢复触摸。LG `msm_atomic:complete_commit`→wait_done→KMS complete→connector post→`lge_update_backlight`；真实caller/九函数执行及中间静态绑定已核对。target发送中变化补发且不延长预算；触摸恢复期间请求由客户端完成后重试。无bl-update-flag不取消LG pending。不是完整DRM或错误语义等价；见[0225](PANEL-LINEAGE-BRIGHTNESS.md)。 |
 | D08 | 普通亮度 HS/LP | **同/0225 mode2/7 typed亮度，本地通过；a35/mode7两轮恢复HS完成及用户调光响应已确认**。同步typed入口及异步恢复明确清DMA bit26，long DCS仍51 high low；普通DCS/公开sequence和ON/OFF表保留LP。参考panel kzalloc、目标无mode_flags写入，通用transfer仅MODE_LPM时加USE_LPM，普通亮度默认HS。真实MIPI链/四DTS与实际wire控制验证；旧模式继续LP，不能扩展为全部vendor命令HS已支持。 |
@@ -168,7 +172,7 @@ workspace `scratch/framebuffer-0223/full-flow-audit.py` 已运行，输出 `full
 
 ## 后续对齐的明确范围
 
-1. 0224 D03/D04已有a34实机，0225 D07/D08已有a35普通路径证据；0226 D09默认SDR恢复已有a36 mode7/PV四轮实机普通功能证据。下一步先审计C08完整逐命令资源/显示引擎动态票周期，再确定其余PD4实现批次。D09动态策略仍保留；各批从真实caller和条件建立期望。
+1. 0224 D03/D04已有a34实机，0225 D07/D08已有a35普通路径证据；0226 D09默认SDR恢复已有a36 mode7/PV四轮实机普通功能证据。0227已补C08的普通ESC0停启，下一步新CI/实机（建议a37）；之后继续完整逐命令资源/显示引擎动态票及其余PD4。D09动态策略仍保留；各批从真实caller和条件建立期望。
 2. 首次接管与持续刷新：B01的splash、E04–E06的autorefresh/提交/帧同步，不能靠更改一个寄存器值宣布整段一致。
 3. 完整显示驱动：B04–B08、E07、F05/F06、G组中的缺项继续作为独立实现范围；不能用“普通OFF/ON通过”销项。
 4. 用户指定FIFO/物理DMA、prepared buffer与真实完成/独立pin、SMMU/IRQ/资源归属保护继续保留；跨OS亮度政策等适配要显式记录，不机械复制Linux错误清理。

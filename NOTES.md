@@ -1,5 +1,16 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0227 ESC0 ordinary power cycle locally passed)
+
+**CURRENT：用户授权继续C08；0227普通OFF/ON的ESC0低速时钟子项已实现，提交71da5dc，本地验证通过，待新CI/实机。** a36/mode7仍最新普通SDR唤醒实机基线；BUG-006/007未修，完整C08和PD4未完成。
+mode2/7：原HS停→ULPS entry成功→ESC0停止请求/真实CLK_OFF→PHY关；ON先ESC0启动/CLK_OFF清除及XO父源可用→host setup/PHY/ULPS重入→原HS与ON表、色彩/亮度/第二帧/触摸。新增LinkLPStop/Start在内部enum尾部，旧值不移动；每方向10ms、原link250ms/生命周期16s不变，旧模式和首次接管保持。
+物理暂停mask普通Lineage OFF从0x70扩大到0x78，ESC运行后先退回0x70；BOOT租约仍保留但hardwareSuspended包含ESC。供电/DATA与额外引用保护同步更新；丢状态/取消/超时不继续写，不撤资源/pin。6份生产文件变化（含DisplayClock.h仅注释）；公有Backend/ABI608/ADT/605byte参数和固件不变。
+16组驱动回归通过：两模式四profile/三轮、ESC两模式各20等待故障及延迟/超时/丢写/root/第三租约、命令/亮度/色彩/实际MDSS→FB各120状态、旧mode6/mode4/host/DSI。Lineage16个原函数执行，新增真实LP start/stop；SDE自动刷新抑制延迟idle-off及MDP client为静态caller核对，非完整DRM/CCF运行。
+ARM64基线与最终成功，1596→1599告警；新增3条均固定下标fClockParents[3]的unsafe-buffer-usage，数组长10，无告警抑制。43patch严格重放80文件。补丁SHA256 d9646f81366355e8929b852bcb860f6e7d512682d1a08680a402f80a81d7271e。证据scratch/framebuffer-0227/final-review.json、verification.json、clock-reference.json及测试日志。
+CircleCI仅替换1条源码断言/增加2条，总146；YAML、4参数模板、6run shell通过，工作流/资源不变，无服务器验证。打包同步新标记，真实旧a36拒绝且无输出；a36镜像SHA仍9ea8bb9763a946310b6cd1714b4542f1bb397d64ea292edec1822b83ffed4e6d。
+**NEXT：用户push main，下载新CircleCI kernel/buildtree（建议0121a37）；agent核对0227后沿原ABI608打包mode7并交付。** 先首次接管/触摸/调光，再两轮息屏5秒/唤醒，各亮屏至少60秒并留USB/持久日志；新增ESC halt pending→halted→running before host三条日志。当前无新kernel/boot/CI run或实机结果，未push/触发CI/操作设备。详见docs/PANEL-LINEAGE-LP-CLOCK.md。
+C08完整DSI/MDP逐命令/外层动态票、core/GDSC/SMMU/QoS/RSC，以及D09动态色彩/首次接管等仍保留。新增ESC停止不等于共享core collapse或节电验收，BUG-007仍按用户要求暂缓。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, a36 ordinary SDR wake validated)
 
 **CURRENT：a36/mode7 USB确认四轮OFF/ON及首帧前默认SDR色彩/锐度恢复，用户反馈“我感觉没问题”；a36成为普通SDR唤醒最新实机基线。** 实现ba8a38a/0226、交付0d07ca2。BUG-006/007未修，未获得BUG-007消失的明确反馈。

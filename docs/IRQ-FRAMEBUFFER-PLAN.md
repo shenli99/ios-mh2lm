@@ -1,5 +1,11 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
+## 0227 当前进展（2026-11-14，ESC0低速时钟停启本地通过）
+
+[C08普通OFF/ON ESC0子项](PANEL-LINEAGE-LP-CLOCK.md)已实现，提交71da5dc。mode2/7在原HS停/ULPS进入后关闭ESC0并等真实halt，再关PHY；ON先启动ESC0、确认CLK_OFF清除及XO父源可用，再host setup/PHY与原色彩/亮度/触摸流程。物理暂停mask0x70→0x78→0x70→0，额外引用、供电/DATA门槛、失败保资源/pin保持。
+16组驱动回归、Lineage16个原始函数、两模式各120条MDSS→FB状态通过；ARM64 1596→1599告警，新增3条固定下标unsafe-buffer-usage，未抑制。43patch/80文件严格重放。CircleCI仅换1条/加2条source检查，146markers、YAML/4参数模板/6shell段通过，工作流与资源不变；旧a36被新打包标记拒绝，基线镜像保留。
+**下一步用户push并下载新CircleCI kernel/buildtree（建议0121a37），agent沿原ABI608核对打包mode7，再首次接管与两轮OFF/ON各60秒实测。** 当前无新kernel/boot/CI run，a36仍最新实机基线；未push/触发CI/操作设备。证据scratch/framebuffer-0227/final-review.json。完整C08动态票、共享core/SMMU/QoS/RSC与其余PD4仍未完成，BUG-006/007保持。以下为历史。
+
 ## 0121a36 实机进展（2026-11-14，普通SDR唤醒功能已验）
 
 [a36实机审计](PANEL-D1-0121A36.md)：USB确认mode7/PV四轮OFF/ON，generation1→2→3→4→5；每轮原17包LP/4DMA→display引用→六包HS色彩/1DMA完成→首帧→HS亮度→同generation第二kickoff→触摸/ON完成。用户反馈“我感觉没问题”，a36成为普通SDR唤醒最新实机基线。
