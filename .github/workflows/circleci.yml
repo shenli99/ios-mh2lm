@@ -81,6 +81,10 @@ jobs:
               fi
             }
             require_marker xnu/iokit/Kernel/arm/SweetPmicKeys.cpp 'SWEET KEYS IRQ: three routes active; IRQ-only'
+            require_marker xnu/iokit/Kernel/arm/SweetFBService.inc 'fPanelLifecycleDataParking=lifecycle==2 || lifecycle==3 || lifecycle==5 || lifecycle==6;'
+            require_marker xnu/iokit/Kernel/arm/SweetFBService.inc 'fPanelLifecycleLinkCycle=lifecycle==2 || lifecycle==4 || lifecycle==5 || lifecycle==6;'
+            require_marker xnu/iokit/Kernel/arm/SweetFBService.inc 'fPanelLifecycleSupplyCycle=lifecycle==2 || lifecycle==6;'
+            require_marker xnu/iokit/Kernel/arm/SweetFBService.inc 'SWEET FB PANEL: Lineage mode2 supply/link/data completion enabled'
             require_marker xnu/iokit/Kernel/arm/SweetPmicKeys.cpp 'SWEET KEYS IRQ: preparing backend on consumer workloop before attach'
             require_marker xnu/iokit/Kernel/arm/SweetSpmiMuxClient.cpp 'if (prepare && !prepare(context))'
             require_marker xnu/bsd/dev/sweet_usb.c 'SWEET USB IRQ: FAILED'

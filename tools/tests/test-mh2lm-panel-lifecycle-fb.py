@@ -68,21 +68,12 @@ int main(){
  // Stop cancels exactly the retained token; a late timer never queries/advances.
  {Harness h;assert(h.request(true)==0);auto token=h.f->fPanelLifecycleToken;
   h.f->stop(h.p);auto frames=h.f->fVsyncCount;h.tick();assert(h.f->fVsyncCount==frames&&h.b->cancelled==std::vector<uint64_t>{token});}
- // Mode2 never accepts a warm-only backend, or generic Complete without the
- // matching profile/sleep/reset/brightness proofs. The actual FB checks run.
- {Harness h;h.f->fPanelLifecycleFull=true;
-  assert(h.request(true)!=0&&h.b->operations.empty()&&h.f->fPanelLifecycleFault);}
- {Harness h;h.f->fPanelLifecycleFull=true;h.b->cap|=SweetPanelRetainedSleepReset;
+ // Select real mode2 at startup; the old hand-set Full flag hid a mapping
+ // bug. A legacy all-held OFF is no longer a valid mode2 completion.
+ lifecycleArg=2;
+ {Harness h;h.b->cap|=SweetPanelSupplyCycle|SweetPanelDataParking|SweetPanelLinkPowerCycle|SweetPanelRetainedSleepReset;
   assert(h.request(true)==0);h.b->lifecycle.profile=4;h.b->lifecycle.sleeping=true;h.complete();
-  assert(!h.f->fPanelLifecycleFault&&h.f->fPowerOff);
-  assert(h.request(false)==0);h.b->lifecycle.profile=4;h.b->lifecycle.resetComplete=h.b->lifecycle.brightnessRestored=true;h.complete();
-  assert(!h.f->fPanelLifecycleFault&&!h.f->fPowerOff);}
- for(unsigned missing=0;missing<4;++missing){Harness h;h.f->fPanelLifecycleFull=true;h.b->cap|=SweetPanelRetainedSleepReset;
-  assert(h.request(true)==0);h.b->lifecycle.profile=4;h.b->lifecycle.sleeping=true;h.complete();
-  assert(h.request(false)==0);h.b->lifecycle.profile=4;h.b->lifecycle.resetComplete=h.b->lifecycle.brightnessRestored=true;
-  if(missing==0)h.b->lifecycle.profile=0;if(missing==1)h.b->lifecycle.resetComplete=false;
-  if(missing==2)h.b->lifecycle.brightnessRestored=false;if(missing==3)h.b->lifecycle.sleeping=true;
-  h.complete();assert(h.f->fPanelLifecycleFault&&h.f->fPowerOff);}
+  assert(h.f->fPanelLifecycleFault&&h.b->cancelled.size()==1&&h.request(false)!=0);}
 
  // Boot mode3 selects the actual consumer path. Require explicit capability
  // and both retained/config ownership and data release/reacquire proofs.
@@ -164,8 +155,10 @@ int main(){
   h.complete();assert(h.f->fPanelLifecycleFault==(missing!=16));
   assert(h.f->fPowerOff==(missing!=16));
  }
- // Mode6 requires explicit supply capability and all combined OFF/ON proof.
- lifecycleArg=6;
+ // Mode2 and mode6 both require explicit supply capability and all combined
+ // OFF/ON proof. Exercise actual boot-arg parsing, not manual flag mutation.
+ for(int mode:{2,6}) {
+ lifecycleArg=mode;
  for(unsigned bit:{unsigned(SweetPanelSupplyCycle),unsigned(SweetPanelDataParking),unsigned(SweetPanelLinkPowerCycle),unsigned(SweetPanelRetainedSleepReset)}){Harness h;
   assert(h.f->fPanelLifecycleSupplyCycle&&h.f->fPanelLifecycleFull&&h.f->fPanelLifecycleDataParking&&h.f->fPanelLifecycleLinkCycle);
   h.b->cap|=SweetPanelSupplyCycle|SweetPanelDataParking|SweetPanelLinkPowerCycle|SweetPanelRetainedSleepReset;
@@ -197,8 +190,9 @@ int main(){
   if(missing==28)v.dataToken=0;if(missing==29)v.linkPoweredDown=true;if(missing==30)v.resourcesParked=true;
   h.complete();assert(h.f->fPanelLifecycleFault==(missing!=31));assert(h.f->fPowerOff==(missing!=31));
  }
+ }
  lifecycleArg=1;
- puts("PASS: actual FB asynchronous lifecycle requests/status, pending presentation freeze, rapid OFF/ON coalescing, no completion from frame mailbox, retained provider/token, explicit fault/withdrawal/stop, no legacy fallback and zero objects/allocations/buffers");
+ puts("PASS: actual FB modes1-6, real mode2/6 startup, supply/link/data capability and 32 completion cases each, legacy mode2 rejection, asynchronous requests, pending freeze, rapid OFF/ON coalescing, token/provider/timeout/stop fences and zero objects/allocations/buffers");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-lifecycle-fb-') as temp:
