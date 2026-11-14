@@ -6,6 +6,8 @@
 在 0222 后修改七份 MDSS 源文件，无新 ADT 映射、boot arg、固件或 framebuffer ABI。
 参考仍是 LG Lineage `2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`，不是本机 Android 寄存器实测。
 
+**再次审计：本补丁只完成下表中的局部修正，整体流程未完全对齐。** [0223上层流程复核](PANEL-LINEAGE-0223-FLOW-AUDIT.md)补查确认HS/ULPS顺序、LG亮度恢复、首次splash接管与autorefresh策略仍有差异；原测试未覆盖这些上层条件。本轮审计没有修改0223源码或增加实机结果。
+
 ## 本次对齐
 
 | 环节 | 0223 行为与依据 |
@@ -15,7 +17,7 @@
 | tearcheck | OFF 排空扫描后写 INTF1+0x284=0，再释放显示引擎引用、发送 OFF。ON 在恢复扫描前重新启用；mode7 重配完整参数。mode2 不再要求停驻时该位恒为1。依据是 command encoder disable 的 `enable_tearcheck(false)`。 |
 | 命令引擎 | 活动 continuous splash 对应一个显示引用；OFF 表前释放。每条 FIFO/物理 DMA 命令获取单次传输引用，fresh DMA_DONE 且 MDP/DMA idle 后释放，再执行命令间延时。ON 整表完成才重新持有显示引用。两类使用者均由原 MDSS gate 串行化，没有额外 owner。同步亮度也经过同一引用管理。 |
 | host reset | wake 的 `cmn_soft_reset` 恢复原控制值，不再强置 command bit；DDIC reset 时 controller 开、command engine 关，ON 命令临时启用。 |
-| 命令缓冲 | 一个 prepared、低4GiB、物理连续的4KiB缓冲服务 FIFO 和长包命令，跨 OFF/ON 保留，普通唤醒不再分配。独立 DMA 引用在真实完成前保持，service free 不能替代完成。 |
+| 命令缓冲 | 一个 prepared、低4GiB、物理连续的4KiB缓冲作为 FIFO/长包共同准入条件，跨 OFF/ON 保留，普通唤醒不再分配。FIFO仍从栈上words写入硬件，仅长包拷入该缓冲。独立 DMA 引用在真实完成前保持，service free 不能替代完成。 |
 
 Lineage 的 `dsi_host_transfer` 对每次普通命令（包括短命令）都会确保4KiB缓冲存在：启用/获取 command engine → 首次懒分配 GEM → transfer → 释放 engine。它使用 unsecure IOVA。
 **本实现明确保留两个适配差异：短 FIFO/长物理 DMA 是用户指定方案；mode2/7 的物理缓冲在服务发布前准备，比 Lineage 首次 transfer 懒分配更早。**

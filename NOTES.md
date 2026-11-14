@@ -1,5 +1,16 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0223 upper-flow re-audit)
+
+**CURRENT：用户要求再次对比Lineage。0223局部修正仍成立，但全流程未对齐；本轮仅审计/文档，无新驱动修改。**
+实现仍为6ff3085，之前交接3a0533a；0223补丁及七份最终源码哈希复核一致。
+新审计按实际caller确认四项剩余差异：HS时钟释放与ULPS先后（Lineage先HS后ULPS，XNU相反）；LG亮度在post-kickoff恢复而XNU在像素前；首次warm takeover仍做PHY/host reset及resync，不等同continuous splash；mode7固定autorefresh1，Lineage属性默认0且可由用户态设置。
+这些差异早于0223或本轮未改动，不能据此归因a32黑屏。既有helper/夹具测试未覆盖这些上层条件，不再将通过解释为全流程一致。
+逐命令clock vote/停扫/IRQ完成模型仍有差异；短FIFO/长物理DMA及启动前prepare为明确适配。FIFO字节来自栈上words，仅长包使用descriptor搬运。
+详见docs/PANEL-LINEAGE-0223-FLOW-AUDIT.md；底稿scratch/framebuffer-0223/upper-flow-audit.json及audit-upper-flow.py（37段源码、6项静态检查）。未重跑13份驱动回归，无新内核/镜像/实机。
+**NEXT：后续对齐优先处理普通OFF/ON的HS/ULPS顺序与LG亮度恢复，按真实调用链补期望；首次splash与autorefresh/逐帧策略独立收口。0223仍可由用户构建，但只代表局部修正，非全流程对齐完成。**
+a31成功基线、a32日志和产物保持；a32持久日志不覆盖OFF，USB末行为分配入口，根因及0223实机效果仍未定。不push/触发CI/操作设备。以下为历史交接。
+
 ## Agent handoff / active work (2026-11-14, 0223 Lineage command lifecycle implemented)
 
 **CURRENT：用户授权连命令缓冲准备一起对齐；0223已实现/本地验证，待用户push云编译及新实机。**
@@ -7,7 +18,7 @@
 补丁0223 SHA256=946daee753f31c81669b5a47b23e4f33330f59b9583bf6126bb177d89853fc83；修改七份MDSS源码。
 mode7取消正常首次/ON的CTL reset，保留固定管线重配/代数/新帧验证；mode2/7在flush前连接external TE，OFF清tearcheck，ON恢复。
 命令引擎分display/transfer两引用：OFF表前释放display、每条FIFO/DMA独立获取/真实完成后释放、DDIC reset期间command关闭、ON整表后获取display；同步亮度也使用同一引用和完成规则。
-4KiB prepared缓冲供短FIFO/长物理DMA共用并跨OFF/ON保留。mode2/7在服务发布前准备，刻意早于Lineage首transfer懒分配，避免活动gate首分配；不改为IOVA，不宣称启动分配有可中断期限。
+4KiB prepared缓冲作为短FIFO/长物理DMA共同准入条件并跨OFF/ON保留；仅长包通过它搬运字节。mode2/7在服务发布前准备，刻意早于Lineage首transfer懒分配，避免活动gate首分配；不改为IOVA，不宣称启动分配有可中断期限。
 命令完成/pin、SMMU、IRQ、触摸、供电/资源票保持；不确定传输保留引用/物理DMA pin且禁止继续命令/撤资源。
 本地mode2/7四profile各三轮；命令缓冲/引用/七类分配准备失败/FIFO及DMA故障/同步亮度完成故障；两档各60份实际MDSS→FB；DSI/host/link/profile/旧mode6/通用display通过ASan/UBSan。
 新增真实Lineage上层调用点静态校验；14底层helper执行的normal trace与reset自测分开，仍不等于完整DRM执行。

@@ -1,5 +1,7 @@
 # 0220：按 Lineage 对齐面板息屏与唤醒
 
+2026-11-14补充：[0223上层流程复核](PANEL-LINEAGE-0223-FLOW-AUDIT.md)发现本文原本遗漏的HS时钟/ULPS顺序和LG亮度post-kickoff差异。以下记录说明已实现的部分，不代表整体Lineage流程一致；a31成功实机事实保持。
+
 ## 0221：framebuffer配合逻辑已修复（2026-11-14）
 
 实现提交`5cf36dd`，补丁[0221](../xnu/patches/0221-mh2lm-lineage-framebuffer-lifecycle.patch)，

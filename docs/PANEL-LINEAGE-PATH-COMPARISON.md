@@ -1,5 +1,19 @@
 # LG G8X：Lineage 与当前 XNU 的显示流程和硬件控制对照
 
+## 0223 再次复核（2026-11-14，当前结论）
+
+**局部已修正，整体尚未对齐。** [本次完整调用链审计](PANEL-LINEAGE-0223-FLOW-AUDIT.md)确认正常CTL reset、TE-before-flush、tearcheck和command engine引用的修正；同时确认以下剩余差异：
+
+| 环节 | Lineage | 当前XNU |
+|---|---|---|
+| OFF链路时序 | 先释放HS时钟，再在LP回调进入ULPS | 先进入ULPS，再关闭HS分支/PLL |
+| LG恢复亮度 | OFF设置pending机制，恢复经bridge/post-kickoff | ON表后、像素kickoff前恢复 |
+| 首次接管 | splash跳过PHY/host reset及resync等步骤 | 仍停链路并重建PHY/host，仅CTL reset已取消 |
+| 提交策略 | autorefresh属性默认0；非零才使用自动刷新 | mode7固定autorefresh1；未取得同机Android实际属性 |
+
+命令逐次clock vote/停扫/IRQ完成机制与共享域重建也未全部等价；启动前物理缓冲准备和短FIFO/长DMA是明确适配。缓冲已准备不表示FIFO也通过descriptor搬运。
+本轮仅源码审计/文档，未改驱动或重跑既有回归。a31仍成功基线，a32根因与0223实机修复均未证实。后续普通OFF/ON对齐优先补HS/ULPS与LG亮度时机；下面的0223交付计划只代表已实现的局部修正。
+
 ## 0223 当前进展（2026-11-14）
 
 用户授权驱动逻辑和命令缓冲一起对齐；[0223实现与验证](PANEL-LINEAGE-COMMAND-LIFECYCLE.md)已完成本地工作，待用户push CircleCI并提供新kernel/buildtree（建议0121a33）。
@@ -67,7 +81,7 @@ PV DTS 和 common panel override 定义：四lane RGB888 command mode、1080×23
 `lp11-init`、`ulps-enabled`、`suspend-ulps-enabled`、`panel-allow-phy-poweroff`、
 `lge,use-labibb`、`lge,reset-after-ddvd` 均启用。LG解析器还会按 lane0-state 设置lp11_init，此处仍为true。
 本PV节点未配置`lge,incell-panel`、额外panel-pins、压缩/DSC、pre/post ON/OFF命令、`qcom,bl-update-flag`。
-因此不能套用其他LG OLED/DSC面板的PPS、AOD退出表或“亮度必须等首帧”的规则。
+因此不能套用其他LG OLED/DSC面板的PPS、AOD退出表或额外first-frame等待选项。2026-11-14补充复核：此处无bl-update-flag不表示亮度应在kickoff前恢复；LG自身的pending/post-kickoff路径仍适用，见顶部当前审计。
 
 直接从Lineage DTS抽取字节，与a29 `SweetPanelProfile.h` 的PV数组比较：
 
