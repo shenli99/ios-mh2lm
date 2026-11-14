@@ -6,7 +6,7 @@
 
 ## 0226 更新
 
-[D09普通SDR Auto色彩/锐度恢复](PANEL-LINEAGE-COLOR.md)已实现，提交ba8a38a，本地14组驱动、九个真实LG函数、ARM64及42patch/80文件严格重放通过，待0121a36新CI/实机。mode2/7在ON表/display引用后、首帧前完成六包HS（1物理DMA）；只PV等待20ms，恢复默认RGB及sharpness-off。500ms新阶段及原完成/资源保护保持。当前只有明确的SDR Auto默认策略；HDR/专家/RGB动态状态、首次接管色彩、DSPP及完整C08/PD4仍保留，不将D09全项标成完成。a35仍为最新实机基线，BUG-007未修；本节使用scratch/framebuffer-0226/verify与final-review.json。
+[D09普通SDR Auto色彩/锐度恢复](PANEL-LINEAGE-COLOR.md)已实现，提交ba8a38a，本地14组驱动、九个真实LG函数、ARM64及42patch/80文件严格重放通过，[0121a36产物](PANEL-D1-0121A36.md)已核对打包，待实机。mode2/7在ON表/display引用后、首帧前完成六包HS（1物理DMA）；只PV等待20ms，恢复默认RGB及sharpness-off。500ms新阶段及原完成/资源保护保持。当前只有明确的SDR Auto默认策略；HDR/专家/RGB动态状态、首次接管色彩、DSPP及完整C08/PD4仍保留，不将D09全项标成完成。a35仍为最新实机基线，BUG-007未修；本节使用scratch/framebuffer-0226/verify与final-review.json。
 
 ## 0225 更新（a35实机历史）
 

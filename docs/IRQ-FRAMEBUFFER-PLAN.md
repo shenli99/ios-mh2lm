@@ -1,5 +1,11 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
+## 0121a36 当前进展（2026-11-14，默认SDR色彩镜像已交付，待实机）
+
+[a36/0226镜像与验收](PANEL-D1-0121A36.md)已完成80份源码、144source/251kernel markers核对；相比a35三份修改和一份新增，匹配ba8a38a。沿原ABI608打包identity/pipeline并回读通过，ADT/605与477byte参数与a35一致；a31–a35旧镜像保持。
+**下一步用户先开USB采集，再测试a36/mode7：首次接管/调光正常后，两轮OFF/ON各保持亮屏至少60秒，观察颜色/锐度、亮度、触摸和持续刷新。** 新顺序为ON表/display引用→六包HS色彩/锐度完成→首帧→原0225亮度/第二帧→触摸完成，每轮generation只增加一次。BUG-007只记录、继续暂缓。
+a36尚无实机结果，a35仍最新实机基线；D09动态状态、首次色彩、完整C08/LP/core及其余PD4仍保留。证据scratch/artifact-0121a36/final-review.json。本轮无驱动/CI修改、驱动回归重跑、push/设备操作。以下为历史。
+
 ## 0226 当前进展（2026-11-14，默认SDR色彩/锐度本地通过，待新CI/实机）
 
 [D09普通SDR Auto色彩/锐度恢复](PANEL-LINEAGE-COLOR.md)已实现并提交ba8a38a：mode2/7 ON表LP/display引用→六包HS色彩/锐度真实完成→管线/首帧→原0225亮度与第二帧→触摸/FB完成。四profile按实际LG函数结果选择，PV单独保留20ms；默认RGB preset2 offsets0、锐度off。动态HDR/专家/RGB策略和首次接管色彩仍未实现，BUG-007按用户要求暂缓。

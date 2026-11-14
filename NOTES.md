@@ -1,5 +1,14 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0121a36 ABI608 SDR color images ready)
+
+**CURRENT：用户提供0121a36；80份源码与ba8a38a/0226及最终SHA一致，identity/pipeline两档打包回读通过，待实机。** 相比a35仅Backend.h/MDSS.cpp/Lifecycle.inc三份修改和新增SweetPanelSDRColor.h；144source/251kernel markers通过。a35/mode7仍最新实机基线，BUG-007暂缓保留，a31–a35旧镜像保持。
+内核17776400bytes、SHA256 `dfeb7a143daab2e746617089a0f303b4adc0efda42a7bc0568a704579169c0f6`，包内SHA清单一致、ARM64 subtype0。已取得包含0226的新产物；未提供独立CI run ID/完整build log，云端提交元数据/全量告警未核对。本轮无驱动/CI修改、驱动测试重跑或新固件。
+两档均35545088bytes，boot header/FAT中kernel+ADT+TOML回读通过；原ABI608固件/BootShim/追加DTB保持，pipeline ADT/605byte args、identity ADT/477byte args与a35相同（上限607）。证据scratch/artifact-0121a36/final-review.json及核对/回读脚本。
+**NEXT：用户先USB采集，再fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a36-abi608-panel-pipeline.img。** SHA256 `9ea8bb9763a946310b6cd1714b4542f1bb397d64ea292edec1822b83ffed4e6d`。完整命令与验收见docs/PANEL-D1-0121A36.md，采集终端静默是重定向预期，可另开tail -F看文件。
+首次接管generation1/桌面/调光正常后，两轮息屏约5秒/唤醒，各正常后保持亮屏至少60秒。PV ON表17包LP/4DMA→display引用→新增六包HS色彩/锐度（1DMA，CE后20ms）真实完成→generation2/3首帧→原HS亮度→同generation第二帧→触摸/ON完成。重点观察颜色/锐度、亮度、触摸、持续刷新有无新异常，不混淆命令完成与可见内容就绪。
+日志live-0121a36-abi608-panel-pipeline.txt、-host.txt及sweetlog-0121a36-abi608-panel-pipeline.bin；当前无a36实机结果。BUG-007旧画面闪现只记录，不要求本批消失，BUG-006也未修。D09仅普通SDR默认分支待实机；动态色彩/HDR、首次初始化、完整C08/LP/core/SMMU/QoS及其余PD4保留。本轮仅核对/打包/文档/本地提交，无push/触发CI/设备操作。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, 0226 SDR color/sharpness local implementation passed)
 
 **CURRENT：用户授权继续；D09普通SDR Auto默认色彩/锐度恢复已实现，提交ba8a38a，本地验证通过，待新CI/实机。** a35/mode7仍为最新实机基线，带已知BUG-007；BUG-007/006继续暂缓、未修复。

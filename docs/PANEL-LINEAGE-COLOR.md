@@ -1,6 +1,6 @@
 # 0226：普通 SDR 默认色彩/锐度恢复
 
-2026-11-14。实现提交 **`ba8a38a`**。D09 的普通 SDR Auto 默认分支已实现并通过本地验证，**待新 CircleCI 内核与实机**。最新实机基线仍是[a35/0225](PANEL-D1-0121A35.md)，带已知且暂缓处理的BUG-007。补丁 `xnu/patches/0226-mh2lm-lineage-sdr-color-restore.patch`，SHA256 `e3f37195b56fb0a5f6f10ab500b29f35929759419d76ba7fa77f883f6c608f59`。
+2026-11-14。实现提交 **`ba8a38a`**。D09 的普通 SDR Auto 默认分支已实现并通过本地验证，**[a36产物与镜像](PANEL-D1-0121A36.md)已核对打包，待实机**。最新实机基线仍是[a35/0225](PANEL-D1-0121A35.md)，带已知且暂缓处理的BUG-007。补丁 `xnu/patches/0226-mh2lm-lineage-sdr-color-restore.patch`，SHA256 `e3f37195b56fb0a5f6f10ab500b29f35929759419d76ba7fa77f883f6c608f59`。
 
 ## 本批行为与边界
 
@@ -40,7 +40,11 @@ CircleCI仅追加三条源码断言，执行器、参数、资源及工作流保
 
 证据目录 `scratch/framebuffer-0226/`：`color-reference.json/.c`、`test-color-reference.log`、14份 `test-*.log`、`fb*/mdss-status.json`、`verification.json`、`cumulative-replay.json`、`ci-check.json`、`final-review.json`及对应脚本。a35镜像SHA保持 `34a35e7d1bc4e39fccf05502a4472aee800c1712c19126a2b3675a8260454280`。
 
-## 下一步
+## 0121a36 产物交付
+
+[a36](PANEL-D1-0121A36.md)的80份受检源码与本批最终SHA一致，144source/251kernel markers通过；两档ABI608镜像与内部kernel/ADT/TOML回读通过，a35参数和旧镜像保持。下一步按该页先USB采集，再临时启动pipeline档验证；当前仍无本批实机结果。以下新CI安排为交付前历史。
+
+## 原CI与实机安排（历史，当前命令见a36）
 
 用户push包含`ba8a38a`的main并触发CircleCI，下载新kernel/buildtree，建议 **0121a36**；agent核对0226及内核marker后沿原ABI608打包mode7。当前没有新内核或新boot镜像，不重复测试同版a35。
 
