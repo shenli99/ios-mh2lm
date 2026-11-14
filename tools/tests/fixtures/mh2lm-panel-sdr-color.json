@@ -1,0 +1,61 @@
+{
+  "pin": "2e897dddf49a4c3e85b2ff77fdf7c70f860398dd",
+  "policy": {
+    "screen_mode": 0,
+    "hdr_mode": 0,
+    "cm_preset_step": 2,
+    "cm_red_step": 0,
+    "cm_green_step": 0,
+    "cm_blue_step": 0,
+    "sharpness": "off"
+  },
+  "functions": [
+    "lge_ddic_dsi_panel_tx_cmd_set",
+    "update_color_table",
+    "color_space_mapper",
+    "custom_rgb_mapper",
+    "screen_tune_mapper",
+    "screen_tune_sharpness",
+    "lge_display_control_store_r66456",
+    "lge_set_screen_mode_r66456",
+    "lge_dsi_panel_mode_set"
+  ],
+  "sources": {
+    "drivers/gpu/drm/msm/lge/lge_dsi_panel.c": "4268881b4e8eb97ec0a512ee957bcbeb390c516cfd000c0176a6f344e82421b1",
+    "drivers/gpu/drm/msm/dsi-staging/dsi_panel.c": "177b0be21fce2e46ca68d75fa61eb20c32b530c77d0eabc1c2a412669046d8b2",
+    "drivers/gpu/drm/msm/lge/lge_ddic_ops_r66456_tianma_md.c": "1b962e707e1d1f46256938e155b8826383bbc846a51a8c0f2704c654b04ed326",
+    "drivers/gpu/drm/msm/lge/cm/lge_color_manager.h": "e27ad1d766c4741541c53dc21dc1cb2e6883ff2eb8f5fc5b1a93a39ae6c1e2fb",
+    "arch/arm64/boot/dts/lge/sm8150_common/settings_panel/dsi-panel-r66456-pp1-tianmamd-fhd-cmd.dtsi": "da4a9b301351b5cb46be50098c44af7cd48815aa604de18dbd51f5642ea02f23",
+    "arch/arm64/boot/dts/lge/sm8150_common/sm8150_common-panel.dtsi": "cfdb5c623d029c1a86eb4374793de023c25c43d4658bfdfbc3613533bd6a50b8",
+    "arch/arm64/boot/dts/lge/sm8150_common/settings_panel/dsi-panel-r66456-dv1-tianmamd-fhd-cmd.dtsi": "a98035001a10f6329816ae378f65d958f4e14ef1f6933edf7ebe4d13eddc96c6",
+    "arch/arm64/boot/dts/lge/sm8150_common/settings_panel/dsi-panel-r66456-dv2-tianmamd-fhd-cmd.dtsi": "d87193a45c7bdd796183ff68f8c25a7bef459c45bc0392ee9e7715b5f3ee47de",
+    "arch/arm64/boot/dts/lge/sm8150_common/settings_panel/dsi-panel-r66456-pv-tianmamd-fhd-cmd.dtsi": "529d1f990baade46facc205e17098427a663e9c0daf92fe2b633a22ee0775b69",
+    "drivers/gpu/drm/msm/lge/lge_ddic_ops.c": "b963353ea26ff8d735e4ef0b747d317708ff7e59ac8c36094a5d5635a9cea84c"
+  },
+  "profiles": [
+    {
+      "id": 1,
+      "name": "pp1",
+      "path": "arch/arm64/boot/dts/lge/sm8150_common/settings_panel/dsi-panel-r66456-pp1-tianmamd-fhd-cmd.dtsi",
+      "sdr_auto_restore_hex": "15010000000002b00039010000000043cec11cf8fff4ef0a0a14efd3efdce02bfeeb0300fbf5f5e5ffb697e6b6973c00000000000000000000000000000000000000000000000000000000000000000000000815010000000002b00315010000000002b00039010000000005dd3206076515010000000002b003"
+    },
+    {
+      "id": 2,
+      "name": "dv1",
+      "path": "arch/arm64/boot/dts/lge/sm8150_common/settings_panel/dsi-panel-r66456-dv1-tianmamd-fhd-cmd.dtsi",
+      "sdr_auto_restore_hex": "15010000000002b00039010000000043cec11cf8fff4ef0a0a14efd3efdce02bfeeb0300fbf5f5e5ffb697e6b6973c00000000000000000000000000000000000000000000000000000000000000000000000815010000000002b00315010000000002b00039010000000005dd3206076515010000000002b003"
+    },
+    {
+      "id": 3,
+      "name": "dv2",
+      "path": "arch/arm64/boot/dts/lge/sm8150_common/settings_panel/dsi-panel-r66456-dv2-tianmamd-fhd-cmd.dtsi",
+      "sdr_auto_restore_hex": "15010000000002b00039010000000043cec11cf8fff4ef0a0a14efd3efdce02bfeeb0300fbf5f5e5ffb697e6b6973c00000000000000000000000000000000000000000000000000000000000000000000000815010000000002b00315010000000002b00039010000000005dd3206076515010000000002b003"
+    },
+    {
+      "id": 4,
+      "name": "pv",
+      "path": "arch/arm64/boot/dts/lge/sm8150_common/settings_panel/dsi-panel-r66456-pv-tianmamd-fhd-cmd.dtsi",
+      "sdr_auto_restore_hex": "15010000000002b00039010000140043cec11cf4f0ffef0a0a14efd3efdce02bfeeb0300fbf5f5e5ffb697e4b6973c00000000000000000000000000000000000000000000000000000000000000000000000815010000000002b00315010000000002b00039010000000005dd3206076515010000000002b003"
+    }
+  ]
+}

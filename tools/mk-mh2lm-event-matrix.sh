@@ -412,6 +412,8 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
       'ULPS entered after HS stop; PHY shutdown next' \
       'fresh frame before brightness; draining IRQ/MDP' \
       'post-frame HS brightness complete' \
+      'SDR Auto color/sharpness HS admitted' \
+      'SDR Auto color/sharpness HS complete; pixels pending' \
       'SWEET PANEL LINEAGE:' 'SweetPanelLineageSuspendULPS' \
       'SWEET PANEL PINS CONFIG:' 'owned source recommitted/flush issued' \
       'SWEET PANEL WAKE:' 'reset-proof-ready' 'dma-allocate-enter' \

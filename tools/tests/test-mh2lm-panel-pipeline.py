@@ -105,8 +105,8 @@ int main(){
  // owner. Configuration readbacks themselves remain diagnostics, not gates.
  {Harness h;ready(h);supplyPark(h);erasePipeline();regs[bases[7]+0xc0c]=3;
   uint64_t token=0;auto before=supplyWrites.size();assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)!=0&&!token&&supplyWrites.size()==before);}
- for(unsigned fault=0;fault<4;++fault){Harness h;ready(h);supplyPark(h);h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelCommand);
-  // Finish the real ON table before testing pipeline admission.
+ for(unsigned fault=0;fault<4;++fault){Harness h;ready(h);supplyPark(h);h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelColorRestore);
+  // Finish ON plus color/锐度 before testing pipeline admission.
   for(unsigned n=0;n<1000&&h.m->dsiBusy();++n){fakeTicks+=1000000;physical(h.m);SweetMDSS::dsiTimerAction(h.m,h.m->fDsiTimer);}
   assert(!h.m->dsiBusy());auto before=ctlResetCount;
   if(fault==0)regs[bases[6]+8]|=6;if(fault==1)regs[bases[11]+0x30c]|=1u<<19;

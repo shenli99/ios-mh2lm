@@ -57,7 +57,7 @@ int main(){
    assert(!(regs[bases[6]+4]&4)&&!h.m->fDsiDisplayEngine&&panelPackets.empty());
    h.untilLife(SweetPanelCommand);
    for(unsigned n=0;n<4000&&h.m->fLifecycle.phase==SweetPanelCommand;++n)engineStep(h);
-   assert((h.m->fLifecycle.phase==SweetPanelFrame||h.m->fLifecycle.phase==SweetPanelPipelineRestore)&&h.m->fDsiDisplayEngine&&!h.m->fLifecycle.brightnessRestored);
+   assert((h.m->fLifecycle.phase==SweetPanelColorRestore||h.m->fLifecycle.phase==SweetPanelFrame||h.m->fLifecycle.phase==SweetPanelPipelineRestore)&&h.m->fDsiDisplayEngine&&!h.m->fLifecycle.brightnessRestored);
    h.wakePixels();checkPackets(profile,true,0x345);
    assert(h.m->fDsiBuffer==buffer&&dsiAllocations==allocations&&dsiPrepares==prepares&&!h.m->fDsiPinned);
   }

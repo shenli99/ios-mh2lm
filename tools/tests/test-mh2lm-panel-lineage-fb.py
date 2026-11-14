@@ -67,14 +67,15 @@ int main() {
    h.power(SweetPanelDisplayOff);emitStatus(h,profile,round,0);
    h.untilLife(SweetPanelComplete);emitStatus(h,profile,round,1);
    h.power(SweetPanelDisplayOn);emitStatus(h,profile,round,2);
-   h.untilLife(SweetPanelFrame);emitStatus(h,profile,round,3);
+   h.untilLife(SweetPanelColorRestore);emitStatus(h,profile,round,3);
+   h.untilLife(SweetPanelFrame);emitStatus(h,profile,round,4);
    regs[bases[3]+0x18]=regs[bases[3]+0x1c]=0;regs[0x0ae01014]|=0x100;realFrame(h.m);h.life();
-   assert(h.m->fLifecycle.phase==SweetPanelBrightnessDrain);emitStatus(h,profile,round,4);
-   h.untilLife(SweetPanelBrightness);emitStatus(h,profile,round,5);
-   h.untilLife(SweetPanelFrame);emitStatus(h,profile,round,6);
+   assert(h.m->fLifecycle.phase==SweetPanelBrightnessDrain);emitStatus(h,profile,round,5);
+   h.untilLife(SweetPanelBrightness);emitStatus(h,profile,round,6);
+   h.untilLife(SweetPanelFrame);emitStatus(h,profile,round,7);
    regs[bases[3]+0x18]=regs[bases[3]+0x1c]=0;regs[0x0ae01014]|=0x100;realFrame(h.m);
-   h.untilLife(SweetPanelTouchResume);emitStatus(h,profile,round,7);
-   h.untilLife(SweetPanelComplete);emitStatus(h,profile,round,8);
+   h.untilLife(SweetPanelTouchResume);emitStatus(h,profile,round,8);
+   h.untilLife(SweetPanelComplete);emitStatus(h,profile,round,9);
   }
  }
 }
@@ -109,10 +110,10 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-lineage-fb-') as temp:
         assert len(values) == len(fields) + 4, line
         records.append(dict(profile=values[0], round=values[1], stage=values[2], cap=values[3],
                             status=dict(zip(fields, values[4:]))))
-    assert len(records) == 108, len(records)
+    assert len(records) == 120, len(records)
     initializers = []
     for i, record in enumerate(records):
-        assert (record['profile'], record['round'], record['stage']) == (i // 27 + 1, i // 9 % 3, i % 9)
+        assert (record['profile'], record['round'], record['stage']) == (i // 30 + 1, i // 10 % 3, i % 10)
         assignments = ''.join(f'v.{field}={value}ULL;' for field, value in record['status'].items())
         initializers.append('{'+str(record['cap'])+',[]{SweetPanelLifecycleStatus v{};'+assignments+'return v;}()}')
     data = 'struct Record{unsigned cap;SweetPanelLifecycleStatus status;};\nstatic Record records[]={\n' + ',\n'.join(initializers) + '\n};\n'
@@ -127,10 +128,10 @@ static void pending(Harness& h) {
 int main() {
  lifecycleArg=2;
  for(unsigned profile=0;profile<4;++profile) {
-  Harness h;auto*first=&records[profile*27];h.b->cap=first->cap;
+  Harness h;auto*first=&records[profile*30];h.b->cap=first->cap;
   h.b->next=first->status.token-1;
   for(unsigned round=0;round<3;++round) {
-   auto*r=first+round*9;
+   auto*r=first+round*10;
    assert(h.request(true)==0&&h.f->fPanelLifecycleToken==r[0].status.token);
    feed(h,r[0].status);pending(h);
    // One round queues ON while OFF is still pending; only OFF completion
@@ -145,8 +146,8 @@ int main() {
    assert(h.f->fPanelLifecycleToken==r[2].status.token);
    feed(h,r[2].status);pending(h);
    feed(h,r[3].status);pending(h); // fresh pixels/touch not complete yet
-   for(unsigned stage=4;stage<8;++stage){feed(h,r[stage].status);pending(h);}
-   feed(h,r[8].status);
+   for(unsigned stage=4;stage<9;++stage){feed(h,r[stage].status);pending(h);}
+   feed(h,r[9].status);
    assert(!h.f->fPanelLifecycleFault&&!h.f->fPowerOff&&!h.f->fPanelLifecycleBackend);
    assert(h.b->cancelled.empty()&&h.b->operations.size()==(round+1)*2);
    assert(h.b->operations[round*2]==SweetPanelDisplayOff&&h.b->operations[round*2+1]==SweetPanelDisplayOn);
@@ -159,7 +160,7 @@ int main() {
   Harness h;h.b->cap=records[0].cap;h.b->next=records[0].status.token-1;
   assert(h.request(true)==0);
   if(on){feed(h,records[1].status);assert(h.request(false)==0);}
-  auto v=records[on?8:1].status;
+  auto v=records[on?9:1].status;
   if(fault==0)v.uncertain=true;
   if(fault==1)v.result=kIOReturnIOError;
   if(fault==2)v.profile=0;
@@ -172,7 +173,7 @@ int main() {
   feed(h,v);
   assert(h.f->fPanelLifecycleFault&&h.f->fPowerOff&&h.b->cancelled.size()==1&&h.request(false)!=0);
  }
- puts("PASS: 108 actual MDSS mode2 status observations across four profiles/three OFF-ON cycles accepted by real framebuffer; pending/fresh-pixel/touch gates, coalesced ON, 18 corrupted proofs rejected, no cancellation on success or legacy fallback");
+ puts("PASS: 120 actual MDSS mode2 status observations across four profiles/three OFF-ON cycles accepted by real framebuffer; pending color/fresh-pixel/touch gates, coalesced ON, 18 corrupted proofs rejected, no cancellation on success or legacy fallback");
 }
 '''
     if args.pipeline:
@@ -185,7 +186,7 @@ int main() {
   assert(h.request(true)==0);auto off=records[1].status;
   if(fault==1){off.pipelineGeneration=0;feed(h,off);assert(h.f->fPanelLifecycleFault);continue;}
   feed(h,off);assert(h.f->fPanelPipelineGeneration==off.pipelineGeneration&&h.request(false)==0);
-  auto on=records[8].status;
+  auto on=records[9].status;
   if(fault==2)on.pipelineGeneration=0;
   if(fault==3)on.pipelineGeneration=off.pipelineGeneration;
   if(fault==4)on.pixelsComplete=false;

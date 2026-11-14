@@ -91,17 +91,29 @@ for rec in json.loads((here/'fixtures/mh2lm-panel-profiles.json').read_text())['
   while off<len(raw):
    n=int.from_bytes(raw[off+5:off+7],'big');packets.append((raw[off],raw[off+4],raw[off+7:off+7+n]));off+=7+n
   expected.append(f'if(profile=={rec["id"]} && on=={str(key=="on").lower()}) return {{'+','.join('{'+str(t)+','+str(delay)+',{'+','.join(map(str,payload))+'}}' for t,delay,payload in packets)+'};')
+color_expected=[]
+for rec in json.loads((here/'fixtures/mh2lm-panel-sdr-color.json').read_text())['profiles']:
+ raw=bytes.fromhex(rec['sdr_auto_restore_hex']);off=0;packets=[]
+ while off<len(raw):
+  n=int.from_bytes(raw[off+5:off+7],'big');packets.append((raw[off],raw[off+4],raw[off+7:off+7+n]));off+=7+n
+ color_expected.append(f'if(profile=={rec["id"]}) return {{'+','.join('{'+str(t)+','+str(delay)+',{'+','.join(map(str,payload))+'}}' for t,delay,payload in packets)+'};')
 tests=r'''
 struct Expected{unsigned type,delay;std::vector<uint8_t>payload;};
 static std::vector<Expected>expected(unsigned profile,bool on){
 '''+ '\n'.join(expected)+r'''
  abort();}
+static std::vector<Expected>expectedColor(unsigned profile){
+'''+ '\n'.join(color_expected)+r'''
+ abort();}
+static constexpr bool hasColorRestore='''+str((root/'iokit/Kernel/arm/SweetPanelSDRColor.h').exists()).lower()+r''';
 static void checkPackets(unsigned profile,bool on,unsigned brightness=0){
- auto want=expected(profile,on);if(brightness)want.push_back({57,0,{0x51,uint8_t(brightness>>8),uint8_t(brightness)}});
+ auto want=expected(profile,on);auto tableCount=want.size();bool lineage=lifecycleMode==2||lifecycleMode==7;
+ if(on&&lineage&&hasColorRestore){auto color=expectedColor(profile);want.insert(want.end(),color.begin(),color.end());}
+ if(brightness)want.push_back({57,0,{0x51,uint8_t(brightness>>8),uint8_t(brightness)}});
  assert(panelPackets.size()==want.size());
  for(unsigned i=0;i<want.size();++i){auto&p=panelPackets[i];assert(p.type==want[i].type&&p.payload==want[i].payload);
   assert(p.memory==(p.type==57&&p.payload.size()+4>64));
-  assert(p.lowPower==(!(lifecycleMode==2||lifecycleMode==7)||!brightness||i+1<want.size()));
+  assert(p.lowPower==(!lineage||i<tableCount));
   auto end=i+1<want.size()?panelPackets[i+1].time:fakeTicks;
   assert(end-p.time>=uint64_t(want[i].delay)*1000000ULL);}
 }

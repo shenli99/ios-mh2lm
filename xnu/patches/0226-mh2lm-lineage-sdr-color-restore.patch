@@ -1,0 +1,230 @@
+diff --git a/iokit/Kernel/arm/SweetDisplayBackend.h b/iokit/Kernel/arm/SweetDisplayBackend.h
+--- a/iokit/Kernel/arm/SweetDisplayBackend.h
++++ b/iokit/Kernel/arm/SweetDisplayBackend.h
+@@ -27,7 +27,7 @@
+  SweetPanelLinkPowerDown, SweetPanelLinkRebuild,
+  SweetPanelPinParkActivate, SweetPanelPinParkWait, SweetPanelPinPark,
+  SweetPanelSupplyActivate, SweetPanelSupplyPark, SweetPanelSupplyRestore, SweetPanelPipelineRestore,
+- SweetPanelBrightnessDrain };
++ SweetPanelBrightnessDrain, SweetPanelColorRestore };
+ struct SweetPanelLifecycleStatus {
+  uint64_t token, touchToken, commandToken, pinToken;
+  unsigned operation, phase, rails, profile;
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -14,6 +14,7 @@
+ #include "SweetDisplayClock.h"
+ #include "SweetDSILink.h"
+ #include "SweetPanelProfile.h"
++#include "SweetPanelSDRColor.h"
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOMessage.h>
+ #include <IOKit/IOCommandGate.h>
+@@ -236,7 +237,7 @@
+  OSData *fDsiSequence;
+  IOBufferMemoryDescriptor *fDsiBuffer;
+  SweetDSIStatus fDsiStatus;
+- bool fDsiHS; /* selected explicitly by the typed lifecycle brightness caller */
++ bool fDsiHS; /* selected explicitly by typed lifecycle callers */
+  IOReturn beginDSISequenceMode(const uint8_t *,size_t,uint64_t *,bool);
+  bool fDsiEnabled, fDsiTimerAdded, fDsiPrepared, fDsiPinned, fDsiPaused, fDsiSaved, fDsiPoisoned;
+  uint64_t fDsiNextToken, fDsiDeadline, fDsiPhysical;
+@@ -495,6 +496,8 @@
+  void traceWake(const char *,unsigned = 0);
+  void lifecycleCommand(bool);
+  void lifecycleReset(void);
++ bool fLifecycleColorRestored; /* current ordinary SDR policy, not a user color API */
++ void lifecycleColor(void);
+  void lifecycleBrightness(void);
+  static IOReturn brightnessAction(OSObject *,void *,void *,void *,void *);
+  bool lifecycleBusy(void) const;
+diff --git a/iokit/Kernel/arm/SweetMDSSLifecycle.inc b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+--- a/iokit/Kernel/arm/SweetMDSSLifecycle.inc
++++ b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+@@ -43,6 +43,11 @@
+   return false;
+  }
+  fLifecycleLineage=mode==2 || mode==7;
++ if (fLifecycleLineage) {
++  const SweetPanelSDRColor *color=sweet_panel_sdr_color(profile);unsigned count=0;
++  if (!color || !sweet_dsi_sequence_valid(color->commands,color->size,&count) || count!=6) return false;
++  setProperty("SweetPanelColorPolicy","SDR Auto RGB preset2 offsets0 sharpness-off");
++ }
+  fLifecycleSupplyCycle=mode==6 || fLifecycleLineage;
+  fLifecycleLinkCycle=mode==4 || mode==5 || mode==6 || fLifecycleLineage;
+  if (fLifecycleLinkCycle && (fCoreProfile!=2 || fHostProfile!=1 || fLinkProfile!=2)) return false;
+@@ -71,7 +76,7 @@
+  case SweetPanelLinkPowerDown:case SweetPanelLinkRebuild:
+  case SweetPanelPinParkActivate:case SweetPanelPinParkWait:case SweetPanelPinPark:
+  case SweetPanelSupplyActivate:case SweetPanelSupplyPark:case SweetPanelSupplyRestore:
+- case SweetPanelPipelineRestore:case SweetPanelBrightnessDrain: return true;
++ case SweetPanelPipelineRestore:case SweetPanelBrightnessDrain:case SweetPanelColorRestore: return true;
+  default: return false;
+  }
+ }
+@@ -92,6 +97,7 @@
+  setProperty("SweetPanelLifecycleSleeping",fLifecycle.sleeping);
+  setProperty("SweetPanelLifecycleResetComplete",fLifecycle.resetComplete);
+  setProperty("SweetPanelLifecycleBrightnessRestored",fLifecycle.brightnessRestored);
++ setProperty("SweetPanelLifecycleColorRestored",fLifecycleColorRestored);
+  setProperty("SweetPanelPipelineGeneration",(unsigned long long)fLifecycle.pipelineGeneration,64);
+  fLifecycle.rails=fManagedRails;
+  setProperty("SweetPanelLifecycleRails",(unsigned long long)fLifecycle.rails,32);
+@@ -246,6 +252,7 @@
+  unsigned released=fLifecycleSupplyCycle && op==SweetPanelDisplayOn ? fLifecycle.panelReleasedMask : 0u;
+  unsigned aggregate=fLifecycleSupplyCycle && op==SweetPanelDisplayOn ? fLifecycle.panelAggregateEnabledMask : 3u;
+  uint64_t previousVotes[2]={fLifecycle.panelVoteTokens[0],fLifecycle.panelVoteTokens[1]};
++ fLifecycleColorRestored=false;
+  fLifecycle={};fWakeTraceCount=0;fLifecycle.token=++fLifecycleNextToken;fLifecycle.operation=op;
+  fLifecycle.pinToken=pinToken;
+  fLifecycle.pipelineGeneration=fPipelineEnabled && op==SweetPanelDisplayOff ? fPipelineGeneration : 0;
+@@ -326,6 +333,9 @@
+ {
+  /* A post-brightness restart reuses this wake generation. Rebuilding it
+   * again would invalidate the first-frame proof and reset ownership. */
++ if (fLifecycleLineage && fLifecycle.operation==SweetPanelDisplayOn && !fLifecycleColorRestored) {
++  finishLifecycle(kIOReturnNotReady,"SDR color restore absent before pixels");return;
++ }
+  bool brightnessResume=fLifecycleLineage && fLifecycle.phase==SweetPanelBrightness;
+  if (fPipelineEnabled && fLifecycle.phase!=SweetPanelPipelineRestore && !brightnessResume) {
+   IOReturn rc=beginPipeline();
+@@ -521,7 +531,7 @@
+   if (fLifecycle.phase==SweetPanelPinActivate) {fLifecyclePinsActive=true;lifecycleReset();}
+   else {fLifecycle.resetComplete=true;traceWake("reset-proof-ready");lifecycleCommand(true);}
+   publishLifecycle();return;
+- } else if (fLifecycle.phase==SweetPanelCommand || fLifecycle.phase==SweetPanelBrightness) {
++ } else if (fLifecycle.phase==SweetPanelCommand || fLifecycle.phase==SweetPanelBrightness || fLifecycle.phase==SweetPanelColorRestore) {
+   if (!lifecycleResourcesHeld()) {finishLifecycle(kIOReturnNotReady,"command resource lease lost");return;}
+   if (dsiBusy()) return;
+   if (fDsiStatus.token!=fLifecycle.commandToken || fDsiStatus.state!=SweetDSIComplete ||
+@@ -549,8 +559,15 @@
+    /* dsi_display_enable acquires its persistent reference AFTER panel ON. */
+    if (!setDSIDisplayEngine(true)) {finishLifecycle(kIOReturnNotReady,"display engine acquire");return;}
+    fLifecycle.sleeping=false;
+-   if (fLifecycleLineage) restoreLifecycleStream();else lifecycleBrightness();
++   if (fLifecycleLineage) lifecycleColor();else lifecycleBrightness();
+    publishLifecycle();return;
++  }
++  if (fLifecycle.phase==SweetPanelColorRestore) {
++   if (!lifecycleResourceStepAllowed() || fDsiStatus.completed!=6 || fDsiStatus.total!=6) {
++    finishLifecycle(kIOReturnNotReady,"SDR color completion proof absent");return;
++   }
++   fLifecycleColorRestored=true;
++   SWEET_LOG_INFO("SWEET PANEL LINEAGE: SDR Auto color/sharpness HS complete; pixels pending\n");
+   }
+   if (fLifecycle.phase==SweetPanelBrightness) {
+    /* A newer target can arrive while DMA is in flight. Keep the original
+@@ -634,6 +651,22 @@
+  fLifecycle.phase=SweetPanelCommand;
+  fLifecycleStepDeadline=scanout_now()+(fLifecycleFull ? 5000000000ULL : 500000000ULL);
+ }
++void SweetMDSS::lifecycleColor(void)
++{
++ const SweetPanelSDRColor *color=fPanelProfile ? sweet_panel_sdr_color(fPanelProfile->id) : NULL;
++ fLifecycle.phase=SweetPanelColorRestore;fLifecycleStepDeadline=scanout_now()+500000000ULL;
++ if (!color || !lifecycleResourceStepAllowed()) {
++  finishLifecycle(kIOReturnNotReady,"SDR color restore admission");return;
++ }
++ /* LG mode_set runs after ON/display-engine acquire, before first kickoff.
++  * Keep both three-packet sets and their per-profile delays in one bounded
++  * transaction. Any error stops before pixels; no best-effort sharpness. */
++ fLifecycleInternal=true;
++ IOReturn rc=beginDSISequenceMode(color->commands,color->size,&fLifecycle.commandToken,true);
++ fLifecycleInternal=false;
++ if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"SDR color sequence admission");return;}
++ SWEET_LOG_INFO("SWEET PANEL LINEAGE: SDR Auto color/sharpness HS admitted profile=%u; six commands before pixels\n",color->id);
++}
+ void SweetMDSS::lifecycleBrightness(void)
+ {
+  if (!fPanelBrightnessKnown) {finishLifecycle(kIOReturnNotReady,"no typed brightness target");return;}
+@@ -661,6 +694,15 @@
+ bool SweetMDSS::lifecycleResourceStepAllowed(void)
+ {
+  if (!lifecycleParticipants()) return false;
++ if (fLifecycle.phase==SweetPanelColorRestore) {
++  return fLifecycleLineage && fLifecycle.operation==SweetPanelDisplayOn &&
++      scanout_now()<fLifecycleDeadline && scanout_now()<fLifecycleStepDeadline &&
++      fLifecycle.resetComplete && !fLifecycle.pixelsComplete && !fLifecycleColorRestored &&
++      fLifecycle.touchQuiesced && fLifecycle.displayDrained && fDsiDisplayEngine &&
++      lifecycleResourcesHeld() && lifecycleIRQDrained() &&
++      !(dp_rd(dp_intf1,0x288)&(1u<<20)) && !dp_rd(dp_intf1,0x2b4) &&
++      !dp_rd(dp_ctl,0x18) && !dp_rd(dp_ctl,0x1c);
++ }
+  if (fLifecycleLineage && fLifecycle.phase==SweetPanelBrightness) {
+   return scanout_now()<fLifecycleDeadline && scanout_now()<fLifecycleStepDeadline &&
+       fLifecycle.pixelsComplete && lifecycleResourcesHeld() && lifecycleIRQDrained() &&
+diff --git a/iokit/Kernel/arm/SweetPanelSDRColor.h b/iokit/Kernel/arm/SweetPanelSDRColor.h
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetPanelSDRColor.h
+@@ -0,0 +1,69 @@
++/* SPDX-License-Identifier: GPL-2.0-only
++ * LG R66456 ordinary SDR Auto restore. Derived from the actual LG mappers
++ * at 2e897dddf49a4c3e85b2ff77fdf7c70f860398dd and each profile's DTS.
++ * Policy: screen_mode=Auto, HDR=off, RGB preset=2, offsets=0, sharpness=off.
++ * This is an explicit current XNU policy, not Android userspace state.
++ * Color and sharpness each keep their bank-select/restore packets; only
++ * PV waits 20ms after CE. Six HS packets total, one physical DMA packet.
++ * See test-mh2lm-lineage-color-reference.py and PANEL-LINEAGE-COLOR.md.
++ */
++#ifndef SWEET_PANEL_SDR_COLOR_H
++#define SWEET_PANEL_SDR_COLOR_H
++struct SweetPanelSDRColor { unsigned id; const uint8_t *commands; size_t size; };
++static const uint8_t sweetPanelSDR_pp1[]={
++ 0x15,0x01,0x00,0x00,0x00,0x00,0x02,0xb0,0x00,0x39,0x01,0x00,0x00,0x00,0x00,0x43,
++ 0xce,0xc1,0x1c,0xf8,0xff,0xf4,0xef,0x0a,0x0a,0x14,0xef,0xd3,0xef,0xdc,0xe0,0x2b,
++ 0xfe,0xeb,0x03,0x00,0xfb,0xf5,0xf5,0xe5,0xff,0xb6,0x97,0xe6,0xb6,0x97,0x3c,0x00,
++ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++ 0x00,0x00,0x08,0x15,0x01,0x00,0x00,0x00,0x00,0x02,0xb0,0x03,0x15,0x01,0x00,0x00,
++ 0x00,0x00,0x02,0xb0,0x00,0x39,0x01,0x00,0x00,0x00,0x00,0x05,0xdd,0x32,0x06,0x07,
++ 0x65,0x15,0x01,0x00,0x00,0x00,0x00,0x02,0xb0,0x03,
++};
++static const uint8_t sweetPanelSDR_dv1[]={
++ 0x15,0x01,0x00,0x00,0x00,0x00,0x02,0xb0,0x00,0x39,0x01,0x00,0x00,0x00,0x00,0x43,
++ 0xce,0xc1,0x1c,0xf8,0xff,0xf4,0xef,0x0a,0x0a,0x14,0xef,0xd3,0xef,0xdc,0xe0,0x2b,
++ 0xfe,0xeb,0x03,0x00,0xfb,0xf5,0xf5,0xe5,0xff,0xb6,0x97,0xe6,0xb6,0x97,0x3c,0x00,
++ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++ 0x00,0x00,0x08,0x15,0x01,0x00,0x00,0x00,0x00,0x02,0xb0,0x03,0x15,0x01,0x00,0x00,
++ 0x00,0x00,0x02,0xb0,0x00,0x39,0x01,0x00,0x00,0x00,0x00,0x05,0xdd,0x32,0x06,0x07,
++ 0x65,0x15,0x01,0x00,0x00,0x00,0x00,0x02,0xb0,0x03,
++};
++static const uint8_t sweetPanelSDR_dv2[]={
++ 0x15,0x01,0x00,0x00,0x00,0x00,0x02,0xb0,0x00,0x39,0x01,0x00,0x00,0x00,0x00,0x43,
++ 0xce,0xc1,0x1c,0xf8,0xff,0xf4,0xef,0x0a,0x0a,0x14,0xef,0xd3,0xef,0xdc,0xe0,0x2b,
++ 0xfe,0xeb,0x03,0x00,0xfb,0xf5,0xf5,0xe5,0xff,0xb6,0x97,0xe6,0xb6,0x97,0x3c,0x00,
++ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++ 0x00,0x00,0x08,0x15,0x01,0x00,0x00,0x00,0x00,0x02,0xb0,0x03,0x15,0x01,0x00,0x00,
++ 0x00,0x00,0x02,0xb0,0x00,0x39,0x01,0x00,0x00,0x00,0x00,0x05,0xdd,0x32,0x06,0x07,
++ 0x65,0x15,0x01,0x00,0x00,0x00,0x00,0x02,0xb0,0x03,
++};
++static const uint8_t sweetPanelSDR_pv[]={
++ 0x15,0x01,0x00,0x00,0x00,0x00,0x02,0xb0,0x00,0x39,0x01,0x00,0x00,0x14,0x00,0x43,
++ 0xce,0xc1,0x1c,0xf4,0xf0,0xff,0xef,0x0a,0x0a,0x14,0xef,0xd3,0xef,0xdc,0xe0,0x2b,
++ 0xfe,0xeb,0x03,0x00,0xfb,0xf5,0xf5,0xe5,0xff,0xb6,0x97,0xe4,0xb6,0x97,0x3c,0x00,
++ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++ 0x00,0x00,0x08,0x15,0x01,0x00,0x00,0x00,0x00,0x02,0xb0,0x03,0x15,0x01,0x00,0x00,
++ 0x00,0x00,0x02,0xb0,0x00,0x39,0x01,0x00,0x00,0x00,0x00,0x05,0xdd,0x32,0x06,0x07,
++ 0x65,0x15,0x01,0x00,0x00,0x00,0x00,0x02,0xb0,0x03,
++};
++static const SweetPanelSDRColor sweetPanelSDRColors[]={
++ {1,sweetPanelSDR_pp1,sizeof(sweetPanelSDR_pp1)},
++ {2,sweetPanelSDR_dv1,sizeof(sweetPanelSDR_dv1)},
++ {3,sweetPanelSDR_dv2,sizeof(sweetPanelSDR_dv2)},
++ {4,sweetPanelSDR_pv,sizeof(sweetPanelSDR_pv)},
++};
++static inline const SweetPanelSDRColor *sweet_panel_sdr_color(unsigned id)
++{
++ switch (id) {
++ case 1:return &sweetPanelSDRColors[0];
++ case 2:return &sweetPanelSDRColors[1];
++ case 3:return &sweetPanelSDRColors[2];
++ case 4:return &sweetPanelSDRColors[3];
++ default:return NULL;
++ }
++}
++#endif
