@@ -1,5 +1,48 @@
 # 0220：按 Lineage 对齐面板息屏与唤醒
 
+## 0221：framebuffer配合逻辑已修复（2026-11-14）
+
+实现提交`5cf36dd`，补丁[0221](../xnu/patches/0221-mh2lm-lineage-framebuffer-lifecycle.patch)，
+SHA256=`5c2d8591be684f07885e32a783cc0be6cf95d7d5e771db352255619b783f7ebf`。
+用户要求补齐配合逻辑；本轮已修复下述mode2 consumer遗漏，待新内核实机验证。
+
+framebuffer现在将`sweetpanellifecycle=2`同时映射为supply cycle、link cycle和data parking，
+与0220的MDSS一致。OFF完成接受本panel票已撤销、链路/DATA停驻、共享config仍持有的状态；
+ON完成仍须供电票/链路/资源恢复，以及新像素和触摸恢复证明。现有完成条件、超时和取消规则保留，
+仅选择正确的完整验收分支。快速OFF期间到达的ON继续排队，OFF完成后才提交。
+接口注释也已更正；模式2不再表示全部资源保持。新增一次软件模式日志，供CI产物核对。
+
+本轮没有变更MDSS底层时序、GPIO/ULPS、命令表、FIFO/物理DMA、固定扫描管线或固件/ADT/启动参数。
+完整MDP/INTF/SMMU独立重建及共享核心低功耗仍属原有边界，不因这次配合修复宣称已实现。
+
+本地验证：
+
+- 新[跨层回归](../tools/tests/test-mh2lm-panel-lineage-fb.py)实际运行MDSS mode2，
+  经其`panelLifecycleStatus()`导出四profile各三轮的60份pending/OFF/ON状态和capabilities，
+  再交给实际framebuffer处理。有效OFF→ON、排队ON、未完成像素/触摸时保持等待均通过；18组损坏凭据被拒绝。
+  同一测试在未修改a30源码上因OFF完成被拒而失败，证明覆盖了本次回归。
+- 修正原[FB回归](../tools/tests/test-mh2lm-panel-lifecycle-fb.py)：真实mode2/6初始化，
+  各32组完成场景、四种缺失capability、旧mode2资源保持结果拒绝；保留mode1/3/4/5、provider退出/超时/取消验证。
+- 原Lineage mode2底层回归和framebuffer service回归通过。上述四套使用ASan/UBSan。
+- `SweetFramebuffer.cpp`真实ARM64对象编译通过；基线/修改各1398条告警，逐条消息与类别计数相同。
+  使用已有Linux clang19兼容参数，非完整macOS CI构建。
+- 0185–0221共37补丁严格重放，无offset/fuzz，78源码逐字节一致。
+  CI新增4个mode2源码marker，共118项通过；构建环境未调整。
+- 打包脚本新增`SWEET FB PANEL: Lineage mode2 supply/link/data completion enabled`门槛，
+  真实旧a30被拒绝且无boot/ramdisk/TOML输出；bash语法与CI YAML解析通过。
+
+跨层回归分两进程传递实际typed状态；OS、硬件响应仍是既有fixture，不能替代真机或并发workloop验证。
+底稿`scratch/framebuffer-0221/`含`final-review.json`、四份test输出、旧a30失败输出、
+`bridge/mdss-status.json`、编译/告警、累计重放和旧产物拒绝证据。prepare-patch会重建verify，不能在测试/编译读取时执行。
+
+下一步由用户push最新main触发CircleCI，下载新kernel/buildtree（建议`0121a31`）；
+agent核对0221及118项source markers后沿ABI608/原ADT/原605字节retained参数打包。
+实机先确认OFF complete之后不再出现consumer cancelled，再看ON begin、ULPS退出、host soft reset、
+DDIC/ON、owned flush/fresh pixels及touch/ON complete。无需重测a30或切combined/supply。
+当前尚无新云端内核/镜像/实机结果；修复的是已证明的软件合同缺陷，后续唤醒硬件仍待验证。
+
+以下为0221修复前的审计与历史实现记录。
+
 ## 四项对齐复核（2026-11-14）
 
 用户要求检查此前“除命令传输外，其他四项与Lineage对齐”是否真正完成。本轮以

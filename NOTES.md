@@ -1,5 +1,24 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0221 framebuffer Lineage lifecycle cooperation fixed)
+
+**CURRENT：用户要求补齐配合逻辑；0221已实现并本地验证通过，待用户push/云编译与新实机。**
+实现提交`5cf36dd`；补丁xnu/patches/0221-mh2lm-lineage-framebuffer-lifecycle.patch，
+SHA256=`5c2d8591be684f07885e32a783cc0be6cf95d7d5e771db352255619b783f7ebf`。
+FB mode2同时启用supply/link/data parking，OFF合法停驻结果不再按resourcesHeld拒绝；ON继续完整恢复验收，快速反向请求按原规则排队。
+生产只改SweetFBService.inc模式映射/一次日志及SweetDisplayBackend.h注释；未放宽完成条件或改MDSS/命令传输/硬件时序。
+新跨层回归运行实际MDSS，取四profile各三轮60份typed状态经真实FB消费；有效OFF→ON/排队ON/pending像素触摸通过，18组损坏凭据拒绝。
+同测试在原a30按预期复现OFF验收失败；原FB回归改用真实mode2/6启动，各32完成场景及capability/旧模式拒绝通过。
+连同原Lineage mode2和FB service共四套ASan/UBSan通过；跨层为两进程状态回放，非硬件/并发workloop仿真。
+SweetFramebuffer ARM64对象基线/修改编译通过，告警1398→1398且逐条消息/类别一致；沿用既有Linux兼容参数，未做完整云构建。
+0185–0221共37patch严格无offset/fuzz、78文件一致；CI增加4个模式映射/日志marker，总118项通过，环境不变。
+matrix增加新FB marker，实际拒绝旧a30且无boot输出；bash语法/YAML解析通过。底稿scratch/framebuffer-0221/（final-review.json、bridge/mdss-status.json、test/compile/replay）。
+**NEXT：用户push最新main到origin触发CircleCI，下载新kernel/buildtree（建议0121a31）；agent核对0221及118项markers后沿ABI608/原ADT/605字节retained参数打包。**
+先一次OFF/ON：OFF complete不再cancel→ON begin→ULPS exit/host soft reset→DDIC/ON→owned flush/fresh pixels→touch/ON complete。
+当前无0221云端内核、镜像或实机结果；a30仍是最后实测，不需重测旧版或切combined/supply。
+详细实现/测试边界见docs/PANEL-LINEAGE-SUSPEND-RESUME.md顶部；编译入口/对照/显示计划及workspace PLAN同步。
+未push/触发CI/操作设备，未改固件/ADT/args或命令传输。独立MDP/INTF/SMMU重建和完整核心低功耗仍未实现。以下交接为历史。
+
 ## Agent handoff / active work (2026-11-14, four-item Lineage alignment audit)
 
 **CURRENT：按用户要求复核除命令传输外的四项逻辑；0220确有实现，但整体未完成对齐，未实施新修复。**

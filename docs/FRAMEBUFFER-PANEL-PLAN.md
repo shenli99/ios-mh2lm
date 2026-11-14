@@ -1,13 +1,12 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**当前执行点（2026-11-14）：接手时已发现a30日志，OFF完成后framebuffer验收失败；mode2上下层合同不一致已静态定位。**
-日志2190 HANDOFF active，3467 OFF命令完成，3494 ULPS entry通过，3566/3569撤面板票ACK，3570 OFF complete；
-随后consumer cancelled/FB completion IOError，USB/按键/用户态继续，没有ON begin。
-0220的MDSS mode2启用supply/link/data parking，但SweetFBService仍用旧mode2要求resourcesHeld，拒绝合法停驻结果。
-下一步同步consumer语义并覆盖真实mode2初始化及OFF结果→ON请求回归；保留完成和资源保护，修复后再验收唤醒硬件路径。
-后续四项对齐审计已本地复现真实mode2 consumer取消合法OFF并拒绝ON，原底层/FB测试仍通过，确认原测试漏掉上下层合同。
-见[日志证据](PANEL-D1-0121A30.md)及[四项对齐与测试缺口](PANEL-LINEAGE-SUSPEND-RESUME.md#四项对齐复核2026-11-14)。
-本轮为审计/本地验证/记录，未改驱动；不重测旧a30，不切combined/supply。以下为历史。
+**当前执行点（2026-11-14）：0221已修复FB mode2与MDSS的配合逻辑（`5cf36dd`），本地通过，待用户push云编译。**
+FB mode2启用supply/link/data parking验收，接受合法OFF停驻并继续ON；保留完整资源、像素和触摸完成条件。
+四profile各三轮60份实际MDSS状态→真实FB回放通过，原a30同测试失败；损坏凭据、capability、旧资源保持结果仍拒绝。
+四套ASan/UBSan、ARM64对象（1398条告警不变）、37patch严格重放/78文件/118项CI markers通过。
+下一步下载新kernel/buildtree（建议0121a31），核对0221后沿原ABI608/ADT/605字节参数打包，先测一次OFF→ON。
+先确认OFF complete后不再cancel，再看ON/ULPS退出/host soft reset/DDIC/新像素/触摸。
+见[实现与完整验证](PANEL-LINEAGE-SUSPEND-RESUME.md)。a30仍是最后实测，无新镜像；不重测旧版或切combined/supply。以下为历史。
 
 **历史执行点（2026-11-13）：a25已分析；0213局部状态/复位取证已提交7f4f55a，待用户push云编译。**
 a25首错仍为branch7/+4004 branch-wait，PA正确，立即及39次等待均未见enable，整体期限仍余188.3ms。
