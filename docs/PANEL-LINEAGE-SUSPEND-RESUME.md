@@ -4,7 +4,7 @@
 
 实现提交`5cf36dd`，补丁[0221](../xnu/patches/0221-mh2lm-lineage-framebuffer-lifecycle.patch)，
 SHA256=`5c2d8591be684f07885e32a783cc0be6cf95d7d5e771db352255619b783f7ebf`。
-用户要求补齐配合逻辑；本轮已修复下述mode2 consumer遗漏，待新内核实机验证。
+用户要求补齐配合逻辑；下述mode2 consumer遗漏已修复，a31普通息屏唤醒实测通过，见下方交付与实测更新。
 
 framebuffer现在将`sweetpanellifecycle=2`同时映射为supply cycle、link cycle和data parking，
 与0220的MDSS一致。OFF完成接受本panel票已撤销、链路/DATA停驻、共享config仍持有的状态；
@@ -35,12 +35,14 @@ ON完成仍须供电票/链路/资源恢复，以及新像素和触摸恢复证�
 底稿`scratch/framebuffer-0221/`含`final-review.json`、四份test输出、旧a30失败输出、
 `bridge/mdss-status.json`、编译/告警、累计重放和旧产物拒绝证据。prepare-patch会重建verify，不能在测试/编译读取时执行。
 
-2026-11-14交付更新：[0121a31产物与测试命令](PANEL-D1-0121A31.md)已就绪。
+2026-11-14交付与实测更新：[0121a31普通息屏唤醒实测通过](PANEL-D1-0121A31.md)。
 78份受检源码匹配0221验证树，118项source markers、223项内核markers通过；ABI608四档打包/回读通过，
 全部ADT与args保持a30、retained仍605字节。未取得独立CI run ID或完整构建日志。
-实机先确认OFF complete之后不再出现consumer cancelled，再看ON begin、ULPS退出、host soft reset、
-DDIC/ON、owned flush/fresh pixels及touch/ON complete。无需重测a30或切combined/supply。
-下一步直接实测a31，无需再编同一内核。当前尚无a31实机结果；修复的是已证明的软件合同缺陷，后续唤醒硬件仍待验证。
+用户确认息屏后点亮、触摸/按键/亮度调节正常。日志4776 OFF complete后无consumer cancelled，
+4816 ON begin，ULPS exit/host soft reset/DDIC reset/17条ON命令（含四个长包DMA）完成，
+5482 owned flush、5495 touch恢复、5496 ON complete、5509 FB owned resume verified。
+6636唤醒后完整一分钟59.942Hz/dropped0。本轮配合修复收口，保留a31基线，无需重编或重复首次验证。
+此次仅一个普通OFF/ON周期；不代表多轮耐久、完整管线独立重建或完整核心低功耗验收。
 
 以下为0221修复前的审计与历史实现记录。
 

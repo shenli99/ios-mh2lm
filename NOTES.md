@@ -1,5 +1,23 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0121a31 ordinary suspend/wake passed on device)
+
+**CURRENT：用户确认a31息屏后成功点亮，触摸/按键/亮度调节正常；USB日志确认一次完整OFF→ON，本轮0221配合修复实测通过。**
+实现5cf36dd，产物交付af62d09；保留0121a31-abi608-panel-retained为已验证基线。
+日志logs/live-0121a31-abi608-panel-retained.txt共623042bytes/7282行，SHA256=34763ae3ee45d071bea30a9e4d1f5c114f210ef927cd9c376c96de5071e02655。
+2306初次HANDOFF active/A=c3b64000；4670 OFF四命令done，4678reset commanded0，4698ULPS entry，4772/4775撤票ACK。
+4776 OFF complete后未cancel，4816 ON begin；4822/4825恢复票ACK，5018ULPS reentry，5165ULPS exit，5170host soft reset，5342DDIC reset完成。
+5370 ON17条含memory-dma1，四长包均有trigger后packet-done，5465全表fresh DMA_DONE+idle；5480亮度命令完成，5482owned source/flush。
+5495touch app/format/IRQ恢复，5496 ON complete/data-restored1/link-rebuilt1/own-rails0xf，5509FB owned resume verified/frame5002/flush0。
+6636唤醒后完整60090ms窗口3602帧/59.942Hz/dropped0；日志末尾正常shutdown路径至PSCI SYSTEM_OFF，无panic签名。
+全日志无consumer cancelled；OFF起无显示生命周期WARN/ERROR/失败，启动前旧scanout预检及独立电池告警不算全局已修复。
+用户可见亮度调节正常；35次CoreBrightness请求928–3408位于OFF前，不能当唤醒后全档遍历证据。按键唤醒后仍有HID down/up。
+底稿scratch/artifact-0121a31/wake-log-review.json；retained镜像SHA重算匹配020fa7803cd5703c649d6db5d1dd2228db17e43a03a2e1f6094e08ad7e0ed218。
+**NEXT：本轮普通息屏唤醒修复收口，保持a31基线；不再要求重编/重打或重复首次验证，后续显示工作按独立范围推进。**
+只有一个普通OFF/ON周期，不是多轮耐久/长休眠/全部故障退出验收；完整MDP/INTF/SMMU重建、共享核心低功耗和完整显示计划仍未完成。
+详见docs/PANEL-D1-0121A31.md顶部；BUILD-GUIDE/显示计划/Lineage实现及workspace PLAN已同步。
+本轮仅读日志/核对镜像/文档，未改驱动、命令传输、固件、ADT或args，未重跑回归、push/触发CI或操作设备。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, 0121a31 artifacts and ABI608 wake test ready)
 
 **CURRENT：用户已下载0121a31；核对包含0221并完成ABI608四档打包/回读，待retained一次OFF→ON实测。**

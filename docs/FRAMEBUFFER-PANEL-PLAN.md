@@ -1,13 +1,14 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**当前执行点（2026-11-14）：0121a31已核对包含0221（`5cf36dd`），ABI608四档镜像就绪，待retained一次OFF→ON实测。**
+**当前执行点（2026-11-14）：0121a31/0221（`5cf36dd`）普通息屏唤醒实测通过，触摸、按键及亮度调节正常。**
 FB mode2启用supply/link/data parking验收，接受合法OFF停驻并继续ON；保留完整资源、像素和触摸完成条件。
 四profile各三轮60份实际MDSS状态→真实FB回放通过，原a30同测试失败；损坏凭据、capability、旧资源保持结果仍拒绝。
 四套ASan/UBSan、ARM64对象（1398条告警不变）、37patch严格重放/78文件/118项CI markers通过。
 产物78源码/118 source markers/223内核markers通过；四档回读一致，固件/ADT/605字节retained参数保持a30。
-先确认OFF complete后不再cancel，再看ON/ULPS退出/host soft reset/DDIC/新像素/触摸。
-命令见[a31交付](PANEL-D1-0121A31.md)，修复见[实现与完整验证](PANEL-LINEAGE-SUSPEND-RESUME.md)。
-a30仍是最后实测；无需再编同一内核，不重测旧版或切combined/supply。未取得独立CI run ID/完整构建日志。以下为历史。
+日志确认OFF complete后无cancel，ON的供电/ULPS退出/host soft reset/DDIC/17条命令含长包DMA、owned flush/触摸及FB恢复验收完成。
+唤醒后完整60090ms窗口59.942Hz/dropped0；用户可见功能正常。证据见[a31实测](PANEL-D1-0121A31.md)，修复见[实现与验证](PANEL-LINEAGE-SUSPEND-RESUME.md)。
+本轮修复收口，保留a31已验证基线，无需重编/重打或重复首次验证。仅一个普通周期，多轮耐久/长休眠尚未覆盖；
+完整MDP/INTF/SMMU重建、共享核心低功耗及整个显示计划仍未完成，后续工作按独立范围推进。以下为历史。
 
 **历史执行点（2026-11-13）：a25已分析；0213局部状态/复位取证已提交7f4f55a，待用户push云编译。**
 a25首错仍为branch7/+4004 branch-wait，PA正确，立即及39次等待均未见enable，整体期限仍余188.3ms。
