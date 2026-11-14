@@ -5,7 +5,16 @@
 后半保留原a27/0215（`2ffc1a4`）首次接管审计作为历史。
 Lineage 一侧是源码所定义的路径，未取得本次同机 Android 寄存器轨迹；不能把它写成实机测量结果。
 
-## 0220 实现进展（当前）
+## 0220复核结论（2026-11-14，当前）
+
+用户要求复核除命令传输外的四项逻辑。已直接对照Lineage与a30实际源码并运行本地验证：
+下层已补OFF供电/reset、ULPS/host恢复及GPIO诊断规则；扫描只做固定管线source/flush/kickoff重新提交。
+**整体仍未对齐完成：framebuffer漏改mode2语义，拒绝合法停驻OFF，随后取消token并拒绝ON。**
+真实mode2初始化的consumer复现已通过；原FB测试使用旧resources-held完成状态，漏掉这项配合问题。
+四项判定、源文件/行号、三个验证输出及边界见[0220四项对齐复核](PANEL-LINEAGE-SUSPEND-RESUME.md#四项对齐复核2026-11-14)。
+本轮为审计，没有新修复补丁。下方a29表格是用户引用表的修改前背景，不代表a30现状。
+
+## 0220 实现进展（原记录）
 
 用户随后授权对齐息屏后状态、host/PHY、画面恢复和复位检查；已实现
 [0220 Lineage suspend/resume](PANEL-LINEAGE-SUSPEND-RESUME.md)。mode2采用panel票周期、

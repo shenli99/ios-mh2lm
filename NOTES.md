@@ -1,5 +1,18 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, four-item Lineage alignment audit)
+
+**CURRENT：按用户要求复核除命令传输外的四项逻辑；0220确有实现，但整体未完成对齐，未实施新修复。**
+直接比较Lineage@2e897dd与a30实际CI源码；六份关键文件匹配0220验证树。
+OFF供电/reset顺序、ULPS/host恢复路径和普通GPIO回显诊断已补；画面只在固定MDP/INTF/SMMU布局内重写source/stride/crop→flush/kickoff，非完整管线重建。
+mode2 framebuffer漏改已从静态判断推进到本地复现：真实初始化下，合法停驻OFF被取消，ON被拒；同状态mode6控制组通过，mode2却接受旧资源保持结果。
+原Lineage mode2测试（四profile各三轮）和原FB测试均ASan/UBSan通过；原FB mode2只手动置Full并提供resourcesHeld=true，没覆盖新上下层合同。
+复现只用原始a30 FB源码和受控backend状态，非硬件证明。底稿scratch/audit-lineage-0220/（consumer/lineage/original-fb.txt、reproduce-consumer.py、source-check.json）。
+**NEXT：同步FB consumer mode2的supply/link/data parking语义，补真实模式初始化与有效OFF→ON、缺失凭据拒绝的回归，再打新版本实机。**
+最新实机仍是a30：OFF完成后consumer取消，未进入ON；ON长包DMA、ULPS退出、像素/触摸恢复仍待验证。不重测旧a30，不切其他档位绕过。
+四项判定与源行见docs/PANEL-LINEAGE-SUSPEND-RESUME.md顶部；流程对照、a30记录、显示计划和workspace PLAN同步。
+本轮只审计/本地验证/文档，无生产补丁、CI、固件/ADT/args或设备操作。命令传输保持用户指定排除范围。以下交接为历史。
+
 ## Agent handoff / active work (2026-11-14, workspace intake and a30 OFF completion mismatch)
 
 **CURRENT：已完成项目接手梳理；发现已有a30 USB实测日志，旧“待首次OFF/ON”安排已过时。此次只审计与记录，未改驱动。**

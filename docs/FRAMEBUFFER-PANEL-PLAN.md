@@ -5,7 +5,9 @@
 随后consumer cancelled/FB completion IOError，USB/按键/用户态继续，没有ON begin。
 0220的MDSS mode2启用supply/link/data parking，但SweetFBService仍用旧mode2要求resourcesHeld，拒绝合法停驻结果。
 下一步同步consumer语义并覆盖真实mode2初始化及OFF结果→ON请求回归；保留完成和资源保护，修复后再验收唤醒硬件路径。
-见[日志证据、源码及边界](PANEL-D1-0121A30.md)。本轮仅接手/审计/记录，未改驱动或运行新回归；不重测旧a30，不切combined/supply。以下为历史。
+后续四项对齐审计已本地复现真实mode2 consumer取消合法OFF并拒绝ON，原底层/FB测试仍通过，确认原测试漏掉上下层合同。
+见[日志证据](PANEL-D1-0121A30.md)及[四项对齐与测试缺口](PANEL-LINEAGE-SUSPEND-RESUME.md#四项对齐复核2026-11-14)。
+本轮为审计/本地验证/记录，未改驱动；不重测旧a30，不切combined/supply。以下为历史。
 
 **历史执行点（2026-11-13）：a25已分析；0213局部状态/复位取证已提交7f4f55a，待用户push云编译。**
 a25首错仍为branch7/+4004 branch-wait，PA正确，立即及39次等待均未见enable，整体期限仍余188.3ms。

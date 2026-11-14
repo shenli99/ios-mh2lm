@@ -1,5 +1,55 @@
 # 0220：按 Lineage 对齐面板息屏与唤醒
 
+## 四项对齐复核（2026-11-14）
+
+用户要求检查此前“除命令传输外，其他四项与Lineage对齐”是否真正完成。本轮以
+Lineage `2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`与a30实际CI源码为准，命令传输排除在检查目标之外。
+**结论：四项都有实际修改，但整体未完成对齐。mode2的framebuffer consumer漏改，导致已完成的OFF被取消；
+画面恢复只补齐固定管线的重新提交，没有完整的MDP/INTF/SMMU状态重建。**
+
+| 用户要求 | a30/0220实际实现 | 判定与实机边界 |
+|---|---|---|
+| 息屏后reset低、休眠引脚、撤面板供电请求 | OFF表完成→5ms→suspend pinctrl→reset低5ms→host/link关闭→VPNL/VDDI撤票→5ms；ON先active pinctrl保持低，按VDDI ACK+20ms、VPNL ACK+5ms恢复 | 下层顺序已对齐所选PV普通OFF/ON路径。a30日志已有OFF/reset-low/ULPS/撤票完成；上层验收漏改，整体在此中断 |
+| host/PHY的ULPS、时钟恢复与soft reset | 已加入ULPS entry/reentry/exit、PHY idle-off/on、reset mask/unmask、PLL/时钟恢复、resync、host soft reset，之后才DDIC reset | 所选底层路径已实现，模拟通过；实机仅走过关闭侧。v2.3/v4对应路径没有有效硬件clamp回调，不写额外clamp寄存器是符合本机Lineage的；共享核心供电及RSC完整低功耗状态机仍保留原范围 |
+| 恢复管线并提交新帧 | 重新写已pin自有buffer的source/stride/crop→CTL flush→TE/autorefresh；frame_count为0才CTL_START；等待flush0+fresh PP_DONE+RD_PTR后恢复touch | 部分对齐。已超过旧的仅恢复TE/autorefresh，但仍依赖既有固定MDP/INTF/SMMU布局；未重新建立整条管线，也未获得a30唤醒实测 |
+| 去掉额外GPIO回显强制检查 | 普通CTL/mux/pull/drive/latch/input差异改为有界诊断；删除1ms输入跟随门槛，按高10/低2/高10/settle5ms推进 | 表中要求的检查规则已修改。仍保留owner/ABI/IRQ竞争及100ms总调度期限，不能说“所有检查都删除”；resetKnown/resetHigh是命令状态，不是独立电压证明 |
+
+源码路径以`scratch/artifact-0121a30/actual/xnu/iokit/Kernel/arm/`为根：
+`SweetMDSSLifecycle.inc:44,319,469,497`、`SweetMDSSPanelSupply.inc:109`、
+`SweetMDSSLink.inc:167,182,278,378`、`SweetMDSSHost.inc:25,81,138`、`SweetPanelPins.cpp:72,94,172`。
+这六份审计文件（含`SweetFBService.inc`）与0220验证树逐字节一致，记录在
+`scratch/audit-lineage-0220/source-check.json`。
+Lineage直接核对了`lge_dsi_panel.c:689,778,837,891,1047`、
+`dsi_display.c:3388,3466,7286,8092`、`dsi_phy.c:764,801`、
+`dsi_phy_hw_v4_0.c:352,377,431,487`、`dsi_ctrl_hw_cmn.c:172`、
+`dsi_ctrl_hw_2_2.c:32`、`dsi_catalog.c:113,252`及`sde_encoder_phys_cmd.c:1629,1677`。
+
+### 明确遗漏：framebuffer仍按旧mode2验收
+
+MDSS的mode2把supply/link/data parking全部打开；`SweetFBService.inc:13–14`却只给旧mode3–6
+设置这些标志。mode2于是走`:346`的`resourcesHeld`要求，拒绝下层OFF后正常的false。
+随后`:350`取消token并进入永久fault，之后的ON请求在准入处被拒绝。
+这与[a30日志3570–3577](PANEL-D1-0121A30.md)中的OFF complete→consumer cancelled→FB IOError一致。
+因此不能通过“下层OFF/ON测试通过”宣称整个驱动完成对齐。
+
+### 本轮验证及原测试缺口
+
+使用未修改的a30源码，本轮运行ASan/UBSan验证：
+
+- 原`test-mh2lm-panel-lineage-wake.py`通过：四profile各三轮、ULPS/host时序、固定扫描提交及故障场景。
+  它直接驱动MDSS，没有通过AppleCLCD consumer发起并验收电源请求。
+- 原`test-mh2lm-panel-lifecycle-fb.py`也通过，但其旧mode2用例手动设置`fPanelLifecycleFull`，
+  未以`lifecycleArg=2`验证完整模式映射；`complete()`始终给`resourcesHeld=true`，未模拟0220停驻结果。
+- 新审计复现程序用真实mode2初始化和有效停驻OFF结果，确定会取消token并拒绝ON。
+  同一结果作为mode6控制组可以通过；mode2反而仍接受缺少新供电/link凭据的旧resources-held结果。
+
+底稿和完整输出：`scratch/audit-lineage-0220/reproduce-consumer.py`、`consumer.txt`、
+`lineage.txt`、`original-fb.txt`。审计复现使用实际FB源码和受控backend状态，不是同机硬件仿真或修复测试。
+下一步先同步mode2 consumer合同，并覆盖真实模式选择、有效OFF完成→ON及缺失新凭据的拒绝场景。
+本轮没有修改生产补丁、构建新内核、操作设备或宣称唤醒修复；ON后续硬件效果仍【待核实】。
+
+## 原实现记录（2026-11-13，以下验收状态为当时快照）
+
 2026-11-13。用户授权对齐息屏后的状态、host/PHY、恢复画面和复位检查，保留命令传输。
 补丁：[0220](../xnu/patches/0220-mh2lm-lineage-panel-suspend-resume.patch)。
 参考 Lineage `2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`；此前的
