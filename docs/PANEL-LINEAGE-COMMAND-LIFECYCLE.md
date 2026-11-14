@@ -1,6 +1,6 @@
 # 0223：Lineage 命令生命周期与缓冲准备
 
-2026-11-14。用户授权将驱动逻辑及命令缓冲准备一起对齐。0223 已实现并完成本地验证，待新 CircleCI 内核和实机。a31/mode2 保留为最后成功实机基线；a32/mode7 首次接管成功、息屏后无法唤醒，不能把本次逻辑修正先记为实机修复。
+2026-11-14。用户授权将驱动逻辑及命令缓冲准备一起对齐。0223 已实现并完成本地验证；[0121a33产物和ABI608镜像](PANEL-D1-0121A33.md)已核对/打包，待实机。a31/mode2 保留为最后成功实机基线；a32/mode7 首次接管成功、息屏后无法唤醒，不能把本次逻辑修正先记为实机修复。
 
 实现提交：`6ff3085`。补丁：`xnu/patches/0223-mh2lm-lineage-command-lifecycle.patch`；SHA256：`946daee753f31c81669b5a47b23e4f33330f59b9583bf6126bb177d89853fc83`。
 在 0222 后修改七份 MDSS 源文件，无新 ADT 映射、boot arg、固件或 framebuffer ABI。
@@ -45,8 +45,8 @@ Lineage 的 `dsi_host_transfer` 对每次普通命令（包括短命令）都会
 
 ## 下一步
 
-用户 push 最新 main 后由 CircleCI 编译，下载新 `xnu-kernel-0121a33.gz` 和 `xnu-buildtree-0121a33.gz` 到 workspace logs。Agent 核对0223及源码/内核 markers，再沿原 ABI608 manifest 打 `--panel-pipeline`、mode7。当前尚无 a33 内核/镜像，不重打旧 a32，也不重测 a31。
+用户已提供0121a33两个归档，79份源码/132项source markers/243项kernel markers及ABI608两档镜像回读通过。直接测试[0121a33 panel-pipeline](PANEL-D1-0121A33.md)；ADT/启动参数与a32一致，无需再编内核或固件。
 
 实机先确认启动时 `command buffer ready bytes=4096`、generation1 和桌面更新，再做一次 OFF/ON。检查显示引用0、OFF complete、host/DDIC reset、ON逐包完成、显示引用1、generation2/fresh pixels、触摸及 FB owned resume；保存 USB 和持久日志。
 
-a32 持久日志最后仍早于 OFF；USB 末行只是 `dma-allocate-enter`，打印卡住且持续采集时长不确定。该事实不能证明分配死锁，也不能证明本次修正已经消除黑屏，详见 [a32 审计](PANEL-D1-0121A32.md)。
+a32最新pipeline1复测已确认尝试唤醒后等待超过一分钟，USB仍止于`dma-allocate-enter`；持久日志覆盖OFF完成，但仍早于ON。该事实不能证明分配死锁，也不能证明0223已经消除黑屏，详见[a32审计](PANEL-D1-0121A32.md)。

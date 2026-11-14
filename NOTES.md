@@ -1,5 +1,18 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0121a33 ABI608 mode7 artifacts ready)
+
+**CURRENT：已接手codex-session-11.md末尾“产物0121a33”；kernel/buildtree核对及两档镜像打包/回读完成，待用户实机。**
+实现内容匹配6ff3085/0223；79份受检源码匹配本地verify和既有最终SHA，相比a32恰好七份预期MDSS源码变化。132项source/243项kernel markers通过，六个明确替换的旧字符串不存在。
+内核17775912bytes，SHA256 `6feee929f7d1c69fce76e8725aa8b6a9e45a205caba54ef5dbdc90d6155a82fc`，匹配包内SHA256SUMS，ARM64 subtype0。无独立CI run ID/完整build log，未核对云端提交元数据/全量告警，未重跑旧驱动回归。
+identity/pipeline的boot header/FAT kernel+ADT+TOML回读通过；原ABI608固件/BootShim/DTB保持，两档ADT与args均与a32完全一致，pipeline605/607bytes。a31四档、a32两档镜像哈希保持。
+**NEXT：用户先开USB日志，再fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a33-abi608-panel-pipeline.img。**
+镜像35545088bytes，SHA256 `a51b55af2a06a65d0bf089fa40e2c695cbf7fefce6bb1b81b6f026f3b1514117`。完整命令及验收见[0121a33](docs/PANEL-D1-0121A33.md)。
+先检查启动command buffer ready、generation1/fresh PP/HANDOFF与桌面持续更新，再息屏5秒、唤醒一次并持续接收至少60秒；期待ON表真实完成、display引用1、generation2/new pixels/touch/ON complete/FB owned resume。首次接管失败则保留日志，不继续OFF。
+新日志live-0121a33-abi608-panel-pipeline.txt、对应-host.txt及sweetlog-0121a33-abi608-panel-pipeline.bin。a33无实机结果，a31仍成功基线；不再重复同条件a32。
+a32复测已确认等待超过一分钟，USB仍止于分配入口，持久覆盖OFF但早于ON。0223效果及a32根因未证实；全流程差异按矩阵保留，PD4未完成。
+证据scratch/artifact-0121a33/；本轮仅产物核对/打包/文档，无驱动修改、固件重编、push/触发CI或设备操作。以下交接为历史。
+
 ## Agent handoff / active work (2026-11-14, a32 pipeline1 repeat audited)
 
 **CURRENT：用户提供pipeline1 USB/持久日志，并明确尝试唤醒后等待超过1分钟；复测仍以dma-allocate-enter结束。不要再要求同条件重复a32。**

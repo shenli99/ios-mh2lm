@@ -29,14 +29,11 @@ boot.img（Android header v1, page 2048）
 已实现功能在后续使用中暴露的独立问题统一记入 [Bug 台账](BUGS.md)，
 不自动作为当前主计划的新步骤或前置测试。
 
-**最新实测：[0121a32 mode7](PANEL-D1-0121A32.md)首次接管通过，息屏后无法唤醒；日志最后为DMA缓冲分配入口，根因未确认。**
-79份受检源码、125项source markers和237项内核markers通过；ABI608的identity/pipeline两档boot/FAT回读一致。
-新路径`--panel-pipeline`/`sweetpanellifecycle=7`，追加三窄MMIO映射/pipeline ABI，参数605/607字节；固件不重编。
-USB已证实OFF完成、ON供电/ULPS/host及DDIC reset完成，未见DMA分配返回/ON表受理/generation2。持久日志只到OFF前，采集持续时间不确定。
-**待编译：[0223命令生命周期/缓冲准备](PANEL-LINEAGE-COMMAND-LIFECYCLE.md)已实现并本地通过，用户push最新main后下载新kernel/buildtree（建议0121a33）。**
-正常mode7取消CTL reset；TE/tearcheck、display/transfer引擎引用及4KiB缓冲准备已修正，短FIFO/长物理DMA保持。
-agent核对0223与132项source markers后沿原ABI608/原ADT/参数打--panel-pipeline；本轮无需重编固件。a31 retained保留作已验证基线，a32不重打；根因和0223实机效果仍待验证。
-上层调用链补充确认：0222的每次无条件CTL reset及kickoff后才连接TE，与Lineage正常command-mode流程不同；旧tearcheck关闭/命令引擎生命周期也有差异。详见[a32上层流程审计](PANEL-D1-0121A32.md)，后续需同时审查这些策略，尚未证明黑屏因果。
+**当前待实机：[0121a33/0223](PANEL-D1-0121A33.md)已完成产物核对和ABI608 identity/pipeline两档打包、回读。**
+79份受检源码匹配0223验证树；相比a32恰好七份预期变化，132项source/243项kernel markers通过。
+直接测试`boot-16k-0121a33-abi608-panel-pipeline.img`：启动command buffer ready、generation1，再一次OFF/ON及generation2。pipeline605/607bytes参数、ADT和ABI608固件与a32一致，无需重编。
+最新已测仍是[a32](PANEL-D1-0121A32.md)：首次mode7接管成功，唤醒失败；两次USB均止于dma-allocate-enter。pipeline1确认等待超过一分钟，持久覆盖OFF完成但早于ON，根因未证实。
+[0223实现](PANEL-LINEAGE-COMMAND-LIFECYCLE.md)修正CTL/TE/tearcheck、命令引擎引用与提前prepared缓冲，短FIFO/长物理DMA保持；效果待实机，剩余差异以[全流程矩阵](PANEL-LINEAGE-FULL-FLOW-AUDIT.md)为准。a31保留为成功基线。
 
 [0121a31实测与产物](PANEL-D1-0121A31.md)：包含0221，ABI608四档镜像打包与回读通过，retained普通息屏唤醒已实测通过。
 78份受检源码匹配0221验证树、118项CI source markers和223项内核markers通过；全部ADT/启动参数与a30相同。
