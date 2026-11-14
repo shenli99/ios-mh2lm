@@ -122,7 +122,7 @@ int main(){
    assert(supplyWrites[exitClear].time>=supplyWrites[exit].time+1000000);
    assert(supplyWrites[soft].time>=supplyWrites[stop].time+100000);
    for(auto&w:supplyWrites)assert(w.address!=bases[6]+0x12c); // no cold PHY reset
-   h.untilLife(SweetPanelFrame);checkPackets(profile,true,0x345);
+   h.untilLife(SweetPanelFrame);checkPackets(profile,true);assert(!h.m->fLifecycle.brightnessRestored);
    unsigned source=findWrite(bases[2]+0x14,uint32_t(h.pool->physical(0)));
    unsigned flush=findWrite(bases[3]+0x18,1);
    unsigned te=findWrite(bases[4]+0x288,h.m->fLifecycleTE);
@@ -132,7 +132,7 @@ int main(){
    assert(regs[bases[3]+0x18]==1&&h.m->fLifecycle.touchQuiesced&&h.pool->pinned);
    // New PP done + advancing RD_PTR cannot bypass a still-pending flush.
    regs[0x0ae01014]|=0x100;realFrame(h.m);h.life();assert(h.m->fLifecycle.phase==SweetPanelFrame);
-   regs[bases[3]+0x18]=0;h.complete();assert(h.m->fLifecycle.pixelsComplete&&h.t->fStatus.ready);
+   regs[bases[3]+0x18]=0;h.complete();checkPackets(profile,true,0x345);assert(h.m->fLifecycle.pixelsComplete&&h.t->fStatus.ready);
    assert(h.m->fClockBootToken==boot&&h.m->fManagedARC==arc&&h.m->fManagedRails==15);
    assert(h.m->fDsiBuffer==buffer&&dsiAllocations==allocations&&h.m->fDsiDisplayEngine&&!h.m->fDsiTransferEngine&&regs[bases[4]+0x284]==1);
   }

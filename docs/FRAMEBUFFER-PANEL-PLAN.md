@@ -1,5 +1,11 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
+## 0225 当前进展（2026-11-14，本地通过，待新CI/实机）
+
+[D07/D08首帧后亮度恢复与HS](PANEL-LINEAGE-BRIGHTNESS.md)已实现：mode2/7先ON表/首帧，再限时排空IRQ/MDP、恢复最新typed亮度，复用同generation重启并确认新帧后恢复触摸。普通亮度HS、ON/OFF表/通用DCS仍LP；prepared缓冲、完成/pin/引用/资源保护保持。
+12组驱动回归、固定参考9函数与caller静态审计、ARM641596→1596告警、41patch/79文件严格重放、141源码markers通过；旧a34被新打包门槛拒绝。证据scratch/framebuffer-0225/final-review.json。
+**下一步用户push并下载新CircleCI kernel/buildtree（建议0121a35），agent沿原ABI608核对打包mode7，再实机验证亮度/普通唤醒。** a34仍最新成功基线，无本批新kernel/boot/实机结果。通过后继续D09及其余PD4；完整C08/LP/core、首次接管/持续刷新差异、BUG-006仍单列。
+
 ## 0223 当前进展（2026-11-14）
 
 用户确认0121a33亮屏成功；[0223实现](PANEL-LINEAGE-COMMAND-LIFECYCLE.md)的[两次OFF/ON实机与日志审计](PANEL-D1-0121A33.md)通过，generation1→2→3，启动prepared缓冲跨唤醒复用。a33/mode7为当前成功基线；完整PD4及全流程一致仍未完成。

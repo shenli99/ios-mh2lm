@@ -1,5 +1,11 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+## 0225 当前进展（2026-11-14，本地通过，待新CI/实机）
+
+[D07/D08首帧后亮度恢复与HS](PANEL-LINEAGE-BRIGHTNESS.md)已实现：mode2/7先ON表/首帧，再限时排空IRQ/MDP、恢复最新typed亮度，复用同generation重启并确认新帧后恢复触摸。普通亮度HS、ON/OFF表/通用DCS仍LP；prepared缓冲、完成/pin/引用/资源保护保持。
+12组驱动回归、固定参考9函数与caller静态审计、ARM641596→1596告警、41patch/79文件严格重放、141源码markers通过；旧a34被新打包门槛拒绝。证据scratch/framebuffer-0225/final-review.json。
+**下一步用户push并下载新CircleCI kernel/buildtree（建议0121a35），agent沿原ABI608核对打包mode7，再实机验证亮度/普通唤醒。** a34仍最新成功基线，无本批新kernel/boot/实机结果。通过后继续D09及其余PD4；完整C08/LP/core、首次接管/持续刷新差异、BUG-006仍单列。
+
 ## 0224 / a34 当前进展（2026-11-14，三轮实机通过）
 
 用户确认无异常；[a34三轮OFF/ON实机与日志](PANEL-D1-0121A34.md)确认HS停→ULPS entry→OFF完整完成，ON每次17命令/4物理DMA、generation1→2→3→4、触摸/新像素/后续呈现。前两轮各完整60秒硬件刷新统计、dropped0；第三轮无完整60秒窗口。

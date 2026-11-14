@@ -60,8 +60,8 @@ int main(){
    supplyWrites.clear();supplyPark(h);checkHSOff();erasePipeline();h.m->fLifecycleTE=0xdeadbeef;h.m->fLifecycleAuto=0x81231234;
    panelPackets.clear();supplyWrites.clear();h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelPipelineRestore);
    assert(regs[bases[3]+0x30]==0&&!h.m->fPipelineConfigured&&h.m->fLifecycle.pipelineGeneration==0);
-   assert(ctlResetCount==0&&h.m->fLifecycle.brightnessRestored);
-   h.untilLife(SweetPanelFrame);configured(h);checkPackets(profile,true,0x345);
+   assert(ctlResetCount==0&&!h.m->fLifecycle.brightnessRestored);
+   h.untilLife(SweetPanelFrame);configured(h);checkPackets(profile,true);
    checkHSOn();
    auto source=findWrite(bases[2]+0x14,uint32_t(h.pool->physical(0)));
    auto sub=findWrite(bases[3]+0x110,2),flush=findWrite(bases[3]+0x18,0x80020041);
@@ -75,7 +75,8 @@ int main(){
    regs[bases[3]+0x18]=0;h.life();assert(h.m->fLifecycle.phase==SweetPanelFrame);
    realFrame(h.m);regs[0x0ae01014]&=~0x100;h.life();assert(h.m->fLifecycle.phase==SweetPanelFrame);
    regs[0x0ae01014]|=0x100;regs[bases[3]+0x18]=1;h.life();assert(h.m->fLifecycle.phase==SweetPanelFrame);
-   regs[bases[3]+0x18]=0;h.complete();assert(h.t->fStatus.ready&&h.m->fLifecycle.pixelsComplete);
+   regs[bases[3]+0x18]=0;h.complete();checkPackets(profile,true,0x345);assert(h.t->fStatus.ready&&h.m->fLifecycle.pixelsComplete);
+   assert(h.m->fPipelineGeneration==round+2);
    assert(h.m->fClockBootToken==boot&&h.m->fManagedARC==arc);
   }
  }
@@ -104,8 +105,8 @@ int main(){
  // owner. Configuration readbacks themselves remain diagnostics, not gates.
  {Harness h;ready(h);supplyPark(h);erasePipeline();regs[bases[7]+0xc0c]=3;
   uint64_t token=0;auto before=supplyWrites.size();assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)!=0&&!token&&supplyWrites.size()==before);}
- for(unsigned fault=0;fault<4;++fault){Harness h;ready(h);supplyPark(h);h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelBrightness);
-  // Finish the real brightness command before testing pipeline admission.
+ for(unsigned fault=0;fault<4;++fault){Harness h;ready(h);supplyPark(h);h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelCommand);
+  // Finish the real ON table before testing pipeline admission.
   for(unsigned n=0;n<1000&&h.m->dsiBusy();++n){fakeTicks+=1000000;physical(h.m);SweetMDSS::dsiTimerAction(h.m,h.m->fDsiTimer);}
   assert(!h.m->dsiBusy());auto before=ctlResetCount;
   if(fault==0)regs[bases[6]+8]|=6;if(fault==1)regs[bases[11]+0x30c]|=1u<<19;

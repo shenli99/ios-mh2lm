@@ -18,7 +18,7 @@ root=ns['root'];prelude=ns['prelude'];helpers=ns['helpers'];touch=ns['touch'];ac
 prelude=prelude.replace('for(unsigned off=4;off<0x400;off+=4)if(off!=8&&off!=12)regs[b+off]=0;',
  'regs[b+4]=0;regs[b+0x11c]=0;regs[b+0x118]=0;')
 prelude=prelude.replace('static void writeReg(uintptr_t b',r'''
-struct WirePacket {uint64_t time;unsigned type;std::vector<uint8_t>payload;bool memory;};
+struct WirePacket {uint64_t time;unsigned type;std::vector<uint8_t>payload;bool memory,lowPower;};
 static std::vector<WirePacket>panelPackets;
 static std::vector<uint8_t>panelFIFO,*commandMemory=nullptr;
 static std::vector<std::pair<uint64_t,unsigned>>pinEdges;
@@ -44,7 +44,7 @@ prelude=prelude.replace('trace.push_back({true,b+o,v});',r'''trace.push_back({tr
   std::vector<uint8_t>payload;
   if(type==57){assert(bytes[3]==0xc0&&n+4<=bytes.size());payload.assign(bytes.begin()+4,bytes.begin()+4+n);}
   else{assert((type==5||type==21)&&bytes[3]==0x80);payload.assign(bytes.begin(),bytes.begin()+n);}
-  panelPackets.push_back({fakeTicks,type,payload,memory});panelFIFO.clear();
+  panelPackets.push_back({fakeTicks,type,payload,memory,bool(regs[b+0x3c]&(1u<<26))});panelFIFO.clear();
  }
 ''')
 # Exact fixture memory backing used by the real descriptor DMA, not a driver state model.
@@ -72,6 +72,15 @@ helpers=helpers.replace('physical(m);linkPhysical(m);',r'''physical(m);linkPhysi
   {std::lock_guard<std::recursive_mutex>l(p->fLoop->gate);SweetPanelPins::timerAction(p,p->fTimer);}
 ''')
 helpers=helpers.replace('void wakePixels(){untilLife(SweetPanelFrame);', 'void wakePixels(){untilLife(SweetPanelFrame);regs[bases[3]+0x18]=0;')
+# complete() is called only after the test supplies the FIRST real frame.
+# Supply a separate physical completion after the post-brightness restart.
+helpers=helpers.replace('void complete(){untilLife(SweetPanelTouchResume);', r'''void complete(){
+ if(m->fLifecycleLineage&&m->fLifecycle.operation==SweetPanelDisplayOn){
+  life();untilLife(SweetPanelBrightness);untilLife(SweetPanelFrame);
+  assert(m->fLifecycle.brightnessRestored&&!m->fLifecycle.pixelsComplete);
+  regs[bases[3]+0x18]=0;regs[bases[3]+0x1c]=0;regs[0x0ae01014]|=0x100;realFrame(m);
+ }
+ untilLife(SweetPanelTouchResume);''')
 helpers=helpers.replace('bool pinned=pool->pinned;m->release();', 'bool pinned=pool->pinned;auto*buffer=m->fDsiPinned?m->fDsiBuffer:nullptr;m->release();if(buffer){buffer->complete(kIODirectionOut);buffer->release();}')
 helpers=helpers.replace('t->stop(tn);t->release();dropNub(tn);', 't->stop(tn);t->release();dropNub(tn);p->stop(pn);p->release();dropNub(pn);')
 # Independent immutable LG fixtures used only as a wire oracle.
@@ -92,6 +101,7 @@ static void checkPackets(unsigned profile,bool on,unsigned brightness=0){
  assert(panelPackets.size()==want.size());
  for(unsigned i=0;i<want.size();++i){auto&p=panelPackets[i];assert(p.type==want[i].type&&p.payload==want[i].payload);
   assert(p.memory==(p.type==57&&p.payload.size()+4>64));
+  assert(p.lowPower==(!(lifecycleMode==2||lifecycleMode==7)||!brightness||i+1<want.size()));
   auto end=i+1<want.size()?panelPackets[i+1].time:fakeTicks;
   assert(end-p.time>=uint64_t(want[i].delay)*1000000ULL);}
 }

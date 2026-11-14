@@ -1,0 +1,287 @@
+diff --git a/iokit/Kernel/arm/SweetDisplayBackend.h b/iokit/Kernel/arm/SweetDisplayBackend.h
+--- a/iokit/Kernel/arm/SweetDisplayBackend.h
++++ b/iokit/Kernel/arm/SweetDisplayBackend.h
+@@ -26,7 +26,8 @@
+  SweetPanelResourcePark, SweetPanelResourceRestore,
+  SweetPanelLinkPowerDown, SweetPanelLinkRebuild,
+  SweetPanelPinParkActivate, SweetPanelPinParkWait, SweetPanelPinPark,
+- SweetPanelSupplyActivate, SweetPanelSupplyPark, SweetPanelSupplyRestore, SweetPanelPipelineRestore };
++ SweetPanelSupplyActivate, SweetPanelSupplyPark, SweetPanelSupplyRestore, SweetPanelPipelineRestore,
++ SweetPanelBrightnessDrain };
+ struct SweetPanelLifecycleStatus {
+  uint64_t token, touchToken, commandToken, pinToken;
+  unsigned operation, phase, rails, profile;
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -236,6 +236,8 @@
+  OSData *fDsiSequence;
+  IOBufferMemoryDescriptor *fDsiBuffer;
+  SweetDSIStatus fDsiStatus;
++ bool fDsiHS; /* selected explicitly by the typed lifecycle brightness caller */
++ IOReturn beginDSISequenceMode(const uint8_t *,size_t,uint64_t *,bool);
+  bool fDsiEnabled, fDsiTimerAdded, fDsiPrepared, fDsiPinned, fDsiPaused, fDsiSaved, fDsiPoisoned;
+  uint64_t fDsiNextToken, fDsiDeadline, fDsiPhysical;
+  size_t fDsiOffset;
+@@ -488,7 +490,7 @@
+  const SweetPanelProfile *fPanelProfile;
+  bool fLifecycleLineage, fLifecycleFull, fLifecycleDataParking, fLifecycleLinkCycle, fLifecycleSupplyCycle, fLifecyclePinsActive, fPanelBrightnessKnown;
+  uint64_t fLifecycleSupplyWait;
+- uint32_t fPanelBrightnessTarget;
++ uint32_t fPanelBrightnessTarget, fLifecycleBrightnessTarget;
+  bool setupLifecycle(IOService *);
+  void traceWake(const char *,unsigned = 0);
+  void lifecycleCommand(bool);
+@@ -556,7 +558,7 @@
+  void dp_smmu_context(uint32_t,uint32_t,uint32_t);
+  void dp_probe(unsigned,vm_offset_t,vm_offset_t,vm_offset_t,vm_offset_t,
+      vm_offset_t,vm_offset_t,vm_offset_t,vm_offset_t);
+- int dp_dcs_write(vm_offset_t,vm_offset_t,const uint32_t *,unsigned,bool = false);
++ int dp_dcs_write(vm_offset_t,vm_offset_t,const uint32_t *,unsigned,bool = false,bool = false);
+  int dp_clocks_on(void);
+  static IOReturn scanoutInspectAction(OSObject *,void *,void *,void *,void *);
+  static IOReturn readyAction(OSObject *,void *,void *,void *,void *);
+@@ -1052,13 +1054,17 @@
+      (!self->fClockEnabled || self->localClocksReady()) ? kIOReturnSuccess : kIOReturnNotReady;
+ }
+ /* The backlight owns policy/fades. Retain only its latest typed target so a
+- * full vendor OFF (51=0) and DDIC reset can restore it before stream resume. */
++ * full vendor OFF (51=0) and DDIC reset can restore it after the first frame.
++ * Generic DCS remains LP; only this typed entry selects ordinary HS in the
++ * pinned Lineage modes. Admission and completion still use writeAction. */
+ IOReturn SweetMDSS::brightnessAction(OSObject *owner,void *arg,void *,void *,void *)
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
+  if (!s->fAccepting || s->isInactive() || s->fDsiPoisoned) return kIOReturnNotReady;
+  uint32_t level=*(uint32_t *)arg;
+- IOReturn rc=s->SweetDisplayBackend::setBrightness(level);
++ const uint32_t words[2]={0xc0390003u,
++     0xff000051u | ((level >> 8) << 8) | ((level & 0xffu) << 16)};
++ IOReturn rc=writeAction(s,(void *)words,(void *)(uintptr_t)2,(void *)(uintptr_t)1,NULL);
+  if (rc==kIOReturnSuccess || (rc==kIOReturnBusy && s->fPanelBrightnessKnown)) s->fPanelBrightnessTarget=level;
+  if (rc==kIOReturnSuccess) s->fPanelBrightnessKnown=true;
+  return rc;
+@@ -1074,7 +1080,7 @@
+  return fGate ? fGate->runAction(readyAction) : kIOReturnNotReady;
+ }
+ IOReturn
+-SweetMDSS::writeAction(OSObject *owner,void *words,void *n,void *,void *)
++SweetMDSS::writeAction(OSObject *owner,void *words,void *n,void *typedBrightness,void *)
+ {
+  SweetMDSS *self=(SweetMDSS *)owner;
+  if (self->lifecycleBlocked()) return kIOReturnBusy;
+@@ -1087,7 +1093,8 @@
+   return kIOReturnNotReady;
+  }
+  int rc=self->dp_dcs_write(self->dp_intf1,self->dp_dsi,(const uint32_t *)words,(unsigned)(uintptr_t)n,
+-     self->fPanelPowerEnabled && (self->fPanelState==PanelOff || self->fPanelState==PanelUnknown));
++     self->fPanelPowerEnabled && (self->fPanelState==PanelOff || self->fPanelState==PanelUnknown),
++     typedBrightness && self->fLifecycleLineage);
+  self->dp_logged++;
+  if (rc && ++self->dp_failed>=3) {
+   SWEET_LOG_ERROR("SWEET MDSS: dcs failed %d times: writes disabled\n",self->dp_failed);
+@@ -1340,7 +1347,7 @@
+ }
+ 
+ int
+-SweetMDSS::dp_dcs_write(vm_offset_t intf, vm_offset_t dsi, const uint32_t *words, unsigned count, bool idleOnly)
++SweetMDSS::dp_dcs_write(vm_offset_t intf, vm_offset_t dsi, const uint32_t *words, unsigned count, bool idleOnly, bool hs)
+ {
+ 	if ((fLifecycleLineage && (!fDsiPrepared || !fDsiBuffer || fDsiTransferEngine || fDsiPoisoned)) ||
+ 	    ((dp_rd(dsi, 0x004) & (fLifecycleLineage ? 3u : 7u)) != (fLifecycleLineage ? 1u : 5u)) || dp_rd(dsi, 0x15c) != 0 || (dp_rd(dsi, 0x110) & (1u << 24))) {
+@@ -1388,7 +1395,7 @@
+ 	if (count & 1u) {
+ 		dp_wr(dsi, 0x17c, 0);
+ 	}
+-	dp_wr(dsi, 0x03c, (dma & ~((1u << 31) | (1u << 30))) | (1u << 28) | (1u << 26));
++	dp_wr(dsi, 0x03c, (dma & ~((1u << 31) | (1u << 30) | (1u << 26))) | (1u << 28) | (hs ? 0u : (1u << 26)));
+ 	dp_wr(dsi, 0x04c, count * 4u);
+ 	dp_wr(dsi, 0x090, 1);                           /* CMD_DMA trigger */
+ 	if (dp_poll(dsi, 0x110, 1u, 1u, 200)) {
+diff --git a/iokit/Kernel/arm/SweetMDSSDSI.inc b/iokit/Kernel/arm/SweetMDSSDSI.inc
+--- a/iokit/Kernel/arm/SweetMDSSDSI.inc
++++ b/iokit/Kernel/arm/SweetMDSSDSI.inc
+@@ -1,4 +1,4 @@
+-/* D1 LP command sequencer. All actions run on the existing MDSS workloop.
++/* D1 command sequencer: profile tables LP, typed Lineage brightness HS. All actions run on the existing MDSS workloop.
+  * No busy wait for idle/DMA/delays; no synchronous consumer callback.
+  * This transport does NOT select/authorize an unknown vendor panel profile.
+  */
+@@ -99,6 +99,9 @@
+ }
+ IOReturn
+ SweetMDSS::beginDSISequence(const uint8_t *bytes,size_t length,uint64_t *token)
++{ return beginDSISequenceMode(bytes,length,token,false); }
++IOReturn
++SweetMDSS::beginDSISequenceMode(const uint8_t *bytes,size_t length,uint64_t *token,bool hs)
+ {
+  if (!token) return kIOReturnBadArgument;
+  *token=0;
+@@ -109,15 +112,16 @@
+  if (!copy) return kIOReturnNoMemory;
+  IOReturn rc=kIOReturnBadArgument;
+  if (sweet_dsi_sequence_valid((const uint8_t *)copy->getBytesNoCopy(),copy->getLength(),NULL))
+-  rc=fGate ? fGate->runAction(dsiBeginAction,copy,token) : kIOReturnNotReady;
++  rc=fGate ? fGate->runAction(dsiBeginAction,copy,token,(void *)(uintptr_t)hs) : kIOReturnNotReady;
+  copy->release(); return rc;
+ }
+ IOReturn
+-SweetMDSS::dsiBeginAction(OSObject *owner,void *arg,void *output,void *,void *)
++SweetMDSS::dsiBeginAction(OSObject *owner,void *arg,void *output,void *hs,void *)
+ {
+  SweetMDSS *s=(SweetMDSS *)owner;
+  OSData *data=(OSData *)arg;
+  s->traceWake("dsi-admission-enter");
++ if (hs && (!s->fLifecycleInternal || !s->fLifecycleLineage)) return kIOReturnBadArgument;
+  if (!s->fLifecycleInternal && s->lifecycleBlocked()) return kIOReturnBusy;
+  if (!s->fAccepting || s->isInactive() || s->fDsiPoisoned) return kIOReturnNotReady;
+  if (!s->fDsiEnabled) return kIOReturnUnsupported;
+@@ -162,7 +166,7 @@
+   IOReturn rc=s->prepareDSICommandBuffer();if (rc!=kIOReturnSuccess) return rc;
+  }
+  s->traceWake("dsi-arm-enter");
+- data->retain(); s->fDsiSequence=data; s->fDsiOffset=0;
++ data->retain(); s->fDsiSequence=data; s->fDsiOffset=0; s->fDsiHS=hs!=NULL;
+  s->fDsiStatus={}; s->fDsiStatus.token=++s->fDsiNextToken;
+  s->fDsiStatus.total=commands; s->fDsiStatus.state=SweetDSIQuiescing;
+  *(uint64_t *)output=s->fDsiStatus.token;
+@@ -173,8 +177,8 @@
+  s->fDsiDeadline=scanout_now()+200000000ULL;
+  s->setProperty("SweetDSISequenceState",(unsigned long long)SweetDSIQuiescing,32);
+  s->fDsiTimer->setTimeoutMS(1);
+- SWEET_LOG_INFO("SWEET MDSS DSI: D1 v1 admitted token=%llu commands=%u memory-dma=%u; LP/timer sequence\n",
+-     s->fDsiStatus.token,commands,needsDMA);
++ SWEET_LOG_INFO("SWEET MDSS DSI: D1 v1 admitted token=%llu commands=%u memory-dma=%u; %s/timer sequence\n",
++     s->fDsiStatus.token,commands,needsDMA,s->fDsiHS ? "HS" : "LP");
+  return kIOReturnSuccess;
+ }
+ IOReturn
+@@ -330,7 +334,7 @@
+  }
+  /* Both paths use EMBEDDED mode; no non-embedded->embedded soft reset.
+   * Longest supported payload=252; PV's149-byte payload fits intact. */
+- dp_wr(dp_dsi,0x3c,(fDsiDMA&~((1u<<31)|(1u<<30)|(1u<<29)|(1u<<24)))|(1u<<28)|(1u<<26));
++ dp_wr(dp_dsi,0x3c,(fDsiDMA&~((1u<<31)|(1u<<30)|(1u<<29)|(1u<<26)|(1u<<24)))|(1u<<28)|(fDsiHS ? 0u : (1u<<26)));
+  dp_wr(dp_dsi,0x4c,(uint32_t)bytes);
+  __asm__ volatile("dsb oshst" ::: "memory");
+  fDsiOffset=next; fDsiWaitMS=m.waitMS;
+diff --git a/iokit/Kernel/arm/SweetMDSSLifecycle.inc b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+--- a/iokit/Kernel/arm/SweetMDSSLifecycle.inc
++++ b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+@@ -71,7 +71,7 @@
+  case SweetPanelLinkPowerDown:case SweetPanelLinkRebuild:
+  case SweetPanelPinParkActivate:case SweetPanelPinParkWait:case SweetPanelPinPark:
+  case SweetPanelSupplyActivate:case SweetPanelSupplyPark:case SweetPanelSupplyRestore:
+- case SweetPanelPipelineRestore: return true;
++ case SweetPanelPipelineRestore:case SweetPanelBrightnessDrain: return true;
+  default: return false;
+  }
+ }
+@@ -324,7 +324,10 @@
+ }
+ void SweetMDSS::restoreLifecycleStream(void)
+ {
+- if (fPipelineEnabled && fLifecycle.phase!=SweetPanelPipelineRestore) {
++ /* A post-brightness restart reuses this wake generation. Rebuilding it
++  * again would invalidate the first-frame proof and reset ownership. */
++ bool brightnessResume=fLifecycleLineage && fLifecycle.phase==SweetPanelBrightness;
++ if (fPipelineEnabled && fLifecycle.phase!=SweetPanelPipelineRestore && !brightnessResume) {
+   IOReturn rc=beginPipeline();
+   if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"pipeline wake configuration admission");return;}
+   fLifecycle.phase=SweetPanelPipelineRestore;fLifecycleStepDeadline=scanout_now()+100000000ULL;
+@@ -334,6 +337,7 @@
+  const vm_offset_t top=fMaps[9]->getVirtualAddress();
+  dp_wr(top,0x1018,1u<<8);
+  if (dp_rd(top,0x1014)&(1u<<8)) { finishLifecycle(kIOReturnIOError,"stale pixel done did not clear");return; }
++ fLifecycle.pixelsComplete=false;
+  fLifecycleFrame=fFrameCount;fPanelState=PanelOn;fIrqDisplayOn=true;publishPanelState();
+  if (!armIRQ()) { finishLifecycle(kIOReturnIOError,"pixel IRQ rearm");return; }
+  if (fPipelineEnabled) {
+@@ -544,10 +548,33 @@
+   if (fLifecycleFull && fLifecycle.phase==SweetPanelCommand) {
+    /* dsi_display_enable acquires its persistent reference AFTER panel ON. */
+    if (!setDSIDisplayEngine(true)) {finishLifecycle(kIOReturnNotReady,"display engine acquire");return;}
+-   fLifecycle.sleeping=false;lifecycleBrightness();publishLifecycle();return;
+-  }
+-  if (fLifecycle.phase==SweetPanelBrightness) fLifecycle.brightnessRestored=true;
++   fLifecycle.sleeping=false;
++   if (fLifecycleLineage) restoreLifecycleStream();else lifecycleBrightness();
++   publishLifecycle();return;
++  }
++  if (fLifecycle.phase==SweetPanelBrightness) {
++   /* A newer target can arrive while DMA is in flight. Keep the original
++    * brightness deadline, and acknowledge only the most recent completed one. */
++   if (fLifecycleLineage && fLifecycleBrightnessTarget!=fPanelBrightnessTarget) {
++    lifecycleBrightness();publishLifecycle();return;
++   }
++   fLifecycle.brightnessRestored=true;
++   if (fLifecycleLineage) SWEET_LOG_INFO("SWEET PANEL LINEAGE: post-frame HS brightness complete target=%#x; stream restart pending\n",fLifecycleBrightnessTarget);
++  }
+   restoreLifecycleStream();publishLifecycle();return;
++ } else if (fLifecycle.phase==SweetPanelBrightnessDrain) {
++  if (!lifecycleResourcesHeld() || !scanoutConfiguration(false) ||
++      (fPipelineEnabled && (!fPipelineConfigured || fLifecycle.pipelineGeneration!=fPipelineGeneration))) {
++   finishLifecycle(kIOReturnNotReady,"post-frame brightness resources lost");return;
++  }
++  if (!lifecycleIRQDrained() || (dp_rd(dp_dsi,8)&6u) || dp_rd(dp_ctl,0x18) || dp_rd(dp_ctl,0x1c)) return;
++  if ((dp_rd(dp_intf1,0x288)&(1u<<20)) || dp_rd(dp_intf1,0x2b4)) {
++   finishLifecycle(kIOReturnIOError,"post-frame brightness pause drift");return;
++  }
++  uint32_t line=dp_rd(dp_intf1,0x2b0)&0xffffu;
++  if (line>0 && line<2340) fLifecycleIdleSamples=0;else ++fLifecycleIdleSamples;
++  if (fLifecycleIdleSamples<2) return;
++  lifecycleBrightness();publishLifecycle();return;
+  } else if (fLifecycle.phase==SweetPanelPipelineRestore) {
+   IOReturn rc=advancePipeline();
+   if (rc==kIOReturnBusy) return;
+@@ -560,6 +587,17 @@
+   observeLineage("lifecycle-te",dp_intf1,0x288,fLifecycleTE);
+   if (dp_rd(dp_ctl,0x18) || !(dp_rd(fMaps[9]->getVirtualAddress(),0x1014)&(1u<<8)) || fFrameCount<=fLifecycleFrame) return;
+   fLifecycle.pixelsComplete=true;
++  if (fLifecycleLineage && fLifecycle.operation==SweetPanelDisplayOn &&
++      (!fLifecycle.brightnessRestored || fLifecycleBrightnessTarget!=fPanelBrightnessTarget)) {
++   /* LG complete_commit -> post_kickoff unlocks pending brightness only
++    * after pixels. Our sequencer additionally needs bounded IRQ/MDP drain. */
++   fLifecycle.brightnessRestored=false;
++   dp_wr(dp_intf1,0x288,fLifecycleTE&~(1u<<20));dp_wr(dp_intf1,0x2b4,0);
++   pauseIRQ();fLifecycleIdleSamples=0;
++   fLifecycle.phase=SweetPanelBrightnessDrain;fLifecycleStepDeadline=now+50000000ULL;
++   SWEET_LOG_INFO("SWEET PANEL LINEAGE: fresh frame before brightness; draining IRQ/MDP target=%#x\n",fPanelBrightnessTarget);
++   publishLifecycle();return;
++  }
+  } else return;
+  /* A retained rail lease plus fresh pixel transfer precedes touch recovery.
+   * This is NOT a proof that reset/shared-rail power-cycling is safe. */
+@@ -599,13 +637,15 @@
+ void SweetMDSS::lifecycleBrightness(void)
+ {
+  if (!fPanelBrightnessKnown) {finishLifecycle(kIOReturnNotReady,"no typed brightness target");return;}
+- uint32_t level=fPanelBrightnessTarget;
++ bool retry=fLifecycle.phase==SweetPanelBrightness;
++ uint32_t level=fPanelBrightnessTarget;fLifecycleBrightnessTarget=level;
+  const uint8_t command[]={0x39,1,0,0,0,0,3,0x51,(uint8_t)(level>>8),(uint8_t)level};
+  fLifecycleInternal=true;
+- IOReturn rc=beginDSISequence(command,sizeof(command),&fLifecycle.commandToken);
++ IOReturn rc=beginDSISequenceMode(command,sizeof(command),&fLifecycle.commandToken,fLifecycleLineage);
+  fLifecycleInternal=false;
+  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"brightness restore admission");return;}
+- fLifecycle.phase=SweetPanelBrightness;fLifecycleStepDeadline=scanout_now()+500000000ULL;
++ fLifecycle.phase=SweetPanelBrightness;
++ if (!retry) fLifecycleStepDeadline=scanout_now()+500000000ULL;
+ }
+ 
+ void SweetMDSS::lifecycleStartReset(void)
+@@ -621,6 +661,13 @@
+ bool SweetMDSS::lifecycleResourceStepAllowed(void)
+ {
+  if (!lifecycleParticipants()) return false;
++ if (fLifecycleLineage && fLifecycle.phase==SweetPanelBrightness) {
++  return scanout_now()<fLifecycleDeadline && scanout_now()<fLifecycleStepDeadline &&
++      fLifecycle.pixelsComplete && lifecycleResourcesHeld() && lifecycleIRQDrained() &&
++      scanoutConfiguration(false) && (!fPipelineEnabled || (fPipelineConfigured && fLifecycle.pipelineGeneration==fPipelineGeneration)) &&
++      !(dp_rd(dp_intf1,0x288)&(1u<<20)) && !dp_rd(dp_intf1,0x2b4) &&
++      !dp_rd(dp_ctl,0x18) && !dp_rd(dp_ctl,0x1c);
++ }
+  if (fLifecycleLinkCycle && (fLifecycle.phase==SweetPanelLinkPowerDown || fLifecycle.phase==SweetPanelLinkRebuild))
+   return lifecycleLinkStepAllowed();
+  if (fLifecycle.phase!=SweetPanelResourcePark && fLifecycle.phase!=SweetPanelResourceRestore) return true;

@@ -1,5 +1,14 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0225 D07/D08 local implementation passed)
+
+**CURRENT：用户“好继续”；D07/D08已实现、本地验证通过，待新CI和实机。a34/mode7仍最新成功实机基线，a33/mode7与a31/mode2保留。**
+0225：mode2/7 ON表→display引用→管线/真实首帧→新增BrightnessDrain（50ms、真实IRQ/MDP/CTL/line排空）→最新typed亮度HS（500ms）→同generation重启、再次新帧（100ms）→触摸/FB完成。发送中target变化补发不延长预算；第二帧前target变化再按首帧后的流程发送，总16s不变；触摸恢复期更新由原backlight完成通知重试。普通typed同步也HS；ON/OFF表/通用DCS/旧模式保持LP，51 high low不变。
+只变四份生产源码SweetDisplayBackend.h、SweetMDSS.cpp、DSI.inc、Lifecycle.inc；enum尾部追加，状态布局/ABI608/ADT/605byte参数不变。a34 prepared4KiB缓冲、FIFO/物理DMA/真实完成/引用/pin与clock/link/supply/IRQ归属保持。新等待失败关闭、资源保留、无自动恢复。
+12组驱动回归通过（mode2/7四profile三轮、两模式亮度专属、命令生命周期、实际MDSS→FB各108状态、mode6供电/host/sequence/旧DCS）；新边界含六排空条件、五阶段×五种cancel/stop/provider/deadline/resource失败、五种command失败、实际backlight延迟重试。Lineage固定2e897dd九个未改写函数执行，实际complete_commit与pending/post/MIPI链，KMS/connector中间层和DTS静态审计；不是完整DRM或硬件执行。LG失败会清pending，XNU保留更严格保护。
+ARM64基线/修改MDSS均成功，1596→1596告警；41patch严格重放79文件一致，141CI source markers，新2kernel markers使旧a34拒绝且无输出。scratch/framebuffer-0225/final-review.json、brightness-reference.json、fb*/mdss-status.json及脚本/日志；实现说明docs/PANEL-LINEAGE-BRIGHTNESS.md。补丁SHA256 2a9a0242d7530c2b413222da62508b7c7cb4975fd8f40e18a0dba95ca5e2a698。
+**NEXT：用户push main触发CircleCI，下载新kernel/buildtree建议0121a35；agent核对0225并沿原ABI608打包mode7。实机先首次接管，再低/中/高调光与两轮OFF/ON各60秒，确认首帧→HS亮度→同generation新帧→触摸完成，无闪亮/跳变/停帧。** 没有新kernel/boot/CI run或实机结果，不重测a34同版。此批实机通过后D09色彩/锐度，再其余PD4；完整C08动态时钟/MDP票、LP/core/SMMU/QoS、首次/持续提交与BUG-006仍未完成。agent未push/触发CI/操作设备。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, a34 three ordinary wake cycles passed)
 
 **CURRENT：用户反馈日志已导出、无异常；USB/持久均确认三轮OFF/ON，generation1→2→3→4。a34/mode7为最新成功实机基线，a33/mode7与a31/mode2保留。**

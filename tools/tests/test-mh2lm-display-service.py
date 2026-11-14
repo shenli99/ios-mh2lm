@@ -166,7 +166,7 @@ struct IOWorkLoop : OSObject {
 struct IOCommandGate : IOEvent {
  using Action=IOReturn(*)(OSObject*,void*,void*,void*,void*);
  static IOCommandGate *commandGate(OSObject *o){auto*p=new IOCommandGate;p->owner=o;return p;}
- IOReturn runAction(Action a,void*x=nullptr,void*y=nullptr){std::lock_guard<std::recursive_mutex> l(loop->gate);return a(owner,x,y,nullptr,nullptr);}
+ IOReturn runAction(Action a,void*x=nullptr,void*y=nullptr,void*z=nullptr,void*w=nullptr){std::lock_guard<std::recursive_mutex> l(loop->gate);return a(owner,x,y,z,w);}
 };
 static std::vector<struct IOInterruptEventSource*> queued;
 struct IOInterruptEventSource : IOEvent {
