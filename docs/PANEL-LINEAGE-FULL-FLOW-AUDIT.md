@@ -1,10 +1,14 @@
-# 目标显示驱动全流程审计（更新至0225）
+# 目标显示驱动全流程审计（更新至0226）
 
 2026-11-14。用户要求整体、全面检查。**当前实现仍是局部对齐，不能称为与 Lineage 全流程一致。** 本文统一记录目标选择、首次接管、普通 OFF/ON、亮度与其他命令、持续刷新、资源、跨层完成和异常退出，以及目标面板已有但 XNU 未实现的功能。旧专项文档保留历史，当前范围和结论以本文为入口。
 
 原始0223审计未修改驱动、构建内核或操作设备。随后a33/0223、a34/0224普通OFF/ON通过；最新a35/0225结果见下方更新。旧基线保留，剩余源码差异不因唤醒通过改判为全流程一致。a32黑屏的单项根因尚未确定。
 
-## 0225 更新
+## 0226 更新
+
+[D09普通SDR Auto色彩/锐度恢复](PANEL-LINEAGE-COLOR.md)已实现，提交ba8a38a，本地14组驱动、九个真实LG函数、ARM64及42patch/80文件严格重放通过，待0121a36新CI/实机。mode2/7在ON表/display引用后、首帧前完成六包HS（1物理DMA）；只PV等待20ms，恢复默认RGB及sharpness-off。500ms新阶段及原完成/资源保护保持。当前只有明确的SDR Auto默认策略；HDR/专家/RGB动态状态、首次接管色彩、DSPP及完整C08/PD4仍保留，不将D09全项标成完成。a35仍为最新实机基线，BUG-007未修；本节使用scratch/framebuffer-0226/verify与final-review.json。
+
+## 0225 更新（a35实机历史）
 
 [D07/D08首帧后亮度与HS](PANEL-LINEAGE-BRIGHTNESS.md)已实现并通过本地12组驱动回归、固定Lineage九函数执行、ARM64及41patch严格重放。mode2/7改为首帧→限时排空→HS亮度→同generation重启/新帧→触摸完成。**[a35持久日志](PANEL-D1-0121A35.md)确认mode7两轮普通路径，用户确认滑条调光正常；a35成为带BUG-007的最新普通唤醒/亮度基线。** 第一轮约33.9秒，第二轮两个完整60秒IRQ窗口，dropped0。USB忘开，不是传输失败。BUG-007为唤醒闪现旧画面，按用户要求暂缓；硬件fresh frame不证明锁屏内容就绪。晚到target保留/补发、失败关闭仍为XNU适配，本次未获得这些边界的实机证据。D09、完整C08/PD4、首次/持续提交差异仍保留；本轮未实施D09。本节及D07/D08使用scratch/framebuffer-0225/verify；旧审计基线和未修改项证据保持。
 
@@ -34,7 +38,7 @@
 | link/resources OFF | HS pre-off 停 PHY clock gating → 释放 HS → LP pre-off 进 ULPS → 释放 LP → CORE pre-off PHY idle/clamp/reset mask → 撤 panel supplies。 | 0224先停PHY gating/HS/PLL，再重新检查lane idle→ULPS→PHY；park DATA，保留共享 core/ESC/config/模拟供电，最后撤 panel supplies。 |
 | ON 供电/链路 | panel pre_prepare 供电；CORE、controller、LP/PHY idle_on/ULPS重入、HS/resync/ULPS退出；随后 host soft reset、panel reset。 | 恢复 panel votes/DATA；controller 配置、PHY/ULPS重入、PLL/HS/resync/ULPS退出；host soft reset，再 panel reset。细节见 D03–D06。 |
 | ON 表/引擎 | bridge pre_enable 内 prepare→panel ON→取得 display engine 引用；encoder enable 连接 TE。 | ON 表→取得 display engine 引用→重配/恢复像素流；0225亮度移至首帧后。 |
-| ON 表之外 | KMS commit 的 connector pre_kickoff 消费 ON 电源属性；LG mode_set 恢复色彩/锐度，随后像素 kickoff。 | **没有 LG color-manager 恢复步骤**。mode7 重建固定管线，TE→flush→autorefresh1。 |
+| ON 表之外 | KMS commit 的 connector pre_kickoff 消费 ON 电源属性；LG mode_set 恢复色彩/锐度，随后像素 kickoff。 | 0226普通ON先恢复SDR Auto默认色彩/锐度六包HS，再mode7固定管线，TE→flush→autorefresh1；动态模式仍缺。 |
 | 亮度/完成 | bridge enable 的亮度更新先 pending；wait_commit_done→complete_commit→post_kickoff 发亮度并开放更新。 | 0225先等 fresh PP_DONE/flush/RD_PTR 和 generation；限时排空IRQ/MDP后发HS亮度；同generation重启并验证新帧，再恢复触摸/完成FB。 |
 
 上层依据：`L:msm_atomic.c:214/425/573`、`dsi-staging/dsi_drm.c:179/237/269/298`、`sde/sde_encoder.c:3374/4759`、`sde/sde_connector.c:423/556/603/680/718`；对应 `X:SweetMDSSLifecycle.inc:197/373`、`SweetMDSSPanelSupply.inc:103`、`SweetMDSSResources.inc:289`。
@@ -72,7 +76,7 @@
 | ID | 项目 | 判定、依据与边界 |
 |---|---|---|
 | C01 | 四 profile 的 ON/OFF | **同**。本轮独立逐字节比较8张表，包含 packet type/last/VC/ACK/长度/payload/wait；均匹配。`X:SweetPanelProfile.h` 对照四份 DTS，统计见下表。 |
-| C02 | ON/OFF 的 LP 属性 | **同**。四 profile 的 ON/OFF state 均 dsi_lp_mode，当前 sequencer 也为 LP。不能推及普通亮度和 LG vendor 表，见 D08/D09。 |
+| C02 | ON/OFF 的 LP 属性 | **同**。四 profile 的 ON/OFF state 均 dsi_lp_mode，当前 ON/OFF 入口保持 LP。不能推及普通亮度和 LG vendor 表，见 D08/D09。 |
 | C03 | 支持的 packet 范围 | **同/目标表；缺/通用能力**。目标表全是0x05/0x15/0x39、VC0、last1、noACK，最大payload149；本地支持上限252。Lineage 还支持 read/BTA、非 last 批处理、多控制器等；这些不在当前 ON/OFF 命令内。`X:SweetDSICommand.h`。 |
 | C04 | 编码与搬运 | **适**。编码≤64bytes 从栈 words 写 FIFO，较长包拷入低4GiB连续物理缓冲后 DMA。Lineage 普通 host_transfer 使用保留 GEM/IOVA。缓冲存在不表示 FIFO 也经该 descriptor 搬运。`X:SweetMDSSDSI.inc:268`。 |
 | C05 | 缓冲准备/寿命 | **适**。0223 mode2/7 发布服务前 prepare4KiB，跨 OFF/ON 保留；Lineage `L:dsi-staging/dsi_display.c:3000/519` 首 transfer 懒分配4KiB。目的为移出活动 gate 首次分配，不是照搬分配时机；也未证明启动分配可被 deadline 打断。 |
@@ -103,7 +107,7 @@ DMA 包数按当前≤64bytes编码走 FIFO 的规则统计；不是 Lineage 的
 | D06 | clamp/host soft reset | **同/局部**。v2.3 ctrl clamp和v4 PHY clamp未提供硬件回调；不能发明clamp寄存器。软件clamp状态仍参与ULPS重入，reset_config false置mask。host soft reset在ULPS退出后保存/恢复clock/control。`L:dsi_catalog.c`、`dsi_ctrl_hw_cmn.c:172/602`；`X:SweetMDSSHost.inc:25/82`。host enable/disable force clocks在Lineage也存在。 |
 | D07 | 亮度恢复时机 | **同/0225普通成功路径先后，本地通过，a35/mode7两轮实机先后已确认；适/XNU排空与失败保护**。ON表后先kickoff并取得真实首帧，再限时暂停/排空、发送待恢复亮度，最后同generation重启/验证新帧再恢复触摸。LG `msm_atomic:complete_commit`→wait_done→KMS complete→connector post→`lge_update_backlight`；真实caller/九函数执行及中间静态绑定已核对。target发送中变化补发且不延长预算；触摸恢复期间请求由客户端完成后重试。无bl-update-flag不取消LG pending。不是完整DRM或错误语义等价；见[0225](PANEL-LINEAGE-BRIGHTNESS.md)。 |
 | D08 | 普通亮度 HS/LP | **同/0225 mode2/7 typed亮度，本地通过；a35/mode7两轮恢复HS完成及用户调光响应已确认**。同步typed入口及异步恢复明确清DMA bit26，long DCS仍51 high low；普通DCS/公开sequence和ON/OFF表保留LP。参考panel kzalloc、目标无mode_flags写入，通用transfer仅MODE_LPM时加USE_LPM，普通亮度默认HS。真实MIPI链/四DTS与实际wire控制验证；旧模式继续LP，不能扩展为全部vendor命令HS已支持。 |
-| D09 | ON 表外色彩/锐度恢复 | **差**。四份DTS均有use-color-manager，均未启用ddic-register-backup；正常初值backup=false/complete=false使 `!(backup ^ complete)` 为true。ON电源属性→set_nolp的OFF→ON分支→mode_set→r66456 screen_mode→display_control，发送CM dummy与sharpness两组 **HS** 命令。`L:lge/lge_dsi_panel.c:112/634`、`lge/lge_ddic_ops_r66456_tianma_md.c:316/575/796`、PV:191/227。当前XNU只恢复ON表/亮度，没有此步骤。payload按screen/HDR/RGB状态修改，不能直接硬拷一份默认vendor表就宣称全部支持。 |
+| D09 | ON 表外色彩/锐度恢复 | **同/0226普通SDR Auto默认分支本地通过、实机待验；缺/动态策略**。四DTS启用color-manager、无ddic-register-backup；backup/complete默认false仍执行mode_set。ON电源属性→set_nolp→mode_set→r66456 screen_mode/display_control发送两组HS。XNU ON表/display引用后发送六包HS（1DMA），只有PV在CE后20ms，全部完成再首帧；固定Auto/HDRoff/RGB preset2 offsets0/锐度off，输出由九个真实LG函数核对。LG忽略命令错误而XNU停止整事务，错误语义不同；未实现HDR/专家/RGB用户接口及状态恢复，不能把默认表当成全部模式。见[0226](PANEL-LINEAGE-COLOR.md)。 |
 | D10 | 亮度数值/0/default | **适/行为不同**。LG UI max365/default158经blmap映射至12位DCS，允许0且OFF另外发送0；XNU Apple backlight使用0..4095，backend将0夹到1，OFF表内才包含51=0。`L:lge/brightness/lge_brightness.c:207`、common-panel；`X:SweetFramebuffer.cpp:330`、SweetMDSS.cpp:35。UI刻度/渐变政策应适配iOS，不能把Android UI值直接用作DCS值。 |
 | D11 | 首次亮度未知时准入 | **适/限制**。XNU full lifecycle要求已有成功typed brightness，初始未知时拒绝；Lineage有default brightness状态。`X:SweetMDSSLifecycle.inc:197`、SweetMDSS.cpp:1056；失败或Busy时target保存规则不同于LG pending。 |
 | D12 | 唤醒成功定义 | **适**。XNU supplies/link/config generation、亮度、fresh pixels、touch均成功才报告FB ON；Lineage经atomic/commit/fences及notifier表达完成。`X:SweetMDSSLifecycle.inc:550`、SweetFBService.inc:319；不能用单个配置读回、软件post-kickoff或ON表发送成功替代新帧。 |
@@ -139,7 +143,7 @@ DMA 包数按当前≤64bytes编码走 FIFO 的规则统计；不是 Lineage 的
 | G01 | ESD检测/恢复 | **缺**。PV:49启用esd-check、te_signal_check；Lineage `dsi_display.c:432/811/862` TE GPIO检查及panel-dead后续恢复。XNU RD_PTR watchdog并不覆盖TE检测、panel-dead恢复和重试链。不能因r66456专用err_detect ops为空就认定没有通用ESD。 |
 | G02 | ROI/partial update | **缺**。DTS启用single_roi及alignment约束，Lineage提交路径可变ROI；XNU固定全帧。代码存在不代表Android每帧都用ROI，但功能确实适用于目标。 |
 | G03 | AOD/LP1/LP2/NOLP | **缺**。目标有use-ambient、LP2/NOLP命令和AOD ops；XNU只做完整OFF/ON，无这些显示状态和触摸LPWG配合。普通ON-from-OFF在LG set_nolp中跳过NOLP命令表，但仍进入mode_set，不能把两者一起跳过。 |
-| G04 | screen mode/HDR/RGB/锐度 | **缺，且影响D09正常恢复**。r66456_ops实现动态payload映射和CM/锐度发送；PV明确use-color-manager。XNU没有状态保存/用户接口/恢复执行。此处是DDIC色彩命令，另有E07的MDP DSPP状态，两者不能混为一项。 |
+| G04 | screen mode/HDR/RGB/锐度 | **局部/0226普通SDR默认恢复；缺/动态控制**。已恢复明确的Auto/HDRoff/RGB preset2 offsets0/锐度off状态；XNU尚无对应用户接口及动态状态保存，r66456其他mapper分支未接入。首次接管仍保留ABL色彩。DDIC命令与E07的MDP DSPP状态分开处理。 |
 | G05 | ACE/IRC/FP-LHBM/TC-perf/VR-LP | **缺/按条件触发**。PV有对应开关/表/ops；forced_lhbm、need_fp_lhbm_set、HDR/IRC状态、非零tc_perf或显式VR请求才进入相应路径。不能据此认定每次普通ON无条件漏发所有vendor表。PP1无VR开关，其余三份有；具体表也随revision不同。 |
 | G06 | DDIC register backup | **不适/当前配置**。四profile/common对应节点均未启用ddic-register-backup；备份work不是本目标正常必经步骤。**这不会禁用color manager**：backup/complete都false时mode_set条件反而成立。 |
 | G07 | panel专用bc_dim/错误线/BIST等 | **不适/按ops**。`L:lge/lge_ddic_ops_r66456_tianma_md.c:796` 的bc_dim、部分检测/BIST/动态分辨率ops为空。不能从LG通用mode_set有调用点就断言本机还必须发送bc_dim命令。通用ESD仍见G01。 |
@@ -164,7 +168,7 @@ workspace `scratch/framebuffer-0223/full-flow-audit.py` 已运行，输出 `full
 
 ## 后续对齐的明确范围
 
-1. 0224 D03/D04已由a34三轮实机收口；0225 D07/D08已本地实现验证，下一步新CI/实机（建议a35），之后D09色彩/锐度。C08完整逐命令资源/动态票周期仍随显示资源工作处理；各批从真实caller和条件建立期望。
+1. 0224 D03/D04已有a34实机，0225 D07/D08已有a35普通路径证据；0226 D09默认SDR恢复已本地实现，下一步新CI/实机（建议a36）。D09动态策略及C08完整逐命令资源/动态票周期保留；各批从真实caller和条件建立期望。
 2. 首次接管与持续刷新：B01的splash、E04–E06的autorefresh/提交/帧同步，不能靠更改一个寄存器值宣布整段一致。
 3. 完整显示驱动：B04–B08、E07、F05/F06、G组中的缺项继续作为独立实现范围；不能用“普通OFF/ON通过”销项。
 4. 用户指定FIFO/物理DMA、prepared buffer与真实完成/独立pin、SMMU/IRQ/资源归属保护继续保留；跨OS亮度政策等适配要显式记录，不机械复制Linux错误清理。

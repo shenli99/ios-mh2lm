@@ -1,5 +1,16 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0226 SDR color/sharpness local implementation passed)
+
+**CURRENT：用户授权继续；D09普通SDR Auto默认色彩/锐度恢复已实现，提交ba8a38a，本地验证通过，待新CI/实机。** a35/mode7仍为最新实机基线，带已知BUG-007；BUG-007/006继续暂缓、未修复。
+0226在mode2/7普通ON表LP完成/display引擎引用后，新增六包HS色彩/锐度并全部真实完成，再管线/首帧→原0225排空/HS亮度→同generation第二帧→触摸/FB完成。CE67bytes走1次物理DMA，其余5包FIFO；只有PV在CE后20ms，其他三profile无该等待。policy明确SDR Auto/HDRoff/RGB preset2 offsets0/锐度off（DD32）；不是Android用户态模式或动态色彩支持。
+新增尾部ColorRestore阶段500ms，16s总预算、公有状态结构/ABI608/ADT/参数不变；逐次检查participant、触摸、reset、资源、引擎、IRQ/TE/CTL，成功前禁止像素；异常保留资源/pin不自动恢复。首次接管仍保留ABL色彩，旧模式/ON-OFF表/亮度及缓冲完成机制保持。
+14组驱动运行通过；新阶段每模式20个生命周期故障组合、8个FIFO/DMA完成故障、staleDONE及6个child准入；实际MDSS→FB每模式120条状态（含色彩pending），18坏凭据及mode7额外6种拒绝。Lineage固定2e897dd九个未改写函数及真实常量/四DTS输出验证；caller/初始化为静态审计，非完整DRM/硬件执行。LG mapper忽略首组错误仍发锐度，XNU整事务失败即停，差异明确保留。
+ARM64基线/修改均成功，1596→1596且warning类别数量一致；42patch严格重放80文件。生产修改Backend.h/MDSS.cpp/Lifecycle.inc、新增SweetPanelSDRColor.h。补丁SHA256 e3f37195b56fb0a5f6f10ab500b29f35929759419d76ba7fa77f883f6c608f59。
+CircleCI只加3条source断言（共144），executor/workflows/参数/资源保持；YAML、4处参数模板、6段shell语法通过。打包增加2个kernel markers，真实旧a35被拒绝且无输出；无云端服务器验证/CI run。a35镜像SHA保持34a35e7d1bc4e39fccf05502a4472aee800c1712c19126a2b3675a8260454280。
+证据scratch/framebuffer-0226/final-review.json、color-reference.json、ci-check.json、fb*/mdss-status.json及对应脚本/日志；说明docs/PANEL-LINEAGE-COLOR.md。仅本地实现/验证/提交，未push/触发CI/操作设备；没有新kernel/boot。
+**NEXT：用户push main触发CircleCI并下载新kernel/buildtree（建议0121a36）；agent核对0226后沿原ABI608打mode7，再验证首次接管及两轮OFF/ON、色彩/亮度/触摸和各60秒。** ON表17包/4DMA后新增6包HS/1DMA，再generation2/3及原亮度路径。BUG-007旧画面闪现不作为本批修复目标。D09动态状态/用户接口、首次色彩、DSPP/HDR、完整C08/LP/core/SMMU/QoS及其余PD4仍保留，不称全流程一致。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, a35 persistent wake/brightness audited, BUG-007 deferred)
 
 **CURRENT：a35/mode7两轮普通OFF/ON及首帧后HS亮度完成，用户确认滑条调光正常；另报唤醒先闪现息屏前画面，登记BUG-007并按用户要求暂缓修复。** a35为普通唤醒/亮度最新验证基线，带已知视觉问题；a34/a33/a31保留，不写“本轮无异常”。

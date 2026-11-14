@@ -1,5 +1,11 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+## 0226 当前进展（2026-11-14，默认SDR色彩/锐度本地通过，待新CI/实机）
+
+[D09普通SDR Auto色彩/锐度恢复](PANEL-LINEAGE-COLOR.md)已实现并提交ba8a38a：mode2/7 ON表LP/display引用→六包HS色彩/锐度真实完成→管线/首帧→原0225亮度与第二帧→触摸/FB完成。四profile按实际LG函数结果选择，PV单独保留20ms；默认RGB preset2 offsets0、锐度off。动态HDR/专家/RGB策略和首次接管色彩仍未实现，BUG-007按用户要求暂缓。
+14组驱动运行、九个固定LG函数、每模式120条MDSS→FB状态、ARM64告警1596→1596、42patch/80文件严格重放通过。CircleCI仅增加3条源码断言，工作流/资源保持；144markers、YAML/4参数模板/6shell段通过。旧a35被新kernel门槛拒绝，原镜像保留；证据scratch/framebuffer-0226/final-review.json。
+**下一步用户push并下载新CircleCI kernel/buildtree（建议0121a36），agent沿原ABI608核对打包mode7，再实机验证色彩/锐度、亮度和两轮OFF/ON各60秒。** 当前无新kernel/boot或实机结果，a35仍为带BUG-007的最新实机基线。D09动态状态、完整C08/LP/core、首次/持续提交及其余PD4仍保留；本轮未push/触发CI/操作设备。以下为历史。
+
 ## 0121a35 当前进展（2026-11-14，两轮唤醒/调光留证，BUG-007暂缓）
 
 [a35/0225实机持久日志](PANEL-D1-0121A35.md)确认两轮OFF/ON，generation1→2→3；每轮17包LP/4物理DMA后首帧→排空→1包HS亮度真实完成→同generation重启/新帧门槛→触摸/ON完成，后续输入与CPU呈现存在。用户确认滑条调光正常。第一轮33913ms，第二轮两个完整60秒IRQ窗口，均dropped0；不记为两轮各60秒或60Hz UI。
