@@ -1,5 +1,10 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
+## 0121a35 当前进展（2026-11-14，产物已交付，待实机）
+
+[a35/0225首帧后亮度与HS镜像](PANEL-D1-0121A35.md)已核对：79源码/141source/249kernel markers，四份变化匹配005e2ed。identity/pipeline两档沿原ABI608打包回读，ADT/参数与a34一致；a31–a34镜像保留。
+**下一步用户测试a35/mode7：先首次接管、低中高调光，再两轮OFF/ON各60秒，观察首帧→HS亮度→同generation新帧→触摸完成。** a35尚无实机结果，a34仍最新成功基线；D07/D08此批通过后再D09及其余PD4。CI/驱动无本轮改动，无测试重跑/push/设备操作。证据scratch/artifact-0121a35/final-review.json。以下为历史。
+
 ## 0225 当前进展（2026-11-14，本地通过，待新CI/实机）
 
 [D07/D08首帧后亮度恢复与HS](PANEL-LINEAGE-BRIGHTNESS.md)已实现：mode2/7先ON表/首帧，再限时排空IRQ/MDP、恢复最新typed亮度，复用同generation重启并确认新帧后恢复触摸。普通亮度HS、ON/OFF表/通用DCS仍LP；prepared缓冲、完成/pin/引用/资源保护保持。

@@ -6,7 +6,7 @@
 
 ## 0225 更新
 
-[D07/D08首帧后亮度与HS](PANEL-LINEAGE-BRIGHTNESS.md)已实现并通过本地12组驱动回归、固定Lineage九函数执行、ARM64及41patch严格重放。mode2/7改为首帧→限时排空→HS亮度→同generation重启/新帧→触摸完成。晚到target保留/补发、失败关闭是显式XNU适配；D09、完整C08/PD4仍未完成。**待新CI/实机，a34仍为最新成功基线。** 本节及D07/D08使用scratch/framebuffer-0225/verify；旧审计基线和未修改项证据保持。
+[D07/D08首帧后亮度与HS](PANEL-LINEAGE-BRIGHTNESS.md)已实现并通过本地12组驱动回归、固定Lineage九函数执行、ARM64及41patch严格重放。mode2/7改为首帧→限时排空→HS亮度→同generation重启/新帧→触摸完成。晚到target保留/补发、失败关闭是显式XNU适配；D09、完整C08/PD4仍未完成。**[a35产物](PANEL-D1-0121A35.md)已核对打包，待实机，a34仍为最新成功基线。** 本节及D07/D08使用scratch/framebuffer-0225/verify；旧审计基线和未修改项证据保持。
 
 ## 0224 更新
 

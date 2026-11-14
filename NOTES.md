@@ -1,5 +1,15 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0121a35 ABI608 brightness images ready)
+
+**CURRENT：用户已下载0121a35；kernel/buildtree核对和identity/pipeline两档打包/回读通过，待实机。** 内容匹配005e2ed/0225；此前CI模板修复389ac6e。a34/mode7仍最新成功实机基线，a33与a31保留。
+79份受检源码匹配scratch/framebuffer-0225/verify及最终SHA，相比a34只有Backend.h/MDSS.cpp/DSI.inc/Lifecycle.inc四份预期变化；141source/249kernel markers通过，新首帧后亮度/动态HS-LP序列日志存在，旧固定LP格式消失。没有驱动修改、测试重跑或CI配置修改。
+内核17775976bytes、SHA256 `2e6d223f342eaa0cd6da6131df06dc56146c72efe43b2553984a6a4cef06c877`，包内SHA256SUMS一致，ARM64 subtype0。已收到包含0225的新构建产物；没有独立run ID/完整build log，未核对云端提交元数据/全量告警。
+两档boot header/FAT内kernel+ADT+TOML回读通过；原ABI608固件/BootShim/追加DTB保持，pipeline ADT/605byte args和identity ADT/477byte args与a34相同（上限607）。a31四档、a32/a33/a34各两档镜像SHA保持。
+**NEXT：用户先开USB采集，再fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a35-abi608-panel-pipeline.img。** 镜像35545088bytes，SHA256 `34a35e7d1bc4e39fccf05502a4472aee800c1712c19126a2b3675a8260454280`。命令与验收见docs/PANEL-D1-0121A35.md；采集终端静默预期，另开tail -n40 -F可看输出。
+先确认首次generation1/桌面/持续更新，调低中高亮度；低/中亮度下息屏5秒唤醒，两轮正常后各留至少60秒。ON表/首帧→fresh frame before brightness→1包HS亮度真实完成→同generation重新kickoff/新帧→触摸/ON complete；每轮generation只增加一次到2/3。重点观察闪亮/跳变/停帧，异常先保存USB和持久日志，不放宽判据。
+日志live-0121a35-abi608-panel-pipeline.txt、-host.txt及sweetlog-0121a35-abi608-panel-pipeline.bin；本轮无实机结果。证据scratch/artifact-0121a35/final-review.json及核对/回读脚本。仅核对/打包/文档，无push/触发CI/设备操作。D07/D08实机待验；之后D09及其余PD4，完整C08/LP/core/SMMU/QoS/首次及持续提交差异、BUG-006保持单列。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, fix CircleCI template parsing before build)
 
 **CURRENT：用户报告推送0225后编译根本未启动；005e2ed新增的CircleCI marker有模板语法冲突，本轮已本地修复。** `.github/workflows/circleci.yml:107` 的 `fDsiHS ? 0u : (1u<<26)` 含未转义的 `<<`，会进入CircleCI模板解析；shell单引号不能保护此处。改为同源唯一前缀 `fDsiHS ? 0u :`，保留141项source检查。是agent上轮修改引入的配置缺陷；此前源码marker通过/ARM64单文件编译不证明CircleCI配置可启动。
