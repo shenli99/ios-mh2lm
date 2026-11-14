@@ -1,6 +1,6 @@
 # 0222：按 Lineage 重建固定显示管线
 
-2026-11-14，承接 a31/0221 的成功息屏唤醒基线。本轮推进计划“独立重建显示管线（PD4 及 PD2 余项）”的第一段：首次受控接管以及每次 mode7 唤醒，重新配置 VIG0 → LM0 → CTL0/PP0 → INTF1，然后提交自有 A 缓冲并等待新帧。已完成本地实现与验证，尚无新 CI 内核或实机结果，PD4 保持进行中。
+2026-11-14，承接 a31/0221 的成功息屏唤醒基线。本轮推进计划“独立重建显示管线（PD4 及 PD2 余项）”的第一段：首次受控接管以及每次 mode7 唤醒，重新配置 VIG0 → LM0 → CTL0/PP0 → INTF1，然后提交自有 A 缓冲并等待新帧。本地实现与验证已完成；0121a32内核已核对并完成ABI608 mode7镜像回读，尚无实机结果，PD4保持进行中。见[本轮镜像与步骤](PANEL-D1-0121A32.md)。
 
 实现提交：`c94d59d`。补丁：`xnu/patches/0222-mh2lm-lineage-pipeline-rebuild.patch`。
 补丁 SHA256：`6f4a8f6241521f8334c5b302b4181ddc930875c89dee54f0dea21a1f7fef37ac`。
@@ -48,15 +48,15 @@ SMMU domain 检查与像素配置检查拆开：已接管后的 mode7 可以从�
 
 ## 下一步交付与验收
 
-用户 push 最新 main 触发 CircleCI，下载新 kernel/buildtree（建议标签 `0121a32`）。Agent 核对 0222、79 份受检源码和 125 项 source markers，沿用 ABI608 固件；无需重新编固件。
+用户已提供0121a32 kernel/buildtree；0222、79份受检源码、125项source markers和237项内核markers核对通过，ABI608两档镜像回读完成。无需重新编内核或固件；下一步[临时启动mode7验证](PANEL-D1-0121A32.md)。
 
 新档使用 `--panel-pipeline`，`sweetpanellifecycle=7`，不会因旧文件名误用 mode2。mode7 新增 MDSS map16–18：LM0 `0x0ae45000/0x320`、PP0 `0x0ae71000/0xd4`、VIG0 CSC10 opmode `0x0ae06a00/4`，以及 `sweet,display-pipeline-abi=1`。原16映射及 identity元数据不变。
 
-拿到并核对新内核后再打包：
+本轮已执行的打包命令（无需重跑）：
 
 ```sh
 SWEET_PANEL_UEFI_MANIFEST=/home/shenli/work1/out-bs/panel-uefi-0121a14-bootargs608/panel-uefi.json \
   tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-0121a32.gz 0121a32-abi608 --panel-pipeline
 ```
 
-预计输出 `boot-16k-0121a32-abi608-panel-pipeline.img` 及 metadata-only identity；当前尚无这些新镜像。a31 retained保留。用户只需临时启动新 pipeline 档，先确认首次管线重建及桌面更新，再一次 OFF/ON 检查画面、触摸、按键和亮度。日志应见初次 generation1，唤醒 generation2，随后 fresh pixels、touch/ON complete、FB owned resume。成功后再决定剩余独立恢复范围和多轮验收，不重测旧版来替代新路径验证。
+已输出并回读 `boot-16k-0121a32-abi608-panel-pipeline.img` 及 metadata-only identity。a31 retained保留。用户只需临时启动新 pipeline 档，先确认首次管线重建及桌面更新，再一次 OFF/ON 检查画面、触摸、按键和亮度。日志应见初次 generation1，唤醒 generation2，随后 fresh pixels、touch/ON complete、FB owned resume。成功后再决定剩余独立恢复范围和多轮验收，不重测旧版来替代新路径验证。

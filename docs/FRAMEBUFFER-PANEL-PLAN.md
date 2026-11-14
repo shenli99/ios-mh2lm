@@ -1,9 +1,10 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**当前执行点（2026-11-14）：0222固定单管线重建本地通过，待用户push云编译及mode7实机。**
+**当前执行点（2026-11-14）：0121a32包含0222已核对，ABI608 mode7镜像回读通过，待实机。**
 按Lineage补CTL0 reset、VIG0/LM0/CTL0/PP0/INTF1软件配置、flush/kickoff/TE顺序及FB新代数/新帧验收。
 四profile各三轮清空配置恢复、真实MDSS→FB配合、ARM64对象、38patch/79源码/125项source markers通过；FIFO/物理DMA保持。
-详见[0222实现与边界](PANEL-PIPELINE-REBUILD.md)。新产物建议0121a32，沿ABI608打panel-pipeline（mode7，605字节）；a31/mode2作为已验证基线保留。
+产物79源码/125 source/237内核markers通过；[a32镜像与步骤](PANEL-D1-0121A32.md)已就绪。只启动panel-pipeline（mode7，605字节），先验证首次generation1再一次OFF/ON generation2；a31/mode2作为已验证基线保留。
+[0222实现与边界](PANEL-PIPELINE-REBUILD.md)保持；无需再次云编译或重编固件。
 PD4仍进行中：共享SMMU/core/VBIF/QoS/DSPP/部分PP状态和ABL首帧依赖尚待补齐，不是完整掉电重建。之后仍按PD1余项/PD5→F5→F7执行。
 
 以下为a31已完成的基线记录，其“无需重编”仅指旧a31修复，不代替本次0222的新内核验证。

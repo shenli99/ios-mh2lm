@@ -1,5 +1,27 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0121a32 ABI608 mode7 artifacts ready)
+
+**CURRENT：用户提供0121a32，已核对含0222并打包/回读identity+pipeline；待mode7首次接管与一次OFF/ON实机。**
+本段替代下方“待push/云编译”。实现c94d59d，交接f0c8bca；本轮无驱动修改。
+2026-11-14原会话中断后接手：复核两个输入归档及两档boot镜像SHA、79份源码、125项source/237项内核markers全部匹配；交付文档补齐后本地提交。
+复核证据scratch/artifact-0121a32/handoff-resume-verification.json；当前无a32实机日志，下一步仍为下述临时启动。未重复编译、打包或驱动回归。
+79份受检源码与scratch/framebuffer-0222/verify逐字节一致；比a31恰好八份预期新增/修改源码。
+125项CI source markers、237项内核markers通过；短FIFO/长物理DMA和命令表保持。
+内核17775680bytes，SHA256=c1beb951c6c2aa5efbda963708d30d9ff0c30bca5fc160037520891134972d87；包内SHA匹配，ARM64 subtype0。
+没有独立CI run ID/完整build log，未核对云端提交元数据与全量告警；未重跑0222回归。
+ABI608固件/BootShim/追加DTB保持，identity477bytes与旧ADT/参数相同；pipeline605/607bytes，args只将a31 mode2改7。
+ADT增加LM0/PP0/CSC10三窄map及pipeline ABI1，去掉扩展即a31完整ADT；display161/apps37保持。
+boot header/FAT kernel+ADT+TOML回读通过；a31四档镜像哈希与原基础ADT/固件保持。
+**NEXT：用户先开USB日志，再fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a32-abi608-panel-pipeline.img。**
+镜像35545088bytes，SHA256=38a06adb59255ffd74feb5d6e1c5fb9ff64a454946ffb8559f5700405dc5290b。
+日志logs/live-0121a32-abi608-panel-pipeline.txt；先确认generation1/freshPPDONE/HANDOFF及桌面持续更新，然后息屏约5秒再唤醒并继续接收至少30秒。
+ON应出现generation2/new frame/touch/ON complete/FB owned resume；首次接管未正常则先保留日志，不继续OFF测试。
+当前无a32实机结果，a31/mode2仍最后成功基线；不重测旧版或identity、不重编同一内核/固件。
+PD4仍进行中：共享SMMU/core/QoS/色彩/部分PP及ABL首帧依赖保持。详见docs/PANEL-D1-0121A32.md和PANEL-PIPELINE-REBUILD.md。
+底稿scratch/artifact-0121a32/含两脚本、输出、source/changes/verification/boot-verification及packaging.txt。
+本轮只产物核对/打包/文档，无push/触发CI/设备操作；未改驱动、固件、脚本或备份。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, 0222 Lineage fixed pipeline rebuild)
 
 **CURRENT：用户授权按计划继续并优先对齐Lineage；0222已实现mode7固定单管线重建，本地验证全部通过，尚无新CI/实机。**
