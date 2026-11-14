@@ -412,6 +412,9 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
       'ULPS entered after HS stop; ESC0 halt pending' \
       'ESC0 halted after ULPS; PHY shutdown next' \
       'ESC0 running before ULPS host setup' \
+      'per-transfer leases enabled; shared BOOT/core retained' \
+      'command-clock-held' \
+      'command-clock-released' \
       'fresh frame before brightness; draining IRQ/MDP' \
       'post-frame HS brightness complete' \
       'SDR Auto color/sharpness HS admitted' \

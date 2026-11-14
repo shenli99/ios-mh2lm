@@ -1,0 +1,232 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -249,9 +249,15 @@
+  bool setupDSI(void);
+  IOReturn prepareDSICommandBuffer(void);
+  bool fDsiDisplayEngine, fDsiTransferEngine;
++ uint64_t fDsiTransferClock;
++ unsigned fDsiClockLogged;
++ bool dsiClockContextReady(void);
++ bool dsiTransferClockReady(void);
++ bool retainDSITransferClock(void);
++ bool releaseDSITransferClock(void);
+  bool setDSIDisplayEngine(bool);
+  bool acquireDSITransfer(void);
+- void releaseDSITransfer(void);
++ bool releaseDSITransfer(void);
+  void finishDSI(IOReturn,unsigned,bool = false);
+  void restoreDSICommand(void);
+  void advanceDSI(void);
+@@ -668,6 +674,7 @@
+    * No DMA address is exposed here; each long packet rechecks its route. */
+   if (prepareDSICommandBuffer()!=kIOReturnSuccess) return false;
+   fDsiDisplayEngine=true; /* adopt the already active continuous splash */
++  SWEET_LOG_INFO("SWEET MDSS DSI CLOCK: per-transfer leases enabled; shared BOOT/core retained\n");
+  }
+  SWEET_LOG_INFO("SWEET MDSS: F1a v1 IOService backend; ABL scanout unchanged\n");
+  registerService();
+@@ -1409,6 +1416,9 @@
+ 	}
+ 	if (fLifecycleLineage && !rc && dp_poll(dsi,0x008,6u,0,200)) rc=-3;
+ 	irq = dp_rd(dsi, 0x110); status = dp_rd(dsi, 0x008); ack = dp_rd(dsi, 0x068);
++	if (fLifecycleLineage && !dsiTransferClockReady()) {
++		fDsiPoisoned=true;return -4; /* lost lease/clock: no cleanup writes */
++	}
+ 	if (fLifecycleLineage && (rc || !(irq&1u) || (irq&(1u<<24)) || ack || (status&6u))) {
+ 		/* Same completion rule as asynchronous packets: retain the reference,
+ 		 * keep TE paused and close admission. No FIFO reset on uncertain DMA. */
+@@ -1432,7 +1442,8 @@
+         }
+ 	}
+ restore:
+-	releaseDSITransfer();
++	if (!releaseDSITransfer() || (fLifecycleLineage &&
++	    (fDsiPoisoned || !dsiClockContextReady()))) return rc ? rc : -4;
+ 	dp_wr(intf, 0x288, sync);
+ 	dp_wr(intf, 0x2b4, refresh);
+ 	return rc;
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -137,6 +137,7 @@
+ bool SweetMDSS::clockCanGate(void)
+ {
+  if (fPipelinePending || linkBusy() || hostBusy() || dsiBusy() || fDsiPoisoned || fDsiPinned ||
++     fDsiTransferClock ||
+      fScanoutState==SweetScanoutQuiescing || fScanoutState==SweetScanoutSubmitted ||
+      (fIrqMode>=2 && __atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE)!=IrqIdle)) return false;
+  /* No boolean supplied by a consumer can substitute for hardware idle.
+@@ -268,6 +269,10 @@
+  unsigned slot=4;
+  for (unsigned n=0;n<4;++n) if (token && s->fClockLeases[n].token==token) { slot=n; break; }
+  if (slot==4 || s->fClockLeases[slot].state!=SweetClockHeld) return kIOReturnBadArgument;
++ /* Only command completion may return its lease. Retain its prerequisites
++  * even before CMD_DMA starts, when the hardware may still report idle. */
++ if (s->fDsiTransferClock && (token==s->fDsiTransferClock ||
++     token==s->fClockBootToken || token==s->fManagedClock)) return kIOReturnBusy;
+  if (token==s->fNoCClockToken && !s->noCCanReleaseClock()) return kIOReturnBusy;
+  if (!s->clockPrerequisites()) return kIOReturnNotReady;
+  unsigned disable=0;
+@@ -523,6 +528,71 @@
+  }
+  return true;
+ }
++/* Command references share this controller's real leases/counters. Existing
++ * BOOT/display owners keep all branches running; joining them must not write
++ * clocks or wait under the synchronous brightness caller's gate. Last-user
++ * transitions remain the asynchronous controller's responsibility. */
++bool SweetMDSS::dsiClockContextReady(void)
++{
++ if (!fLifecycleLineage || clockBusy() || hostBusy() || fDsiPoisoned ||
++     fHostPhase==HostFault || fHostPhase==HostStopped || !localClocksReady()) return false;
++ SweetClockLease boot={};
++ if (localClockStatus(fClockBootToken,&boot)!=kIOReturnSuccess ||
++     boot.state!=SweetClockHeld || boot.uncertain || boot.hardwareSuspended ||
++     boot.result!=kIOReturnSuccess || boot.mask!=mdssClockMasks[SweetClockDSI0]) return false;
++ unsigned mask=mdssClockMasks[SweetClockDSI0];
++ if ((fClockKnownMask&mask)!=mask) return false;
++ for (unsigned i=0;i<SweetClockCount;++i)
++  if ((mask&(1u<<i)) && !fClockReferences[i]) return false;
++ return true;
++}
++bool SweetMDSS::dsiTransferClockReady(void)
++{
++ if (!fDsiTransferClock || !dsiClockContextReady()) return false;
++ SweetClockLease lease={};
++ if (localClockStatus(fDsiTransferClock,&lease)!=kIOReturnSuccess ||
++     lease.state!=SweetClockHeld || lease.uncertain || lease.hardwareSuspended ||
++     lease.result!=kIOReturnSuccess || lease.mask!=mdssClockMasks[SweetClockDSI0]) return false;
++ for (unsigned i=0;i<SweetClockCount;++i)
++  if ((lease.mask&(1u<<i)) && fClockReferences[i]<2u) return false;
++ return true;
++}
++bool SweetMDSS::retainDSITransferClock(void)
++{
++ if (fDsiTransferClock || !dsiClockContextReady() || fClockNextToken==~(uint64_t)0) return false;
++ unsigned slot=4,mask=mdssClockMasks[SweetClockDSI0];
++ for (unsigned n=0;n<4;++n)
++  if (!fClockLeases[n].token || fClockLeases[n].state==SweetClockReleased) {slot=n;break;}
++ if (slot==4) return false;
++ for (unsigned i=0;i<SweetClockCount;++i)
++  if ((mask&(1u<<i)) && fClockReferences[i]==~0u) return false;
++ /* Validate everything before changing the existing ledger. */
++ SweetClockLease &lease=fClockLeases[slot];lease={};
++ lease.token=++fClockNextToken;lease.mask=mask;lease.state=SweetClockHeld;
++ lease.result=kIOReturnSuccess;lease.inheritedUpstream=true;
++ for (unsigned i=0;i<SweetClockCount;++i) if (mask&(1u<<i)) ++fClockReferences[i];
++ fDsiTransferClock=lease.token;
++ traceWake("command-clock-held");
++ if (fDsiClockLogged<8) SWEET_LOG_INFO("SWEET MDSS DSI CLOCK: acquired token=%llu mask=%#x; running branches shared\n",lease.token,mask);
++ return true;
++}
++bool SweetMDSS::releaseDSITransferClock(void)
++{
++ if (fDsiTransferEngine || fDsiPinned || fDsiSaved || !dsiTransferClockReady()) return false;
++ unsigned slot=4;
++ for (unsigned n=0;n<4;++n) if (fClockLeases[n].token==fDsiTransferClock) {slot=n;break;}
++ if (slot==4) return false;
++ SweetClockLease &lease=fClockLeases[slot];
++ /* A retained BOOT/display reference prevents last-user physical OFF. */
++ for (unsigned i=0;i<SweetClockCount;++i) if (lease.mask&(1u<<i)) --fClockReferences[i];
++ lease.state=SweetClockReleased;fDsiTransferClock=0;
++ traceWake("command-clock-released");
++ if (fDsiClockLogged<8) {
++  ++fDsiClockLogged;
++  SWEET_LOG_INFO("SWEET MDSS DSI CLOCK: released token=%llu after command idle; shared owners retained\n",lease.token);
++ }
++ return true;
++}
+ void SweetMDSS::stopLocalClocks(void)
+ {
+  stopCoreResources();
+diff --git a/iokit/Kernel/arm/SweetMDSSDSI.inc b/iokit/Kernel/arm/SweetMDSSDSI.inc
+--- a/iokit/Kernel/arm/SweetMDSSDSI.inc
++++ b/iokit/Kernel/arm/SweetMDSSDSI.inc
+@@ -75,7 +75,7 @@
+ bool SweetMDSS::setDSIDisplayEngine(bool on)
+ {
+  if (!fLifecycleLineage) return true;
+- if (fDsiTransferEngine || dsiBusy() || fDsiPinned || fDsiPoisoned ||
++ if (fDsiTransferEngine || fDsiTransferClock || dsiBusy() || fDsiPinned || fDsiPoisoned ||
+      !dp_clocks_on() || (dp_rd(dp_dsi,8)&6u)) return false;
+  if (fDsiDisplayEngine==on) return true;
+  dp_wr(dp_dsi,4,on ? dp_rd(dp_dsi,4)|4u : dp_rd(dp_dsi,4)&~4u);
+@@ -86,16 +86,27 @@
+ bool SweetMDSS::acquireDSITransfer(void)
+ {
+  if (!fLifecycleLineage) return true;
+- if (fDsiTransferEngine || fDsiPoisoned || fDsiPinned || !fDsiPrepared || !fDsiBuffer) return false;
++ if (fDsiTransferEngine || fDsiPoisoned || fDsiPinned || !fDsiPrepared || !fDsiBuffer ||
++     !retainDSITransferClock()) return false;
+  if (!fDsiDisplayEngine) dp_wr(dp_dsi,4,dp_rd(dp_dsi,4)|4u);
+  fDsiTransferEngine=true;
+  return true;
+ }
+-void SweetMDSS::releaseDSITransfer(void)
+-{
+- if (!fLifecycleLineage || !fDsiTransferEngine) return;
++bool SweetMDSS::releaseDSITransfer(void)
++{
++ if (!fLifecycleLineage) return true;
++ if (!fDsiTransferEngine && !fDsiTransferClock) return !fDsiPoisoned;
++ if (!fDsiTransferEngine || fDsiPinned || !dsiTransferClockReady()) {
++  fDsiPoisoned=true;return false;
++ }
+  if (!fDsiDisplayEngine) dp_wr(dp_dsi,4,dp_rd(dp_dsi,4)&~4u);
+  fDsiTransferEngine=false;
++ if (!releaseDSITransferClock()) {
++  fDsiPoisoned=true;
++  SWEET_LOG_ERROR("SWEET MDSS DSI CLOCK: release failed; lease retained, command admission closed\n");
++  return false;
++ }
++ return true;
+ }
+ IOReturn
+ SweetMDSS::beginDSISequence(const uint8_t *bytes,size_t length,uint64_t *token)
+@@ -231,18 +242,22 @@
+   * TE/auto paused. No reset/clock-off pretending to be a completion fence.
+   * A partially applied table is also an unknown DDIC state, even when its
+   * command DMA is already idle/unpinned. Recovery belongs to full rebuild. */
+- bool clocks=!noRestore && dp_clocks_on();
++ bool clocks=!noRestore && dp_clocks_on() && (!fLifecycleLineage || dsiClockContextReady());
+  bool uncertain=noRestore || fDsiStatus.state==SweetDSITransferring || (fDsiPaused && !clocks) ||
+      (result!=kIOReturnSuccess && (fDsiStatus.completed || result==kIOReturnIOError));
+- fDsiStatus.hardwareUncertain=uncertain;
+  if (uncertain) fDsiPoisoned=true;
+  else if (clocks) {
+   restoreDSICommand();
+-  releaseDSITransfer();
+-  if (fDsiPaused) {
++  if (!releaseDSITransfer()) uncertain=true;
++  if (!uncertain && fDsiPaused) {
+    dp_wr(dp_intf1,0x2b4,fDsiAuto); dp_wr(dp_intf1,0x288,fDsiTE);
+   }
+  }
++ if (uncertain) {
++  fDsiPoisoned=true;
++  if (result==kIOReturnSuccess) {result=kIOReturnNotReady;terminal=SweetDSIFailed;}
++ }
++ fDsiStatus.hardwareUncertain=uncertain;
+  fDsiPaused=false;
+  fDsiStatus.result=(int)result; fDsiStatus.state=terminal;
+  OSSafeReleaseNULL(fDsiSequence);
+@@ -279,6 +294,7 @@
+   fDsiStatus.state=SweetDSIQuiescing; fDsiDeadline=now+200000000ULL;
+  }
+  if (fDsiStatus.state==SweetDSITransferring) {
++  if (fLifecycleLineage && !dsiTransferClockReady()) {finishDSI(kIOReturnNotReady,SweetDSIFailed,true);return;}
+   fDsiStatus.irq=dp_rd(dp_dsi,0x110); fDsiStatus.hardwareStatus=dp_rd(dp_dsi,8);
+   fDsiStatus.ack=dp_rd(dp_dsi,0x68);
+   if ((fDsiStatus.irq&(1u<<24)) || fDsiStatus.ack) {
+@@ -288,7 +304,9 @@
+    /* Only a fresh done PLUS DMA/MDP idle grants command memory reuse. */
+    if (fDsiPinned) { fDsiPinned=false; fDsiBuffer->release(); }
+    traceWake("packet-done",fDsiStatus.completed+1);
+-   restoreDSICommand(); releaseDSITransfer(); ++fDsiStatus.completed;
++   restoreDSICommand();
++   if (!releaseDSITransfer()) {finishDSI(kIOReturnNotReady,SweetDSIFailed,true);return;}
++   ++fDsiStatus.completed;
+    fDsiStatus.state=SweetDSIDelay; fDsiDeadline=now+(uint64_t)fDsiWaitMS*1000000ULL;
+    fDsiTimer->setTimeoutMS(fDsiWaitMS ? fDsiWaitMS : 1); return;
+   }
