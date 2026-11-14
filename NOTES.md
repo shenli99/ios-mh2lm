@@ -1,5 +1,17 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0121a34 ABI608 mode7 artifacts ready)
+
+**CURRENT：用户提供0121a34；kernel/buildtree核对和identity/pipeline两档打包/回读通过，待用户实机。实现e09ffe0/0224，a33仍成功基线。**
+79份受检源码匹配scratch/framebuffer-0224/verify及最终SHA；相比a33仅SweetMDSS.cpp/Link.inc两个预期变化。136项source/246项kernel markers通过，新HS→ULPS日志存在，旧“ULPS entered; link clocks stopping”消失；a33 prepared缓冲及完成/引用保护保持。
+内核17775912bytes，SHA256 `8f3695d8645113e7b10ca5534ec10f190cc8b5eb2f7b450d424b68946b448f70`，与包内SHA256SUMS一致，ARM64 subtype0。无独立CI run ID/完整build log，未核对云端提交元数据/全量告警；未重跑既有驱动回归。
+两档boot header/FAT内kernel+ADT+TOML回读通过；原ABI608固件/BootShim/DTB保持，pipeline ADT和605byte args与a33一致（上限607），identity477bytes。a31四档/a32两档/a33两档镜像哈希保持。
+**NEXT：用户先开USB采集，再fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a34-abi608-panel-pipeline.img。**
+镜像35545088bytes，SHA256 `f8554f0a21c2d3f1ae14d8c45e2ac3837c381a3d883145324b7736ec8533fadd`。完整命令和验收见docs/PANEL-D1-0121A34.md；另开tail -n40 -F可看文件输出，采集终端静默是重定向预期。
+先确认generation1/首次接管与持续更新；再息屏5秒唤醒，两轮各观察至少60秒。OFF应先HS branches halted/PLL bias stop→ULPS entered after HS stop→OFF complete；ON应generation2/3、真实命令/新像素/触摸完成。异常先存日志，不放宽判据。
+日志live-0121a34-abi608-panel-pipeline.txt及-host.txt；持久sweetlog-0121a34-abi608-panel-pipeline.bin。本轮尚无a34实机结果，a33/mode7成功基线和a31/mode2保持。
+底稿scratch/artifact-0121a34/final-review.json及核对/回读脚本。仅产物核对/打包/文档，无驱动/固件/脚本修改、push/CI或设备操作。D03/D04实机待验；C08动态票及LP/core、亮度/色彩等剩余差异保持。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, 0224 HS/ULPS ordering implemented locally)
 
 **CURRENT：用户授权按计划继续；0224已实现D03/D04顺序并审计C08，本地验证通过，待用户push新CI。a33/mode7仍成功实机基线。**

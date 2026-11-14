@@ -1,6 +1,6 @@
 # 0224：普通 OFF/ON 的 HS 时钟与 ULPS 顺序
 
-2026-11-14。在 a33/0223 两次普通唤醒成功基线上，按全流程矩阵推进 D03/D04，并审计 C08。**本地实现与验证完成，待新 CircleCI 内核及实机；a33 仍是成功实机基线。** 没有改亮度/色彩、固件、ADT、启动参数或日志环。
+2026-11-14。在 a33/0223 两次普通唤醒成功基线上，按全流程矩阵推进 D03/D04，并审计 C08。**本地实现与验证完成；后续[0121a34产物](PANEL-D1-0121A34.md)已核对打包，待实机，a33仍是成功实机基线。** 没有改亮度/色彩、固件、ADT、启动参数或日志环。
 
 ## 实现范围
 
@@ -46,7 +46,7 @@ PLL unlock 和配置回显仍只是诊断，不能当作硬件完成证据。每
 - 实际 MDSS→FB mode2/mode7：各 60 份状态，分别拒绝 18/24 种损坏凭据；成功不取消，待新帧与触摸后恢复。另通过 warm link、DSI host/sequence、旧 mode6 supply、display service 回归。
 - ARM64 `SweetMDSS.cpp` 基线/修改版按同一份历史 CI 命令做本地单文件交叉编译，都通过；clang 汇总均 1596 warnings，没有新增。Linux 兼容调整见 `compile.py`；这不是整核 CI 编译。
 - 0224 严格 apply 后与 edited 逐字节相同；0185–0224 共 40 个补丁严格重放，无 offset/fuzz，79 文件一致；136 项 CI source markers 通过。
-- 打包器新增两个 0224 kernel markers。真实旧 a33 被拒绝且未创建输出，记录 `old-a33-rejected.txt`。ABI608、ADT、参数保持；没有新 kernel，尚未生成 a34 镜像。
+- 打包器新增两个 0224 kernel markers。真实旧 a33 被拒绝且未创建输出，记录 `old-a33-rejected.txt`。ABI608、ADT、参数保持；实现提交时尚无新kernel。后续a34已核对并打包，见上方产物链接。
 
 复现（在 `ref/ios-mh2lm`）：
 
@@ -58,7 +58,7 @@ python3 tools/tests/test-mh2lm-panel-pipeline.py /home/shenli/work1/scratch/fram
 
 ## 下一步
 
-用户 push 本地 main 触发 CircleCI，下载新 `kernel/buildtree`（建议命名 0121a34）。agent 核对 0224 和产物后，沿原 ABI608 打包 mode7；用户临时启动，先看首次 generation1，再验证两次普通 OFF/ON 和 generation2/3、触摸/持续更新。
+0121a34已提供，agent核对0224和产物并沿原ABI608打包mode7完成；用户临时启动，先看首次generation1，再验证两次普通OFF/ON和generation2/3、触摸/持续更新。
 
 OFF 预期先出现 `HS branches halted; PLL/bias stop issued; checking ULPS lane idle`，再出现 `ULPS entered after HS stop; PHY shutdown next`，最终 OFF complete。ON 沿原 true-completion/generation/pixels/touch 验收。若卡在新 idle 检查，保留完整 USB 与持久日志；不放宽判据绕过。
 

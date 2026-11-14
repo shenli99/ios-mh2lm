@@ -29,7 +29,7 @@ boot.img（Android header v1, page 2048）
 已实现功能在后续使用中暴露的独立问题统一记入 [Bug 台账](BUGS.md)，
 不自动作为当前主计划的新步骤或前置测试。
 
-**最新本地实现：[0224 HS/ULPS顺序](PANEL-LINEAGE-CLOCK-ULPS.md)已验证，待用户push新CircleCI及下载kernel/buildtree（建议0121a34）。** 沿原ABI608/mode7核对打包；新打包器拒绝旧a33，旧已交付镜像保留。无a34实机结果。
+**最新交付：[0121a34/0224](PANEL-D1-0121A34.md)源码/内核核对及ABI608 mode7打包回读通过，待用户临时启动验证两次OFF/ON。** 原ADT/参数保持；本版修正HS/ULPS顺序，a33成功基线保留。无a34实机结果。
 
 **最新实测：[0121a33/0223](PANEL-D1-0121A33.md)两次普通OFF/ON通过，generation1→2→3，用户确认亮屏成功。**
 持久日志确认启动command buffer ready，之后无再次分配；两次各17条ON命令/4条物理DMA完成，触摸、vsync及后续CPU呈现运行。

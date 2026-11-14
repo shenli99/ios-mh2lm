@@ -1,10 +1,10 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
-## 0224 当前进展（2026-11-14，待新CI/实机）
+## 0224 / a34 当前进展（2026-11-14，镜像已交付待实机）
 
 [HS/ULPS顺序修正](PANEL-LINEAGE-CLOCK-ULPS.md)已实现并本地验证：OFF先PHY gating/HS分支halt/PLL与bias，再新lane-idle检查→ULPS；ON/ OFF三个HS分支顺序对齐。a33的缓冲复用、命令完成/pin及generation保护保持，成功实机基线仍为a33/mode7。
 14个真实Lineage函数执行参考、mode2/7循环/故障与命令/FB联动等11份驱动回归、ARM64基线/修改对象、40patch/79文件/136项source markers通过。C08核对wake_up为空且clock请求聚合；完整逐命令/MDP票周期与共享LP/core物理释放尚未实现。未改ABI608/ADT/args、亮度色彩或日志环。
-**下一步：用户push main、下载新kernel/buildtree（建议0121a34），agent核对/打包原mode7，用户验证两次OFF/ON；之后D07/D08/D09及其余PD4。** 无新内核/镜像/实机结果。以下0223为历史基线记录。
+**0121a34产物已核对并打包回读通过；[测试镜像和命令](PANEL-D1-0121A34.md)已就绪。下一步用户临时启动mode7，验证首次接管和两次OFF/ON。** 79份源码、136项source/246项kernel markers匹配，ABI608/ADT/args保持；尚无a34实机结果。之后D07/D08/D09及其余PD4。以下0223为历史基线记录。
 
 ## 0223 / a33 已验证基线（2026-11-14）
 
