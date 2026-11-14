@@ -5,6 +5,7 @@
 四profile各三轮清空配置恢复、真实MDSS→FB配合、ARM64对象、38patch/79源码/125项source markers通过；FIFO/物理DMA保持。
 产物79源码/125 source/237内核markers通过；[a32日志及回归审计](PANEL-D1-0121A32.md)已完成。首次generation1通过，OFF完成、ON已到DDIC reset，未观察到分配返回及generation2。
 未发现既有Lineage生命周期逻辑回退；持久日志早于OFF，USB继续接收时长不确定。下一步聚焦命令缓冲准备及采集连续性，a31/mode2仍为已验证基线。
+上层调用链补充确认：0222的每次无条件CTL reset及kickoff后才连接TE，与Lineage正常command-mode流程不同；旧tearcheck关闭/命令引擎生命周期也有差异。详见[a32上层流程审计](PANEL-D1-0121A32.md)，后续需同时审查这些策略，尚未证明黑屏因果。
 [0222实现与边界](PANEL-PIPELINE-REBUILD.md)保持；无需再次云编译或重编固件。
 PD4仍进行中：共享SMMU/core/VBIF/QoS/DSPP/部分PP状态和ABL首帧依赖尚待补齐，不是完整掉电重建。之后仍按PD1余项/PD5→F5→F7执行。
 

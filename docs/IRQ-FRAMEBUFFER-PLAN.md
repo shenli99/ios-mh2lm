@@ -7,6 +7,7 @@ mode7沿Lineage配置VIG0/LM0/CTL0/PP0/INTF1，并以新配置代数及新帧完
 0121a32产物/镜像核对通过，USB显示OFF完成及ON供电/ULPS/host/DDIC reset完成，尾部停在首次DMA缓冲分配入口；未见generation2。
 [日志与回归审计](PANEL-D1-0121A32.md)未发现旧Lineage生命周期逻辑回退，但采集时长不确定、持久日志仅到OFF前，根因未确认。下一步查命令缓冲准备及日志连续性；[实现边界](PANEL-PIPELINE-REBUILD.md)保持，无新修复产物待编译。
 本节替代下方历史“当前执行点”和旧待编译/待测试安排；a31/0221为已验证基线，实测记录提交56e7b5c。
+上层调用链补充确认：0222的每次无条件CTL reset及kickoff后才连接TE，与Lineage正常command-mode流程不同；旧tearcheck关闭/命令引擎生命周期也有差异。详见[a32上层流程审计](PANEL-D1-0121A32.md)，后续需同时审查这些策略，尚未证明黑屏因果。
 
 | 大目标 | 当前状态 | 剩余范围 |
 |---|---|---|

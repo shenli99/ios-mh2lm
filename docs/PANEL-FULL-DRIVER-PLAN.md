@@ -6,6 +6,7 @@
 mode7首次接管及每次唤醒按Lineage执行CTL0 reset、VIG0/LM0/CTL/PP/INTF重配与新帧提交，保留a31/mode2基线。
 见[实现与边界](PANEL-PIPELINE-REBUILD.md)。[a32日志/回归审计](PANEL-D1-0121A32.md)显示OFF完成及ON供电/ULPS/host/DDIC reset完成，最后为首次DMA分配入口；未见ON表受理或generation2。
 未发现旧Lineage流程回退，分配阻塞尚未确认；下一步聚焦命令缓冲准备和采集连续性，无新代码待编译。
+上层调用链补充确认：0222的每次无条件CTL reset及kickoff后才连接TE，与Lineage正常command-mode流程不同；旧tearcheck关闭/命令引擎生命周期也有差异。详见[a32上层流程审计](PANEL-D1-0121A32.md)，后续需同时审查这些策略，尚未证明黑屏因果。
 基线为a31/0221（实现5cf36dd、实测记录56e7b5c），[本次证据](PANEL-D1-0121A31.md)已包含用户画面/输入/亮度反馈。
 
 | 阶段 | 已取得的结果 | 仍未完成 |

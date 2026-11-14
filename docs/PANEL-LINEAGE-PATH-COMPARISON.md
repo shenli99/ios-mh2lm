@@ -5,7 +5,21 @@
 后半保留原a27/0215（`2ffc1a4`）首次接管审计作为历史。
 Lineage 一侧是源码所定义的路径，未取得本次同机 Android 寄存器轨迹；不能把它写成实机测量结果。
 
-## 0221配合逻辑修复（2026-11-14，当前）
+## a32上层流程复核（2026-11-14，当前）
+
+a31普通OFF/ON已通过，a32首次mode7接管通过但唤醒失败。已读取MSM atomic、DSI bridge、LG panel override和SDE encoder/CRTC的上层调用，详见[a32专项审计](PANEL-D1-0121A32.md)。
+不能把“供电/ULPS/复位没有退回旧版”或“14个底层函数输出匹配”扩展为全流程等价。
+
+- 0222新增：首次/每次ON必做CTL_SW_RESET；Lineage正常command enable没有此无条件步骤，CRTC中由错误恢复条件触发。
+- 0222新增：flush/autorefresh后才接external TE；Lineage正常encoder enable helper在KMS commit/kickoff前已连接，底层注释不能代替上层顺序。
+- a31已有：OFF不清tearcheck enable；命令引擎保持开、wake DDIC reset前置command bit；短FIFO使首次命令缓冲分配推迟到wake的长表准入。
+- 共享SMMU/core/QoS/色彩保留及不完整错误恢复仍是阶段差异。
+
+命令表、供电/reset/ULPS大体先后及ON表先于像素kickoff保持；FIFO/物理DMA是用户要求，继续保留。
+持久日志末段止于OFF之前，USB最后是dma-allocate-enter；用户确认终端打印卡住，不能确认内核挂死或某项差异是黑屏根因。
+下方为各旧版本历史对照；证据`scratch/artifact-0121a32/lineage-upper-flow-review.json`。
+
+## 0221配合逻辑修复（2026-11-14，历史）
 
 用户要求补齐配合后，已在`5cf36dd`修复framebuffer mode2的supply/link/data parking映射。
 实际MDSS四profile各三轮60份typed状态经实际FB消费通过；原a30同测试失败，确认修复覆盖已见缺陷。

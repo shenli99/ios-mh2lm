@@ -1,5 +1,17 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, a32 upper Lineage flow differences confirmed)
+
+**CURRENT：用户追问持久日志/Lineage流程；补充当时终端停止打印，持续接收时长仍不确定。已复核持久末10行=USB5832–5841，早于6044 OFF，未覆盖故障。**
+上一轮审计提交860edb1仅排除a31供电/ULPS/复位/FB配合被改回旧版，不能推出全流程等同Lineage。
+直接读取LG2e897dd的MSM atomic→DSI bridge→LG panel override→SDE encoder/CRTC上层调用。
+**0222新增差异：首次/每次ON无条件CTL_SW_RESET（Lineage正常command enable不这样做，CRTC reset为错误恢复分支）；external TE放在kickoff之后连接（Lineage正常encoder enable helper在KMS commit前连接）。**
+旧差异：OFF不清tearcheck+284；command engine保持开启、wake reset前置bit；FIFO使首次DMA缓冲申请推迟到wake；共享域/核心/恢复仍不完整。
+14个底层参考函数的main为测试手工排列，未证明上层调用顺序，已修正PANEL-PIPELINE-REBUILD中“TE时序一致”等表述。
+**NEXT：同时审查上述0222策略与命令缓冲准备；根因未定，不把逻辑差异或USB末行当实机因果证明。**
+保持短FIFO/长物理DMA、真实完成/pin/资源保护及a31基线。无驱动修改/新内核/CI/设备操作。
+详见docs/PANEL-D1-0121A32.md顶部；证据scratch/artifact-0121a32/lineage-upper-flow-review.json，wake-log-review.json补充用户观察。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, a32 wake failed before DMA allocation return)
 
 **CURRENT：用户实测a32其它正常、息屏无法唤醒；USB+持久日志已审计。首次mode7 generation1/HANDOFF通过，普通ON未完成，a31仍成功基线。**

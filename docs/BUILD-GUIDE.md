@@ -34,6 +34,7 @@ boot.img（Android header v1, page 2048）
 新路径`--panel-pipeline`/`sweetpanellifecycle=7`，追加三窄MMIO映射/pipeline ABI，参数605/607字节；固件不重编。
 USB已证实OFF完成、ON供电/ULPS/host及DDIC reset完成，未见DMA分配返回/ON表受理/generation2。持久日志只到OFF前，采集持续时间不确定。
 先按[a32审计](PANEL-D1-0121A32.md)定位分配和日志连续性；本轮无新修复或待编译产物，a31 retained保留作已验证基线。
+上层调用链补充确认：0222的每次无条件CTL reset及kickoff后才连接TE，与Lineage正常command-mode流程不同；旧tearcheck关闭/命令引擎生命周期也有差异。详见[a32上层流程审计](PANEL-D1-0121A32.md)，后续需同时审查这些策略，尚未证明黑屏因果。
 
 [0121a31实测与产物](PANEL-D1-0121A31.md)：包含0221，ABI608四档镜像打包与回读通过，retained普通息屏唤醒已实测通过。
 78份受检源码匹配0221验证树、118项CI source markers和223项内核markers通过；全部ADT/启动参数与a30相同。

@@ -7,15 +7,18 @@
 参考仓：`ref/lge-lineage-kernel`，提交 `2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`。
 生产修改八份文件；新增 `SweetMDSSPipeline.inc`，继续使用唯一 SweetMDSS owner/gate 和原有 timer、资源票、扫描缓冲区。
 
+**2026-11-14上层流程复核：0222没有完整复制Lineage正常command-mode状态机。每次无条件CTL reset、kickoff之后才连接external TE均为本实现的策略，与所读Lineage上层正常路径不同。**
+原14个底层函数执行参考由测试手工安排调用，不能证明上层顺序等价；详见[a32专项审计](PANEL-D1-0121A32.md)。这些差异是否引起本次黑屏未证实。
+
 ## 实际变化
 
 | 部分 | 实现与 Lineage 依据 |
 |---|---|
-| CTL 复位 | `sde_hw_ctl_reset_control` 的 CTL0 `SW_RESET=1`，轮询 bit0 清除；2ms 硬件等待界限，XNU 用异步 timer，不在 gate 内睡眠或自旋。等待期间禁止撤回 boot clock lease。 |
+| CTL 复位 | 寄存器/等待界限来自`sde_hw_ctl_reset_control`：CTL0 `SW_RESET=1`，轮询bit0清除、2ms界限。XNU用异步timer并禁止等待期间撤boot clock票；但首次接管/每次唤醒必做reset是XNU策略，Lineage普通command enable没有同样无条件步骤。 |
 | SSPP | `sde_hw_sspp` 的 BGRA format/unpack、单矩形、尺寸/裁剪/行距/四平面地址、软件 pixel-extension；无缩放时关闭 QSEED3、旁路 CSC10。仍使用 1125×2436 自有缓冲，1080×2340 输出、stride4608、crop22,48。 |
 | Mixer/CTL 路由 | LM0 输出尺寸、单 base stage、无 split/alpha blend/dim layer；清除 CTL0 内其他 mixer stage，VIG0 仅接 LM0。ACTIVE_CFG command mode、INTF1 active，无 WB/CWB/CDM/merge3D/DSC。其他 CTL 不写入。 |
 | PP/INTF | PP0 DSC bypass、INTF1 绑定 PP0，TE0 及完整 tearcheck 配置。四 R66456 DTS 都是 1080×2340、vtotal2360、60Hz；按 Lineage 公式 `19200000/(2360*60)=135`，不重放 ABL 的 0x88。 |
-| 提交顺序 | 清旧 PP_DONE → rearm IRQ → INTF 子 flush mask2 → 主 flush `0x80020041`（VIG0/LM0/CTL/INTF）→ autorefresh frame_count1 → 连接 external TE。先 kickoff 再连接 TE，对应 Lineage 防止 premature autorefresh 的顺序。 |
+| 提交顺序 | 清旧 PP_DONE → rearm IRQ → INTF 子 flush mask2 → 主 flush `0x80020041`（VIG0/LM0/CTL/INTF）→ autorefresh frame_count1 → 连接 external TE。flush先于kickoff与Lineage一致；TE最后连接是本实现策略。Lineage底层虽有延后TE的注释，上层encoder enable helper会在KMS commit/kickoff前连接TE，不能仅凭注释称完整顺序一致。 |
 | 完成协同 | 新配置生成单调递增 `pipelineGeneration`；仍须 flush0、新 PP_DONE、RD_PTR 前进，才恢复触摸。FB mode7 需要新 capability、完整 supply/link/data 凭据以及比 OFF 更新的配置代数，旧代数不能算唤醒完成。 |
 
 SMMU domain 检查与像素配置检查拆开：已接管后的 mode7 可以从丢失的像素配置恢复，不能因旧尺寸/format/TE 不存在就提前拒绝；SMMU ID、唯一 SID 路由、CB2 属性及实际 fault 检查保留。第一次进入仍验证已知 ABL 管线并排空旧扫描，尚未实现无 ABL 冷启动。
