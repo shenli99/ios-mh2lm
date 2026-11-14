@@ -409,7 +409,9 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
  if [ "$PANEL_LIFECYCLE" = '1' ]; then
   for marker in 'SWEET FB PANEL: Lineage mode2 supply/link/data completion enabled' \
       'HS branches halted; PLL/bias stop issued; checking ULPS lane idle' \
-      'ULPS entered after HS stop; PHY shutdown next' \
+      'ULPS entered after HS stop; ESC0 halt pending' \
+      'ESC0 halted after ULPS; PHY shutdown next' \
+      'ESC0 running before ULPS host setup' \
       'fresh frame before brightness; draining IRQ/MDP' \
       'post-frame HS brightness complete' \
       'SDR Auto color/sharpness HS admitted' \

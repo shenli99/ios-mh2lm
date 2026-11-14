@@ -12,11 +12,14 @@ ns={'__file__':str(fixture),'__name__':'lineage_wake_fixture'}
 exec(compile(fixture.read_text().rsplit('\nwith tempfile.TemporaryDirectory(',1)[0],str(fixture),'exec'),ns)
 root=ns['root'];prelude=ns['prelude'];actual=ns['actual'];helpers=ns['helpers']
 touch=ns['touch'].replace('lifecycleMode=6;', 'lifecycleMode=2;')
+# ESC0 is also a BRANCH_HALT leaf. Its read-only completion bit changes in
+# the physical peer, independently of the driver's branch request write.
+helpers=helpers.replace('for(auto b:{0x2004,0x202c,0x2028})', 'for(auto b:{0x2004,0x202c,0x2028,0x2038})')
 # Independently enforce the hardware command engine prerequisite at every
 # actual wire trigger, including synchronous brightness and FIFO commands.
 prelude=prelude.replace('if(b==bases[6]&&o==0x90){',
  'if(b==bases[6]&&o==0x90){assert((regs[b+4]&7u)==5u);assert(commandMemory);')
-tests=ns['tests'].split('int main(){')[0]+r'''
+tests=ns['tests'].split('int main(){')[0].replace('m.fLinkSuspendedMask==0x70', 'm.fLinkSuspendedMask==0x78')+r'''
 static unsigned findWrite(uintptr_t address,uint32_t value,uint32_t mask=~0u,unsigned from=0){
  for(unsigned i=from;i<supplyWrites.size();++i){auto&w=supplyWrites[i];if(w.address==address&&(w.value&mask)==value)return i;}
  assert(!"expected physical write missing");return 0;
@@ -34,8 +37,9 @@ static void checkHSOff(){
  auto global=findWrite(bases[12]+0x14,0,0x20),pll=findWrite(bases[12]+0x3c,0);
  auto fifo=findWrite(bases[12]+0x1c,0),mux=findWrite(bases[12]+0x528,0),bias=findWrite(bases[12]+0x24,0,0x20);
  auto ulps=findWrite(bases[12]+0xa4,0x1f),lprx=findWrite(bases[12]+0x214,0,~0u,ulps);
+ auto esc=findWrite(bases[1]+0x2038,0,1),phy=findWrite(bases[12]+0xa0,0);
  auto mask=findWrite(bases[1]+0x8000,1,1),rail=commandIndex(0x40104);
- assert(host<gating&&gating<intf&&intf<pixel&&pixel<byte&&byte<global&&global<pll&&pll<fifo&&fifo<mux&&mux<bias&&bias<ulps&&ulps<lprx&&lprx<mask&&mask<rail);
+ assert(host<gating&&gating<intf&&intf<pixel&&pixel<byte&&byte<global&&global<pll&&pll<fifo&&fifo<mux&&mux<bias&&bias<ulps&&ulps<lprx&&lprx<esc&&esc<phy&&phy<mask&&mask<rail);
  assert(supplyWrites[ulps].time>=supplyWrites[bias].time+250);
  assert(supplyWrites[lprx].time>=supplyWrites[ulps].time+100000);
 }

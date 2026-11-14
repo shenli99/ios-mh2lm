@@ -69,6 +69,31 @@ def audit(root, pin):
             'reinit_completion(&dsi_ctrl->irq_info.cmd_dma_done)',
             'dsi_hw_ops.kickoff_command(', 'wait_for_completion_timeout(')
     checks.append(['host/ctrl/message command chain has no unconditional TE/autorefresh stop; dynamic clock change has an MDP-idle wait'])
+    encoder = 'drivers/gpu/drm/msm/sde/sde_encoder.c'
+    resource = function(encoder, 'sde_encoder_resource_control')
+    frame = resource.split('caseSDE_ENC_RC_EVENT_FRAME_DONE:', 1)[1].split('caseSDE_ENC_RC_EVENT_PRE_STOP:', 1)[0]
+    ordered(frame, 'if(sde_crtc_frame_pending(sde_enc->crtc)>1)', 'return0;',
+            'autorefresh_enabled=sde_enc->cur_master->ops.is_autorefresh_enabled(',
+            'if(!autorefresh_enabled)kthread_mod_delayed_work(')
+    ordered(function(encoder, '_sde_encoder_resource_control_helper'),
+            'sde_power_resource_enable(&priv->phandle,sde_kms->core_client,true)',
+            'sde_connector_clk_ctrl(sde_enc->cur_master->connector,true)',
+            '_sde_encoder_irq_control(drm_enc,true)',
+            '_sde_encoder_pm_qos_add_request(drm_enc,sde_kms)')
+    connector = 'drivers/gpu/drm/msm/sde/sde_connector.c'
+    assert 'c_conn->ops.clk_ctrl(display->mdp_clk_handle,DSI_ALL_CLKS,state)' in function(connector, 'sde_connector_clk_ctrl')
+    checks.append(['SDE FRAME_DONE skips delayed idle-off scheduling with autorefresh; connector uses the independent MDP clock client; static caller checks only'])
+    manager = 'drivers/gpu/drm/msm/dsi-staging/dsi_clk_manager.c'
+    ordered(function(manager, 'dsi_link_lp_clk_start'),
+            'if(mngr->is_cont_splash_enabled)gotoprepare;',
+            'clk_set_rate(link_lp_clks->esc_clk,l_clks->freq.esc_clk_rate)',
+            'clk_prepare_enable(link_lp_clks->esc_clk)')
+    assert 'clk_disable_unprepare(l_clks->lp_clks.esc_clk)' in function(manager, 'dsi_link_lp_clk_stop')
+    cc = source('drivers/clk/qcom/dispcc-sm8150.c')
+    esc = re.sub(r'\s+', '', cc.split('static struct clk_branch disp_cc_mdss_esc0_clk =', 1)[1].split('static struct clk_branch', 1)[0])
+    assert '.halt_reg=0x2038' in esc and '.halt_check=BRANCH_HALT' in esc
+    assert '.enable_reg=0x2038' in esc and '.enable_mask=BIT(0)' in esc
+    checks.append(['ESC0 is local BRANCH_HALT at DISPCC+0x2038, bit0 request; actual LP helpers execute separately in the reference test'])
     pll = 'drivers/clk/qcom/mdss/mdss-dsi-pll-7nm.c'
     ordered(function(pll, 'vco_7nm_unprepare'), 'dsi_pll_disable(vco)', 'mdss_pll_resource_enable(pll,false)')
     ordered(function(pll, 'dsi_pll_disable'), 'dsi_pll_disable_global_clk(rsc)',

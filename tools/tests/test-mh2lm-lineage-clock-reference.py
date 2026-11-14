@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Execute pinned LG clock manager, callbacks and HS helpers unmodified.
 Usage: test-mh2lm-lineage-clock-reference.py LINEAGE_ROOT [EVIDENCE_DIR]
-OS/CCF, core/LP clock and PHY leaves are stubs. This proves caller ordering and
+OS/CCF, core clock and PHY leaves are stubs. This proves caller ordering and
 aggregate votes; it does not execute DRM, CCF topology, PLL MMIO or hardware.
 """
 from pathlib import Path
@@ -58,9 +58,12 @@ static int clk_prepare(struct clk*c){event(c->prepare);return 0;}
 static int clk_enable(struct clk*c){event(c->enable);return 0;}
 static void clk_disable(struct clk*c){event(c->disable);}
 static void clk_unprepare(struct clk*c){event(c->unprepare);}
+static int clk_set_rate(struct clk*c,unsigned long rate){assert(rate==19200000);event("rate-esc19m2");return 0;}
+static int clk_prepare_enable(struct clk*c){int rc=clk_prepare(c);return rc?rc:clk_enable(c);}
+static void clk_disable_unprepare(struct clk*c){clk_disable(c);clk_unprepare(c);}
 struct dsi_link_hs_clk_info {struct clk *byte_clk,*pixel_clk,*byte_intf_clk;};
-struct dsi_link_lp_clk_info {int unused;};
-struct dsi_link_clks {struct dsi_link_hs_clk_info hs_clks;struct dsi_link_lp_clk_info lp_clks;};
+struct dsi_link_lp_clk_info {struct clk *esc_clk;};
+struct dsi_link_clks {struct dsi_link_hs_clk_info hs_clks;struct dsi_link_lp_clk_info lp_clks;struct {unsigned long esc_clk_rate;}freq;};
 struct dsi_core_clks {int unused;};
 struct list_head {struct list_head *next;};
 #define list_for_each(p,h) for(p=(h)->next;p!=(h);p=p->next)
@@ -68,7 +71,8 @@ struct list_head {struct list_head *next;};
 typedef int (*callback)(void*,enum dsi_clk_type,enum dsi_lclk_type,enum dsi_clk_state);
 struct dsi_clk_mngr {
  void *priv_data;callback pre_clkon_cb,post_clkon_cb,pre_clkoff_cb,post_clkoff_cb;
- struct dsi_core_clks *core_clks;struct dsi_link_clks *link_clks;
+ struct dsi_core_clks *core_clks;struct dsi_link_clks link_clks[MAX_DSI_CTRL];
+ bool is_cont_splash_enabled;
  u32 core_clk_state,link_clk_state,dsi_ctrl_count,master_ndx;
  struct list_head client_list;int clk_mutex;
 };
@@ -91,8 +95,6 @@ static int dsi_display_ctrl_setup(struct dsi_display*d){event("ctrl-setup");retu
 static int dsi_display_phy_idle_on(struct dsi_display*d,bool b){event("phy-on");d->phy_idle_power_off=false;return 0;}
 static int dsi_display_toggle_resync_fifo(struct dsi_display*d){event("resync");return 0;}
 static int dsi_link_hs_clk_set_rate(struct dsi_link_hs_clk_info*c,int i){event("hs-rates");return 0;}
-static int dsi_link_lp_clk_start(struct dsi_link_lp_clk_info*c,int i){event("lp-on");return 0;}
-static int dsi_link_lp_clk_stop(struct dsi_link_lp_clk_info*c){event("lp-off");return 0;}
 static int dsi_display_core_clk_enable(struct dsi_core_clks*c,u32 n,u32 m){event("core-on");return 0;}
 static int dsi_display_core_clk_disable(struct dsi_core_clks*c,u32 n,u32 m){event("core-off");return 0;}
 static int pre_on(void*p,enum dsi_clk_type c,enum dsi_lclk_type l,enum dsi_clk_state s){return 0;}
@@ -101,6 +103,7 @@ manager = 'drivers/gpu/drm/msm/dsi-staging/dsi_clk_manager.c'
 display = 'drivers/gpu/drm/msm/dsi-staging/dsi_display.c'
 code = prelude + ''.join(extract(display, n) for n in ('dsi_pre_clkoff_cb', 'dsi_post_clkon_cb'))
 code += ''.join(extract(manager, n) for n in (
+    'dsi_link_lp_clk_start', 'dsi_link_lp_clk_stop',
     'dsi_link_hs_clk_prepare', 'dsi_link_hs_clk_unprepare',
     'dsi_link_hs_clk_enable', 'dsi_link_hs_clk_disable',
     'dsi_link_hs_clk_start', 'dsi_link_hs_clk_stop',
@@ -113,20 +116,21 @@ int main(void){
  struct clk byte={"prepare-byte","on-byte","off-byte","unprepare-byte"};
  struct clk pixel={"prepare-pixel","on-pixel","off-pixel","unprepare-pixel"};
  struct clk intf={"prepare-intf","on-intf","off-intf","unprepare-intf"};
- struct dsi_link_clks link={.hs_clks={&byte,&pixel,&intf}};
+ struct clk esc={"prepare-esc","on-esc","off-esc","unprepare-esc"};
+ struct dsi_link_clks link={.hs_clks={&byte,&pixel,&intf},.lp_clks={&esc},.freq={19200000}};
  struct dsi_core_clks core={0};
  struct dsi_panel panel={.ulps_suspend_enabled=true,.ulps_feature=true};
  struct dsi_display display={.panel=&panel,.ctrl_count=1};
- struct dsi_clk_mngr m={.priv_data=&display,.pre_clkon_cb=pre_on,.post_clkon_cb=dsi_post_clkon_cb,.pre_clkoff_cb=dsi_pre_clkoff_cb,.core_clks=&core,.link_clks=&link,.core_clk_state=DSI_CLK_ON,.link_clk_state=DSI_CLK_ON,.dsi_ctrl_count=1};
+ struct dsi_clk_mngr m={.priv_data=&display,.pre_clkon_cb=pre_on,.post_clkon_cb=dsi_post_clkon_cb,.pre_clkoff_cb=dsi_pre_clkoff_cb,.core_clks=&core,.link_clks={link},.core_clk_state=DSI_CLK_ON,.link_clk_state=DSI_CLK_ON,.dsi_ctrl_count=1};
  struct dsi_clk_client_info dsi={.mngr=&m,.core_clk_state=DSI_CLK_ON,.link_clk_state=DSI_CLK_ON,.core_refcount=1,.link_refcount=1};
  struct dsi_clk_client_info mdp={.mngr=&m};
  m.client_list.next=&dsi.list;dsi.list.next=&mdp.list;mdp.list.next=&m.client_list;
  // Ordinary blank: clock manager chooses HS then LP callbacks, even though
  // the source body of pre_clkoff_cb lists its LP branch first.
  assert(!dsi_clk_req_state(&dsi,DSI_ALL_CLKS,DSI_CLK_OFF));
- expect("gating-off off-intf off-pixel off-byte unprepare-intf unprepare-pixel unprepare-byte ulps-enter lp-off phy-off clamp-on reset-mask irq-off core-off ");
+ expect("gating-off off-intf off-pixel off-byte unprepare-intf unprepare-pixel unprepare-byte ulps-enter off-esc unprepare-esc phy-off clamp-on reset-mask irq-off core-off ");
  assert(!dsi_clk_req_state(&dsi,DSI_ALL_CLKS,DSI_CLK_ON));
- expect("core-on irq-on lp-on ctrl-setup phy-on ulps-enter reset-unmask clamp-off hs-rates prepare-byte prepare-pixel prepare-intf on-byte on-pixel on-intf resync ulps-exit gating-on ");
+ expect("core-on irq-on rate-esc19m2 prepare-esc on-esc ctrl-setup phy-on ulps-enter reset-unmask clamp-off hs-rates prepare-byte prepare-pixel prepare-intf on-byte on-pixel on-intf resync ulps-exit gating-on ");
  // ON-table per-command votes nest inside prepare's held clock votes.
  for(unsigned n=0;n<17;++n){assert(!dsi_clk_req_state(&dsi,DSI_ALL_CLKS,DSI_CLK_ON));assert(!dsi_clk_req_state(&dsi,DSI_ALL_CLKS,DSI_CLK_OFF));assert(!events[0]);}
  assert(dsi.core_refcount==1&&dsi.link_refcount==1);
@@ -136,8 +140,15 @@ int main(void){
  // An initialized panel uses normal ULPS enable, not suspend enable.
  panel.initialized=true;panel.ulps_suspend_enabled=false;
  assert(!dsi_clk_req_state(&mdp,DSI_ALL_CLKS,DSI_CLK_OFF));
- expect("gating-off off-intf off-pixel off-byte unprepare-intf unprepare-pixel unprepare-byte ulps-enter lp-off phy-off clamp-on reset-mask irq-off core-off ");
- puts("PASS: 14 unchanged LG functions; ordinary HS/LP callback order, HS branch order, nested DSI and aggregate MDP votes");
+ expect("gating-off off-intf off-pixel off-byte unprepare-intf unprepare-pixel unprepare-byte ulps-enter off-esc unprepare-esc phy-off clamp-on reset-mask irq-off core-off ");
+ // Continuous splash skips setting the LP rate, but still prepares ESC.
+ m.is_cont_splash_enabled=true;
+ assert(!dsi_link_lp_clk_start(&m.link_clks[0].lp_clks,0));
+ expect("prepare-esc on-esc ");
+ assert(!dsi_link_lp_clk_stop(&m.link_clks[0].lp_clks));
+ expect("off-esc unprepare-esc ");
+ assert(dsi_link_lp_clk_start(&m.link_clks[0].lp_clks,MAX_DSI_CTRL)==-EINVAL&&!events[0]);
+ puts("PASS: 16 unchanged LG functions; HS then ULPS/ESC stop, ESC start before host/PHY, splash rate guard, nested DSI and aggregate MDP votes");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-clock-reference-') as tmp:
