@@ -1,4 +1,58 @@
 {
+  "upper_flow": {
+    "kind": "static real upper-call-site audit, not DRM execution",
+    "sources": {
+      "msm_atomic.c": "68086f63bbd16ccb793060217a18b182510c75aa37d01ed12e4d464687a0ab8e",
+      "dsi-staging/dsi_drm.c": "21f565aa8a4faf9e20d9207ca4cac672b6bec0c53420e7e4a5579ef269cbdf0d",
+      "sde/sde_encoder.c": "abdb39c27bbbc4e0a1de5514c057cdf8b6cba5ff6b0f2539bec4c3d17a15ea2a",
+      "sde/sde_encoder_phys_cmd.c": "1a2c73855eb67544c0e9834963e0663e60bc2196f12b312db49f2bbbee4848fa",
+      "sde/sde_crtc.c": "c839db2d447e129d6a96e4ae8eb5248bebf8b249fa032822d1a7acb4076eb856",
+      "dsi-staging/dsi_display.c": "aa2f867214645d944306d2d477a4faf1bb330e203df3d0bd7a282c3e97809c70"
+    },
+    "checks": [
+      [
+        "drm_bridge_pre_enable(encoder->bridge)",
+        "funcs->enable(encoder)",
+        "kms->funcs->commit(kms,old_state)",
+        "drm_bridge_enable(encoder->bridge)"
+      ],
+      [
+        "dsi_display_prepare(c_bridge->display)",
+        "dsi_display_enable(c_bridge->display)"
+      ],
+      [
+        "phys->ops.enable(phys)",
+        "_sde_encoder_virt_enable_helper(drm_enc)"
+      ],
+      [
+        "encoder enable helper connects TE before atomic KMS commit"
+      ],
+      [
+        "command enable chain has no CTL reset",
+        "CRTC reset is guarded by reset_req",
+        "command disable stops tearcheck"
+      ],
+      [
+        "dsi_panel_enable(display->panel)",
+        "dsi_display_cmd_engine_enable(display)"
+      ],
+      [
+        "dsi_display_cmd_engine_disable(display)",
+        "dsi_panel_disable(display->panel)"
+      ],
+      [
+        "dsi_display_cmd_engine_enable(display)",
+        "if(display->tx_cmd_buf==NULL)",
+        "dsi_host_alloc_cmd_tx_buffer(display)",
+        "dsi_ctrl_cmd_transfer(",
+        "dsi_display_cmd_engine_disable(display)"
+      ],
+      [
+        "one retained 4KiB buffer for all ordinary host transfers",
+        "refcounted command engine"
+      ]
+    ]
+  },
   "reference_commit": "2e897dddf49a4c3e85b2ff77fdf7c70f860398dd",
   "sources": {
     "sde_hw_ctl.c": "da16798bd5450574ed0c6668b10a01c93f660d002ea9e3e30e4364a36b5cb870",
@@ -34,10 +88,6 @@
     ]
   },
   "trace": [
-    {
-      "address": 182460464,
-      "value": 1
-    },
     {
       "address": 182472960,
       "value": 0
@@ -163,6 +213,10 @@
       "value": 1
     },
     {
+      "address": 182893192,
+      "value": 1572999
+    },
+    {
       "address": 182460688,
       "value": 2
     },
@@ -173,10 +227,12 @@
     {
       "address": 182893236,
       "value": 2147483649
-    },
+    }
+  ],
+  "recovery_selftest_trace": [
     {
-      "address": 182893192,
-      "value": 1572999
+      "address": 182460464,
+      "value": 1
     },
     {
       "address": 182460464,

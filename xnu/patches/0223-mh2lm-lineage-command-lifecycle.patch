@@ -1,0 +1,454 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -223,8 +223,8 @@
+  static void scanoutTimerAction(OSObject *,IOTimerEventSource *);
+  bool scanoutDomain(SweetScanoutSnapshot * = NULL);
+  bool scanoutConfiguration(bool);
+- bool fPipelineEnabled, fPipelineResetPending, fPipelineConfigured;
+- uint64_t fPipelineDeadline, fPipelineGeneration;
++ bool fPipelineEnabled, fPipelinePending, fPipelineConfigured;
++ uint64_t fPipelineGeneration;
+  bool setupPipeline(IOService *);
+  bool pipelineExclusive(void);
+  IOReturn beginPipeline(void);
+@@ -244,6 +244,11 @@
+  bool dsiBusy(void) const;
+  bool dsiDMAReady(void);
+  bool setupDSI(void);
++ IOReturn prepareDSICommandBuffer(void);
++ bool fDsiDisplayEngine, fDsiTransferEngine;
++ bool setDSIDisplayEngine(bool);
++ bool acquireDSITransfer(void);
++ void releaseDSITransfer(void);
+  void finishDSI(IOReturn,unsigned,bool = false);
+  void restoreDSICommand(void);
+  void advanceDSI(void);
+@@ -650,6 +655,14 @@
+  if (!setupPanelPins()) return false;
+  if (!setupTouchPanel()) return false;
+  if (!setupLifecycle(provider)) return false;
++ if (fLifecycleLineage) {
++  /* Lineage retains one 4KiB command buffer even for short commands. Our
++   * physical allocation can block: do it before publishing to consumers,
++   * outside the lifecycle gate, instead of Linux's first-transfer lazy GEM.
++   * No DMA address is exposed here; each long packet rechecks its route. */
++  if (prepareDSICommandBuffer()!=kIOReturnSuccess) return false;
++  fDsiDisplayEngine=true; /* adopt the already active continuous splash */
++ }
+  SWEET_LOG_INFO("SWEET MDSS: F1a v1 IOService backend; ABL scanout unchanged\n");
+  registerService();
+  return true;
+@@ -1329,7 +1342,8 @@
+ int
+ SweetMDSS::dp_dcs_write(vm_offset_t intf, vm_offset_t dsi, const uint32_t *words, unsigned count, bool idleOnly)
+ {
+-	if ((dp_rd(dsi, 0x004) & 7u) != 5u || dp_rd(dsi, 0x15c) != 0 || (dp_rd(dsi, 0x110) & (1u << 24))) {
++	if ((fLifecycleLineage && (!fDsiPrepared || !fDsiBuffer || fDsiTransferEngine || fDsiPoisoned)) ||
++	    ((dp_rd(dsi, 0x004) & (fLifecycleLineage ? 3u : 7u)) != (fLifecycleLineage ? 1u : 5u)) || dp_rd(dsi, 0x15c) != 0 || (dp_rd(dsi, 0x110) & (1u << 24))) {
+ 		SWEET_LOG_ERROR("SWEET MDSS: dcs: DSI not in the expected state (ctrl %#x fifo %#x irq %#x)\n",
+ 		    dp_rd(dsi, 0x004), dp_rd(dsi, 0x15c), dp_rd(dsi, 0x110));
+ 		return -1;
+@@ -1358,9 +1372,14 @@
+ 		rc = -2;
+ 		goto restore;
+ 	}
++	if (!acquireDSITransfer()) { rc=-1;goto restore; }
+ 	dma = dp_rd(dsi, 0x03c); length = dp_rd(dsi, 0x04c); trigger = dp_rd(dsi, 0x084);
+ 	/* W1C only the DMA/BTA status bits. */
+ 	dp_wr(dsi, 0x110, (dp_rd(dsi, 0x110) & ~statuses) | 1u | (1u << 20));
++	if (fLifecycleLineage && (dp_rd(dsi,0x110)&(1u|(1u<<24)))) {
++		fDsiPoisoned=true; /* stale status is not fresh completion */
++		return -4;
++	}
+ 	dp_wr(dsi, 0x084, (trigger & ~7u) | 4u);        /* software DMA trigger */
+ 	dp_wr(dsi, 0x15c, (1u << 1) | (1u << 2) | (3u << 16));
+ 	for (unsigned i = 0; i < count; i++) {
+@@ -1377,7 +1396,15 @@
+ 	} else if (dp_rd(dsi, 0x110) & (1u << 24)) {
+ 		rc = -4;
+ 	}
++	if (fLifecycleLineage && !rc && dp_poll(dsi,0x008,6u,0,200)) rc=-3;
+ 	irq = dp_rd(dsi, 0x110); status = dp_rd(dsi, 0x008); ack = dp_rd(dsi, 0x068);
++	if (fLifecycleLineage && (rc || !(irq&1u) || (irq&(1u<<24)) || ack || (status&6u))) {
++		/* Same completion rule as asynchronous packets: retain the reference,
++		 * keep TE paused and close admission. No FIFO reset on uncertain DMA. */
++		fDsiPoisoned=true;
++		SWEET_LOG_ERROR("SWEET MDSS DSI: synchronous transfer uncertain; engine reference retained\n");
++		return rc ? rc : -4;
++	}
+ 	dp_wr(dsi, 0x110, (dp_rd(dsi, 0x110) & ~statuses) | 1u | (1u << 20));
+ 	dp_wr(dsi, 0x15c, 0);
+ 	dp_wr(dsi, 0x1ec, 1);                           /* FIFO reset, as the native timeout path */
+@@ -1394,6 +1421,7 @@
+         }
+ 	}
+ restore:
++	releaseDSITransfer();
+ 	dp_wr(intf, 0x288, sync);
+ 	dp_wr(intf, 0x2b4, refresh);
+ 	return rc;
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -136,7 +136,7 @@
+ }
+ bool SweetMDSS::clockCanGate(void)
+ {
+- if (fPipelineResetPending || linkBusy() || hostBusy() || dsiBusy() || fDsiPoisoned || fDsiPinned ||
++ if (fPipelinePending || linkBusy() || hostBusy() || dsiBusy() || fDsiPoisoned || fDsiPinned ||
+      fScanoutState==SweetScanoutQuiescing || fScanoutState==SweetScanoutSubmitted ||
+      (fIrqMode>=2 && __atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE)!=IrqIdle)) return false;
+  /* No boolean supplied by a consumer can substitute for hardware idle.
+diff --git a/iokit/Kernel/arm/SweetMDSSDSI.inc b/iokit/Kernel/arm/SweetMDSSDSI.inc
+--- a/iokit/Kernel/arm/SweetMDSSDSI.inc
++++ b/iokit/Kernel/arm/SweetMDSSDSI.inc
+@@ -37,6 +37,65 @@
+   fDsiTimerAdded=true;
+  }
+  return true;
++}
++IOReturn
++SweetMDSS::prepareDSICommandBuffer(void)
++{
++ if (fDsiBuffer) return fDsiPrepared ? kIOReturnSuccess : kIOReturnNotReady;
++ SWEET_LOG_INFO("SWEET MDSS DSI: command buffer allocate/prepare enter bytes=4096\n");
++ traceWake("dma-allocate-enter");
++ fDsiBuffer=IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
++     kIODirectionOut | kIOMemoryPhysicallyContiguous | kIOMemoryMapperNone |
++     kIOMapWriteCombineCache,4096,0xffffffffULL);
++ traceWake("dma-allocate-return",fDsiBuffer!=NULL);
++ if (!fDsiBuffer) return kIOReturnNoMemory;
++ traceWake("dma-prepare-enter");
++ if (!fDsiBuffer->getBytesNoCopy() || fDsiBuffer->getLength()<4096 ||
++     fDsiBuffer->prepare(kIODirectionOut)!=kIOReturnSuccess) {
++  OSSafeReleaseNULL(fDsiBuffer); return kIOReturnNoMemory;
++ }
++ fDsiPrepared=true;
++ traceWake("dma-prepare-return");
++ IOByteCount contiguous=0;
++ traceWake("dma-physical-enter");
++ fDsiPhysical=fDsiBuffer->getPhysicalSegment(0,&contiguous,kIOMemoryMapperNone);
++ uint64_t pa=fDsiPhysical;
++ traceWake("dma-physical-return",(uint32_t)pa);
++ if (!pa || (pa&7u) || pa>=0x100000000ULL || 4096>0x100000000ULL-pa || contiguous<4096 ||
++     (pa<0x9e400000ULL && 0x9d200000ULL<pa+4096)) {
++  (void)fDsiBuffer->complete(kIODirectionOut); fDsiPrepared=false;
++  OSSafeReleaseNULL(fDsiBuffer); return kIOReturnBadArgument;
++ }
++ SWEET_LOG_INFO("SWEET MDSS DSI: command buffer ready bytes=4096 pa=%#llx; retained for FIFO and physical DMA\n",fDsiPhysical);
++ return kIOReturnSuccess;
++}
++/* At most one transfer can run under this gate. These two references are the
++ * display and host-transfer users of Lineage's command-engine refcount. A
++ * transfer reference survives uncertain DMA; stop is not completion proof. */
++bool SweetMDSS::setDSIDisplayEngine(bool on)
++{
++ if (!fLifecycleLineage) return true;
++ if (fDsiTransferEngine || dsiBusy() || fDsiPinned || fDsiPoisoned ||
++     !dp_clocks_on() || (dp_rd(dp_dsi,8)&6u)) return false;
++ if (fDsiDisplayEngine==on) return true;
++ dp_wr(dp_dsi,4,on ? dp_rd(dp_dsi,4)|4u : dp_rd(dp_dsi,4)&~4u);
++ fDsiDisplayEngine=on;
++ SWEET_LOG_INFO("SWEET MDSS DSI: display command-engine reference=%u\n",on);
++ return true;
++}
++bool SweetMDSS::acquireDSITransfer(void)
++{
++ if (!fLifecycleLineage) return true;
++ if (fDsiTransferEngine || fDsiPoisoned || fDsiPinned || !fDsiPrepared || !fDsiBuffer) return false;
++ if (!fDsiDisplayEngine) dp_wr(dp_dsi,4,dp_rd(dp_dsi,4)|4u);
++ fDsiTransferEngine=true;
++ return true;
++}
++void SweetMDSS::releaseDSITransfer(void)
++{
++ if (!fLifecycleLineage || !fDsiTransferEngine) return;
++ if (!fDsiDisplayEngine) dp_wr(dp_dsi,4,dp_rd(dp_dsi,4)&~4u);
++ fDsiTransferEngine=false;
+ }
+ IOReturn
+ SweetMDSS::beginDSISequence(const uint8_t *bytes,size_t length,uint64_t *token)
+@@ -77,7 +136,7 @@
+  /* This revision is already observed in 0121a12 (+0=20030000).
+   * Recheck live before writes; DT compatible alone does not authorize them. */
+  s->traceWake("dsi-registers-enter");
+- s->observeLineage("dsi-command-control",s->dp_dsi,4,5u,7u);
++ s->observeLineage("dsi-command-control",s->dp_dsi,4,s->fLifecycleLineage && !s->fDsiDisplayEngine ? 1u : 5u,7u);
+  if (dp_rd(s->dp_dsi,0)!=0x20030000u ||
+      dp_rd(s->dp_dsi,0x15c) || (dp_rd(s->dp_dsi,0x110)&(1u<<24)) ||
+      dp_rd(s->dp_dsi,0x68)) return kIOReturnNotReady;
+@@ -95,30 +154,12 @@
+  s->traceWake("dsi-timer-enter",needsDMA);
+  if (s->fDsiNextToken==~(uint64_t)0 || !s->setupDSI()) return kIOReturnNoResources;
+  s->traceWake("dsi-timer-return");
+- if (needsDMA && !s->fDsiBuffer) {
+-  s->traceWake("dma-allocate-enter");
+-  s->fDsiBuffer=IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+-      kIODirectionOut | kIOMemoryPhysicallyContiguous | kIOMemoryMapperNone |
+-      kIOMapWriteCombineCache,4096,0xffffffffULL);
+-  s->traceWake("dma-allocate-return",s->fDsiBuffer!=NULL);
+-  if (!s->fDsiBuffer) return kIOReturnNoMemory;
+-  s->traceWake("dma-prepare-enter");
+-  if (!s->fDsiBuffer->getBytesNoCopy() || s->fDsiBuffer->getLength()<4096 ||
+-      s->fDsiBuffer->prepare(kIODirectionOut)!=kIOReturnSuccess) {
+-   OSSafeReleaseNULL(s->fDsiBuffer); return kIOReturnNoMemory;
+-  }
+-  s->fDsiPrepared=true;
+-  s->traceWake("dma-prepare-return");
+-  IOByteCount contiguous=0;
+-  s->traceWake("dma-physical-enter");
+-  s->fDsiPhysical=s->fDsiBuffer->getPhysicalSegment(0,&contiguous,kIOMemoryMapperNone);
+-  uint64_t pa=s->fDsiPhysical;
+-  s->traceWake("dma-physical-return",(uint32_t)pa);
+-  if (!pa || (pa&7u) || pa>=0x100000000ULL || 4096>0x100000000ULL-pa || contiguous<4096 ||
+-      (pa<0x9e400000ULL && 0x9d200000ULL<pa+4096)) {
+-   (void)s->fDsiBuffer->complete(kIODirectionOut); s->fDsiPrepared=false;
+-   OSSafeReleaseNULL(s->fDsiBuffer); return kIOReturnBadArgument;
+-  }
++ /* Preparation is required for FIFO too, as in dsi_host_transfer. Lineage
++  * modes must already own the startup buffer; never allocate in OFF/ON. */
++ if (s->fLifecycleLineage) {
++  if (!s->fDsiBuffer || !s->fDsiPrepared) return kIOReturnNotReady;
++ } else {
++  IOReturn rc=s->prepareDSICommandBuffer();if (rc!=kIOReturnSuccess) return rc;
+  }
+  s->traceWake("dsi-arm-enter");
+  data->retain(); s->fDsiSequence=data; s->fDsiOffset=0;
+@@ -193,6 +234,7 @@
+  if (uncertain) fDsiPoisoned=true;
+  else if (clocks) {
+   restoreDSICommand();
++  releaseDSITransfer();
+   if (fDsiPaused) {
+    dp_wr(dp_intf1,0x2b4,fDsiAuto); dp_wr(dp_intf1,0x288,fDsiTE);
+   }
+@@ -242,7 +284,7 @@
+    /* Only a fresh done PLUS DMA/MDP idle grants command memory reuse. */
+    if (fDsiPinned) { fDsiPinned=false; fDsiBuffer->release(); }
+    traceWake("packet-done",fDsiStatus.completed+1);
+-   restoreDSICommand(); ++fDsiStatus.completed;
++   restoreDSICommand(); releaseDSITransfer(); ++fDsiStatus.completed;
+    fDsiStatus.state=SweetDSIDelay; fDsiDeadline=now+(uint64_t)fDsiWaitMS*1000000ULL;
+    fDsiTimer->setTimeoutMS(fDsiWaitMS ? fDsiWaitMS : 1); return;
+   }
+@@ -265,6 +307,7 @@
+  if (!bytes || (memory && (!fDsiBuffer || !dsiDMAReady()))) {
+   finishDSI(kIOReturnNotReady,SweetDSIFailed); return;
+  }
++ if (!acquireDSITransfer()) {finishDSI(kIOReturnNotReady,SweetDSIFailed);return;}
+  traceWake("packet-registers-enter",m.type);
+  fDsiDMA=dp_rd(dp_dsi,0x3c); fDsiLength=dp_rd(dp_dsi,0x4c);
+  fDsiTrigger=dp_rd(dp_dsi,0x84); fDsiFIFO=dp_rd(dp_dsi,0x50);
+diff --git a/iokit/Kernel/arm/SweetMDSSHost.inc b/iokit/Kernel/arm/SweetMDSSHost.inc
+--- a/iokit/Kernel/arm/SweetMDSSHost.inc
++++ b/iokit/Kernel/arm/SweetMDSSHost.inc
+@@ -115,7 +115,7 @@
+  observeLineage("host-ready-irq",dp_dsi,0x110,0,hostInterruptEnables);
+  for (unsigned n=0;n<sizeof(hostCommandProfile)/sizeof(hostCommandProfile[0]);++n) {
+   const SweetHostRegister &r=hostCommandProfile[n];
+-  observeLineage("host-ready-config",dp_dsi,r.offset,r.offset==4 ? r.value|5u : r.value);
++  observeLineage("host-ready-config",dp_dsi,r.offset,r.offset==4 ? r.value|(fLifecycleLineage && !fDsiDisplayEngine ? 1u : 5u) : r.value);
+  }
+  return true; /* Real transfer completion remains independent. */
+ }
+@@ -136,9 +136,9 @@
+   }
+   fHostPhase=HostConfigure;
+   if (fHostLineageReset) {
+-   /* cmn_soft_reset restores previous clocks/control. Retain the existing
+-    * command-engine policy used by our unchanged FIFO/DMA transport. */
+-   dp_wr(dp_dsi,0x11c,fHostSavedClocks);dp_wr(dp_dsi,4,fHostSavedControl|4u);
++   /* cmn_soft_reset restores control exactly. Command engine stays off
++    * during DDIC reset; ON transfers acquire their own reference. */
++   dp_wr(dp_dsi,0x11c,fHostSavedClocks);dp_wr(dp_dsi,4,fHostSavedControl);
+    SWEET_LOG_INFO("SWEET PANEL LINEAGE: host soft reset after ULPS exit; DDIC reset pending\n");
+    fDsiTimer->setTimeoutUS(1);return;
+   }
+@@ -189,12 +189,12 @@
+ IOReturn SweetMDSS::disableHostForLink(void)
+ {
+  if (!fLifecycleLinkCycle || fLifecycle.phase!=SweetPanelLinkPowerDown || fHostPhase!=HostReady ||
+-     !lifecycleLinkStepAllowed()) return kIOReturnNotReady;
++     !lifecycleLinkStepAllowed() || (fLifecycleLineage && (fDsiDisplayEngine || fDsiTransferEngine))) return kIOReturnNotReady;
+  observeLineage("host-stop-prior-reset",dp_dsi,0x118,0);
+  observeLineage("host-stop-prior-phy-reset",dp_dsi,0x12c,0);
+  uint32_t clocks=dp_rd(dp_dsi,0x11c),ctrl=dp_rd(dp_dsi,4);
+  observeLineage("host-stop-prior-clocks",dp_dsi,0x11c,0x23fu);
+- observeLineage("host-stop-prior-control",dp_dsi,4,5u,7u);
++ observeLineage("host-stop-prior-control",dp_dsi,4,fLifecycleLineage ? 1u : 5u,7u);
+  fHostTouched=fClockTouched=true;
+  dp_wr(dp_dsi,0x110,0); /* disable enables; never W1C stale status by replay */
+  observeLineage("host-stop-irq",dp_dsi,0x110,0,hostInterruptEnables,true);
+diff --git a/iokit/Kernel/arm/SweetMDSSLifecycle.inc b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+--- a/iokit/Kernel/arm/SweetMDSSLifecycle.inc
++++ b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+@@ -299,7 +299,7 @@
+    * old TE replay, reset, powerdown or background transport continuation. */
+   fLifecycle.phase=stopped ? SweetPanelStopped : SweetPanelFault;
+   fLifecycle.result=result;fLifecycle.uncertain=true;fPanelState=PanelUnknown;
+-  fPipelineResetPending=false;fPipelineConfigured=false;
++  fPipelinePending=false;fPipelineConfigured=false;
+   lifecycleCancelSupply(); /* synchronize child BEFORE invalidating leaf tokens */
+   if (fPanelPins && fLifecycle.pinToken)
+    (void)fPanelPins->cancelRequest(fPanelPinsConsumer,fLifecycle.pinToken);
+@@ -326,10 +326,11 @@
+ {
+  if (fPipelineEnabled && fLifecycle.phase!=SweetPanelPipelineRestore) {
+   IOReturn rc=beginPipeline();
+-  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"pipeline wake reset admission");return;}
++  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"pipeline wake configuration admission");return;}
+   fLifecycle.phase=SweetPanelPipelineRestore;fLifecycleStepDeadline=scanout_now()+100000000ULL;
+   return;
+  }
++ if (fLifecycleLineage && !fPipelineEnabled) dp_wr(dp_intf1,0x284,1);
+  const vm_offset_t top=fMaps[9]->getVirtualAddress();
+  dp_wr(top,0x1018,1u<<8);
+  if (dp_rd(top,0x1014)&(1u<<8)) { finishLifecycle(kIOReturnIOError,"stale pixel done did not clear");return; }
+@@ -350,10 +351,10 @@
+    * Command-mode autorefresh is the kickoff: Lineage does not CTL_START it. */
+   dp_wr(dp_sspp,8,0x00300016u);dp_wr(dp_sspp,0x24,4608);
+   dp_wr(dp_sspp,0x14,(uint32_t)fHardwarePool->physical(0));
++  dp_wr(dp_intf1,0x288,fLifecycleTE); /* encoder enable before KMS commit */
+   dp_wr(dp_ctl,0x18,1u);
+   uint32_t frameCount=fLifecycleAuto&0xffffu;
+   fLifecycleAuto=frameCount ? (1u<<31)|frameCount : 0u;
+-  dp_wr(dp_intf1,0x288,fLifecycleTE);
+   dp_wr(dp_intf1,0x2b4,fLifecycleAuto);
+   if (!frameCount) dp_wr(dp_ctl,0x1c,1u);
+   SWEET_LOG_INFO("SWEET PANEL LINEAGE: owned source recommitted/flush issued; auto=%#x, fresh pixels pending\n",fLifecycleAuto);
+@@ -435,6 +436,11 @@
+   if (line>0 && line<2340) fLifecycleIdleSamples=0;else ++fLifecycleIdleSamples;
+   if (fLifecycleIdleSamples<2) return;
+   fLifecycle.displayDrained=true;
++  if (fLifecycleLineage && fLifecycle.operation==SweetPanelDisplayOff) {
++   /* command encoder disable precedes bridge/display disable and OFF table. */
++   dp_wr(dp_intf1,0x284,0);
++   if (!setDSIDisplayEngine(false)) {finishLifecycle(kIOReturnNotReady,"display engine release");return;}
++  }
+   if (fLifecycleFull && fLifecycle.operation==SweetPanelDisplayOn) {
+    lifecycleStartReset();
+   } else lifecycleCommand(fLifecycle.operation==SweetPanelDisplayOn);
+@@ -536,6 +542,8 @@
+    return;
+   }
+   if (fLifecycleFull && fLifecycle.phase==SweetPanelCommand) {
++   /* dsi_display_enable acquires its persistent reference AFTER panel ON. */
++   if (!setDSIDisplayEngine(true)) {finishLifecycle(kIOReturnNotReady,"display engine acquire");return;}
+    fLifecycle.sleeping=false;lifecycleBrightness();publishLifecycle();return;
+   }
+   if (fLifecycle.phase==SweetPanelBrightness) fLifecycle.brightnessRestored=true;
+@@ -543,7 +551,7 @@
+  } else if (fLifecycle.phase==SweetPanelPipelineRestore) {
+   IOReturn rc=advancePipeline();
+   if (rc==kIOReturnBusy) return;
+-  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"pipeline wake reset/configuration failed");return;}
++  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"pipeline wake configuration failed");return;}
+   restoreLifecycleStream();publishLifecycle();return;
+  } else if (fLifecycle.phase==SweetPanelFrame) {
+   unsigned irq=__atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE);
+diff --git a/iokit/Kernel/arm/SweetMDSSPipeline.inc b/iokit/Kernel/arm/SweetMDSSPipeline.inc
+--- a/iokit/Kernel/arm/SweetMDSSPipeline.inc
++++ b/iokit/Kernel/arm/SweetMDSSPipeline.inc
+@@ -42,36 +42,38 @@
+ 
+ IOReturn SweetMDSS::beginPipeline(void)
+ {
+- if (!fPipelineEnabled || fPipelineResetPending || fPipelineGeneration==~0ULL ||
++ if (!fPipelineEnabled || fPipelinePending || fPipelineGeneration==~0ULL ||
+      !lifecycleParticipants() || !fLifecycle.touchQuiesced || !fLifecycle.displayDrained ||
+      !lifecycleResourcesHeld() || !lifecycleIRQDrained() || dsiBusy() || fDsiPinned || fDsiPoisoned ||
+      !fHardwarePool || !scanoutDomain() || !pipelineExclusive()) return kIOReturnNotReady;
+  if ((dp_rd(dp_dsi,8)&6u) || dp_rd(dp_ctl,0x18) || dp_rd(dp_ctl,0x1c) ||
+-     dp_rd(dp_intf1,0x2b4) || (dp_rd(dp_intf1,0x288)&(1u<<20))) return kIOReturnBusy;
++     (dp_rd(dp_ctl,0x30)&1u) || dp_rd(dp_intf1,0x2b4) || (dp_rd(dp_intf1,0x288)&(1u<<20))) return kIOReturnBusy;
+  uint32_t line=dp_rd(dp_intf1,0x2b0)&0xffffu;
+  if (line>0 && line<2340) return kIOReturnBusy;
+  fPipelineConfigured=false;fLifecycle.pipelineGeneration=0;
+- /* Independent hardware pin before any reset/programming can expose DMA. */
++ /* Independent hardware pin before programming can expose DMA. */
+  if (!fScanoutTouched) {
+   fHardwarePool->pinHardware();fScanoutTouched=true;
+   fScanoutStatus.hardwareReachable=true;setProperty("SweetScanoutHardwarePinned",true);
+  }
+- dp_wr(dp_ctl,0x30,1u); /* Lineage CTL_SW_RESET; asynchronous 2ms bound. */
+- fPipelineResetPending=true;fPipelineDeadline=scanout_now()+2000000ULL;
+- SWEET_LOG_INFO("SWEET MDSS PIPELINE: CTL0 reset issued generation=%llu; waiting for hardware\n",fPipelineGeneration+1);
++ /* Lineage command enable does not reset CTL. CRTC reset_req is an error
++  * recovery branch, which this driver does not yet implement. Keep a gated
++  * continuation so cancellation/participant loss still precedes programming. */
++ fPipelinePending=true;
++ SWEET_LOG_INFO("SWEET MDSS PIPELINE: normal command enable generation=%llu; no CTL reset\n",fPipelineGeneration+1);
+  return kIOReturnSuccess;
+ }
+ 
+ IOReturn SweetMDSS::advancePipeline(void)
+ {
+- if (!fPipelineResetPending || !lifecycleParticipants() || !lifecycleResourcesHeld() ||
++ if (!fPipelinePending || !lifecycleParticipants() || !lifecycleResourcesHeld() ||
+      !lifecycleIRQDrained() || !fLifecycle.touchQuiesced || !fLifecycle.displayDrained ||
+      dsiBusy() || fDsiPinned || fDsiPoisoned || !scanoutDomain()) return kIOReturnNotReady;
+- if (dp_rd(dp_dsi,8)&6u) return kIOReturnNotReady;
+- if (dp_rd(dp_ctl,0x30)&1u)
+-  return scanout_now()>=fPipelineDeadline ? kIOReturnTimeout : kIOReturnBusy;
++ if ((dp_rd(dp_dsi,8)&6u) || (dp_rd(dp_ctl,0x30)&1u) ||
++     dp_rd(dp_ctl,0x18) || dp_rd(dp_ctl,0x1c) || dp_rd(dp_intf1,0x2b4) ||
++     (dp_rd(dp_intf1,0x288)&(1u<<20))) return kIOReturnNotReady;
+  if (!pipelineExclusive()) return kIOReturnNotReady;
+- fPipelineResetPending=false;
++ fPipelinePending=false;
+  const vm_offset_t p=dp_sspp,c=dp_ctl,i=dp_intf1;
+  const vm_offset_t lm=fMaps[16]->getVirtualAddress(),pp=fMaps[17]->getVirtualAddress();
+  const uint32_t size=(2340u<<16)|1080u;
+@@ -101,7 +103,7 @@
+  dp_wr(i,0x25c,dp_rd(i,0x25c)&~15u); /* bind PP0 */
+  /* Four R66456 DTS profiles: 1080x2340, vtotal=2360, 60Hz, TE0.
+   * 19.2MHz/(2360*60)=135, derived as in encoder_phys_cmd tearcheck.
+-  * External TE remains disconnected until AFTER flush and kickoff. */
++  * External TE is connected by encoder enable BEFORE commit/kickoff. */
+  dp_wr(i,0x280,0);dp_wr(i,0x2b4,0);dp_wr(i,0x288,(1u<<19)|135u);
+  dp_wr(i,0x28c,0xfff0);dp_wr(i,0x294,2340);dp_wr(i,0x2a4,2341);
+  dp_wr(i,0x2a0,2340);dp_wr(i,0x29c,0x00040004);dp_wr(i,0x290,2345);dp_wr(i,0x284,1);
+@@ -116,9 +118,10 @@
+ {
+  /* ACTIVE_CFG uses an INTF sub-mask and top-level INTF/CTL/LM/VIG flush.
+   * Autorefresh frame_count=1 is software policy, never a saved ABL value. */
++ /* msm_atomic modeset enables -> encoder enable/control_te -> kms commit. */
++ dp_wr(dp_intf1,0x288,(1u<<20)|(1u<<19)|135u);
+  dp_wr(dp_ctl,0x110,2u);
+  dp_wr(dp_ctl,0x18,(1u<<31)|(1u<<17)|(1u<<6)|1u);
+  dp_wr(dp_intf1,0x2b4,0x80000001u);
+- dp_wr(dp_intf1,0x288,(1u<<20)|(1u<<19)|135u);
+- SWEET_LOG_INFO("SWEET MDSS PIPELINE: generation=%llu flush/kickoff/TE connected; waiting for fresh PP_DONE and RD_PTR\n",fPipelineGeneration);
++ SWEET_LOG_INFO("SWEET MDSS PIPELINE: generation=%llu TE connected before flush/kickoff; waiting for fresh PP_DONE and RD_PTR\n",fPipelineGeneration);
+ }
+diff --git a/iokit/Kernel/arm/SweetMDSSScanout.inc b/iokit/Kernel/arm/SweetMDSSScanout.inc
+--- a/iokit/Kernel/arm/SweetMDSSScanout.inc
++++ b/iokit/Kernel/arm/SweetMDSSScanout.inc
+@@ -94,7 +94,7 @@
+  }
+  if (v.secure || v.size!=0x09240438u || v.out!=0x09240438u || v.outXY ||
+      v.format!=0x237ffu || v.unpack!=0x03020001u || v.op!=0x80000000u ||
+-     v.ctlTop!=0x20000u || v.start || v.te!=1u) return false;
++     v.ctlTop!=0x20000u || v.start || (v.te!=1u && (inherited || !fLifecycleLineage))) return false;
+  fScanoutStatus.fsr=v.cbFault; /* raw bit10 is retained, never silently cleared */
+  if (inherited) return v.address==0x9d200000u && v.stride==4320u && !v.xy && !v.flush;
+  if (!fHardwarePool || !fScanoutTouched || !fScanoutStatus.hardwareReachable) return false;
+@@ -200,7 +200,7 @@
+   if (s->fManagedState!=ManagedReady) { sender->setTimeoutMS(1); return; }
+   if (s->fPipelineEnabled) {
+    IOReturn rc=s->beginPipeline();
+-   if (rc!=kIOReturnSuccess) { s->cancelScanout("pipeline takeover reset admission");return; }
++   if (rc!=kIOReturnSuccess) { s->cancelScanout("pipeline takeover configuration admission");return; }
+    s->fScanoutState=SweetScanoutRebuilding;s->fScanoutDeadline=scanout_now()+100000000ULL;
+    sender->setTimeoutMS(1);return;
+   }
+@@ -217,7 +217,7 @@
+   if (scanout_now()>=s->fScanoutDeadline) { s->cancelScanout("pipeline takeover deadline");return; }
+   IOReturn rc=s->advancePipeline();
+   if (rc==kIOReturnBusy) {sender->setTimeoutMS(1);return;}
+-  if (rc!=kIOReturnSuccess) {s->cancelScanout("pipeline takeover reset/configuration failed");return;}
++  if (rc!=kIOReturnSuccess) {s->cancelScanout("pipeline takeover configuration failed");return;}
+   const vm_offset_t top=s->fMaps[9]->getVirtualAddress();
+   dp_wr(top,0x1018,1u<<8);
+   if (dp_rd(top,0x1014)&(1u<<8)) {s->cancelScanout("pipeline stale PP done");return;}

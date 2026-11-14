@@ -33,7 +33,9 @@ boot.img（Android header v1, page 2048）
 79份受检源码、125项source markers和237项内核markers通过；ABI608的identity/pipeline两档boot/FAT回读一致。
 新路径`--panel-pipeline`/`sweetpanellifecycle=7`，追加三窄MMIO映射/pipeline ABI，参数605/607字节；固件不重编。
 USB已证实OFF完成、ON供电/ULPS/host及DDIC reset完成，未见DMA分配返回/ON表受理/generation2。持久日志只到OFF前，采集持续时间不确定。
-先按[a32审计](PANEL-D1-0121A32.md)定位分配和日志连续性；本轮无新修复或待编译产物，a31 retained保留作已验证基线。
+**待编译：[0223命令生命周期/缓冲准备](PANEL-LINEAGE-COMMAND-LIFECYCLE.md)已实现并本地通过，用户push最新main后下载新kernel/buildtree（建议0121a33）。**
+正常mode7取消CTL reset；TE/tearcheck、display/transfer引擎引用及4KiB缓冲准备已修正，短FIFO/长物理DMA保持。
+agent核对0223与132项source markers后沿原ABI608/原ADT/参数打--panel-pipeline；本轮无需重编固件。a31 retained保留作已验证基线，a32不重打；根因和0223实机效果仍待验证。
 上层调用链补充确认：0222的每次无条件CTL reset及kickoff后才连接TE，与Lineage正常command-mode流程不同；旧tearcheck关闭/命令引擎生命周期也有差异。详见[a32上层流程审计](PANEL-D1-0121A32.md)，后续需同时审查这些策略，尚未证明黑屏因果。
 
 [0121a31实测与产物](PANEL-D1-0121A31.md)：包含0221，ABI608四档镜像打包与回读通过，retained普通息屏唤醒已实测通过。
@@ -58,7 +60,7 @@ matrix现在要求`SWEET FB PANEL: Lineage mode2 supply/link/data completion ena
    只改 `edited/`，用脚本做修改（`edit-*.py`，每处 `assert count==1`），方便重放。
 2. 生成补丁并校验：参照 `scratch/battery-0169/generate-verify.py`——`git diff` 生成
    `ios-mh2lm/xnu/patches/NNNN-mh2lm-<主题>.patch`，再对 `base/` 做 `git apply --check` + apply，
-   结果与 `edited/` 逐字节相同，写入 `verify/`。编号顺延（当前最大 0169）。
+   结果与 `edited/` 逐字节相同，写入 `verify/`。编号顺延（当前最大 0223）。
 3. 本地交叉编译（不需要 macOS）：参照 `scratch/battery-0169/compile.py`。它用 0114a13 CI 树里记录的
    编译参数（`scratch/irq-final-0114a13/ci`、`scratch/mux-service-0115/native-0116-command.txt`）和
    Debian `clang-19` 编译 7 个电池/mux/SPMI 文件。`--verify` 编 `verify/`。比较告警：新增类别要解释。

@@ -4,7 +4,9 @@ Usage: test-mh2lm-pipeline-lineage.py LINEAGE_TREE [--write-fixture]
 """
 from pathlib import Path
 import hashlib,json,os,re,subprocess,sys,tempfile
+from mh2lm_lineage_upper_flow import audit
 root=Path(sys.argv[1]).resolve();directory=root/'drivers/gpu/drm/msm/sde'
+upper=audit(root)
 selection={
  'sde_hw_ctl.c':['sde_hw_ctl_poll_reset_status','sde_hw_ctl_reset_control','sde_hw_ctl_intf_cfg_v1','sde_hw_ctl_trigger_flush_v1'],
  'sde_hw_intf.c':['sde_hw_intf_bind_pingpong_blk','sde_hw_intf_vsync_sel','sde_hw_intf_setup_te_config','sde_hw_intf_enable_te','sde_hw_intf_setup_autorefresh_config','sde_hw_intf_connect_external_te'],
@@ -59,7 +61,6 @@ enum{SDE_SSPP_SRC=1};static int _sspp_subblk_offset(sde_hw_pipe*,int,u32*out){*o
 main=r'''
 int main(){
  sde_hw_ctl ctl{{0x0ae02000},0,{}};
- if(sde_hw_ctl_reset_control(&ctl)||ticks<50||ticks>2000)return 1;
  sde_hw_pipe pipe{{0x0ae05000}};sde_hw_pixel_ext ext{};
  for(int n=0;n<4;++n){ext.roi_w[n]=1080;ext.roi_h[n]=2340;}
  sde_hw_sspp_setup_pe_config(&pipe,&ext);
@@ -74,9 +75,13 @@ int main(){
  tc.vsync_init_val=tc.start_pos=2340;tc.rd_ptr_irq=2341;tc.sync_threshold_start=tc.sync_threshold_continue=4;
  sde_hw_intf_setup_te_config(&intf,&tc);sde_hw_intf_enable_te(&intf,true);
  ctl.flush.pending_flush_mask=BIT(31)|BIT(17)|BIT(6)|BIT(0);ctl.flush.pending_intf_flush_mask=BIT(1);
+ // Order supplied by the separately audited real upper callers.
+ sde_hw_intf_connect_external_te(&intf,true);
  sde_hw_ctl_trigger_flush_v1(&ctl);
  sde_hw_autorefresh refresh{true,1};sde_hw_intf_setup_autorefresh_config(&intf,&refresh);
- sde_hw_intf_connect_external_te(&intf,true);
+ // CTL reset helpers are a separate recovery self-test, never a normal enable.
+ puts("RECOVERY");
+ if(sde_hw_ctl_reset_control(&ctl)||ticks<50||ticks>2000)return 1;
  stuck=true;auto start=ticks;if(sde_hw_ctl_reset_control(&ctl)!=-EINVAL||ticks-start!=2000)return 2;
 }
 '''
@@ -85,10 +90,12 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-lineage-pipeline-') as temp:
  source.write_text(prelude+'\n'.join(parts)+main)
  subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-fsanitize=address,undefined',str(source),'-o',str(binary)],check=True)
  output=subprocess.check_output([str(binary)],text=True,env=dict(os.environ,ASAN_OPTIONS="detect_leaks=0",UBSAN_OPTIONS="halt_on_error=1"))
-trace=[dict(address=int(a,16),value=int(v,16)) for a,v in (line.split() for line in output.splitlines())]
+normal,recovery=output.split('RECOVERY\n')
+trace=[dict(address=int(a,16),value=int(v,16)) for a,v in (line.split() for line in normal.splitlines())]
+recovery_trace=[dict(address=int(a,16),value=int(v,16)) for a,v in (line.split() for line in recovery.splitlines())]
 final={str(v['address']):v['value'] for v in trace if v['address']!=0x0ae02030}
-record=dict(reference_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),sources=hashes,helpers=selection,trace=trace,configured_registers=final)
+record=dict(upper_flow=upper,reference_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip(),sources=hashes,helpers=selection,trace=trace,recovery_selftest_trace=recovery_trace,configured_registers=final)
 fixture=Path(__file__).parent/'fixtures/mh2lm-pipeline-lineage.json'
 if '--write-fixture' in sys.argv:fixture.write_text(json.dumps(record,indent=2)+'\n')
 else:assert record==json.loads(fixture.read_text()),'Lineage source or reference trace changed'
-print('PASS: executed',sum(map(len,selection.values())),'unaltered Lineage helpers; CTL 2ms reset bound, command routing, mixer, pixel extension, PP bypass, TE config and flush/kickoff/TE trace')
+print('PASS: executed',sum(map(len,selection.values())),'unaltered Lineage helpers; CTL 2ms reset bound, command routing, mixer, pixel extension, PP bypass, TE config; separate static upper-call audit; manually composed TE/flush/kickoff trace (not full DRM execution)')

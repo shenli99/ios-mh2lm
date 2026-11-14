@@ -10,12 +10,12 @@ here=Path(__file__).resolve().parent;fixture=here/'test-mh2lm-panel-lineage-wake
 ns={'__file__':str(fixture),'__name__':'pipeline_fixture'}
 exec(compile(fixture.read_text().rsplit('\nwith tempfile.TemporaryDirectory(',1)[0],str(fixture),'exec'),ns)
 root=ns['root'];prelude=ns['prelude'];actual=ns['actual'];helpers=ns['helpers']
-touch=ns['touch'].replace('lifecycleMode=2;', 'lifecycleMode=7;ctlResetWorks=true;ctlResetAt=0;ctlResetCount=0;')
+touch=ns['touch'].replace('lifecycleMode=2;', 'lifecycleMode=7;ctlResetCount=0;')
 # Config loss is a test fault, not production writes or a claimed real reset
 # footprint. Only programmed configuration is lost; shared SMMU/QoS/colour,
 # DMA status and independent IRQ counters are not emulated by configuration.
 prelude=prelude.replace('static void writeReg(uintptr_t b',r'''
-static bool ctlResetWorks=true;static uint64_t ctlResetAt=0;static unsigned ctlResetCount=0;
+static unsigned ctlResetCount=0;
 static void erasePipeline(){
  for(unsigned o:{0u,8u,0xcu,0x10u,0x14u,0x18u,0x1cu,0x20u,0x24u,0x28u,0x30u,0x34u,0x38u,0x70u,0xb4u,0x138u,0x170u,0xa04u})regs[bases[2]+o]=0;
  for(unsigned n=0;n<3;++n)for(unsigned o:{0x100u,0x104u,0x108u})regs[bases[2]+o+n*0x10]=0;
@@ -25,15 +25,11 @@ static void erasePipeline(){
  regs[bases[16]]=regs[bases[16]+4]=regs[bases[17]+0xa0]=regs[bases[17]+0xc8]=regs[bases[18]]=0;
  for(unsigned n=0;n<11;++n)regs[bases[16]+0x20+n*0x18]=0;
 }
-static void pipelinePhysical(){
- if(ctlResetWorks&&ctlResetAt&&fakeTicks-ctlResetAt>=50000){regs[bases[3]+0x30]=0;ctlResetAt=0;}
-}
 static void writeReg(uintptr_t b''',1)
 prelude=prelude.replace('supplyWrites.push_back({fakeTicks,b+o,v});','''supplyWrites.push_back({fakeTicks,b+o,v});
- if(b==bases[3]&&o==0x30&&v==1){++ctlResetCount;ctlResetAt=fakeTicks;erasePipeline();}''')
+ if(b==bases[3]&&o==0x30&&v==1){++ctlResetCount;}''')
 helpers=helpers.replace('static IOService*displayNub(){auto*n=nub(false);','''static IOService*displayNub(){auto*n=nub(false);
  uint32_t pipelineABI=1;n->properties["sweet,display-pipeline-abi"]=OSData::withBytes(&pipelineABI,4);''')
-helpers=helpers.replace('physical(m);linkPhysical(m);','physical(m);linkPhysical(m);pipelinePhysical();')
 tests=ns['tests'].split('int main(){')[0]+r'''
 static void configured(Harness&h){
  assert(regs[bases[2]]==0x09240438&&regs[bases[2]+0xc]==0x09240438);
@@ -48,30 +44,28 @@ static void configured(Harness&h){
  assert(regs[bases[4]+0x2a0]==2340&&regs[bases[4]+0x29c]==0x40004&&regs[bases[4]+0x290]==2345);
  assert(h.m->fPipelineConfigured&&h.m->fLifecycle.pipelineGeneration==h.m->fPipelineGeneration);
 }
-static void untilReset(Harness&h,bool wake){
+static void untilConfiguration(Harness&h,bool wake){
  if(wake){supplyPark(h);erasePipeline();h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelPipelineRestore);}
- else {h.begin();for(unsigned n=0;n<12000&&!h.m->fPipelineResetPending&&h.m->fLifecycle.phase!=SweetPanelFault;++n)h.step();}
- assert(h.m->fPipelineResetPending&&!h.m->fPipelineConfigured&&h.pool->pinned);
+ else {h.begin();for(unsigned n=0;n<12000&&!h.m->fPipelinePending&&h.m->fLifecycle.phase!=SweetPanelFault;++n)h.step();}
+ assert(h.m->fPipelinePending&&!h.m->fPipelineConfigured&&h.pool->pinned);
  assert(!h.m->clockCanGate());auto writesBefore=supplyWrites.size();
  assert(h.m->releaseLocalClocks(h.m->fClockBootToken)==kIOReturnBusy&&supplyWrites.size()==writesBefore);
 }
 int main(){
  for(unsigned profile=1;profile<=4;++profile){selectedProfile=profile;Harness h;ready(h);configured(h);
-  assert(h.m->fPipelineGeneration==1&&ctlResetCount==1&&(h.m->panelLifecycleCapabilities()&SweetPanelPipelineRebuild));
+  assert(h.m->fPipelineGeneration==1&&ctlResetCount==0&&(h.m->panelLifecycleCapabilities()&SweetPanelPipelineRebuild));
   auto boot=h.m->fClockBootToken,arc=h.m->fManagedARC;
   for(unsigned round=0;round<3;++round){
    supplyPark(h);erasePipeline();h.m->fLifecycleTE=0xdeadbeef;h.m->fLifecycleAuto=0x81231234;
    panelPackets.clear();supplyWrites.clear();h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelPipelineRestore);
-   assert(regs[bases[3]+0x30]==1&&!h.m->fPipelineConfigured&&h.m->fLifecycle.pipelineGeneration==0);
-   unsigned reset=findWrite(bases[3]+0x30,1);assert(h.m->fLifecycle.brightnessRestored);
-   auto count=supplyWrites.size();h.life();assert(supplyWrites.size()==count&&h.m->fPipelineResetPending);
+   assert(regs[bases[3]+0x30]==0&&!h.m->fPipelineConfigured&&h.m->fLifecycle.pipelineGeneration==0);
+   assert(ctlResetCount==0&&h.m->fLifecycle.brightnessRestored);
    h.untilLife(SweetPanelFrame);configured(h);checkPackets(profile,true,0x345);
    auto source=findWrite(bases[2]+0x14,uint32_t(h.pool->physical(0)));
    auto sub=findWrite(bases[3]+0x110,2),flush=findWrite(bases[3]+0x18,0x80020041);
    auto autoRefresh=findWrite(bases[4]+0x2b4,0x80000001),te=findWrite(bases[4]+0x288,0x180087);
-   assert(reset<source&&source<sub&&sub<flush&&flush<autoRefresh&&autoRefresh<te);
-   assert(supplyWrites[source].time>=supplyWrites[reset].time+50000);
-   assert(h.m->fPipelineGeneration==round+2&&ctlResetCount==round+2&&h.m->fLifecycle.touchQuiesced);
+   assert(source<te&&te<sub&&sub<flush&&flush<autoRefresh);
+   assert(h.m->fPipelineGeneration==round+2&&ctlResetCount==0&&h.m->fLifecycle.touchQuiesced);
    // A generation or register echoes do not prove a new transfer. Each of
    // fresh PP_DONE, empty flush and advancing RD_PTR is independently needed.
    h.life();assert(h.m->fLifecycle.phase==SweetPanelFrame);
@@ -83,11 +77,11 @@ int main(){
    assert(h.m->fClockBootToken==boot&&h.m->fManagedARC==arc);
   }
  }
- // Both new reset waits: hardware timeout, cancelled transaction, service stop,
- // detached participant, SMMU/DSI/resource/IRQ failure. No late configuration.
- for(bool wake:{false,true})for(unsigned fault=0;fault<9;++fault){Harness h;if(wake)ready(h);untilReset(h,wake);
+ // Both configuration continuations: deadline, cancelled transaction, service stop,
+ // detached participant, SMMU/DSI/resource/IRQ failure. No late configuration and no automatic CTL reset recovery.
+ for(bool wake:{false,true})for(unsigned fault=0;fault<10;++fault){Harness h;if(wake)ready(h);untilConfiguration(h,wake);
   auto generation=h.m->fPipelineGeneration;
-  if(fault==0){ctlResetWorks=false;fakeTicks+=2000001;}
+  if(fault==0){fakeTicks+=100000001;}
   if(fault==1)h.m->cancelPanelLifecycle(h.m->fLifecycle.token);
   if(fault==2)h.m->stop(h.d);
   if(fault==3){SweetPanelPinsClient::terminated(h.m->fPanelPinsClient,nullptr,h.p,nullptr);pump();}
@@ -95,12 +89,13 @@ int main(){
   if(fault==5)regs[bases[6]+8]|=6;
   if(fault==6)h.m->fManagedRails&=~1u;
   if(fault==7)regs[bases[11]+0x30c]|=1u<<19;
+  if(fault==9)regs[bases[3]+0x30]=1; // external reset already active, no programming
   if(fault==8)regs[bases[3]+0x200+0xf4]=2; // competing controller, no reset of it
-  if(fault>=4){regs[bases[3]+0x30]=0;ctlResetAt=0;}
+
   if(wake)h.life();else {h.scan();h.life();}
   assert(h.m->fLifecycle.phase==SweetPanelFault||h.m->fLifecycle.phase==SweetPanelStopped);
   assert(h.m->fPipelineGeneration==generation&&!h.m->fLifecycle.pixelsComplete);
-  auto writesBefore=supplyWrites.size();ctlResetWorks=true;fakeTicks+=10000000;pipelinePhysical();quiet(h);
+  auto writesBefore=supplyWrites.size();fakeTicks+=10000000;quiet(h);
   assert(supplyWrites.size()==writesBefore&&h.pool->pinned);
  }
  // Parked configuration loss must not hide domain loss or permit a competing
@@ -123,7 +118,7 @@ int main(){
   missingMap=badMap=shortMap=99;mdssClockWriter=mdssNoCWriter=0;
   assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
  }
- puts("PASS: mode7 actual driver, four profiles x three erased-configuration wakes; initial CTL reset/rebuild, software-only geometry/TE, Lineage flush-before-kickoff-before-TE, fresh pixel fences, both reset waits timeout/cancel/stop/provider/domain/DMA/resource/IRQ/conflict failures, ABI/maps unwind; shared SMMU/core retained");
+ puts("PASS: mode7 actual driver, four profiles x three erased-configuration wakes; no normal CTL reset, software geometry/TE, encoder TE-before-flush-before-kickoff, fresh pixel fences, both configuration continuations deadline/cancel/stop/provider/domain/DMA/resource/IRQ/conflict failures, ABI/maps unwind; shared SMMU/core retained");
 }
 '''
 # Immutable oracle was generated by executing the selected, unmodified LG

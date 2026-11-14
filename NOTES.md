@@ -1,5 +1,20 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0223 Lineage command lifecycle implemented)
+
+**CURRENT：用户授权连命令缓冲准备一起对齐；0223已实现/本地验证，待用户push云编译及新实机。**
+补丁0223 SHA256=946daee753f31c81669b5a47b23e4f33330f59b9583bf6126bb177d89853fc83；修改七份MDSS源码。
+mode7取消正常首次/ON的CTL reset，保留固定管线重配/代数/新帧验证；mode2/7在flush前连接external TE，OFF清tearcheck，ON恢复。
+命令引擎分display/transfer两引用：OFF表前释放display、每条FIFO/DMA独立获取/真实完成后释放、DDIC reset期间command关闭、ON整表后获取display；同步亮度也使用同一引用和完成规则。
+4KiB prepared缓冲供短FIFO/长物理DMA共用并跨OFF/ON保留。mode2/7在服务发布前准备，刻意早于Lineage首transfer懒分配，避免活动gate首分配；不改为IOVA，不宣称启动分配有可中断期限。
+命令完成/pin、SMMU、IRQ、触摸、供电/资源票保持；不确定传输保留引用/物理DMA pin且禁止继续命令/撤资源。
+本地mode2/7四profile各三轮；命令缓冲/引用/七类分配准备失败/FIFO及DMA故障/同步亮度完成故障；两档各60份实际MDSS→FB；DSI/host/link/profile/旧mode6/通用display通过ASan/UBSan。
+新增真实Lineage上层调用点静态校验；14底层helper执行的normal trace与reset自测分开，仍不等于完整DRM执行。
+ARM64 MDSS基线/修改均通过，clang汇总1596→1596、warning文本计数相同；39patch严格重放79文件/132项source markers；真实a32被新打包门拒绝且无boot输出。
+**NEXT：用户push最新main触发CircleCI，下载kernel/buildtree建议0121a33；agent核对0223后沿原ABI608/原mode7 ADT与605/607byte参数打--panel-pipeline，用户验证首次generation1及一次OFF/ON generation2。**
+a31产物保留为成功实机基线；a32持久日志未覆盖OFF、USB止于分配入口，未证实根因或本次实机修复。无a33内核/镜像，不重打a32、不重编固件。
+详见docs/PANEL-LINEAGE-COMMAND-LIFECYCLE.md；底稿scratch/framebuffer-0223。PD4和共享SMMU/core/QoS/色彩/ABL首帧等仍未完成；本轮不push/触发CI/操作设备。
+
 ## Agent handoff / active work (2026-11-14, a32 upper Lineage flow differences confirmed)
 
 **CURRENT：用户追问持久日志/Lineage流程；补充当时终端停止打印，持续接收时长仍不确定。已复核持久末10行=USB5832–5841，早于6044 OFF，未覆盖故障。**

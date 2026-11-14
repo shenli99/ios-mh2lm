@@ -1,11 +1,21 @@
 # LG G8X：Lineage 与当前 XNU 的显示流程和硬件控制对照
 
+## 0223 当前进展（2026-11-14）
+
+用户授权驱动逻辑和命令缓冲一起对齐；[0223实现与验证](PANEL-LINEAGE-COMMAND-LIFECYCLE.md)已完成本地工作，待用户push CircleCI并提供新kernel/buildtree（建议0121a33）。
+正常mode7不再CTL reset；mode2/7的TE在flush前连接、OFF关闭tearcheck、命令引擎按display/transfer引用启停。4KiB物理缓冲在服务发布前准备并复用，明确早于Lineage首次命令懒分配；短FIFO/长物理DMA和真实完成/pin保持。
+mode2/7循环/缓冲引用与故障/实际MDSS→FB、ARM64对象、39patch/79文件/132项source markers通过；ABI608/ADT/参数不变，旧a32打新档被拒绝。
+下一步核对a33后打mode7、实测generation1→OFF/ON generation2；a31保留为成功基线。尚未证实a32黑屏根因或0223实机恢复，完整PD4及共享域/核心/QoS/色彩/ABL首帧余项继续保留。
+
+以下0222/a32及更早记录均为历史阶段，不作为“没有新代码待编译”的当前结论。
+
+
 2026-11-13。比较对象是 Lineage `android_kernel_lge_sm8150` 的
 `2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`。顶部新增专项使用实际a29源码/retained参数；
 后半保留原a27/0215（`2ffc1a4`）首次接管审计作为历史。
 Lineage 一侧是源码所定义的路径，未取得本次同机 Android 寄存器轨迹；不能把它写成实机测量结果。
 
-## a32上层流程复核（2026-11-14，当前）
+## a32上层流程复核（2026-11-14，0223之前）
 
 a31普通OFF/ON已通过，a32首次mode7接管通过但唤醒失败。已读取MSM atomic、DSI bridge、LG panel override和SDE encoder/CRTC的上层调用，详见[a32专项审计](PANEL-D1-0121A32.md)。
 不能把“供电/ULPS/复位没有退回旧版”或“14个底层函数输出匹配”扩展为全流程等价。

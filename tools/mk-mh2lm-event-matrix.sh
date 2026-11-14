@@ -432,7 +432,8 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
    fi
   done
   if [ "$PANEL_PIPELINE" = '1' ]; then
-   for marker in 'SWEET MDSS PIPELINE: mode7 Lineage' 'SWEET MDSS PIPELINE: configured generation=' \
+   for marker in 'SWEET MDSS PIPELINE: normal command enable generation=' 'TE connected before flush/kickoff' \
+       'command buffer ready bytes=4096' 'display command-engine reference=' 'SWEET MDSS PIPELINE: configured generation=' \
        'SWEET FB PANEL: mode7 requires a new pipeline generation' 'sweet,display-pipeline-abi'; do
     if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
      printf 'kernel lacks pipeline rebuild marker: %s\n' "$marker" >&2

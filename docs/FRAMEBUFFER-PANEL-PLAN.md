@@ -1,5 +1,15 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
+## 0223 当前进展（2026-11-14）
+
+用户授权驱动逻辑和命令缓冲一起对齐；[0223实现与验证](PANEL-LINEAGE-COMMAND-LIFECYCLE.md)已完成本地工作，待用户push CircleCI并提供新kernel/buildtree（建议0121a33）。
+正常mode7不再CTL reset；mode2/7的TE在flush前连接、OFF关闭tearcheck、命令引擎按display/transfer引用启停。4KiB物理缓冲在服务发布前准备并复用，明确早于Lineage首次命令懒分配；短FIFO/长物理DMA和真实完成/pin保持。
+mode2/7循环/缓冲引用与故障/实际MDSS→FB、ARM64对象、39patch/79文件/132项source markers通过；ABI608/ADT/参数不变，旧a32打新档被拒绝。
+下一步核对a33后打mode7、实测generation1→OFF/ON generation2；a31保留为成功基线。尚未证实a32黑屏根因或0223实机恢复，完整PD4及共享域/核心/QoS/色彩/ABL首帧余项继续保留。
+
+以下0222/a32及更早记录均为历史阶段，不作为“没有新代码待编译”的当前结论。
+
+
 **当前执行点（2026-11-14）：a32首次mode7接管通过，息屏后唤醒失败；日志最后在首次长包DMA缓冲分配入口，根因未确认。**
 按Lineage补CTL0 reset、VIG0/LM0/CTL0/PP0/INTF1软件配置、flush/kickoff/TE顺序及FB新代数/新帧验收。
 四profile各三轮清空配置恢复、真实MDSS→FB配合、ARM64对象、38patch/79源码/125项source markers通过；FIFO/物理DMA保持。

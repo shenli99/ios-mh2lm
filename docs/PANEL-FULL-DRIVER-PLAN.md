@@ -1,6 +1,16 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
-## 当前阶段对照（2026-11-14，a32唤醒失败审计）
+## 0223 当前进展（2026-11-14）
+
+用户授权驱动逻辑和命令缓冲一起对齐；[0223实现与验证](PANEL-LINEAGE-COMMAND-LIFECYCLE.md)已完成本地工作，待用户push CircleCI并提供新kernel/buildtree（建议0121a33）。
+正常mode7不再CTL reset；mode2/7的TE在flush前连接、OFF关闭tearcheck、命令引擎按display/transfer引用启停。4KiB物理缓冲在服务发布前准备并复用，明确早于Lineage首次命令懒分配；短FIFO/长物理DMA和真实完成/pin保持。
+mode2/7循环/缓冲引用与故障/实际MDSS→FB、ARM64对象、39patch/79文件/132项source markers通过；ABI608/ADT/参数不变，旧a32打新档被拒绝。
+下一步核对a33后打mode7、实测generation1→OFF/ON generation2；a31保留为成功基线。尚未证实a32黑屏根因或0223实机恢复，完整PD4及共享域/核心/QoS/色彩/ABL首帧余项继续保留。
+
+以下0222/a32及更早记录均为历史阶段，不作为“没有新代码待编译”的当前结论。
+
+
+## 0223之前阶段对照（2026-11-14，a32唤醒失败审计）
 
 **0222固定单管线重建本地通过，a32首次接管实测通过、息屏后无法唤醒；PD4仍进行中。**
 mode7首次接管及每次唤醒按Lineage执行CTL0 reset、VIG0/LM0/CTL/PP/INTF重配与新帧提交，保留a31/mode2基线。

@@ -12,6 +12,10 @@ ns={'__file__':str(fixture),'__name__':'lineage_wake_fixture'}
 exec(compile(fixture.read_text().rsplit('\nwith tempfile.TemporaryDirectory(',1)[0],str(fixture),'exec'),ns)
 root=ns['root'];prelude=ns['prelude'];actual=ns['actual'];helpers=ns['helpers']
 touch=ns['touch'].replace('lifecycleMode=6;', 'lifecycleMode=2;')
+# Independently enforce the hardware command engine prerequisite at every
+# actual wire trigger, including synchronous brightness and FIFO commands.
+prelude=prelude.replace('if(b==bases[6]&&o==0x90){',
+ 'if(b==bases[6]&&o==0x90){assert((regs[b+4]&7u)==5u);assert(commandMemory);')
 tests=ns['tests'].split('int main(){')[0]+r'''
 static unsigned findWrite(uintptr_t address,uint32_t value,uint32_t mask=~0u,unsigned from=0){
  for(unsigned i=from;i<supplyWrites.size();++i){auto&w=supplyWrites[i];if(w.address==address&&(w.value&mask)==value)return i;}
@@ -25,10 +29,13 @@ static void untilLink(Harness&h,unsigned phase){
 int main(){
  for(unsigned profile=1;profile<=4;++profile){selectedProfile=profile;Harness h;ready(h);
   assert(h.m->fLifecycleLineage&&h.m->fLifecycleSupplyCycle&&h.m->fLifecycleDataParking&&h.m->fLifecycleLinkCycle);
-  auto boot=h.m->fClockBootToken,arc=h.m->fManagedARC;
+  auto boot=h.m->fClockBootToken,arc=h.m->fManagedARC;auto*buffer=h.m->fDsiBuffer;auto allocations=dsiAllocations;assert(buffer&&h.m->fDsiPrepared);
   for(unsigned round=0;round<3;++round){
    supplyWrites.clear();pinEdges.clear();auto phy=phyResets,host=hostResets;
    supplyPark(h);assert(phyResets==phy&&hostResets==host);
+   assert(regs[bases[4]+0x284]==0&&!h.m->fDsiDisplayEngine&&!h.m->fDsiTransferEngine);
+   unsigned teOff=findWrite(bases[4]+0x284,0),engineOff=findWrite(bases[6]+4,1,7),firstCommand=findWrite(bases[6]+0x90,1);
+   assert(teOff<engineOff&&engineOff<firstCommand);
    unsigned suspend=findWrite(0x03d06000,0x201,0x3ff);
    unsigned resetLow=findWrite(0x03d06004,0);
    unsigned hostOff=findWrite(bases[6]+4,0,7);
@@ -45,7 +52,7 @@ int main(){
    panelPackets.clear();supplyWrites.clear();h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelPinReset);
    assert(phyResets==phy&&hostResets==host+1&&panelPackets.empty());
    assert(regs[bases[6]+0x58]==0x0ca90039&&regs[bases[6]+0x5c]==0x09240438&&regs[bases[6]+0xb0]==0x8421);
-   assert(regs[bases[6]+4]==0x1f5&&regs[bases[6]+0x11c]==0x23f);
+   assert(regs[bases[6]+4]==0x1f1&&regs[bases[6]+0x11c]==0x23f);
    unsigned hostSetup=findWrite(bases[6]+0xb0,0x8421);
    unsigned phyOn=findWrite(bases[12]+0x24,0x60);
    unsigned reentry=findWrite(bases[12]+0xa4,0x1f);
@@ -67,13 +74,14 @@ int main(){
    unsigned flush=findWrite(bases[3]+0x18,1);
    unsigned te=findWrite(bases[4]+0x288,h.m->fLifecycleTE);
    unsigned autoRefresh=findWrite(bases[4]+0x2b4,h.m->fLifecycleAuto);
-   assert(source<flush&&flush<te&&te<autoRefresh);
+   assert(source<te&&te<flush&&flush<autoRefresh);
    for(auto&w:supplyWrites)assert(w.address!=bases[3]+0x1c); // autorefresh kickoff
    assert(regs[bases[3]+0x18]==1&&h.m->fLifecycle.touchQuiesced&&h.pool->pinned);
    // New PP done + advancing RD_PTR cannot bypass a still-pending flush.
    regs[0x0ae01014]|=0x100;realFrame(h.m);h.life();assert(h.m->fLifecycle.phase==SweetPanelFrame);
    regs[bases[3]+0x18]=0;h.complete();assert(h.m->fLifecycle.pixelsComplete&&h.t->fStatus.ready);
    assert(h.m->fClockBootToken==boot&&h.m->fManagedARC==arc&&h.m->fManagedRails==15);
+   assert(h.m->fDsiBuffer==buffer&&dsiAllocations==allocations&&h.m->fDsiDisplayEngine&&!h.m->fDsiTransferEngine&&regs[bases[4]+0x284]==1);
   }
  }
  selectedProfile=4;

@@ -4,12 +4,13 @@ using IOByteCount=uint64_t;
 constexpr unsigned kIODirectionOut=2,kIOMemoryPhysicallyContiguous=0x10,
  kIOMemoryMapperNone=0x800,kIOMapWriteCombineCache=0x400;
 constexpr uintptr_t kernel_task=1;
-static unsigned dsiMemoryFault=0,dsiPrepares=0,dsiCompletes=0;
+static unsigned dsiMemoryFault=0,dsiPrepares=0,dsiCompletes=0,dsiAllocations=0;
 struct IOBufferMemoryDescriptor : OSObject {
  std::vector<uint8_t> bytes;bool prepared=false;uint64_t pa=0x18000000;
  static IOBufferMemoryDescriptor *inTaskWithPhysicalMask(uintptr_t task,unsigned options,uint64_t length,uint64_t mask){
   assert(task==kernel_task&&length==4096&&mask==0xffffffffULL);
   assert(options==(kIODirectionOut|kIOMemoryPhysicallyContiguous|kIOMemoryMapperNone|kIOMapWriteCombineCache));
+  ++dsiAllocations;
   if(dsiMemoryFault==1)return nullptr;
   auto*p=new IOBufferMemoryDescriptor;p->bytes.resize(4096,0xab);
   if(dsiMemoryFault==5)p->pa=0x9d210000;
