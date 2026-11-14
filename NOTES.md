@@ -1,5 +1,16 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0224 HS/ULPS ordering implemented locally)
+
+**CURRENT：用户授权按计划继续；0224已实现D03/D04顺序并审计C08，本地验证通过，待用户push新CI。a33/mode7仍成功实机基线。**
+OFF：host/初次lane-idle→停PHY gating→HS按intf/pixel/byte关→真实CBCR_OFF+RCG UPDATE排除→global/PLL/FIFO/bias stop→250ns→新LinkULPSIdle五lane100us检查→ULPS100us/status→LinkPHYOff/旧Dormant与供电协调。
+ON：byte/pixel/intf开，再原resync/ULPS exit/gating。仅SweetMDSS.cpp枚举和SweetMDSSLink.inc变化；a33已prepared4K复用、真实完成/DMA pin、资源/IRQ/新帧保护保持。未改亮度/色彩、ABI608/ADT/参数、固件或BUG-006。
+Lineage固定2e897dd：真实manager/callback/HS共14函数执行验证普通顺序与17次嵌套/MDP聚合票；PLL/C08/四DTS另作静态审计，不是完整DRM/CCF执行。wake_up仅return0；C08完整post_enable/pre_disable资源周期、每包动态票和共享LP/core释放仍未实现，明确保留。
+11份驱动回归：mode2/7四profile各三轮、五lane各延迟/超时、关钟不halt/转换期DSI与clock拒绝/新等待取消stopprovider、命令复用/完成/engine refs、实际MDSS→FB各60状态及18/24坏凭据、旧mode6/host/link/sequence/display通过。
+ARM64 MDSS基线/修改对象通过，clang汇总1596→1596告警；0224严格apply及0185–0224共40patch严格重放79文件，136项CI source markers。旧a33被新打包marker拒绝且无输出。完整证据scratch/framebuffer-0224/final-review.json及同目录脚本/日志。
+补丁SHA256 282162e246c92c316354e5221c74ecebd64aef9e64701ff4582afdf5309c16a4；详见docs/PANEL-LINEAGE-CLOCK-ULPS.md与全流程矩阵D03/D04/C08。没有新kernel/buildtree/boot镜像或实机结果。
+**NEXT：用户push main触发CircleCI，下载kernel/buildtree建议0121a34；agent核对0224后沿原ABI608打mode7，再用户验证首次generation1及两次OFF/ON generation2/3。之后D07/D08亮度时机与HS、D09色彩/锐度，再其余PD4。** 不重复a33同版测试、不自行push/操作设备。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, a33 two wake cycles passed and logs audited)
 
 **CURRENT：用户反馈亮屏成功；USB441450bytes/5164行已采集，两次OFF/ON均完成，generation1→2→3。a33/mode7成为当前成功实机基线，a31/mode2保留。**

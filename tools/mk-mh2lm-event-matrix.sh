@@ -408,6 +408,8 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
  fi
  if [ "$PANEL_LIFECYCLE" = '1' ]; then
   for marker in 'SWEET FB PANEL: Lineage mode2 supply/link/data completion enabled' \
+      'HS branches halted; PLL/bias stop issued; checking ULPS lane idle' \
+      'ULPS entered after HS stop; PHY shutdown next' \
       'SWEET PANEL LINEAGE:' 'SweetPanelLineageSuspendULPS' \
       'SWEET PANEL PINS CONFIG:' 'owned source recommitted/flush issued' \
       'SWEET PANEL WAKE:' 'reset-proof-ready' 'dma-allocate-enter' \

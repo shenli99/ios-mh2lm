@@ -1,0 +1,104 @@
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -279,7 +279,7 @@
+  enum LinkPhase { LinkIdle, LinkLaneIdle, LinkGatesOff, LinkPLLStop, LinkBiasOff,
+      LinkResetHold, LinkResetSettle, LinkRefgen, LinkPHYConfig, LinkPLLConfig,
+      LinkBiasOn, LinkLock, LinkRoots, LinkRootWait, LinkGatesOn, LinkResync,
+-     LinkULPSEntry, LinkULPSReentry, LinkULPSExit, LinkULPSStop, LinkResumeComplete,
++     LinkULPSEntry, LinkULPSReentry, LinkULPSExit, LinkULPSStop, LinkResumeComplete, LinkULPSIdle, LinkPHYOff,
+      LinkReady, LinkFault, LinkStopped, LinkDormant };
+  unsigned fLinkProfile, fLinkPhase, fLinkCursor, fLinkRoot;
+  uint32_t fLinkMisc;
+diff --git a/iokit/Kernel/arm/SweetMDSSLink.inc b/iokit/Kernel/arm/SweetMDSSLink.inc
+--- a/iokit/Kernel/arm/SweetMDSSLink.inc
++++ b/iokit/Kernel/arm/SweetMDSSLink.inc
+@@ -11,7 +11,7 @@
+  {0x024,0x7f}, {0x0a0,0x1f}, {0x02c,0x40}, {0x014,0}
+ };
+ static const uint8_t linkTiming[14]={0,0x21,8,8,0x25,0x22,9,8,6,3,4,0,0x1b,0x18};
+-static const uint32_t linkGates[3]={0x2004,0x202c,0x2028}; /* off: pixel,intf,byte */
++static const uint32_t linkGates[3]={0x202c,0x2004,0x2028}; /* OFF: intf,pixel,byte; ON: byte,pixel,intf */
+ static const uint32_t linkRoots[2]={0x2110,0x2098};
+ /* LG v2.2 ops used by v2.3: wrapper bit0=1 masks PHY reset propagation;
+  * bits5/7/9 permit PHY0 pixel/byte/PHY dynamic gating. PHY1 bits untouched. */
+@@ -167,10 +167,10 @@
+    if (now>=fLinkStepDeadline) { finishLink(kIOReturnTimeout,"lane/engine stop state"); return; }
+    break;
+   }
+-  if (fLifecycleLineage && fLinkPowerDown) {
+-   linkWrite(0xa4,0x1f); /* v4 ULPS request, four data + clock lanes */
+-   fLinkPhase=LinkULPSEntry;fLinkWait=scanout_now()+100000ULL;break;
+-  }
++  /* dsi_update_clk_state stops HS before invoking the LP pre-off ULPS
++   * callback. Its HS pre-off callback first disables PHY clock gating. */
++  if (fLifecycleLineage && fLinkPowerDown)
++   dp_wr(dp_dispcc,0x8000,dp_rd(dp_dispcc,0x8000)&~0x2a0u);
+   if (fLinkPowerDown) {
+    fLinkSuspendedMask=0x70u;
+    setProperty("SweetDisplaySuspendedClockMask",(unsigned long long)fLinkSuspendedMask,32);
+@@ -180,6 +180,16 @@
+    observeLineage("link-gate-disable",dp_dispcc,b,0,1u,true);
+   }
+   fLinkPhase=LinkGatesOff; fLinkStepDeadline=now+10000000ULL; break;
++ case LinkULPSIdle:
++  /* The earlier pre-HS idle sample is insufficient: v4 checks all five
++   * lanes immediately before a non-clamped ULPS entry request. LP/core
++   * leases remain held, and every timer step revalidates ownership/idle. */
++  if ((dp_rd(p,0x14c)&0x1fu)!=0x1fu) {
++   if (now>=fLinkStepDeadline) {finishLink(kIOReturnTimeout,"post-HS ULPS lane idle");return;}
++   break;
++  }
++  linkWrite(0xa4,0x1f);
++  fLinkPhase=LinkULPSEntry;fLinkWait=scanout_now()+100000ULL;break;
+  case LinkULPSEntry:
+   linkWrite(0x214,0); /* LPRX/CDRX off after >=100us */
+   {
+@@ -187,15 +197,8 @@
+    SWEET_LOG_INFO("SWEET PANEL LINEAGE: ULPS entry lane-status=%#x mask=0x1f want=0\n",status);
+    if (status&0x1fu) {finishLink(kIOReturnIOError,"ULPS entry status");return;}
+   }
+-  fLinkSuspendedMask=0x70u;
+-  setProperty("SweetDisplaySuspendedClockMask",(unsigned long long)fLinkSuspendedMask,32);
+-  dp_wr(dp_dispcc,0x8000,dp_rd(dp_dispcc,0x8000)&~0x2a0u);
+-  for (unsigned n=0;n<3;++n) {
+-   uint32_t b=linkGates[n];dp_wr(dp_dispcc,b,dp_rd(dp_dispcc,b)&~1u);
+-   observeLineage("ulps-gate-disable",dp_dispcc,b,0,1u,true);
+-  }
+-  SWEET_LOG_INFO("SWEET PANEL LINEAGE: ULPS entered; link clocks stopping\n");
+-  fLinkPhase=LinkGatesOff;fLinkStepDeadline=scanout_now()+10000000ULL;break;
++  SWEET_LOG_INFO("SWEET PANEL LINEAGE: ULPS entered after HS stop; PHY shutdown next\n");
++  fLinkPhase=LinkPHYOff;break;
+  case LinkGatesOff: {
+   bool off=true;
+   for (unsigned n=0;n<3;++n) if (!(dp_rd(dp_dispcc,linkGates[n])&CBCR_OFF)) off=false;
+@@ -220,11 +223,19 @@
+  case LinkPLLStop:
+   /* Lineage 7nm disable writes PLL/bias off without polling unlock. */
+   observeLineage("link-pll-stop-lock",p,0x6b0,0,1u,true);
+-  if (!linkWrite(0x528,0) || !linkWrite(0x24,dp_rd(p,0x24)&~(1u<<5))) {
++  /* dsi_pll_disable_sub stops the resync FIFO before withdrawing bias. */
++  if (!linkWrite(0x1c,0) || !linkWrite(0x528,0) || !linkWrite(0x24,dp_rd(p,0x24)&~(1u<<5))) {
+    finishLink(kIOReturnIOError,"PLL bias off"); return;
+   }
+   fLinkPhase=LinkBiasOff; fLinkWait=scanout_now()+250; break;
+  case LinkBiasOff:
++  if (fLifecycleLineage && fLinkPowerDown) {
++   SWEET_LOG_INFO("SWEET PANEL LINEAGE: HS branches halted; PLL/bias stop issued; checking ULPS lane idle\n");
++   fLinkPhase=LinkULPSIdle;fLinkStepDeadline=now+100000ULL;break;
++  }
++  fLinkPhase=LinkPHYOff;
++  /* fall through */
++ case LinkPHYOff:
+   if (fLinkPowerDown && (!linkWrite(0x214,0) || !linkWrite(0x24,dp_rd(p,0x24)&~0x1fu))) {
+    finishLink(kIOReturnIOError,"PHY LPRX/lane shutdown");return;
+   }
+@@ -354,7 +365,7 @@
+   observeLineage("link-byte-prior-divider",dp_dispcc,0x2128,fClockParents[5][4]);
+   uint32_t divider=(fClockParents[5][4]&~3u)|1u; /* DPHY byte_intf = byte / 2 */ dp_wr(dp_dispcc,0x2128,divider);
+   observeLineage("link-byte-divider",dp_dispcc,0x2128,divider,~0u,true);
+-  /* Reverse gate order: byte -> intf -> pixel. Check actual CLK_OFF below. */
++  /* Reverse gate order: byte -> pixel -> intf. Check actual CLK_OFF below. */
+   for (unsigned n=3;n>0;--n) {
+    uint32_t b=linkGates[n-1]; dp_wr(dp_dispcc,b,dp_rd(dp_dispcc,b)|1u);
+    observeLineage("link-gate-enable",dp_dispcc,b,1u,1u,true);

@@ -1,6 +1,12 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
-## 0223 当前进展（2026-11-14）
+## 0224 当前进展（2026-11-14，待新CI/实机）
+
+[HS/ULPS顺序修正](PANEL-LINEAGE-CLOCK-ULPS.md)已实现并本地验证：OFF先PHY gating/HS分支halt/PLL与bias，再新lane-idle检查→ULPS；ON/ OFF三个HS分支顺序对齐。a33的缓冲复用、命令完成/pin及generation保护保持，成功实机基线仍为a33/mode7。
+14个真实Lineage函数执行参考、mode2/7循环/故障与命令/FB联动等11份驱动回归、ARM64基线/修改对象、40patch/79文件/136项source markers通过。C08核对wake_up为空且clock请求聚合；完整逐命令/MDP票周期与共享LP/core物理释放尚未实现。未改ABI608/ADT/args、亮度色彩或日志环。
+**下一步：用户push main、下载新kernel/buildtree（建议0121a34），agent核对/打包原mode7，用户验证两次OFF/ON；之后D07/D08/D09及其余PD4。** 无新内核/镜像/实机结果。以下0223为历史基线记录。
+
+## 0223 / a33 已验证基线（2026-11-14）
 
 用户确认0121a33亮屏成功；[0223实现](PANEL-LINEAGE-COMMAND-LIFECYCLE.md)的[两次OFF/ON实机与日志审计](PANEL-D1-0121A33.md)通过，generation1→2→3，启动prepared缓冲跨唤醒复用。a33/mode7为当前成功基线；完整PD4及全流程一致仍未完成。
 正常mode7不再CTL reset；mode2/7的TE在flush前连接、OFF关闭tearcheck、命令引擎按display/transfer引用启停。4KiB物理缓冲在服务发布前准备并复用，明确早于Lineage首次命令懒分配；短FIFO/长物理DMA和真实完成/pin保持。

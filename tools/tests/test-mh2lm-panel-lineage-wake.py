@@ -26,7 +26,58 @@ static void untilLink(Harness&h,unsigned phase){
  if(h.m->fLinkPhase!=phase)for(auto&msg:messages)fputs(msg.c_str(),stderr);
  assert(h.m->fLinkPhase==phase);
 }
+// Expectations are also exercised against the pinned, unmodified LG clock
+// manager/callback call chain by test-mh2lm-lineage-clock-reference.py.
+static void checkHSOff(){
+ auto host=findWrite(bases[6]+4,0,7),gating=findWrite(bases[1]+0x8000,0,0x2a0);
+ auto intf=findWrite(bases[1]+0x202c,0,1),pixel=findWrite(bases[1]+0x2004,0,1),byte=findWrite(bases[1]+0x2028,0,1);
+ auto global=findWrite(bases[12]+0x14,0,0x20),pll=findWrite(bases[12]+0x3c,0);
+ auto fifo=findWrite(bases[12]+0x1c,0),mux=findWrite(bases[12]+0x528,0),bias=findWrite(bases[12]+0x24,0,0x20);
+ auto ulps=findWrite(bases[12]+0xa4,0x1f),lprx=findWrite(bases[12]+0x214,0,~0u,ulps);
+ auto mask=findWrite(bases[1]+0x8000,1,1),rail=commandIndex(0x40104);
+ assert(host<gating&&gating<intf&&intf<pixel&&pixel<byte&&byte<global&&global<pll&&pll<fifo&&fifo<mux&&mux<bias&&bias<ulps&&ulps<lprx&&lprx<mask&&mask<rail);
+ assert(supplyWrites[ulps].time>=supplyWrites[bias].time+250);
+ assert(supplyWrites[lprx].time>=supplyWrites[ulps].time+100000);
+}
+static void checkHSOn(){
+ auto byte=findWrite(bases[1]+0x2028,1,1),pixel=findWrite(bases[1]+0x2004,1,1),intf=findWrite(bases[1]+0x202c,1,1);
+ auto fifo=findWrite(bases[12]+0x1c,1),exit=findWrite(bases[12]+0xa8,0x1f);
+ auto gating=findWrite(bases[1]+0x8000,0x2a0,0x2a0);
+ assert(byte<pixel&&pixel<intf&&intf<fifo&&fifo<exit&&exit<gating);
+}
+static void clockULPSFaults(){
+ // Hold each data/clock lane non-idle AFTER HS has stopped. No ULPS request,
+ // PHY power-off or rail withdrawal is allowed; a fresh idle sample recovers.
+ for(unsigned lane=0;lane<5;++lane)for(bool timeout:{false,true}){
+  Harness h;ready(h);supplyWrites.clear();h.power(SweetPanelDisplayOff);untilLink(h,SweetMDSS::LinkULPSIdle);
+  assert(h.m->fLinkSuspendedMask==0x70&&!regs[bases[12]+0x3c]);
+  regs[bases[12]+0x14c]&=~(1u<<lane);auto before=supplyWrites.size();
+  auto poll=[&](){fakeTicks+=10000;SweetMDSS::dsiTimerAction(h.m,h.m->fDsiTimer);};
+  for(unsigned n=0;n<3;++n)poll();
+  assert(h.m->fLinkPhase==SweetMDSS::LinkULPSIdle&&supplyWrites.size()==before);
+  assert(!ulpsRequestAt&&regs[bases[12]+0xa0]==0x1f&&h.m->fManagedRails==15&&h.pool->pinned);
+  assert(!h.m->localClocksReady()&&h.m->setBrightness(0x346)!=kIOReturnSuccess);
+  uint64_t token=0;const uint8_t command[]={0x05,1,0,0,0,0,1,0x28};
+  assert(sweet_dsi_sequence_valid(command,sizeof(command),nullptr));
+  assert(h.m->retainLocalClocks(SweetClockDSI0,&token)==kIOReturnNotReady&&!token);
+  assert(h.m->beginDSISequence(command,sizeof(command),&token)==kIOReturnBusy&&!token);
+  assert(h.m->releaseLocalClocks(h.m->fClockBootToken)!=kIOReturnSuccess&&supplyWrites.size()==before);
+  if(timeout){fakeTicks+=100001;poll();supplyFailed(h);assert(!ulpsRequestAt&&h.m->fManagedRails==15);}
+  else {regs[bases[12]+0x14c]|=1u<<lane;poll();assert(h.m->fLinkPhase==SweetMDSS::LinkULPSEntry);h.untilLife(SweetPanelComplete);checkHSOff();}
+ }
+ // A branch that never halts must prevent PLL/ULPS/PHY/rail shutdown.
+ {Harness h;ready(h);supplyWrites.clear();h.power(SweetPanelDisplayOff);untilLink(h,SweetMDSS::LinkLaneIdle);
+  physicalHalt=false;supplyFailed(h);assert(!ulpsRequestAt&&regs[bases[12]+0x3c]==1&&h.m->fManagedRails==15);}
+ const unsigned down[]={SweetMDSS::LinkGatesOff,SweetMDSS::LinkPLLStop,SweetMDSS::LinkBiasOff,SweetMDSS::LinkULPSIdle,SweetMDSS::LinkULPSEntry,SweetMDSS::LinkPHYOff};
+ for(unsigned phase:down)for(unsigned fault=0;fault<3;++fault){Harness h;ready(h);h.power(SweetPanelDisplayOff);untilLink(h,phase);
+  if(fault==0)h.m->cancelPanelLifecycle(h.m->fLifecycle.token);
+  if(fault==1)h.m->stop(h.d);
+  if(fault==2){SweetPanelPinsClient::terminated(h.m->fPanelPinsClient,nullptr,h.p,nullptr);SweetMDSS::dsiTimerAction(h.m,h.m->fDsiTimer);pump();}
+  supplyFailed(h);assert(h.m->fManagedRails==15);
+ }
+}
 int main(){
+ clockULPSFaults();
  for(unsigned profile=1;profile<=4;++profile){selectedProfile=profile;Harness h;ready(h);
   assert(h.m->fLifecycleLineage&&h.m->fLifecycleSupplyCycle&&h.m->fLifecycleDataParking&&h.m->fLifecycleLinkCycle);
   auto boot=h.m->fClockBootToken,arc=h.m->fManagedARC;auto*buffer=h.m->fDsiBuffer;auto allocations=dsiAllocations;assert(buffer&&h.m->fDsiPrepared);
@@ -44,7 +95,8 @@ int main(){
    unsigned gates=findWrite(bases[1]+0x2004,0,1);
    unsigned mask=findWrite(bases[1]+0x8000,1,1);
    unsigned rail=commandIndex(0x40104);
-   assert(suspend<resetLow&&resetLow<hostOff&&hostOff<ulps&&ulps<lprx&&lprx<gates&&gates<mask&&mask<rail);
+   assert(suspend<resetLow&&resetLow<hostOff&&hostOff<gates&&gates<ulps&&ulps<lprx&&lprx<mask&&mask<rail);
+   checkHSOff();
    assert(supplyWrites[hostOff].time>=supplyWrites[resetLow].time+5000000);
    assert(supplyWrites[lprx].time>=supplyWrites[ulps].time+100000);
    assert(supplyWrites[suspend].time>=panelPackets.back().time+155000000);
@@ -64,6 +116,7 @@ int main(){
    unsigned exitClear=findWrite(bases[12]+0xa8,0,~0u,exit+1);
    unsigned stop=findWrite(bases[12]+0xac,0x1f);
    unsigned soft=findWrite(bases[6]+0x118,1);
+   checkHSOn();
    assert(hostSetup<phyOn&&phyOn<reentry&&reentry<unmask&&unmask<pllStart&&pllStart<gateOn&&gateOn<fifo&&fifo<exit&&exit<exitClear&&exitClear<stop&&stop<soft);
    assert(supplyWrites[unmask].time>=supplyWrites[reentry].time+100000);
    assert(supplyWrites[exitClear].time>=supplyWrites[exit].time+1000000);
@@ -121,7 +174,7 @@ int main(){
   assert(!p.resetHigh&&p.resetKnown&&regs[0x03d06004]==3&&h.p->fDiagnosticCount);
   h.power(SweetPanelDisplayOn);h.wakePixels();assert(h.m->fLifecycle.resetComplete&&h.m->fLifecycle.pixelsComplete);
  }
- puts("PASS: mode2 four Lineage profiles x three cycles; independent ULPS timing/status, reset-mask polarity, host setup/soft reset, no cold PHY pulse, panel-only supply requests, exact unchanged FIFO/DMA wire tables, owned source/flush/TE/autorefresh and fresh pixels, real completion faults, every new wait cancel/stop/provider loss, diagnostic GPIO echoes and zero objects after reboot");
+ puts("PASS: mode2 four Lineage profiles x three cycles; HS-before-ULPS and branch order, post-HS five-lane delay/timeout, rejected DSI/clock requests, branch halt failure and shutdown waits cancel/stop/provider loss; independent ULPS timing/status, reset-mask polarity, host setup/soft reset, no cold PHY pulse, panel-only supply requests, exact unchanged FIFO/DMA wire tables, owned source/flush/TE/autorefresh and fresh pixels, real completion faults, diagnostic GPIO echoes and zero objects after reboot");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-lineage-wake-') as temp:

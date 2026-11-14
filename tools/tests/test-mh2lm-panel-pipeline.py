@@ -52,15 +52,17 @@ static void untilConfiguration(Harness&h,bool wake){
  assert(h.m->releaseLocalClocks(h.m->fClockBootToken)==kIOReturnBusy&&supplyWrites.size()==writesBefore);
 }
 int main(){
+ clockULPSFaults();
  for(unsigned profile=1;profile<=4;++profile){selectedProfile=profile;Harness h;ready(h);configured(h);
   assert(h.m->fPipelineGeneration==1&&ctlResetCount==0&&(h.m->panelLifecycleCapabilities()&SweetPanelPipelineRebuild));
   auto boot=h.m->fClockBootToken,arc=h.m->fManagedARC;
   for(unsigned round=0;round<3;++round){
-   supplyPark(h);erasePipeline();h.m->fLifecycleTE=0xdeadbeef;h.m->fLifecycleAuto=0x81231234;
+   supplyWrites.clear();supplyPark(h);checkHSOff();erasePipeline();h.m->fLifecycleTE=0xdeadbeef;h.m->fLifecycleAuto=0x81231234;
    panelPackets.clear();supplyWrites.clear();h.power(SweetPanelDisplayOn);h.untilLife(SweetPanelPipelineRestore);
    assert(regs[bases[3]+0x30]==0&&!h.m->fPipelineConfigured&&h.m->fLifecycle.pipelineGeneration==0);
    assert(ctlResetCount==0&&h.m->fLifecycle.brightnessRestored);
    h.untilLife(SweetPanelFrame);configured(h);checkPackets(profile,true,0x345);
+   checkHSOn();
    auto source=findWrite(bases[2]+0x14,uint32_t(h.pool->physical(0)));
    auto sub=findWrite(bases[3]+0x110,2),flush=findWrite(bases[3]+0x18,0x80020041);
    auto autoRefresh=findWrite(bases[4]+0x2b4,0x80000001),te=findWrite(bases[4]+0x288,0x180087);
