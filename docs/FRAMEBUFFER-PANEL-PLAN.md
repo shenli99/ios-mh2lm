@@ -1,11 +1,11 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**当前执行点（2026-11-14）：0121a30已核对含0219+0220，ABI608镜像就绪，待一次OFF/ON实测。**
-78源码/114原CI source markers/222内核markers及四档boot回读通过，ADT/启动参数与a29一致，retained605字节。
-先开USB，再启动`out-bs/boot-16k-0121a30-abi608-panel-retained.img`；桌面正常后息屏等5秒再唤醒，继续收日志至少30秒。
-重点看ULPS entry/reentry/exit、供电ACK、host soft reset、DDIC/ON表、owned flush/fresh pixels/touch。
-a29桌面正常/息屏不能唤醒仍为最后实测，根因未定；不重测a29/identity，不展开combined/supply或长测。
-见[产物与命令](PANEL-D1-0121A30.md)、[0220实现](PANEL-LINEAGE-SUSPEND-RESUME.md)。本轮只核对打包/菜单标题/记录，没有驱动修改。以下为历史。
+**当前执行点（2026-11-14）：接手时已发现a30日志，OFF完成后framebuffer验收失败；mode2上下层合同不一致已静态定位。**
+日志2190 HANDOFF active，3467 OFF命令完成，3494 ULPS entry通过，3566/3569撤面板票ACK，3570 OFF complete；
+随后consumer cancelled/FB completion IOError，USB/按键/用户态继续，没有ON begin。
+0220的MDSS mode2启用supply/link/data parking，但SweetFBService仍用旧mode2要求resourcesHeld，拒绝合法停驻结果。
+下一步同步consumer语义并覆盖真实mode2初始化及OFF结果→ON请求回归；保留完成和资源保护，修复后再验收唤醒硬件路径。
+见[日志证据、源码及边界](PANEL-D1-0121A30.md)。本轮仅接手/审计/记录，未改驱动或运行新回归；不重测旧a30，不切combined/supply。以下为历史。
 
 **历史执行点（2026-11-13）：a25已分析；0213局部状态/复位取证已提交7f4f55a，待用户push云编译。**
 a25首错仍为branch7/+4004 branch-wait，PA正确，立即及39次等待均未见enable，整体期限仍余188.3ms。

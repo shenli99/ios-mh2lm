@@ -1,5 +1,8 @@
 # MH2LM 当前 USB、按键、屏幕与电池驱动架构
 
+**当前执行点以[NOTES顶部](../NOTES.md)为准。2026-11-14接手已发现a30实机OFF完成后的consumer验收失败，
+详见[a30日志与mode2合同分析](PANEL-D1-0121A30.md)。下方各版执行点是历史；本页用于查架构，不据此重复旧测试。**
+
 **当前执行点（2026-11-13）：a25已分析；0213局部状态/复位取证已提交7f4f55a，待用户push云编译。**
 a25首错仍为branch7/+4004 branch-wait，PA正确，立即及39次等待均未见enable，整体期限仍余188.3ms。
 RSC准入为NON_GDSC0/RSCC_AHB1/RSCC_VSYNC1；十次apps IRQ和core2通过，未display TCS/新DMA。

@@ -1,5 +1,23 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, workspace intake and a30 OFF completion mismatch)
+
+**CURRENT：已完成项目接手梳理；发现已有a30 USB实测日志，旧“待首次OFF/ON”安排已过时。此次只审计与记录，未改驱动。**
+接手时主仓HEAD为39e60ae，工作树干净；当前实现基线0220/9244ec1，构建仍走CircleCI。
+日志`logs/live-0121a30-abi608-panel-retained.txt`共306515bytes/3942行，SHA256=`1184ff2bf89036f09edc8c586763638662b8048204e476a28946427b0498224c`。
+2126新扫描源fresh PP_DONE/flush0，2190 HANDOFF active；3459硬件帧约59.9Hz/dropped0。
+3467 OFF四条命令完成；3494/3498 ULPS entry通过；3566/3569 VPNL/VDDI撤票ACK；3570 token2 OFF complete。
+3571–3577随即consumer cancelled及FB completion IOError；此后USB/按键/用户态继续，未见ON begin，不能解释成整机死机。
+已核对a30实际源码存在mode2合同不一致：SweetMDSSLifecycle.inc:44–50启用supply/link/data parking，
+SweetFBService.inc:13–14仍仅为旧mode3–6置相应标志；mode2完成检查落到:346的resourcesHeld要求，
+而下层息屏完成时该值为false（SweetMDSSLifecycle.inc:470）。FB拒绝完成→stopPanelLifecycle→cancel→Fault与日志相符。
+这是明确的静态不一致；尚无修复后实机验证，ON后续长包DMA/ULPS退出/画面及触摸恢复仍待验证，不宣称整体唤醒问题已解决。
+镜像与解出的内核SHA本轮重新计算，均匹配a30交付记录；未重跑历史回归或全量构建，未核对独立CI run ID/完整构建日志。
+**NEXT：优先同步framebuffer consumer与MDSS的mode2语义，并用真实mode2初始化和实际OFF完成状态覆盖consumer验收/随后ON；保留真实完成与资源保护。**
+本轮用户要求是接手项目，未开始实现修复；不需重复a30测试或重编同一版本，不切combined/supply绕过此问题。
+详细日志行号、源码链及验证边界见`docs/PANEL-D1-0121A30.md`顶部；workspace PLAN/显示计划/编译入口已同步。
+保留Mu-Silicium既有未提交改动和旧设备仓pycache；未操作设备、备份、固件、ADT/args，未push/触发CI。以下交接为历史。
+
 
 ## Agent handoff / active work (2026-11-14, 0121a30 artifacts and ABI608 wake test ready)
 

@@ -31,9 +31,10 @@ boot.img（Android header v1, page 2048）
 
 [0121a30产物](PANEL-D1-0121A30.md)已核对包含0219+0220，并完成ABI608四档镜像打包与回读。
 78源码匹配0220验证树、114原CI source markers和222内核markers通过；全部ADT/启动参数与a29相同。
-下一步直接按a30文档启动`boot-16k-0121a30-abi608-panel-retained.img`，进入桌面后测一次OFF/ON并保留USB日志。
+2026-11-14接手时已发现a30实机日志：OFF完成后被framebuffer consumer拒绝并取消，详见[a30实测分析](PANEL-D1-0121A30.md)。
 `panel-retained`是历史文件名，mode2会执行[0220 Lineage息屏/唤醒流程](PANEL-LINEAGE-SUSPEND-RESUME.md)，
-撤销本panel票并恢复ULPS链路；菜单标题已更正。当前待实机，不需要再编同一内核或重测a29。
+撤销本panel票并恢复ULPS链路；菜单标题已更正。当前应先修正consumer仍按旧mode2资源保留规则验收的差异，
+覆盖mode2的OFF/ON合同后再生成新版本；不需要再编同一内核或重测a29/a30。本轮接手仅分析，尚无修复补丁。
 
 ## 1. 写补丁（agent）
 
