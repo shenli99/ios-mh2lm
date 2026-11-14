@@ -1,5 +1,18 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0223 full target-display audit)
+
+**CURRENT：用户要求整体全面检查；已完成本轮目标源码审计，统一入口为 [全流程审计矩阵](docs/PANEL-LINEAGE-FULL-FLOW-AUDIT.md)，64项覆盖8类。整体仍未对齐，本轮无驱动修改。**
+固定Lineage `2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`，XNU实现仍为 `6ff3085`，审计起点HEAD `a66348c`；0223补丁和七份最终源码hash保持。
+既有CTL reset/TE-before-flush/tearcheck/command engine引用修正仍成立；不能扩展为全流程一致。
+普通OFF/ON剩余：HS释放先于ULPS及HS内部开关顺序；LG亮度pending/post-kickoff，而XNU像素前恢复；普通亮度参考默认HS而XNU固定LP；LG ON电源属性回调还恢复CM/锐度HS命令，XNU没有该步骤。
+**四profile均启用use-color-manager，均未启用ddic-register-backup；backup/complete都false不会阻止mode_set。** 普通ON-from-OFF跳过NOLP表，但不跳过mode_set；不能误记成PV无color manager。LG Kconfig默认y已补查，电源属性/特殊功能触发条件见矩阵。
+首次warm takeover仍不同splash；mode7固定auto1、单缓冲30Hz原地拷贝，不等价完整DRM提交。RSC/逐包clock vote、共享SMMU/core/QoS/DSPP、ESD/ROI/AOD/其他DDIC功能、冷启动/系统PM/故障退出均已分类，未实现项不能归入“目标不适用”。
+明确适配仍为短FIFO/长物理DMA、提前prepared4K、真实完成/独立pin、资源与IRQ归属、FB/触摸协调；不移除保护。亮度UI/blmap政策不机械复制Android。
+底稿 `scratch/framebuffer-0223/full-flow-audit.py` 与 `full-flow-audit.json`：63份source hash、150段完整函数、72项静态检查、8张ON/OFF表字节一致，既有upper-flow检查通过。不是DRM执行/全状态覆盖；既有13份回归/ARM64/39patch证据复用，未重跑。
+**NEXT：按矩阵D03/D04/D07/D08/D09及C08处理普通路径并补真实caller期望；B01、E04–E06另收首次接管/持续提交，其他缺项继续保留。0223只能称局部修正。**
+a31成功基线与a32日志/产物保持；持久日志不覆盖OFF，USB止于分配入口且接收时长不确定，根因及0223实机效果未定。无新内核/镜像/实机，不push/触发CI/操作设备。本轮仅审计/文档并本地提交；以下为历史。
+
 ## Agent handoff / active work (2026-11-14, 0223 upper-flow re-audit)
 
 **CURRENT：用户要求再次对比Lineage。0223局部修正仍成立，但全流程未对齐；本轮仅审计/文档，无新驱动修改。**

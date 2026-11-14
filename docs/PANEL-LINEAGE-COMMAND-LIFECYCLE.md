@@ -6,7 +6,7 @@
 在 0222 后修改七份 MDSS 源文件，无新 ADT 映射、boot arg、固件或 framebuffer ABI。
 参考仍是 LG Lineage `2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`，不是本机 Android 寄存器实测。
 
-**再次审计：本补丁只完成下表中的局部修正，整体流程未完全对齐。** [0223上层流程复核](PANEL-LINEAGE-0223-FLOW-AUDIT.md)补查确认HS/ULPS顺序、LG亮度恢复、首次splash接管与autorefresh策略仍有差异；原测试未覆盖这些上层条件。本轮审计没有修改0223源码或增加实机结果。
+**全面审计：本补丁只完成下表中的局部修正，整体流程未完全对齐。** 当前入口是[64项全流程矩阵](PANEL-LINEAGE-FULL-FLOW-AUDIT.md)，覆盖普通/首次/持续刷新/资源/功能/异常路径；[上一轮专项](PANEL-LINEAGE-0223-FLOW-AUDIT.md)仅记录四项差异。除HS/ULPS、LG亮度时机、splash与autorefresh外，还确认普通亮度HS/LP差异和ON表外CM/锐度恢复缺失等。原测试未覆盖这些条件；本轮审计未修改0223源码或增加实机结果。
 
 ## 本次对齐
 

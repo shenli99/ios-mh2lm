@@ -1,8 +1,14 @@
 # LG G8X：Lineage 与当前 XNU 的显示流程和硬件控制对照
 
-## 0223 再次复核（2026-11-14，当前结论）
+## 0223 全面审计（2026-11-14，当前入口）
 
-**局部已修正，整体尚未对齐。** [本次完整调用链审计](PANEL-LINEAGE-0223-FLOW-AUDIT.md)确认正常CTL reset、TE-before-flush、tearcheck和command engine引用的修正；同时确认以下剩余差异：
+**[全流程审计矩阵](PANEL-LINEAGE-FULL-FLOW-AUDIT.md)为当前统一清单，共64项。** 已覆盖目标配置、首次接管、普通OFF/ON、命令/亮度/色彩、持续刷新、资源、触摸/FB/故障退出及ESD/AOD/ROI等功能；不能再把下面四项专项当作全部剩余差异。普通路径还确认亮度参考默认HS而XNU固定LP、LG ON电源属性回调恢复CM/锐度HS命令而XNU缺失，以及HS开启内部顺序。四profile均启用color manager，无register backup不阻止mode_set。
+
+本轮固定原Lineage和0223源码，仅审计/文档；63份source hash、150段完整函数、72项静态检查、8表字节一致。未重跑驱动回归或取得新实机结果。
+
+## 0223 上一轮专项复核（2026-11-14，历史范围）
+
+**局部已修正，整体尚未对齐。** [上一轮上层调用链专项](PANEL-LINEAGE-0223-FLOW-AUDIT.md)确认正常CTL reset、TE-before-flush、tearcheck和command engine引用的修正；同时确认以下剩余差异：
 
 | 环节 | Lineage | 当前XNU |
 |---|---|---|

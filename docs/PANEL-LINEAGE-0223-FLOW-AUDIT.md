@@ -1,5 +1,7 @@
 # 0223 与 Lineage 上层显示流程复核
 
+**后续全面检查已完成本轮源码审计：[64项统一矩阵](PANEL-LINEAGE-FULL-FLOW-AUDIT.md)。** 本文为上一轮四项专项记录，不是剩余差异的完整清单。全面检查补入亮度HS/LP、ON表外色彩/锐度恢复、HS开启内部顺序、持续刷新/资源/功能/退出范围；本轮未修改0223驱动。
+
 2026-11-14，用户要求再次比较。**0223 修正了上一轮确认的局部差异，整体流程仍未完全对齐。** 本轮只审计和更新文档，没有修改驱动、生成新内核或验证实机。
 
 比较基线：XNU 实现 `6ff3085`、交接 `3a0533a`，最终源码为 workspace `scratch/framebuffer-0223/verify/iokit/Kernel/arm/`；补丁 SHA256 `946daee753f31c81669b5a47b23e4f33330f59b9583bf6126bb177d89853fc83`。Lineage 是 `ref/lge-lineage-kernel` 的 `2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`，工作树干净。下文 Lineage 文件位于 `drivers/gpu/drm/msm/`，另标路径除外；行号对应这两个固定版本。

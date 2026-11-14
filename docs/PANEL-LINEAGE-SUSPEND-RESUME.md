@@ -1,6 +1,6 @@
 # 0220：按 Lineage 对齐面板息屏与唤醒
 
-2026-11-14补充：[0223上层流程复核](PANEL-LINEAGE-0223-FLOW-AUDIT.md)发现本文原本遗漏的HS时钟/ULPS顺序和LG亮度post-kickoff差异。以下记录说明已实现的部分，不代表整体Lineage流程一致；a31成功实机事实保持。
+2026-11-14补充：当前统一入口为[64项全流程审计](PANEL-LINEAGE-FULL-FLOW-AUDIT.md)。[上一轮专项](PANEL-LINEAGE-0223-FLOW-AUDIT.md)发现HS时钟/ULPS和LG亮度post-kickoff差异；全面检查另确认HS内部开关顺序、亮度HS/LP、ON表外CM/锐度恢复等。以下记录仅说明已实现的部分，不代表整体Lineage流程一致；a31成功实机事实保持。
 
 ## 0221：framebuffer配合逻辑已修复（2026-11-14）
 
