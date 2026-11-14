@@ -1,5 +1,15 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, diagnosis and repair order recommended)
+
+用户询问下一步修复顺序，以及是否先重复采集故障日志。**建议先用原a32/mode7补采一次，再验证已有0223；这是建议，尚无用户重试/新日志/新实机结果。**
+保持原镜像/参数：启动确认首次接管，息屏5秒后唤醒；从唤醒尝试起计时60秒，期间即使无输出也继续接收，之后保存USB及持久日志并记录操作时刻。
+复核接收脚本先stdout.write/flush再写日志；本次命令重定向stdout到/dev/null、另存stderr，避开终端输出阻塞采集这一可能性；未证明它是上次截断原因，不改驱动/采集脚本。
+新日志独立命名retry1，不覆盖a31/a32旧证据。若仍停dma-allocate-enter，也只证明重复的最后可见位置，不能单凭无return认定allocator死锁；不安排无新增信息的连续旧版重试。
+随后建议先编译/验证已有0223这组候选修正（含启动前prepared buffer），不把全面审计差异一次混入首个验证版本。通过只能归因该组改动，不能单独证明某项是黑屏根因；失败按新的最后完成阶段继续定位。
+整体对齐继续按矩阵分组：时钟HS/ULPS；亮度HS/LP与post-kickoff及色彩恢复；首次接管/持续刷新；其余功能/资源缺项。a31已有的差异和故障位置之后的差异，不直接记为a32根因。具体建议与采集命令见docs/PANEL-D1-0121A32.md顶部。
+本轮仅源码/现有证据复核和建议文档；未生成新内核/镜像、未运行设备命令、未push/CI。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, 0223 full target-display audit)
 
 **CURRENT：用户要求整体全面检查；已完成本轮目标源码审计，统一入口为 [全流程审计矩阵](docs/PANEL-LINEAGE-FULL-FLOW-AUDIT.md)，64项覆盖8类。整体仍未对齐，本轮无驱动修改。**
