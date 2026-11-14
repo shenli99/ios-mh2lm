@@ -10,6 +10,10 @@ FB mode2启用supply/link/data parking验收，接受合法OFF停驻并继续ON�
 本轮修复收口，保留a31已验证基线，无需重编/重打或重复首次验证。仅一个普通周期，多轮耐久/长休眠尚未覆盖；
 完整MDP/INTF/SMMU重建、共享核心低功耗及整个显示计划仍未完成，后续工作按独立范围推进。以下为历史。
 
+**总计划位置：** 当前仍是[四大目标路线](IRQ-FRAMEBUFFER-PLAN.md)中的第二项。
+下一主段按[PD阶段表](PANEL-FULL-DRIVER-PLAN.md)推进独立管线重建，再补无ABL首帧/console/panic及必要生命周期，之后进入F5直扫。
+当前自有A/30Hz CPU拷贝保留，约60Hz硬件IRQ不代表已完成60Hz UI或零拷贝；F7及后续日志/整机低功耗目标尚未收尾。
+
 **历史执行点（2026-11-13）：a25已分析；0213局部状态/复位取证已提交7f4f55a，待用户push云编译。**
 a25首错仍为branch7/+4004 branch-wait，PA正确，立即及39次等待均未见enable，整体期限仍余188.3ms。
 RSC准入为NON_GDSC0/RSCC_AHB1/RSCC_VSYNC1；十次apps IRQ和core2通过，未display TCS/新DMA。

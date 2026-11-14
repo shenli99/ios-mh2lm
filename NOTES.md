@@ -1,5 +1,18 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, overall roadmap reconciled after a31)
+
+**CURRENT：用户询问大计划位置；已核对四大目标路线、显示F0–F7和完整面板PD0–PD5，本次仅同步计划，无新实现。**
+当前主线仍是大目标二；a31/0221普通OFF/ON实测通过（记录提交56e7b5c），保持此基线。
+F1/F2/F3正常使用通过；F4自有A扫描/裁剪及恢复通过，但仍单缓冲30Hz CPU拷贝；不是F5直扫或60Hz UI。
+PD2链路和PD3普通面板生命周期已走通；PD2固定MDP/CTL/INTF/SMMU依赖的独立配置、PD4状态失效后重建仍未完成。
+**NEXT（原计划顺序）：补齐独立管线配置并推进PD4 → PD1无ABL首帧/default surface/console/panic与PD5必要生命周期 → F5直扫/完成等待/复用 → F7。**
+不因本次问进度开始新代码/云编译/设备测试，不重新展开拷贝双缓冲或旧版验证；F6按需。
+大目标一IRQ主体已使用，但电池补强/组合验收未全部结案，不误写全完成或重新设为显示前置。
+大目标三日志仅有分级基础；大目标四整机低功耗仍末尾待规划。显示自身资源/恢复继续在目标二完成。
+IRQ-FRAMEBUFFER-PLAN及PANEL-FULL-DRIVER-PLAN顶部旧a25/a27当前状态已改为历史并加阶段表；显示总计划与workspace PLAN增加准确入口。
+workspace旧总表P3阻塞/触控未开始等未逐条历史重写，顶部明确已过时，实际M3/M4和输入功能已有证据。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, 0121a31 ordinary suspend/wake passed on device)
 
 **CURRENT：用户确认a31息屏后成功点亮，触摸/按键/亮度调节正常；USB日志确认一次完整OFF→ON，本轮0221配合修复实测通过。**
