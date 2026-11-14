@@ -1,9 +1,10 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**当前执行点（2026-11-14）：0121a32包含0222已核对，ABI608 mode7镜像回读通过，待实机。**
+**当前执行点（2026-11-14）：a32首次mode7接管通过，息屏后唤醒失败；日志最后在首次长包DMA缓冲分配入口，根因未确认。**
 按Lineage补CTL0 reset、VIG0/LM0/CTL0/PP0/INTF1软件配置、flush/kickoff/TE顺序及FB新代数/新帧验收。
 四profile各三轮清空配置恢复、真实MDSS→FB配合、ARM64对象、38patch/79源码/125项source markers通过；FIFO/物理DMA保持。
-产物79源码/125 source/237内核markers通过；[a32镜像与步骤](PANEL-D1-0121A32.md)已就绪。只启动panel-pipeline（mode7，605字节），先验证首次generation1再一次OFF/ON generation2；a31/mode2作为已验证基线保留。
+产物79源码/125 source/237内核markers通过；[a32日志及回归审计](PANEL-D1-0121A32.md)已完成。首次generation1通过，OFF完成、ON已到DDIC reset，未观察到分配返回及generation2。
+未发现既有Lineage生命周期逻辑回退；持久日志早于OFF，USB继续接收时长不确定。下一步聚焦命令缓冲准备及采集连续性，a31/mode2仍为已验证基线。
 [0222实现与边界](PANEL-PIPELINE-REBUILD.md)保持；无需再次云编译或重编固件。
 PD4仍进行中：共享SMMU/core/VBIF/QoS/DSPP/部分PP状态和ABL首帧依赖尚待补齐，不是完整掉电重建。之后仍按PD1余项/PD5→F5→F7执行。
 

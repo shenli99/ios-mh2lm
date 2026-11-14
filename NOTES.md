@@ -1,5 +1,21 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, a32 wake failed before DMA allocation return)
+
+**CURRENT：用户实测a32其它正常、息屏无法唤醒；USB+持久日志已审计。首次mode7 generation1/HANDOFF通过，普通ON未完成，a31仍成功基线。**
+实现c94d59d，a32交付d05f992。没有发现0222恢复旧供电/ULPS/GPIO强制回显或FB取消逻辑，不能据此排除所有间接影响。
+USB logs/live-0121a32-abi608-panel-pipeline.txt：562139bytes/6699行，SHA=fbaf3ba21c98521f157f29df21d14a5517941249e12c02282819d95744882d68。
+2185–2200首次reset/config generation1/fresh PP/HANDOFF；6161 OFF complete，6176 ON begin，6505ULPS exit，6510host soft reset，6679DDIC reset完成。
+6699最后为dma-allocate-enter；无allocate-return/ON表受理/generation2/ON complete，无consumer cancelled或panic(cpu记录。
+DSI/Host/Link/PanelPins/PanelSupply/Resources/命令表等与a31字节相同，复位完成到DMA分配前12条阶段日志完全相同。
+持久logs/sweetlog-0121a32-abi608-panel-pipeline.bin：4198400bytes，SHA=83ad2a8fd1f0ab1e8e53b46617705829f3e9e1fe01cac0f7f0b323e1bb8917e7；stream503154/flush15，解码6105行，末段对齐USB5832–5841，早于OFF。
+用户不确定黑屏后USB继续接收时长；不能确认分配挂死、日志提前结束或panic。根因未证实。
+已确认旧设计风险：首个长包在MDSS gate内同步申请低4GiB物理缓冲；若调用阻塞，同loop期限和FB gated查询不能推进。Lineage也懒分配GEM/IOVA；不得误称其必定预分配。
+**NEXT：定位首次DMA缓冲准备/分配返回及采集连续性；保留FIFO/物理DMA与完成/pin规则，不盲退0222或供电/ULPS，也不宣布PD4通过。**
+候选改进是息屏唤醒前准备并保留命令缓冲；尚未实施。当前无需新CI产物，不能把本轮标为修复完成。
+证据scratch/artifact-0121a32/wake-log-review.json、persistent-log.txt；详见docs/PANEL-D1-0121A32.md顶部。
+本轮仅读日志/源码、更新文档，无驱动/固件/镜像修改、驱动回归、push/CI或设备操作。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, 0121a32 ABI608 mode7 artifacts ready)
 
 **CURRENT：用户提供0121a32，已核对含0222并打包/回读identity+pipeline；待mode7首次接管与一次OFF/ON实机。**
