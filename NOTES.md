@@ -1,5 +1,21 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0222 Lineage fixed pipeline rebuild)
+
+**CURRENT：用户授权按计划继续并优先对齐Lineage；0222已实现mode7固定单管线重建，本地验证全部通过，尚无新CI/实机。**
+a31/0221仍是已验证基线。新mode7=mode2供电/ULPS/host/面板流程+首次接管及每次ON的CTL0 reset、VIG0/LM0/CTL0/PP0/INTF1软件重配。
+CTL reset按Lineage2ms界限异步等待，期间禁止撤回boot clock；固定1080x2340/stride4608/crop22,48、TE计数按19.2MHz/(2360*60)=135。
+INTF子flush→主flush80020041→autorefresh1→externalTE；配置代数与freshPPDONE/flush0/RDPTR、触摸恢复分开验收。
+FB mode7映射完整supply/link/data，要求capability和新pipelineGeneration；旧mode2保持。FIFO/物理DMA与命令表不变。
+ADT append-only三窄map16–18（LM0/PP0/CSC10）与pipeline ABI1；matrix新增--panel-pipeline，参数仍605/607bytes、ABI608固件不重编。
+本地mode7四profile各三轮清空配置恢复、60份实际MDSS→FB状态及损坏凭据、旧mode2与FB回归已通过；CTL等待时钟保护及其拒绝撤票回归通过。
+14个未改写Lineage函数执行参考；ARM64 MDSS/FB对象通过，最终MDSS时钟保护对象编译通过；38patch严格重放79文件、125项source markers；同命令clang汇总MDSS告警1585→1596（增加11项有界映射数组访问），FB1396→1396。
+全部128种旧ADT组合字节不变，真实a31打新pipeline被marker门拒绝且无boot输出。通用display旧scenario5回显立即失败在a31同样复现，已更新为诊断/等待完成/超时保pin；两树修正版回归通过。
+**NEXT：用户push最新main触发CircleCI，下载新kernel/buildtree（建议0121a32）；agent核对后沿ABI608打panel-pipeline mode7，用户临时启动验证首次generation1和唤醒generation2。**
+PD4未完成：共享SMMU/core/VBIF/QoS/DSPP/部分PP状态仍保留，首次帧仍从ABL初始化；无整核collapse/全状态丢失实测。
+显示自身依赖继续在目标二补齐，再PD1余项/PD5→F5→F7；不把这些余项转给整机低功耗。详见docs/PANEL-PIPELINE-REBUILD.md。
+底稿scratch/framebuffer-0222；生产八文件含新Pipeline.inc。不push/触发CI/操作设备或改固件、备份。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, overall roadmap reconciled after a31)
 
 **CURRENT：用户询问大计划位置；已核对四大目标路线、显示F0–F7和完整面板PD0–PD5，本次仅同步计划，无新实现。**

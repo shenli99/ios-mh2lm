@@ -1,5 +1,13 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
+**当前执行点（2026-11-14）：0222固定单管线重建本地通过，待用户push云编译及mode7实机。**
+按Lineage补CTL0 reset、VIG0/LM0/CTL0/PP0/INTF1软件配置、flush/kickoff/TE顺序及FB新代数/新帧验收。
+四profile各三轮清空配置恢复、真实MDSS→FB配合、ARM64对象、38patch/79源码/125项source markers通过；FIFO/物理DMA保持。
+详见[0222实现与边界](PANEL-PIPELINE-REBUILD.md)。新产物建议0121a32，沿ABI608打panel-pipeline（mode7，605字节）；a31/mode2作为已验证基线保留。
+PD4仍进行中：共享SMMU/core/VBIF/QoS/DSPP/部分PP状态和ABL首帧依赖尚待补齐，不是完整掉电重建。之后仍按PD1余项/PD5→F5→F7执行。
+
+以下为a31已完成的基线记录，其“无需重编”仅指旧a31修复，不代替本次0222的新内核验证。
+
 **当前执行点（2026-11-14）：0121a31/0221（`5cf36dd`）普通息屏唤醒实测通过，触摸、按键及亮度调节正常。**
 FB mode2启用supply/link/data parking验收，接受合法OFF停驻并继续ON；保留完整资源、像素和触摸完成条件。
 四profile各三轮60份实际MDSS状态→真实FB回放通过，原a30同测试失败；损坏凭据、capability、旧资源保持结果仍拒绝。

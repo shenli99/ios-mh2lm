@@ -19,7 +19,8 @@ PANEL_PIN_WINDOWS = ((0x03d06000, 0x1000), (0x03908000, 0x1000))  # GPIO6 SOUTH,
 NOC_WINDOWS = ((0x0af20000, 0x1c00), (0x0af21c00, 0x3000), (0x0af30000, 0x3fd4))
 
 
-def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False):
+def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False):
+    display_noc = display_noc or panel_pipeline
     display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
     root, end = adt.parse(blob)
     if end != len(blob) or b'lge,mh2lm\0' not in (root.prop('compatible') or b''):
@@ -46,6 +47,9 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
         windows.append(PHY_WINDOW)
     if display_noc:
         windows.extend(NOC_WINDOWS)
+    if panel_pipeline:
+        # Append-only mode7 ABI: LM0, PP0, VIG0 CSC10 opmode.
+        windows.extend(((0x0ae45000, 0x320), (0x0ae71000, 0xd4), (0x0ae06a00, 4)))
     regs = encode(windows)
     mdss = adt.Node()
     mdss.props = [('name', 0, b'mdss\0'), ('compatible', 0, b'sweet,mdss\0'),
@@ -54,6 +58,8 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
                   # controller before publishing standard interrupt properties.
                   ('sweet,mdss-intid', 0, struct.pack('<I', 115))]
     arm.children.append(mdss)
+    if panel_pipeline:
+        mdss.props.append(('sweet,display-pipeline-abi', 0, struct.pack('<I', 1)))
     if panel_identity:
         # ABI placeholder only. No CLI option can preselect a revision: the
         # DarwinBoot adapter replaces this from ABL's live /chosen/bootargs before XNU.
@@ -97,10 +103,11 @@ if __name__ == '__main__':
     parser.add_argument('--panel-touch', action='store_true', help='append typed touch worker coordination service; no new GPIO/IRQ mapping, no automatic pause/resume')
     parser.add_argument('--panel-identity', action='store_true', help='reserve zeroed live-ABL panel selection slot; implies resources, never selects a revision')
     parser.add_argument('--rpmh-irq', action='store_true', help='append apps RSC GIC mapping and INTID37 completion ABI; implies display resources')
+    parser.add_argument('--panel-pipeline', action='store_true', help='append LM0/PP0/CSC10 windows for mode7 pipeline rebuild; implies display NoC resources')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
     source, destination = args.source, args.destination
     if source.resolve() == destination.resolve():
         sys.exit('output must differ from the baseline ADT')
-    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq))
+    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline))

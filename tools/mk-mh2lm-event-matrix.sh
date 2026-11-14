@@ -6,7 +6,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
-	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service|--framebuffer-state|--framebuffer-power|--framebuffer-irq-preflight|--framebuffer-vsync|--framebuffer-scanout|--framebuffer-handoff|--panel-resources|--panel-lifecycle]\n' "$0" >&2
+	printf 'usage: %s XNU_KERNEL_ARTIFACT LABEL [--key-irq-preflight|--key-irq-diag-matrix|--key-irq-pon-route-micro|--key-irq-upstream|--key-irq-mux|--usb-irq|--touch-irq|--irq-only|--battery-irq|--battery-charge-check|--battery-transport|--battery-runtime|--battery-adc5-conversion|--battery-adc5-consumer|--battery-evidence|--battery-dependencies|--battery-basic-charge|--board-startup|--framebuffer-f0|--framebuffer-contract|--framebuffer-proof|--framebuffer-service|--framebuffer-state|--framebuffer-power|--framebuffer-irq-preflight|--framebuffer-vsync|--framebuffer-scanout|--framebuffer-handoff|--panel-resources|--panel-lifecycle|--panel-pipeline]\n' "$0" >&2
 	exit 2
 fi
 
@@ -22,6 +22,7 @@ FRAMEBUFFER_SCANOUT=0
 FRAMEBUFFER_HANDOFF=0
 PANEL_RESOURCES=0
 PANEL_LIFECYCLE=0
+PANEL_PIPELINE=0
 case "$KEY_IRQ_PROFILE" in
 	'')
 		;;
@@ -62,8 +63,9 @@ case "$KEY_IRQ_PROFILE" in
 		FRAMEBUFFER_VSYNC=1
 		KEY_IRQ_PROFILE='--framebuffer-service'
 		;;
-	--framebuffer-scanout|--framebuffer-handoff|--panel-resources|--panel-lifecycle)
-		if [ "$KEY_IRQ_PROFILE" = '--panel-lifecycle' ]; then
+	--framebuffer-scanout|--framebuffer-handoff|--panel-resources|--panel-lifecycle|--panel-pipeline)
+		if [ "$KEY_IRQ_PROFILE" = '--panel-lifecycle' ] || [ "$KEY_IRQ_PROFILE" = '--panel-pipeline' ]; then
+			if [ "$KEY_IRQ_PROFILE" = '--panel-pipeline' ]; then PANEL_PIPELINE=1; fi
 			PANEL_LIFECYCLE=1
 			FRAMEBUFFER_HANDOFF=1
 		fi
@@ -429,10 +431,22 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
     exit 1
    fi
   done
+  if [ "$PANEL_PIPELINE" = '1' ]; then
+   for marker in 'SWEET MDSS PIPELINE: mode7 Lineage' 'SWEET MDSS PIPELINE: configured generation=' \
+       'SWEET FB PANEL: mode7 requires a new pipeline generation' 'sweet,display-pipeline-abi'; do
+    if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
+     printf 'kernel lacks pipeline rebuild marker: %s\n' "$marker" >&2
+     exit 1
+    fi
+   done
+  fi
   # NoC ABI declaration requires resource2/clock1 even before lifecycle setup.
   # Keep metadata admission independent of hardware lifecycle providers.
   python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --panel-identity "$ADT" "$TMPDIR/identity.adt"
   python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --display-noc --panel-pins --panel-touch --panel-identity --rpmh-irq "$ADT" "$TMPDIR/mdss.adt"
+  if [ "$PANEL_PIPELINE" = '1' ]; then
+   python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --display-noc --panel-pins --panel-touch --panel-identity --rpmh-irq --panel-pipeline "$ADT" "$TMPDIR/pipeline.adt"
+  fi
  elif [ "$PANEL_RESOURCES" = '1' ]; then
   for marker in 'SweetRPMhABI' 'SweetRPMhWritesAllowed' 'SweetDisplayRPMhBound' \
       'SWEET MDSS: matched RPMh consumer=' 'SWEET RPMH: pre-v3 RSC id=' \
@@ -513,6 +527,11 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
   make_profile panel-identity "LG G8X - XNU live ABL panel selection, metadata only (${LABEL})" \
    "$PANEL_ARGS sweetfbpower=0 sweetmdssirq=0 sweetfbvsync=0 sweetfbown=0 sweetdsi=0 sweetdisplayresources=1 sweetdisplayclocks=0 sweetdisplaycore=0 sweetdisplaymanaged=0 sweetdsihost=0 sweetdsilink=0 sweetpanelpins=0 sweettouchpanel=0 sweetpanellifecycle=0" "$TMPDIR/identity.adt"
   PANEL_ARGS="$PANEL_ARGS sweetfbpower=1 sweetmdssirq=2 sweetfbvsync=1 sweetfbown=2 sweetdsi=1 sweetdisplayresources=2 sweetdisplayclocks=1 sweetdisplaycore=2 sweetdisplaymanaged=1 sweetdsihost=1 sweetdsilink=2 sweetpanelpins=2 sweettouchpanel=2"
+  if [ "$PANEL_PIPELINE" = '1' ]; then
+   make_profile panel-pipeline "LG G8X - XNU independent pipeline rebuild (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=7" "$TMPDIR/pipeline.adt"
+   printf 'kernel SHA256: %s\ncreated identity/pipeline profiles for %s; a31 retained baseline is separate\n' "$KERNEL_SHA256" "$LABEL"
+   exit 0
+  fi
   make_profile panel-retained "LG G8X - XNU panel sleep and wake (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=2"
   make_profile panel-combined "LG G8X - XNU DATA and link parking, supply votes held (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=5"
   make_profile panel-supply "LG G8X - XNU panel-only vote withdrawal and restore (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=6"

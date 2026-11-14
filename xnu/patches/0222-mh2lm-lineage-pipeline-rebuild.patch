@@ -1,0 +1,495 @@
+diff --git a/iokit/Kernel/arm/SweetDisplayBackend.h b/iokit/Kernel/arm/SweetDisplayBackend.h
+--- a/iokit/Kernel/arm/SweetDisplayBackend.h
++++ b/iokit/Kernel/arm/SweetDisplayBackend.h
+@@ -14,10 +14,11 @@
+  * vote withdrawal/restore, while shared core/config power stays held. Mode3
+  * additionally releases/reacquires managed DATA leases, retaining a separate
+  * config floor and all boot/core/link/power ownership. Mode4 shuts down and
+- * reconstructs host/PHY/PLL, retaining all resource tickets. */
++ * reconstructs host/PHY/PLL, retaining all resource tickets. Mode7 adds a
++ * new software pipeline generation to mode2; fresh pixels remain separate. */
+ enum SweetPanelOperation { SweetPanelTakeover=1, SweetPanelDisplayOff,
+  SweetPanelDisplayOn, SweetPanelPrepare, SweetPanelReset, SweetPanelUnprepare };
+-enum { SweetPanelRetainedSleepReset=1u<<16, SweetPanelDataParking=1u<<17, SweetPanelLinkPowerCycle=1u<<18, SweetPanelSupplyCycle=1u<<19 };
++enum { SweetPanelRetainedSleepReset=1u<<16, SweetPanelDataParking=1u<<17, SweetPanelLinkPowerCycle=1u<<18, SweetPanelSupplyCycle=1u<<19, SweetPanelPipelineRebuild=1u<<20 };
+ enum SweetPanelPhase { SweetPanelIdle, SweetPanelTouchPause, SweetPanelDrain,
+  SweetPanelTakeoverPending, SweetPanelCommand, SweetPanelFrame,
+  SweetPanelTouchResume, SweetPanelComplete, SweetPanelFault, SweetPanelStopped,
+@@ -25,7 +26,7 @@
+  SweetPanelResourcePark, SweetPanelResourceRestore,
+  SweetPanelLinkPowerDown, SweetPanelLinkRebuild,
+  SweetPanelPinParkActivate, SweetPanelPinParkWait, SweetPanelPinPark,
+- SweetPanelSupplyActivate, SweetPanelSupplyPark, SweetPanelSupplyRestore };
++ SweetPanelSupplyActivate, SweetPanelSupplyPark, SweetPanelSupplyRestore, SweetPanelPipelineRestore };
+ struct SweetPanelLifecycleStatus {
+  uint64_t token, touchToken, commandToken, pinToken;
+  unsigned operation, phase, rails, profile;
+@@ -42,11 +43,13 @@
+  unsigned panelReleasedMask, panelAggregateEnabledMask, supplyRail;
+  uint64_t supplyToken, panelVoteTokens[2];
+  bool resetHeldLow, panelVotesParked, panelVotesRestored;
++ /* Monotonic software configuration generation; pixelsComplete is separate. */
++ uint64_t pipelineGeneration;
+ };
+ class SweetMDSS;
+ class SweetScanoutPool;
+ enum SweetScanoutState { SweetScanoutIdle, SweetScanoutQuiescing,
+- SweetScanoutSubmitted, SweetScanoutActive, SweetScanoutFailed, SweetScanoutResources, SweetScanoutCoordinating };
++ SweetScanoutSubmitted, SweetScanoutActive, SweetScanoutFailed, SweetScanoutResources, SweetScanoutCoordinating, SweetScanoutRebuilding };
+ struct SweetScanoutStatus {
+  unsigned state;
+  bool hardwareReachable;
+diff --git a/iokit/Kernel/arm/SweetFBService.inc b/iokit/Kernel/arm/SweetFBService.inc
+--- a/iokit/Kernel/arm/SweetFBService.inc
++++ b/iokit/Kernel/arm/SweetFBService.inc
+@@ -9,13 +9,15 @@
+  if (!fStateGate || fWorkLoop->addEventSource(fStateGate)!=kIOReturnSuccess) return false;
+  fStateGateAdded=true;
+  int lifecycle=0; (void)PE_parse_boot_argn("sweetpanellifecycle",&lifecycle,sizeof(lifecycle));
+- fPanelLifecycleRequested=lifecycle>=1 && lifecycle<=6;fPanelLifecycleFull=lifecycle>=2 && lifecycle<=6;
++ fPanelLifecycleRequested=lifecycle>=1 && lifecycle<=7;fPanelLifecycleFull=lifecycle>=2 && lifecycle<=7;
+  /* Mode2 follows the MDSS Lineage suspend path: parked DATA/link and this
+   * panel's withdrawn supply votes are the successful OFF state. Use the
+   * same full supply/restore proofs as mode6, not the old all-held contract. */
+- fPanelLifecycleDataParking=lifecycle==2 || lifecycle==3 || lifecycle==5 || lifecycle==6;
+- fPanelLifecycleLinkCycle=lifecycle==2 || lifecycle==4 || lifecycle==5 || lifecycle==6;
+- fPanelLifecycleSupplyCycle=lifecycle==2 || lifecycle==6;
++ fPanelLifecycleDataParking=lifecycle==7 || lifecycle==2 || lifecycle==3 || lifecycle==5 || lifecycle==6;
++ fPanelLifecycleLinkCycle=lifecycle==7 || lifecycle==2 || lifecycle==4 || lifecycle==5 || lifecycle==6;
++ fPanelLifecycleSupplyCycle=lifecycle==7 || lifecycle==2 || lifecycle==6;
++ fPanelLifecyclePipeline=lifecycle==7;
++ if (fPanelLifecyclePipeline) SWEET_LOG_INFO("SWEET FB PANEL: mode7 requires a new pipeline generation and fresh pixels on wake\n");
+  if (lifecycle==2) SWEET_LOG_INFO("SWEET FB PANEL: Lineage mode2 supply/link/data completion enabled\n");
+  if (fPanelLifecycleRequested && (!fHardwareVsyncRequested || !fOwnScanoutRequested)) return false;
+  if (fHardwareVsyncRequested && !setupHardwareVsync()) return false;
+@@ -291,7 +293,8 @@
+  if (off==fPanelLifecycleDisplayOff) return kIOReturnSuccess;
+  SweetDisplayBackend *b=fDisplayClient->copyBackend();
+  IOReturn rc=kIOReturnNotReady;uint64_t token=0;
+- if (b && (!fPanelLifecycleSupplyCycle || (b->panelLifecycleCapabilities()&SweetPanelSupplyCycle)) &&
++ if (b && (!fPanelLifecyclePipeline || (b->panelLifecycleCapabilities()&SweetPanelPipelineRebuild)) &&
++     (!fPanelLifecycleSupplyCycle || (b->panelLifecycleCapabilities()&SweetPanelSupplyCycle)) &&
+      (!fPanelLifecycleLinkCycle || (b->panelLifecycleCapabilities()&SweetPanelLinkPowerCycle)) &&
+      (!fPanelLifecycleDataParking || (b->panelLifecycleCapabilities()&SweetPanelDataParking)) &&
+      (!fPanelLifecycleFull || (b->panelLifecycleCapabilities()&SweetPanelRetainedSleepReset)) &&
+@@ -330,6 +333,9 @@
+  bool completed=rc==kIOReturnSuccess && v.token==fPanelLifecycleToken &&
+      v.phase==SweetPanelComplete && v.result==kIOReturnSuccess && !v.uncertain &&
+      v.operation==(fPanelLifecycleRequestOff ? SweetPanelDisplayOff : SweetPanelDisplayOn) &&
++     (!fPanelLifecyclePipeline || (v.pipelineGeneration &&
++       (fPanelLifecycleRequestOff ? (!fPanelPipelineGeneration || v.pipelineGeneration==fPanelPipelineGeneration) :
++        v.pipelineGeneration>fPanelPipelineGeneration))) &&
+      (!fPanelLifecycleFull || (v.profile>=1 && v.profile<=4 &&
+        (fPanelLifecycleRequestOff ? v.sleeping : (!v.sleeping && v.resetComplete && v.brightnessRestored)))) &&
+      (!fPanelLifecycleSupplyCycle ||
+@@ -358,6 +364,7 @@
+   return;
+  }
+  fPanelLifecycleDisplayOff=v.operation==SweetPanelDisplayOff;
++ if (fPanelLifecyclePipeline) fPanelPipelineGeneration=v.pipelineGeneration;
+  OSSafeReleaseNULL(fPanelLifecycleBackend);fPanelLifecycleToken=0;
+  fPowerOff=fPanelLifecycleDisplayOff;fDirty=true;
+  setProperty("SweetPanelPowerLastResult",(unsigned long long)(uint32_t)kIOReturnSuccess,32);
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -162,9 +162,9 @@
+  void shutdownHardwareVsync(void);
+  void fallbackHardwareVsync(const char *);
+  static void hardwareVsyncFired(OSObject *,IOInterruptEventSource *,int);
+- bool fPanelLifecycleRequested, fPanelLifecycleFull, fPanelLifecycleDataParking, fPanelLifecycleLinkCycle, fPanelLifecycleSupplyCycle, fPanelLifecycleFault, fPanelLifecycleDisplayOff, fPanelLifecycleDesiredOff, fPanelLifecycleRequestOff;
++ bool fPanelLifecyclePipeline, fPanelLifecycleRequested, fPanelLifecycleFull, fPanelLifecycleDataParking, fPanelLifecycleLinkCycle, fPanelLifecycleSupplyCycle, fPanelLifecycleFault, fPanelLifecycleDisplayOff, fPanelLifecycleDesiredOff, fPanelLifecycleRequestOff;
+  SweetDisplayBackend *fPanelLifecycleBackend;
+- uint64_t fPanelLifecycleToken, fPanelLifecycleStart;
++ uint64_t fPanelLifecycleToken, fPanelLifecycleStart, fPanelPipelineGeneration;
+  void servicePanelLifecycle(void);
+  void stopPanelLifecycle(void);
+  IOReturn requestCoordinatedPower(bool);
+diff --git a/iokit/Kernel/arm/SweetMDSS.cpp b/iokit/Kernel/arm/SweetMDSS.cpp
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -221,7 +221,15 @@
+  static IOReturn scanoutStatusAction(OSObject *,void *,void *,void *,void *);
+  static IOReturn scanoutAbandonAction(OSObject *,void *,void *,void *,void *);
+  static void scanoutTimerAction(OSObject *,IOTimerEventSource *);
++ bool scanoutDomain(SweetScanoutSnapshot * = NULL);
+  bool scanoutConfiguration(bool);
++ bool fPipelineEnabled, fPipelineResetPending, fPipelineConfigured;
++ uint64_t fPipelineDeadline, fPipelineGeneration;
++ bool setupPipeline(IOService *);
++ bool pipelineExclusive(void);
++ IOReturn beginPipeline(void);
++ IOReturn advancePipeline(void);
++ void kickoffPipeline(void);
+  void cancelScanout(const char *);
+  /* D1 command transport: same owner/gate as display, separate from pixels. */
+  IOTimerEventSource *fDsiTimer;
+@@ -311,7 +319,7 @@
+  void advanceManagedResources(void);
+  void failManagedResources(IOReturn,const char *);
+  void stopManagedResources(void);
+- IOMemoryMap *fMaps[16];
++ IOMemoryMap *fMaps[19];
+  SweetRPMhClient *fRPMhClient;
+  SweetRPMh *fRPMh;
+  uint64_t fRPMhConsumer;
+@@ -1009,6 +1017,7 @@
+ }
+ 
+ #include "SweetMDSSScanout.inc"
++#include "SweetMDSSPipeline.inc"
+ #include "SweetMDSSClock.inc"
+ #include "SweetMDSSCore.inc"
+ #include "SweetMDSSNoC.inc"
+@@ -1171,7 +1180,7 @@
+  if (fIntervals) { IOFreeData(fIntervals,4096*sizeof(*fIntervals)); fIntervals=NULL; }
+  OSSafeReleaseNULL(fIrqEvent); OSSafeReleaseNULL(fIrqTimer);
+  OSSafeReleaseNULL(fIrqProbe); OSSafeReleaseNULL(fProbe); OSSafeReleaseNULL(fGate); OSSafeReleaseNULL(fLoop);
+- for (unsigned i=0;i<16;++i) OSSafeReleaseNULL(fMaps[i]);
++ for (unsigned i=0;i<19;++i) OSSafeReleaseNULL(fMaps[i]);
+  SweetDisplayBackend::free();
+ }
+ 
+diff --git a/iokit/Kernel/arm/SweetMDSSClock.inc b/iokit/Kernel/arm/SweetMDSSClock.inc
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -136,7 +136,7 @@
+ }
+ bool SweetMDSS::clockCanGate(void)
+ {
+- if (linkBusy() || hostBusy() || dsiBusy() || fDsiPoisoned || fDsiPinned ||
++ if (fPipelineResetPending || linkBusy() || hostBusy() || dsiBusy() || fDsiPoisoned || fDsiPinned ||
+      fScanoutState==SweetScanoutQuiescing || fScanoutState==SweetScanoutSubmitted ||
+      (fIrqMode>=2 && __atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE)!=IrqIdle)) return false;
+  /* No boolean supplied by a consumer can substitute for hardware idle.
+diff --git a/iokit/Kernel/arm/SweetMDSSLifecycle.inc b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+--- a/iokit/Kernel/arm/SweetMDSSLifecycle.inc
++++ b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+@@ -4,7 +4,8 @@
+  * a separate config floor and all power/boot/link resources stay live. Mode4
+  * cycles host/PHY/PLL hardware while retaining ALL resource tickets. Mode5
+  * composes data parking and link shutdown, retaining the config/power path.
+- * Mode6 adds reset-low and panel-only vote withdrawal/restore; L3/L5 stay held. */
++ * Mode6 adds reset-low and panel-only vote withdrawal/restore; L3/L5 stay held.
++ * Mode7 composes mode2 with the fixed single-pipeline rebuild. */
+ /* Software-only breadcrumbs around potentially blocking calls. A printed entry
+  * never proves return/completion. Keep real resource, pin and DMA fences intact.
+  * Pin phases are short (100ms); trace each poll so a post-reset stall cannot be
+@@ -33,7 +34,7 @@
+  (void)PE_parse_boot_argn("sweettouchpanel",&touch,sizeof(touch));
+  (void)PE_parse_boot_argn("sweetfbown",&own,sizeof(own));
+  (void)PE_parse_boot_argn("sweetpanelpins",&pins,sizeof(pins));
+- if ((mode!=1 && mode!=2 && mode!=3 && mode!=4 && mode!=5 && mode!=6) || touch!=2 || own!=2 || !fTouchPanelClient || !fManagedEnabled ||
++ if ((mode!=1 && mode!=2 && mode!=3 && mode!=4 && mode!=5 && mode!=6 && mode!=7) || touch!=2 || own!=2 || !fTouchPanelClient || !fManagedEnabled ||
+      !fDsiEnabled || !fPanelPowerEnabled || fIrqMode!=2) return false;
+  if (mode>=2 && (!fPanelProfile || pins!=2 || !fPanelPinsClient ||
+      !sweet_dsi_sequence_valid(fPanelProfile->on,fPanelProfile->onSize,NULL) ||
+@@ -41,10 +42,11 @@
+   SWEET_LOG_ERROR("SWEET PANEL: profile lifecycle requires live-ABL profile and pins2; refused before side effects\n");
+   return false;
+  }
+- fLifecycleLineage=mode==2;
++ fLifecycleLineage=mode==2 || mode==7;
+  fLifecycleSupplyCycle=mode==6 || fLifecycleLineage;
+  fLifecycleLinkCycle=mode==4 || mode==5 || mode==6 || fLifecycleLineage;
+  if (fLifecycleLinkCycle && (fCoreProfile!=2 || fHostProfile!=1 || fLinkProfile!=2)) return false;
++ if (mode==7 && !setupPipeline(provider)) return false;
+  setProperty("SweetPanelLinkCycleEnabled",fLifecycleLinkCycle);
+  setProperty("SweetPanelSupplyCycleEnabled",fLifecycleSupplyCycle);
+  fLifecycleDataParking=mode==3 || mode==5 || mode==6 || fLifecycleLineage;
+@@ -68,7 +70,8 @@
+  case SweetPanelResourcePark:case SweetPanelResourceRestore:
+  case SweetPanelLinkPowerDown:case SweetPanelLinkRebuild:
+  case SweetPanelPinParkActivate:case SweetPanelPinParkWait:case SweetPanelPinPark:
+- case SweetPanelSupplyActivate:case SweetPanelSupplyPark:case SweetPanelSupplyRestore: return true;
++ case SweetPanelSupplyActivate:case SweetPanelSupplyPark:case SweetPanelSupplyRestore:
++ case SweetPanelPipelineRestore: return true;
+  default: return false;
+  }
+ }
+@@ -76,7 +79,7 @@
+ { return fLifecycleEnabled && (lifecycleBusy() || fLifecycleParked || fLifecycle.phase==SweetPanelFault || fLifecycle.phase==SweetPanelStopped); }
+ unsigned SweetMDSS::panelLifecycleCapabilities(void)
+ {
+- return fLifecycleEnabled ? (1u<<SweetPanelTakeover)|(1u<<SweetPanelDisplayOff)|(1u<<SweetPanelDisplayOn)|(fLifecycleFull ? SweetPanelRetainedSleepReset : 0u)|(fLifecycleDataParking ? SweetPanelDataParking : 0u)|(fLifecycleLinkCycle ? SweetPanelLinkPowerCycle : 0u)|(fLifecycleSupplyCycle ? SweetPanelSupplyCycle : 0u) : 0;
++ return fLifecycleEnabled ? (1u<<SweetPanelTakeover)|(1u<<SweetPanelDisplayOff)|(1u<<SweetPanelDisplayOn)|(fLifecycleFull ? SweetPanelRetainedSleepReset : 0u)|(fLifecycleDataParking ? SweetPanelDataParking : 0u)|(fLifecycleLinkCycle ? SweetPanelLinkPowerCycle : 0u)|(fLifecycleSupplyCycle ? SweetPanelSupplyCycle : 0u)|(fPipelineEnabled ? SweetPanelPipelineRebuild : 0u) : 0;
+ }
+ void SweetMDSS::publishLifecycle(void)
+ {
+@@ -89,6 +92,7 @@
+  setProperty("SweetPanelLifecycleSleeping",fLifecycle.sleeping);
+  setProperty("SweetPanelLifecycleResetComplete",fLifecycle.resetComplete);
+  setProperty("SweetPanelLifecycleBrightnessRestored",fLifecycle.brightnessRestored);
++ setProperty("SweetPanelPipelineGeneration",(unsigned long long)fLifecycle.pipelineGeneration,64);
+  fLifecycle.rails=fManagedRails;
+  setProperty("SweetPanelLifecycleRails",(unsigned long long)fLifecycle.rails,32);
+  setProperty("SweetPanelLifecyclePanelReleasedMask",(unsigned long long)fLifecycle.panelReleasedMask,32);
+@@ -244,6 +248,7 @@
+  uint64_t previousVotes[2]={fLifecycle.panelVoteTokens[0],fLifecycle.panelVoteTokens[1]};
+  fLifecycle={};fWakeTraceCount=0;fLifecycle.token=++fLifecycleNextToken;fLifecycle.operation=op;
+  fLifecycle.pinToken=pinToken;
++ fLifecycle.pipelineGeneration=fPipelineEnabled && op==SweetPanelDisplayOff ? fPipelineGeneration : 0;
+  fLifecycle.panelReleasedMask=released;fLifecycle.panelAggregateEnabledMask=aggregate;
+  if (released) {fLifecycle.panelVoteTokens[0]=previousVotes[0];fLifecycle.panelVoteTokens[1]=previousVotes[1];}
+  fLifecycle.panelVotesParked=released==3u;fLifecycle.resetHeldLow=released==3u;fLifecycleSupplyWait=0;fLifecycle.profile=fPanelProfile ? fPanelProfile->id : 0;
+@@ -294,6 +299,7 @@
+    * old TE replay, reset, powerdown or background transport continuation. */
+   fLifecycle.phase=stopped ? SweetPanelStopped : SweetPanelFault;
+   fLifecycle.result=result;fLifecycle.uncertain=true;fPanelState=PanelUnknown;
++  fPipelineResetPending=false;fPipelineConfigured=false;
+   lifecycleCancelSupply(); /* synchronize child BEFORE invalidating leaf tokens */
+   if (fPanelPins && fLifecycle.pinToken)
+    (void)fPanelPins->cancelRequest(fPanelPinsConsumer,fLifecycle.pinToken);
+@@ -318,12 +324,24 @@
+ }
+ void SweetMDSS::restoreLifecycleStream(void)
+ {
++ if (fPipelineEnabled && fLifecycle.phase!=SweetPanelPipelineRestore) {
++  IOReturn rc=beginPipeline();
++  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"pipeline wake reset admission");return;}
++  fLifecycle.phase=SweetPanelPipelineRestore;fLifecycleStepDeadline=scanout_now()+100000000ULL;
++  return;
++ }
+  const vm_offset_t top=fMaps[9]->getVirtualAddress();
+  dp_wr(top,0x1018,1u<<8);
+  if (dp_rd(top,0x1014)&(1u<<8)) { finishLifecycle(kIOReturnIOError,"stale pixel done did not clear");return; }
+  fLifecycleFrame=fFrameCount;fPanelState=PanelOn;fIrqDisplayOn=true;publishPanelState();
+  if (!armIRQ()) { finishLifecycle(kIOReturnIOError,"pixel IRQ rearm");return; }
+- if (fLifecycleLineage) {
++ if (fPipelineEnabled) {
++  if (!fPipelineConfigured || fLifecycle.pipelineGeneration!=fPipelineGeneration || !scanoutConfiguration(false)) {
++   finishLifecycle(kIOReturnNotReady,"pipeline wake generation absent");return;
++  }
++  fLifecycleTE=(1u<<20)|(1u<<19)|135u;fLifecycleAuto=0x80000001u;
++  kickoffPipeline();
++ } else if (fLifecycleLineage) {
+   if (!fHardwarePool || !fHardwarePool->hardwarePinned() || !scanoutConfiguration(false) ||
+       dp_rd(dp_ctl,0x18) || dp_rd(dp_ctl,0x1c)) {
+    finishLifecycle(kIOReturnNotReady,"owned pipeline wake admission");return;
+@@ -522,9 +540,14 @@
+   }
+   if (fLifecycle.phase==SweetPanelBrightness) fLifecycle.brightnessRestored=true;
+   restoreLifecycleStream();publishLifecycle();return;
++ } else if (fLifecycle.phase==SweetPanelPipelineRestore) {
++  IOReturn rc=advancePipeline();
++  if (rc==kIOReturnBusy) return;
++  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"pipeline wake reset/configuration failed");return;}
++  restoreLifecycleStream();publishLifecycle();return;
+  } else if (fLifecycle.phase==SweetPanelFrame) {
+   unsigned irq=__atomic_load_n(&fIrqState,__ATOMIC_ACQUIRE);
+-  if (!lifecycleResourcesHeld() || !scanoutConfiguration(false) || (irq!=IrqArmed && irq!=IrqPending)) {finishLifecycle(kIOReturnNotReady,"resumed pixel participants lost");return;}
++  if ((fPipelineEnabled && (!fPipelineConfigured || fLifecycle.pipelineGeneration!=fPipelineGeneration)) || !lifecycleResourcesHeld() || !scanoutConfiguration(false) || (irq!=IrqArmed && irq!=IrqPending)) {finishLifecycle(kIOReturnNotReady,"resumed pixel participants lost");return;}
+   observeLineage("lifecycle-auto",dp_intf1,0x2b4,fLifecycleAuto);
+   observeLineage("lifecycle-te",dp_intf1,0x288,fLifecycleTE);
+   if (dp_rd(dp_ctl,0x18) || !(dp_rd(fMaps[9]->getVirtualAddress(),0x1014)&(1u<<8)) || fFrameCount<=fLifecycleFrame) return;
+diff --git a/iokit/Kernel/arm/SweetMDSSPipeline.inc b/iokit/Kernel/arm/SweetMDSSPipeline.inc
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetMDSSPipeline.inc
+@@ -0,0 +1,124 @@
++/* PD2/PD4 first pipeline stage. LG Lineage 2e897dd, sm8150-sde.dtsi and
++ * sde_hw_{sspp,lm,ctl,pingpong,intf}.c: VIG0 -> LM0 -> PP0 -> INTF1.
++ * Software describes the fixed BGRA/unscaled command-mode path. No register
++ * snapshot replay. Shared core/SMMU, VBIF/QoS and DSPP colour state stay held;
++ * this is not a whole-MDP power-collapse or cold-boot implementation.
++ * Same MDSS gate/timers and lifetime-pinned pool as the resource owner. */
++bool SweetMDSS::setupPipeline(IOService *provider)
++{
++ const uint32_t abiVersion=1;
++ OSData *abi=OSDynamicCast(OSData,provider->getProperty("sweet,display-pipeline-abi"));
++ if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),&abiVersion,4)) return false;
++ const uint64_t pa[]={0x0ae45000,0x0ae71000,0x0ae06a00};
++ const uint64_t size[]={0x320,0xd4,4};
++ for (unsigned n=0;n<3;++n) {
++  fMaps[16+n]=provider->mapDeviceMemoryWithIndex(16+n);
++  if (!fMaps[16+n] || fMaps[16+n]->getPhysicalAddress()!=pa[n] || fMaps[16+n]->getLength()!=size[n]) return false;
++ }
++ fPipelineEnabled=true;
++ setProperty("SweetDisplayPipelineRebuild",true);
++ SWEET_LOG_INFO("SWEET MDSS PIPELINE: mode7 Lineage VIG0/LM0/CTL0/PP0/INTF1 rebuild enabled; shared SMMU/core/QoS/colour retained\n");
++ return true;
++}
++
++bool SweetMDSS::pipelineExclusive(void)
++{
++ /* DRM's resource manager allocates these blocks exclusively. Here the ABI
++  * names one fixed path; reject another active CTL using INTF1, LM0 or VIG0.
++  * Do not reset or clear another controller's routes. */
++ for (unsigned ctl=1;ctl<6;++ctl) {
++  vm_offset_t c=dp_ctl+ctl*0x200u;
++  uint32_t intfs=dp_rd(c,0xf4),wb=dp_rd(c,0xec);
++  if (intfs&2u) return false;
++  if (!intfs && !wb) continue;
++  for (unsigned lm=0;lm<6;++lm) {
++   uint32_t a=dp_rd(c,lm==5 ? 0x24u : lm*4u),b=dp_rd(c,0x40u+lm*4u);
++   uint32_t d=dp_rd(c,0x70u+lm*4u),e=dp_rd(c,0xa0u+lm*4u);
++   if ((!lm && (a || b || d || e)) || (a&7u) || (b&1u) || (e&15u)) return false;
++  }
++ }
++ return true;
++}
++
++IOReturn SweetMDSS::beginPipeline(void)
++{
++ if (!fPipelineEnabled || fPipelineResetPending || fPipelineGeneration==~0ULL ||
++     !lifecycleParticipants() || !fLifecycle.touchQuiesced || !fLifecycle.displayDrained ||
++     !lifecycleResourcesHeld() || !lifecycleIRQDrained() || dsiBusy() || fDsiPinned || fDsiPoisoned ||
++     !fHardwarePool || !scanoutDomain() || !pipelineExclusive()) return kIOReturnNotReady;
++ if ((dp_rd(dp_dsi,8)&6u) || dp_rd(dp_ctl,0x18) || dp_rd(dp_ctl,0x1c) ||
++     dp_rd(dp_intf1,0x2b4) || (dp_rd(dp_intf1,0x288)&(1u<<20))) return kIOReturnBusy;
++ uint32_t line=dp_rd(dp_intf1,0x2b0)&0xffffu;
++ if (line>0 && line<2340) return kIOReturnBusy;
++ fPipelineConfigured=false;fLifecycle.pipelineGeneration=0;
++ /* Independent hardware pin before any reset/programming can expose DMA. */
++ if (!fScanoutTouched) {
++  fHardwarePool->pinHardware();fScanoutTouched=true;
++  fScanoutStatus.hardwareReachable=true;setProperty("SweetScanoutHardwarePinned",true);
++ }
++ dp_wr(dp_ctl,0x30,1u); /* Lineage CTL_SW_RESET; asynchronous 2ms bound. */
++ fPipelineResetPending=true;fPipelineDeadline=scanout_now()+2000000ULL;
++ SWEET_LOG_INFO("SWEET MDSS PIPELINE: CTL0 reset issued generation=%llu; waiting for hardware\n",fPipelineGeneration+1);
++ return kIOReturnSuccess;
++}
++
++IOReturn SweetMDSS::advancePipeline(void)
++{
++ if (!fPipelineResetPending || !lifecycleParticipants() || !lifecycleResourcesHeld() ||
++     !lifecycleIRQDrained() || !fLifecycle.touchQuiesced || !fLifecycle.displayDrained ||
++     dsiBusy() || fDsiPinned || fDsiPoisoned || !scanoutDomain()) return kIOReturnNotReady;
++ if (dp_rd(dp_dsi,8)&6u) return kIOReturnNotReady;
++ if (dp_rd(dp_ctl,0x30)&1u)
++  return scanout_now()>=fPipelineDeadline ? kIOReturnTimeout : kIOReturnBusy;
++ if (!pipelineExclusive()) return kIOReturnNotReady;
++ fPipelineResetPending=false;
++ const vm_offset_t p=dp_sspp,c=dp_ctl,i=dp_intf1;
++ const vm_offset_t lm=fMaps[16]->getVirtualAddress(),pp=fMaps[17]->getVirtualAddress();
++ const uint32_t size=(2340u<<16)|1080u;
++ /* Lineage format/rect/multirect/pixel-extension and scaler bypass. */
++ dp_wr(fMaps[18]->getVirtualAddress(),0,dp_rd(fMaps[18]->getVirtualAddress(),0)&~3u);
++ dp_wr(p,0xa04,0); /* QSEED3 disabled for 1:1 RGB. */
++ dp_wr(p,0x30,0x237ffu);dp_wr(p,0x34,0x03020001u);dp_wr(p,0x38,1u<<31);
++ dp_wr(p,0x70,0);dp_wr(p,0x138,1u<<31); /* non-secure, UBWC error clear */
++ dp_wr(p,0x170,0);dp_wr(p,0xb4,0);
++ dp_wr(p,0,size);dp_wr(p,8,0x00300016u);dp_wr(p,0xc,size);dp_wr(p,0x10,0);
++ dp_wr(p,0x24,4608);dp_wr(p,0x28,0);
++ for (unsigned n=0;n<3;++n) {
++  dp_wr(p,0x100+n*0x10,0);dp_wr(p,0x104+n*0x10,0);dp_wr(p,0x108+n*0x10,size);
++ }
++ dp_wr(p,0x14,(uint32_t)fHardwarePool->physical(0));
++ dp_wr(p,0x18,0);dp_wr(p,0x1c,0);dp_wr(p,0x20,0);
++ /* One base layer, no split mixer, alpha blend, dim layers or DSC. */
++ dp_wr(lm,4,size);dp_wr(lm,0,0);
++ for (unsigned n=0;n<11;++n) dp_wr(lm,0x20+n*0x18,0);
++ for (unsigned n=0;n<6;++n) {
++  dp_wr(c,n==5 ? 0x24u : n*4u,n==0 ? 1u : 0u);
++  dp_wr(c,0x40+n*4,0);dp_wr(c,0x70+n*4,0);dp_wr(c,0xa0+n*4,0);
++ }
++ dp_wr(c,0x14,1u<<17);dp_wr(c,0xec,0);dp_wr(c,0xf0,0);dp_wr(c,0xf4,2);
++ dp_wr(c,0xf8,0);dp_wr(c,0xe4,0);dp_wr(c,0x134,0);dp_wr(c,0xe8,0);
++ dp_wr(pp,0xc8,dp_rd(pp,0xc8)&~(1u<<18));dp_wr(pp,0xa0,0);
++ dp_wr(i,0x25c,dp_rd(i,0x25c)&~15u); /* bind PP0 */
++ /* Four R66456 DTS profiles: 1080x2340, vtotal=2360, 60Hz, TE0.
++  * 19.2MHz/(2360*60)=135, derived as in encoder_phys_cmd tearcheck.
++  * External TE remains disconnected until AFTER flush and kickoff. */
++ dp_wr(i,0x280,0);dp_wr(i,0x2b4,0);dp_wr(i,0x288,(1u<<19)|135u);
++ dp_wr(i,0x28c,0xfff0);dp_wr(i,0x294,2340);dp_wr(i,0x2a4,2341);
++ dp_wr(i,0x2a0,2340);dp_wr(i,0x29c,0x00040004);dp_wr(i,0x290,2345);dp_wr(i,0x284,1);
++ fPipelineConfigured=true;++fPipelineGeneration;
++ fLifecycle.pipelineGeneration=fPipelineGeneration;
++ setProperty("SweetDisplayPipelineGeneration",(unsigned long long)fPipelineGeneration,64);
++ SWEET_LOG_INFO("SWEET MDSS PIPELINE: configured generation=%llu source=%#llx 1080x2340 stride=4608 crop=22,48; fresh frame still required\n",fPipelineGeneration,fHardwarePool->physical(0));
++ return kIOReturnSuccess;
++}
++
++void SweetMDSS::kickoffPipeline(void)
++{
++ /* ACTIVE_CFG uses an INTF sub-mask and top-level INTF/CTL/LM/VIG flush.
++  * Autorefresh frame_count=1 is software policy, never a saved ABL value. */
++ dp_wr(dp_ctl,0x110,2u);
++ dp_wr(dp_ctl,0x18,(1u<<31)|(1u<<17)|(1u<<6)|1u);
++ dp_wr(dp_intf1,0x2b4,0x80000001u);
++ dp_wr(dp_intf1,0x288,(1u<<20)|(1u<<19)|135u);
++ SWEET_LOG_INFO("SWEET MDSS PIPELINE: generation=%llu flush/kickoff/TE connected; waiting for fresh PP_DONE and RD_PTR\n",fPipelineGeneration);
++}
+diff --git a/iokit/Kernel/arm/SweetMDSSScanout.inc b/iokit/Kernel/arm/SweetMDSSScanout.inc
+--- a/iokit/Kernel/arm/SweetMDSSScanout.inc
++++ b/iokit/Kernel/arm/SweetMDSSScanout.inc
+@@ -70,16 +70,29 @@
+  uint64_t ns; absolutetime_to_nanoseconds(mach_absolute_time(),&ns); return ns;
+ }
+ bool
+-SweetMDSS::scanoutConfiguration(bool inherited)
+-{
+- SweetScanoutSnapshot v={};
++SweetMDSS::scanoutDomain(SweetScanoutSnapshot *snapshot)
++{
++ SweetScanoutSnapshot local={};SweetScanoutSnapshot &v=snapshot ? *snapshot : local;
+  if (scanoutInspectAction(this,&v,NULL,NULL,NULL)!=kIOReturnSuccess) return false;
+  if (!v.knownSmmu || v.matches!=1 || !v.cb2Observed || v.smmuFault ||
+      v.smmuCR0!=0x2b0406u || v.smr!=0x84200800u || v.s2cr!=2u || v.streamIndex!=3 ||
+      (v.cbFault&SWEET_SMMU_KNOWN_FSR) || (v.cbFault&~0x400u) ||
+      v.sctlr!=0xe0u || v.cbar!=0x1f000u || v.cba2r!=1u ||
+-     v.ttbcr || v.ttbrLo || v.ttbrHi || v.mairLo || v.mairHi ||
+-     v.secure || v.size!=0x09240438u || v.out!=0x09240438u || v.outXY ||
++     v.ttbcr || v.ttbrLo || v.ttbrHi || v.mairLo || v.mairHi) return false;
++ fScanoutStatus.fsr=v.cbFault;
++ return true;
++}
++bool
++SweetMDSS::scanoutConfiguration(bool inherited)
++{
++ SweetScanoutSnapshot v={};
++ if (!scanoutDomain(&v)) return false;
++ if (fPipelineEnabled && !inherited) {
++  /* Domain/ownership remains mandatory while configuration is lost or parked.
++   * Pipeline generation + fresh frame fences govern the rebuilt submission. */
++  return fHardwarePool && fScanoutTouched && fScanoutStatus.hardwareReachable;
++ }
++ if (v.secure || v.size!=0x09240438u || v.out!=0x09240438u || v.outXY ||
+      v.format!=0x237ffu || v.unpack!=0x03020001u || v.op!=0x80000000u ||
+      v.ctlTop!=0x20000u || v.start || v.te!=1u) return false;
+  fScanoutStatus.fsr=v.cbFault; /* raw bit10 is retained, never silently cleared */
+@@ -185,6 +198,12 @@
+   s->advanceManagedResources();
+   if (s->fManagedState==ManagedFault) { s->cancelScanout("managed resource transaction failed"); return; }
+   if (s->fManagedState!=ManagedReady) { sender->setTimeoutMS(1); return; }
++  if (s->fPipelineEnabled) {
++   IOReturn rc=s->beginPipeline();
++   if (rc!=kIOReturnSuccess) { s->cancelScanout("pipeline takeover reset admission");return; }
++   s->fScanoutState=SweetScanoutRebuilding;s->fScanoutDeadline=scanout_now()+100000000ULL;
++   sender->setTimeoutMS(1);return;
++  }
+   /* Re-check the retained pipeline before exposing the new source address. */
+   if (!s->scanoutConfiguration(true) || !s->clockCanGate() || !s->localClocksReady()) {
+    s->cancelScanout("resource-complete pipeline changed"); return;
+@@ -193,6 +212,21 @@
+   s->fScanoutState=SweetScanoutQuiescing;
+   s->fScanoutIdleSamples=0; s->fScanoutDeadline=scanout_now()+50000000ULL;
+   sender->setTimeoutMS(1); return;
++ }
++ if (s->fScanoutState==SweetScanoutRebuilding) {
++  if (scanout_now()>=s->fScanoutDeadline) { s->cancelScanout("pipeline takeover deadline");return; }
++  IOReturn rc=s->advancePipeline();
++  if (rc==kIOReturnBusy) {sender->setTimeoutMS(1);return;}
++  if (rc!=kIOReturnSuccess) {s->cancelScanout("pipeline takeover reset/configuration failed");return;}
++  const vm_offset_t top=s->fMaps[9]->getVirtualAddress();
++  dp_wr(top,0x1018,1u<<8);
++  if (dp_rd(top,0x1014)&(1u<<8)) {s->cancelScanout("pipeline stale PP done");return;}
++  if (!s->armIRQ()) {s->cancelScanout("pipeline pixel IRQ rearm");return;}
++  s->fScanoutTE=(1u<<20)|(1u<<19)|135u;s->fScanoutAuto=0x80000001u;
++  s->fScanoutSubmitFrame=s->fFrameCount;s->fScanoutStatus.address=s->fHardwarePool->physical(0);
++  s->kickoffPipeline();s->fScanoutState=SweetScanoutSubmitted;
++  s->fScanoutDeadline=scanout_now()+100000000ULL;
++  sender->setTimeoutMS(1);return;
+  }
+  if (s->fScanoutState!=SweetScanoutQuiescing && s->fScanoutState!=SweetScanoutSubmitted) return;
+  unsigned irq=__atomic_load_n(&s->fIrqState,__ATOMIC_ACQUIRE);
+@@ -243,7 +277,7 @@
+       s->fScanoutStatus.address,line,s->fScanoutSubmitFrame);
+   sender->setTimeoutMS(1); return;
+  }
+- if (!s->scanoutConfiguration(false)) { s->cancelScanout("submitted SMMU/layout changed"); return; }
++ if (!s->scanoutConfiguration(false) || (s->fPipelineEnabled && (!s->fPipelineConfigured || !s->fLifecycle.pipelineGeneration))) { s->cancelScanout("submitted SMMU/layout changed"); return; }
+  s->observeLineage("scanout-te",s->dp_intf1,0x288,s->fScanoutTE);
+  s->observeLineage("scanout-auto",s->dp_intf1,0x2b4,s->fScanoutAuto);
+  s->fScanoutStatus.flush=dp_rd(s->dp_ctl,0x18);

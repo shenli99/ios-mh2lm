@@ -1,0 +1,221 @@
+{
+  "reference_commit": "2e897dddf49a4c3e85b2ff77fdf7c70f860398dd",
+  "sources": {
+    "sde_hw_ctl.c": "da16798bd5450574ed0c6668b10a01c93f660d002ea9e3e30e4364a36b5cb870",
+    "sde_hw_intf.c": "db2d8605cc9d0868530c6246540fd35c7139ef22253ff361b171f93196af0c83",
+    "sde_hw_lm.c": "1f758b685c42063fee4484291688b2dd8e884d2d844be807570f569e3a2b60a4",
+    "sde_hw_pingpong.c": "ddf91e01b38d5a7002c8df673a70d14a70bc8cc8a9456366b32bbad983fb2a31",
+    "sde_hw_sspp.c": "83ac46913df443fd283414e715c6a5ea78d028bcf9188cb050a24629d284d5eb"
+  },
+  "helpers": {
+    "sde_hw_ctl.c": [
+      "sde_hw_ctl_poll_reset_status",
+      "sde_hw_ctl_reset_control",
+      "sde_hw_ctl_intf_cfg_v1",
+      "sde_hw_ctl_trigger_flush_v1"
+    ],
+    "sde_hw_intf.c": [
+      "sde_hw_intf_bind_pingpong_blk",
+      "sde_hw_intf_vsync_sel",
+      "sde_hw_intf_setup_te_config",
+      "sde_hw_intf_enable_te",
+      "sde_hw_intf_setup_autorefresh_config",
+      "sde_hw_intf_connect_external_te"
+    ],
+    "sde_hw_lm.c": [
+      "sde_hw_lm_setup_out",
+      "sde_hw_lm_setup_color3"
+    ],
+    "sde_hw_pingpong.c": [
+      "sde_hw_pp_dsc_disable"
+    ],
+    "sde_hw_sspp.c": [
+      "sde_hw_sspp_setup_pe_config"
+    ]
+  },
+  "trace": [
+    {
+      "address": 182460464,
+      "value": 1
+    },
+    {
+      "address": 182472960,
+      "value": 0
+    },
+    {
+      "address": 182472964,
+      "value": 0
+    },
+    {
+      "address": 182472968,
+      "value": 153355320
+    },
+    {
+      "address": 182472976,
+      "value": 0
+    },
+    {
+      "address": 182472980,
+      "value": 0
+    },
+    {
+      "address": 182472984,
+      "value": 153355320
+    },
+    {
+      "address": 182472992,
+      "value": 0
+    },
+    {
+      "address": 182472996,
+      "value": 0
+    },
+    {
+      "address": 182473000,
+      "value": 153355320
+    },
+    {
+      "address": 182734852,
+      "value": 153355320
+    },
+    {
+      "address": 182734848,
+      "value": 0
+    },
+    {
+      "address": 182734848,
+      "value": 0
+    },
+    {
+      "address": 182460436,
+      "value": 131072
+    },
+    {
+      "address": 182460652,
+      "value": 0
+    },
+    {
+      "address": 182460656,
+      "value": 0
+    },
+    {
+      "address": 182460660,
+      "value": 2
+    },
+    {
+      "address": 182460664,
+      "value": 0
+    },
+    {
+      "address": 182460644,
+      "value": 0
+    },
+    {
+      "address": 182460724,
+      "value": 0
+    },
+    {
+      "address": 182915272,
+      "value": 0
+    },
+    {
+      "address": 182915232,
+      "value": 0
+    },
+    {
+      "address": 182893148,
+      "value": 0
+    },
+    {
+      "address": 182893184,
+      "value": 0
+    },
+    {
+      "address": 182893192,
+      "value": 524423
+    },
+    {
+      "address": 182893196,
+      "value": 65520
+    },
+    {
+      "address": 182893204,
+      "value": 2340
+    },
+    {
+      "address": 182893220,
+      "value": 2341
+    },
+    {
+      "address": 182893216,
+      "value": 2340
+    },
+    {
+      "address": 182893212,
+      "value": 262148
+    },
+    {
+      "address": 182893200,
+      "value": 2345
+    },
+    {
+      "address": 182893188,
+      "value": 1
+    },
+    {
+      "address": 182460688,
+      "value": 2
+    },
+    {
+      "address": 182460440,
+      "value": 2147614785
+    },
+    {
+      "address": 182893236,
+      "value": 2147483649
+    },
+    {
+      "address": 182893192,
+      "value": 1572999
+    },
+    {
+      "address": 182460464,
+      "value": 1
+    }
+  ],
+  "configured_registers": {
+    "182472960": 0,
+    "182472964": 0,
+    "182472968": 153355320,
+    "182472976": 0,
+    "182472980": 0,
+    "182472984": 153355320,
+    "182472992": 0,
+    "182472996": 0,
+    "182473000": 153355320,
+    "182734852": 153355320,
+    "182734848": 0,
+    "182460436": 131072,
+    "182460652": 0,
+    "182460656": 0,
+    "182460660": 2,
+    "182460664": 0,
+    "182460644": 0,
+    "182460724": 0,
+    "182915272": 0,
+    "182915232": 0,
+    "182893148": 0,
+    "182893184": 0,
+    "182893192": 1572999,
+    "182893196": 65520,
+    "182893204": 2340,
+    "182893220": 2341,
+    "182893216": 2340,
+    "182893212": 262148,
+    "182893200": 2345,
+    "182893188": 1,
+    "182460688": 2,
+    "182460440": 2147614785,
+    "182893236": 2147483649
+  }
+}

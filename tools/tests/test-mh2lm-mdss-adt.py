@@ -253,3 +253,36 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-rpmh-irq-adt-') as temp:
                                           panel_touch=True, panel_identity=True, rpmh_irq=True)
     assert source.read_bytes() == blob
 print('PASS: lifecycle hardware CLI declares completion IRQ; identity/default ADT bytes unchanged')
+
+# Pipeline ABI appends exactly three narrow windows; removing it restores the
+# complete old ADT including pins, touch, live identity and apps IRQ metadata.
+for pins in (False, True):
+    for touch in (False, True):
+        for irq in (False, True):
+            opts = dict(display_noc=True, panel_pins=pins, panel_touch=touch,
+                        panel_identity=True, rpmh_irq=irq)
+            extended = m.derive(blob, panel_pipeline=True, **opts)
+            tree, end = adt.parse(extended)
+            assert end == len(extended)
+            arm = tree.children[1]
+            mdss = next(n for n in arm.children if n.name == 'mdss')
+            assert mdss.prop('sweet,display-pipeline-abi') == struct.pack('<I', 1)
+            windows = list(struct.iter_unpack('<QQ', mdss.prop('reg')))
+            assert len(windows) == 19
+            assert windows[16:] == [(pa-m.SOC_BASE, size) for pa, size in
+                                    ((0x0ae45000, 0x320), (0x0ae71000, 0xd4), (0x0ae06a00, 4))]
+            for a, n in windows[16:]:
+                for b, count in windows:
+                    if a != b:
+                        assert a+n <= b or b+count <= a
+            mdss.props = [(k, f, v[:16*16] if k == 'reg' else v) for k, f, v in mdss.props
+                          if k != 'sweet,display-pipeline-abi']
+            assert adt.serialize(tree) == m.derive(blob, **opts)
+with tempfile.TemporaryDirectory(prefix='mh2lm-pipeline-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'pipeline.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--panel-pipeline',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == m.derive(blob, display_noc=True, panel_pipeline=True)
+    assert source.read_bytes() == blob
+print('PASS: mode7 LM0/PP0/CSC10 narrow maps, append-only ABI, all pins/touch/IRQ compositions, exact old ADT restoration and CLI')

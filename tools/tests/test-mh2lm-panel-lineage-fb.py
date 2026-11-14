@@ -17,6 +17,7 @@ import tempfile
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('xnu', type=Path)
 parser.add_argument('--evidence-dir', type=Path)
+parser.add_argument('--pipeline', action='store_true', help='exercise mode7 with erased pipeline configuration')
 args = parser.parse_args()
 root = args.xnu.resolve()
 here = Path(__file__).resolve().parent
@@ -48,7 +49,7 @@ for declaration in body.split(';'):
         array = re.fullmatch(r'(\w+)\[(\d+)\]', name)
         fields.extend([f'{array[1]}[{i}]' for i in range(int(array[2]))] if array else [name])
 
-provider = fixture('panel-lineage-wake')
+provider = fixture('panel-pipeline' if args.pipeline else 'panel-lineage-wake')
 consumer = fixture('panel-lifecycle-fb')
 emit = '\n'.join(f' printf(" %llu",(unsigned long long)v.{field});' for field in fields)
 provider_tests = provider['tests'].split('int main(){', 1)[0] + r'''
@@ -72,6 +73,8 @@ int main() {
  }
 }
 '''
+if args.pipeline:
+    provider_tests = provider_tests.replace('h.power(SweetPanelDisplayOn);emitStatus', 'erasePipeline();h.power(SweetPanelDisplayOn);emitStatus')
 flags = ['-g', '-fsanitize=address,undefined', '-fno-omit-frame-pointer']
 runtime = dict(os.environ, ASAN_OPTIONS='detect_leaks=0',
                UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1')
@@ -165,6 +168,26 @@ int main() {
  puts("PASS: 60 actual MDSS mode2 status observations across four profiles/three OFF-ON cycles accepted by real framebuffer; pending/fresh-pixel/touch gates, coalesced ON, 18 corrupted proofs rejected, no cancellation on success or legacy fallback");
 }
 '''
+    if args.pipeline:
+        tests = tests.replace('lifecycleArg=2;', 'lifecycleArg=7;')
+        tests = tests.replace(' puts("PASS:', r''' // The valid final state came from the real driver. Remove only its
+ // generation/pixel/capability proof and ensure the consumer rejects it.
+ for(unsigned fault=0;fault<6;++fault) {
+  Harness h;h.b->cap=records[0].cap;h.b->next=records[0].status.token-1;
+  if(fault==0){h.b->cap&=~SweetPanelPipelineRebuild;assert(h.request(true)!=0&&h.b->operations.empty());continue;}
+  assert(h.request(true)==0);auto off=records[1].status;
+  if(fault==1){off.pipelineGeneration=0;feed(h,off);assert(h.f->fPanelLifecycleFault);continue;}
+  feed(h,off);assert(h.f->fPanelPipelineGeneration==off.pipelineGeneration&&h.request(false)==0);
+  auto on=records[4].status;
+  if(fault==2)on.pipelineGeneration=0;
+  if(fault==3)on.pipelineGeneration=off.pipelineGeneration;
+  if(fault==4)on.pixelsComplete=false;
+  if(fault==5)on.touchQuiesced=true;
+  feed(h,on);assert(h.f->fPanelLifecycleFault&&h.f->fPowerOff&&h.b->cancelled.size()==1);
+ }
+ puts("PASS:''')
+        tests = tests.replace('MDSS mode2 status', 'MDSS mode7 erased-pipeline status')
+        tests = tests.replace('18 corrupted proofs rejected', '18 common plus 6 pipeline/capability proofs rejected')
     source = temp / 'consumer.cpp'
     source.write_text(consumer['prelude'] + consumer['ns']['source'] + consumer['helpers'] + tests)
     binary = temp / 'consumer'

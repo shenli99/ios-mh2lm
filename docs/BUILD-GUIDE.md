@@ -29,6 +29,11 @@ boot.img（Android header v1, page 2048）
 已实现功能在后续使用中暴露的独立问题统一记入 [Bug 台账](BUGS.md)，
 不自动作为当前主计划的新步骤或前置测试。
 
+**最新实现：[0222固定单管线重建](PANEL-PIPELINE-REBUILD.md)，本地通过，待用户push最新main并下载新kernel/buildtree（建议0121a32）。**
+新路径是`--panel-pipeline`/`sweetpanellifecycle=7`，需核对79份受检源码、125项source markers和新pipeline内核marker。
+沿用ABI608固件，新增三窄MMIO映射/pipeline ABI，启动参数仍605/607字节。拿到真实新产物后再打`panel-pipeline`，当前没有新镜像。
+a31 retained仍是已验证对照；下面“无需重编”只适用于a31本身，不代替0222验证。
+
 [0121a31实测与产物](PANEL-D1-0121A31.md)：包含0221，ABI608四档镜像打包与回读通过，retained普通息屏唤醒已实测通过。
 78份受检源码匹配0221验证树、118项CI source markers和223项内核markers通过；全部ADT/启动参数与a30相同。
 a30实机曾在OFF完成后被framebuffer consumer拒绝并取消，详见[a30实测分析](PANEL-D1-0121A30.md)。

@@ -24,6 +24,8 @@ if (arm/'SweetPanelProfile.h').exists():
 legacy = (root/'bsd/dev/sweet_display_probe.c').read_text()
 source = source.replace('#include "SweetMDSSIRQ.inc"', (arm/'SweetMDSSIRQ.inc').read_text())
 source = source.replace('#include "SweetMDSSScanout.inc"', (arm/'SweetMDSSScanout.inc').read_text())
+if (arm/'SweetMDSSPipeline.inc').exists():
+    source = source.replace('#include "SweetMDSSPipeline.inc"', (arm/'SweetMDSSPipeline.inc').read_text())
 source = source.replace('#include "SweetMDSSDSI.inc"', (arm/'SweetMDSSDSI.inc').read_text())
 if (arm/'SweetMDSSLifecycle.inc').exists():
     source = source.replace('#include "SweetMDSSLifecycle.inc"', (arm/'SweetMDSSLifecycle.inc').read_text())
@@ -179,8 +181,8 @@ struct IOTimerEventSource : IOEvent {
  static IOTimerEventSource*timerEventSource(OSObject*o,Action a){if(++timerCreates==failTimerCreate)return nullptr;auto*p=new IOTimerEventSource;p->owner=o;p->action=a;return p;}
  void setTimeoutMS(unsigned t){timeout=t;} void setTimeoutUS(unsigned t){timeout=t;} void cancelTimeout(){timeout=0;}
 };
-static constexpr uintptr_t bases[16]={0x0010b000,0x0af00000,0x0ae05000,0x0ae02000,0x0ae6b800,0x0ae6c000,0x0ae94000,0x15000000,0x15082000,0x0ae00000,0x0ae6e800,0x17a00000,0x0ae94400,0x0af20000,0x0af21c00,0x0af30000};
-static constexpr size_t lengths[16]={0x1000,0x3000,0x1000,0x1000,0x800,0x800,0x400,0x2000,0x1000,0x2000,0x200,0x10000,0x760,0x1c00,0x3000,0x3fd4};
+static constexpr uintptr_t bases[19]={0x0010b000,0x0af00000,0x0ae05000,0x0ae02000,0x0ae6b800,0x0ae6c000,0x0ae94000,0x15000000,0x15082000,0x0ae00000,0x0ae6e800,0x17a00000,0x0ae94400,0x0af20000,0x0af21c00,0x0af30000,0x0ae45000,0x0ae71000,0x0ae06a00};
+static constexpr size_t lengths[19]={0x1000,0x3000,0x1000,0x1000,0x800,0x800,0x400,0x2000,0x1000,0x2000,0x200,0x10000,0x760,0x1c00,0x3000,0x3fd4,0x320,0xd4,4};
 static int resourceMode=0,panelPinsMode=0,touchPanelMode=0;
 static unsigned badMap=99,missingMap=99,shortMap=99;
 static std::vector<unsigned> mapCalls;
@@ -220,7 +222,7 @@ struct IOService : OSObject {
  virtual IOWorkLoop*getWorkLoop()const{return nullptr;}
  OSObject*getProperty(const char*k){return properties.count(k)?properties[k]:nullptr;}
  bool isInactive(){return inactive;}
- int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){mapCalls.push_back(i);assert(i<16);if(i==missingMap)return nullptr;auto*m=new IOMemoryMap(i);if(pinsNub){assert(i<2);m->customPA=i?0x03908000:0x03d06000;m->customSize=0x1000;}if(rpmhNub){assert(i<4);static const uintptr_t pa[]={0x18220000,0x18220d00,0x0c3f000c,0x17a00000};static const size_t n[]={0x100,0x3000,8,0x10000};m->customPA=pa[i];m->customSize=n[i];}return m;}
+ int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){mapCalls.push_back(i);assert(i<19);if(i==missingMap)return nullptr;auto*m=new IOMemoryMap(i);if(pinsNub){assert(i<2);m->customPA=i?0x03908000:0x03d06000;m->customSize=0x1000;}if(rpmhNub){assert(i<4);static const uintptr_t pa[]={0x18220000,0x18220d00,0x0c3f000c,0x17a00000};static const size_t n[]={0x100,0x3000,8,0x10000};m->customPA=pa[i];m->customSize=n[i];}return m;}
  void setProperty(const char*,unsigned long long,unsigned){}void setProperty(const char*,bool){}
  void setProperty(const char*,const char*){} void setProperty(const char*,OSObject*){}
  void registerService(){}
@@ -740,7 +742,12 @@ int main(){
     regs[bases[4]+0x2b0]=2340;pollHandoff();assert(!pool->pinned);
     if(scenario==5)dropSourceWrite=true;
     pollHandoff();dropSourceWrite=false;assert(pool->pinned&&s->fScanoutTouched);
-    if(scenario==5)assert(s->fScanoutState==SweetScanoutFailed);
+    if(scenario==5){
+     // Since 0220, an ordinary source echo mismatch is diagnostic. It must
+     // still wait for actual completion and keep the pool pinned on timeout.
+     assert(s->fScanoutState==SweetScanoutSubmitted&&regs[bases[2]+0x14]==0x9d200000);
+     fakeTicks+=100000000;pollHandoff();assert(s->fScanoutState==SweetScanoutFailed&&pool->pinned);
+    }
     else{
      assert(s->fScanoutState==SweetScanoutSubmitted&&regs[bases[2]+0x14]==pool->pa);
      assert(regs[bases[2]+0x24]==4608&&regs[bases[2]+8]==0x300016&&!regs[0x0ae01014]);
