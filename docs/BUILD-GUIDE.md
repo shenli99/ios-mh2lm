@@ -29,16 +29,16 @@ boot.img（Android header v1, page 2048）
 已实现功能在后续使用中暴露的独立问题统一记入 [Bug 台账](BUGS.md)，
 不自动作为当前主计划的新步骤或前置测试。
 
-[0121a30产物](PANEL-D1-0121A30.md)已核对包含0219+0220，并完成ABI608四档镜像打包与回读。
-78源码匹配0220验证树、114原CI source markers和222内核markers通过；全部ADT/启动参数与a29相同。
-2026-11-14接手时已发现a30实机日志：OFF完成后被framebuffer consumer拒绝并取消，详见[a30实测分析](PANEL-D1-0121A30.md)。
+[0121a31产物与测试命令](PANEL-D1-0121A31.md)已就绪：包含0221，ABI608四档镜像打包与回读通过。
+78份受检源码匹配0221验证树、118项CI source markers和223项内核markers通过；全部ADT/启动参数与a30相同。
+a30实机曾在OFF完成后被framebuffer consumer拒绝并取消，详见[a30实测分析](PANEL-D1-0121A30.md)。
 `panel-retained`是历史文件名，mode2会执行[0220 Lineage息屏/唤醒流程](PANEL-LINEAGE-SUSPEND-RESUME.md)，
 撤销本panel票并恢复ULPS链路；菜单标题已更正。
-**0221已修复consumer模式映射（`5cf36dd`），四套本地回归/ARM64对象/累计重放通过；现在需要用户push最新main云编译。**
-新kernel/buildtree建议编号`0121a31`，核对0221及118项CI source markers后沿原ABI608、ADT和605字节retained参数打包。
+**0221已修复consumer模式映射（`5cf36dd`），a31产物核对通过；下一步直接实测retained一次OFF→ON。**
+沿用原ABI608、ADT和605字节retained参数，无需再编同一内核。
 matrix现在要求`SWEET FB PANEL: Lineage mode2 supply/link/data completion enabled`，旧a30不能再用于新打包。
 实测关注OFF complete后ON是否开始，再验证ULPS退出、host soft reset、像素和触摸恢复；不重测a29/a30。
-详见[0221实现与交付条件](PANEL-LINEAGE-SUSPEND-RESUME.md)。当前没有0221新云端内核或boot。
+详见[0221实现与验证](PANEL-LINEAGE-SUSPEND-RESUME.md)。当前没有a31实机结果；未取得独立CI run ID或完整构建日志。
 
 ## 1. 写补丁（agent）
 

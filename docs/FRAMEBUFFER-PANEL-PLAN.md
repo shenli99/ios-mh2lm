@@ -1,12 +1,13 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
-**当前执行点（2026-11-14）：0221已修复FB mode2与MDSS的配合逻辑（`5cf36dd`），本地通过，待用户push云编译。**
+**当前执行点（2026-11-14）：0121a31已核对包含0221（`5cf36dd`），ABI608四档镜像就绪，待retained一次OFF→ON实测。**
 FB mode2启用supply/link/data parking验收，接受合法OFF停驻并继续ON；保留完整资源、像素和触摸完成条件。
 四profile各三轮60份实际MDSS状态→真实FB回放通过，原a30同测试失败；损坏凭据、capability、旧资源保持结果仍拒绝。
 四套ASan/UBSan、ARM64对象（1398条告警不变）、37patch严格重放/78文件/118项CI markers通过。
-下一步下载新kernel/buildtree（建议0121a31），核对0221后沿原ABI608/ADT/605字节参数打包，先测一次OFF→ON。
+产物78源码/118 source markers/223内核markers通过；四档回读一致，固件/ADT/605字节retained参数保持a30。
 先确认OFF complete后不再cancel，再看ON/ULPS退出/host soft reset/DDIC/新像素/触摸。
-见[实现与完整验证](PANEL-LINEAGE-SUSPEND-RESUME.md)。a30仍是最后实测，无新镜像；不重测旧版或切combined/supply。以下为历史。
+命令见[a31交付](PANEL-D1-0121A31.md)，修复见[实现与完整验证](PANEL-LINEAGE-SUSPEND-RESUME.md)。
+a30仍是最后实测；无需再编同一内核，不重测旧版或切combined/supply。未取得独立CI run ID/完整构建日志。以下为历史。
 
 **历史执行点（2026-11-13）：a25已分析；0213局部状态/复位取证已提交7f4f55a，待用户push云编译。**
 a25首错仍为branch7/+4004 branch-wait，PA正确，立即及39次等待均未见enable，整体期限仍余188.3ms。

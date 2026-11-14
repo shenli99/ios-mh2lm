@@ -1,5 +1,25 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, 0121a31 artifacts and ABI608 wake test ready)
+
+**CURRENT：用户已下载0121a31；核对包含0221并完成ABI608四档打包/回读，待retained一次OFF→ON实测。**
+本段替代下方“待push/云编译”的NEXT。实现提交5cf36dd，之前交接3fd29f3；本轮仅产物核对/打包/文档。
+78份受检源码与scratch/framebuffer-0221/verify逐字节一致；相比a30恰好变化SweetFBService.inc、SweetDisplayBackend.h。
+118项CI source markers、223项内核markers通过；新增FB Lineage mode2 supply/link/data completion日志存在。
+内核17758968bytes，SHA256=d76e828afb148b8c22dc8bb18f779b80e91cd36f58af34cebc77ffc07e86d449；包内SHA256SUMS匹配，ARM64 subtype0。
+5cf36dd是预期实现基线；无独立CI run ID/完整build log，未核对云端提交元数据或全量告警。
+四档boot header/FAT kernel+ADT+TOML回读通过；ABI608固件/BootShim/两个追加DTB保持，全部ADT和args与a30相同。
+retained605/607bytes，display161/apps37保持，identity最小ADT不变；panel-retained为历史文件名，mode2采用0220流程和0221完整FB验收。
+**NEXT：用户先开USB接收，再fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a31-abi608-panel-retained.img。**
+镜像35545088bytes，SHA256=020fa7803cd5703c649d6db5d1dd2228db17e43a03a2e1f6094e08ad7e0ed218。
+日志logs/live-0121a31-abi608-panel-retained.txt；桌面确认更新后，息屏等约5秒再唤醒，无论结果继续接收至少30秒。
+重点OFF complete不再consumer cancelled→ON begin→供电ACK/ULPS exit/host soft reset→DDIC/ON→owned flush/fresh pixels→touch/ON complete。
+当前没有a31实机结果，a30仍是最后实测；不需再编同一内核或重测a30，不切combined/supply。
+底稿scratch/artifact-0121a31/含两份验证脚本/输出、source/changes-from-a30/verification/boot-verification JSON和packaging.txt。
+详见docs/PANEL-D1-0121A31.md；BUILD-GUIDE/显示计划/Lineage实现交付指针及workspace PLAN已同步。
+未push/触发CI/操作设备；未改驱动、命令传输、固件、ADT或args，未重跑既有0221回归。
+完整MDP/INTF/SMMU重建和共享核心低功耗仍未实现。以下交接为历史。
+
 ## Agent handoff / active work (2026-11-14, 0221 framebuffer Lineage lifecycle cooperation fixed)
 
 **CURRENT：用户要求补齐配合逻辑；0221已实现并本地验证通过，待用户push/云编译与新实机。**

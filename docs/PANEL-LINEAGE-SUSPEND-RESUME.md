@@ -35,11 +35,12 @@ ON完成仍须供电票/链路/资源恢复，以及新像素和触摸恢复证�
 底稿`scratch/framebuffer-0221/`含`final-review.json`、四份test输出、旧a30失败输出、
 `bridge/mdss-status.json`、编译/告警、累计重放和旧产物拒绝证据。prepare-patch会重建verify，不能在测试/编译读取时执行。
 
-下一步由用户push最新main触发CircleCI，下载新kernel/buildtree（建议`0121a31`）；
-agent核对0221及118项source markers后沿ABI608/原ADT/原605字节retained参数打包。
+2026-11-14交付更新：[0121a31产物与测试命令](PANEL-D1-0121A31.md)已就绪。
+78份受检源码匹配0221验证树，118项source markers、223项内核markers通过；ABI608四档打包/回读通过，
+全部ADT与args保持a30、retained仍605字节。未取得独立CI run ID或完整构建日志。
 实机先确认OFF complete之后不再出现consumer cancelled，再看ON begin、ULPS退出、host soft reset、
 DDIC/ON、owned flush/fresh pixels及touch/ON complete。无需重测a30或切combined/supply。
-当前尚无新云端内核/镜像/实机结果；修复的是已证明的软件合同缺陷，后续唤醒硬件仍待验证。
+下一步直接实测a31，无需再编同一内核。当前尚无a31实机结果；修复的是已证明的软件合同缺陷，后续唤醒硬件仍待验证。
 
 以下为0221修复前的审计与历史实现记录。
 
