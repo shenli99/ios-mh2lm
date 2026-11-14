@@ -3,6 +3,8 @@
 ## Agent handoff / active work (2026-11-14, 0222 Lineage fixed pipeline rebuild)
 
 **CURRENT：用户授权按计划继续并优先对齐Lineage；0222已实现mode7固定单管线重建，本地验证全部通过，尚无新CI/实机。**
+实现提交`c94d59d`；补丁0222 SHA256=`6f4a8f6241521f8334c5b302b4181ddc930875c89dee54f0dea21a1f7fef37ac`。
+本地最终证据scratch/framebuffer-0222/final-review.json。
 a31/0221仍是已验证基线。新mode7=mode2供电/ULPS/host/面板流程+首次接管及每次ON的CTL0 reset、VIG0/LM0/CTL0/PP0/INTF1软件重配。
 CTL reset按Lineage2ms界限异步等待，期间禁止撤回boot clock；固定1080x2340/stride4608/crop22,48、TE计数按19.2MHz/(2360*60)=135。
 INTF子flush→主flush80020041→autorefresh1→externalTE；配置代数与freshPPDONE/flush0/RDPTR、触摸恢复分开验收。

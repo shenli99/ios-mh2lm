@@ -2,7 +2,8 @@
 
 2026-11-14，承接 a31/0221 的成功息屏唤醒基线。本轮推进计划“独立重建显示管线（PD4 及 PD2 余项）”的第一段：首次受控接管以及每次 mode7 唤醒，重新配置 VIG0 → LM0 → CTL0/PP0 → INTF1，然后提交自有 A 缓冲并等待新帧。已完成本地实现与验证，尚无新 CI 内核或实机结果，PD4 保持进行中。
 
-补丁：`xnu/patches/0222-mh2lm-lineage-pipeline-rebuild.patch`。
+实现提交：`c94d59d`。补丁：`xnu/patches/0222-mh2lm-lineage-pipeline-rebuild.patch`。
+补丁 SHA256：`6f4a8f6241521f8334c5b302b4181ddc930875c89dee54f0dea21a1f7fef37ac`。
 参考仓：`ref/lge-lineage-kernel`，提交 `2e897dddf49a4c3e85b2ff77fdf7c70f860398dd`。
 生产修改八份文件；新增 `SweetMDSSPipeline.inc`，继续使用唯一 SweetMDSS owner/gate 和原有 timer、资源票、扫描缓冲区。
 
