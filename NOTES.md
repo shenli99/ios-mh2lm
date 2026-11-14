@@ -1,5 +1,14 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, a37 ESC0 wake audited; startup UI discrepancies recorded)
+
+**CURRENT：a37/mode7 PV五轮OFF/ON与ESC0停启日志通过，成为最新普通唤醒基线；用户另报首次亮度/音量滑条不一致，已登记BUG-008/009。** 用户明确说本轮没有旧画面闪现，BUG-007记未复现、保留暂缓，未证明修复。实现71da5dc/0227，交付bc4832c。
+USB837423bytes/9385行，SHA256 `310917328754dbed1b89fb75b017b03d1bcda3bc48489cc6381d427f0c32090e`，启动中段至SYSTEM_OFF；0NUL，但2–101与103–202行100行重复，prepared4096/PA0xc51e4000日志29/130两次不能视作独立分配。活动期无再分配。host546bytes/9行、无时间戳，含断开/等待；未找到a37持久日志，BUG-006不关闭。
+五轮HS→ULPS→ESC halted→PHY关/OFF complete；ON先ESC running before host→ULPS→17包LP/4DMA→六包HS色彩/1DMA→generation2–6首帧→HS亮度target1完成→第二kickoff→触摸/ON完成。首次generation1/HANDOFF有证据。各轮后均vsync/触摸；第2轮无独立正CPU窗口，第3轮八个完整60002–60004ms IRQ窗、59.897–59.914Hz/dropped0，其他轮3597/10274/10647ms尾窗或无窗口。不是两轮各60秒或60Hz UI。
+用户确认拖动后、唤醒后亮度和滑条一致，其它正常；不能泛称首次启动无异常。BUG-008源码确认SweetFramebuffer.cpp未知fLevel4096被publish钳成4095；与a36逐字相同，非0227新增。5次不含brightness数值设置的键名未知，随后35次数字请求/8条DCS rc0；40条日志上限，不能推断后续不调光。实际首次面板值/UI读取未捕获，完整因果待验证。
+BUG-009仅确认音量按键HUD与控制中心不符；HID输入已送达，但音量类别/路由及实际输出未知，不假定拖动/唤醒后音量恢复或与亮度共因。详见docs/BUGS.md与docs/PANEL-D1-0121A37.md。首次OFF后无显示生命周期WARN/ERROR/panic/deadline；全局其它系统条目未诊断。
+**NEXT：C08 ESC0普通子项实机功能收口，继续完整DSI/MDP动态票及其余PD4；首次亮度接管缺口单列，音量独立诊断。** BUG-007继续暂缓观察，不为本轮重编同版；完整core/SMMU/RSC/QoS、D09动态/首次等保持。证据scratch/artifact-0121a37/audit-wake.py、wake-log-review.json、wake-user-input.json、startup-ui-review.json。本轮仅日志/源码分析和文档提交，无驱动/CI/固件/镜像修改、驱动回归重跑、push或设备操作。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, 0121a37 ABI608 ESC0 images ready)
 
 **CURRENT：用户提供0121a37并补下载buildtree；最终两包完整，80份源码匹配71da5dc/0227，identity/pipeline打包回读通过，待实机。** 相比a36六份预期修改（含DisplayClock.h仅注释），146source/253kernel markers通过，旧ULPS后直接PHY关标记消失。a36/mode7仍最新实机基线，BUG-006/007保持。

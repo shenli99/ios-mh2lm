@@ -1,5 +1,11 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+## 0121a37 实机进展（2026-11-14，ESC0五轮通过，启动UI问题已登记）
+
+[a37实机记录](PANEL-D1-0121A37.md)：USB确认mode7/PV五轮HS→ULPS→ESC0 halt→PHY关，以及ESC0运行→host/PHY→ON表/色彩/首帧/HS亮度/第二帧/触摸完成，generation1→6；第3轮八个完整60秒IRQ窗口、dropped0，其余轮短或无完整窗口，不称两轮各60秒耐久通过。a37作为最新普通唤醒基线。
+用户确认拖动后及唤醒后亮度与滑条一致、其它正常，BUG-007本轮未复现但未证明修复。新增[BUG-008/009](BUGS.md)：首次亮度滑条不符（未知初值被发布为4095，源码与a36相同）、音量按键指示与控制中心不符（类别/路由未知）。0NUL但启动有重复文本；无a37持久对照，BUG-006未修。
+**下一步继续完整C08动态DSI/MDP资源周期及其余PD4，首次亮度接管缺口单列。** 完整shared core/SMMU/RSC/QoS、D09动态色彩等仍未完成。证据scratch/artifact-0121a37/wake-log-review.json、wake-user-input.json、startup-ui-review.json。本轮仅分析/文档/本地提交，无驱动/CI/镜像修改或设备操作。以下为历史。
+
 ## 0121a37 当前进展（2026-11-14，ESC0停启镜像已交付，待实机）
 
 [a37镜像与验收](PANEL-D1-0121A37.md)：补下载后的kernel/buildtree完整，80份源码与71da5dc/0227一致，相比a36六份预期修改，146source/253kernel markers通过。初始buildtree尾部截断已解决，kernel与受检源码未变，历史副本保留。沿原ABI608打包identity/pipeline并回读通过，ADT/605与477byte参数同a36，a31–a36旧镜像保持。
