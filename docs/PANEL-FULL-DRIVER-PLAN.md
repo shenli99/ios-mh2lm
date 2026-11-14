@@ -1,5 +1,11 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+## 0121a36 实机进展（2026-11-14，普通SDR唤醒功能已验）
+
+[a36实机审计](PANEL-D1-0121A36.md)：USB确认mode7/PV四轮OFF/ON，generation1→2→3→4→5；每轮原17包LP/4DMA→display引用→六包HS色彩/1DMA完成→首帧→HS亮度→同generation第二kickoff→触摸/ON完成。用户反馈“我感觉没问题”，a36成为普通SDR唤醒最新实机基线。
+第2轮五个完整60000–60100ms IRQ窗口、59.914–59.933Hz、dropped0；第1/3轮仅10188/7800ms，第4轮无完整窗口，不称两轮各60秒、全档亮度或色度一致性通过。USB7710行到SYSTEM_OFF，含3NUL；无a36持久对照。BUG-006/007继续保留，未确认旧画面闪现消失。
+**下一步先审计C08完整命令/显示资源周期，再确定其余PD4实现批次。** D09动态HDR/专家/RGB、首次色彩、DSPP及LP/core/SMMU/QoS仍保留，完整显示驱动未完成；后续新批次可补足分轮观察时长。本轮只做日志审计/文档/本地提交，无驱动/CI/镜像修改、驱动测试重跑、push或设备操作。证据scratch/artifact-0121a36/audit-wake.py、wake-log-review.json、wake-user-input.json；实现ba8a38a、交付0d07ca2。以下为历史。
+
 ## 0121a36 当前进展（2026-11-14，默认SDR色彩镜像已交付，待实机）
 
 [a36/0226镜像与验收](PANEL-D1-0121A36.md)已完成80份源码、144source/251kernel markers核对；相比a35三份修改和一份新增，匹配ba8a38a。沿原ABI608打包identity/pipeline并回读通过，ADT/605与477byte参数与a35一致；a31–a35旧镜像保持。

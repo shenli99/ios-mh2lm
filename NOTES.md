@@ -1,5 +1,14 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-14, a36 ordinary SDR wake validated)
+
+**CURRENT：a36/mode7 USB确认四轮OFF/ON及首帧前默认SDR色彩/锐度恢复，用户反馈“我感觉没问题”；a36成为普通SDR唤醒最新实机基线。** 实现ba8a38a/0226、交付0d07ca2。BUG-006/007未修，未获得BUG-007消失的明确反馈。
+USB687193bytes/7710行，SHA256 `638f74ede8fe1d2f725bbb8bede1d0c76d915c2821d8739e1722a9c05b779cc8`；启动中段至SYSTEM_OFF，未捕获启动prepared缓冲；本轮未找到a36持久文件，未作双路对照。host546bytes/9行、无时间戳，含断开/等待。USB7007/7638行共3NUL，保留原始字节，记入BUG-006现象，不能唯一归因。
+四轮ON均17包LP/4DMA→display引用1→新增六包HS色彩/1DMA真实完成→generation2/3/4/5首帧→HS亮度target1完成→同generation第二kickoff→触摸/ON完成；OFF均先HS停再ULPS。首次generation1/HANDOFF完成，四轮后均有vsync/触摸；第2/3/4轮区间有正CPU呈现统计，第1轮无独立PERF窗口。
+第1/3轮IRQ窗口10188/7800ms，第2轮五个60000–60100ms完整窗口、59.914–59.933Hz及38558ms尾窗，均dropped0；第4轮无完整窗口。**普通功能收口，但不称两轮各60秒、全档调光、60Hz UI或色度一致性通过。** 用户仅主观未见问题。首次OFF后无显示生命周期WARN/ERROR/panic/deadline；全局仍有BindFS/hfs/SpringBoard/NVRAM等条目未诊断。
+证据scratch/artifact-0121a36/audit-wake.py、wake-log-review.json、wake-user-input.json；行号/覆盖边界见docs/PANEL-D1-0121A36.md。镜像保留，SHA仍使用交付记录 `9ea8bb9763a946310b6cd1714b4542f1bb397d64ea292edec1822b83ffed4e6d`。
+**NEXT：保留a36基线，先审计C08完整命令/显示资源周期，再确定其余PD4实现批次。** D09动态HDR/专家/RGB、首次色彩、DSPP及LP/core/SMMU/QoS等仍保留；后续新批次测试可补足分轮观察时长，无需为本次记录重编同版。BUG-007按用户要求暂缓，不将硬件fresh frame当锁屏就绪。本轮仅日志/文档/本地提交，无驱动/CI/固件/镜像修改、驱动测试重跑、push或设备操作。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, 0121a36 ABI608 SDR color images ready)
 
 **CURRENT：用户提供0121a36；80份源码与ba8a38a/0226及最终SHA一致，identity/pipeline两档打包回读通过，待实机。** 相比a35仅Backend.h/MDSS.cpp/Lifecycle.inc三份修改和新增SweetPanelSDRColor.h；144source/251kernel markers通过。a35/mode7仍最新实机基线，BUG-007暂缓保留，a31–a35旧镜像保持。

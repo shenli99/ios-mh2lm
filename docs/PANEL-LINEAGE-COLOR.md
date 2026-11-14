@@ -1,6 +1,6 @@
 # 0226：普通 SDR 默认色彩/锐度恢复
 
-2026-11-14。实现提交 **`ba8a38a`**。D09 的普通 SDR Auto 默认分支已实现并通过本地验证，**[a36产物与镜像](PANEL-D1-0121A36.md)已核对打包，待实机**。最新实机基线仍是[a35/0225](PANEL-D1-0121A35.md)，带已知且暂缓处理的BUG-007。补丁 `xnu/patches/0226-mh2lm-lineage-sdr-color-restore.patch`，SHA256 `e3f37195b56fb0a5f6f10ab500b29f35929759419d76ba7fa77f883f6c608f59`。
+2026-11-14。实现提交 **`ba8a38a`**。D09 的普通 SDR Auto 默认分支已实现并通过本地验证，**[a36实机](PANEL-D1-0121A36.md)USB确认mode7/PV四轮色彩恢复与普通唤醒，用户主观未见问题，作为最新普通SDR唤醒基线**。第二轮有五个完整60秒IRQ窗口、dropped0；其余轮未覆盖完整60秒，不称两轮各60秒或色度一致性通过。USB有3NUL、无本轮持久对照，BUG-006/007继续保留。补丁 `xnu/patches/0226-mh2lm-lineage-sdr-color-restore.patch`，SHA256 `e3f37195b56fb0a5f6f10ab500b29f35929759419d76ba7fa77f883f6c608f59`。
 
 ## 本批行为与边界
 
