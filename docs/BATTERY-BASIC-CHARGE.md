@@ -123,7 +123,11 @@ deps 诊断路径代码不动；runtime3 需要 `sweetbattery=1 sweetbatt=1 swee
   说明 CPU 一直在跑、系统没有进入真睡眠；0168 的 WillSleep 分支不打日志，无法从日志直接看到
   是否收到过 WillSleep。真睡眠下 bark 能否唤醒仍【待核实】。
 
-## 0169：FG 温度变化中断（本地完成，待云编译/实机）
+<a id="0169fg-温度变化中断本地完成待云编译实机"></a>
+
+## 0169：FG 温度变化中断（实现说明；0120a18已验证路由挂接）
+
+原本地阶段说明如下，APID待核实项已由下一节关闭；实际IRQ触发仍未观察到，不需要重复云编译。
 
 - 新路由 `battery-temp-delta`：SID2 外设 0x42（FG RRADC）bit2，双边沿，事件 `SWEET_BATT_IRQ_TEMP`
   0x200。依据 LG pm8150b.dtsi:428-435 `fg-rradc@4200` 与 qpnp-fg-gen4.c:3940
@@ -140,7 +144,7 @@ deps 诊断路径代码不动；runtime3 需要 `sweetbattery=1 sweetbatt=1 swee
   只改 bit2、命中一次触发一次采样、拆除恢复原配置；读失败或固件已使能时整组可见失败）；
   7 文件 CI buildtree 交叉编译 rc0，告警与 0168 树相比只多 1 条同类 missing-field（新路由表项）。
   patch 对 0168 结果树 strict apply、逐字节一致；CI 新增 4 个 require_marker，本地 114 条全部命中。
-- 【待核实】0x242 在本机是否唯一 EE0 IRQ-owned APID（0120a17 路由诊断未列 0x242，0169 已加入
+- 当时待核实、现已由0120a18关闭：0x242 在本机是否唯一 EE0 IRQ-owned APID（0120a17 路由诊断未列 0x242，0169 已加入
   诊断列表）；若不是，tempirq 镜像会在挂接时整组失败、不启充，退回普通镜像即可。
   FG 默认 delta 阈值和实际触发频率未知。
 

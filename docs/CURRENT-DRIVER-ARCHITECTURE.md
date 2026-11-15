@@ -1,4 +1,77 @@
-# MH2LM 当前 USB、按键、屏幕与电池驱动架构
+# MH2LM 当前驱动架构
+
+更新：2026-11-15，以0121a39 / 0229为实现与普通实机基线。状态与下一步见[STATUS](STATUS.md)，日志证据见[a39记录](PANEL-D1-0121A39.md)。本页说明现有职责与接口；文末折叠保留旧架构记录。
+
+## 启动与服务归属
+
+`bsd_init` 在根卷查找前调用一次 `sweet_board_init`，发布晚期 PMIC mux、ADC5、按键服务并启动触摸、USB和显示探针入口。mux/按键/ADC5各有自己的nub；电池由IOResources匹配。关闭按键不会阻止mux/电池初始化。UFS负责存储及依赖分区的持久日志，USB实时console不等待UFS。
+
+按键、电池和ADC5通过registry通知发现mux，分别持有 `SweetSpmiMuxClient`，在自己的workloop内调用公开C++接口；mux在自己的gate内串行配置与确认中断路由。SPMI底层锁保护单笔事务，不能把整个遥测过程锁成一笔。`stop/free`、provider撤回及故障隔离有实现与本地验证，真实设备终止/重匹配未全验收。
+
+## 显示数据流与所有权
+
+```mermaid
+flowchart TD
+  CA[CoreAnimation / backboardd 软件渲染] --> S[IOSurface 兼容实现]
+  S --> FB[AppleCLCD / IOMobileFramebuffer ABI]
+  FB --> COPY[约30 Hz CPU拷贝到自有A]
+  COPY --> PIPE[VIG0 → LM0 → PP0 → INTF1]
+  PIPE --> PANEL[DSI0 / PHY0 / R66456 PV]
+  IRQ[MDSS INTID115 / RD_PTR约60 Hz] --> MDSS[SweetMDSS workloop / gate]
+  MDSS --> FB
+  FB --> CLIENT[SweetDisplayClient / typed backend]
+  BL[CoreBrightness / AppleARMBacklight] --> CLIENT
+  CLIENT --> MDSS
+  MDSS --> PIPE
+  MDSS --> RPM[SweetRPMh / apps RSC / panel与ARC票]
+  MDSS --> PINS[SweetPanelPins / reset与TE]
+  MDSS --> TOUCH[SweetTouchPanel / 原TCM worker暂停恢复]
+```
+
+`SweetMDSS : IOService` 是显示MMIO的owner，一个workloop/command gate管理内部Lifecycle、Profile、DSI、Host/Link、Core/Clock/NoC、Pipeline/Scanout/IRQ模块；这些模块不是独立IOService。显示本地RSC由MDSS拥有，apps RSC中的供电/ARC/CN0由SweetRPMh拥有。上层通过typed begin/status/cancel和token请求亮度、电源、扫描，不传寄存器地址。面板命令和显示RPMh不经过电池SPMI白名单。
+
+模式7使用驱动持有的A缓冲，1125×2436画布、stride4608，硬件裁剪到1080×2340；固定VIG0→LM0→PP0→INTF1管线在首次接管和恢复时重配。普通扫描已离开ABL缓冲，但首次复制像素、console/panic和部分共享状态仍有ABL依赖。CPU原地拷贝保留；硬件RD_PTR约60 Hz不是60 fps UI或逐surface复用fence。`SwapWait`和完整提交/复用同步仍属于F4/F5余项。
+
+## 面板、命令与资源周期
+
+R66456通过四lane D-PHY、VC0、RGB888 command mode工作，当前host profile不启用DSC。DSI controller v2.3已有实机版本读数，PHY v4.0/PLL 7nm-v2来自LG参考及准入。实机采用ABL传递的PV身份，不是DDIC ID读回；四profile的本地覆盖不等于四种面板均实机验收。
+
+当前支持LP/HS DCS短包和长包，启动时准备并复用命令DMA缓冲；ON/OFF表走LP，默认SDR色彩/锐度及typed亮度走HS。真实完成后才归还命令引用，不确定时保留buffer/pin。read/BTA/ACK及其它VC仍未覆盖。
+
+| 周期 | 当前mode7普通路径 |
+|---|---|
+| OFF | pre-disable重取DSI → 排空扫描/IRQ并归还MDP → OFF表 → reset/host停止 → HS停止、ULPS、ESC停、PHY关闭 → unprepare归还DSI及资源/供电停放 |
+| ON | prepare取得DSI（暂停引用本身不授权发命令）→ ESC/host/PHY/ULPS恢复 → ON表 → 默认SDR色彩 → 取得MDP并重建管线 → 首帧 → HS亮度 → 同generation第二帧 → post-enable归还DSI → 触摸/FB完成 |
+| 持续扫描/调光 | autorefresh和临时亮度停扫仍持有MDP；单包命令取得/完成/归还引用，不等于全部时钟关闭 |
+
+以上普通路径已随a39验证。[C08六项清单](PANEL-LINEAGE-DISPLAY-CLIENT-CLOCKS.md)中，第5项最后使用者的完整物理转换、第6项提交协调仍有余项。BOOT/managed/core/config底座保留；共享core/SMMU/RSC/QoS状态丢失后的独立重建单列PD4。
+
+面板VDDI/VPNL分别使用PM8150 L14/L17；host L3和PHY L5与UFS/USB共享，保留最后disable保护。撤掉本panel票及RPMh ACK不证明物理rail-off。完整IOPM、故障后释放、无ABL首帧及panic仍未收口，不能把普通OFF/ON当整机睡眠。
+
+## IRQ、输入与USB
+
+| 部件 | 路径与边界 |
+|---|---|
+| PMIC中断 | PMIC-arb/PDC → INTID513 → 短callback → mux软件IOInterruptEventSource/workloop → 对应consumer；固定硬件路由覆盖按键、电池及ADC5，0169扩至20路，按配置挂接 |
+| 按键 | SweetPmicKeys consumer → C后端读取电平 → SweetHIDButtons → backboardd |
+| 触摸 | TLMM GPIO122 / INTID240 → BSD worker → GPIO模拟I²C读取Synaptics TouchComm → SweetHIDTouch；显示owner通过SweetTouchPanel协调暂停/恢复 |
+| USB日志 | INTID165 → DWC3事件worker → EP0/CDC-ACM；发送线程由日志新增、配置或TX完成唤醒 |
+| 显示 | INTID115 → SweetMDSS IRQ下半部，RD_PTR通知vsync，相关完成状态用于排空/新帧确认；apps RPMh另有自身完成IRQ |
+
+按键/触摸/USB运行故障显式停止，没有静默轮询回退。板级 `sleh_irq` 分派、直接GIC寄存器管理仍存在，尚无通用 `IOInterruptController` provider。USB是板级gadget，触摸没有通用I²C/GPIO provider；IOService封装不代表完整通用总线实现。
+
+## 电池、日志与电源
+
+`SweetBattery : IOPMPowerSource` 在自己的workloop内处理事件/遥测，通过标准属性和 `updateStatus` 通知powerd。`SweetPmicAdc5`拥有转换状态机和mux EOC事件。runtime3已接管基础充电启停、限值与温度表策略，并保留有界定时采样/维护；不是只读电量采样，也不是全部遥测均由IRQ触发。
+
+0120a17已验证71→100%、CC→CV→硬件截止；0120a18证明0169温度路由APID285归属和挂接。实际温度IRQ未观察到，温区、服务停止、完整UI及组合覆盖仍不完整。回充与关机尾日志按2026-11-08用户决定暂缓，不再安排重复60分钟测试。见[电池实现计划](BATTERY-IMPLEMENTATION-PLAN.md)和[充电证据](BATTERY-BASIC-CHARGE.md)。
+
+日志同时走内存console/USB和UFS持久环。部分Sweet驱动已有ERROR/WARN/INFO/DEBUG与 `sweetloglevel`，尚未统一全部内核/用户态或按目标独立过滤。a39 USB无NUL不关闭BUG-006发布竞态。PSCI关机/重启可用，整机CPU suspend及完整低功耗仍属第四大目标。
+
+## 历史架构与阶段记录
+
+<details>
+<summary>展开2026-11-05至11-14的原始架构和执行记录；其中“当前/下一步”仅指当时</summary>
 
 **当前执行点以[NOTES顶部](../NOTES.md)为准。2026-11-14接手已发现a30实机OFF完成后的consumer验收失败，
 详见[a30日志与mode2合同分析](PANEL-D1-0121A30.md)。下方各版执行点是历史；本页用于查架构，不据此重复旧测试。**
@@ -845,3 +918,5 @@ IRQ 已验证的事实。详细实施和验收仍由 `IRQ-FRAMEBUFFER-PLAN.md`
 
 相关历史、实机日志 SHA256 和后续目标见 `NOTES.md` 与
 `IRQ-FRAMEBUFFER-PLAN.md`。本次仅做架构核对和文档记录，没有改变内核代码。
+
+</details>

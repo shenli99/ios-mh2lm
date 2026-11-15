@@ -1,170 +1,73 @@
-# MH2LM 编译、打包与刷写指南
+# MH2LM 编译、打包与取日志指南
 
-适用：LG G8X（mh2lm）iOS 16 移植，2026-11-08 起的流程。目标是让接手的 agent 不必再从
-历史脚本里反推。路径默认在 WSL `/home/shenli/work1`（下称 `W`）。
+更新：2026-11-15。适用LG G8X（mh2lm）iOS 16移植；工作区为 `/home/shenli/work1`。当前状态见[STATUS](STATUS.md)，最新实机基线为[a39/0229](PANEL-D1-0121A39.md)，已完成本轮验收，无需重编或重测同版。以下命令用于实际有新实现时的交付。
 
-## 0. 总览
+## 0. 总览与分工
 
-```
-ios-mh2lm 仓库(xnu/patches/*.patch)
-   └─用户 push → CircleCI(macOS, Xcode 15.4) 编 XNU
-        └─用户下载两个产物到 W/logs/
-             xnu-kernel-<LABEL>.gz     （kernel.development.mh2lm + SHA256SUMS）
-             xnu-buildtree-<LABEL>.gz  （补丁后的完整源码树 + 编译参数，供本地核对/交叉编译）
-                └─tools/mk-mh2lm-event-matrix.sh  → W/out-bs/boot-16k-<LABEL>-<profile>.img（测试，fastboot boot）
-                └─out-bs/mk-boot-persist*.sh       → W/out-bs/boot-persistN.img（刷 boot_a/boot_b）
+用户负责push、下载CI产物、sudo及所有fastboot操作；agent负责补丁、本地验证、源码/产物核对、打包回读、记录和本地提交。调试使用 `fastboot boot`；持久刷写按第5节单独处理。独立问题记入[BUGS](BUGS.md)，不自动成为当前计划的前置测试。
 
-boot.img（Android header v1, page 2048）
-   kernel 段 = gzip(BootShim 112B + Mu-Silicium FD 3 MiB) + LG DTB     → out-bs/kernel-32m*.blob
-   ramdisk 段 = 32 MiB FAT16 卷（卷标 MH2LMSP）：
-       EFI/UniXNU/unixnu.toml              启动菜单/参数
-       EFI/UniXNU/Payloads/kernel.macho    XNU 内核
-       EFI/UniXNU/Payloads/kernel.macho.adt  ADT（out-bs/adt-16k-3g.adt，3 GiB 窗口）
-       EFI/UniXNU/Payloads/MassStorage.efi （持久镜像才有）
+```text
+ios-mh2lm/xnu/patches → 用户push → CircleCI构建MH2LM
+  → 用户下载kernel/buildtree/构建日志 → agent核对与打包回读
+  → 用户临时启动并取日志 → 实机审计 → 更新状态/计划/交接
+
+boot.img: Android header v1 / page2048
+  kernel段: gzip(BootShim 112B + Mu FD 3 MiB) + LG DTB
+  ramdisk段: 32 MiB FAT16
+    EFI/UniXNU/unixnu.toml
+    EFI/UniXNU/Payloads/kernel.macho
+    EFI/UniXNU/Payloads/kernel.macho.adt
+    EFI/UniXNU/Payloads/MassStorage.efi（持久镜像）
 ```
 
-分工：**用户**负责 push、下载 CI 产物、所有 fastboot 操作和 sudo；**agent** 负责补丁、本地验证、
-核对产物、打包、写记录。调试期只 `fastboot boot`；刷分区前说明风险并得到确认。
+## 1. 写补丁与本地验证（agent）
 
-已实现功能在后续使用中暴露的独立问题统一记入 [Bug 台账](BUGS.md)，
-不自动作为当前主计划的新步骤或前置测试。
-
-**最新实测：[0121a34/0224](PANEL-D1-0121A34.md)三轮普通OFF/ON通过，新HS→ULPS顺序及generation1→2→3→4、命令/触摸/像素完成确认。** 前两轮各有完整60秒硬件统计、dropped0，第三轮无完整60秒窗口。a34为当前成功基线，a33/a31保留；下一批D07/D08亮度与D09色彩，不重编/重测同版。日志/证据和边界见a34记录。
-
-以下为a33及更早历史记录。
-
-**最新实测：[0121a33/0223](PANEL-D1-0121A33.md)两次普通OFF/ON通过，generation1→2→3，用户确认亮屏成功。**
-持久日志确认启动command buffer ready，之后无再次分配；两次各17条ON命令/4条物理DMA完成，触摸、vsync及后续CPU呈现运行。
-USB已保存441450bytes/5164行并到SYSTEM_OFF；此前命令重定向stdout/stderr，终端安静是预期。另开`tail -n 40 -F /home/shenli/work1/logs/live-0121a33-abi608-panel-pipeline.txt`即可查看，不需重启采集。
-产物79源码/132项source/243项kernel markers和ABI608回读已通过，ADT/参数/固件与a32相同。保留a33/mode7成功基线及a31/mode2，无需重编/重打或重复a32。
-a32分配入口停滞在本轮未复现；0223是多项修正，旧allocator死锁和单项因果未证实。完整PD4及[全流程差异](PANEL-LINEAGE-FULL-FLOW-AUDIT.md)仍未完成；USB单行NUL/console ring发布竞态单列BUG-006。
-
-[0121a31实测与产物](PANEL-D1-0121A31.md)：包含0221，ABI608四档镜像打包与回读通过，retained普通息屏唤醒已实测通过。
-78份受检源码匹配0221验证树、118项CI source markers和223项内核markers通过；全部ADT/启动参数与a30相同。
-a30实机曾在OFF完成后被framebuffer consumer拒绝并取消，详见[a30实测分析](PANEL-D1-0121A30.md)。
-`panel-retained`是历史文件名，mode2会执行[0220 Lineage息屏/唤醒流程](PANEL-LINEAGE-SUSPEND-RESUME.md)，
-撤销本panel票并恢复ULPS链路；菜单标题已更正。
-**0221已修复consumer模式映射（`5cf36dd`），用户确认a31息屏后点亮、触摸/按键/亮度调节正常。**
-日志确认OFF不再cancel，ON的ULPS/host reset/长包DMA/owned flush/触摸及FB恢复验收完成，唤醒后一整分钟59.942Hz/dropped0。
-沿用原ABI608、ADT和605字节retained参数，保留a31基线；本轮修复收口，无需重编/重打或重复首次验证。
-matrix现在要求`SWEET FB PANEL: Lineage mode2 supply/link/data completion enabled`，旧a30不能再用于新打包。
-详见[0221实现与验证](PANEL-LINEAGE-SUSPEND-RESUME.md)。本次为一个普通OFF/ON周期，完整管线重建/核心低功耗仍属后续；
-未取得独立CI run ID或完整构建日志。
-
-## 1. 写补丁（agent）
-
-1. 基线：从最新 `logs/xnu-buildtree-<最新LABEL>.gz` 解出相关文件当 `base/`，复制一份为 `edited/`，
-   工作目录放 `W/scratch/<主题>/`（不入 git）。
-   ```sh
-   tar -xzf W/logs/xnu-buildtree-0120a18.gz -C base --wildcards 'xnu/iokit/Kernel/arm/SweetBattery.cpp' ...
-   ```
-   只改 `edited/`，用脚本做修改（`edit-*.py`，每处 `assert count==1`），方便重放。
-2. 生成补丁并校验：参照 `scratch/battery-0169/generate-verify.py`——`git diff` 生成
-   `ios-mh2lm/xnu/patches/NNNN-mh2lm-<主题>.patch`，再对 `base/` 做 `git apply --check` + apply，
-   结果与 `edited/` 逐字节相同，写入 `verify/`。编号顺延（当前最大 0223）。
-3. 本地交叉编译（不需要 macOS）：参照 `scratch/battery-0169/compile.py`。它用 0114a13 CI 树里记录的
-   编译参数（`scratch/irq-final-0114a13/ci`、`scratch/mux-service-0115/native-0116-command.txt`）和
-   Debian `clang-19` 编译 7 个电池/mux/SPMI 文件。`--verify` 编 `verify/`。比较告警：新增类别要解释。
-   其他文件按同样方式把路径加进列表。
-4. host 测试：`for t in ios-mh2lm/tools/tests/test-*.py; do python3 $t <源码树>; done`，
-   源码树是 `edited/` 或 `verify/`（含 `bsd/`、`iokit/`）。全部 PASS 才提交。改了结构体/路由表要同步改测试里的
-   mock（`tools/tests/sweet_mux_test_support.py` 等）。
-   **0121a1 教训：** 验证不得额外加 `-I <整个XNU或edited根目录>` 来让私有头文件可见。
-   这会掩盖 CI 中不存在的搜索路径。保证源码同目录头文件齐全，沿用真实的 component 搜索路径；
-   对未导出的 BSD 私有头，BSD 用同目录双引号，IOKit 用项目已有的源码相对路径。
-   若为移植本地工具链添加兼容参数，须说明哪些是兼容调整，不将其误称等价 CI。
-5. CI 门：在 `.github/workflows/circleci.yml` 的 Build 步骤加 `require_marker <文件> '<补丁独有字符串>'`，
-   防止补丁被静默拒绝。**字符串里不能有 `<<`**（CircleCI 模板会解析，曾导致配置损坏）。本地可用
-   `python3 -c "import yaml;yaml.safe_load(open(...))"` 和对 `verify/` 逐条检查 marker。
-6. 打包脚本：新功能需要新启动参数时，在 `tools/mk-mh2lm-event-matrix.sh` 加 profile，并在其中
-   `grep -Fqa` 检查内核里有新日志字符串（旧内核拒绝打包）。`bash -n` 检查语法。
-7. 提交到 ios-mh2lm（不 push），更新 `NOTES.md` 交接段。告诉用户需要 push。
+1. 从最新已核对的buildtree提取相关源码为 `scratch/<主题>/base`，修改副本 `edited`。当前基线是0121a39/0229；补丁编号从仓库实际最大编号顺延，不预留空版本。
+2. 生成 `xnu/patches/NNNN-mh2lm-<主题>.patch`，对基线严格apply，比较结果与edited逐字节一致；涉及累积依赖时重放整段。保留生成/验证脚本与摘要，避免用模糊上下文掩盖未应用的补丁。
+3. 用真实CI编译参数做相关文件ARM64单编译，比较告警并解释新增类别。示例见工作区 `scratch/framebuffer-0229/`；本地兼容参数须记录，不能额外加入整个XNU根include来掩盖CI缺失头文件。
+4. 根据改动运行相关 `tools/tests/` 状态机与故障验证；各脚本入口参数不同，按对应测试说明调用。变更共享接口时覆盖依赖consumer；通过后不无故重复整套测试。
+5. 在 `.github/workflows/circleci.yml` 增加必要的 `require_marker`；字符串不能含未处理的 `<<`，CircleCI会将其解释为模板。检查YAML、模板及生成shell，核对实际源码标记。marker不能替代源码比对。
+6. 新打包能力在 `tools/mk-mh2lm-event-matrix.sh` 增加必要的内核标记/profile，验证旧内核会被拒绝、参数符合ABI限制，再做shell语法检查。
+7. 更新STATUS/计划/NOTES，提交到ios-mh2lm。只有确实需要新内核时才交由用户push；文档整理不要求云编译。
 
 ## 2. 云端编译（用户）
 
-- CI 是 CircleCI，配置文件放在 `ios-mh2lm/.github/workflows/circleci.yml`（项目设置指向此路径）。
-  push 后触发；也可手动带参数 `machine_config=MH2LM kernel_config=DEVELOPMENT`。
-- 构建流程：取 blacktop/darwin-xnu-build@6639065，把 `xnu/patches/*` 拷进去，`build.sh` 打补丁并编译，
-  然后检查 require_marker。**dxb 把打不上的补丁当警告**，所以 marker 是唯一的“补丁生效”保证。
-- 产物：`xnu-kernel`（kernel-out.tgz）、`xnu-buildtree`（buildtree.tgz）、`xnu-build-log`。用户另存为
-  `W/logs/xnu-kernel-<LABEL>.gz`、`W/logs/xnu-buildtree-<LABEL>.gz`。LABEL 惯例 `0120aNN` 递增。
-- agent 不能直接看 CI；先去 `W/logs/` 找产物，没有再问用户。
-
-## 3. 核对 CI 产物（agent）
-
-参照 `scratch/artifact-0120a18/verify-artifacts.py`（复制后改 LABEL 和期望源码目录）：
-1. 从 buildtree 取出补丁涉及的源码，与本地 `verify/` 逐字节比较。
-2. 对 buildtree 源码逐条执行 circleci.yml 里的 `require_marker`。
-3. 解 kernel 包，`kernel.development.mh2lm` 的 SHA256 必须出现在 `SHA256SUMS`；`grep` 新补丁的日志字符串。
-4. 结果写 `scratch/artifact-<LABEL>/verification.json`。没有构建日志时注明“未查全量警告”。
-**防旧产物**：新内核 SHA 必须与上一 LABEL 不同，且含新补丁字符串（曾因下载到旧产物白查一轮）。
-
-## 4. 打测试镜像（agent）
+活跃CI是CircleCI，项目设置指向 `.github/workflows/circleci.yml`；参数 `machine_config=MH2LM kernel_config=DEVELOPMENT`，macOS/Xcode构建环境与固定dxb版本以该配置为准。GitHub Actions旧 `xnu.yml` 和guacamole/sweet指令不是当前流程。
 
 ```sh
-cd W/ref/ios-mh2lm
-tools/mk-mh2lm-event-matrix.sh W/logs/xnu-kernel-<LABEL>.gz <LABEL> --battery-basic-charge
+git -C /home/shenli/work1/ref/ios-mh2lm push origin main
 ```
-- 输入：内核包、`out-bs/kernel-32m.blob`（DEBUG UEFI）、`out-bs/adt-16k-3g.adt`、`out-bs/ramdisk-clean`。
-- 输出：`out-bs/boot-16k-<LABEL>-<profile>.img`（+ 同名 kernel/ramdisk/toml），一次生成同一内核的多档。
-- 回读：参照 `scratch/artifact-0120a18/verify-boots.py`，检查 header、kernel 段、ramdisk 内
-  kernel/ADT/TOML 逐字节一致、参数无重复且符合预期。
-- 常用 profile：`--battery-basic-charge`（runtime3 充电，0169 内核额外出 `-tempirq`）、`--irq-only`
-  （三键/触摸/USB 基线）。`--framebuffer-contract` 需要0173，输出 baseline/owned 两档，
-  只差 `sweetfbcontract=0/1`；测试与限制见[自有快照实验](FRAMEBUFFER-OWNED-CONTRACT.md)。
-  `--framebuffer-proof` 需要0174，仅输出 `fb-contract-proof`（contract=1、proof=1），
-  用于关联同一 swap 的自有像素、组帧和扫描内存回读，见[同ID取证](FRAMEBUFFER-SAME-SWAP-PROOF.md)。
-  完整列表看脚本 usage。
 
-用户测试：`fastboot boot W/out-bs/boot-16k-<LABEL>-<profile>.img`，测完导出日志（第 6 节）。
+下载 `xnu-kernel`、`xnu-buildtree`，保存为 `logs/xnu-kernel-<LABEL>.gz`、`logs/xnu-buildtree-<LABEL>.gz`，并尽可能保存构建日志和CI run ID。LABEL按已有实验编号递增，当前最新0121a39。agent先检查本地已有产物；缺少CI元数据时明确记录，不能把文件名视为构建来源证明。
 
-### 4.1 0201完整固件与面板生命周期四档
+## 3. 核对CI产物（agent）
 
-**0121a17当前执行点：** 已核对0204 ACV metadata诊断：78源码字节一致、114 source/154
-binary markers及ABI608镜像回读通过。只启动`boot-16k-0121a17-abi608-panel-retained.img`，
-停留约一分钟导日志，目标取ACV具体gate/字段；这不是ACV修复版，仍可能显示静帧。
-无需息屏/插拔/长测；identity不重测，combined/supply继续暂停。
-见[0121a17镜像与步骤](PANEL-D1-0121A17.md)。以下旧执行点按历史保留，以本段及NOTES为准。
+1. 读取gzip/tar至结尾，检查CRC/完整性，记录输入大小和SHA256。
+2. 将buildtree源码与预期补丁结果比较，执行当前源码标记检查；记录受检范围。
+3. 核对 `kernel.development.mh2lm` 的SHA与包内清单，检查新增内核标记，防止重下旧版本。a39首次包实际等同a38，已由重新下载解决，详见[a39记录](PANEL-D1-0121A39.md)。
+4. 保存 `scratch/artifact-<LABEL>/verification.json` 等证据。没有完整build log/CI ID就标明未查全量告警/云端提交元数据；不以标记数量推断全部构建正确。
 
-0121a14已下载并核对0201补丁、SHA及实际产物，本轮ABI修正只涉及loader和本地打包，
-可复用该内核，无需push/云编译。未来内核仍需核对相应marker，不能拿不含0201的旧kernel只改参数。
-完整Mu FD已在本地构建，包含ABL→Mu HOB→DarwinBoot→ADT身份传递adapter。
-原`out-bs/kernel-32m.blob`未改；完整FD构建成功尚不代表手机启动成功。
+## 4. 当前ABI608面板镜像（agent）
 
-在仓库根目录执行（将`LABEL`替换为用户实际下载编号）：
+以下为新产物命令模板；将两处 `<LABEL>` 替换为同一实际编号。命令只打包，不执行设备操作。
 
 ```sh
+cd /home/shenli/work1/ref/ios-mh2lm
 SWEET_PANEL_UEFI_MANIFEST=/home/shenli/work1/out-bs/panel-uefi-0121a14-bootargs608/panel-uefi.json \
-  tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-LABEL.gz LABEL --panel-lifecycle
+  tools/mk-mh2lm-event-matrix.sh /home/shenli/work1/logs/xnu-kernel-<LABEL>.gz <LABEL>-abi608 --panel-pipeline
 ```
 
-脚本核验manifest ABI/full-FD与blob SHA，检查新内核marker；四档共用内核/新固件。
-manifest必须声明`xnu8796-arm64-608`，旧1024-byte loader布局不兼容。所有参数需ASCII且
-不超过607字节；面板矩阵省略经源码核对的默认值，保留非默认硬件模式，不静默截断。
-当前identity477字节、后三档605字节。原0201-final manifest及原失败镜像仅保留取证，
-勿继续上机；[ABI错误与修正](BOOTARGS-ABI-0121A14.md)记录了原因和测试边界。
-identity独立ADT仅增加resource/RPMh与96-byte全零身份slot，不声明NoC/Pins/Touch，使用
-resource1/clock0/pins0/touch0。后三档共用包含NoC/Pins/Touch的完整ADT，使用resource2/clock1。
-NoC声明与resource1/clock0不兼容，会导致SweetMDSS启动失败；不要混用两种ADT。
-不接受静态指定panel。保留USB ACM、按键与电池：
+输出 `out-bs/boot-16k-<LABEL>-abi608-panel-pipeline.img`（mode7）及 `panel-identity.img`。identity为配套metadata档，并非每轮都要求重测；本批主线mode7。脚本核对manifest/full-FD/blob SHA和内核标记，并生成对应ADT与参数。
 
-| 镜像（位于`W/out-bs/`） | 测什么 |
-|---|---|
-| `boot-16k-LABEL-panel-identity.img` | lifecycle0、metadata-only；先确认新固件可启动、live source/profile有效且唯一。panel写入/接管开关为0 |
-| `boot-16k-LABEL-panel-retained.img` | lifecycle2，供电票保留；完整表、reset、亮度与实际触摸恢复（E7） |
-| `boot-16k-LABEL-panel-combined.img` | lifecycle5，DATA/clock停驻及host/PHY/PLL关闭重建 |
-| `boot-16k-LABEL-panel-supply.img` | lifecycle6，reset低保持、VPNL/VDDI撤本票及恢复、FB联合完成证据 |
+manifest必须声明 `xnu8796-arm64-608`，命令行ASCII且≤607字节；a39 pipeline为605字节，identity为477字节。旧1024-byte loader不兼容，见[ABI说明](BOOTARGS-ABI-0121A14.md)。不能把identity的resource1/clock0与完整NoC/pins/touch ADT混用，也不能静态伪造实机panel身份。
 
-由用户按上述顺序`fastboot boot`，每档先导出日志并核对再进入后档。任一失败停止后档。
-后三档手动息屏/唤醒并确认画面、亮度、按键、触摸；不要求自动息屏或半小时等待，
-不重测旧USB/BUG002/F3矩阵。供电档保留共享L3/L5、ARC/config floor；RPMh ACK和本票撤销
-不证明实际rail-off。完整模式参数由脚本生成，勿手动拼接缺依赖的档位。
+打包后回读boot header、kernel段与FAT中的kernel/ADT/TOML，逐字节比对、检查参数重复和长度，并记录SHA。保留已验证镜像；新固件需要时才用 `tools/build-mh2lm-panel-uefi.py --output <新隔离目录>` 构建并核对。
 
-需要重建固件时，用`tools/build-mh2lm-panel-uefi.py --output <新隔离目录>`；manifest记录
-实际Mu/DarwinBoot HEAD、命令和SHA。不要将设备DTB、FD/blob或Apple产物加入git。
-详见[供电生命周期、架构及剩余边界](PANEL-SUPPLY-LIFECYCLE-D1.md)。
+历史/专项入口：`--panel-lifecycle` 生成identity/retained/combined/supply，mode2 retained的当前实现已包含供电票与链路周期，不能按旧文件名解释为永远保留供电。`--irq-only`、`--battery-basic-charge`、`--framebuffer-*` 等用途和依赖见脚本usage及对应版本记录。不按旧a14/a17说明重复逐档测试。
 
 ## 5. 持久镜像（刷 boot_a/boot_b）
+
+以下保留persist4构建方式；它不是a39已持久更新的证明，也不安排本次刷写。源码提交和旧blob日期描述该历史基线，未来更新须重新核对实际源码/固件/ABI及回读结果。
 
 规则：默认菜单项必须是 **Mass Storage**——Android 一旦启动会清空 userdata 上的 iOS 根卷，
 任何复位都要停在 UEFI 里。
@@ -172,13 +75,13 @@ NoC声明与resource1/clock0不兼容，会导致SweetMDSS启动失败；不要�
 ### 5.1 Mu-Silicium UEFI
 
 ```sh
-bash W/scripts/build-mh2-uefi.sh DEBUG     # 或 RELEASE
-# 产物：W/ref/Mu-Silicium/Build/mh2Pkg/<TYPE>_CLANGPDB/FV/SILICIUM_UEFI.fd 与 AARCH64/MassStorage.efi
+bash /home/shenli/work1/scripts/build-mh2-uefi.sh DEBUG     # 或 RELEASE
+# 产物：/home/shenli/work1/ref/Mu-Silicium/Build/mh2Pkg/<TYPE>_CLANGPDB/FV/SILICIUM_UEFI.fd 与 AARCH64/MassStorage.efi
 ```
 - 源码：`ref/Mu-Silicium`（cca95b7，含 UniXNU 启动链补丁）+ `ref/UniXNU-src`（DarwinBoot 4ad0c42，32 MiB 放置）。
 - **FD_BASE 必须是 0xA0000000**（`Resources/Configs/mh2.toml`）。脚本默认值 2026-11-08 已改正，旧的
   0x9FC00000 会做出起不来的 FD。改完可用 `grep PcdFdBaseAddress Build/.../AutoGen.h` 确认。
-- 当前 `out-bs/kernel-32m.blob` 里是 10-31 编的 DEBUG FD，旧测试档使用它；4.1的面板生命周期档使用独立的新固件manifest。**不要覆盖 DEBUG 构建目录**
+- 当前 `out-bs/kernel-32m.blob` 里是 10-31 编的 DEBUG FD，旧测试档使用它；第4节的ABI608面板档使用独立的新固件manifest。**不要覆盖 DEBUG 构建目录**
   （重编前先备份 `Build/mh2Pkg/DEBUG_CLANGPDB`）。同源重编的 FD 只因编译时间戳不同而不逐字节相同。
 - `make-bootimg.sh`/`build-mh2lm-uefi.sh` 是 Aloha 旧线（SurfaceDuo1Pkg），已不用。
 
@@ -197,40 +100,50 @@ profile 的 `unixnu-16k-<LABEL>-<profile>.toml` 的 `args`）、标题、UEFI �
 ### 5.4 刷写（用户执行，刷前确认）
 
 ```sh
-fastboot boot  W/out-bs/boot-persistN.img      # 先试：菜单、默认进 U 盘、能进 iOS
-fastboot flash boot_a W/out-bs/boot-persistN.img
-fastboot flash boot_b W/out-bs/boot-persistN.img
+fastboot boot  /home/shenli/work1/out-bs/boot-persistN.img      # 先试：菜单、默认进 U 盘、能进 iOS
+fastboot flash boot_a /home/shenli/work1/out-bs/boot-persistN.img
+fastboot flash boot_b /home/shenli/work1/out-bs/boot-persistN.img
 fastboot reboot
 ```
 boot 分区 96 MiB（0x6000000）。失败时 fastboot 仍可用，刷回上一版 persist 镜像。
 历史：persist2（0107，DEBUG）、persist3（0111，DEBUG）、persist4（0120a18 充电，RELEASE UEFI，2026-11-08）。
 
-## 6. 取日志
+## 6. 取日志与实机验收
 
-内核把控制台写进 userdata 最后 4 MiB 环形区（每 10 s 刷一次，`ufslogsecs=` 可调）。
-- 首选：手机进 UEFI Mass Storage，Windows 管理员 PowerShell 运行
-  `\\wsl.localhost\Debian\home\shenli\work1\scratch\p4-flash\pull-log.ps1 -Name <名字>`，得到
-  `W/logs/sweetlog-<名字>.bin`（只读访问磁盘）。usbipd 转 WSL 会在第一条 SCSI 命令超时，不要用。
-- 解码：`python3 ios-mh2lm/tools/sweet-log.py W/logs/sweetlog-<名字>.bin out.txt`，或照
-  `scratch/artifact-0120a18` 里的方式按头部（magic/version/size/total/seq）自行展开环形区。
-- 实时：带 `sweetusb=2` 的镜像有 USB CDC-ACM 日志（`tools/sweet-usbacm-log.sh`）。
-- 命名惯例：`sweetlog-<LABEL>-<profile>.bin`。关机/重启前最后 10 s 的日志可能丢失。
+下列命令将 `<LABEL>` 替换为实际测试编号；复测使用新后缀保存，避免把多次启动混在同一日志。先在Bash开启采集，由用户执行sudo：
 
-## 7. 常见坑
+```bash
+sudo /home/shenli/work1/ref/ios-mh2lm/tools/sweet-usbacm-log.sh /home/shenli/work1/logs/live-<LABEL>-abi608-panel-pipeline.txt > /dev/null 2> >(tee /home/shenli/work1/logs/live-<LABEL>-abi608-panel-pipeline-host.txt >&2)
+```
 
-| 现象 | 原因 / 处理 |
+另一个终端由用户临时启动新镜像：
+
+```sh
+fastboot boot /home/shenli/work1/out-bs/boot-16k-<LABEL>-abi608-panel-pipeline.img
+```
+
+采集器会跨断开/重连等待唯一的ACM节点。看到 `Reading live MH2LM console` 且live文件增长才算开始采集；Waiting不算。多ACM时按实际节点设置 `SWEET_ACM_DEVICE`。观察输出可用 `tail -n 40 -F` 对应live文件。
+
+持久日志从UEFI Mass Storage读取：Windows管理员PowerShell运行工作区 `scratch/p4-flash/pull-log.ps1 -Name <名字>`，得到 `logs/sweetlog-<名字>.bin`。此流程只读磁盘；USB转WSL曾在SCSI读取时超时，沿用已验证的PowerShell方式。解码：
+
+```sh
+python3 /home/shenli/work1/ref/ios-mh2lm/tools/sweet-log.py /home/shenli/work1/logs/sweetlog-<名字>.bin /home/shenli/work1/logs/sweetlog-<名字>.txt
+```
+
+持久区包含4 KiB头部及4 MiB环，默认约10秒刷盘；尾部缺关机日志不能直接判定回调没执行。USB与持久日志分别记录覆盖范围、SHA、NUL/回卷/截断情况，不能由一路成功推断另一路或BUG-006已修复。
+
+新显示批次按实际改动制定验收；普通回归检查首次桌面/触摸/按键/调光，两轮息屏约5秒再唤醒，每轮正常后亮屏至少60秒，并审计资源、命令、新帧、亮度、触摸完成顺序。a39这一轮已通过，不因文档更新安排重测。60Hz硬件IRQ统计不代表60fps UI、长期耐久或完整掉电重建。
+
+## 7. 常见问题
+
+| 现象 | 核对 |
 |---|---|
-| CI 绿了但功能没变 | 补丁被 dxb 拒绝；加 require_marker，核对 buildtree 源码 |
-| CircleCI 配置报错 | require_marker 字符串含 `<<` |
-| Installing KDK 后 `hdiutil: attach failed - image not recognized` | KDK下载文件无法识别，尚未进入XNU编译；100%不代表文件有效。先重跑现有job重新下载，重复失败时保留文件，核对实际URL、HTTP状态/重定向、大小、file类型及hdiutil校验。可能是错误页面或损坏/截断，未核实前不定因、不改内核或CI配置 |
-| 新镜像行为和上次一样 | 下载了旧产物；比 SHA 和新字符串 |
-| UEFI 不启动 | FD_BASE 错（要 0xA0000000）或 FD 尺寸不是 0x300000 |
-| iOS 内核静默挂起 | ADT 缺 `/chosen/darwinboot-memory-size`（要 3 GiB），用 `adt-16k-3g.adt` |
-| 手机进了 Android | userdata 上的 iOS 根卷会被清；持久镜像默认项必须是 Mass Storage |
-| 新根卷首启 SpringBoard 不出图 | lsd 重建数据库 10+ 分钟，等 30 分钟再判断 |
-| 本地交叉编译找不到头文件 | 用 buildtree 里的 `sdk-kernel-platform`，路径替换见 compile.py |
+| CI成功但功能没变化 | dxb可能只警告补丁失败；核对完整源码、新标记及SHA，不只看包名 |
+| CircleCI模板解析失败 | 检查marker中的 `<<` 及模板展开后的shell |
+| KDK下载完成但hdiutil无法识别 | 尚未进入内核编译；保存失败日志，检查实际URL/内容/完整性，不能由下载100%断定包有效 |
+| UEFI不启动 | FD_BASE须与已验证布局一致（0xA0000000），FD精确0x300000；核对ABI608及manifest |
+| 内核早期挂起 | 核对ADT 3 GiB窗口、loader ABI、实际kernel/ADT和参数来源 |
+| USB文件为空 | 查host是否Reading、手机是否配置ACM/打开端口；不能凭Waiting判定内核没日志 |
+| 本地找不到头文件 | 沿真实CI component include路径及buildtree SDK排查，不能加整个源码根来绕过 |
 
-2026-11-09用户贴出的失败片段为KDK 13.5 / 22G74下载100%后挂载不可识别，尚无完整失败
-日志文件或CI run ID。旧`W/logs/xnu-build-log-0121a1.txt`第5–34行同版KDK下载、挂载校验、
-安装均成功，故不是该版本从未可用。近期显示/日志诊断提交未改circleci.yml；失败下载文件
-未取得，不能区分下载错误内容与传输损坏。本地无法联网复查源端，不能声称已验证下载URL。
+2026-11-09的KDK 13.5/22G74失败片段未附完整文件或CI ID；旧0121a1日志曾成功安装同版，根因未定。该历史问题不表示a39构建失败。

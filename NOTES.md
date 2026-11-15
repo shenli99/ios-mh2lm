@@ -1,4 +1,19 @@
-# iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
+# iOS 16 on LG G8X (mh2lm / SM8150) — working notes
+
+## Agent handoff / active work (2026-11-15, documentation synchronized after a39 acceptance)
+
+**CURRENT：接续codex-session-25.md最后的文档更新请求，统一入口、构建/架构与计划到a39/0229已验收状态。** 中英文README改为MH2LM，新增[STATUS](docs/STATUS.md)和[文档索引](docs/README.md)；修正文档中的旧M3阻塞、guacamole/sweet构建命令、软件vsync/ABL扫描现状及0169重复待测要求。三份显示计划正文先列当前阶段，原版本流水折叠保留；旧架构/启动记录也明确标为历史。工作区README/AI-GUIDE/STATUS/PLAN/索引/环境/相关旧布局条目同步。
+
+最新实机基线仍为a39 mode7/PV：实现b9b3305、镜像交付67da2bc、实机记录7dedbc5。两轮普通OFF/ON、15个DSI/MDP外层事件、每轮24组命令完成链及至少一个完整60秒IRQ窗口已验收。USB0NUL至SYSTEM_OFF，无本轮持久对照；详见[a39记录](docs/PANEL-D1-0121A39.md)。pipeline镜像SHA256仍为14e9398fc3fbf7744f9fa20eae04f40c785fe838de0675638f37307b656f903f。硬件扫描约60Hz、CPU拷贝约30Hz；普通功能不等于完整共享掉电重建或60fps UI。
+
+**NEXT：继续C08第5项多使用者汇总后的物理转换，再结合第6项提交协调；core/SMMU/RSC/QoS状态丢失后独立重建单列PD4，然后PD1/PD5→F5→F7。** 当前没有待下载的新版本，不要求重编/重测a39。BOOT/managed/core/config底座保留，BUG-006/008/009保持、BUG-007暂缓。电池0120a18温度路由挂接已验但实际IRQ未观察到，回充及关机尾日志按2026-11-08决定暂缓。
+
+本次仅文档整理及核对、本地提交，未改驱动/CI/固件/镜像，未重跑驱动回归、push或操作设备。25份文档的链接/锚点、折叠/代码块结构、7段命令语法及6处历史正文保留检查通过，a39两份镜像SHA与交付一致。校验底稿为工作区 `scratch/docs-sync-20261115/validation.json`，工作区报告 `docs/reports/DOCS-SYNC-2026-11-15.md`。用户负责push、下载、sudo和设备；文档同步不需要新的CI验收。
+
+## Historical handoffs and working notes
+
+<details>
+<summary>历史交接与工程记录（原文保留；旧CURRENT/NEXT只描述当时）</summary>
 
 ## Agent handoff / active work (2026-11-15, a39 two wakes and C08 items 3/4 hardware passed)
 
@@ -9761,3 +9776,5 @@ DWC3 gadget 枚举缺陷单独跟踪。日志末尾 ADC5 token 373 已得到有�
 0120a6 没有记录故障后的 route/APID/status/ack 读回，暂不能判断 ADC、按键或电池
 route；下一轮先补充这些取证并实现按 group 隔离候选，避免共享 mux 的一个 pending
 位停掉无关 consumer。
+
+</details>

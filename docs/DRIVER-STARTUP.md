@@ -1,5 +1,12 @@
 # MH2LM 驱动启动归属与依赖清理
 
+更新：2026-11-15。当前 `sweet_board_init` 在根查找前统一发布/启动mux、ADC5、按键、触摸、USB和显示探针；mux/按键/ADC5归各自服务，UFS只负责存储与分区日志。按键/电池/ADC5各自通过registry通知连接mux。见[当前架构](CURRENT-DRIVER-ARCHITECTURE.md)；本页下方保留0143～0145的改造原因和证据，不要求重测旧baseline/no-keys/usbin。
+
+电池已推进到runtime3真实充电及0169温度路由挂接，显示已在a39验证普通mode7 OFF/ON。真实stop/free及完整IOPM仍未全验收。
+
+<details>
+<summary>历史启动归属改造与测试（2026-11-05）</summary>
+
 **0145 当前改造：** board 的 keys 入口改为发布晚期 nub，匹配 SweetPmicKeys
 IOService；按键与电池各自通过 registry 通知接入 mux，不再使用全局 C 桥接。
 实际按键 arm 在 consumer workloop 异步完成，不要求先于 UFS；board 发布仍在
@@ -157,3 +164,5 @@ no-keys 档应没有 group0 和 key routes，但必须有 group1/USBIN；之后�
 
 CircleCI 的构建命令未改；增加 0143 的 board/consumer 源码门禁与旧依赖反向
 检查，避免 dxb 跳过补丁后仍把旧内核当成功产物。未 push、未触发 CI、未写设备。
+
+</details>

@@ -67,7 +67,9 @@ workspace证据入口：`scratch/framebuffer-0229/final-review.json`。2026-11-1
 
 证据还有 `verification.json`、`regressions.json`、`cumulative-replay.json`、`display-client-clock-reference.json`、`command-clock-reference.json`、`warning-review.json`、`ci-check.json`、`packaging-gate.json` 及测试日志；编译、重放、配置和最终汇总脚本在同目录。
 
-## 交付下一步
+## 交付下一步（历史交付过程，a39已完成验收）
+
+当前无需再次下载或重测；以下保留初次提交、误下旧包和原验收步骤，最终结果见[a39实机记录](PANEL-D1-0121A39.md)。
 
 **a39实机已通过（2026-11-15）：** USB确认15个连贯外层引用事件、generation1→2→3，每轮24组命令held/trigger/DONE/released，分别1个和3个完整60秒IRQ窗口，dropped0；用户感觉无异常。第3/4项本批普通mode7/PV收口，下一步第5项资源汇总后的物理转换及第6项协调，PD4重建分开处理。详见[a39实机记录](PANEL-D1-0121A39.md)，证据 `scratch/artifact-0121a39/wake-log-review.json`。无需为本轮重编或重测同版；以下为历史交付记录。
 

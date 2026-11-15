@@ -17,6 +17,9 @@
 [面板DSI/显示MDP外层引用](PANEL-LINEAGE-DISPLAY-CLIENT-CLOCKS.md)已提交b9b3305：DSI按prepare/post-enable/pre-disable/unprepare持票；MDP扫描前取得、自动刷新持续持有、真正OFF排空后归还。两角色进入原clock ledger，保留BOOT/managed/core/config底座；暂停票不授权命令，额外使用者和故障保留保护不变。下方C08按0229更新，六项拆分与C08/PD4边界见实现文档；历史章节和未修改项源码行号仍按各自基线。
 21组驱动回归、固定Lineage参考链、ARM64及45patch/80文件重放通过。参考实际执行post/pre及SDE资源调度，prepare/unprepare仍是静态核对，未运行完整DRM/CCF。接手时复核证据见scratch/framebuffer-0229/handoff-recheck.json。**待包含0229的新CircleCI产物和a39实机；a38仍为最新实机基线。** C08第5项完整物理转换、第6项提交协调差异和单列PD4状态重建未完成。
 
+<details>
+<summary>a38及更早的增量审计记录（各节最新状态仅指当时）</summary>
+
 ## a38实机更新（2026-11-15，两轮命令引用/普通唤醒通过；后续实现见上节）
 
 [a38持久日志](PANEL-D1-0121A38.md)确认mode7/PV两轮普通OFF/ON，每轮24对held→trigger→DONE→released及17包ON/六包色彩/首帧/HS亮度/第二帧/触摸完整顺序，另8对同步亮度引用成功；每轮两个完整60秒IRQ窗口、dropped0。用户感觉无异常，a38成为最新普通唤醒基线。证据scratch/artifact-0121a38/wake-log-review.json。
@@ -42,6 +45,8 @@ USB未采到内容、原因未确定，持久0NUL且未绕环，但无SYSTEM_OFF
 ## 0224 更新（历史基线）
 
 [HS/ULPS顺序修正与C08审计](PANEL-LINEAGE-CLOCK-ULPS.md)已本地实现/验证，[0121a34三轮OFF/ON](PANEL-D1-0121A34.md)实测通过，generation1→2→3→4，现为最新成功基线。D03收口HS→ULPS先后，D04收口分支顺序；C08明确wake_up为空、时钟票聚合与停扫适配边界，完整资源周期仍未对齐。下面固定对象/底稿中0223指原审计基线；标0224的行使用scratch/framebuffer-0224/verify，其他判定保持。
+
+</details>
 
 ## 固定对象与判定方法
 

@@ -1,5 +1,7 @@
 # guacamole: the sweet port on the OnePlus 7 Pro (SM8150)
 
+> 本页是一加 7 Pro（guacamole）的继承参考，不是 LG G8X 的当前硬件或操作说明。MH2LM 请从[状态](docs/STATUS.md)和[构建指南](docs/BUILD-GUIDE.md)进入。
+
 The same plan as sweet, one board over: **Apple's XNU boots from the stock
 bootloader via `fastboot boot`, reuses ABL's continuous-splash framebuffer,
 runs the unmodified iPhone X iOS 16.7.16 userland, and keeps its HFS+ root
