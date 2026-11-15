@@ -335,6 +335,8 @@ BUG-001/004未关闭。780–783行driverkitd仍sig9/ns1/code7，BUG-005仍存�
 
 ## BUG-006：console ring提前发布长度，实时日志偶发零字节
 
+2026-11-15补充a38：本轮USB live为空、host仅“等待/dev/ttyACM0”，持久日志ACM配置成功但只有host关闭端口，无打开记录。属于本轮未采到USB内容的现象，原因未确定，不与ring提前发布竞态合并归因。持久有效区573401bytes/6649行、0NUL，无双路对照；BUG-006保持。详见[a38实机审计](PANEL-D1-0121A38.md)。用户仅主观“感觉无异常”，也不据此关闭BUG-007/008/009。
+
 2026-11-14，a33显示验证时发现。USB `logs/live-0121a33-abi608-panel-pipeline.txt:4196`含16个NUL，持久解码`scratch/artifact-0121a33/persistent-log.txt:4478`对应整行完整；USB继续记录packet-done、两次ON complete和最终SYSTEM_OFF。a32 pipeline1也有单行16NUL。原文件SHA和逐行对应见[a33实机审计](PANEL-D1-0121A33.md)。
 源码证据：实际a33 `bsd/dev/sweet_ufs.c:712`的`os_atomic_add_orig(&sweet_log_total, size, relaxed)`先预留并公开长度，再在714写ring；729–735的`sweet_log_copy`用该长度读取。并发读者可能在填充完成前读到旧字节/零值。USB读取较及时，持久线程默认10秒后读取，因此两者出现不同内容与此竞态相容，但没有本次调度跟踪，不能唯一归因或排除USB DMA/传输等其他来源。UFS消费者也使用同一total，并非天然不受此风险影响。
 需要独立修复范围：为任意console上下文及多CPU写者区分预留与已提交字节，保证读者只读完整数据，同时保持不阻塞的约束；仅换release/acquire不能修复先发布后填充。关闭需验证并发发布与wrap/丢失策略、USB/持久两个消费者及实机字节一致性。本轮仅登记，不修改驱动、不作为显示主线的新前置。

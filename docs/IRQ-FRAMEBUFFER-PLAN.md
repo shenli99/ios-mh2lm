@@ -1,9 +1,10 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
-## 0121a38 当前进展（2026-11-15，镜像核对通过，待实机）
+## 0121a38 当前进展（2026-11-15，两轮普通唤醒及命令引用已验）
 
-大目标二/PD4继续推进。[a38](PANEL-D1-0121A38.md)下载包完整，80源码匹配0228，现有ABI608两档镜像回读通过；证据scratch/artifact-0121a38/final-review.json。**下一步先USB采集，再用户启动a38/mode7，验证首次接管/调光及两轮OFF/ON各60秒。** a37仍为最新实机基线，a38尚待实测。
-C08外层DSI/MDP引用及core/SMMU/RSC/QoS、其余PD4未完成，之后PD1/PD5→F5→F7；大目标三日志、四整机电源管理顺序保持。BUG-006/008/009保留、BUG-007暂缓。以下为历史。
+[a38实机审计](PANEL-D1-0121A38.md)：持久日志确认mode7/PV两轮完整OFF/ON，generation1→2→3；每轮24对命令clock held→trigger→DONE→released，另有8对同步亮度成功引用。每轮两个完整60秒IRQ窗口（59.854–59.931Hz）、dropped0，用户感觉无异常，a38成为最新普通唤醒基线。证据scratch/artifact-0121a38/wake-log-review.json。
+USB为空、host仅等待ttyACM0；持久ACM配置成功但无port opened，原因未确定，本轮无需重测。持久0NUL但无SYSTEM_OFF尾部，无双路对照；BUG-006/008/009保留，BUG-007暂缓。
+**下一步继续C08外层DSI/MDP引用及其余PD4，再PD1/PD5→F5→F7。** 完整core/SMMU/RSC/QoS、D09动态/首次等保持；此次只审计和记录，不将普通成功路径通过当完整资源管理完成。以下为历史。
 
 ## 0228 当前进展（2026-11-15交接，待a38构建与实机）
 

@@ -1,5 +1,12 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-15, a38 persistent wake/command-clock audit passed)
+
+**CURRENT：a38/mode7/PV两轮普通OFF/ON与0228命令引用已实机验证，用户“感觉无异常”，a38成为最新基线。** 每轮17包LP/4DMA→六包HS色彩/1DMA→generation2/3首帧→HS亮度target1→同generation第二kickoff→触摸/ON完成；HS→ULPS→ESC停止/恢复及完整完成顺序保持。各轮24对held/trigger/DONE/released按DSI token/completed逐包配对，另有8对同步亮度成功引用token4–11。
+持久logs/sweetlog-0121a38-abi608-panel-pipeline.bin为4198400bytes，SHA256 53c807f0fa30555b785fffa52edf64c60cc022644d6e2211d9dd3a32e3a9e77b；v1/total573401/flush48，未绕环，有效6649行、0NUL，无SYSTEM_OFF尾部。两轮各两个完整60001–60011ms IRQ窗口，59.854–59.931Hz，全体dropped0；两轮各60秒要求已有证据，不证明60Hz UI或长期耐久。各轮后有vsync/触摸/正CPU呈现；首次OFF后无显示生命周期WARN/ERROR/panic/deadline。
+USB live为空，host38bytes仅等待/dev/ttyACM0；持久1649–1651行ACM配置成功、host关闭端口，无打开记录。未确定主机节点/连接原因，不归因0228或BUG-006 ring竞态；本轮使用持久完成审计，无需重测。下次实机先确认Reading及文件增长。BUG-006/008/009保持、BUG-007继续暂缓，用户未单独确认这些问题消失。
+**NEXT：保留a38，继续C08外层DSI/MDP引用及其余PD4，再PD1/PD5→F5→F7。** 完整core/SMMU/RSC/QoS、D09动态/首次等仍未实现；失败保留引用/pin仅有既有本地测试，本次未硬件注入故障。证据scratch/artifact-0121a38/wake-log-review.json、audit-wake.py、wake-user-input.json、persistent-header.json；详见[实机记录](docs/PANEL-D1-0121A38.md)。实现072200c、交付090fb83，镜像保持。本轮仅日志/源码分析、文档/本地提交，无驱动/CI/固件修改、驱动测试重跑、push或设备操作。以下为历史。
+
 ## Agent handoff / active work (2026-11-15, a38 ABI608 images verified; awaiting hardware)
 
 **CURRENT：0121a38下载产物和现有两档镜像已复核通过，mode7可交付实机。** 从codex-session-22/23接续“下载好了”；发现已有未收尾的a38核对/打包文件，重新执行产物核对和镜像回读，补成final-review.json及本次交接，没有重复打包。实现072200c/0228，前置交接a93a1e7；a37仍为最新普通唤醒实机基线。
