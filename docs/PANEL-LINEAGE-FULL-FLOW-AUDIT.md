@@ -1,10 +1,15 @@
-# 目标显示驱动全流程审计（更新至0227）
+# 目标显示驱动全流程审计（更新至0228）
 
 2026-11-14。用户要求整体、全面检查。**当前实现仍是局部对齐，不能称为与 Lineage 全流程一致。** 本文统一记录目标选择、首次接管、普通 OFF/ON、亮度与其他命令、持续刷新、资源、跨层完成和异常退出，以及目标面板已有但 XNU 未实现的功能。旧专项文档保留历史，当前范围和结论以本文为入口。
 
 原始0223审计未修改驱动、构建内核或操作设备。随后a33/0223、a34/0224普通OFF/ON通过；最新a35/0225结果见下方更新。旧基线保留，剩余源码差异不因唤醒通过改判为全流程一致。a32黑屏的单项根因尚未确定。
 
-## 0227 更新
+## 0228 更新（2026-11-15交接）
+
+[逐命令DSI时钟引用](PANEL-LINEAGE-COMMAND-CLOCK.md)已实现并提交072200c，mode2/7同步亮度和FIFO/DMA命令在现有账本取得clock引用，再持有engine，真实完成后依次释放；超时/取消/stop或失钟/凭据失效时保留不确定引用/pin。引用加入已运行的分支，BOOT/managed外层继续持票，本批取得/归还不执行物理关钟。
+19组驱动测试、固定Lineage真实host_transfer与clock-manager参考链、ARM64及44patch/80文件重放本地通过；证据scratch/framebuffer-0228/final-review.json。当前无a38产物或0228实机结果，a37仍为最新普通唤醒基线。下一步构建/打包a38并验证新增引用与既有功能；完整DSI post_enable/pre_disable、MDP外层动态引用、core/SMMU/RSC/QoS及PD4继续保留。下方C08/C10按0228更新，其余源码行号保持各节所注明的历史基线。
+
+## 0227 更新（历史）
 
 [C08普通OFF/ON的ESC0低速时钟子项](PANEL-LINEAGE-LP-CLOCK.md)已实现，提交71da5dc，本地16组驱动回归、16个Lineage原函数、ARM64及43patch/80文件重放通过；[a37实机](PANEL-D1-0121A37.md)USB已确认mode7/PV五轮完整ESC0停启及唤醒。HS停/ULPS进入后停ESC0并等CLK_OFF，再PHY关；ON先ESC0运行及XO父源验证，再host/PHY。暂停mask加入ESC，额外使用者拒绝、失败保留资源/pin；普通逐包DSI/MDP引用和共享core collapse仍未实现。SDE FRAME_DONE在autorefresh开启时不安排常规idle-off、connector走MDP client的结论是固定caller静态核对；不能把本批叶子停启当成动态资源全流程完成。a37为最新普通唤醒基线；BUG-007本轮未复现但未证明修复，启动亮度/音量问题已登记BUG-008/009，BUG-006保持。实机证据scratch/artifact-0121a37/wake-log-review.json；本地实现证据scratch/framebuffer-0227/final-review.json。
 
@@ -86,9 +91,9 @@
 | C05 | 缓冲准备/寿命 | **适**。0223 mode2/7 发布服务前 prepare4KiB，跨 OFF/ON 保留；Lineage `L:dsi-staging/dsi_display.c:3000/519` 首 transfer 懒分配4KiB。目的为移出活动 gate 首次分配，不是照搬分配时机；也未证明启动分配可被 deadline 打断。 |
 | C06 | 每包软件内存 | **适**。Lineage `L:dsi-staging/dsi_ctrl.c:986` 每包另有 copy/pad 临时分配，不能说 Lineage 从无逐包 allocation。XNU 栈编码、保留 DMA descriptor；真实完成前不复用/释放。 |
 | C07 | command engine 引用 | **同/限定语义**。OFF 表前释放 display，每 transfer 获取/完成后释放，ON 整表后持有 display；wake reset 恢复旧 control，DDIC reset 时 command bit 关闭。`L:dsi-staging/dsi_display.c:289/333/3000/7791/8031`；`X:SweetMDSSDSI.inc:75`、Lifecycle.inc:544、Host.inc:134。 |
-| C08 | 每包 clock/wake 与停扫 | **差/完整动态资源仍缺；局部/0227 ESC0普通停启已有a37 mode7/PV五轮实机**。host_transfer的ALL_CLKS→wake_up（固定版为空）→engine→transfer→engine/clock release按DSI/MDP引用聚合。post_enable撤长期DSI票、pre_disable重取；SDE autorefresh时不安排常规idle-off。XNU仍依赖BOOT/managed资源及停扫适配，0227仅补HS→ULPS→ESC halt→PHY关及ON先ESC运行→host/PHY；完整外层票、core/SMMU/RSC/QoS仍保留。见[0227实现及边界](PANEL-LINEAGE-LP-CLOCK.md)。 |
+| C08 | 每包 clock/wake 与停扫 | **局部/0228逐命令DSI引用本地通过，待a38实机；完整动态资源仍缺**。Lineage host_transfer的ALL_CLKS→wake_up（固定版为空）→engine→transfer→engine/clock release按DSI/MDP引用聚合。XNU mode2/7已接现有clock ledger，真实完成才归还；BOOT/managed外层继续持有，不每包物理关钟。0227 ESC0普通停启已有a37 mode7/PV五轮实机。post_enable撤长期DSI票、pre_disable重取、MDP外层动态管理及core/SMMU/RSC/QoS仍缺；停扫仍是XNU适配。见[0228实现及边界](PANEL-LINEAGE-COMMAND-CLOCK.md)。 |
 | C09 | 完成、延时与 IRQ | **同+适**。均要求真实完成再做表内 delay；Lineage `dsi_ctrl.c:1304` DMA_DONE IRQ/completion、200ms超时后读状态补漏 IRQ；XNU timer1ms查询，同步亮度最长200ms轮询，fresh DONE+MDP/DMA idle+ACK/error 检查。不是相同通知/调度模型。 |
-| C10 | 失败/取消后的缓冲与引擎 | **适**。XNU uncertain 传输保留引擎引用，DMA另保留独立 pin；poison 后禁止继续或撤资源。Lineage有 FIFO reset、释放引用和部分 OFF 错误继续清理，见 `dsi_ctrl.c:1304`、`dsi_panel.c:4454`。不能通过“超时就当完成”获得表面相同的退出。 |
+| C10 | 失败/取消后的缓冲与引擎 | **适**。XNU uncertain传输保留引擎引用，0228同时保留实际clock引用，DMA另保留独立pin；poison后禁止继续DSI清理或撤资源，合法显示IRQ mask/ACK仍可执行。Lineage有FIFO reset、释放引用和部分OFF错误继续清理，见 `dsi_ctrl.c:1304`、`dsi_panel.c:4454`；真实host_transfer参考链确认其错误出口仍归还clock引用。不能通过“超时就当完成”获得表面相同的退出。 |
 
 | profile | ON bytes/包数 | ON 长 DMA 包数 | 最大 payload | OFF bytes/包数 |
 |---|---:|---:|---:|---:|
@@ -172,7 +177,7 @@ workspace `scratch/framebuffer-0223/full-flow-audit.py` 已运行，输出 `full
 
 ## 后续对齐的明确范围
 
-1. 0224 D03/D04已有a34实机，0225 D07/D08已有a35普通路径证据；0226 D09默认SDR恢复已有a36 mode7/PV四轮实机普通功能证据。0227 C08普通ESC0停启已有a37 mode7/PV五轮实机证据；下一步继续完整逐命令资源/显示引擎动态票及其余PD4。首次亮度状态发布缺口BUG-008单列，音量显示BUG-009独立诊断。D09动态策略仍保留；各批从真实caller和条件建立期望。
+1. 0224 D03/D04、0225 D07/D08、0226 D09默认SDR及0227 C08普通ESC0停启已有a34–a37实机普通功能证据。0228逐命令DSI引用本地通过，下一步构建/打包a38并验证新增引用、调光及两轮OFF/ON各60秒；随后继续外层DSI/MDP资源及其余PD4。首次亮度状态发布缺口BUG-008单列，音量显示BUG-009独立诊断。D09动态策略仍保留；各批从真实caller和条件建立期望。
 2. 首次接管与持续刷新：B01的splash、E04–E06的autorefresh/提交/帧同步，不能靠更改一个寄存器值宣布整段一致。
 3. 完整显示驱动：B04–B08、E07、F05/F06、G组中的缺项继续作为独立实现范围；不能用“普通OFF/ON通过”销项。
 4. 用户指定FIFO/物理DMA、prepared buffer与真实完成/独立pin、SMMU/IRQ/资源归属保护继续保留；跨OS亮度政策等适配要显式记录，不机械复制Linux错误清理。

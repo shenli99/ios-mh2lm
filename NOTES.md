@@ -1,5 +1,15 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-15, 0228 command clock leases locally passed; awaiting a38)
+
+**CURRENT：0228逐命令DSI时钟引用已实现并提交072200c，本地验证通过，待新CircleCI产物和实机。** a37/mode7/PV五轮普通唤醒及ESC0停启仍是最新实机基线；C08仅局部推进，完整PD4未完成。
+mode2/7同步亮度与FIFO/DMA命令统一在现有clock ledger取得引用，再取得engine引用；fresh DONE/idle/无错误后释放engine与clock引用。正常完成保持BOOT/managed外层使用者和共享时钟；超时、取消、stop、失钟或凭据失效保留不确定引用/pin，阻止后续DSI清理、停钟与撤供电。故障处理仍可mask/ACK合法显示IRQ，不能概括为全部MMIO零写。
+三份生产源码变化：SweetMDSS.cpp、Clock.inc、DSI.inc；公有Backend/ABI608/ADT/605byte参数、固件和面板策略保持。19组驱动回归、Lineage真实host_transfer与clock-manager参考链通过；18个原函数编入夹具，不等于完整DRM/CCF或所有分支执行。ARM64基线/最终成功，1599→1613告警，新增14条unsafe-buffer-usage，无告警抑制。44patch严格重放80文件。
+CircleCI仅替换1条/新增3条源码断言，总149；YAML、4参数模板、6run shell与源码检查通过，工作流/资源保持，未服务器验证。真实旧a37被新打包门槛拒绝且无输出；原镜像SHA仍ec7a22ab2f62af9a00b5937e5724725b5f750eed61dac57d1461c803cae89366。补丁SHA e62c0b50f3d32b5f4e080f07ee2284dedb653593ed56b7ee39aa5fd4d59c9a4c。
+证据scratch/framebuffer-0228/final-review.json及其引用文件；详见[实现、验证边界与交付步骤](docs/PANEL-LINEAGE-COMMAND-CLOCK.md)。2026-11-15从codex-session-22.md接手，补齐上轮未完成的说明/计划/交接；复核补丁、CI、a37镜像SHA与既有测试记录，未重跑驱动测试或修改驱动/CI。
+**NEXT：用户push main并下载包含072200c/0228的新CircleCI kernel及buildtree（建议0121a38）；agent核对后沿原ABI608打包mode7。** 当前本地无a38 kernel/buildtree/boot或0228实机结果；本轮未push、触发CI或操作设备。实机先首次接管/触摸/调光，再两轮息屏5秒/唤醒，每轮正常后各亮屏至少60秒，留USB/持久日志并核对命令held/released及既有完整完成顺序。
+后续继续C08外层DSI/MDP引用、共享core/SMMU/RSC/QoS及其余PD4，再PD1/PD5→F5→F7。BUG-006日志、BUG-008首次亮度和BUG-009音量分别保留；BUG-007在a37未复现但未证明修复，继续暂缓。以下为历史。
+
 ## Agent handoff / active work (2026-11-14, a37 ESC0 wake audited; startup UI discrepancies recorded)
 
 **CURRENT：a37/mode7 PV五轮OFF/ON与ESC0停启日志通过，成为最新普通唤醒基线；用户另报首次亮度/音量滑条不一致，已登记BUG-008/009。** 用户明确说本轮没有旧画面闪现，BUG-007记未复现、保留暂缓，未证明修复。实现71da5dc/0227，交付bc4832c。

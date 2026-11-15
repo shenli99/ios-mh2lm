@@ -1,5 +1,10 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
+## 0228 当前进展（2026-11-15交接，待a38构建与实机）
+
+[逐命令DSI时钟引用](PANEL-LINEAGE-COMMAND-CLOCK.md)已提交072200c：mode2/7命令使用现有clock ledger，真实完成后释放，不确定时保留引用/pin；外层BOOT/managed资源继续持有。19组驱动测试、Lineage参考链、ARM64及44patch/80文件重放本地通过，证据scratch/framebuffer-0228/final-review.json。
+**下一步用户push并下载包含0228的新CircleCI kernel/buildtree（建议0121a38），agent核对打包mode7，再首次接管/调光与两轮OFF/ON各60秒。** 当前无a38产物/实机结果，a37仍是普通唤醒实机基线。完整C08外层引用及其余PD4继续；BUG-006/008/009保留，BUG-007暂缓。本次接手只补文档与核对既有记录。以下为历史。
+
 ## 0121a37 实机进展（2026-11-14，ESC0五轮通过，启动UI问题已登记）
 
 [a37实机记录](PANEL-D1-0121A37.md)：USB确认mode7/PV五轮HS→ULPS→ESC0 halt→PHY关，以及ESC0运行→host/PHY→ON表/色彩/首帧/HS亮度/第二帧/触摸完成，generation1→6；第3轮八个完整60秒IRQ窗口、dropped0，其余轮短或无完整窗口，不称两轮各60秒耐久通过。a37作为最新普通唤醒基线。

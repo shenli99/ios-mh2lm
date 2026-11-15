@@ -1,5 +1,10 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
+## 0228 当前进展（2026-11-15交接，待a38构建与实机）
+
+大目标二/PD4继续推进。[C08逐命令DSI时钟引用](PANEL-LINEAGE-COMMAND-CLOCK.md)已提交072200c，本地19组驱动测试、Lineage参考链、ARM64及44patch/80文件重放通过，尚无新实机结果。a37普通唤醒及ESC0停启已验证；本批增加命令引用管理，BOOT/managed外层资源仍保留。
+**下一步用户push并下载包含0228的CircleCI kernel/buildtree（建议0121a38），agent核对打包，再首次接管/调光及两轮OFF/ON各60秒。** 完整C08外层DSI/MDP引用、core/SMMU/RSC/QoS及PD4仍未完成，之后PD1/PD5→F5→F7；大目标三日志、大目标四整机电源管理顺序不变。BUG-006/008/009保留，BUG-007暂缓。证据scratch/framebuffer-0228/final-review.json；本次仅交接文档收尾与既有记录核对。以下为历史。
+
 ## 0121a37 实机进展（2026-11-14，ESC0五轮通过，启动UI问题已登记）
 
 [a37实机记录](PANEL-D1-0121A37.md)：USB确认mode7/PV五轮HS→ULPS→ESC0 halt→PHY关，以及ESC0运行→host/PHY→ON表/色彩/首帧/HS亮度/第二帧/触摸完成，generation1→6；第3轮八个完整60秒IRQ窗口、dropped0，其余轮短或无完整窗口，不称两轮各60秒耐久通过。a37作为最新普通唤醒基线。
