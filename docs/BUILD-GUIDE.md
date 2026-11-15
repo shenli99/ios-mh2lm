@@ -40,6 +40,23 @@ git -C /home/shenli/work1/ref/ios-mh2lm push origin main
 
 下载 `xnu-kernel`、`xnu-buildtree`，保存为 `logs/xnu-kernel-<LABEL>.gz`、`logs/xnu-buildtree-<LABEL>.gz`，并尽可能保存构建日志和CI run ID。LABEL按已有实验编号递增，当前最新0121a39。agent先检查本地已有产物；缺少CI元数据时明确记录，不能把文件名视为构建来源证明。
 
+### 2.1 完整源码分支 `full-source`（可选路线）
+
+该分支把 xnu-8796.141.3 与 dxb 构建修正、三个 staging 脚本及 0001..0229 全部补丁
+提交为 `dxb/xnu/` 完整源码树，CI 读取分支内的 `.github/workflows/circleci.yml`，
+**不再执行补丁步骤**；`require_marker` 与产物形式不变。版本横幅由 workflow 的
+`KERNEL_BUILD_DATE` / `KERNEL_BUILD_OBJROOT` 固定为 `Mon Aug 14 05:06:07 UTC 2023` /
+`xnu-8796.141.3`。
+
+```sh
+git -C /home/shenli/work1/ref/ios-mh2lm switch full-source
+# 直接修改 dxb/xnu/**，不生成 patch
+git -C /home/shenli/work1/ref/ios-mh2lm push origin full-source
+```
+
+边界：只有该分支是完整树，`main` 仍是补丁仓库；`xnu/patches/` 在分支上仅作历史参考；
+依赖项目与 KDK 仍在云端获取。来源与树组成见 [`dxb/README-MH2LM.md`](../dxb/README-MH2LM.md)。
+
 ## 3. 核对CI产物（agent）
 
 1. 读取gzip/tar至结尾，检查CRC/完整性，记录输入大小和SHA256。

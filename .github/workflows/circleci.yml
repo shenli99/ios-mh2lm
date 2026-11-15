@@ -23,8 +23,10 @@ jobs:
     resource_class: m4pro.medium
     # timeout-minutes: 120 → CircleCI 默认超时为 10 分钟，可在 Project Settings 中调整
     environment:
-      DXB_REPO: https://github.com/blacktop/darwin-xnu-build
-      DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
+      # Banner pinned to the committed tree's source drop; the vendored tree has
+      # no git metadata, so build.sh cannot derive these from git describe.
+      KERNEL_BUILD_DATE: "Mon Aug 14 05:06:07 UTC 2023"
+      KERNEL_BUILD_OBJROOT: "xnu-8796.141.3"
       MACOS_VERSION: << pipeline.parameters.macos_version >>
       KERNEL_CONFIG: << pipeline.parameters.kernel_config >>
       MACHINE_CONFIG: << pipeline.parameters.machine_config >>
@@ -33,16 +35,23 @@ jobs:
       - checkout   # 对应 actions/checkout@v4
 
       - run:
-          name: Fetch build script
+          name: Verify full source tree
           command: |
-            git init -q dxb
-            git -C dxb fetch -q --depth 1 "$DXB_REPO" "$DXB_SHA"
-            git -C dxb checkout -q FETCH_HEAD
-            cp xnu/patches/*.patch xnu/patches/*.sh dxb/patches/
-            cp -R xnu/patches/bearssl-vendor dxb/patches/
-            sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
-            grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
-            ls dxb/patches
+            set -eu
+            test -f dxb/build.sh
+            test -f dxb/xnu/APPLE_LICENSE
+            test -d dxb/xnu/bsd/sweet_hfs/core
+            test -d dxb/xnu/bsd/pthread/sweet_libpthread/kern
+            test -d dxb/xnu/libkern/crypto/sweet_bearssl
+            test -f dxb/xnu/bsd/pthread/sweet_libpthread/TargetConditionals.h
+            test -f dxb/xnu/bsd/sweet_hfs/TargetConditionals.h
+            grep -Fq 'XNU_SOURCE_TAG="${XNU_SOURCE_TAG:-xnu-8796.141.3}"' dxb/build.sh
+            if find dxb/xnu \( -name '*.rej' -o -name '*.orig' \) -print -quit | grep -q .; then
+              echo 'ERROR: rejected or backup files in the committed source tree' >&2
+              exit 1
+            fi
+            echo "source files: $(find dxb/xnu -type f | wc -l)"
+            echo 'committed tree: xnu-8796.141.3 + dxb build fixes + sweet staging + mh2lm 0229 series'
 
       - run:
           name: Deps
@@ -68,8 +77,8 @@ jobs:
             fi
             set -o pipefail
             bash build.sh 2>&1 | tee ../build.log
-            # dxb treats a rejected patch as a warning. Require the source
-            # markers before accepting the kernel artifact.
+            # The tree is committed, not patched. Keep the same source markers
+            # as the patch-based workflow so a drifted tree fails here.
             if [ ! -f xnu/bsd/dev/sweet_log_level.h ]; then
               echo 'ERROR: 0140 log level header missing from built XNU source' >&2
               exit 1

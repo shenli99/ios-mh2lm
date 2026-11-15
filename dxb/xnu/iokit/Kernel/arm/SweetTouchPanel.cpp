@@ -1,0 +1,284 @@
+#if defined(ARM64_BOARD_CONFIG_MH2LM)
+#include "SweetTouchPanel.h"
+#include <IOKit/IOLib.h>
+#include <libkern/c++/OSData.h>
+#include <sys/errno.h>
+#include <pexpert/pexpert.h>
+#include <kern/clock.h>
+#define SWEET_LOG_SINK IOLog
+#include "../../../bsd/dev/sweet_log_level.h"
+OSDefineMetaClassAndStructors(SweetTouchPanel,IOService);
+OSDefineMetaClassAndStructors(SweetTouchPanelClient,OSObject);
+struct TouchPanelRequest { unsigned op; uint64_t client,token; uint64_t *out; SweetTouchPanelStatus *status; bool *available; };
+static IOReturn touchPanelReturn(int rc)
+{
+ switch (rc) {
+ case 0:return kIOReturnSuccess;
+ case EBUSY:return kIOReturnBusy;
+ case ENOENT:return kIOReturnNotFound;
+ case EINVAL:return kIOReturnBadArgument;
+ case EOVERFLOW:return kIOReturnNoResources;
+ case EAGAIN:return kIOReturnNotReady;
+ default:return kIOReturnIOError;
+ }
+}
+uint64_t SweetTouchPanel::nowNS(void)
+{ uint64_t n=0; absolutetime_to_nanoseconds(mach_absolute_time(),&n); return n; }
+bool SweetTouchPanel::start(IOService *p)
+{
+ int mode=0;(void)PE_parse_boot_argn("sweettouchpanel",&mode,sizeof(mode));
+ if ((mode!=1 && mode!=2) || !IOService::start(p)) return false;
+ OSData *abi=OSDynamicCast(OSData,p->getProperty("sweet,touch-panel-abi"));
+ if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),"\1\0\0\0",4)) return false;
+ if (sweet_touch_panel_open(&fSession)!=0) return false;
+ fMode=(unsigned)mode;
+ fLoop=IOWorkLoop::workLoop();fGate=IOCommandGate::commandGate(this);
+ fTimer=IOTimerEventSource::timerEventSource(this,timerAction);
+ if (!fLoop || !fGate || !fTimer) return false;
+ if (fLoop->addEventSource(fGate)!=kIOReturnSuccess) return false;
+ fGateAdded=true;
+ if (fLoop->addEventSource(fTimer)!=kIOReturnSuccess) return false;
+ fTimerAdded=true;fAccepting=true;
+ setProperty("SweetTouchPanelABI",1ULL,32);
+ setProperty("SweetTouchPanelWritesEnabled",mode==2);
+ SWEET_LOG_INFO("SWEET TOUCH PANEL: native binding mode=%u; sole legacy worker retained, no automatic pause/resume\n",fMode);
+ registerService();return true;
+}
+void SweetTouchPanel::refresh(void)
+{
+ if (!fSession || !fStatus.token) return;
+ sweet_touch_panel_status p={};
+ int rc=sweet_touch_panel_snapshot(fSession,fStatus.token,&p);
+ if (rc) { fStatus.state=SWEET_TOUCH_FAILED;fStatus.result=touchPanelReturn(rc); }
+ else {
+  fStatus.state=p.available ? p.state : (unsigned)SWEET_TOUCH_FAILED;
+  bool pending=p.state==SWEET_TOUCH_PAUSE_REQUESTED || p.state==SWEET_TOUCH_PAUSING ||
+      p.state==SWEET_TOUCH_RESUME_REQUESTED || p.state==SWEET_TOUCH_RESUMING;
+  fStatus.quiesced=p.available && p.state==SWEET_TOUCH_QUIESCED;
+  fStatus.ready=p.available && p.state==SWEET_TOUCH_RUNNING;
+  fStatus.result=(fStatus.quiesced || fStatus.ready) ? kIOReturnSuccess :
+      (pending && p.available ? kIOReturnNotReady : kIOReturnIOError);
+  if (pending && p.available) return;
+ }
+ fBusy=false;
+ if (fTimer) fTimer->cancelTimeout();
+ if (fStatus.result!=kIOReturnSuccess) {
+  fPoisoned=true;fStatus.uncertain=fTouched;fStatus.quiesced=fStatus.ready=false;
+  SWEET_LOG_ERROR("SWEET TOUCH PANEL: worker unavailable/failed token=%llu state=%u; no implicit resume\n",fStatus.token,fStatus.state);
+ }
+}
+IOReturn SweetTouchPanel::action(OSObject *owner,void *arg,void *,void *,void *)
+{
+ SweetTouchPanel *s=(SweetTouchPanel *)owner;TouchPanelRequest &r=*(TouchPanelRequest *)arg;
+ if (r.op==OpStop) {
+  s->fAccepting=false;
+  if (s->fTimer) s->fTimer->cancelTimeout();
+  if (s->fSession) { (void)sweet_touch_panel_close(s->fSession);s->fSession=0; }
+  if (s->fStatus.token) {
+   s->fStatus.state=SWEET_TOUCH_STOPPED;s->fStatus.result=kIOReturnAborted;
+   s->fStatus.quiesced=s->fStatus.ready=false;s->fStatus.uncertain=s->fTouched;
+  }
+  s->fBusy=false;return kIOReturnSuccess;
+ }
+ if (r.op==OpQuery) {
+  if (!r.client || r.client!=s->fClient || !r.token || r.token!=s->fStatus.token) return kIOReturnNotFound;
+  if (s->fAccepting && !s->fPoisoned) s->refresh();
+  *r.status=s->fStatus;return kIOReturnSuccess;
+ }
+ if (r.op==OpCancel) {
+  if (!r.client || r.client!=s->fClient || !r.token || r.token!=s->fStatus.token) return kIOReturnNotFound;
+  if (s->fTimer) s->fTimer->cancelTimeout();
+  if (s->fSession) { (void)sweet_touch_panel_close(s->fSession);s->fSession=0; }
+  s->fBusy=false;s->fPoisoned=true;
+  s->fStatus.state=SWEET_TOUCH_STOPPED;s->fStatus.result=kIOReturnAborted;
+  s->fStatus.quiesced=s->fStatus.ready=false;s->fStatus.uncertain=s->fTouched;
+  return kIOReturnSuccess;
+ }
+ if (!s->fAccepting || s->isInactive()) return kIOReturnNotReady;
+ if (r.op==OpInfo) {
+  sweet_touch_panel_status p={};
+  IOReturn rc=touchPanelReturn(sweet_touch_panel_snapshot(s->fSession,0,&p));
+  *r.available=!s->fPoisoned && rc==kIOReturnSuccess && p.available && p.state!=SWEET_TOUCH_FAILED && p.state!=SWEET_TOUCH_STOPPED;
+  return rc;
+ }
+ if (r.op==OpAttach) {
+  if (s->fPoisoned) return kIOReturnNotReady;
+  if (s->fClient) return kIOReturnBusy;
+  if (s->fNextClient==~0ULL) return kIOReturnNoResources;
+  s->fClient=++s->fNextClient;*r.out=s->fClient;return kIOReturnSuccess;
+ }
+ if (!r.client || r.client!=s->fClient) return kIOReturnNotFound;
+ if (r.op==OpDetach) {
+  if (!s->fPoisoned) s->refresh();
+  if (s->fBusy || s->fPoisoned || s->fStatus.quiesced) return kIOReturnBusy;
+  s->fClient=0;s->fStatus={};return kIOReturnSuccess;
+ }
+ if (s->fMode!=2) return kIOReturnNotPermitted;
+ if (s->fPoisoned) return kIOReturnNotReady;
+ if (s->fBusy) return kIOReturnBusy;
+ uint64_t token=0;
+ IOReturn rc=touchPanelReturn(sweet_touch_panel_request(s->fSession,r.op==OpResume,&token));
+ if (rc!=kIOReturnSuccess) return rc;
+ s->fStatus={};s->fStatus.token=token;
+ s->fStatus.state=r.op==OpResume ? SWEET_TOUCH_RESUME_REQUESTED : SWEET_TOUCH_PAUSE_REQUESTED;
+ s->fStatus.result=kIOReturnNotReady;s->fBusy=s->fTouched=true;
+ s->fDeadline=nowNS()+6000000000ULL;*r.out=token;s->fTimer->setTimeoutMS(1);
+ return kIOReturnSuccess;
+}
+void SweetTouchPanel::timerAction(OSObject *owner,IOTimerEventSource *)
+{
+ SweetTouchPanel *s=(SweetTouchPanel *)owner;
+ if (!s->fAccepting || s->isInactive() || !s->fBusy) return;
+ s->refresh();
+ if (!s->fBusy) return;
+ if (nowNS()>=s->fDeadline) {
+  (void)sweet_touch_panel_close(s->fSession);s->fSession=0;
+  s->fBusy=false;s->fPoisoned=true;
+  s->fStatus.state=SWEET_TOUCH_FAILED;s->fStatus.result=kIOReturnTimeout;
+  s->fStatus.ready=s->fStatus.quiesced=false;s->fStatus.uncertain=true;
+  SWEET_LOG_ERROR("SWEET TOUCH PANEL: worker deadline; cancelled, no quiescence assumed\n");
+  return;
+ }
+ s->fTimer->setTimeoutMS(1);
+}
+IOReturn SweetTouchPanel::request(unsigned op,uint64_t id,uint64_t *token)
+{ if (!token) return kIOReturnBadArgument;*token=0;TouchPanelRequest r={};r.op=op;r.client=id;r.out=token;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+IOReturn SweetTouchPanel::attachConsumer(uint64_t *id) { return request(OpAttach,0,id); }
+IOReturn SweetTouchPanel::quiesce(uint64_t id,uint64_t *token) { return request(OpQuiesce,id,token); }
+IOReturn SweetTouchPanel::resume(uint64_t id,uint64_t *token) { return request(OpResume,id,token); }
+IOReturn SweetTouchPanel::detachConsumer(uint64_t id)
+{ TouchPanelRequest r={};r.op=OpDetach;r.client=id;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+IOReturn SweetTouchPanel::copyWorkerAvailable(bool *available)
+{ if (!available) return kIOReturnBadArgument;*available=false;TouchPanelRequest r={};r.op=OpInfo;r.available=available;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+IOReturn SweetTouchPanel::copyStatus(uint64_t id,uint64_t token,SweetTouchPanelStatus *status)
+{ if (!status) return kIOReturnBadArgument;*status={};TouchPanelRequest r={};r.op=OpQuery;r.client=id;r.token=token;r.status=status;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+IOReturn SweetTouchPanel::cancelRequest(uint64_t id,uint64_t token)
+{ TouchPanelRequest r={};r.op=OpCancel;r.client=id;r.token=token;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+void SweetTouchPanel::shutdown(void)
+{
+ if (fGateAdded) { TouchPanelRequest r={};r.op=OpStop;(void)fGate->runAction(action,&r); }
+ else if (fSession) { (void)sweet_touch_panel_close(fSession);fSession=0; }
+ if (fTimerAdded) { fLoop->removeEventSource(fTimer);fTimerAdded=false; }
+}
+bool SweetTouchPanel::willTerminate(IOService *p,IOOptionBits o)
+{ shutdown();return IOService::willTerminate(p,o); }
+void SweetTouchPanel::stop(IOService *p)
+{
+ shutdown();
+ if (fClient) SWEET_LOG_WARN("SWEET TOUCH PANEL: consumer still attached at stop; worker cancellation retained\n");
+ IOService::stop(p);
+}
+void SweetTouchPanel::free(void)
+{
+ shutdown();
+ if (fGateAdded) { fLoop->removeEventSource(fGate);fGateAdded=false; }
+ OSSafeReleaseNULL(fTimer);OSSafeReleaseNULL(fGate);OSSafeReleaseNULL(fLoop);
+ IOService::free();
+}
+SweetTouchPanelClient *
+SweetTouchPanelClient::withOwner(OSObject *owner, IOWorkLoop *loop, void (*changed)(OSObject *))
+{
+ if (!owner || !loop || !changed) return NULL;
+ SweetTouchPanelClient *self=OSTypeAlloc(SweetTouchPanelClient);
+ if (!self) return NULL;
+ if (!self->init()) { self->release(); return NULL; }
+ self->fOwner=owner; self->fChanged=changed; self->fLoop=loop; loop->retain();
+ self->fLock=IOLockAlloc();
+ self->fEvent=IOInterruptEventSource::interruptEventSource(self, SweetTouchPanelClient::changed);
+ if (!self->fLock || !self->fEvent) { self->release(); return NULL; }
+ self->fEvent->disable();
+ if (loop->addEventSource(self->fEvent)!=kIOReturnSuccess) { self->release(); return NULL; }
+ self->fEventAdded=true;
+ return self;
+}
+
+bool
+SweetTouchPanelClient::watch(void)
+{
+ OSDictionary *matching=IOService::serviceMatching("SweetTouchPanel");
+ if (!matching) return false;
+ fTerminated=IOService::addMatchingNotification(gIOTerminatedNotification,matching,terminated,this);
+ if (fTerminated) fMatched=IOService::addMatchingNotification(gIOFirstMatchNotification,matching,matched,this);
+ matching->release(); /* API retains the dictionary */
+ if (!fTerminated || !fMatched) { stop(); return false; }
+ fEvent->enable(); fEvent->interruptOccurred(NULL,NULL,0);
+ return true;
+}
+
+bool
+SweetTouchPanelClient::matched(void *target, void *, IOService *service, IONotifier *)
+{
+ SweetTouchPanelClient *self=(SweetTouchPanelClient *)target;
+ SweetTouchPanel *backend=OSDynamicCast(SweetTouchPanel,service);
+ if (!backend) return true;
+ IOLockLock(self->fLock);
+ if (!self->fStopping && !self->fBackend && !backend->isInactive()) {
+  backend->retain(); self->fBackend=backend;
+  self->fEvent->interruptOccurred(NULL,NULL,0);
+ }
+ IOLockUnlock(self->fLock);
+ return true;
+}
+
+bool
+SweetTouchPanelClient::terminated(void *target, void *, IOService *service, IONotifier *)
+{
+ SweetTouchPanelClient *self=(SweetTouchPanelClient *)target;
+ SweetTouchPanel *old=NULL;
+ IOLockLock(self->fLock);
+ if (self->fBackend==service) {
+  old=self->fBackend; self->fBackend=NULL;
+  if (!self->fStopping) self->fEvent->interruptOccurred(NULL,NULL,0);
+ }
+ IOLockUnlock(self->fLock);
+ /* No provider method or register access in notification context. In-flight
+  * callers hold their own reference; provider checks inactive under its gate. */
+ OSSafeReleaseNULL(old);
+ return true;
+}
+
+void
+SweetTouchPanelClient::changed(OSObject *owner, IOInterruptEventSource *, int)
+{
+ SweetTouchPanelClient *self=(SweetTouchPanelClient *)owner;
+ IOLockLock(self->fLock); bool active=!self->fStopping; IOLockUnlock(self->fLock);
+ if (active) self->fChanged(self->fOwner);
+}
+
+SweetTouchPanel *
+SweetTouchPanelClient::copyBackend(void)
+{
+ IOLockLock(fLock);
+ SweetTouchPanel *backend=!fStopping ? fBackend : NULL;
+ if (backend) backend->retain();
+ IOLockUnlock(fLock);
+ return backend;
+}
+
+void
+SweetTouchPanelClient::stop(void)
+{
+ if (fLock) { IOLockLock(fLock); fStopping=true; IOLockUnlock(fLock); }
+ /* remove consumes the notifier and synchronizes callbacks. Never hold a
+  * consumer lock/gate here: a replaying notification may be waiting on it. */
+ if (fMatched) { fMatched->remove(); fMatched=NULL; }
+ if (fTerminated) { fTerminated->remove(); fTerminated=NULL; }
+ if (fEventAdded) {
+  fEvent->disable(); fLoop->removeEventSource(fEvent); fEventAdded=false;
+ }
+ if (fLock) {
+  IOLockLock(fLock); SweetTouchPanel *old=fBackend; fBackend=NULL; IOLockUnlock(fLock);
+  OSSafeReleaseNULL(old);
+ }
+}
+
+void
+SweetTouchPanelClient::free(void)
+{
+ stop(); OSSafeReleaseNULL(fEvent); OSSafeReleaseNULL(fLoop);
+ if (fLock) { IOLockFree(fLock); fLock=NULL; }
+ OSObject::free();
+}
+
+
+#endif
