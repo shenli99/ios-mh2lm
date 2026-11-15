@@ -1,0 +1,454 @@
+--- a/iokit/Kernel/arm/SweetMDSS.cpp
++++ b/iokit/Kernel/arm/SweetMDSS.cpp
+@@ -342,7 +342,24 @@
+  IOTimerEventSource *fClockTimer;
+  bool fClockTimerAdded, fClockEnabled, fClockClaimed, fClockTouched, fClockFault;
+  uint64_t fClockNextToken, fClockBootToken, fClockDeadline, fClockWaitDeadline, fClockVoteSettleAt;
+- SweetClockLease fClockLeases[4];
++ enum { ClockLeaseSlots=6 };
++ SweetClockLease fClockLeases[ClockLeaseSlots];
++ /* Owner tags describe the real ledger slots; there is no second refcount. */
++ unsigned fClockClient[ClockLeaseSlots];
++ enum DisplayClientState { ClientsBoot, ClientsPreparing, ClientsActive, ClientsStopping, ClientsOff };
++ unsigned fDisplayClientState;
++ uint64_t fPanelDSIClock, fMdpClock;
++ bool displayClientHeld(uint64_t,unsigned,bool = false);
++ bool displayClientsValid(void);
++ bool retainDisplayClient(unsigned,bool = false);
++ bool releaseDisplayClient(unsigned);
++ bool prepareDisplayClients(bool = false);
++ bool startMDPClient(void);
++ bool stopMDPClient(void);
++ bool postEnableDisplayClients(void);
++ bool unprepareDisplayClients(void);
++ void publishDisplayClients(const char *);
++
+  unsigned fClockReferences[SweetClockCount], fClockOwnedMask, fClockKnownMask, fClockIssuedMask;
+  uint32_t fClockParents[SweetClockCount][6];
+  unsigned fClockOperation, fClockCursor, fClockReleaseMask;
+@@ -675,6 +692,7 @@
+   if (prepareDSICommandBuffer()!=kIOReturnSuccess) return false;
+   fDsiDisplayEngine=true; /* adopt the already active continuous splash */
+   SWEET_LOG_INFO("SWEET MDSS DSI CLOCK: per-transfer leases enabled; shared BOOT/core retained\n");
++  SWEET_LOG_INFO("SWEET MDSS CLIENT CLOCK: DSI prepare/post-enable/pre-disable and MDP scan/stop enabled; shared core floor retained\n");
+  }
+  SWEET_LOG_INFO("SWEET MDSS: F1a v1 IOService backend; ABL scanout unchanged\n");
+  registerService();
+--- a/iokit/Kernel/arm/SweetMDSSClock.inc
++++ b/iokit/Kernel/arm/SweetMDSSClock.inc
+@@ -207,10 +207,10 @@
+      (s->fHostTouched && (s->fHostPhase==HostFault || s->fHostPhase==HostStopped))) return kIOReturnNotReady;
+  if (s->fLinkSuspendedMask) return kIOReturnNotReady;
+  if (s->clockBusy() || s->coreBusy() || s->linkBusy() || s->hostBusy()) return kIOReturnBusy;
+- unsigned slot=4;
+- for (unsigned n=0;n<4;++n)
++ unsigned slot=ClockLeaseSlots;
++ for (unsigned n=0;n<ClockLeaseSlots;++n)
+   if (!s->fClockLeases[n].token || s->fClockLeases[n].state==SweetClockReleased) { slot=n; break; }
+- if (slot==4 || s->fClockNextToken==~(uint64_t)0) return kIOReturnNoResources;
++ if (slot==ClockLeaseSlots || s->fClockNextToken==~(uint64_t)0) return kIOReturnNoResources;
+  if (!s->clockPrerequisites(diagnose)) return kIOReturnNotReady;
+  unsigned mask=mdssClockMasks[use]; uint32_t parents[SweetClockCount][6]={};
+  uint32_t admittedRSC[3]={};
+@@ -242,7 +242,7 @@
+  for (unsigned i=0;i<SweetClockCount;++i) if (mask&(1u<<i))
+   memcpy(s->fClockParents[i],parents[i],sizeof(parents[i]));
+  s->fClockKnownMask|=mask;
+- SweetClockLease &lease=s->fClockLeases[slot]; lease={};
++ SweetClockLease &lease=s->fClockLeases[slot]; lease={};s->fClockClient[slot]=0;
+  lease.token=++s->fClockNextToken; lease.mask=mask; lease.state=SweetClockPending;
+  lease.inheritedUpstream=true;
+  s->fClockOperation=slot+1; s->fClockCursor=0; s->fClockReleaseMask=0;
+@@ -266,13 +266,16 @@
+      (s->fHostTouched && (s->fHostPhase==HostFault || s->fHostPhase==HostStopped))) return kIOReturnNotReady;
+  if (s->fLinkSuspendedMask) return kIOReturnNotReady;
+  if (s->clockBusy() || s->coreBusy() || s->linkBusy() || s->hostBusy()) return kIOReturnBusy;
+- unsigned slot=4;
+- for (unsigned n=0;n<4;++n) if (token && s->fClockLeases[n].token==token) { slot=n; break; }
+- if (slot==4 || s->fClockLeases[slot].state!=SweetClockHeld) return kIOReturnBadArgument;
++ unsigned slot=ClockLeaseSlots;
++ for (unsigned n=0;n<ClockLeaseSlots;++n) if (token && s->fClockLeases[n].token==token) { slot=n; break; }
++ if (slot==ClockLeaseSlots || s->fClockLeases[slot].state!=SweetClockHeld) return kIOReturnBadArgument;
+  /* Only command completion may return its lease. Retain its prerequisites
+   * even before CMD_DMA starts, when the hardware may still report idle. */
+  if (s->fDsiTransferClock && (token==s->fDsiTransferClock ||
+      token==s->fClockBootToken || token==s->fManagedClock)) return kIOReturnBusy;
++ if (s->fClockClient[slot] ||
++     ((s->fPanelDSIClock || s->fMdpClock) && token==s->fClockBootToken) ||
++     (s->fMdpClock && token==s->fManagedClock)) return kIOReturnBusy;
+  if (token==s->fNoCClockToken && !s->noCCanReleaseClock()) return kIOReturnBusy;
+  if (!s->clockPrerequisites()) return kIOReturnNotReady;
+  unsigned disable=0;
+@@ -297,7 +300,7 @@
+ IOReturn SweetMDSS::clockStatusAction(OSObject *owner,void *arg,void *out,void *,void *)
+ {
+  SweetMDSS *s=(SweetMDSS *)owner; uint64_t token=*(uint64_t *)arg;
+- for (unsigned n=0;n<4;++n) if (token && s->fClockLeases[n].token==token) {
++ for (unsigned n=0;n<ClockLeaseSlots;++n) if (token && s->fClockLeases[n].token==token) {
+   *(SweetClockLease *)out=s->fClockLeases[n];
+   ((SweetClockLease *)out)->hardwareSuspended=(s->fClockLeases[n].mask&s->fLinkSuspendedMask)!=0;
+   return kIOReturnSuccess;
+@@ -516,7 +519,7 @@
+ }
+ bool SweetMDSS::localClocksReady(void)
+ {
+- if (fLinkSuspendedMask || noCBusy() || (fNoCEnabled && fNoCFault)) return false; /* No re-entry during transition/fault. */
++ if (!displayClientsValid() || fLinkSuspendedMask || noCBusy() || (fNoCEnabled && fNoCFault)) return false; /* No re-entry during transition/fault. */
+  if (!fAccepting || isInactive() || !fClockEnabled || fClockFault || !fClockBootToken || !clockPrerequisites()) return false;
+  SweetClockLease status={};
+  if (clockStatusAction(this,&fClockBootToken,&status,NULL,NULL)!=kIOReturnSuccess || status.state!=SweetClockHeld)
+@@ -534,7 +537,7 @@
+  * transitions remain the asynchronous controller's responsibility. */
+ bool SweetMDSS::dsiClockContextReady(void)
+ {
+- if (!fLifecycleLineage || clockBusy() || hostBusy() || fDsiPoisoned ||
++ if (!fLifecycleLineage || !displayClientsValid() || (!fPanelDSIClock && !fMdpClock) || clockBusy() || hostBusy() || fDsiPoisoned ||
+      fHostPhase==HostFault || fHostPhase==HostStopped || !localClocksReady()) return false;
+  SweetClockLease boot={};
+  if (localClockStatus(fClockBootToken,&boot)!=kIOReturnSuccess ||
+@@ -560,14 +563,14 @@
+ bool SweetMDSS::retainDSITransferClock(void)
+ {
+  if (fDsiTransferClock || !dsiClockContextReady() || fClockNextToken==~(uint64_t)0) return false;
+- unsigned slot=4,mask=mdssClockMasks[SweetClockDSI0];
+- for (unsigned n=0;n<4;++n)
++ unsigned slot=ClockLeaseSlots,mask=mdssClockMasks[SweetClockDSI0];
++ for (unsigned n=0;n<ClockLeaseSlots;++n)
+   if (!fClockLeases[n].token || fClockLeases[n].state==SweetClockReleased) {slot=n;break;}
+- if (slot==4) return false;
++ if (slot==ClockLeaseSlots) return false;
+  for (unsigned i=0;i<SweetClockCount;++i)
+   if ((mask&(1u<<i)) && fClockReferences[i]==~0u) return false;
+  /* Validate everything before changing the existing ledger. */
+- SweetClockLease &lease=fClockLeases[slot];lease={};
++ SweetClockLease &lease=fClockLeases[slot];lease={};fClockClient[slot]=0;
+  lease.token=++fClockNextToken;lease.mask=mask;lease.state=SweetClockHeld;
+  lease.result=kIOReturnSuccess;lease.inheritedUpstream=true;
+  for (unsigned i=0;i<SweetClockCount;++i) if (mask&(1u<<i)) ++fClockReferences[i];
+@@ -579,9 +582,9 @@
+ bool SweetMDSS::releaseDSITransferClock(void)
+ {
+  if (fDsiTransferEngine || fDsiPinned || fDsiSaved || !dsiTransferClockReady()) return false;
+- unsigned slot=4;
+- for (unsigned n=0;n<4;++n) if (fClockLeases[n].token==fDsiTransferClock) {slot=n;break;}
+- if (slot==4) return false;
++ unsigned slot=ClockLeaseSlots;
++ for (unsigned n=0;n<ClockLeaseSlots;++n) if (fClockLeases[n].token==fDsiTransferClock) {slot=n;break;}
++ if (slot==ClockLeaseSlots) return false;
+  SweetClockLease &lease=fClockLeases[slot];
+  /* A retained BOOT/display reference prevents last-user physical OFF. */
+  for (unsigned i=0;i<SweetClockCount;++i) if (lease.mask&(1u<<i)) --fClockReferences[i];
+@@ -597,7 +600,7 @@
+ {
+  stopCoreResources();
+  if (fClockTimer) fClockTimer->cancelTimeout();
+- for (unsigned i=0;i<4;++i) {
++ for (unsigned i=0;i<ClockLeaseSlots;++i) {
+   SweetClockLease &lease=fClockLeases[i];
+   if (lease.state==SweetClockPending || lease.state==SweetClockReleasing || lease.state==SweetClockHeld) {
+    lease.state=SweetClockStopped; lease.result=(int)kIOReturnAborted;
+@@ -607,3 +610,152 @@
+  /* No register access or vote withdrawal. Existing scanout/DSI may still
+   * read memory, so stop/free never powers down its inherited dependencies. */
+ }
++
++
++/* Separate DSI-panel and MDP consumers, matching the two Lineage handles.
++ * This stage joins the retained core/config floor. It does not implement
++ * last-owner core collapse. Only DSI prepare can span the established
++ * suspended-link transaction; hardwareSuspended never grants MMIO access. */
++bool SweetMDSS::displayClientHeld(uint64_t token,unsigned client,bool suspended)
++{
++ if (!token || token==fClockBootToken || token==fManagedClock ||
++     token==fNoCClockToken || token==fDsiTransferClock) return false;
++ for (unsigned i=0;i<ClockLeaseSlots;++i) if (fClockLeases[i].token==token) {
++  const SweetClockLease &v=fClockLeases[i];
++  return fClockClient[i]==client && v.state==SweetClockHeld && !v.uncertain &&
++      v.result==kIOReturnSuccess && v.mask==mdssClockMasks[SweetClockDSI0] &&
++      (suspended || !fLinkSuspendedMask);
++ }
++ return false;
++}
++bool SweetMDSS::displayClientsValid(void)
++{
++ if (!fLifecycleLineage) return true;
++ /* A stale role token must not hide a live reference, and a lost aggregate
++  * count must never authorize a last-owner clock transition. Pending joins
++  * are not counted until finishClock; pending withdrawals still own refs. */
++ unsigned counts[SweetClockCount]={};
++ for (unsigned n=0;n<ClockLeaseSlots;++n) {
++  const SweetClockLease &v=fClockLeases[n];unsigned client=fClockClient[n];
++  if (client && (client>2 || !v.token || v.token!=(client==1 ? fPanelDSIClock : fMdpClock))) return false;
++  if (v.state==SweetClockHeld || v.state==SweetClockReleasing)
++   for (unsigned i=0;i<SweetClockCount;++i) if (v.mask&(1u<<i)) ++counts[i];
++ }
++ for (unsigned i=0;i<SweetClockCount;++i) if (counts[i]!=fClockReferences[i]) return false;
++ if (fPanelDSIClock && !displayClientHeld(fPanelDSIClock,1,true)) return false;
++ if (fMdpClock && !displayClientHeld(fMdpClock,2)) return false;
++ switch (fDisplayClientState) {
++ case ClientsBoot:case ClientsOff: return !fPanelDSIClock && !fMdpClock;
++ case ClientsPreparing:case ClientsStopping: return fPanelDSIClock!=0;
++ case ClientsActive: return !fPanelDSIClock && fMdpClock;
++ default: return false;
++ }
++}
++void SweetMDSS::publishDisplayClients(const char *step)
++{
++ setProperty("SweetDisplayClientState",(unsigned long long)fDisplayClientState,32);
++ setProperty("SweetPanelDSIClockToken",(unsigned long long)fPanelDSIClock,64);
++ setProperty("SweetMDPClockToken",(unsigned long long)fMdpClock,64);
++ SWEET_LOG_INFO("SWEET MDSS CLIENT CLOCK: %s state=%u dsi=%llu mdp=%llu suspended=%#x; shared core floor retained\n",
++     step,fDisplayClientState,fPanelDSIClock,fMdpClock,fLinkSuspendedMask);
++}
++bool SweetMDSS::retainDisplayClient(unsigned client,bool dormant)
++{
++ if (!fLifecycleLineage || (client!=1 && client!=2) || !displayClientsValid() ||
++     !fAccepting || isInactive() || fClockFault || fNoCFault || fDsiPoisoned ||
++     clockBusy() || coreBusy() || linkBusy() || hostBusy() || noCBusy() ||
++     fDsiTransferClock || fDsiTransferEngine || fDsiPinned || fDsiSaved || dsiBusy()) return false;
++ uint64_t &token=client==1 ? fPanelDSIClock : fMdpClock;
++ if (token || fClockNextToken==~0ULL) return false;
++ if (dormant) {
++  if (client!=1 || fDisplayClientState!=ClientsOff || !fLifecycleParked ||
++      fLifecycle.operation!=SweetPanelDisplayOn || !fLifecycle.touchQuiesced ||
++      !fLifecycle.displayDrained || !fLifecycle.resetHeldLow ||
++      fManagedState!=ManagedParked || fManagedClock || fManagedBandwidth ||
++      !managedConfigHeld() || !managedRetainedResources() || !linkDormantConfiguration()) return false;
++ } else if (!localClocksReady()) return false;
++ SweetClockLease boot={};
++ if (localClockStatus(fClockBootToken,&boot)!=kIOReturnSuccess || boot.state!=SweetClockHeld ||
++     boot.result!=kIOReturnSuccess || boot.uncertain || boot.mask!=mdssClockMasks[SweetClockDSI0]) return false;
++ unsigned slot=ClockLeaseSlots,mask=mdssClockMasks[SweetClockDSI0];
++ for (unsigned i=0;i<ClockLeaseSlots;++i)
++  if (!fClockLeases[i].token || fClockLeases[i].state==SweetClockReleased) {slot=i;break;}
++ if (slot==ClockLeaseSlots || (fClockKnownMask&mask)!=mask) return false;
++ for (unsigned i=0;i<SweetClockCount;++i)
++  if ((mask&(1u<<i)) && (!fClockReferences[i] || fClockReferences[i]==~0u)) return false;
++ SweetClockLease &v=fClockLeases[slot];v={};
++ v.token=++fClockNextToken;v.mask=mask;v.state=SweetClockHeld;
++ v.result=kIOReturnSuccess;v.inheritedUpstream=true;fClockClient[slot]=client;
++ for (unsigned i=0;i<SweetClockCount;++i) if (mask&(1u<<i)) ++fClockReferences[i];
++ token=v.token;return true;
++}
++bool SweetMDSS::releaseDisplayClient(unsigned client)
++{
++ uint64_t &token=client==1 ? fPanelDSIClock : fMdpClock;
++ if ((client!=1 && client!=2) || !displayClientsValid() ||
++     !displayClientHeld(token,client,client==1) || fDsiTransferClock || fDsiTransferEngine ||
++     fDsiPinned || fDsiSaved || fDsiPoisoned || dsiBusy() ||
++     !fAccepting || isInactive() || fClockFault || fNoCFault ||
++     clockBusy() || coreBusy() || noCBusy() || linkBusy() || hostBusy()) return false;
++ unsigned slot=ClockLeaseSlots;
++ for (unsigned i=0;i<ClockLeaseSlots;++i) if (fClockLeases[i].token==token) {slot=i;break;}
++ if (slot==ClockLeaseSlots) return false;
++ const unsigned mask=mdssClockMasks[SweetClockDSI0];
++ for (unsigned i=0;i<SweetClockCount;++i)
++  if ((mask&(1u<<i)) && fClockReferences[i]<2u) return false;
++ for (unsigned i=0;i<SweetClockCount;++i) if (mask&(1u<<i)) --fClockReferences[i];
++ fClockLeases[slot].state=SweetClockReleased;fClockClient[slot]=0;token=0;
++ return true;
++}
++bool SweetMDSS::prepareDisplayClients(bool dormant)
++{
++ if (!fLifecycleLineage) return true;
++ bool off=fLifecycle.operation==SweetPanelDisplayOff;
++ if (!lifecycleBusy() || !lifecycleParticipants() ||
++     (off ? (fDisplayClientState!=ClientsActive || dormant) :
++      (fDisplayClientState!=(dormant ? ClientsOff : ClientsBoot)))) return false;
++ if (!retainDisplayClient(1,dormant)) return false;
++ fDisplayClientState=off ? ClientsStopping : ClientsPreparing;
++ publishDisplayClients(off ? "pre-disable DSI held before MDP drain" : "prepare DSI held; hardware readiness required");
++ return true;
++}
++bool SweetMDSS::startMDPClient(void)
++{
++ if (!fLifecycleLineage) return true;
++ if (!displayClientsValid() || !localClocksReady() || !lifecycleParticipants()) return false;
++ if (fMdpClock) return displayClientHeld(fMdpClock,2);
++ if (fDisplayClientState!=ClientsPreparing || !displayClientHeld(fPanelDSIClock,1) ||
++     !fLifecycle.touchQuiesced || !fLifecycle.displayDrained || !lifecycleIRQDrained() ||
++     !clockCanGate() || dp_rd(dp_ctl,0x18) || dp_rd(dp_ctl,0x1c) ||
++     !retainDisplayClient(2)) return false;
++ publishDisplayClients("MDP held before pipeline/IRQ/kickoff; autorefresh retains vote");return true;
++}
++bool SweetMDSS::stopMDPClient(void)
++{
++ if (!fLifecycleLineage) return true;
++ if (fDisplayClientState!=ClientsStopping || !displayClientHeld(fPanelDSIClock,1) ||
++     !lifecycleParticipants() || !fLifecycle.displayDrained || !fLifecycle.touchQuiesced ||
++     !lifecycleIRQDrained() || !clockCanGate() || dp_rd(dp_ctl,0x18) || dp_rd(dp_ctl,0x1c)) return false;
++ uint32_t line=dp_rd(dp_intf1,0x2b0)&0xffffu;
++ if ((line>0 && line<2340) || !releaseDisplayClient(2)) return false;
++ publishDisplayClients("MDP released after scan/IRQ drain; DSI retained for OFF");return true;
++}
++bool SweetMDSS::postEnableDisplayClients(void)
++{
++ if (!fLifecycleLineage) return true;
++ if (fDisplayClientState!=ClientsPreparing || !displayClientHeld(fMdpClock,2) ||
++     !lifecycleParticipants() || !lifecycleResourcesHeld() || !fLifecycle.pixelsComplete ||
++     (fLifecycle.operation==SweetPanelDisplayOn && (!fLifecycle.brightnessRestored || !fLifecycleColorRestored)) ||
++     !releaseDisplayClient(1)) return false;
++ fDisplayClientState=ClientsActive;
++ publishDisplayClients("post-enable DSI released; MDP owns continuous scan");return true;
++}
++bool SweetMDSS::unprepareDisplayClients(void)
++{
++ if (!fLifecycleLineage) return true;
++ if (fDisplayClientState!=ClientsStopping || fMdpClock || !lifecycleParticipants() ||
++     !fLifecycle.displayDrained || !lifecycleIRQDrained() || !linkDormantConfiguration() ||
++     !managedRetainedResources() || !releaseDisplayClient(1)) return false;
++ fDisplayClientState=ClientsOff;
++ publishDisplayClients("unprepare DSI released after host/PHY stop");return true;
++}
+--- a/iokit/Kernel/arm/SweetMDSSLifecycle.inc
++++ b/iokit/Kernel/arm/SweetMDSSLifecycle.inc
+@@ -123,7 +123,7 @@
+  * BEFORE detach/release. No replacement may inherit an old completion token. */
+ bool SweetMDSS::lifecycleParticipants(void)
+ {
+- if (!fAccepting || isInactive() || !fTouchPanel || !fRPMh ||
++ if (!displayClientsValid() || !fAccepting || isInactive() || !fTouchPanel || !fRPMh ||
+      fTouchPanel->isInactive() || fRPMh->isInactive() || !fTouchPanelConsumer || !fRPMhConsumer) return false;
+  SweetTouchPanel *t=fTouchPanelClient->copyBackend();
+  SweetRPMh *r=fRPMhClient->copyBackend();
+@@ -277,6 +277,12 @@
+  }
+  if (fLifecycleSupplyCycle && op==SweetPanelDisplayOn) {
+   fLifecycle.displayDrained=true;fLifecycle.retainedPower=false;
++  /* Enter the existing parked-rail admission phase before taking DSI's
++   * suspended reference. No pin or supply request has been issued yet. */
++  fLifecycle.phase=SweetPanelSupplyActivate;
++  if (!prepareDisplayClients(true)) {
++   finishLifecycle(kIOReturnNotReady,"DSI prepare suspended resource admission");*token=fLifecycle.token;return kIOReturnSuccess;
++  }
+   lifecycleStartSupplyRestore();
+   if (!lifecycleBusy()) {*token=fLifecycle.token;return kIOReturnSuccess;}
+  } else if (fLifecycle.linkPoweredDown && !fLifecycle.resourcesParked) {
+@@ -290,6 +296,9 @@
+   IOReturn rc=beginManagedParking(true);
+   if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"data restore admission");*token=fLifecycle.token;return kIOReturnSuccess;}
+   fLifecycleStepDeadline=scanout_now()+4000000000ULL;
++ }
++ if (fLifecycleLineage && op==SweetPanelDisplayOff && !prepareDisplayClients()) {
++  finishLifecycle(kIOReturnNotReady,"DSI pre-disable resource admission");*token=fLifecycle.token;return kIOReturnSuccess;
+  }
+  if (pool) {pool->retain();fLifecyclePool=pool;}
+  *token=fLifecycle.token;publishLifecycle();fLifecycleTimer->setTimeoutMS(available ? 1 : 50);
+@@ -336,6 +345,7 @@
+  if (fLifecycleLineage && fLifecycle.operation==SweetPanelDisplayOn && !fLifecycleColorRestored) {
+   finishLifecycle(kIOReturnNotReady,"SDR color restore absent before pixels");return;
+  }
++ if (!startMDPClient()) {finishLifecycle(kIOReturnNotReady,"MDP scan resource admission");return;}
+  bool brightnessResume=fLifecycleLineage && fLifecycle.phase==SweetPanelBrightness;
+  if (fPipelineEnabled && fLifecycle.phase!=SweetPanelPipelineRestore && !brightnessResume) {
+   IOReturn rc=beginPipeline();
+@@ -451,6 +461,7 @@
+   if (fLifecycleIdleSamples<2) return;
+   fLifecycle.displayDrained=true;
+   if (fLifecycleLineage && fLifecycle.operation==SweetPanelDisplayOff) {
++   if (!stopMDPClient()) {finishLifecycle(kIOReturnNotReady,"MDP drained resource release");return;}
+    /* command encoder disable precedes bridge/display disable and OFF table. */
+    dp_wr(dp_intf1,0x284,0);
+    if (!setDSIDisplayEngine(false)) {finishLifecycle(kIOReturnNotReady,"display engine release");return;}
+@@ -465,6 +476,7 @@
+   if (linkBusy() || hostBusy()) return;
+   if (fLifecycle.phase==SweetPanelLinkPowerDown) {
+    if (fLinkResult!=kIOReturnSuccess || !linkDormantConfiguration()) {finishLifecycle(kIOReturnIOError,"link shutdown completion absent");return;}
++   if (!unprepareDisplayClients()) {finishLifecycle(kIOReturnNotReady,"DSI unprepare resource release");return;}
+    fLifecycle.linkPoweredDown=fLifecycle.retainedPower=true;
+    if (fLifecycleDataParking) {
+     if (fManagedState!=ManagedParkLink) {finishLifecycle(kIOReturnIOError,"park link handoff absent");return;}
+@@ -616,6 +628,7 @@
+    publishLifecycle();return;
+   }
+  } else return;
++ if (!postEnableDisplayClients()) {finishLifecycle(kIOReturnNotReady,"DSI post-enable resource handoff");return;}
+  /* A retained rail lease plus fresh pixel transfer precedes touch recovery.
+   * This is NOT a proof that reset/shared-rail power-cycling is safe. */
+  uint64_t touch=0;IOReturn rc=fTouchPanel->resume(fTouchPanelConsumer,&touch);
+@@ -752,11 +765,14 @@
+      fRPMh->copyDisplayPowerStatus(fRPMhConsumer,fManagedARC,&a)!=kIOReturnSuccess ||
+      a.state!=SweetRPMhComplete || a.uncertain || a.corner!=SweetDisplayTurbo) return false;
+  /* An additional link lease is another user, not permission to override its
+-  * Held promise. Only boot + managed tickets may be physically suspended. */
+- for (unsigned i=fLifecycleLineage ? 3u : 4u;i<=6;++i) if (fClockReferences[i]!=(bridge ? 1u : 2u)) return false;
+- for (unsigned i=0;i<4;++i) {
++  * Held promise. Only admitted BOOT/managed and panel-DSI tickets may be
++  * suspended; lifecycleLinkStepAllowed requires MDP to have stopped. */
++ if (!displayClientsValid()) return false;
++ unsigned clients=(fPanelDSIClock ? 1u : 0u)+(fMdpClock ? 1u : 0u);
++ for (unsigned i=fLifecycleLineage ? 3u : 4u;i<=6;++i) if (fClockReferences[i]!=(bridge ? 1u : 2u)+clients) return false;
++ for (unsigned i=0;i<ClockLeaseSlots;++i) {
+   const SweetClockLease &v=fClockLeases[i];
+-  if (v.state==SweetClockHeld && (v.mask&linkParkedMask()) && v.token!=fClockBootToken && v.token!=fManagedClock) return false;
++  if (v.state==SweetClockHeld && (v.mask&linkParkedMask()) && v.token!=fClockBootToken && v.token!=fManagedClock && v.token!=fPanelDSIClock && v.token!=fMdpClock) return false;
+  }
+  for (unsigned i=0;i<SweetClockCount;++i) if ((fClockKnownMask&(1u<<i)) && !((0x70u|(fLinkSuspendedMask&8u))&(1u<<i))) {
+   uint32_t parent[6]={},value=dp_rd(dp_dispcc,mdssClockBranches[i].cbcr);
+@@ -767,7 +783,7 @@
+ }
+ bool SweetMDSS::lifecycleLinkStepAllowed(void)
+ {
+- if ((fLifecycleSupplyCycle && !fLifecycle.resetHeldLow) || !fLifecycleLinkCycle || !lifecycleParticipants() || !fLifecycle.sleeping || !fLifecycle.touchQuiesced ||
++ if (fMdpClock || (fLifecycleSupplyCycle && !fLifecycle.resetHeldLow) || !fLifecycleLinkCycle || !lifecycleParticipants() || !fLifecycle.sleeping || !fLifecycle.touchQuiesced ||
+      !fLifecycle.displayDrained || !lifecycleLinkResourcesHeld() || !lifecycleIRQDrained() ||
+      scanout_now()>=fLifecycleDeadline || scanout_now()>=fLifecycleStepDeadline ||
+      (dp_rd(dp_intf1,0x288)&(1u<<20)) || dp_rd(dp_intf1,0x2b4) ||
+--- a/iokit/Kernel/arm/SweetMDSSResources.inc
++++ b/iokit/Kernel/arm/SweetMDSSResources.inc
+@@ -156,7 +156,8 @@
+    failManagedResources(kIOReturnNotReady,"final resource validation failed"); return;
+   }
+   if (fHostProfile) {
+-   fManagedState=fLinkProfile ? ManagedLink : ManagedHost;
++   if (!prepareDisplayClients()) {failManagedResources(kIOReturnNotReady,"initial DSI client prepare");return;}
++  fManagedState=fLinkProfile ? ManagedLink : ManagedHost;
+    setProperty("SweetDisplayManagedState",(unsigned long long)fManagedState,32); return;
+   }
+   fManagedState=ManagedReady; fManagedResult=kIOReturnSuccess;
+@@ -244,7 +245,7 @@
+ }
+ bool SweetMDSS::managedRetainedResources(void)
+ {
+- if (!fRPMh || !fRPMhConsumer || !lifecyclePanelRailsValid() || !fManagedARC || fNoCFault || fClockFault ||
++ if (!displayClientsValid() || !fRPMh || !fRPMhConsumer || !lifecyclePanelRailsValid() || !fManagedARC || fNoCFault || fClockFault ||
+      !clockPrerequisites() || (fCoreProfile && !coreReady()) ||
+      (fHostProfile && fHostPhase!=HostReady && !(fLifecycleLinkCycle && fHostPhase==HostDormant)) ||
+      (fLinkProfile && (fLinkPhase!=LinkReady || !linkConfiguration()) &&
+@@ -258,11 +259,11 @@
+   * validate the independent BOOT lease/physical branches during that operation. */
+  if (fLifecycleLinkCycle && fLifecycleDataParking) {
+   if (linkOtherUsers()) return false;
+-  for (unsigned n=0;n<4;++n) {
++  for (unsigned n=0;n<ClockLeaseSlots;++n) {
+    const SweetClockLease &v=fClockLeases[n];
+-   if (v.state==SweetClockHeld && (v.mask&linkParkedMask()) && v.token!=fClockBootToken && v.token!=fManagedClock) return false;
+-  }
+-  if (fLinkSuspendedMask) for (unsigned n=fLifecycleLineage ? 3u : 4u;n<=6;++n) if (fClockReferences[n]!=1) return false;
++   if (v.state==SweetClockHeld && (v.mask&linkParkedMask()) && v.token!=fClockBootToken && v.token!=fManagedClock && v.token!=fPanelDSIClock && v.token!=fMdpClock) return false;
++  }
++  if (fLinkSuspendedMask) for (unsigned n=fLifecycleLineage ? 3u : 4u;n<=6;++n) if (fClockReferences[n]!=1u+(fPanelDSIClock ? 1u : 0u)) return false;
+  }
+  for (unsigned n=0;n<SweetClockCount;++n) if ((boot.mask&(1u<<n)) && !(fLinkSuspendedMask&(1u<<n))) {
+   uint32_t parent[6]={},v=dp_rd(dp_dispcc,mdssClockBranches[n].cbcr);
+--- a/iokit/Kernel/arm/SweetMDSSScanout.inc
++++ b/iokit/Kernel/arm/SweetMDSSScanout.inc
+@@ -198,6 +198,7 @@
+   s->advanceManagedResources();
+   if (s->fManagedState==ManagedFault) { s->cancelScanout("managed resource transaction failed"); return; }
+   if (s->fManagedState!=ManagedReady) { sender->setTimeoutMS(1); return; }
++  if (!s->startMDPClient()) {s->cancelScanout("initial MDP scan resource admission");return;}
+   if (s->fPipelineEnabled) {
+    IOReturn rc=s->beginPipeline();
+    if (rc!=kIOReturnSuccess) { s->cancelScanout("pipeline takeover configuration admission");return; }
+@@ -307,6 +308,10 @@
+   return kIOReturnSuccess;
+  }
+  unsigned irq=__atomic_load_n(&s->fIrqState,__ATOMIC_ACQUIRE);
++ if (!s->displayClientsValid()) {
++  s->finishLifecycle(kIOReturnNotReady,"display client lease lost");
++  s->cancelScanout("display client lease lost");
++ }
+  if (s->fManagedEnabled && s->fManagedState==ManagedFault)
+   s->cancelScanout("managed resources unavailable");
+  if (s->fScanoutState==SweetScanoutActive && (irq==IrqFailed || irq==IrqStopped))

@@ -182,13 +182,16 @@ int main(){auto*n=nub();fixtures();auto*s=make(n);assert(!writes());
   s=new SweetMDSS();assert(!s->start(n));s->release();queued.clear();
   failTimerCreate=failEventAdd=0;assert(!mdssClockWriter&&!liveMaps&&!rawBlocks&&!writes());
  }
- // Four bounded leases, overlapping references, stale tokens, no MMIO query.
+ // Fill the bounded ledger, including outer-client capacity, through the
+ // actual allocator; overlapping references, stale tokens, no MMIO query.
  fixtures();s=make(n);uint64_t old=s->fClockBootToken;
  uint64_t a=acquireCore(s),denied=999;
  assert(s->retainLocalClocks(SweetClockCore,&denied)==kIOReturnBusy&&!denied);complete(s);
  uint64_t b=acquireCore(s);complete(s);uint64_t c=acquireCore(s);complete(s);
+ const unsigned capacity=sizeof(s->fClockLeases)/sizeof(s->fClockLeases[0]);
+ for(unsigned slot=4;slot<capacity;++slot){(void)acquireCore(s);complete(s);}
  assert(s->retainLocalClocks(SweetClockCore,&denied)==kIOReturnNoResources&&!denied);
- for(unsigned i=0;i<3;++i)assert(s->fClockReferences[i]==4);
+ for(unsigned i=0;i<3;++i)assert(s->fClockReferences[i]==capacity);
  assert(s->releaseLocalClocks(a)==0);complete(s);
  uint64_t fresh=acquireCore(s);complete(s);assert(fresh!=a);
  SweetClockLease q{};assert(s->localClockStatus(a,&q)==kIOReturnBadArgument);

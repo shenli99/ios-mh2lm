@@ -415,6 +415,10 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
       'per-transfer leases enabled; shared BOOT/core retained' \
       'command-clock-held' \
       'command-clock-released' \
+      'DSI prepare/post-enable/pre-disable and MDP scan/stop enabled; shared core floor retained' \
+      'post-enable DSI released; MDP owns continuous scan' \
+      'MDP released after scan/IRQ drain; DSI retained for OFF' \
+      'unprepare DSI released after host/PHY stop' \
       'fresh frame before brightness; draining IRQ/MDP' \
       'post-frame HS brightness complete' \
       'SDR Auto color/sharpness HS admitted' \
