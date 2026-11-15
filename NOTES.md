@@ -1,5 +1,11 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-15, received a39 files are identical to a38; awaiting correct download)
+
+**CURRENT：用户提供0121a39，但两份包与a38逐字节相同，未包含0229；未打包新镜像。** kernel包59960926bytes/SHA256 7413affb237f76dd9e79945cc20e00e1e22281b194e3c9e69b53d8333d88d761，buildtree包23343324bytes/SHA256 4b76cd9cefadd500415a6d9513d4709075ac777ce91040ad9a3e54233cd511bb。两包gzip CRC/tar完整，非截断；包内kernel SHA504c186e594df95b65434b3ef0ef02f6b01791149fb0f1ff1bd5dd3bbf863238与清单一致，仍为a38。对照0229的80份源码，恰好五份生产修改未包含；154条源码断言缺新增5条，新增4个内核标记全部不存在。尚无CI run ID，不能确定旧文件来自下载选择、复制还是构建环节。
+证据scratch/artifact-0121a39/rejected-inputs.json。代码b9b3305/交接dd3670f保持；C08第3/4项仍为本地完成、待新内核和实机，a38仍是最新实机基线。此次仅产物审计和文档，无驱动/CI/固件修改、测试重跑、push或设备操作。
+**NEXT：用户从包含b9b3305（例如dd3670f或其后继）的新CircleCI成功构建重新下载xnu-kernel和xnu-buildtree，保存为logs/xnu-kernel-0121a39.gz、xnu-buildtree-0121a39.gz；agent重新核对后再打包ABI608/mode7。** 若新构建尚未完成，先等待其成功，不重测当前旧包。原a38镜像及BUG-006/008/009、暂缓BUG-007的状态保持。以下为历史。
+
 ## Agent handoff / active work (2026-11-15, 0229 panel DSI/MDP clients locally passed; awaiting a39)
 
 **CURRENT：用户指定的C08第3/4项已本地实现并提交b9b3305，待新CircleCI产物与实机；a38仍为最新实机基线。** 0229将面板DSI的prepare/post-enable/pre-disable/unprepare，以及MDP扫描前取得、自动刷新持续持有、OFF排空后归还接入同一clock ledger；槽位4→6，BOOT/managed/core/config底座保留。暂停DSI引用不授权命令，额外使用者阻止链路关闭，不确定完成保留引用/pin；未实现最后使用者的共享core关闭或完整PD4重建。

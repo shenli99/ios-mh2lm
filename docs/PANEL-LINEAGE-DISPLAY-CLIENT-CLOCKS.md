@@ -69,6 +69,8 @@ workspace证据入口：`scratch/framebuffer-0229/final-review.json`。2026-11-1
 
 ## 交付下一步
 
+**2026-11-15下载核对：收到的0121a39两包与a38逐字节相同，未包含0229，未生成新镜像。** 两包gzip/tar完整；80份源码中五份0229生产修改不匹配，新增5条源码断言和4个内核标记均缺失。证据 `scratch/artifact-0121a39/rejected-inputs.json`。需要从包含 `b9b3305`（例如 `dd3670f` 或其后继）的新CircleCI成功构建重新下载两包；文件名本身不能证明版本。尚无CI run ID，旧文件来源未确定；以下打包/实机步骤仍待正确产物。
+
 按 [BUILD-GUIDE](BUILD-GUIDE.md) 第1节第7步及第2节，由用户push本地main：
 
 ```sh
