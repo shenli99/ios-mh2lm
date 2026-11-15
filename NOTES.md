@@ -1,5 +1,12 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-15, a39 redownload verified; ABI608 images ready)
+
+**CURRENT：重新下载的0121a39已包含b9b3305/0229，identity/pipeline两档打包回读通过，待实机。** 首次收到旧a38的问题已解决，旧核对保留rejected-inputs.json。两包gzip CRC/tar完整，80份源码匹配0229验证树；相比a38仅五份预期变化，154source/260kernel markers通过。内核17777264bytes，SHA256 4accaf777d532a57a12780d94f87c7aa5854aeeb199da37691a853ea01b5c185，与包内清单一致。未提供CI run ID/完整build log，未核查云端提交元数据或全量告警。
+两镜像均35545088bytes，boot header/FAT中的kernel/ADT/TOML回读通过；ABI608固件/BootShim/追加DTB及pipeline605byte、identity477byte参数/ADT与a38相同。a31–a38旧镜像SHA保持。证据scratch/artifact-0121a39/final-review.json、verification.json、boot-abi608-verification.json；详见[镜像、采集与验收](docs/PANEL-D1-0121A39.md)。本轮仅核对/打包/文档，无驱动/CI/固件修改、驱动回归重跑、push或设备操作。
+**NEXT：用户先开USB采集，再fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a39-abi608-panel-pipeline.img。** SHA256 14e9398fc3fbf7744f9fa20eae04f40c785fe838de0675638f37307b656f903f。采集沿原脚本自动选择唯一ACM节点，Bash tee显示/保存host状态；启动后确认Reading且live文件增长。首次桌面/触摸/按键/低中高调光，再两轮息屏约5秒/唤醒，每轮正常后亮屏至少60秒，导出USB/持久日志。
+重点核对DSI prepare→MDP取得→新帧/亮度完成→DSI post-enable归还，以及DSI pre-disable重取→MDP排空归还→host/PHY停止→DSI unprepare归还；自动刷新/临时调光持续持有MDP，原命令/HS/ULPS/ESC/亮度/新帧/触摸完成门槛保持。当前无a39实机结果，a38仍为最新实机基线。C08第3/4项待验；第5/6项剩余范围与PD4独立重建分开，之后PD1/PD5→F5→F7。BUG-006/008/009保持，BUG-007暂缓。以下为历史。
+
 ## Agent handoff / active work (2026-11-15, received a39 files are identical to a38; awaiting correct download)
 
 **CURRENT：用户提供0121a39，但两份包与a38逐字节相同，未包含0229；未打包新镜像。** kernel包59960926bytes/SHA256 7413affb237f76dd9e79945cc20e00e1e22281b194e3c9e69b53d8333d88d761，buildtree包23343324bytes/SHA256 4b76cd9cefadd500415a6d9513d4709075ac777ce91040ad9a3e54233cd511bb。两包gzip CRC/tar完整，非截断；包内kernel SHA504c186e594df95b65434b3ef0ef02f6b01791149fb0f1ff1bd5dd3bbf863238与清单一致，仍为a38。对照0229的80份源码，恰好五份生产修改未包含；154条源码断言缺新增5条，新增4个内核标记全部不存在。尚无CI run ID，不能确定旧文件来自下载选择、复制还是构建环节。

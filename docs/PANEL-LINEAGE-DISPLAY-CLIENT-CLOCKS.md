@@ -69,6 +69,8 @@ workspace证据入口：`scratch/framebuffer-0229/final-review.json`。2026-11-1
 
 ## 交付下一步
 
+**2026-11-15重新下载已核对通过：[a39两档ABI608镜像已就绪](PANEL-D1-0121A39.md)，待mode7实机。** 80份源码匹配0229，154source/260kernel markers通过，两档回读确认内核/ADT/参数/固件正确。初次错误下载已解决，当前不再等待push或下载；下一步按交付文档采集日志、临时启动，首次接管/调光及两轮OFF/ON各60秒。证据 `scratch/artifact-0121a39/final-review.json`；a38保持最新实机基线。下方为原下载阶段记录。
+
 **2026-11-15下载核对：收到的0121a39两包与a38逐字节相同，未包含0229，未生成新镜像。** 两包gzip/tar完整；80份源码中五份0229生产修改不匹配，新增5条源码断言和4个内核标记均缺失。证据 `scratch/artifact-0121a39/rejected-inputs.json`。需要从包含 `b9b3305`（例如 `dd3670f` 或其后继）的新CircleCI成功构建重新下载两包；文件名本身不能证明版本。尚无CI run ID，旧文件来源未确定；以下打包/实机步骤仍待正确产物。
 
 按 [BUILD-GUIDE](BUILD-GUIDE.md) 第1节第7步及第2节，由用户push本地main：
