@@ -4,6 +4,10 @@
 
 原始0223审计未修改驱动、构建内核或操作设备。随后a33/0223、a34/0224普通OFF/ON通过；最新a35/0225结果见下方更新。旧基线保留，剩余源码差异不因唤醒通过改判为全流程一致。a32黑屏的单项根因尚未确定。
 
+## a39实机更新（2026-11-15，C08第3/4项普通路径通过）
+
+[a39 USB审计](PANEL-D1-0121A39.md)确认15个连贯外层DSI/MDP引用事件，首次接管与两轮mode7/PV普通OFF/ON通过；每轮24组逐命令引用完成链，分别1个和3个完整60秒IRQ窗口、dropped0，用户感觉无异常。a39成为最新基线，C08第3/4项普通路径收口，矩阵C08及六项清单同步更新。USB0NUL至SYSTEM_OFF，无持久对照；故障保护仍仅本地注入证据，BUG-006/007/008/009保持。下一步C08第5项物理转换及第6项协调；共享core/SMMU/RSC/QoS独立重建单列PD4。证据scratch/artifact-0121a39/wake-log-review.json。
+
 ## a39产物更新（2026-11-15，待实机）
 
 [重新下载的a39及ABI608镜像](PANEL-D1-0121A39.md)已核对80源码、154source/260kernel markers与镜像回读，匹配b9b3305/0229；初次旧包问题已解决。下一步实测新增DSI/MDP外层引用及原首次接管/调光/两轮OFF/ON各60秒，当前无a39实机结果，a38保持最新实机基线。C08第3/4项尚待硬件验收，其余矩阵判定保持；证据scratch/artifact-0121a39/final-review.json。
@@ -105,7 +109,7 @@ USB未采到内容、原因未确定，持久0NUL且未绕环，但无SYSTEM_OFF
 | C05 | 缓冲准备/寿命 | **适**。0223 mode2/7 发布服务前 prepare4KiB，跨 OFF/ON 保留；Lineage `L:dsi-staging/dsi_display.c:3000/519` 首 transfer 懒分配4KiB。目的为移出活动 gate 首次分配，不是照搬分配时机；也未证明启动分配可被 deadline 打断。 |
 | C06 | 每包软件内存 | **适**。Lineage `L:dsi-staging/dsi_ctrl.c:986` 每包另有 copy/pad 临时分配，不能说 Lineage 从无逐包 allocation。XNU 栈编码、保留 DMA descriptor；真实完成前不复用/释放。 |
 | C07 | command engine 引用 | **同/限定语义**。OFF 表前释放 display，每 transfer 获取/完成后释放，ON 整表后持有 display；wake reset 恢复旧 control，DDIC reset 时 command bit 关闭。`L:dsi-staging/dsi_display.c:289/333/3000/7791/8031`；`X:SweetMDSSDSI.inc:75`、Lifecycle.inc:544、Host.inc:134。 |
-| C08 | 每包 clock/wake 与停扫 | **局部/第1/2项普通实机通过；第3/4项0229本地完成、待a39实机；第5/6项仍有缺口**。Lineage host_transfer的ALL_CLKS→wake_up（固定版为空）→engine→transfer→engine/clock release按DSI/MDP引用聚合。0228逐命令引用已有a38两轮实机，0227 ESC0停启已有a37五轮实机。0229接入面板DSI的prepare/post-enable/pre-disable/unprepare和MDP扫描/排空周期，自动刷新期间MDP持续持有，真实命令完成才归还逐包引用。BOOT/managed/core/config底座仍保留，最后使用者的完整物理转换尚缺；命令停扫跨度仍是XNU适配。core/SMMU/RSC/QoS状态丢失后独立重建单列PD4。见[六项清单与0229证据](PANEL-LINEAGE-DISPLAY-CLIENT-CLOCKS.md)。 |
+| C08 | 每包 clock/wake 与停扫 | **局部/第1/2项普通实机通过；第3/4项0229本地完成、a39普通mode7/PV两轮已验；第5/6项仍有缺口**。Lineage host_transfer的ALL_CLKS→wake_up（固定版为空）→engine→transfer→engine/clock release按DSI/MDP引用聚合。0228逐命令引用已有a38两轮实机，0227 ESC0停启已有a37五轮实机。0229接入面板DSI的prepare/post-enable/pre-disable/unprepare和MDP扫描/排空周期，自动刷新期间MDP持续持有，真实命令完成才归还逐包引用。BOOT/managed/core/config底座仍保留，最后使用者的完整物理转换尚缺；命令停扫跨度仍是XNU适配。core/SMMU/RSC/QoS状态丢失后独立重建单列PD4。见[六项清单与0229证据](PANEL-LINEAGE-DISPLAY-CLIENT-CLOCKS.md)。 |
 | C09 | 完成、延时与 IRQ | **同+适**。均要求真实完成再做表内 delay；Lineage `dsi_ctrl.c:1304` DMA_DONE IRQ/completion、200ms超时后读状态补漏 IRQ；XNU timer1ms查询，同步亮度最长200ms轮询，fresh DONE+MDP/DMA idle+ACK/error 检查。不是相同通知/调度模型。 |
 | C10 | 失败/取消后的缓冲与引擎 | **适**。XNU uncertain传输保留引擎引用，0228同时保留实际clock引用，DMA另保留独立pin；0229失败/取消/provider消失/stop保留尚存外层引用，晚到回调不能释放或重新提交。poison后禁止继续DSI清理或撤资源，合法显示IRQ mask/ACK仍可执行。Lineage有FIFO reset、释放引用和部分OFF错误继续清理，见 `dsi_ctrl.c:1304`、`dsi_panel.c:4454`；真实host_transfer参考链确认其错误出口仍归还clock引用。不能通过“超时就当完成”获得表面相同的退出。 |
 
@@ -191,7 +195,7 @@ workspace `scratch/framebuffer-0223/full-flow-audit.py` 已运行，输出 `full
 
 ## 后续对齐的明确范围
 
-1. 0224 D03/D04、0225 D07/D08、0226 D09默认SDR及0227 C08普通ESC0停启已有a34–a37实机普通功能证据。0228逐命令DSI引用已有a38两轮普通成功路径与每轮两个60秒IRQ窗口。0229外层DSI/MDP引用本地完成，a39产物/镜像已核对就绪，下一步实测；之后继续C08第5项等剩余范围和单列PD4独立重建。首次亮度状态发布缺口BUG-008单列，音量显示BUG-009独立诊断。D09动态策略仍保留；各批从真实caller和条件建立期望。
+1. 0224 D03/D04、0225 D07/D08、0226 D09默认SDR及0227 C08普通ESC0停启已有a34–a37实机普通功能证据。0228逐命令DSI引用已有a38两轮普通成功路径与每轮两个60秒IRQ窗口。0229外层DSI/MDP引用已有a39普通mode7/PV两轮及各60秒实机证据，第3/4项本批收口；下一步C08第5项等剩余范围和单列PD4独立重建。首次亮度状态发布缺口BUG-008单列，音量显示BUG-009独立诊断。D09动态策略仍保留；各批从真实caller和条件建立期望。
 2. 首次接管与持续刷新：B01的splash、E04–E06的autorefresh/提交/帧同步，不能靠更改一个寄存器值宣布整段一致。
 3. 完整显示驱动：B04–B08、E07、F05/F06、G组中的缺项继续作为独立实现范围；不能用“普通OFF/ON通过”销项。
 4. 用户指定FIFO/物理DMA、prepared buffer与真实完成/独立pin、SMMU/IRQ/资源归属保护继续保留；跨OS亮度政策等适配要显式记录，不机械复制Linux错误清理。

@@ -335,6 +335,8 @@ BUG-001/004未关闭。780–783行driverkitd仍sig9/ns1/code7，BUG-005仍存�
 
 ## BUG-006：console ring提前发布长度，实时日志偶发零字节
 
+2026-11-15补充a39：USB采集成功，566638bytes/6635行/0NUL，从启动中段至SYSTEM_OFF；host记录Reading ttyACM0及后续断开/等待，无时间戳。未找到a39持久日志，未作双路对照；本次可采集不确定a38未采到日志的根因，0NUL也不证明ring竞态修复。用户“感觉无异常”未逐项确认BUG-007/008/009消失，四项状态保持。详见[a39实机审计](PANEL-D1-0121A39.md)。
+
 2026-11-15补充a38：本轮USB live为空、host仅“等待/dev/ttyACM0”，持久日志ACM配置成功但只有host关闭端口，无打开记录。属于本轮未采到USB内容的现象，原因未确定，不与ring提前发布竞态合并归因。持久有效区573401bytes/6649行、0NUL，无双路对照；BUG-006保持。详见[a38实机审计](PANEL-D1-0121A38.md)。用户仅主观“感觉无异常”，也不据此关闭BUG-007/008/009。
 
 2026-11-14，a33显示验证时发现。USB `logs/live-0121a33-abi608-panel-pipeline.txt:4196`含16个NUL，持久解码`scratch/artifact-0121a33/persistent-log.txt:4478`对应整行完整；USB继续记录packet-done、两次ON complete和最终SYSTEM_OFF。a32 pipeline1也有单行16NUL。原文件SHA和逐行对应见[a33实机审计](PANEL-D1-0121A33.md)。

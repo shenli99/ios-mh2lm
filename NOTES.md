@@ -1,5 +1,13 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-15, a39 two wakes and C08 items 3/4 hardware passed)
+
+**CURRENT：a39普通mode7/PV首次接管及两轮OFF/ON、外层DSI/MDP引用已实机通过，用户“感觉无异常”；a39成为最新基线。** 15个外层状态事件token/state/suspended连贯：初始DSI4/MDP5，OFF前DSI191/231重取、排空归还MDP、host/PHY停后unprepare归还DSI；ON先DSI196/236暂停0x78持票，链路恢复/色彩完成后取得MDP221/261，首帧/HS亮度/第二帧完成后post-enable归还DSI，再恢复触摸。自动刷新/临时调光保持MDP，非完整stop/free或最后使用者关core证明。
+USB566638bytes/6635行/0NUL，SHA256 81c714e6c6d0170eca822b7017bd729b10937f8fdbb4d99cf7af40a1a489090b，从启动中段至6635行SYSTEM_OFF。首次generation1/HANDOFF已捕获，早期prepared/身份声明未捕获；活动段无再分配。两轮各17包LP/4DMA→六包HS色彩/1DMA→generation2/3→HS亮度target1→第二kickoff/真实完成→触摸，分别1个和3个完整60000–60003ms IRQ窗口、59.930–59.932Hz/dropped0；后续vsync/触摸/正CPU呈现均存在。每轮24组逐命令引用完成链，另8组同步亮度token6–13成功。两轮各60秒要求通过，不证明60Hz UI/色度/长期耐久。
+host548bytes有Reading ttyACM0及断开/等待，无时间戳；本轮USB采集成功，无a39持久对照。首次OFF后无显示生命周期WARN/ERROR/panic/deadline；启动/系统其它诊断未认定消失。BUG-006/008/009保持，BUG-007继续暂缓，未逐项获得消失确认。
+**NEXT：C08第3/4项本批普通路径收口，下一步第5项多使用者汇总后的物理转换，再结合第6项处理提交协调；core/SMMU/RSC/QoS状态丢失后独立重建单列PD4，然后PD1/PD5→F5→F7。** 本轮无需重编或重测同版。故障注入仍仅本地证据，BOOT/managed/core/config底座保留。详见[实机审计](docs/PANEL-D1-0121A39.md)及[六项状态](docs/PANEL-LINEAGE-DISPLAY-CLIENT-CLOCKS.md)。
+实现b9b3305、交付67da2bc；证据scratch/artifact-0121a39/audit-wake.py、wake-log-review.json、wake-user-input.json、wake-final-review.json。原a39镜像SHA仍14e9398fc3fbf7744f9fa20eae04f40c785fe838de0675638f37307b656f903f。本轮仅日志/源码分析、文档和本地提交，无驱动/CI/固件/镜像修改、驱动回归重跑、push或设备操作。以下为历史。
+
 ## Agent handoff / active work (2026-11-15, a39 redownload verified; ABI608 images ready)
 
 **CURRENT：重新下载的0121a39已包含b9b3305/0229，identity/pipeline两档打包回读通过，待实机。** 首次收到旧a38的问题已解决，旧核对保留rejected-inputs.json。两包gzip CRC/tar完整，80份源码匹配0229验证树；相比a38仅五份预期变化，154source/260kernel markers通过。内核17777264bytes，SHA256 4accaf777d532a57a12780d94f87c7aa5854aeeb199da37691a853ea01b5c185，与包内清单一致。未提供CI run ID/完整build log，未核查云端提交元数据或全量告警。
