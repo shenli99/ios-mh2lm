@@ -55,6 +55,7 @@
 #include <pexpert/arm/protos.h>
 #include <pexpert/arm64/apple_arm64_regs.h>
 #include <pexpert/arm64/board_config.h>
+#include <pexpert/arm64/sweet_gic.h>   /* SPI dispatch helper for the SWEET path */
 
 #include <vm/vm_page.h>
 #include <vm/pmap.h>
@@ -1883,6 +1884,7 @@ sleh_irq(arm_saved_state_t *state)
 	} else {
 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
 		bool sweet_handled = false;
+		bool sweet_completed = false;
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
 		extern bool sweet_spmi_mux_irq(unsigned int intid);
 		sweet_handled = sweet_spmi_mux_irq(intid);
@@ -1907,13 +1909,27 @@ sleh_irq(arm_saved_state_t *state)
 			sweet_handled = sweet_mdss_irq(intid);
 		}
 #endif
-		if (!sweet_handled && cdp->interrupt_handler) {
+		/*
+		 * Staged handover: the chain above still owns every driver that
+		 * has not migrated yet, and only an INTID it did not claim
+		 * reaches the GIC controller. The controller dispatches the
+		 * source and completes it, so this path must not write
+		 * ICC_EOIR1_EL1 again -- exactly one EOI per interrupt. It
+		 * returns 0 for SGIs/PPIs and spurious INTIDs, which stay ours.
+		 */
+		if (!sweet_handled && sweet_gic_installed() &&
+		    sweet_gic_handle_irq(iar)) {
+			sweet_completed = true;
+		}
+		if (!sweet_handled && !sweet_completed && cdp->interrupt_handler) {
 			cdp->interrupt_handler(cdp->interrupt_target,
 			    cdp->interrupt_refCon,
 			    cdp->interrupt_nub,
 			    intid);
 		}
-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
+		if (!sweet_completed) {
+			__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
+		}
 	}
 	__builtin_arm_isb(ISB_SY);
 #else

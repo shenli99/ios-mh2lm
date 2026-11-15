@@ -23,6 +23,7 @@ SECURITY_READ_ONLY_LATE(uint32_t) sweet_vtimer_intid = SWEET_VTIMER_INTID;
 #endif
 
 static vm_offset_t gicd_base;
+static vm_offset_t gicd_size;
 static vm_offset_t gicr_base;
 static vm_offset_t gicr_size;
 
@@ -72,6 +73,37 @@ find_gicr_pe_base()
 
 	panic("%s: cannot find GICR base for core %u", __func__, ml_get_cpu_number(phys_id));
 }
+
+#if defined(SWEET)
+/*
+ * The distributor and redistributor windows are mapped here, once for the
+ * whole kernel; SweetGIC uses these instead of mapping the GIC a second
+ * time. All four stay zero until the boot CPU has parsed the GIC node.
+ */
+uint64_t
+pe_gic_distributor_base(void)
+{
+	return (uint64_t) gicd_base;
+}
+
+uint64_t
+pe_gic_distributor_size(void)
+{
+	return (uint64_t) gicd_size;
+}
+
+uint64_t
+pe_gic_redistributor_base(void)
+{
+	return (uint64_t) gicr_base;
+}
+
+uint64_t
+pe_gic_redistributor_size(void)
+{
+	return (uint64_t) gicr_size;
+}
+#endif /* SWEET */
 
 void
 pe_init_fiq()
@@ -128,6 +160,7 @@ pe_init_fiq()
 
 		// Find GICD base address
 		gicd_base = ml_io_map(soc_base_phys + gicd_base_prop, gicd_size_prop);
+		gicd_size = gicd_size_prop;
 
 		if (!gicd_base) {
 			panic("%s: cannot map GICD region", __func__);

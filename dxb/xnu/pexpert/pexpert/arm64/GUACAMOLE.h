@@ -49,34 +49,7 @@
 #define SWEET_VTIMER_INTID        19
 #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
 
-#define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
-
-#define GICR_PE_SIZE              0x20000 // Size of each redistributor region
-
-/* GICv3 register definitions; see GICv3 spec (Arm IHI 0069G) */
-#define GICD_CTLR                 0x0
-
-/* Non-secure view of GICD_CTLR (DS=0) */
-#define GICD_CTLR_ENABLEGRP1      0x1
-#define GICD_CTLR_ENABLEGRP1A     0x2
-#define GICD_CTLR_ARE_NS          0x10
-#define GICD_CTLR_RWP             0x80000000
-
-#define GICR_TYPER                              0x08
-#define GICR_WAKER                              0x14
-#define GICR_IGROUPR0                           0x10080
-#define GICR_ISENABLER0                         0x10100
-#define GICR_IPRIORITYR0                        0x10400
-
-#define GICR_TYPER_AFFINITY_VALUE_SHIFT         32
-#define GICR_TYPER_LAST                         0x10
-
-#define GICR_WAKER_PROCESSORSLEEP               0x2
-#define GICR_WAKER_CHILDRENASLEEP               0x4
-
-#define ICC_CTLR_EOIMODE                        0x2
-
-#define ICC_SRE_SRE                             0x1
-/* End of GICv3 register definitions */
+/* GICv3 register layout and the board-facing controller API. */
+#include <pexpert/arm64/sweet_gic.h>
 
 #endif /* ! _PEXPERT_ARM64_GUACAMOLE_H */
