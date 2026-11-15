@@ -1,5 +1,11 @@
 # 完整面板驱动子计划：从 ABL 交接到 XNU 独立初始化
 
+## 0229 当前进展（2026-11-15，C08第3/4项本地完成，待a39）
+
+[面板DSI与显示MDP外层引用](PANEL-LINEAGE-DISPLAY-CLIENT-CLOCKS.md)已提交b9b3305。DSI按prepare/post-enable/pre-disable/unprepare持有与归还；MDP在扫描前取得、自动刷新及临时调光停扫期间持有、真正OFF排空后归还。两角色进入同一账本，原BOOT/managed/core/config底座保留；21组驱动回归、Lineage参考、ARM64及45patch/80文件重放通过。六个C08子项的状态和边界固定记录在上述实现文档。
+**下一步用户push main，下载包含0229的CircleCI kernel/buildtree（0121a39），agent核对打包，再首次接管/调光及两轮OFF/ON各60秒。** a38保持最新实机基线，新引用尚未实机验收。第5项的完整物理转换和第6项提交协调差异仍保留；共享core/SMMU/RSC/QoS状态丢失后独立重建单列PD4，之后PD1/PD5→F5→F7。BUG-006/008/009保持、BUG-007暂缓。
+证据scratch/framebuffer-0229/final-review.json、handoff-recheck.json。接手仅复核既有证据并补齐文档，无新驱动/CI修改、回归重跑、push或设备操作。以下为历史。
+
 ## 0121a38 当前进展（2026-11-15，两轮普通唤醒及命令引用已验）
 
 [a38实机审计](PANEL-D1-0121A38.md)：持久日志确认mode7/PV两轮完整OFF/ON，generation1→2→3；每轮24对命令clock held→trigger→DONE→released，另有8对同步亮度成功引用。每轮两个完整60秒IRQ窗口（59.854–59.931Hz）、dropped0，用户感觉无异常，a38成为最新普通唤醒基线。证据scratch/artifact-0121a38/wake-log-review.json。
@@ -496,8 +502,8 @@ BUG-003 继续独立跟踪，不能提前声称完整驱动必然解决锁屏时
 
 ## 6. 当前执行点
 
-当前以顶部a38交接为准：a38两轮普通唤醒及逐命令时钟引用已实测通过，每轮有两个完整60秒IRQ窗口、dropped0。
-下一步推进C08外层DSI/MDP资源与其余PD4，之后补PD1剩余ABL退出和PD5，进入F5/F7。
+当前以顶部0229交接为准：C08第3/4项本地实现/验证完成，提交b9b3305；a38保持最新实机基线。
+下一步先构建、核对并打包a39，验证新增DSI/MDP引用。通过后推进C08第5项等剩余范围与单列的PD4独立重建，之后补PD1剩余ABL退出和PD5，进入F5/F7。
 普通唤醒成功不等于所有共享状态丢失后的独立重建；引用归还也不等于物理断电。完整PD计划仍进行中。
 
 以下为0181/0182基础交接时的历史证据与缺口：

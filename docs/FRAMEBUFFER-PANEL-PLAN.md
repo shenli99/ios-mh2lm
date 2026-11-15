@@ -1,5 +1,10 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
+## 0229 当前进展（2026-11-15，C08第3/4项本地完成，待a39）
+
+[面板DSI与显示MDP外层引用](PANEL-LINEAGE-DISPLAY-CLIENT-CLOCKS.md)已提交b9b3305，21组驱动回归、Lineage参考、ARM64及45patch/80文件重放通过。DSI按面板准备/完成/关屏/停止持票，MDP在扫描前取得、自动刷新期间持续持有、OFF排空后归还；同一账本保留BOOT/managed/core/config底座，尚非最后使用者的共享资源物理关闭。
+**下一步用户push并下载包含0229的CircleCI kernel/buildtree（0121a39），agent核对打包，再首次接管/调光及两轮OFF/ON各60秒。** a38仍为最新实机基线，第3/4项待实机验收；C08第5项完整物理转换、第6项提交协调差异及单列PD4重建继续保留，之后PD1/PD5→F5→F7。BUG-006/008/009保持、BUG-007暂缓。证据scratch/framebuffer-0229/final-review.json、handoff-recheck.json；本次接手仅复核证据/文档，无新驱动/CI修改、回归重跑、push或设备操作。以下为历史。
+
 ## 0121a38 当前进展（2026-11-15，两轮普通唤醒及命令引用已验）
 
 [a38实机审计](PANEL-D1-0121A38.md)：持久日志确认mode7/PV两轮完整OFF/ON，generation1→2→3；每轮24对命令clock held→trigger→DONE→released，另有8对同步亮度成功引用。每轮两个完整60秒IRQ窗口（59.854–59.931Hz）、dropped0，用户感觉无异常，a38成为最新普通唤醒基线。证据scratch/artifact-0121a38/wake-log-review.json。

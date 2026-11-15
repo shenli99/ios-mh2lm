@@ -1,5 +1,13 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-15, 0229 panel DSI/MDP clients locally passed; awaiting a39)
+
+**CURRENT：用户指定的C08第3/4项已本地实现并提交b9b3305，待新CircleCI产物与实机；a38仍为最新实机基线。** 0229将面板DSI的prepare/post-enable/pre-disable/unprepare，以及MDP扫描前取得、自动刷新持续持有、OFF排空后归还接入同一clock ledger；槽位4→6，BOOT/managed/core/config底座保留。暂停DSI引用不授权命令，额外使用者阻止链路关闭，不确定完成保留引用/pin；未实现最后使用者的共享core关闭或完整PD4重建。
+21组驱动回归、固定Lineage参考链、ARM64单文件编译、45patch/80文件严格重放通过；1613→1640告警，新增27条有界数组unsafe-buffer-usage，未抑制。CI仅新增5条源码断言，总154，本地配置检查通过；打包新增4个kernel标记，真实旧a38被拒绝且原镜像SHA保持。详见[实现、C08六项状态与交付](docs/PANEL-LINEAGE-DISPLAY-CLIENT-CLOCKS.md)。
+本次接续codex-session-24.md，确认中断发生在代码提交之后、文档收尾之前；重新执行final-review.py核对既有通过日志、源码/补丁/镜像SHA及编译记录，补齐计划/交接。证据scratch/framebuffer-0229/final-review.json、handoff-recheck.json；没有重跑驱动回归或修改生产代码/CI/固件。
+**NEXT：用户运行 `git -C /home/shenli/work1/ref/ios-mh2lm push origin main`，下载包含b9b3305/0229的新CircleCI kernel/buildtree为logs/xnu-kernel-0121a39.gz、xnu-buildtree-0121a39.gz；agent核对后沿原ABI608打包mode7。** 当前无a39内核/镜像/CI run或实机结果；未push、触发CI或操作设备。验收首次接管/桌面/触摸/按键/低中高调光，再两轮息屏约5秒/唤醒，每轮正常后亮屏至少60秒；核对DSI/MDP新引用顺序及原命令/HS/ULPS/ESC/亮度/新帧/触摸完成链。先确认USB显示Reading且文件增长，保留持久日志。
+保留a38 mode7镜像，SHA256 c4941c89ac3863d6fa9a516dc809d58529f8687f1e4f3de4485b490dc04d775f。BUG-006/008/009保持、BUG-007暂缓。第3/4项实机验收后继续C08第5项等剩余范围；core/SMMU/RSC/QoS独立重建单列PD4，之后PD1/PD5→F5→F7。以下为历史。
+
 ## Agent handoff / active work (2026-11-15, a38 persistent wake/command-clock audit passed)
 
 **CURRENT：a38/mode7/PV两轮普通OFF/ON与0228命令引用已实机验证，用户“感觉无异常”，a38成为最新基线。** 每轮17包LP/4DMA→六包HS色彩/1DMA→generation2/3首帧→HS亮度target1→同generation第二kickoff→触摸/ON完成；HS→ULPS→ESC停止/恢复及完整完成顺序保持。各轮24对held/trigger/DONE/released按DSI token/completed逐包配对，另有8对同步亮度成功引用token4–11。
