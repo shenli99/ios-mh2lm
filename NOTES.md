@@ -1,5 +1,13 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## Agent handoff / active work (2026-11-15, a38 ABI608 images verified; awaiting hardware)
+
+**CURRENT：0121a38下载产物和现有两档镜像已复核通过，mode7可交付实机。** 从codex-session-22/23接续“下载好了”；发现已有未收尾的a38核对/打包文件，重新执行产物核对和镜像回读，补成final-review.json及本次交接，没有重复打包。实现072200c/0228，前置交接a93a1e7；a37仍为最新普通唤醒实机基线。
+两包gzip CRC/tar完整，80份源码与0228验证树逐字节相同，相比a37仅MDSS.cpp/Clock.inc/DSI.inc三份预期变化；149source/256kernel markers通过。内核17776688bytes，SHA256 504c186e594df95b65434b3ef0ef02f6b01791149fb0f1ff1bd5dd3bbf863238，与包内清单一致。无独立CI run ID/完整构建日志，不宣称云端提交元数据或全部告警已核查。
+identity/pipeline均35545088bytes，boot header/FAT内kernel/ADT/TOML回读通过；ABI608固件/BootShim/追加DTB和pipeline605byte、identity477byte参数保持，a31–a37旧镜像SHA保持。证据scratch/artifact-0121a38/final-review.json、recheck-artifacts.txt、recheck-boots.txt；完整哈希与命令见[交付与验收](docs/PANEL-D1-0121A38.md)。
+**NEXT：用户先开USB采集，再fastboot boot /home/shenli/work1/out-bs/boot-16k-0121a38-abi608-panel-pipeline.img。** 镜像SHA256 c4941c89ac3863d6fa9a516dc809d58529f8687f1e4f3de4485b490dc04d775f。首次桌面/触摸/按键/低中高调光，再两轮息屏约5秒/唤醒，每轮正常后各亮屏至少60秒；比较亮度/色彩/持续刷新，留USB及持久日志。核对command-clock-held/released与完整OFF/ON完成顺序；目前无a38实机结果。
+C08外层DSI/MDP引用、core/SMMU/RSC/QoS及其余PD4保持未完成，后续PD1/PD5→F5→F7。BUG-006/008/009保留，BUG-007继续暂缓。此次仅复核/文档/本地提交，无驱动/CI/固件修改、驱动测试重跑、push、CI触发或设备操作。以下为历史。
+
 ## Agent handoff / active work (2026-11-15, 0228 command clock leases locally passed; awaiting a38)
 
 **CURRENT：0228逐命令DSI时钟引用已实现并提交072200c，本地验证通过，待新CircleCI产物和实机。** a37/mode7/PV五轮普通唤醒及ESC0停启仍是最新实机基线；C08仅局部推进，完整PD4未完成。

@@ -1,5 +1,10 @@
 # MH2LM 显示/面板驱动重构计划（大目标二）
 
+## 0121a38 当前进展（2026-11-15，镜像核对通过，待实机）
+
+[a38交付与验收](PANEL-D1-0121A38.md)：两包完整，80份源码匹配072200c/0228，149source/256kernel markers通过；现有identity/pipeline镜像回读通过，ABI608/ADT/参数及a31–a37镜像保持。证据scratch/artifact-0121a38/final-review.json。
+**下一步先USB采集，再用户fastboot boot a38/mode7；首次接管/调光及两轮OFF/ON，每轮正常后亮屏至少60秒。** 当前无a38实机结果，a37仍为基线；完整C08外层引用及其余PD4继续，BUG-006/008/009保留、BUG-007暂缓。以下为历史。
+
 ## 0228 当前进展（2026-11-15交接，待a38构建与实机）
 
 [逐命令DSI时钟引用](PANEL-LINEAGE-COMMAND-CLOCK.md)已提交072200c：mode2/7命令使用现有clock ledger，真实完成后释放，不确定时保留引用/pin；外层BOOT/managed资源继续持有。19组驱动测试、Lineage参考链、ARM64及44patch/80文件重放本地通过，证据scratch/framebuffer-0228/final-review.json。

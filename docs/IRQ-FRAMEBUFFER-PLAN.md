@@ -1,5 +1,10 @@
 # MH2LM IRQ、Framebuffer、日志与电源管理路线图
 
+## 0121a38 当前进展（2026-11-15，镜像核对通过，待实机）
+
+大目标二/PD4继续推进。[a38](PANEL-D1-0121A38.md)下载包完整，80源码匹配0228，现有ABI608两档镜像回读通过；证据scratch/artifact-0121a38/final-review.json。**下一步先USB采集，再用户启动a38/mode7，验证首次接管/调光及两轮OFF/ON各60秒。** a37仍为最新实机基线，a38尚待实测。
+C08外层DSI/MDP引用及core/SMMU/RSC/QoS、其余PD4未完成，之后PD1/PD5→F5→F7；大目标三日志、四整机电源管理顺序保持。BUG-006/008/009保留、BUG-007暂缓。以下为历史。
+
 ## 0228 当前进展（2026-11-15交接，待a38构建与实机）
 
 大目标二/PD4继续推进。[C08逐命令DSI时钟引用](PANEL-LINEAGE-COMMAND-CLOCK.md)已提交072200c，本地19组驱动测试、Lineage参考链、ARM64及44patch/80文件重放通过，尚无新实机结果。a37普通唤醒及ESC0停启已验证；本批增加命令引用管理，BOOT/managed外层资源仍保留。
