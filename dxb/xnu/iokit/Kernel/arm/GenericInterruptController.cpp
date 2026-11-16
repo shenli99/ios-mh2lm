@@ -13,7 +13,13 @@
  * controller that owned them would need a per-CPU table for something nothing
  * asks for yet.
  *
- * Two parameter sources coexist:
+ * Creation is ADT-driven: gic_install() looks up the controller's own node
+ * (/arm-io/gic), reads reg, AAPL,phandle and #interrupt-cells, maps the
+ * windows and registers under the phandle name XNU derives
+ * (IOInterruptController%08X). The platform expert's pe_gic_*() windows,
+ * mapped from the same node before BSD existed, are only a fallback.
+ *
+ * Two parameter sources coexist for the sources:
  *
  *   hardcoded (today)   gic_register_irq(intid, ...) passes the INTID with a
  *                       NULL nub; resolveSpec() reads the per-INTID table at
@@ -44,10 +50,15 @@
 #include "GenericInterruptController.h"
 
 #include <IOKit/IOLib.h>
+#include <mach/vm_param.h>
+#include <vm/memory_types.h>
 #include <stdint.h>
 
 #define SWEET_LOG_SINK IOLog
 #include "../../../bsd/dev/sweet_log_level.h"
+
+extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned int);
+extern "C" void ml_io_unmap(vm_offset_t, vm_size_t);
 
 #if defined(SWEET)
 
@@ -76,6 +87,83 @@ static const gic_interrupt_spec gHardcodedSpecs[] = {
 	{ 240, GIC_SPEC_TYPE_LEVEL, GIC_SPEC_DEFAULT_PRIORITY, 0 }, /* TLMM summary */
 	{ 513, GIC_SPEC_TYPE_LEVEL, GIC_SPEC_DEFAULT_PRIORITY, 0 }, /* PMIC-arb */
 };
+
+/* ------------------------------------------------- ADT node description */
+
+struct GicAdtNode {
+	uint64_t gicdPhys;
+	uint64_t gicdSize;
+	uint64_t gicrPhys;
+	uint64_t gicrSize;
+	uint32_t phandle;
+	uint32_t interruptCells;
+};
+
+/*
+ * Read the controller's own description out of the ADT. pe_fiq() parses the
+ * same node for the very early vtimer setup (it has to map the GIC before BSD
+ * exists); here the controller owns the values, which is what lets the rest
+ * of the platform move to "parameters come from the device tree".
+ *
+ * reg is four u64 cells relative to the /arm-io ranges parent (SOC base):
+ * gicd offset, gicd size, gicr offset, gicr size. The phandle is the name
+ * clients will resolve through (IODTInterruptControllerName), and
+ * #interrupt-cells is what their "interrupts" arrays will carry.
+ */
+static bool
+gicAdtLookup(GicAdtNode *node)
+{
+	IORegistryEntry *armIo;
+	IORegistryEntry *gic;
+	OSData *ranges;
+	OSData *reg;
+	OSData *value;
+	const uint64_t *cells;
+	uint64_t socBase;
+
+	bzero(node, sizeof(*node));
+	node->interruptCells = GIC_SPEC_CELLS;
+
+	gic = IORegistryEntry::fromPath(GIC_ADT_NODE_PATH, gIODTPlane);
+	if (!gic) {
+		return false;
+	}
+	armIo = IORegistryEntry::fromPath("/arm-io", gIODTPlane);
+	reg = OSDynamicCast(OSData, gic->getProperty("reg"));
+	ranges = armIo ? OSDynamicCast(OSData, armIo->getProperty("ranges")) : NULL;
+	if (!reg || reg->getLength() < 4 * sizeof(uint64_t) ||
+	    !ranges || ranges->getLength() < 3 * sizeof(uint64_t)) {
+		if (armIo) {
+			armIo->release();
+		}
+		gic->release();
+		return false;
+	}
+
+	/* /arm-io ranges: child address, parent address, size. */
+	socBase = ((const uint64_t *)ranges->getBytesNoCopy())[1];
+	cells = (const uint64_t *)reg->getBytesNoCopy();
+	node->gicdPhys = socBase + cells[0];
+	node->gicdSize = cells[1];
+	node->gicrPhys = socBase + cells[2];
+	node->gicrSize = cells[3];
+
+	value = OSDynamicCast(OSData, gic->getProperty("AAPL,phandle"));
+	if (value && value->getLength() == sizeof(uint32_t)) {
+		node->phandle = *(const uint32_t *)value->getBytesNoCopy();
+	}
+	value = OSDynamicCast(OSData, gic->getProperty("#interrupt-cells"));
+	if (value && value->getLength() == sizeof(uint32_t)) {
+		node->interruptCells = *(const uint32_t *)value->getBytesNoCopy();
+	}
+
+	if (armIo) {
+		armIo->release();
+	}
+	gic->release();
+
+	return node->gicdSize != 0 && node->gicrSize != 0;
+}
 
 /* ---------------------------------------------------------------- MMIO */
 
@@ -934,6 +1022,8 @@ GenericInterruptController::initWithBases(vm_offset_t gicd, vm_size_t gicdSize,
 	fMaxIntID = GIC_INTID_SPI_LAST;
 	fReady = false;
 	fMaskStraySPIs = false;
+	fAdtPhandle = 0;
+	fInterruptCells = GIC_SPEC_CELLS;
 	fStats.interrupts = 0;
 	fStats.handled = 0;
 	fStats.spurious = 0;
@@ -1039,6 +1129,13 @@ GenericInterruptController::bringUp(void)
 	return kIOReturnSuccess;
 }
 
+void
+GenericInterruptController::setAdtInfo(uint32_t phandle, uint32_t interruptCells)
+{
+	fAdtPhandle = phandle;
+	fInterruptCells = interruptCells ? interruptCells : GIC_SPEC_CELLS;
+}
+
 GenericInterruptController *
 GenericInterruptController::controller(void)
 {
@@ -1056,10 +1153,15 @@ GenericInterruptController::setController(GenericInterruptController *controller
 extern "C" int
 gic_install(void)
 {
-	uint64_t gicd;
-	uint64_t gicdSize;
-	uint64_t gicr;
-	uint64_t gicrSize;
+	GicAdtNode adt;
+	vm_offset_t gicd = 0;
+	vm_size_t gicdSize = 0;
+	vm_offset_t gicr = 0;
+	vm_size_t gicrSize = 0;
+	bool adtNode;
+	bool adtMapped = false;
+	const char *source;
+	char nameBuf[40];
 	GenericInterruptController *gic;
 	OSSymbol *name;
 
@@ -1067,41 +1169,107 @@ gic_install(void)
 		return 1;
 	}
 
-	gicd = pe_gic_distributor_base();
-	gicdSize = pe_gic_distributor_size();
-	gicr = pe_gic_redistributor_base();
-	gicrSize = pe_gic_redistributor_size();
+	adtNode = gicAdtLookup(&adt);
+	if (adtNode) {
+		gicdSize = (vm_size_t)adt.gicdSize;
+		gicrSize = (vm_size_t)adt.gicrSize;
+		gicd = ml_io_map_unmappable((vm_offset_t)adt.gicdPhys, gicdSize,
+		    VM_WIMG_IO);
+		gicr = ml_io_map_unmappable((vm_offset_t)adt.gicrPhys, gicrSize,
+		    VM_WIMG_IO);
+		if (!gicd || !gicr) {
+			if (gicd) {
+				ml_io_unmap(gicd, gicdSize);
+			}
+			if (gicr) {
+				ml_io_unmap(gicr, gicrSize);
+			}
+			gicd = 0;
+			gicr = 0;
+			gicdSize = 0;
+			gicrSize = 0;
+			SWEET_LOG_ERROR("SWEET GIC: ADT windows not mappable; "
+			    "falling back to the platform expert mapping\n");
+		} else {
+			adtMapped = true;
+		}
+	}
+
+	/* Both sources describe the same node; a size disagreement means the
+	 * ADT and the platform expert are looking at different trees. */
+	if (adtMapped && pe_gic_distributor_size() &&
+	    ((vm_size_t)pe_gic_distributor_size() != gicdSize ||
+	    (vm_size_t)pe_gic_redistributor_size() != gicrSize)) {
+		SWEET_LOG_ERROR("SWEET GIC: ADT window sizes disagree with "
+		    "pe_fiq (ADT %#lx+%#lx); using the ADT node\n",
+		    (unsigned long)gicdSize, (unsigned long)gicrSize);
+	}
+
+	if (!gicd) {
+		/* pe_fiq() mapped the same node's windows before BSD existed. */
+		gicd = (vm_offset_t)pe_gic_distributor_base();
+		gicdSize = (vm_size_t)pe_gic_distributor_size();
+		gicr = (vm_offset_t)pe_gic_redistributor_base();
+		gicrSize = (vm_size_t)pe_gic_redistributor_size();
+		source = adtNode ? "pe_fiq fallback" : "pe_fiq (no ADT node)";
+	} else {
+		source = "ADT " GIC_ADT_NODE_PATH;
+	}
 
 	if (!gicd || !gicdSize || !gicr || !gicrSize) {
 		return -1;
 	}
 
-	gic = GenericInterruptController::withBases((vm_offset_t)gicd,
-	    (vm_size_t)gicdSize, (vm_offset_t)gicr, (vm_size_t)gicrSize);
+	SWEET_LOG_INFO(
+	    "SWEET GIC: windows from %s: gicd=%#lx+%#lx gicr=%#lx+%#lx phandle=%#x cells=%u\n",
+	    source, (unsigned long)gicd, (unsigned long)gicdSize,
+	    (unsigned long)gicr, (unsigned long)gicrSize,
+	    adtNode ? adt.phandle : 0,
+	    adtNode ? adt.interruptCells : GIC_SPEC_CELLS);
+
+	gic = GenericInterruptController::withBases(gicd, gicdSize, gicr,
+	    gicrSize);
 	if (!gic) {
+		if (adtMapped) {
+			ml_io_unmap(gicd, gicdSize);
+			ml_io_unmap(gicr, gicrSize);
+		}
 		return -2;
 	}
+	gic->setAdtInfo(adtNode ? adt.phandle : 0,
+	    adtNode ? adt.interruptCells : GIC_SPEC_CELLS);
 
 	if (gic->bringUp() != kIOReturnSuccess) {
 		gic->release();
+		if (adtMapped) {
+			ml_io_unmap(gicd, gicdSize);
+			ml_io_unmap(gicr, gicrSize);
+		}
 		return -3;
 	}
 
 	/*
-	 * ADT preparation: publish the controller under the name the ADT GIC
-	 * node will carry, so a device's interrupt-parent can resolve to it
-	 * through IOPlatformExpert::lookUpInterruptController(). Harmless while
-	 * nothing in the tree names it.
+	 * Register under the name XNU derives from the node's phandle
+	 * (IODTInterruptControllerName): that is exactly what a device's
+	 * interrupt-parent will resolve through once the ADT carries GIC
+	 * specifiers. Without a phandle nothing can resolve to us yet, so the
+	 * controller still dispatches BY INTID through the C API, it just is
+	 * not addressable from the device tree.
 	 */
-	name = (OSSymbol *)OSSymbol::withCStringNoCopy(GIC_ADT_CONTROLLER_NAME);
+	nameBuf[0] = '\0';
+	if (adtNode && adt.phandle != 0) {
+		snprintf(nameBuf, sizeof(nameBuf), "%s%08X",
+		    GIC_ADT_CONTROLLER_PREFIX, adt.phandle);
+	}
+	name = nameBuf[0] ? (OSSymbol *)OSSymbol::withCStringNoCopy(nameBuf) : NULL;
 	if (name && IOService::getPlatform() &&
 	    IOService::getPlatform()->registerInterruptController(name, gic) ==
 	    kIOReturnSuccess) {
 		SWEET_LOG_INFO("SWEET GIC: registered as \"%s\" for ADT lookup\n",
-		    GIC_ADT_CONTROLLER_NAME);
+		    nameBuf);
 	} else {
-		SWEET_LOG_ERROR("SWEET GIC: platform registration failed; "
-		    "ADT lookup will not resolve\n");
+		SWEET_LOG_ERROR("SWEET GIC: not registered for ADT lookup "
+		    "(phandle=%#x)\n", adtNode ? adt.phandle : 0);
 	}
 	if (name) {
 		name->release();

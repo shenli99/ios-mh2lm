@@ -32,6 +32,7 @@
 #include <IOKit/IOInterruptController.h>   /* IOInterruptVector, base class */
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOPlatformExpert.h>        /* getPlatform(), controller registry */
+#include <IOKit/IODeviceTreeSupport.h>     /* gIODTPlane, ADT node lookup */
 #include <libkern/c++/OSObject.h>
 #include <mach/vm_types.h>
 #include <pexpert/arm64/board_config.h>
@@ -49,10 +50,10 @@ public:
 	    vm_size_t gicdSize, vm_offset_t gicr, vm_size_t gicrSize);
 
 	/*
-	 * A controller has no provider on this port: pe_fiq() maps the GIC
-	 * before bsd_init and publishes the windows through pe_gic_*(), so the
-	 * board bring-up constructs the object directly instead of matching a
-	 * device-tree node.
+	 * There is no IOService provider to match: the controller is created
+	 * from its own ADT node (GIC_ADT_NODE_PATH), which is the same node
+	 * pe_fiq() parses before BSD exists. The board bring-up calls
+	 * gic_install() once, after the device-tree plane is published.
 	 */
 	bool initWithBases(vm_offset_t gicd, vm_size_t gicdSize,
 	    vm_offset_t gicr, vm_size_t gicrSize);
@@ -60,6 +61,13 @@ public:
 
 	/* Probe TYPER, program GICD_CTLR and make the object usable. */
 	IOReturn bringUp(void);
+
+	/* Identity read from the ADT node, kept for the device-specifier
+	 * phase: the phandle is the name clients resolve, and the cell count
+	 * is what their "interrupts" arrays will use. */
+	void setAdtInfo(uint32_t phandle, uint32_t interruptCells);
+	uint32_t adtPhandle(void) const { return fAdtPhandle; }
+	uint32_t interruptCells(void) const { return fInterruptCells; }
 
 	/* IOInterruptController overrides. `source` is the INTID in hardcoded
 	 * mode (nub == NULL); with a nub the base class ADT path is used. */
@@ -167,6 +175,8 @@ private:
 	int                   fMaxIntID;
 	bool                  fReady;
 	bool                  fMaskStraySPIs;
+	uint32_t              fAdtPhandle;
+	uint32_t              fInterruptCells;
 	uint64_t              fHits[GIC_INTID_SPECIAL_FIRST];
 	uint32_t              fStray[GIC_INTID_SPECIAL_FIRST];
 	Statistics            fStats;

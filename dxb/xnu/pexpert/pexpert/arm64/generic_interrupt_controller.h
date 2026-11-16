@@ -94,11 +94,16 @@
 #include <stdint.h>
 
 /*
- * Name the controller answers to. The ADT node that describes the GIC will
- * carry this as its "name" so that a device's "interrupt-parent" resolves to
- * this controller through IODTInterruptControllerName().
+ * The controller is created from the ADT node at GIC_ADT_NODE_PATH (generated
+ * by tools/mkadt.py): reg is four u64 cells (gicd offset, gicd size, gicr
+ * offset, gicr size) relative to the /arm-io ranges parent, plus AAPL,phandle
+ * and #interrupt-cells. XNU names an interrupt controller after the node's
+ * phandle ("IOInterruptController%08X", IODTInterruptControllerName), which
+ * is what a device's interrupt-parent resolves through, so that is the name
+ * the controller registers with.
  */
-#define GIC_ADT_CONTROLLER_NAME    "gicv3"
+#define GIC_ADT_NODE_PATH          "/arm-io/gic"
+#define GIC_ADT_CONTROLLER_PREFIX  "IOInterruptController"
 
 /*
  * Interrupt specifier. This is the shape the ADT "interrupts" property will
@@ -146,9 +151,11 @@ uint64_t pe_gic_redistributor_base(void);
 uint64_t pe_gic_redistributor_size(void);
 
 /*
- * Install the one controller for this SoC, bring it up and register it with
- * the platform expert under GIC_ADT_CONTROLLER_NAME. Returns 0 on success,
- * 1 when already installed, negative when the GIC windows are not available.
+ * Create the one controller for this SoC from its ADT node (falling back to
+ * the windows the platform expert mapped from the same node), bring it up and
+ * register it with the platform expert under the node's phandle name. Returns
+ * 0 on success, 1 when already installed, negative when no GIC window is
+ * available at all.
  */
 int gic_install(void);
 int gic_installed(void);
