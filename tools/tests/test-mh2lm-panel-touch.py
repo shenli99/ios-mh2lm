@@ -82,6 +82,7 @@ static void fixtures(){
  busReads=busWrites=ups=blocks=clears=wakes=0;firmwareFault=0;sleepScale=1;sleepUntil=0;
  dropMask=keepEnabled=keepPending=false;waitHook=busHook=armHook=nullptr;
  regs[TG]=2;regs[TG+0x11c]=TB;regs[TG+0x21c]=TB;regs[TG+0x31c]=0;
+ regs[TG+0x4f0]=0xa0;  /* controller-programmed priority, configure is read-only now */
  regs[TP+8]=0x71;regs[TP+4]=1;regs[TP+12]=1;
  touchPanelMode=2;resourceMode=2;panelPinsMode=0;trace.clear();
  failTimerCreate=failEventAdd=0;badMap=shortMap=missingMap=99;

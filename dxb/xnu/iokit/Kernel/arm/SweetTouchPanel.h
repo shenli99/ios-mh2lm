@@ -1,4 +1,7 @@
-/* Native service facade for the existing sole TouchComm worker. No MMIO. */
+/* Native service facade for the existing sole TouchComm worker. No MMIO: it
+ * owns the GIC registration for the node (register/enable/mask through the
+ * provider's IOService::*Interrupt path) and everything else stays in the
+ * worker. */
 #ifndef SWEET_TOUCH_PANEL_SERVICE_H
 #define SWEET_TOUCH_PANEL_SERVICE_H
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
@@ -21,6 +24,8 @@ class SweetTouchPanel : public IOService {
  IOCommandGate *fGate;
  IOTimerEventSource *fTimer;
  bool fGateAdded, fTimerAdded, fAccepting, fBusy, fTouched, fPoisoned;
+ IOService *fIRQProvider;
+ bool fIRQRegistered;
  unsigned fMode;
  uint64_t fSession, fClient, fNextClient, fDeadline;
  SweetTouchPanelStatus fStatus;
@@ -37,6 +42,9 @@ public:
  void stop(IOService *) APPLE_KEXT_OVERRIDE;
  void free(void) APPLE_KEXT_OVERRIDE;
  IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE { return fLoop; }
+ /* GIC line ownership; called by the worker's C hooks. */
+ void irqMask(void);
+ void irqUnmask(void);
  IOReturn attachConsumer(uint64_t *);
  IOReturn detachConsumer(uint64_t);
  IOReturn copyWorkerAvailable(bool *);

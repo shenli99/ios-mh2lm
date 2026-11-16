@@ -208,6 +208,8 @@ struct OSDictionary : OSObject {
  void free()override{for(auto &v:values)v.second->release();}
 };
 struct IONotifier;
+struct IOService;
+using IOInterruptAction=void(*)(OSObject*,void*,IOService*,int);
 static std::vector<IONotifier*> subscriptions;
 static constexpr const char *gIOTerminatedNotification="term",*gIOFirstMatchNotification="match",*gIOGeneralInterest="interest";
 using vm_size_t=size_t;
@@ -222,6 +224,11 @@ struct IOService : OSObject {
  virtual bool willTerminate(IOService*,IOOptionBits){inactive=true;return true;}
  virtual IOReturn setProperties(OSObject*){return 0;}
  virtual IOWorkLoop*getWorkLoop()const{return nullptr;}
+ bool propertyExists(const char*k){return properties.count(k)!=0;}
+ virtual IOReturn registerInterrupt(int,OSObject*,IOInterruptAction,void*){return kIOReturnUnsupported;}
+ virtual IOReturn enableInterrupt(int){return kIOReturnSuccess;}
+ virtual IOReturn disableInterrupt(int){return kIOReturnSuccess;}
+ virtual IOReturn unregisterInterrupt(int){return kIOReturnSuccess;}
  OSObject*getProperty(const char*k){return properties.count(k)?properties[k]:nullptr;}
  bool isInactive(){return inactive;}
  int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){mapCalls.push_back(i);assert(i<19);if(i==missingMap)return nullptr;auto*m=new IOMemoryMap(i);if(pinsNub){assert(i<2);m->customPA=i?0x03908000:0x03d06000;m->customSize=0x1000;}if(rpmhNub){assert(i<4);static const uintptr_t pa[]={0x18220000,0x18220d00,0x0c3f000c,0x17a00000};static const size_t n[]={0x100,0x3000,8,0x10000};m->customPA=pa[i];m->customSize=n[i];}return m;}

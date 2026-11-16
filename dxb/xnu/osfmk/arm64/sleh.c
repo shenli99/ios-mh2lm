@@ -1892,10 +1892,6 @@ sleh_irq(arm_saved_state_t *state)
 			sweet_handled = sweet_usb_irq(intid);
 		}
 		if (!sweet_handled) {
-			extern bool sweet_touch_irq(unsigned int intid);
-			sweet_handled = sweet_touch_irq(intid);
-		}
-		if (!sweet_handled) {
 			extern bool sweet_rpmh_irq(unsigned int intid);
 			sweet_handled = sweet_rpmh_irq(intid);
 		}

@@ -1,5 +1,42 @@
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
 #include "SweetTouchPanel.h"
+
+extern "C" void (*ts_irq_mask_fn)(void);
+extern "C" void (*ts_irq_unmask_fn)(void);
+
+static SweetTouchPanel *gTouchPanel;
+
+static void
+sweet_touch_panel_mask(void)
+{
+	if (gTouchPanel) {
+		gTouchPanel->irqMask();
+	}
+}
+
+static void
+sweet_touch_panel_unmask(void)
+{
+	if (gTouchPanel) {
+		gTouchPanel->irqUnmask();
+	}
+}
+
+void
+SweetTouchPanel::irqMask(void)
+{
+	if (fIRQProvider) {
+		(void) fIRQProvider->disableInterrupt(0);
+	}
+}
+
+void
+SweetTouchPanel::irqUnmask(void)
+{
+	if (fIRQProvider) {
+		(void) fIRQProvider->enableInterrupt(0);
+	}
+}
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSData.h>
 #include <sys/errno.h>
@@ -39,6 +76,25 @@ bool SweetTouchPanel::start(IOService *p)
  fGateAdded=true;
  if (fLoop->addEventSource(fTimer)!=kIOReturnSuccess) return false;
  fTimerAdded=true;fAccepting=true;
+ gTouchPanel=this;
+ /*
+  * The ADT node carries <INTID TYPE FLAGS> plus interrupt-parent; the provider
+  * (its IOPlatformDevice nub) owns the resolved source. Registering here makes
+  * the controller dispatch this driver instead of the old sleh predicate, and
+  * the hooks below route enable/mask back through IOService::*Interrupt.
+  */
+ if (p->propertyExists("IOInterruptSpecifiers")) {
+  if (p->registerInterrupt(0, NULL, (IOInterruptAction)sweet_touch_irq_action, NULL)==kIOReturnSuccess) {
+   fIRQProvider=p;fIRQRegistered=true;
+   ts_irq_mask_fn=sweet_touch_panel_mask;
+   ts_irq_unmask_fn=sweet_touch_panel_unmask;
+   SWEET_LOG_INFO("SWEET TOUCH PANEL: GIC source registered on the ADT nub\n");
+  } else {
+   SWEET_LOG_ERROR("SWEET TOUCH PANEL: GIC registration failed; touch IRQ unavailable\n");
+  }
+ } else {
+  SWEET_LOG_ERROR("SWEET TOUCH PANEL: ADT node has no interrupt specifier; touch IRQ unavailable\n");
+ }
  setProperty("SweetTouchPanelABI",1ULL,32);
  setProperty("SweetTouchPanelWritesEnabled",mode==2);
  SWEET_LOG_INFO("SWEET TOUCH PANEL: native binding mode=%u; sole legacy worker retained, no automatic pause/resume\n",fMode);
@@ -165,12 +221,27 @@ bool SweetTouchPanel::willTerminate(IOService *p,IOOptionBits o)
 void SweetTouchPanel::stop(IOService *p)
 {
  shutdown();
+ if (fIRQRegistered && fIRQProvider) {
+  if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
+  if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
+  (void)fIRQProvider->disableInterrupt(0);
+  (void)fIRQProvider->unregisterInterrupt(0);
+  fIRQRegistered=false;fIRQProvider=NULL;
+ }
  if (fClient) SWEET_LOG_WARN("SWEET TOUCH PANEL: consumer still attached at stop; worker cancellation retained\n");
  IOService::stop(p);
 }
 void SweetTouchPanel::free(void)
 {
  shutdown();
+ if (fIRQRegistered && fIRQProvider) {
+  if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
+  if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
+  (void)fIRQProvider->disableInterrupt(0);
+  (void)fIRQProvider->unregisterInterrupt(0);
+  fIRQRegistered=false;fIRQProvider=NULL;
+ }
+ if (gTouchPanel==this) gTouchPanel=NULL;
  if (fGateAdded) { fLoop->removeEventSource(fGate);fGateAdded=false; }
  OSSafeReleaseNULL(fTimer);OSSafeReleaseNULL(fGate);OSSafeReleaseNULL(fLoop);
  IOService::free();

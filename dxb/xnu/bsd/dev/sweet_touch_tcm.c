@@ -220,12 +220,45 @@ ts_gic_rd64(unsigned off)
 	return value;
 }
 
+/*
+ * Interrupt ownership: the IOService that matched this node's ADT entry owns
+ * the GIC line (registration, enable and mask). Until it claims the source --
+ * or on a tree whose node carries no interrupt specifier -- the worker keeps
+ * the legacy raw GICD path, so a controller-less boot still behaves as before.
+ */
+void (*ts_irq_mask_fn)(void);
+void (*ts_irq_unmask_fn)(void);
+
 static void
-ts_gic_wr64(unsigned off, uint64_t value)
+ts_irq_mask_raw(void)
 {
-	__asm__ volatile("dmb oshst" ::: "memory");
-	*(volatile uint64_t *)(ts_gicd + off) = value;
-	__asm__ volatile("dsb osh" ::: "memory");
+	ts_gic_wr(0x180u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+}
+
+static void
+ts_irq_unmask_raw(void)
+{
+	ts_gic_wr(0x100u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+}
+
+static void
+ts_irq_mask(void)
+{
+	if (ts_irq_mask_fn) {
+		ts_irq_mask_fn();
+	} else {
+		ts_irq_mask_raw();
+	}
+}
+
+static void
+ts_irq_unmask(void)
+{
+	if (ts_irq_unmask_fn) {
+		ts_irq_unmask_fn();
+	} else {
+		ts_irq_unmask_raw();
+	}
 }
 
 static bool
@@ -248,22 +281,12 @@ ts_gic_configure(void)
 	if (((typer & 0x1fu) + 1u) * 32u <= TS_IRQ_INTID) {
 		return false;
 	}
-	ts_gic_wr(0x180u + off, TS_IRQ_BIT);
-	if (!ts_gic_wait()) {
-		return false;
-	}
-	ts_gic_wr(0x080u + off, ts_gic_rd(0x080u + off) | TS_IRQ_BIT);
+	/* Priority, trigger, route and Group 1 are programmed by the interrupt
+	 * controller when the service registers this source; verify them. */
 	unsigned cfgOff = 0xc00u + 4u * (TS_IRQ_INTID / 16u);
 	unsigned cfgShift = 2u * (TS_IRQ_INTID % 16u);
-	ts_gic_wr(cfgOff, ts_gic_rd(cfgOff) & ~(3u << cfgShift));
 	unsigned priOff = 0x400u + (TS_IRQ_INTID & ~3u);
 	unsigned priShift = 8u * (TS_IRQ_INTID & 3u);
-	uint32_t priority = ts_gic_rd(priOff);
-	ts_gic_wr(priOff, (priority & ~(0xffu << priShift)) | (0xa0u << priShift));
-	ts_gic_wr64(0x6000u + 8u * TS_IRQ_INTID, 0); /* boot CPU */
-	if (!ts_gic_wait()) {
-		return false;
-	}
 	uint32_t ctlr = ts_gic_rd(0);
 	uint32_t group = ts_gic_rd(0x080u + off);
 	uint32_t cfg = (ts_gic_rd(cfgOff) >> cfgShift) & 3u;
@@ -289,10 +312,10 @@ ts_gic_probe(void)
 	}
 	__atomic_store_n(&ts_irq_probe_hits, 0u, __ATOMIC_RELEASE);
 	__atomic_store_n(&ts_irq_state, 4u, __ATOMIC_RELEASE);
-	ts_gic_wr(0x100u + off, TS_IRQ_BIT);
+	ts_irq_unmask();
 	if (!ts_gic_wait() || (ts_gic_rd(0x100u + off) & TS_IRQ_BIT) == 0) {
 		__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
-		ts_gic_wr(0x180u + off, TS_IRQ_BIT);
+		ts_irq_mask();
 		SWEET_LOG_ERROR("SWEET TOUCH IRQ: GIC probe enable failed\n");
 		return false;
 	}
@@ -304,7 +327,7 @@ ts_gic_probe(void)
 		delay(100);
 	}
 	__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
-	ts_gic_wr(0x180u + off, TS_IRQ_BIT);
+	ts_irq_mask();
 	ts_gic_wr(0x280u + off, TS_IRQ_BIT);
 	bool clear = ts_gic_wait();
 	for (unsigned i = 0; clear && i < 1000; ++i) {
@@ -335,14 +358,14 @@ sweet_touch_irq(unsigned int intid)
 	}
 	unsigned state = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);
 	if (state == 4u) {
-		ts_gic_wr(0x180u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+		ts_irq_mask();
 		__atomic_add_fetch(&ts_irq_probe_hits, 1u, __ATOMIC_RELEASE);
 		return true;
 	}
 	unsigned expected = 1u;
 	if (__atomic_compare_exchange_n(&ts_irq_state, &expected, 2u, false,
 	    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-		ts_gic_wr(0x180u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+		ts_irq_mask();
 		__atomic_add_fetch(&ts_irq_hits, 1u, __ATOMIC_RELEASE);
 		thread_wakeup(&ts_irq_chan);
 		return true;
@@ -355,6 +378,19 @@ sweet_touch_irq(unsigned int intid)
 		return true;
 	}
 	return false;
+}
+
+/*
+ * GIC top half entry for the registered action: the controller dispatches the
+ * INTID, the handler runs exactly like the legacy predicate did.
+ */
+void
+sweet_touch_irq_action(void *target, void *refCon, void *nub, int source)
+{
+	(void)target;
+	(void)refCon;
+	(void)nub;
+	(void)sweet_touch_irq((unsigned int)source);
 }
 
 static void
@@ -377,7 +413,7 @@ ts_irq_fail(const char *reason)
 	vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
 	ts_wr(tile, TS_INTR_CFG, ts_rd(tile, TS_INTR_CFG) & ~1u);
 	if (ts_gicd) {
-		ts_gic_wr(0x180u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+		ts_irq_mask();
 	}
 	SWEET_LOG_ERROR("SWEET TOUCH IRQ: FAILED %s hits=%u empty=%u; touch stopped\n",
 	    reason, __atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE), ts_irq_empty);
@@ -404,7 +440,7 @@ ts_irq_arm(void)
 	}
 	if (ts_panel_interrupted()) return false;
  __atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
-	ts_gic_wr(0x100u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+	ts_irq_unmask();
 	bool waited = ts_gic_wait();
 	bool enabled = (ts_gic_rd(0x100u + 4u * TS_IRQ_WORD) & TS_IRQ_BIT) != 0;
 	unsigned state = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);
@@ -1128,12 +1164,12 @@ static bool ts_panel_mask(void)
  vm_offset_t tile=ts_tiles[ts_tile(TS_PIN_IRQ)];
  uint32_t config=ts_rd(tile,TS_INTR_CFG);
  if (config==~0u) {
-  ts_gic_wr(0x180u+4u*TS_IRQ_WORD,TS_IRQ_BIT);
+  ts_irq_mask();
   SWEET_LOG_ERROR("SWEET TOUCH PANEL: GPIO122 IRQ configuration unreadable\n");return false;
  }
  ts_panel_pin_cfg=config&~1u;
  ts_wr(tile,TS_INTR_CFG,ts_panel_pin_cfg);
- ts_gic_wr(0x180u+4u*TS_IRQ_WORD,TS_IRQ_BIT);
+ ts_irq_mask();
  for (unsigned n=0;n<21;++n) {
   uint32_t readback=ts_rd(tile,TS_INTR_CFG);
   if (readback!=ts_panel_pin_cfg) {
@@ -1371,7 +1407,7 @@ ts_thread(void *arg __unused, wait_result_t wr __unused)
 				    observed, status, attn ? 1 : 0, reports);
 			}
 			__atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
-			ts_gic_wr(0x100u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+			ts_irq_unmask();
 		}
 		if ((ts_gpio_io_rd(TS_PIN_IRQ) & 1u) == 0) {
 			continue;

@@ -15,6 +15,14 @@ enum sweet_touch_panel_state {
  SWEET_TOUCH_RESUMING, SWEET_TOUCH_FAILED, SWEET_TOUCH_STOPPED
 };
 struct sweet_touch_panel_status { uint64_t token; unsigned state, available; };
+/*
+ * GIC top half registered by the IOService that matched the touch ADT node.
+ * The service also installs ts_irq_mask_fn/ts_irq_unmask_fn (defined by the
+ * worker) so enable/mask go through the interrupt controller; with them NULL
+ * the worker keeps the legacy raw GICD path.
+ */
+void sweet_touch_irq_action(void *target, void *refCon, void *nub, int source);
+
 int sweet_touch_panel_open(uint64_t *);
 int sweet_touch_panel_close(uint64_t);
 int sweet_touch_panel_request(uint64_t, unsigned resume, uint64_t *);

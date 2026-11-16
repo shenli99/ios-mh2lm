@@ -75,6 +75,10 @@ public:
 	 * mode (nub == NULL); with a nub the base class ADT path is used. */
 	IOReturn registerInterrupt(IOService *nub, int source, void *target,
 	    IOInterruptHandler handler, void *refCon) APPLE_KEXT_OVERRIDE;
+	/* The base class only sets interruptDisabledSoft here. Drivers on this
+	 * platform mask-and-wait (touch quiesce reads ISENABLER back), so this
+	 * override also writes ICENABLER synchronously. */
+	IOReturn disableInterrupt(IOService *nub, int source) APPLE_KEXT_OVERRIDE;
 
 
 

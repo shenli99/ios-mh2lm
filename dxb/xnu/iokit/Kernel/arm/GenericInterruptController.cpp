@@ -624,6 +624,45 @@ GenericInterruptController::causeVector(IOInterruptVectorNumber vectorNumber,
  * public IOInterruptSpecifiers property.
  */
 /*
+ * Soft-disable (base class state) plus an immediate distributor mask: the
+ * drivers on this platform mask and then read ISENABLER back (touch quiesce
+ * proves the source is quiet before calling a panel transition done), which
+ * the deferred base-class model cannot guarantee when the level source is no
+ * longer asserted and no further interrupt would arrive to trigger the mask.
+ */
+IOReturn
+GenericInterruptController::disableInterrupt(IOService *nub, int source)
+{
+	SourceSpec spec;
+	IOReturn rc;
+
+	if (!fReady) {
+		return kIOReturnNotReady;
+	}
+	if (!nub) {
+		return kIOReturnBadArgument;
+	}
+
+	rc = super::disableInterrupt(nub, source);
+	if (rc != kIOReturnSuccess) {
+		return rc;
+	}
+
+	/* Only public specifier data: cell 0 is the vector number. */
+	if (specFromNubProperties(nub, source, &spec) != kIOReturnSuccess) {
+		return kIOReturnSuccess;
+	}
+	if (spec.intid < GIC_INTID_SPI_FIRST || (int)spec.intid > fMaxIntID) {
+		return kIOReturnSuccess;
+	}
+
+	vectors[spec.intid].interruptDisabledHard = 1;
+	disableVectorHard(spec.intid, &vectors[spec.intid]);
+
+	return kIOReturnSuccess;
+}
+
+/*
  * Standard path: the nub resolved its controller and specifier through
  * IOService::lookupInterrupt(), our resolveInterrupt() recorded the hardware
  * spec, and IOInterruptController owns the vector table, the per-vector lock

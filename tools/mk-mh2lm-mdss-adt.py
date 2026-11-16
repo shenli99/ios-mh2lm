@@ -107,7 +107,21 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
         touch = adt.Node()
         touch.props = [('name', 0, b'panel-touch\0'), ('compatible', 0, b'sweet,touch-panel\0'),
                        ('sweet,touch-panel-abi', 0, struct.pack('<I', 1))]
-        arm.children.append(touch)  # mailbox facade: no new MMIO/IRQ resource
+        # The facade registers this GIC line through the provider nub; the
+        # specifier is <INTID TYPE FLAGS> and the GIC is the interrupt parent.
+        gic = next((n for n in arm.children if n.name == 'gic'), None)
+        gic_ph = 0
+        if gic is not None:
+            ph = dict((k, v) for k, f, v in gic.props).get('AAPL,phandle')
+            if ph is not None and len(ph) == 4:
+                gic_ph = struct.unpack('<I', ph)[0]
+        if not gic_ph:
+            raise ValueError('panel-touch needs the gic node and its phandle')
+        touch.props.extend([
+            ('interrupt-parent', 0, struct.pack('<I', gic_ph)),
+            ('interrupts', 0, struct.pack('<III', 240, 0, 4)),
+        ])
+        arm.children.append(touch)
     return adt.serialize(root)
 
 

@@ -93,7 +93,6 @@ def actual_worker(root):
         'ts_rd': 'return touchRead(base,off);',
         'ts_wr': 'touchWrite(base,off,v);',
         'ts_gic_rd64': 'return (uint64_t)touchRead(ts_gicd,off)|((uint64_t)touchRead(ts_gicd,off+4)<<32);',
-        'ts_gic_wr64': 'touchWrite(ts_gicd,off,(uint32_t)value);touchWrite(ts_gicd,off+4,(uint32_t)(value>>32));',
         'ts_i2c_write': 'if(ts_panel_interrupted())return ECANCELED;return touchBusWrite(tx,n);',
         'ts_i2c_read': 'if(ts_panel_interrupted())return ECANCELED;return touchBusRead(rx,n);',
     }
