@@ -78,26 +78,6 @@ OSDefineMetaClassAndStructors(GenericInterruptController, IOInterruptController)
 
 static GenericInterruptController *gIC;
 
-/*
- * Hardcoded wiring for the sources that exist today. This is the table the
- * ADT will replace: every current driver programs level-sensitive with
- * priority 0xa0 routed to the boot CPU, which are the controller defaults, so
- * all this table needs to say is "level".
- */
-struct HardcodedSource {
-	uint32_t intid;
-	uint32_t flags;
-};
-
-static const HardcodedSource gHardcodedSources[] = {
-	{  37, GIC_ADT_FLAG_LEVEL_HIGH }, /* apps RSC */
-	{ 115, GIC_ADT_FLAG_LEVEL_HIGH }, /* MDSS */
-	{ 161, GIC_ADT_FLAG_LEVEL_HIGH }, /* MDSS NoC */
-	{ 165, GIC_ADT_FLAG_LEVEL_HIGH }, /* DWC3 */
-	{ 240, GIC_ADT_FLAG_LEVEL_HIGH }, /* TLMM summary */
-	{ 513, GIC_ADT_FLAG_LEVEL_HIGH }, /* PMIC-arb */
-};
-
 /* ------------------------------------------------- ADT node description */
 
 struct GicAdtNode {
@@ -156,6 +136,16 @@ gicAdtLookup(GicAdtNode *node)
 	node->gicdSize = cells[1];
 	node->gicrPhys = socBase + cells[2];
 	node->gicrSize = cells[3];
+
+	/* A dedicated property keeps the redistributor description independent
+	 * of the reg cell order; reg cells 2/3 remain the fallback. */
+	value = OSDynamicCast(OSData, gic->getProperty("redistributor"));
+	if (value && value->getLength() >= 2 * sizeof(uint64_t)) {
+		const uint64_t *rd = (const uint64_t *)value->getBytesNoCopy();
+
+		node->gicrPhys = socBase + rd[0];
+		node->gicrSize = rd[1];
+	}
 
 	value = OSDynamicCast(OSData, gic->getProperty("AAPL,phandle"));
 	if (value && value->getLength() == sizeof(uint32_t)) {
@@ -237,17 +227,121 @@ GenericInterruptController::vectorAt(int intid) const
 	return &vectors[intid];
 }
 
-const uint32_t *
-GenericInterruptController::hardcodedFlags(int intid) const
+
+/*
+ * Record the standard 3-cell specifier <TYPE HWIRQ FLAGS> for one INTID.
+ * The dictionary is ours (no nub->_interruptSources access); controllerLock
+ * protects its lazy creation together with the single-cell vector-number
+ * table the base class reads.
+ */
+IOReturn
+GenericInterruptController::ensureSpec(uint32_t intid, uint32_t type,
+    uint32_t hwirq, uint32_t flags)
 {
-	for (unsigned int i = 0;
-	    i < sizeof(gHardcodedSources) / sizeof(gHardcodedSources[0]); i++) {
-		if (gHardcodedSources[i].intid == (uint32_t)intid) {
-			return &gHardcodedSources[i].flags;
-		}
+	uint32_t cells[GIC_ADT_CELLS];
+	OSData *specData;
+	OSData *vectorData;
+	IOReturn rc = kIOReturnSuccess;
+
+	if (intid < GIC_INTID_SPI_FIRST || intid > (uint32_t)fMaxIntID) {
+		return kIOReturnNoInterrupt;
 	}
 
-	return NULL;
+	IOSimpleLockLock(controllerLock);
+	if (!fSpecData[intid]) {
+		if (!_interruptSources) {
+			_interruptSources = IONewZero(IOInterruptSource,
+			    GIC_VECTOR_COUNT);
+			if (!_interruptSources) {
+				IOSimpleLockUnlock(controllerLock);
+				return kIOReturnNoMemory;
+			}
+			_numInterruptSources = GIC_VECTOR_COUNT;
+		}
+
+		cells[0] = type;
+		cells[1] = hwirq;
+		cells[2] = flags;
+		specData = OSData::withBytes(cells, sizeof(cells));
+		vectorData = OSData::withValue(intid);
+		if (!specData || !vectorData) {
+			if (specData) {
+				specData->release();
+			}
+			if (vectorData) {
+				vectorData->release();
+			}
+			IOSimpleLockUnlock(controllerLock);
+			return kIOReturnNoMemory;
+		}
+		fSpecData[intid] = specData;
+		_interruptSources[intid].vectorData = vectorData;
+		_interruptSources[intid].interruptController = this;
+	}
+	IOSimpleLockUnlock(controllerLock);
+
+	return rc;
+}
+
+/*
+ * Read a device node's standard 3-cell specifier from its public
+ * IOInterruptSpecifiers property. No private IOService state is touched.
+ */
+IOReturn
+GenericInterruptController::specFromNubProperties(IOService *nub, int source,
+    SourceSpec *spec) const
+{
+	OSArray *specifiers;
+	OSData *data;
+	const uint32_t *cells;
+	uint32_t intid;
+
+	if (!nub || !spec) {
+		return kIOReturnBadArgument;
+	}
+	if (source < 0) {
+		return kIOReturnBadArgument;
+	}
+
+	specifiers = OSDynamicCast(OSArray,
+	    nub->getProperty(gIOInterruptSpecifiersKey));
+	if (!specifiers) {
+		return kIOReturnNoResources;
+	}
+	data = OSDynamicCast(OSData, specifiers->getObject(source));
+	if (!data || data->getLength() != GIC_ADT_CELLS * sizeof(uint32_t)) {
+		return kIOReturnBadArgument;
+	}
+
+	cells = (const uint32_t *)data->getBytesNoCopy();
+	spec->type = cells[0];
+	spec->flags = cells[2];
+	switch (spec->type) {
+	case GIC_ADT_TYPE_SPI:
+		intid = GIC_ADT_HWIRQ_SPI_BASE + cells[1];
+		break;
+	case GIC_ADT_TYPE_PPI:
+		intid = GIC_ADT_HWIRQ_PPI_BASE + cells[1];
+		break;
+	default:
+		return kIOReturnBadArgument;
+	}
+	spec->intid = intid;
+
+	return kIOReturnSuccess;
+}
+
+int
+GenericInterruptController::intidFromNubProperties(IOService *nub, int source)
+const
+{
+	SourceSpec spec;
+
+	if (specFromNubProperties(nub, source, &spec) != kIOReturnSuccess) {
+		return -1;
+	}
+
+	return (int)spec.intid;
 }
 
 /* ------------------------------------------------------- configuration */
@@ -348,17 +442,6 @@ GenericInterruptController::unmaskSPI(int intid)
  * device node carries is the standard <TYPE HWIRQ FLAGS>; resolveSpec()
  * translates between the two.
  */
-OSData *
-GenericInterruptController::internalSpecData(const SourceSpec *spec) const
-{
-	uint32_t cells[3];
-
-	cells[0] = spec->intid;
-	cells[1] = spec->flags;
-	cells[2] = spec->type;
-
-	return OSData::withBytes(cells, sizeof(cells));
-}
 
 /* ------------------------------------------------------- nub side */
 
@@ -376,16 +459,21 @@ GenericInterruptController::internalSpecData(const SourceSpec *spec) const
 IOReturn
 GenericInterruptController::resolveInterrupt(IOService *nub, int source)
 {
-	IOInterruptSource *slot;
-	SourceSpec spec;
-	OSData *data;
+	IOReturn rc;
 
+	/*
+	 * Nub side for the controller acting as its own nub (the C API). One
+	 * source per INTID: the dictionary gets the standard 3-cell specifier
+	 * and the base class gets a single-cell vector-number entry, so it owns
+	 * the vector number, the table slot and the per-vector lock.
+	 *
+	 * A real ADT nub resolves through IOService::lookupInterrupt() before
+	 * it reaches registerInterrupt(), which reads its public
+	 * IOInterruptSpecifiers property.
+	 */
 	if (nub != this) {
-		/* A real nub resolved its controller and specifier through
-		 * IOService::lookupInterrupt() before calling us; nothing to do. */
 		return kIOReturnSuccess;
 	}
-
 	if (source < GIC_INTID_SPI_FIRST || source > GIC_INTID_SPI_LAST) {
 		return kIOReturnNoInterrupt;
 	}
@@ -393,44 +481,11 @@ GenericInterruptController::resolveInterrupt(IOService *nub, int source)
 		return kIOReturnNotReady;
 	}
 
-	spec.intid = (uint32_t)source;
-	spec.type = GIC_ADT_TYPE_SPI;
-	{
-		const uint32_t *flags = hardcodedFlags(source);
+	rc = ensureSpec((uint32_t)source, GIC_ADT_TYPE_SPI,
+	    (uint32_t)source - GIC_ADT_HWIRQ_SPI_BASE,
+	    GIC_ADT_FLAG_LEVEL_HIGH);
 
-		spec.flags = flags ? *flags : GIC_ADT_FLAG_LEVEL_HIGH;
-	}
-
-	/* The source table is built lazily; controllerLock keeps two
-	 * concurrent first registrations from allocating it twice. Nothing on
-	 * the interrupt path touches this lock. */
-	IOSimpleLockLock(controllerLock);
-	if (!_interruptSources) {
-		_interruptSources = IONewZero(IOInterruptSource,
-		    GIC_VECTOR_COUNT);
-		if (!_interruptSources) {
-			IOSimpleLockUnlock(controllerLock);
-			return kIOReturnNoMemory;
-		}
-		_numInterruptSources = GIC_VECTOR_COUNT;
-	}
-
-	slot = &_interruptSources[source];
-	if (slot->vectorData) {
-		IOSimpleLockUnlock(controllerLock);
-		return kIOReturnSuccess;
-	}
-
-	data = internalSpecData(&spec);
-	if (!data) {
-		IOSimpleLockUnlock(controllerLock);
-		return kIOReturnNoMemory;
-	}
-	slot->vectorData = data;   /* owned here, released in free() */
-	slot->interruptController = this;
-	IOSimpleLockUnlock(controllerLock);
-
-	return kIOReturnSuccess;
+	return rc;
 }
 
 /* ------------------------------------------------------- spec resolution */
@@ -444,100 +499,41 @@ GenericInterruptController::resolveInterrupt(IOService *nub, int source)
  *               <TYPE HWIRQ FLAGS>; the INTID is derived from it.
  */
 IOReturn
-GenericInterruptController::resolveSpec(IOService *nub, int source,
-    SourceSpec *spec)
+GenericInterruptController::resolveSpec(int vectorNumber, SourceSpec *spec)
 {
-	IOInterruptSource *sources;
 	OSData *data;
 	const uint32_t *cells;
-	uint32_t count;
 
 	if (!spec) {
 		return kIOReturnBadArgument;
 	}
-
-	if (nub == this || nub == NULL) {
-		if (!_interruptSources ||
-		    source < 0 || source >= GIC_VECTOR_COUNT) {
-			return kIOReturnNoInterrupt;
-		}
-		data = _interruptSources[source].vectorData;
-		if (!data || data->getLength() < GIC_ADT_CELLS * sizeof(uint32_t)) {
-			return kIOReturnBadArgument;
-		}
-		cells = (const uint32_t *)data->getBytesNoCopy();
-		spec->intid = cells[0];
-		spec->flags = cells[1];
-		spec->type = cells[2];
-
-		return kIOReturnSuccess;
+	if (vectorNumber < GIC_INTID_SPI_FIRST ||
+	    vectorNumber >= (int)GIC_VECTOR_COUNT) {
+		return kIOReturnNoInterrupt;
 	}
 
-	sources = nub->_interruptSources;
-	if (!sources) {
-		return kIOReturnNoResources;
-	}
-	data = sources[source].vectorData;
+	data = fSpecData[vectorNumber];
 	if (!data || data->getLength() < GIC_ADT_CELLS * sizeof(uint32_t)) {
-		return kIOReturnBadArgument;
+		return kIOReturnNoInterrupt;
 	}
-	cells = (const uint32_t *)data->getBytesNoCopy();
-	count = data->getLength() / sizeof(uint32_t);
 
-	/*
-	 * Three cells can be either the standard ADT specifier <TYPE HWIRQ
-	 * FLAGS> (cell 0 is 0 or 1) or the internal translated specifier
-	 * <INTID FLAGS TYPE> (cell 0 is a real INTID, >= 32). Tell them apart
-	 * so initVector() still resolves after registerInterrupt() replaced a
-	 * device node's slot.
-	 */
-	if (count == GIC_ADT_CELLS && cells[0] >= GIC_INTID_SPI_FIRST) {
-		spec->intid = cells[0];
-		spec->flags = cells[1];
-		spec->type = cells[2];
-	} else if (count == GIC_ADT_CELLS) {
-		spec->type = cells[0];
-		spec->flags = cells[2];
-		if (spec->type == GIC_ADT_TYPE_SPI) {
-			spec->intid = GIC_ADT_HWIRQ_SPI_BASE + cells[1];
-		} else if (spec->type == GIC_ADT_TYPE_PPI) {
-			spec->intid = GIC_ADT_HWIRQ_PPI_BASE + cells[1];
-		} else {
-			return kIOReturnBadArgument;
-		}
-	} else {
+	cells = (const uint32_t *)data->getBytesNoCopy();
+	spec->type = cells[0];
+	spec->flags = cells[2];
+	switch (spec->type) {
+	case GIC_ADT_TYPE_SPI:
+		spec->intid = GIC_ADT_HWIRQ_SPI_BASE + cells[1];
+		break;
+	case GIC_ADT_TYPE_PPI:
+		spec->intid = GIC_ADT_HWIRQ_PPI_BASE + cells[1];
+		break;
+	default:
 		return kIOReturnBadArgument;
 	}
 
 	return kIOReturnSuccess;
 }
 
-IOInterruptVectorNumber
-GenericInterruptController::vectorNumberForSource(IOService *nub,
-    int source) const
-{
-	IOInterruptSource *sources;
-	OSData *data;
-
-	if (nub == this || nub == NULL) {
-		if (!_interruptSources || source < 0 || source >= GIC_VECTOR_COUNT) {
-			return -1;
-		}
-		data = _interruptSources[source].vectorData;
-	} else {
-		sources = nub->_interruptSources;
-		if (!sources) {
-			return -1;
-		}
-		data = sources[source].vectorData;
-	}
-
-	if (!data || data->getLength() < sizeof(uint32_t)) {
-		return -1;
-	}
-
-	return *(const IOInterruptVectorNumber *)data->getBytesNoCopy();
-}
 
 void
 GenericInterruptController::programSpec(int intid, const SourceSpec *spec)
@@ -608,8 +604,9 @@ GenericInterruptController::initVector(IOInterruptVectorNumber vectorNumber,
 {
 	SourceSpec spec;
 
-	if (resolveSpec(vector->nub, vector->source, &spec) !=
-	    kIOReturnSuccess) {
+	(void)vector;
+
+	if (resolveSpec((int)vectorNumber, &spec) != kIOReturnSuccess) {
 		SWEET_LOG_ERROR("SWEET GIC: cannot resolve intid %d; left masked\n",
 		    (int)vectorNumber);
 		return;
@@ -660,13 +657,19 @@ GenericInterruptController::causeVector(IOInterruptVectorNumber vectorNumber,
  * sure the specifier the base class will read starts with the vector number,
  * and allocates the per-vector lock it needs.
  */
+/*
+ * Everything the base class needs is in the controller's own dictionary: a
+ * single-cell vector-number entry for the vector table and the standard
+ * 3-cell specifier for the hardware. A real device node contributes only its
+ * public IOInterruptSpecifiers property.
+ */
 IOReturn
 GenericInterruptController::registerInterrupt(IOService *nub, int source,
     void *target, IOInterruptHandler handler, void *refCon)
 {
-	IOInterruptVectorNumber number;
 	SourceSpec spec;
 	IOReturn rc;
+	bool self = (nub == NULL || nub == this);
 
 	if (!fReady) {
 		return kIOReturnNotReady;
@@ -674,18 +677,29 @@ GenericInterruptController::registerInterrupt(IOService *nub, int source,
 	if (!handler) {
 		return kIOReturnBadArgument;
 	}
-	if (nub == NULL) {
-		nub = this;   /* hardcoded mode: the controller is its own nub */
+
+	if (self) {
+		rc = resolveInterrupt(this, source);
+		if (rc != kIOReturnSuccess) {
+			return rc;
+		}
+		rc = resolveSpec(source, &spec);
+		if (rc != kIOReturnSuccess) {
+			return rc;
+		}
+	} else {
+		rc = specFromNubProperties(nub, source, &spec);
+		if (rc != kIOReturnSuccess) {
+			return rc;
+		}
+		rc = ensureSpec(spec.intid, spec.type,
+		    spec.intid - GIC_ADT_HWIRQ_SPI_BASE, spec.flags);
+		if (rc != kIOReturnSuccess) {
+			return rc;
+		}
+		fSpecNub[spec.intid] = nub;
 	}
 
-	rc = resolveInterrupt(nub, source);
-	if (rc != kIOReturnSuccess) {
-		return rc;
-	}
-	rc = resolveSpec(nub, source, &spec);
-	if (rc != kIOReturnSuccess) {
-		return rc;
-	}
 	if (spec.intid < GIC_INTID_SPI_FIRST ||
 	    spec.intid > GIC_INTID_SPI_LAST) {
 		return kIOReturnUnsupported;
@@ -696,97 +710,78 @@ GenericInterruptController::registerInterrupt(IOService *nub, int source,
 	}
 
 	/*
-	 * For a real device nub the base class would otherwise read cell 0 of
-	 * the standard ADT specifier as the vector number. Replace the slot
-	 * with the translated internal specifier so it reads the INTID.
+	 * The C API is one consumer per INTID: a second registration would make
+	 * the base class build an IOSharedInterruptController and rewrite our own
+	 * source slot, while gic_enable_irq()/gic_disable_irq() address the
+	 * vector by INTID. A real ADT nub keeps the stock sharing path.
 	 */
-	if (nub != this) {
-		OSData *internal = internalSpecData(&spec);
-
-		if (!internal) {
-			return kIOReturnNoMemory;
-		}
-		nub->_interruptSources[source].vectorData = internal;
-	}
-
-	number = vectorNumberForSource(nub, source);
-	if (number < 0 || (int)number > fMaxIntID) {
-		return kIOReturnNoInterrupt;
-	}
-
-	/*
-	 * The C API is one consumer per INTID. Allowing the base class to build
-	 * an IOSharedInterruptController here would hand our own source slot to
-	 * that controller, while gic_enable_irq()/gic_disable_irq() address the
-	 * vector by INTID and would then resolve the wrong entry. A real device
-	 * nub (ADT mode) keeps the stock sharing path through
-	 * IOService::registerInterrupt().
-	 */
-	if (nub == this && vectors[number].interruptRegistered) {
+	if (self && vectors[spec.intid].interruptRegistered) {
 		return kIOReturnNoResources;
 	}
-	/* Same lazy-allocation guard as the source table; the base class locks
-	 * this per-vector lock right after we return. */
+
 	IOSimpleLockLock(controllerLock);
-	if (!vectors[number].interruptLock) {
-		vectors[number].interruptLock = IOLockAlloc();
+	if (!vectors[spec.intid].interruptLock) {
+		vectors[spec.intid].interruptLock = IOLockAlloc();
 	}
-	bool haveVectorLock = vectors[number].interruptLock != NULL;
+	bool haveVectorLock = vectors[spec.intid].interruptLock != NULL;
 	IOSimpleLockUnlock(controllerLock);
 	if (!haveVectorLock) {
 		return kIOReturnNoMemory;
 	}
 
-	return super::registerInterrupt(nub, source, target, handler, refCon);
+	return super::registerInterrupt(this, spec.intid, target, handler, refCon);
 }
 
 IOReturn
 GenericInterruptController::unregisterInterrupt(IOService *nub, int source)
 {
+	int intid;
+
 	if (!fReady) {
 		return kIOReturnNotReady;
 	}
-	if (nub == NULL) {
-		nub = this;
-	}
-	if (resolveInterrupt(nub, source) != kIOReturnSuccess) {
+	intid = (nub == NULL || nub == this) ? source :
+	    intidFromNubProperties(nub, source);
+	if (intid < GIC_INTID_SPI_FIRST || intid > fMaxIntID) {
 		return kIOReturnBadArgument;
 	}
 
-	return super::unregisterInterrupt(nub, source);
+	return super::unregisterInterrupt(this, intid);
 }
 
 IOReturn
 GenericInterruptController::getInterruptType(IOService *nub, int source,
     int *interruptType)
 {
+	int intid;
+
 	if (!fReady || !interruptType) {
 		return kIOReturnBadArgument;
 	}
-	if (nub == NULL) {
-		nub = this;
-	}
-	if (resolveInterrupt(nub, source) != kIOReturnSuccess) {
+	intid = (nub == NULL || nub == this) ? source :
+	    intidFromNubProperties(nub, source);
+	if (intid < GIC_INTID_SPI_FIRST || intid > fMaxIntID) {
 		return kIOReturnBadArgument;
 	}
 
-	return super::getInterruptType(nub, source, interruptType);
+	return super::getInterruptType(this, intid, interruptType);
 }
 
 IOReturn
 GenericInterruptController::enableInterrupt(IOService *nub, int source)
 {
+	int intid;
+
 	if (!fReady) {
 		return kIOReturnNotReady;
 	}
-	if (nub == NULL) {
-		nub = this;
-	}
-	if (resolveInterrupt(nub, source) != kIOReturnSuccess) {
+	intid = (nub == NULL || nub == this) ? source :
+	    intidFromNubProperties(nub, source);
+	if (intid < GIC_INTID_SPI_FIRST || intid > fMaxIntID) {
 		return kIOReturnBadArgument;
 	}
 
-	return super::enableInterrupt(nub, source);
+	return super::enableInterrupt(this, intid);
 }
 
 /*
@@ -799,33 +794,35 @@ GenericInterruptController::enableInterrupt(IOService *nub, int source)
 IOReturn
 GenericInterruptController::disableInterrupt(IOService *nub, int source)
 {
+	int intid;
+
 	if (!fReady) {
 		return kIOReturnNotReady;
 	}
-	if (nub == NULL) {
-		nub = this;
-	}
-	if (resolveInterrupt(nub, source) != kIOReturnSuccess) {
+	intid = (nub == NULL || nub == this) ? source :
+	    intidFromNubProperties(nub, source);
+	if (intid < GIC_INTID_SPI_FIRST || intid > fMaxIntID) {
 		return kIOReturnBadArgument;
 	}
 
-	return super::disableInterrupt(nub, source);
+	return super::disableInterrupt(this, intid);
 }
 
 IOReturn
 GenericInterruptController::causeInterrupt(IOService *nub, int source)
 {
+	int intid;
+
 	if (!fReady) {
 		return kIOReturnNotReady;
 	}
-	if (nub == NULL) {
-		nub = this;
-	}
-	if (resolveInterrupt(nub, source) != kIOReturnSuccess) {
+	intid = (nub == NULL || nub == this) ? source :
+	    intidFromNubProperties(nub, source);
+	if (intid < GIC_INTID_SPI_FIRST || intid > fMaxIntID) {
 		return kIOReturnBadArgument;
 	}
 
-	return super::causeInterrupt(nub, source);
+	return super::causeInterrupt(this, intid);
 }
 
 /* ------------------------------------------------------------ dispatch */
@@ -865,7 +862,7 @@ GenericInterruptController::dispatch(uint32_t intid)
 
 	target = vector->target;
 	refCon = vector->refCon;
-	nub = vector->nub;
+	nub = fSpecNub[intid] ? fSpecNub[intid] : vector->nub;
 
 	__atomic_add_fetch(&fHits[intid], 1ull, __ATOMIC_RELAXED);
 	__atomic_add_fetch(&fStats.handled, 1u, __ATOMIC_RELAXED);
@@ -1046,10 +1043,10 @@ GenericInterruptController::initWithBases(vm_offset_t gicd, vm_size_t gicdSize,
 	fStats.handled = 0;
 	fStats.spurious = 0;
 	fStats.stray = 0;
-	for (unsigned int i = 0; i < GIC_VECTOR_COUNT; i++) {
-		fHits[i] = 0;
-		fStray[i] = 0;
-	}
+	fSpecData = NULL;
+	fSpecNub = NULL;
+	fHits = NULL;
+	fStray = NULL;
 
 	if (!super::init()) {
 		return false;
@@ -1064,14 +1061,37 @@ GenericInterruptController::initWithBases(vm_offset_t gicd, vm_size_t gicdSize,
 	fGICRSize = gicrSize;
 
 	vectors = IONewZero(IOInterruptVector, GIC_VECTOR_COUNT);
-	if (!vectors) {
-		return false;
-	}
-
+	fSpecData = IONewZero(OSData *, GIC_VECTOR_COUNT);
+	fSpecNub = IONewZero(IOService *, GIC_VECTOR_COUNT);
+	fHits = IONewZero(uint64_t, GIC_VECTOR_COUNT);
+	fStray = IONewZero(uint32_t, GIC_VECTOR_COUNT);
 	controllerLock = IOSimpleLockAlloc();
-	if (!controllerLock) {
-		IODelete(vectors, IOInterruptVector, GIC_VECTOR_COUNT);
-		vectors = NULL;
+	if (!vectors || !fSpecData || !fSpecNub || !fHits || !fStray ||
+	    !controllerLock) {
+		if (vectors) {
+			IODelete(vectors, IOInterruptVector, GIC_VECTOR_COUNT);
+			vectors = NULL;
+		}
+		if (fSpecData) {
+			IODelete(fSpecData, OSData *, GIC_VECTOR_COUNT);
+			fSpecData = NULL;
+		}
+		if (fSpecNub) {
+			IODelete(fSpecNub, IOService *, GIC_VECTOR_COUNT);
+			fSpecNub = NULL;
+		}
+		if (fHits) {
+			IODelete(fHits, uint64_t, GIC_VECTOR_COUNT);
+			fHits = NULL;
+		}
+		if (fStray) {
+			IODelete(fStray, uint32_t, GIC_VECTOR_COUNT);
+			fStray = NULL;
+		}
+		if (controllerLock) {
+			IOSimpleLockFree(controllerLock);
+			controllerLock = NULL;
+		}
 		return false;
 	}
 
@@ -1087,6 +1107,13 @@ GenericInterruptController::free(void)
 	 * which only IOService::resolveInterrupt() allocates. Detach it from the
 	 * base class before deleting: we own the table and the specifiers.
 	 */
+	for (unsigned int i = 0; i < GIC_VECTOR_COUNT; i++) {
+		if (fSpecData[i]) {
+			fSpecData[i]->release();
+			fSpecData[i] = NULL;
+		}
+		fSpecNub[i] = NULL;
+	}
 	if (_interruptSources) {
 		IOInterruptSource *sources = _interruptSources;
 		uint32_t count = _numInterruptSources;
@@ -1111,12 +1138,79 @@ GenericInterruptController::free(void)
 		IODelete(vectors, IOInterruptVector, GIC_VECTOR_COUNT);
 		vectors = NULL;
 	}
+	if (fSpecData) {
+		IODelete(fSpecData, OSData *, GIC_VECTOR_COUNT);
+		fSpecData = NULL;
+	}
+	if (fSpecNub) {
+		IODelete(fSpecNub, IOService *, GIC_VECTOR_COUNT);
+		fSpecNub = NULL;
+	}
+	if (fHits) {
+		IODelete(fHits, uint64_t, GIC_VECTOR_COUNT);
+		fHits = NULL;
+	}
+	if (fStray) {
+		IODelete(fStray, uint32_t, GIC_VECTOR_COUNT);
+		fStray = NULL;
+	}
 	if (controllerLock) {
 		IOSimpleLockFree(controllerLock);
 		controllerLock = NULL;
 	}
 
 	super::free();
+}
+
+/*
+ * Map the two windows described by the controller's ADT node. Called from
+ * start() when the controller was matched as an IOPlatformDevice (the nub
+ * carries the same properties as the node it was built from).
+ */
+bool
+GenericInterruptController::mapFromProvider(IOService *provider)
+{
+	GicAdtNode node;
+	OSData *value;
+
+	if (!gicAdtLookup(&node)) {
+		return false;
+	}
+
+	if (provider) {
+		/* The nub is authoritative for its own identity properties. */
+		value = OSDynamicCast(OSData, provider->getProperty("AAPL,phandle"));
+		if (value && value->getLength() == sizeof(uint32_t)) {
+			node.phandle = *(const uint32_t *)value->getBytesNoCopy();
+		}
+		value = OSDynamicCast(OSData, provider->getProperty("#interrupt-cells"));
+		if (value && value->getLength() == sizeof(uint32_t)) {
+			node.interruptCells = *(const uint32_t *)value->getBytesNoCopy();
+		}
+	}
+
+	fGICDSize = (vm_size_t)node.gicdSize;
+	fGICRSize = (vm_size_t)node.gicrSize;
+	fGICD = ml_io_map_unmappable((vm_offset_t)node.gicdPhys, fGICDSize,
+	    VM_WIMG_IO);
+	fGICR = fGICD ? ml_io_map_unmappable((vm_offset_t)node.gicrPhys,
+	    fGICRSize, VM_WIMG_IO) : 0;
+	if (!fGICD || !fGICR) {
+		if (fGICD) {
+			ml_io_unmap(fGICD, fGICDSize);
+		}
+		fGICD = 0;
+		fGICR = 0;
+		fGICDSize = 0;
+		fGICRSize = 0;
+		return false;
+	}
+
+	fAdtPhandle = node.phandle;
+	fInterruptCells = node.interruptCells ? node.interruptCells :
+	    GIC_ADT_CELLS;
+
+	return true;
 }
 
 /*
@@ -1180,9 +1274,19 @@ GenericInterruptController::start(IOService *provider)
 		return false;
 	}
 
+	if (!fGICD) {
+		if (!mapFromProvider(provider)) {
+			SWEET_LOG_ERROR("SWEET GIC: start without GIC windows "
+			    "(provider %s)\n",
+			    provider ? provider->getName() : "none");
+			return false;
+		}
+	}
+
 	if (bringUp() != kIOReturnSuccess) {
 		return false;
 	}
+	setController(this);
 
 	/*
 	 * Register under the name XNU derives from the node's phandle

@@ -35,6 +35,11 @@
 const char * gIOKernelConfigTables =
     "("
 #if defined(ARM64_BOARD_CONFIG_SWEET)
+    "   {"
+    "     'IOClass'         = GenericInterruptController;"
+    "     'IOProviderClass' = IOPlatformDevice;"
+    "     'IONameMatch'     = 'sweet,gicv3';"
+    "   },"
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
     "   {"
     "     'IOClass'         = SweetTouchPanel;"

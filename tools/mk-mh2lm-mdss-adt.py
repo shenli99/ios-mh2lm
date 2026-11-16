@@ -29,6 +29,23 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
     expected = struct.pack('<QQQ', 0, SOC_BASE, 0x100000000 - SOC_BASE)
     if arm.prop('ranges') != expected:
         raise ValueError('unexpected arm-io ranges; refusing to replace translations')
+    # The GIC node must describe the driver personality and the redistributor
+    # independently of the reg cell order. Older base ADTs predate both; make
+    # every derived ADT carry them so the controller can match and start.
+    gic = next((n for n in arm.children if n.name == 'gic'), None)
+    if gic is not None:
+        props = dict((k, v) for k, f, v in gic.props)
+        if b'sweet,gicv3\0' not in (props.get('compatible') or b''):
+            gic.props = [(k, f,
+                          b'sweet,gicv3\0arm,gic-v3\0' if k == 'compatible' else v)
+                         for k, f, v in gic.props]
+            props = dict((k, v) for k, f, v in gic.props)
+        if '#interrupt-cells' not in props:
+            gic.props.append(('#interrupt-cells', 0, struct.pack('<I', 3)))
+        if 'redistributor' not in props:
+            reg = struct.unpack('<4Q', props['reg'])
+            gic.props.append(('redistributor', 0,
+                              struct.pack('<QQ', reg[2], reg[3])))
     if any(n.name in ('mdss', 'display-rpmh', 'panel-pins', 'panel-touch') for n in arm.children):
         raise ValueError('display resource node already exists')
     # GCC's 0x10b000 page is below SOC_BASE. Add a disjoint low-PA alias;

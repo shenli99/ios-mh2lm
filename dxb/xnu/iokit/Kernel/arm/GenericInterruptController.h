@@ -119,16 +119,17 @@ public:
 	void causeVector(IOInterruptVectorNumber vectorNumber,
 	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
 
-	/* Internal vector specifier: <INTID FLAGS TYPE>, translated from the
-	 * standard ADT <TYPE HWIRQ FLAGS> specifier. */
+	/* Resolved hardware properties of one source. */
 	struct SourceSpec {
 		uint32_t intid;
 		uint32_t flags;
 		uint32_t type;
 	};
 
-	/* Translate the internal specifier into hardware properties. */
-	IOReturn resolveSpec(IOService *nub, int source, SourceSpec *spec);
+	/* Look a vector number up in the controller's own specifier
+	 * dictionary. The dictionary holds the standard 3-cell
+	 * <TYPE HWIRQ FLAGS> specifier; there is no private form. */
+	IOReturn resolveSpec(int vectorNumber, SourceSpec *spec);
 
 	/* Unregistered SPIs are counted and completed; masking them is opt-in
 	 * so a staged migration can keep the legacy chain in front of the
@@ -158,12 +159,13 @@ public:
 	static void setController(GenericInterruptController *controller);
 
 private:
-	OSData *internalSpecData(const SourceSpec *spec) const;
-	IOInterruptVectorNumber vectorNumberForSource(IOService *nub,
-	    int source) const;
+	IOReturn ensureSpec(uint32_t intid, uint32_t type, uint32_t hwirq,
+	    uint32_t flags);
+	IOReturn specFromNubProperties(IOService *nub, int source,
+	    SourceSpec *spec) const;
+	int intidFromNubProperties(IOService *nub, int source) const;
 
 	IOInterruptVector *vectorAt(int intid) const;
-	const uint32_t *hardcodedFlags(int intid) const;
 
 	uint32_t gicdRead32(uint32_t offset) const;
 	void gicdWrite32(uint32_t offset, uint32_t value);
@@ -172,6 +174,7 @@ private:
 	bool waitForRWP(void);
 	void synchronizeIO(void);
 
+	bool mapFromProvider(IOService *provider);
 	IOReturn bringUp(void);
 	void programSpec(int intid, const SourceSpec *spec);
 	void writeGroup(int intid, bool group1);
@@ -193,8 +196,12 @@ private:
 	bool                  fMaskStraySPIs;
 	uint32_t              fAdtPhandle;
 	uint32_t              fInterruptCells;
-	uint64_t              fHits[GIC_INTID_SPECIAL_FIRST];
-	uint32_t              fStray[GIC_INTID_SPECIAL_FIRST];
+	/* One INTID-indexed table each, heap allocated: an OSObject is limited
+	 * to 16 KiB and four such tables inline would blow past it. */
+	OSData              **fSpecData;
+	IOService           **fSpecNub;
+	uint64_t             *fHits;
+	uint32_t             *fStray;
 	Statistics            fStats;
 };
 

@@ -146,7 +146,9 @@ def build(seed=None, qemu=False, highmem=False, device='sweet', dram_size=None):
 
     gic = node('gic', [
         ph(),
-        ('compatible', cstr('arm,gic-v3')),
+        # 'sweet,gicv3' is the driver personality (GenericInterruptController);
+        # the arm binding stays so the node describes standard hardware.
+        ('compatible', cstr('sweet,gicv3') + cstr('arm,gic-v3')),
         ('interrupt-controller', b''),
         # Device interrupt specifiers: the standard 3-cell GIC binding,
         # <TYPE HWIRQ FLAGS> (0 = SPI, HWIRQ = GIC INTID - 32, flags are the
@@ -154,6 +156,8 @@ def build(seed=None, qemu=False, highmem=False, device='sweet', dram_size=None):
         ('#interrupt-cells', u32(3)),
         ('virtual-timer-intid', u32(vtimer_intid)),
         ('reg', u64(gicd - SOC_BASE, gicd_size, gicr - SOC_BASE, gicr_size)),
+        # Redistributor window kept independent of the reg cell order.
+        ('redistributor', u64(gicr - SOC_BASE, gicr_size)),
     ])
     arm_io = node('arm-io', [
         ph(),
