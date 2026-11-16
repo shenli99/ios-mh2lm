@@ -393,20 +393,6 @@ GenericInterruptController::resolveInterrupt(IOService *nub, int source)
 		return kIOReturnNotReady;
 	}
 
-	if (!_interruptSources) {
-		_interruptSources = IONewZero(IOInterruptSource,
-		    GIC_VECTOR_COUNT);
-		if (!_interruptSources) {
-			return kIOReturnNoMemory;
-		}
-		_numInterruptSources = GIC_VECTOR_COUNT;
-	}
-
-	slot = &_interruptSources[source];
-	if (slot->vectorData) {
-		return kIOReturnSuccess;
-	}
-
 	spec.intid = (uint32_t)source;
 	spec.type = GIC_ADT_TYPE_SPI;
 	{
@@ -415,12 +401,34 @@ GenericInterruptController::resolveInterrupt(IOService *nub, int source)
 		spec.flags = flags ? *flags : GIC_ADT_FLAG_LEVEL_HIGH;
 	}
 
+	/* The source table is built lazily; controllerLock keeps two
+	 * concurrent first registrations from allocating it twice. Nothing on
+	 * the interrupt path touches this lock. */
+	IOSimpleLockLock(controllerLock);
+	if (!_interruptSources) {
+		_interruptSources = IONewZero(IOInterruptSource,
+		    GIC_VECTOR_COUNT);
+		if (!_interruptSources) {
+			IOSimpleLockUnlock(controllerLock);
+			return kIOReturnNoMemory;
+		}
+		_numInterruptSources = GIC_VECTOR_COUNT;
+	}
+
+	slot = &_interruptSources[source];
+	if (slot->vectorData) {
+		IOSimpleLockUnlock(controllerLock);
+		return kIOReturnSuccess;
+	}
+
 	data = internalSpecData(&spec);
 	if (!data) {
+		IOSimpleLockUnlock(controllerLock);
 		return kIOReturnNoMemory;
 	}
 	slot->vectorData = data;   /* owned here, released in free() */
 	slot->interruptController = this;
+	IOSimpleLockUnlock(controllerLock);
 
 	return kIOReturnSuccess;
 }
@@ -581,8 +589,13 @@ bool
 GenericInterruptController::vectorCanBeShared(IOInterruptVectorNumber,
     IOInterruptVector *)
 {
-	/* GIC SPIs are not shareable: one INTID, one consumer. */
-	return false;
+	/*
+	 * SPIs may be shared: IOInterruptController then routes the extra
+	 * consumers through an IOSharedInterruptController that sits on our
+	 * vector. Nothing shares an INTID today, but the vector must say so
+	 * before the first device that does.
+	 */
+	return true;
 }
 
 /*
@@ -604,6 +617,9 @@ GenericInterruptController::initVector(IOInterruptVectorNumber vectorNumber,
 
 	maskSPI((int)vectorNumber);
 	programSpec((int)vectorNumber, &spec);
+	/* Group/priority/trigger/route must be visible before any later
+	 * enableVector() for this source. */
+	synchronizeIO();
 }
 
 int
@@ -697,11 +713,28 @@ GenericInterruptController::registerInterrupt(IOService *nub, int source,
 	if (number < 0 || (int)number > fMaxIntID) {
 		return kIOReturnNoInterrupt;
 	}
+
+	/*
+	 * The C API is one consumer per INTID. Allowing the base class to build
+	 * an IOSharedInterruptController here would hand our own source slot to
+	 * that controller, while gic_enable_irq()/gic_disable_irq() address the
+	 * vector by INTID and would then resolve the wrong entry. A real device
+	 * nub (ADT mode) keeps the stock sharing path through
+	 * IOService::registerInterrupt().
+	 */
+	if (nub == this && vectors[number].interruptRegistered) {
+		return kIOReturnNoResources;
+	}
+	/* Same lazy-allocation guard as the source table; the base class locks
+	 * this per-vector lock right after we return. */
+	IOSimpleLockLock(controllerLock);
 	if (!vectors[number].interruptLock) {
 		vectors[number].interruptLock = IOLockAlloc();
-		if (!vectors[number].interruptLock) {
-			return kIOReturnNoMemory;
-		}
+	}
+	bool haveVectorLock = vectors[number].interruptLock != NULL;
+	IOSimpleLockUnlock(controllerLock);
+	if (!haveVectorLock) {
+		return kIOReturnNoMemory;
 	}
 
 	return super::registerInterrupt(nub, source, target, handler, refCon);
