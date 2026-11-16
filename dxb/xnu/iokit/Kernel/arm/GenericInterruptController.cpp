@@ -889,25 +889,19 @@ GenericInterruptController::logEnabledSPIs(const char *tag)
 
 /* ----------------------------------------------------------- lifecycle */
 
-GenericInterruptController *
-GenericInterruptController::withBases(vm_offset_t gicd, vm_size_t gicdSize,
-    vm_offset_t gicr, vm_size_t gicrSize)
+/*
+ * Every table the controller needs is heap allocated: OSObject::operator new
+ * static-asserts at 16 KiB and four INTID tables inline would exceed it.
+ * Called from start(), which is the only entry point IOKit uses for a matched
+ * service (a custom initializer is never invoked through that path).
+ */
+bool
+GenericInterruptController::allocateTables(void)
 {
-	GenericInterruptController *gic = new GenericInterruptController;
-
-	if (gic && !gic->initWithBases(gicd, gicdSize, gicr, gicrSize)) {
-		gic->release();
-		gic = NULL;
+	if (vectors) {
+		return true;
 	}
 
-	return gic;
-}
-
-bool
-GenericInterruptController::initWithBases(vm_offset_t gicd, vm_size_t gicdSize,
-    vm_offset_t gicr, vm_size_t gicrSize)
-{
-	/* A failed init is released, so every field must be safe to free. */
 	fGICD = 0;
 	fGICDSize = 0;
 	fGICR = 0;
@@ -921,22 +915,6 @@ GenericInterruptController::initWithBases(vm_offset_t gicd, vm_size_t gicdSize,
 	fStats.handled = 0;
 	fStats.spurious = 0;
 	fStats.stray = 0;
-	fSpecData = NULL;
-	fSpecNub = NULL;
-	fHits = NULL;
-	fStray = NULL;
-
-	if (!super::init()) {
-		return false;
-	}
-	if (!gicd || !gicdSize || !gicr || !gicrSize) {
-		return false;
-	}
-
-	fGICD = gicd;
-	fGICDSize = gicdSize;
-	fGICR = gicr;
-	fGICRSize = gicrSize;
 
 	vectors = IONewZero(IOInterruptVector, GIC_VECTOR_COUNT);
 	fSpecData = IONewZero(OSData *, GIC_VECTOR_COUNT);
@@ -946,30 +924,6 @@ GenericInterruptController::initWithBases(vm_offset_t gicd, vm_size_t gicdSize,
 	controllerLock = IOSimpleLockAlloc();
 	if (!vectors || !fSpecData || !fSpecNub || !fHits || !fStray ||
 	    !controllerLock) {
-		if (vectors) {
-			IODelete(vectors, IOInterruptVector, GIC_VECTOR_COUNT);
-			vectors = NULL;
-		}
-		if (fSpecData) {
-			IODelete(fSpecData, OSData *, GIC_VECTOR_COUNT);
-			fSpecData = NULL;
-		}
-		if (fSpecNub) {
-			IODelete(fSpecNub, IOService *, GIC_VECTOR_COUNT);
-			fSpecNub = NULL;
-		}
-		if (fHits) {
-			IODelete(fHits, uint64_t, GIC_VECTOR_COUNT);
-			fHits = NULL;
-		}
-		if (fStray) {
-			IODelete(fStray, uint32_t, GIC_VECTOR_COUNT);
-			fStray = NULL;
-		}
-		if (controllerLock) {
-			IOSimpleLockFree(controllerLock);
-			controllerLock = NULL;
-		}
 		return false;
 	}
 
@@ -1131,6 +1085,10 @@ GenericInterruptController::start(IOService *provider)
 	OSSymbol *name;
 
 	if (!super::start(provider)) {
+		return false;
+	}
+	if (!allocateTables()) {
+		SWEET_LOG_ERROR("SWEET GIC: cannot allocate controller tables\n");
 		return false;
 	}
 

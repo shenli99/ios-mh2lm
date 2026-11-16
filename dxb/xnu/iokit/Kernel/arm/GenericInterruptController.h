@@ -42,17 +42,6 @@ class GenericInterruptController : public IOInterruptController
 	OSDeclareDefaultStructors(GenericInterruptController);
 
 public:
-	static GenericInterruptController *withBases(vm_offset_t gicd,
-	    vm_size_t gicdSize, vm_offset_t gicr, vm_size_t gicrSize);
-
-	/*
-	 * There is no IOService provider to match: the controller is created
-	 * from its own ADT node (GIC_ADT_NODE_PATH), which is the same node
-	 * pe_fiq() parses before BSD exists. The board bring-up calls
-	 * gic_install() once, after the device-tree plane is published.
-	 */
-	bool initWithBases(vm_offset_t gicd, vm_size_t gicdSize,
-	    vm_offset_t gicr, vm_size_t gicrSize);
 	void free(void) APPLE_KEXT_OVERRIDE;
 
 	/*
@@ -171,6 +160,9 @@ private:
 	bool waitForRWP(void);
 	void synchronizeIO(void);
 
+	/* IOKit instantiates a service through init()/start(), never through a
+	 * custom initializer, so every allocation happens in start(). */
+	bool allocateTables(void);
 	bool mapFromProvider(IOService *provider);
 	IOReturn bringUp(void);
 	void programSpec(int intid, const SourceSpec *spec);
