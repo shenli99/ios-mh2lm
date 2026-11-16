@@ -686,6 +686,28 @@ GenericInterruptController::registerInterrupt(IOService *nub, int source,
 		return rc;
 	}
 
+	/*
+	 * IOInterruptController::registerInterrupt() takes the per-vector IOLock
+	 * right away; allocate it on first use (vector number is cell 0 of the
+	 * specifier, the INTID). controllerLock guards the lazy creation.
+	 */
+	SourceSpec spec;
+	if (specFromNubProperties(nub, source, &spec) != kIOReturnSuccess) {
+		return kIOReturnBadArgument;
+	}
+	if (spec.intid < GIC_INTID_SPI_FIRST || (int)spec.intid > fMaxIntID) {
+		return kIOReturnBadArgument;
+	}
+	IOSimpleLockLock(controllerLock);
+	if (!vectors[spec.intid].interruptLock) {
+		vectors[spec.intid].interruptLock = IOLockAlloc();
+	}
+	bool haveVectorLock = vectors[spec.intid].interruptLock != NULL;
+	IOSimpleLockUnlock(controllerLock);
+	if (!haveVectorLock) {
+		return kIOReturnNoMemory;
+	}
+
 	return super::registerInterrupt(nub, source, target, handler, refCon);
 }
 

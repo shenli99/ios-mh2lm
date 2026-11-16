@@ -390,7 +390,8 @@ sweet_touch_irq_action(void *target, void *refCon, void *nub, int source)
 	(void)target;
 	(void)refCon;
 	(void)nub;
-	(void)sweet_touch_irq((unsigned int)source);
+	(void)source;  /* IOInterruptController passes the device source index */
+	(void)sweet_touch_irq(TS_IRQ_INTID);
 }
 
 static void
