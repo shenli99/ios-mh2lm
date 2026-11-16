@@ -106,27 +106,34 @@
 #define GIC_ADT_CONTROLLER_PREFIX  "IOInterruptController"
 
 /*
- * Interrupt specifier. This is the shape the ADT "interrupts" property will
- * carry once the generator emits it:
+ * Interrupt specifier: the standard 3-cell GIC binding, which is what the
+ * ADT "interrupts" property carries and what the controller documents:
  *
- *     interrupts = <INTID TYPE PRIORITY TARGET>
+ *     interrupts = <TYPE HWIRQ FLAGS>
  *
- * where TYPE is GIC_SPEC_TYPE_*, PRIORITY is 0 for the controller default and
- * TARGET is the redistributor/CPU index (0 is the boot CPU). Until the ADT
- * side exists the controller resolves the same fields from its hardcoded
- * source table, so the hardware programming path is already the final one.
+ * TYPE is GIC_ADT_TYPE_SPI (HWIRQ is the SPI number, GIC INTID = 32 + HWIRQ)
+ * or GIC_ADT_TYPE_PPI. FLAGS uses the usual IRQ_TYPE_* values; only the
+ * level/edge distinction matters to the distributor, priority and target stay
+ * controller defaults (0xa0, boot CPU).
+ *
+ * The controller translates this into its internal vector data <INTID FLAGS
+ * TYPE> before handing it to IOInterruptController, whose first cell is the
+ * vector number.
  */
-#define GIC_SPEC_TYPE_LEVEL        0u
-#define GIC_SPEC_TYPE_EDGE         1u
-#define GIC_SPEC_DEFAULT_PRIORITY  0xa0u
-#define GIC_SPEC_CELLS             4u
+#define GIC_ADT_CELLS              3u
+#define GIC_ADT_TYPE_SPI           0u
+#define GIC_ADT_TYPE_PPI           1u
+#define GIC_ADT_HWIRQ_SPI_BASE     GIC_INTID_SPI_FIRST
+#define GIC_ADT_HWIRQ_PPI_BASE     GIC_INTID_PPI_FIRST
 
-struct gic_interrupt_spec {
-	uint32_t intid;
-	uint32_t type;
-	uint32_t priority;
-	uint32_t target;
-};
+#define GIC_ADT_FLAG_NONE          0x0u
+#define GIC_ADT_FLAG_EDGE_RISING   0x1u
+#define GIC_ADT_FLAG_EDGE_FALLING  0x2u
+#define GIC_ADT_FLAG_EDGE_BOTH     0x3u
+#define GIC_ADT_FLAG_LEVEL_HIGH    0x4u
+#define GIC_ADT_FLAG_LEVEL_LOW     0x8u
+
+#define GIC_SPEC_DEFAULT_PRIORITY  0xa0u
 
 /*
  * Interrupt handler signature, identical to IOInterruptHandler: the target
@@ -161,18 +168,16 @@ int gic_install(void);
 int gic_installed(void);
 
 /*
- * Platform IRQ path: dispatch one INTID that was already acknowledged with
- * ICC_IAR1_EL1 (the caller keeps the raw IAR value) and complete it with
- * ICC_EOIR1_EL1.
- *
- * Returns 1 when the controller completed the interrupt -- the handler ran,
- * or the SPI had no handler and was only counted. It returns 0 for SGIs and
- * PPIs (INTID < 32, platform-owned) and for spurious INTIDs, and also when no
- * controller is installed: in every one of those cases the caller still owns
- * the completion and must write ICC_EOIR1_EL1 itself. Exactly one EOI per
- * interrupt, never two.
+ * The controller's standard IOInterruptAction, i.e. what
+ * getInterruptHandlerAddress() returns: sleh_irq() dispatches through this
+ * pointer, there is no controller-specific shortcut. The action takes the
+ * vector number as `source` (for SPIs that is the INTID), runs the registered
+ * handler and never touches ICC_EOIR1_EL1 -- the platform layer that
+ * acknowledged the interrupt completes it.
  */
-int gic_handle_irq(uint64_t iar);
+typedef void (*gic_interrupt_action_t)(void *target, void *refCon, void *nub,
+    int source);
+gic_interrupt_action_t gic_interrupt_action(void);
 
 /*
  * Unregistered SPIs are counted and completed. Masking them is opt-in so a

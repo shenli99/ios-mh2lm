@@ -13,32 +13,37 @@
  * controller that owned them would need a per-CPU table for something nothing
  * asks for yet.
  *
+ * The class follows the standard IOInterruptController layout:
+ *
+ *   start(provider)        IOService lifecycle: probe TYPER, program DL_CTLR,
+ *                          publish under the ADT phandle name
+ *   resolveInterrupt()     nub side: fills IOInterruptSources so the base
+ *                          class owns the vector number (cell 0)
+ *   registerInterrupt()    validates, then calls super::registerInterrupt;
+ *                          the base class owns the vector table, the
+ *                          per-vector lock and the registered/disabled state
+ *   initVector() etc.      hardware only: group/priority/trigger/route,
+ *                          enable/disable/cause for one vector
+ *   getInterruptHandlerAddress() / handleInterrupt()
+ *                          the standard action sleh_irq() dispatches through;
+ *                          it never writes ICC_EOIR1_EL1
+ *
  * Creation is ADT-driven: gic_install() looks up the controller's own node
  * (/arm-io/gic), reads reg, AAPL,phandle and #interrupt-cells, maps the
- * windows and registers under the phandle name XNU derives
- * (IOInterruptController%08X). The platform expert's pe_gic_*() windows,
+ * windows and hands them to start(). The platform expert's pe_gic_*() windows,
  * mapped from the same node before BSD existed, are only a fallback.
  *
  * Two parameter sources coexist for the sources:
  *
  *   hardcoded (today)   gic_register_irq(intid, ...) passes the INTID with a
- *                       NULL nub; resolveSpec() reads the per-INTID table at
- *                       the top of this file, whose values are exactly what
- *                       the ADT specifier will carry later.
- *   ADT (prepared)      a nub registers through IOService; the base class
- *                       resolves vector number and vectorData, and
- *                       resolveSpec() parses the GIC_SPEC_CELLS-cell
- *                       specifier (see generic_interrupt_controller.h).
- *
- * Nothing in the hardware path differs between the two: initVector() programs
- * group, priority, trigger and route from the resolved spec, and the hooks
- * enable/disable/cause the INTID. Switching over means emitting the ADT
- * specifiers and passing a nub; the controller code does not change.
- *
- * EOI is written exactly once per interrupt and only by this controller, for
- * the INTIDs it completed. sleh_irq() keeps the legacy paths (timer, IPIs,
- * drivers that have not migrated) and must not EOI what gic_handle_irq()
- * reported as completed.
+ *                       NULL nub. The controller is then its own nub and
+ *                       resolveInterrupt() materialises the source table from
+ *                       the table at the top of this file.
+ *   ADT (prepared)      a real nub registers through IOService; its
+ *                       interrupt specifier is the standard 3-cell
+ *                       <TYPE HWIRQ FLAGS> (see generic_interrupt_controller.h)
+ *                       and resolveSpec() translates it before the base class
+ *                       reads the vector number.
  *
  * Rollout is staged: the legacy predicate chain runs first in sleh_irq() and
  * only unclaimed INTIDs reach this controller. While that is the case the
@@ -67,25 +72,30 @@ extern "C" void ml_io_unmap(vm_offset_t, vm_size_t);
 OSDefineMetaClassAndStructors(GenericInterruptController, IOInterruptController);
 
 /* Vector table is indexed by INTID; 1020 entries cover SPIs and the specials
- * that are never registered, so vectorNumber == INTID and an ADT specifier can
- * carry the INTID in its first cell. */
+ * that are never registered, so vectorNumber == INTID and the internal
+ * specifier carries the INTID in its first cell. */
 #define GIC_VECTOR_COUNT GIC_INTID_SPECIAL_FIRST
 
 static GenericInterruptController *gIC;
 
 /*
- * Hardcoded wiring. This is the table the ADT will replace: one row per live
- * SPI, with the values the specifier will carry (type, priority, target CPU).
- * Every current driver programs exactly this (level, priority 0xa0, route to
- * the boot CPU), so the hardware path is already the final one.
+ * Hardcoded wiring for the sources that exist today. This is the table the
+ * ADT will replace: every current driver programs level-sensitive with
+ * priority 0xa0 routed to the boot CPU, which are the controller defaults, so
+ * all this table needs to say is "level".
  */
-static const gic_interrupt_spec gHardcodedSpecs[] = {
-	{  37, GIC_SPEC_TYPE_LEVEL, GIC_SPEC_DEFAULT_PRIORITY, 0 }, /* apps RSC */
-	{ 115, GIC_SPEC_TYPE_LEVEL, GIC_SPEC_DEFAULT_PRIORITY, 0 }, /* MDSS */
-	{ 161, GIC_SPEC_TYPE_LEVEL, GIC_SPEC_DEFAULT_PRIORITY, 0 }, /* MDSS NoC */
-	{ 165, GIC_SPEC_TYPE_LEVEL, GIC_SPEC_DEFAULT_PRIORITY, 0 }, /* DWC3 */
-	{ 240, GIC_SPEC_TYPE_LEVEL, GIC_SPEC_DEFAULT_PRIORITY, 0 }, /* TLMM summary */
-	{ 513, GIC_SPEC_TYPE_LEVEL, GIC_SPEC_DEFAULT_PRIORITY, 0 }, /* PMIC-arb */
+struct HardcodedSource {
+	uint32_t intid;
+	uint32_t flags;
+};
+
+static const HardcodedSource gHardcodedSources[] = {
+	{  37, GIC_ADT_FLAG_LEVEL_HIGH }, /* apps RSC */
+	{ 115, GIC_ADT_FLAG_LEVEL_HIGH }, /* MDSS */
+	{ 161, GIC_ADT_FLAG_LEVEL_HIGH }, /* MDSS NoC */
+	{ 165, GIC_ADT_FLAG_LEVEL_HIGH }, /* DWC3 */
+	{ 240, GIC_ADT_FLAG_LEVEL_HIGH }, /* TLMM summary */
+	{ 513, GIC_ADT_FLAG_LEVEL_HIGH }, /* PMIC-arb */
 };
 
 /* ------------------------------------------------- ADT node description */
@@ -102,8 +112,7 @@ struct GicAdtNode {
 /*
  * Read the controller's own description out of the ADT. pe_fiq() parses the
  * same node for the very early vtimer setup (it has to map the GIC before BSD
- * exists); here the controller owns the values, which is what lets the rest
- * of the platform move to "parameters come from the device tree".
+ * exists); here the controller owns the values.
  *
  * reg is four u64 cells relative to the /arm-io ranges parent (SOC base):
  * gicd offset, gicd size, gicr offset, gicr size. The phandle is the name
@@ -122,7 +131,7 @@ gicAdtLookup(GicAdtNode *node)
 	uint64_t socBase;
 
 	bzero(node, sizeof(*node));
-	node->interruptCells = GIC_SPEC_CELLS;
+	node->interruptCells = GIC_ADT_CELLS;
 
 	gic = IORegistryEntry::fromPath(GIC_ADT_NODE_PATH, gIODTPlane);
 	if (!gic) {
@@ -198,10 +207,10 @@ GenericInterruptController::synchronizeIO(void)
 
 /*
  * GICD_CTLR.RWP is polled exactly once: right after the CTLR write in
- * bringUp(), where the spec wants the change acknowledged before anything
- * else is configured. Nothing else waits on it. It is a distributor-wide
- * stall, and the enable/disable writes that drivers issue from interrupt
- * context must not spin on it.
+ * start(), where the spec wants the change acknowledged before anything else
+ * is configured. Nothing else waits on it. It is a distributor-wide stall,
+ * and the enable/disable writes that drivers issue from interrupt context
+ * must not spin on it.
  */
 bool
 GenericInterruptController::waitForRWP(void)
@@ -228,98 +237,17 @@ GenericInterruptController::vectorAt(int intid) const
 	return &vectors[intid];
 }
 
-const gic_interrupt_spec *
-GenericInterruptController::hardcodedSpec(int intid) const
+const uint32_t *
+GenericInterruptController::hardcodedFlags(int intid) const
 {
 	for (unsigned int i = 0;
-	    i < sizeof(gHardcodedSpecs) / sizeof(gHardcodedSpecs[0]); i++) {
-		if (gHardcodedSpecs[i].intid == (uint32_t)intid) {
-			return &gHardcodedSpecs[i];
+	    i < sizeof(gHardcodedSources) / sizeof(gHardcodedSources[0]); i++) {
+		if (gHardcodedSources[i].intid == (uint32_t)intid) {
+			return &gHardcodedSources[i].flags;
 		}
 	}
 
 	return NULL;
-}
-
-/* ------------------------------------------------------- spec resolution */
-
-/*
- * The ADT side. Once the generator emits, for a device node,
- *
- *     interrupt-parent = <phandle of the gicv3 node>
- *     interrupts       = <INTID TYPE PRIORITY TARGET>
- *
- * IODeviceTreeSupport maps that into IOInterruptSpecifiers, resolveInterrupt()
- * records our controller from "gicv3", and the base-class registration path
- * hands us `source` = the device-local index with vectorData pointing at the
- * four cells. Nothing else needs to change.
- */
-IOReturn
-GenericInterruptController::resolveSpecADT(IOService *nub, int source,
-    gic_interrupt_spec *spec) const
-{
-	IOInterruptSource *sources;
-	OSData *data;
-	const uint32_t *cells;
-
-	if (!nub) {
-		return kIOReturnBadArgument;
-	}
-	sources = nub->_interruptSources;
-	if (!sources) {
-		return kIOReturnNoResources;
-	}
-	data = sources[source].vectorData;
-	if (!data || data->getLength() < GIC_SPEC_CELLS * sizeof(uint32_t)) {
-		return kIOReturnBadArgument;
-	}
-	cells = (const uint32_t *)data->getBytesNoCopy();
-
-	spec->intid = cells[0];
-	spec->type = cells[1];
-	spec->priority = cells[2];
-	spec->target = cells[3];
-
-	return kIOReturnSuccess;
-}
-
-IOReturn
-GenericInterruptController::resolveSpecHardcoded(int source,
-    gic_interrupt_spec *spec) const
-{
-	const gic_interrupt_spec *hard;
-
-	if (source < GIC_INTID_SPI_FIRST || source > GIC_INTID_SPI_LAST) {
-		/* SGIs and PPIs are per-CPU platform state, not ours. */
-		return kIOReturnUnsupported;
-	}
-
-	hard = hardcodedSpec(source);
-	if (hard) {
-		*spec = *hard;
-	} else {
-		spec->intid = (uint32_t)source;
-		spec->type = GIC_SPEC_TYPE_LEVEL;
-		spec->priority = GIC_SPEC_DEFAULT_PRIORITY;
-		spec->target = 0;
-	}
-
-	return kIOReturnSuccess;
-}
-
-IOReturn
-GenericInterruptController::resolveSpec(IOService *nub, int source,
-    gic_interrupt_spec *spec)
-{
-	if (!spec) {
-		return kIOReturnBadArgument;
-	}
-
-	if (nub != NULL) {
-		return resolveSpecADT(nub, source, spec);
-	}
-
-	return resolveSpecHardcoded(source, spec);
 }
 
 /* ------------------------------------------------------- configuration */
@@ -379,8 +307,7 @@ GenericInterruptController::triggerIsLevel(int intid) const
 /*
  * SPIs only, and 0 is the default: every driver on this platform programs
  * IROUTER = 0 today, so an unconfigured route keeps the current behaviour.
- * The ADT specifier's TARGET cell will be translated through the topology
- * into an affinity value when routing to another PE is needed.
+ * Routing to another PE comes with the topology work, if it is ever needed.
  */
 uint64_t
 GenericInterruptController::routeForTarget(uint32_t target) const
@@ -414,26 +341,214 @@ GenericInterruptController::unmaskSPI(int intid)
 	    1u << ((uint32_t)intid % 32));
 }
 
-void
-GenericInterruptController::programSpec(int intid, const gic_interrupt_spec *spec)
+/*
+ * The internal specifier handed to IOInterruptController is three cells
+ * <INTID FLAGS TYPE>: the first cell is the vector number the base class
+ * resolves, the other two are what the hooks need. The ADT-facing specifier a
+ * device node carries is the standard <TYPE HWIRQ FLAGS>; resolveSpec()
+ * translates between the two.
+ */
+OSData *
+GenericInterruptController::internalSpecData(const SourceSpec *spec) const
 {
-	uint8_t priority = (uint8_t)spec->priority;
+	uint32_t cells[3];
 
-	if (priority == 0) {
-		priority = (uint8_t)GIC_SPEC_DEFAULT_PRIORITY;
+	cells[0] = spec->intid;
+	cells[1] = spec->flags;
+	cells[2] = spec->type;
+
+	return OSData::withBytes(cells, sizeof(cells));
+}
+
+/* ------------------------------------------------------- nub side */
+
+/*
+ * Fill IOInterruptSources for the controller acting as its own nub: one
+ * source per INTID, specifier in the internal three-cell form. The base class
+ * then owns the vector number (cell 0), the vector table entry and its lock,
+ * and the registered/enabled state.
+ *
+ * A real ADT-backed nub is not handled here: its base-class
+ * resolveInterrupt() resolves the controller from the device tree, and
+ * registerInterrupt() translates its standard three-cell specifier before
+ * handing it to the base class.
+ */
+IOReturn
+GenericInterruptController::resolveInterrupt(IOService *nub, int source)
+{
+	IOInterruptSource *slot;
+	SourceSpec spec;
+	OSData *data;
+
+	if (nub != this) {
+		/* A real nub resolved its controller and specifier through
+		 * IOService::lookupInterrupt() before calling us; nothing to do. */
+		return kIOReturnSuccess;
 	}
 
+	if (source < GIC_INTID_SPI_FIRST || source > GIC_INTID_SPI_LAST) {
+		return kIOReturnNoInterrupt;
+	}
+	if (!fReady) {
+		return kIOReturnNotReady;
+	}
+
+	if (!_interruptSources) {
+		_interruptSources = IONewZero(IOInterruptSource,
+		    GIC_VECTOR_COUNT);
+		if (!_interruptSources) {
+			return kIOReturnNoMemory;
+		}
+		_numInterruptSources = GIC_VECTOR_COUNT;
+	}
+
+	slot = &_interruptSources[source];
+	if (slot->vectorData) {
+		return kIOReturnSuccess;
+	}
+
+	spec.intid = (uint32_t)source;
+	spec.type = GIC_ADT_TYPE_SPI;
+	{
+		const uint32_t *flags = hardcodedFlags(source);
+
+		spec.flags = flags ? *flags : GIC_ADT_FLAG_LEVEL_HIGH;
+	}
+
+	data = internalSpecData(&spec);
+	if (!data) {
+		return kIOReturnNoMemory;
+	}
+	slot->vectorData = data;   /* owned here, released in free() */
+	slot->interruptController = this;
+
+	return kIOReturnSuccess;
+}
+
+/* ------------------------------------------------------- spec resolution */
+
+/*
+ * Translate a source into the hardware properties this controller needs.
+ *
+ * nub == this   the internal three-cell specifier created by
+ *               resolveInterrupt(), cell 0 is already the INTID.
+ * real nub      the device's ADT specifier, standard three-cell
+ *               <TYPE HWIRQ FLAGS>; the INTID is derived from it.
+ */
+IOReturn
+GenericInterruptController::resolveSpec(IOService *nub, int source,
+    SourceSpec *spec)
+{
+	IOInterruptSource *sources;
+	OSData *data;
+	const uint32_t *cells;
+	uint32_t count;
+
+	if (!spec) {
+		return kIOReturnBadArgument;
+	}
+
+	if (nub == this || nub == NULL) {
+		if (!_interruptSources ||
+		    source < 0 || source >= GIC_VECTOR_COUNT) {
+			return kIOReturnNoInterrupt;
+		}
+		data = _interruptSources[source].vectorData;
+		if (!data || data->getLength() < GIC_ADT_CELLS * sizeof(uint32_t)) {
+			return kIOReturnBadArgument;
+		}
+		cells = (const uint32_t *)data->getBytesNoCopy();
+		spec->intid = cells[0];
+		spec->flags = cells[1];
+		spec->type = cells[2];
+
+		return kIOReturnSuccess;
+	}
+
+	sources = nub->_interruptSources;
+	if (!sources) {
+		return kIOReturnNoResources;
+	}
+	data = sources[source].vectorData;
+	if (!data || data->getLength() < GIC_ADT_CELLS * sizeof(uint32_t)) {
+		return kIOReturnBadArgument;
+	}
+	cells = (const uint32_t *)data->getBytesNoCopy();
+	count = data->getLength() / sizeof(uint32_t);
+
+	/*
+	 * Three cells can be either the standard ADT specifier <TYPE HWIRQ
+	 * FLAGS> (cell 0 is 0 or 1) or the internal translated specifier
+	 * <INTID FLAGS TYPE> (cell 0 is a real INTID, >= 32). Tell them apart
+	 * so initVector() still resolves after registerInterrupt() replaced a
+	 * device node's slot.
+	 */
+	if (count == GIC_ADT_CELLS && cells[0] >= GIC_INTID_SPI_FIRST) {
+		spec->intid = cells[0];
+		spec->flags = cells[1];
+		spec->type = cells[2];
+	} else if (count == GIC_ADT_CELLS) {
+		spec->type = cells[0];
+		spec->flags = cells[2];
+		if (spec->type == GIC_ADT_TYPE_SPI) {
+			spec->intid = GIC_ADT_HWIRQ_SPI_BASE + cells[1];
+		} else if (spec->type == GIC_ADT_TYPE_PPI) {
+			spec->intid = GIC_ADT_HWIRQ_PPI_BASE + cells[1];
+		} else {
+			return kIOReturnBadArgument;
+		}
+	} else {
+		return kIOReturnBadArgument;
+	}
+
+	return kIOReturnSuccess;
+}
+
+IOInterruptVectorNumber
+GenericInterruptController::vectorNumberForSource(IOService *nub,
+    int source) const
+{
+	IOInterruptSource *sources;
+	OSData *data;
+
+	if (nub == this || nub == NULL) {
+		if (!_interruptSources || source < 0 || source >= GIC_VECTOR_COUNT) {
+			return -1;
+		}
+		data = _interruptSources[source].vectorData;
+	} else {
+		sources = nub->_interruptSources;
+		if (!sources) {
+			return -1;
+		}
+		data = sources[source].vectorData;
+	}
+
+	if (!data || data->getLength() < sizeof(uint32_t)) {
+		return -1;
+	}
+
+	return *(const IOInterruptVectorNumber *)data->getBytesNoCopy();
+}
+
+void
+GenericInterruptController::programSpec(int intid, const SourceSpec *spec)
+{
+	bool level = !(spec->flags & GIC_ADT_FLAG_EDGE_RISING) &&
+	    !(spec->flags & GIC_ADT_FLAG_EDGE_FALLING) &&
+	    (spec->flags != GIC_ADT_FLAG_EDGE_BOTH);
+
 	writeGroup(intid, true);   /* Group 1: every NS interrupt arrives there */
-	writePriority(intid, priority);
-	writeTrigger(intid, spec->type != GIC_SPEC_TYPE_EDGE);
-	writeRoute(intid, routeForTarget(spec->target));
+	writePriority(intid, (uint8_t)GIC_SPEC_DEFAULT_PRIORITY);
+	writeTrigger(intid, level);
+	writeRoute(intid, routeForTarget(0));
 }
 
 /*
- * An SPI nobody registered. Counted, completed by the caller of dispatch(),
- * and masked only when the stray policy says so: during the staged rollout
- * the legacy chain still owns most INTIDs, so masking here would silently
- * kill a device that simply has not migrated yet.
+ * An SPI nobody registered. Counted and completed by the platform, and masked
+ * only when the stray policy says so: during the staged rollout the legacy
+ * chain still owns most INTIDs, so masking here would silently kill a device
+ * that simply has not migrated yet.
  */
 void
 GenericInterruptController::straySPI(int intid)
@@ -471,16 +586,17 @@ GenericInterruptController::vectorCanBeShared(IOInterruptVectorNumber,
 }
 
 /*
- * Called with the source still masked; the caller (registerInterrupt) decides
- * when it becomes visible.
+ * Called by the base class with the source still masked; the driver decides
+ * when it becomes visible through enableInterrupt().
  */
 void
 GenericInterruptController::initVector(IOInterruptVectorNumber vectorNumber,
     IOInterruptVector *vector)
 {
-	gic_interrupt_spec spec;
+	SourceSpec spec;
 
-	if (resolveSpec(vector->nub, vector->source, &spec) != kIOReturnSuccess) {
+	if (resolveSpec(vector->nub, vector->source, &spec) !=
+	    kIOReturnSuccess) {
 		SWEET_LOG_ERROR("SWEET GIC: cannot resolve intid %d; left masked\n",
 		    (int)vectorNumber);
 		return;
@@ -522,14 +638,18 @@ GenericInterruptController::causeVector(IOInterruptVectorNumber vectorNumber,
 
 /* --------------------------------------------------------- registration */
 
+/*
+ * The base class owns the vector table, the per-vector lock and the
+ * registered/enabled flags; this override only validates the source, makes
+ * sure the specifier the base class will read starts with the vector number,
+ * and allocates the per-vector lock it needs.
+ */
 IOReturn
 GenericInterruptController::registerInterrupt(IOService *nub, int source,
     void *target, IOInterruptHandler handler, void *refCon)
 {
-	gic_interrupt_spec spec;
-	IOInterruptState interruptState;
-	IOInterruptVector *vector;
-	int intid;
+	IOInterruptVectorNumber number;
+	SourceSpec spec;
 	IOReturn rc;
 
 	if (!fReady) {
@@ -538,250 +658,144 @@ GenericInterruptController::registerInterrupt(IOService *nub, int source,
 	if (!handler) {
 		return kIOReturnBadArgument;
 	}
+	if (nub == NULL) {
+		nub = this;   /* hardcoded mode: the controller is its own nub */
+	}
 
+	rc = resolveInterrupt(nub, source);
+	if (rc != kIOReturnSuccess) {
+		return rc;
+	}
 	rc = resolveSpec(nub, source, &spec);
 	if (rc != kIOReturnSuccess) {
 		return rc;
 	}
-
-	intid = (int)spec.intid;
-	if (intid < GIC_INTID_SPI_FIRST || intid > GIC_INTID_SPI_LAST) {
+	if (spec.intid < GIC_INTID_SPI_FIRST ||
+	    spec.intid > GIC_INTID_SPI_LAST) {
 		return kIOReturnUnsupported;
 	}
-	if (intid > fMaxIntID ||
-	    GICD_IROUTER + 8u * (uint32_t)intid + 8u > fGICDSize) {
+	if ((int)spec.intid > fMaxIntID ||
+	    GICD_IROUTER + 8u * spec.intid + 8u > fGICDSize) {
 		return kIOReturnNoSpace;
 	}
 
-	interruptState = IOSimpleLockLockDisableInterrupt(controllerLock);
-	vector = vectorAt(intid);
-	if (!vector) {
-		IOSimpleLockUnlockEnableInterrupt(controllerLock, interruptState);
-		return kIOReturnNoSpace;
-	}
-	if (vector->interruptRegistered) {
-		IOSimpleLockUnlockEnableInterrupt(controllerLock, interruptState);
-		return kIOReturnNoResources;
+	/*
+	 * For a real device nub the base class would otherwise read cell 0 of
+	 * the standard ADT specifier as the vector number. Replace the slot
+	 * with the translated internal specifier so it reads the INTID.
+	 */
+	if (nub != this) {
+		OSData *internal = internalSpecData(&spec);
+
+		if (!internal) {
+			return kIOReturnNoMemory;
+		}
+		nub->_interruptSources[source].vectorData = internal;
 	}
 
-	/* The base class locks a vector through this field; our overrides use
-	 * the controller lock, but a real IOInterruptVector carries its lock. */
-	if (!vector->interruptLock) {
-		vector->interruptLock = IOLockAlloc();
-		if (!vector->interruptLock) {
-			IOSimpleLockUnlockEnableInterrupt(controllerLock, interruptState);
+	number = vectorNumberForSource(nub, source);
+	if (number < 0 || (int)number > fMaxIntID) {
+		return kIOReturnNoInterrupt;
+	}
+	if (!vectors[number].interruptLock) {
+		vectors[number].interruptLock = IOLockAlloc();
+		if (!vectors[number].interruptLock) {
 			return kIOReturnNoMemory;
 		}
 	}
 
-	vector->nub = nub;
-	vector->source = source;
-	vector->target = target;
-	vector->handler = handler;
-	vector->refCon = refCon;
-	vector->interruptActive = 0;
-
-	initVector(vectorNumberForIntid(intid), vector);
-
-	vector->interruptDisabledHard = 1;
-	vector->interruptDisabledSoft = 1;
-	vector->interruptRegistered = 1;
-
-	__atomic_store_n(&fStray[intid], 0u, __ATOMIC_RELAXED);
-	__atomic_store_n(&fHits[intid], 0ull, __ATOMIC_RELAXED);
-
-	IOSimpleLockUnlockEnableInterrupt(controllerLock, interruptState);
-
-	return kIOReturnSuccess;
+	return super::registerInterrupt(nub, source, target, handler, refCon);
 }
 
 IOReturn
 GenericInterruptController::unregisterInterrupt(IOService *nub, int source)
 {
-	gic_interrupt_spec spec;
-	IOInterruptState interruptState;
-	IOInterruptVector *vector;
-	IOReturn rc;
-
 	if (!fReady) {
 		return kIOReturnNotReady;
 	}
-	rc = resolveSpec(nub, source, &spec);
-	if (rc != kIOReturnSuccess) {
-		return rc;
+	if (nub == NULL) {
+		nub = this;
+	}
+	if (resolveInterrupt(nub, source) != kIOReturnSuccess) {
+		return kIOReturnBadArgument;
 	}
 
-	interruptState = IOSimpleLockLockDisableInterrupt(controllerLock);
-	vector = vectorAt((int)spec.intid);
-	if (!vector || !vector->interruptRegistered) {
-		IOSimpleLockUnlockEnableInterrupt(controllerLock, interruptState);
-		return kIOReturnNotOpen;
-	}
-
-	maskSPI((int)spec.intid);
-	vector->interruptActive = 0;
-	vector->interruptDisabledHard = 0;
-	vector->interruptDisabledSoft = 0;
-	vector->interruptRegistered = 0;
-	vector->nub = NULL;
-	vector->source = 0;
-	vector->target = NULL;
-	vector->handler = NULL;
-	vector->refCon = NULL;
-
-	IOSimpleLockUnlockEnableInterrupt(controllerLock, interruptState);
-
-	return kIOReturnSuccess;
+	return super::unregisterInterrupt(nub, source);
 }
 
 IOReturn
 GenericInterruptController::getInterruptType(IOService *nub, int source,
     int *interruptType)
 {
-	gic_interrupt_spec spec;
-	IOInterruptVector *vector;
-
-	if (!interruptType || !fReady) {
+	if (!fReady || !interruptType) {
 		return kIOReturnBadArgument;
 	}
-	if (resolveSpec(nub, source, &spec) != kIOReturnSuccess) {
-		return kIOReturnBadArgument;
+	if (nub == NULL) {
+		nub = this;
 	}
-
-	vector = vectorAt((int)spec.intid);
-	if (!vector) {
+	if (resolveInterrupt(nub, source) != kIOReturnSuccess) {
 		return kIOReturnBadArgument;
 	}
 
-	*interruptType = getVectorType(vectorNumberForIntid((int)spec.intid),
-	    vector);
-
-	return kIOReturnSuccess;
+	return super::getInterruptType(nub, source, interruptType);
 }
 
 IOReturn
 GenericInterruptController::enableInterrupt(IOService *nub, int source)
 {
-	gic_interrupt_spec spec;
-	IOInterruptState interruptState;
-	IOInterruptVector *vector;
-	bool enableHardware = false;
-
 	if (!fReady) {
 		return kIOReturnNotReady;
 	}
-	if (resolveSpec(nub, source, &spec) != kIOReturnSuccess) {
+	if (nub == NULL) {
+		nub = this;
+	}
+	if (resolveInterrupt(nub, source) != kIOReturnSuccess) {
 		return kIOReturnBadArgument;
 	}
 
-	interruptState = IOSimpleLockLockDisableInterrupt(controllerLock);
-	vector = vectorAt((int)spec.intid);
-	if (!vector || !vector->interruptRegistered) {
-		IOSimpleLockUnlockEnableInterrupt(controllerLock, interruptState);
-		return kIOReturnNotOpen;
-	}
-
-	if (vector->interruptDisabledSoft) {
-		vector->interruptDisabledSoft = 0;
-		OSMemoryBarrier();
-		if (vector->interruptDisabledHard) {
-			vector->interruptDisabledHard = 0;
-			enableHardware = true;
-		}
-	}
-
-	IOSimpleLockUnlockEnableInterrupt(controllerLock, interruptState);
-
-	if (enableHardware) {
-		/* Do not unmask under the lock, and let an in-flight handler on
-		 * another CPU finish first (base-class behaviour). */
-		if (!getPlatform()->atInterruptLevel()) {
-			while (vector->interruptActive) {
-				__asm__ volatile ("yield" ::: "memory");
-			}
-		}
-		OSSynchronizeIO();
-		enableVector(vectorNumberForIntid((int)spec.intid), vector);
-	}
-
-	return kIOReturnSuccess;
+	return super::enableInterrupt(nub, source);
 }
 
 /*
- * Mask immediately. The base class defers the hard disable to the next
- * dispatch (it sets interruptDisabledSoft and lets handleInterrupt call
- * disableVectorHard); that does not work here, because the drivers mask their
- * level source in the top half so it must be quiet before the handler returns.
- * dispatch() still honours the soft flag for anything that arrives late.
+ * The base class only clears the soft flag here and lets the next dispatch
+ * hard-disable the vector. That is the standard XNU model and it works for a
+ * level source: the interrupt that is still asserted is re-delivered after
+ * EOI, dispatch sees interruptDisabledSoft, masks the distributor and does not
+ * run the handler again.
  */
 IOReturn
 GenericInterruptController::disableInterrupt(IOService *nub, int source)
 {
-	gic_interrupt_spec spec;
-	IOInterruptState interruptState;
-	IOInterruptVector *vector;
-	bool maskHardware = false;
-
 	if (!fReady) {
 		return kIOReturnNotReady;
 	}
-	if (resolveSpec(nub, source, &spec) != kIOReturnSuccess) {
+	if (nub == NULL) {
+		nub = this;
+	}
+	if (resolveInterrupt(nub, source) != kIOReturnSuccess) {
 		return kIOReturnBadArgument;
 	}
 
-	interruptState = IOSimpleLockLockDisableInterrupt(controllerLock);
-	vector = vectorAt((int)spec.intid);
-	if (!vector || !vector->interruptRegistered) {
-		IOSimpleLockUnlockEnableInterrupt(controllerLock, interruptState);
-		return kIOReturnNotOpen;
-	}
-
-	vector->interruptDisabledSoft = 1;
-	OSMemoryBarrier();
-	if (!vector->interruptDisabledHard) {
-		vector->interruptDisabledHard = 1;
-		maskHardware = true;
-	}
-
-	IOSimpleLockUnlockEnableInterrupt(controllerLock, interruptState);
-
-	if (maskHardware) {
-		disableVectorHard(vectorNumberForIntid((int)spec.intid), vector);
-	}
-
-	return kIOReturnSuccess;
+	return super::disableInterrupt(nub, source);
 }
 
 IOReturn
 GenericInterruptController::causeInterrupt(IOService *nub, int source)
 {
-	gic_interrupt_spec spec;
-	IOInterruptVector *vector;
-
 	if (!fReady) {
 		return kIOReturnNotReady;
 	}
-	if (resolveSpec(nub, source, &spec) != kIOReturnSuccess) {
+	if (nub == NULL) {
+		nub = this;
+	}
+	if (resolveInterrupt(nub, source) != kIOReturnSuccess) {
 		return kIOReturnBadArgument;
 	}
 
-	vector = vectorAt((int)spec.intid);
-	if (!vector || !vector->interruptRegistered) {
-		return kIOReturnNotOpen;
-	}
-
-	causeVector(vectorNumberForIntid((int)spec.intid), vector);
-
-	return kIOReturnSuccess;
+	return super::causeInterrupt(nub, source);
 }
 
 /* ------------------------------------------------------------ dispatch */
-
-uint32_t
-GenericInterruptController::acknowledge(void)
-{
-	return (uint32_t)__builtin_arm_rsr64("ICC_IAR1_EL1");
-}
 
 bool
 GenericInterruptController::dispatch(uint32_t intid)
@@ -807,9 +821,8 @@ GenericInterruptController::dispatch(uint32_t intid)
 	}
 
 	if (vector->interruptDisabledSoft) {
-		/* The driver asked for quiet after registration or from its own
-		 * top half; make sure the distributor agrees and do not run the
-		 * handler for a source it considers stopped. */
+		/* The driver asked for quiet from its top half; mask here, the
+		 * way the base class' dispatch path does. */
 		if (!vector->interruptDisabledHard) {
 			vector->interruptDisabledHard = 1;
 			maskSPI((int)intid);
@@ -825,61 +838,33 @@ GenericInterruptController::dispatch(uint32_t intid)
 	__atomic_add_fetch(&fStats.handled, 1u, __ATOMIC_RELAXED);
 
 	vector->interruptActive = 1;
-	handler(target, refCon, nub, (int)intid);
+	handler(target, refCon, nub, vector->source);
 	vector->interruptActive = 0;
 
 	return true;
 }
 
-void
-GenericInterruptController::endOfInterrupt(uint64_t iar)
-{
-	/* EOIMODE = 0 on this platform: EOI drops priority and deactivates. */
-	__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
-	__atomic_add_fetch(&fStats.endOfInterrupts, 1u, __ATOMIC_RELAXED);
-}
-
 /*
- * Dispatch and complete one acknowledged interrupt. Returns true exactly when
- * this controller wrote ICC_EOIR1_EL1, so the caller knows it must not write
- * it again: either a registered handler ran, or the SPI had no handler and
- * was only counted (and possibly masked).
- *
- * SGIs and PPIs (INTID < 32) return false without completing anything: they
- * belong to the platform, and the caller still owns the EOI. The same is true
- * for spurious INTIDs.
+ * The standard IOInterruptAction. It dispatches one source (the vector
+ * number; for SPIs that is the INTID) and never completes the interrupt:
+ * sleh_irq() wrote ICC_IAR1_EL1 before calling, so sleh_irq() owns the EOI.
  */
-bool
-GenericInterruptController::handleInterruptIAR(uint64_t iar)
-{
-	uint32_t intid = (uint32_t)(iar & 0xffffffULL);
-
-	if (intid >= (uint32_t)GIC_INTID_SPECIAL_FIRST) {
-		__atomic_add_fetch(&fStats.spurious, 1u, __ATOMIC_RELAXED);
-		return false;
-	}
-	if (intid < (uint32_t)GIC_INTID_SPI_FIRST) {
-		return false;
-	}
-
-	__atomic_add_fetch(&fStats.interrupts, 1u, __ATOMIC_RELAXED);
-	(void)dispatch(intid);
-	endOfInterrupt(iar);
-
-	return true;
-}
-
 IOReturn
 GenericInterruptController::handleInterrupt(void *refCon, IOService *nub,
     int source)
 {
-	/* Hardcoded-mode entry: `source` is the INTID. In ADT mode the platform
-	 * passes the device-local source and the base class context; this
-	 * method is then replaced by the platform's own action lookup. */
 	(void)refCon;
 	(void)nub;
 
-	return dispatch((uint32_t)source) ? kIOReturnSuccess : kIOReturnInvalid;
+	if (source < GIC_INTID_SPI_FIRST ||
+	    source >= (int)GIC_INTID_SPECIAL_FIRST) {
+		return kIOReturnInvalid;
+	}
+
+	__atomic_add_fetch(&fStats.interrupts, 1u, __ATOMIC_RELAXED);
+
+	return dispatch((uint32_t)source) ? kIOReturnSuccess :
+	       kIOReturnInvalid;
 }
 
 IOInterruptAction
@@ -1023,12 +1008,11 @@ GenericInterruptController::initWithBases(vm_offset_t gicd, vm_size_t gicdSize,
 	fReady = false;
 	fMaskStraySPIs = false;
 	fAdtPhandle = 0;
-	fInterruptCells = GIC_SPEC_CELLS;
+	fInterruptCells = GIC_ADT_CELLS;
 	fStats.interrupts = 0;
 	fStats.handled = 0;
 	fStats.spurious = 0;
 	fStats.stray = 0;
-	fStats.endOfInterrupts = 0;
 	for (unsigned int i = 0; i < GIC_VECTOR_COUNT; i++) {
 		fHits[i] = 0;
 		fStray[i] = 0;
@@ -1064,6 +1048,26 @@ GenericInterruptController::initWithBases(vm_offset_t gicd, vm_size_t gicdSize,
 void
 GenericInterruptController::free(void)
 {
+	/*
+	 * The source table is ours (resolveInterrupt filled it), but IOService
+	 * free() also knows about it and asserts on reserved->interruptSourcesPrivate,
+	 * which only IOService::resolveInterrupt() allocates. Detach it from the
+	 * base class before deleting: we own the table and the specifiers.
+	 */
+	if (_interruptSources) {
+		IOInterruptSource *sources = _interruptSources;
+		uint32_t count = _numInterruptSources;
+
+		_interruptSources = NULL;
+		_numInterruptSources = 0;
+		for (uint32_t i = 0; i < count; i++) {
+			if (sources[i].vectorData) {
+				sources[i].vectorData->release();
+				sources[i].vectorData = NULL;
+			}
+		}
+		IODelete(sources, IOInterruptSource, count);
+	}
 	if (vectors) {
 		for (unsigned int i = 0; i < GIC_VECTOR_COUNT; i++) {
 			if (vectors[i].interruptLock) {
@@ -1082,6 +1086,10 @@ GenericInterruptController::free(void)
 	super::free();
 }
 
+/*
+ * Probe TYPER, program GICD_CTLR and make the object usable. Called from
+ * start(), i.e. inside the IOService lifecycle.
+ */
 IOReturn
 GenericInterruptController::bringUp(void)
 {
@@ -1097,7 +1105,7 @@ GenericInterruptController::bringUp(void)
 
 	/*
 	 * The platform expert already turned Group 1 on; this only makes the
-	 * controller self-sufficient if it is installed on a different path.
+	 * controller self-sufficient if it is started on a different path.
 	 * This is the one place RWP is polled, and it is not under a lock.
 	 * With DS==0 the non-secure view has EnableGrp1 (bit 0) as RES0, so the
 	 * readback is 0x12 (ARE_NS | ENABLEGRP1A) and not 0x13.
@@ -1129,11 +1137,58 @@ GenericInterruptController::bringUp(void)
 	return kIOReturnSuccess;
 }
 
+bool
+GenericInterruptController::start(IOService *provider)
+{
+	char nameBuf[40];
+	OSSymbol *name;
+
+	if (!super::start(provider)) {
+		return false;
+	}
+
+	if (bringUp() != kIOReturnSuccess) {
+		return false;
+	}
+
+	/*
+	 * Register under the name XNU derives from the node's phandle
+	 * (IODTInterruptControllerName): that is exactly what a device's
+	 * interrupt-parent will resolve through once the ADT carries GIC
+	 * specifiers.
+	 */
+	if (fAdtPhandle != 0) {
+		snprintf(nameBuf, sizeof(nameBuf), "%s%08X",
+		    GIC_ADT_CONTROLLER_PREFIX, fAdtPhandle);
+		name = (OSSymbol *)OSSymbol::withCStringNoCopy(nameBuf);
+		if (name) {
+			if (IOService::getPlatform() &&
+			    IOService::getPlatform()->registerInterruptController(
+			    name, this) == kIOReturnSuccess) {
+				SWEET_LOG_INFO("SWEET GIC: registered as \"%s\" "
+				    "for ADT lookup\n", nameBuf);
+			} else {
+				SWEET_LOG_ERROR("SWEET GIC: platform registration "
+				    "failed for \"%s\"\n", nameBuf);
+			}
+			name->release();
+		}
+	} else {
+		SWEET_LOG_ERROR("SWEET GIC: no ADT phandle; not registered for "
+		    "interrupt-parent lookup\n");
+	}
+
+	registerService();
+
+	return true;
+}
+
 void
-GenericInterruptController::setAdtInfo(uint32_t phandle, uint32_t interruptCells)
+GenericInterruptController::setAdtInfo(uint32_t phandle,
+    uint32_t interruptCells)
 {
 	fAdtPhandle = phandle;
-	fInterruptCells = interruptCells ? interruptCells : GIC_SPEC_CELLS;
+	fInterruptCells = interruptCells ? interruptCells : GIC_ADT_CELLS;
 }
 
 GenericInterruptController *
@@ -1161,9 +1216,8 @@ gic_install(void)
 	bool adtNode;
 	bool adtMapped = false;
 	const char *source;
-	char nameBuf[40];
 	GenericInterruptController *gic;
-	OSSymbol *name;
+	IOService *platform;
 
 	if (gIC) {
 		return 1;
@@ -1221,11 +1275,12 @@ gic_install(void)
 	}
 
 	SWEET_LOG_INFO(
-	    "SWEET GIC: windows from %s: gicd=%#lx+%#lx gicr=%#lx+%#lx phandle=%#x cells=%u\n",
+	    "SWEET GIC: windows from %s: gicd=%#lx+%#lx gicr=%#lx+%#lx "
+	    "phandle=%#x cells=%u\n",
 	    source, (unsigned long)gicd, (unsigned long)gicdSize,
 	    (unsigned long)gicr, (unsigned long)gicrSize,
 	    adtNode ? adt.phandle : 0,
-	    adtNode ? adt.interruptCells : GIC_SPEC_CELLS);
+	    adtNode ? adt.interruptCells : GIC_ADT_CELLS);
 
 	gic = GenericInterruptController::withBases(gicd, gicdSize, gicr,
 	    gicrSize);
@@ -1237,42 +1292,19 @@ gic_install(void)
 		return -2;
 	}
 	gic->setAdtInfo(adtNode ? adt.phandle : 0,
-	    adtNode ? adt.interruptCells : GIC_SPEC_CELLS);
+	    adtNode ? adt.interruptCells : GIC_ADT_CELLS);
 
-	if (gic->bringUp() != kIOReturnSuccess) {
+	platform = IOService::getPlatform();
+	if (!platform || !gic->attach(platform) || !gic->start(platform)) {
+		if (platform) {
+			gic->detach(platform);
+		}
 		gic->release();
 		if (adtMapped) {
 			ml_io_unmap(gicd, gicdSize);
 			ml_io_unmap(gicr, gicrSize);
 		}
 		return -3;
-	}
-
-	/*
-	 * Register under the name XNU derives from the node's phandle
-	 * (IODTInterruptControllerName): that is exactly what a device's
-	 * interrupt-parent will resolve through once the ADT carries GIC
-	 * specifiers. Without a phandle nothing can resolve to us yet, so the
-	 * controller still dispatches BY INTID through the C API, it just is
-	 * not addressable from the device tree.
-	 */
-	nameBuf[0] = '\0';
-	if (adtNode && adt.phandle != 0) {
-		snprintf(nameBuf, sizeof(nameBuf), "%s%08X",
-		    GIC_ADT_CONTROLLER_PREFIX, adt.phandle);
-	}
-	name = nameBuf[0] ? (OSSymbol *)OSSymbol::withCStringNoCopy(nameBuf) : NULL;
-	if (name && IOService::getPlatform() &&
-	    IOService::getPlatform()->registerInterruptController(name, gic) ==
-	    kIOReturnSuccess) {
-		SWEET_LOG_INFO("SWEET GIC: registered as \"%s\" for ADT lookup\n",
-		    nameBuf);
-	} else {
-		SWEET_LOG_ERROR("SWEET GIC: not registered for ADT lookup "
-		    "(phandle=%#x)\n", adtNode ? adt.phandle : 0);
-	}
-	if (name) {
-		name->release();
 	}
 
 	GenericInterruptController::setController(gic);
@@ -1286,14 +1318,14 @@ gic_installed(void)
 	return gIC ? 1 : 0;
 }
 
-extern "C" int
-gic_handle_irq(uint64_t iar)
+extern "C" gic_interrupt_action_t
+gic_interrupt_action(void)
 {
 	if (!gIC) {
-		return 0;
+		return NULL;
 	}
 
-	return gIC->handleInterruptIAR(iar) ? 1 : 0;
+	return (gic_interrupt_action_t)gIC->getInterruptHandlerAddress();
 }
 
 extern "C" void

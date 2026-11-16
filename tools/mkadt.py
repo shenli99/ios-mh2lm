@@ -148,11 +148,10 @@ def build(seed=None, qemu=False, highmem=False, device='sweet', dram_size=None):
         ph(),
         ('compatible', cstr('arm,gic-v3')),
         ('interrupt-controller', b''),
-        # Device interrupt specifiers: <INTID TYPE PRIORITY TARGET>. The
-        # kernel controller (GenericInterruptController) reads this to know
-        # how many cells to parse; the prebuilt base ADT predates it and the
-        # controller then assumes the same four cells.
-        ('#interrupt-cells', u32(4)),
+        # Device interrupt specifiers: the standard 3-cell GIC binding,
+        # <TYPE HWIRQ FLAGS> (0 = SPI, HWIRQ = GIC INTID - 32, flags are the
+        # usual IRQ_TYPE_* values). GenericInterruptController parses it.
+        ('#interrupt-cells', u32(3)),
         ('virtual-timer-intid', u32(vtimer_intid)),
         ('reg', u64(gicd - SOC_BASE, gicd_size, gicr - SOC_BASE, gicr_size)),
     ])

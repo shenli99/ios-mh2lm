@@ -1884,7 +1884,6 @@ sleh_irq(arm_saved_state_t *state)
 	} else {
 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
 		bool sweet_handled = false;
-		bool sweet_completed = false;
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
 		extern bool sweet_spmi_mux_irq(unsigned int intid);
 		sweet_handled = sweet_spmi_mux_irq(intid);
@@ -1912,24 +1911,25 @@ sleh_irq(arm_saved_state_t *state)
 		/*
 		 * Staged handover: the chain above still owns every driver that
 		 * has not migrated yet, and only an INTID it did not claim
-		 * reaches the GIC controller. The controller dispatches the
-		 * source and completes it, so this path must not write
-		 * ICC_EOIR1_EL1 again -- exactly one EOI per interrupt. It
-		 * returns 0 for SGIs/PPIs and spurious INTIDs, which stay ours.
+		 * reaches the GIC controller. Dispatch goes through the standard
+		 * IOInterruptAction the controller returns from
+		 * getInterruptHandlerAddress(); the action runs the registered
+		 * handler and does not touch ICC_EOIR1_EL1, so this path owns the
+		 * completion and writes it once, below.
 		 */
-		if (!sweet_handled && gic_installed() &&
-		    gic_handle_irq(iar)) {
-			sweet_completed = true;
+		if (!sweet_handled) {
+			gic_interrupt_action_t action = gic_interrupt_action();
+
+			if (action) {
+				action(NULL, NULL, NULL, (int)intid);
+			} else if (cdp->interrupt_handler) {
+				cdp->interrupt_handler(cdp->interrupt_target,
+				    cdp->interrupt_refCon,
+				    cdp->interrupt_nub,
+				    intid);
+			}
 		}
-		if (!sweet_handled && !sweet_completed && cdp->interrupt_handler) {
-			cdp->interrupt_handler(cdp->interrupt_target,
-			    cdp->interrupt_refCon,
-			    cdp->interrupt_nub,
-			    intid);
-		}
-		if (!sweet_completed) {
-			__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
-		}
+		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
 	}
 	__builtin_arm_isb(ISB_SY);
 #else

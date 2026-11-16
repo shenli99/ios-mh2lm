@@ -20,10 +20,10 @@
  *   - ADT mode: a nub is passed and the base class resolves the vector number
  *     through IOInterruptSpecifiers, with initVector() parsing the specifier.
  *
- * EOI is written exactly once per interrupt and only by this controller, for
- * the INTIDs it completed: sleh_irq keeps the legacy paths (timer, IPIs,
- * drivers that have not migrated) and must not EOI what gic_handle_irq()
- * reported as completed.
+ * EOI is written exactly once per interrupt, by the layer that acknowledged
+ * it: sleh_irq writes ICC_IAR1_EL1 and completes every INTID it dispatches
+ * through the controller's standard action, so neither the controller nor the
+ * handler writes ICC_EOIR1_EL1.
  */
 
 #ifndef _IOKIT_GENERICINTERRUPTCONTROLLER_H
@@ -59,8 +59,14 @@ public:
 	    vm_offset_t gicr, vm_size_t gicrSize);
 	void free(void) APPLE_KEXT_OVERRIDE;
 
-	/* Probe TYPER, program GICD_CTLR and make the object usable. */
-	IOReturn bringUp(void);
+	/*
+	 * IOService lifecycle: the controller is attached to the platform
+	 * expert and started like any other service. start() probes TYPER,
+	 * programs GICD_CTLR and publishes the controller under the name XNU
+	 * derives from its ADT phandle (IOInterruptController%08X), which is
+	 * what a device's interrupt-parent resolves through.
+	 */
+	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
 
 	/* Identity read from the ADT node, kept for the device-specifier
 	 * phase: the phandle is the name clients resolve, and the cell count
@@ -84,6 +90,21 @@ public:
 	IOReturn handleInterrupt(void *refCon, IOService *nub, int source)
 	    APPLE_KEXT_OVERRIDE;
 
+	/*
+	 * Nub side of the standard lookup: it fills the source table with the
+	 * specifier whose first cell is the vector number, so the base class
+	 * (registerInterrupt, the vector table and the per-vector lock) does
+	 * the bookkeeping. Hardcoded mode is the controller acting as its own
+	 * nub; a real ADT-backed nub resolves through IOService::lookupInterrupt
+	 * before it reaches registerInterrupt().
+	 *
+	 * Not marked override on purpose: in kernel-private builds
+	 * IOService::resolveInterrupt() is not virtual (only kexts get the
+	 * compatibility virtual), so this is the same signature, called by the
+	 * controller itself.
+	 */
+	IOReturn resolveInterrupt(IOService *nub, int source);
+
 	/* Simplified-subclass hooks: the hardware side of one vector. */
 	bool vectorCanBeShared(IOInterruptVectorNumber vectorNumber,
 	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
@@ -98,26 +119,23 @@ public:
 	void causeVector(IOInterruptVectorNumber vectorNumber,
 	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
 
-	/* Platform IRQ entry: ICC_IAR1_EL1 was already read by the caller.
-	 * Dispatches the SPI and completes it; returns true when it wrote
-	 * ICC_EOIR1_EL1 (registered source, or unclaimed SPI that was only
-	 * counted). SGIs/PPIs and spurious INTIDs return false: the caller
-	 * still owns the completion. */
-	bool handleInterruptIAR(uint64_t iar);
+	/* Internal vector specifier: <INTID FLAGS TYPE>, translated from the
+	 * standard ADT <TYPE HWIRQ FLAGS> specifier. */
+	struct SourceSpec {
+		uint32_t intid;
+		uint32_t flags;
+		uint32_t type;
+	};
 
-	/* Translate a registration into hardware properties. Hardcoded table
-	 * today; the ADT specifier will be parsed here once it exists. */
-	IOReturn resolveSpec(IOService *nub, int source,
-	    gic_interrupt_spec *spec);
+	/* Translate the internal specifier into hardware properties. */
+	IOReturn resolveSpec(IOService *nub, int source, SourceSpec *spec);
 
 	/* Unregistered SPIs are counted and completed; masking them is opt-in
 	 * so a staged migration can keep the legacy chain in front of the
 	 * controller until every live SPI has registered. */
 	void setMaskStraySPIs(bool mask);
 
-	uint32_t acknowledge(void);
 	bool dispatch(uint32_t intid);
-	void endOfInterrupt(uint64_t iar);
 
 	/* Read-only inventory of the enabled SPIs, used as the migration list
 	 * while the legacy chain still claims the sources. */
@@ -133,7 +151,6 @@ public:
 		uint64_t handled;
 		uint64_t spurious;
 		uint64_t stray;
-		uint64_t endOfInterrupts;
 	};
 	void getStatistics(Statistics *stats) const;
 
@@ -141,14 +158,12 @@ public:
 	static void setController(GenericInterruptController *controller);
 
 private:
-	IOReturn resolveSpecADT(IOService *nub, int source,
-	    gic_interrupt_spec *spec) const;
-	IOReturn resolveSpecHardcoded(int source, gic_interrupt_spec *spec) const;
+	OSData *internalSpecData(const SourceSpec *spec) const;
+	IOInterruptVectorNumber vectorNumberForSource(IOService *nub,
+	    int source) const;
 
 	IOInterruptVector *vectorAt(int intid) const;
-	int vectorNumberForIntid(int intid) const { return intid; }
-	int intidForSpec(const gic_interrupt_spec *spec) const;
-	const gic_interrupt_spec *hardcodedSpec(int intid) const;
+	const uint32_t *hardcodedFlags(int intid) const;
 
 	uint32_t gicdRead32(uint32_t offset) const;
 	void gicdWrite32(uint32_t offset, uint32_t value);
@@ -157,7 +172,8 @@ private:
 	bool waitForRWP(void);
 	void synchronizeIO(void);
 
-	void programSpec(int intid, const gic_interrupt_spec *spec);
+	IOReturn bringUp(void);
+	void programSpec(int intid, const SourceSpec *spec);
 	void writeGroup(int intid, bool group1);
 	void writePriority(int intid, uint8_t priority);
 	void writeTrigger(int intid, bool level);
