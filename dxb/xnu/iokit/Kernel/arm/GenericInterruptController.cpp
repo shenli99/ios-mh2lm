@@ -245,19 +245,28 @@ GenericInterruptController::ensureSpec(uint32_t intid, uint32_t type,
 		return kIOReturnNoInterrupt;
 	}
 
+	/*
+	 * Build the specifier before taking controllerLock: allocation can take
+	 * a mutex and preemption is disabled inside a simple lock.
+	 */
+	cells[0] = intid;
+	cells[1] = type;
+	cells[2] = flags;
+	specData = OSData::withBytes(cells, sizeof(cells));
+	if (!specData) {
+		return kIOReturnNoMemory;
+	}
+
 	IOSimpleLockLock(controllerLock);
 	if (!fSpecData[intid]) {
-		cells[0] = intid;
-		cells[1] = type;
-		cells[2] = flags;
-		specData = OSData::withBytes(cells, sizeof(cells));
-		if (!specData) {
-			IOSimpleLockUnlock(controllerLock);
-			return kIOReturnNoMemory;
-		}
 		fSpecData[intid] = specData;
+		specData = NULL;
 	}
 	IOSimpleLockUnlock(controllerLock);
+
+	if (specData) {
+		specData->release();
+	}
 
 	return kIOReturnSuccess;
 }
@@ -539,6 +548,60 @@ GenericInterruptController::straySPI(int intid)
 	}
 }
 
+/* ------------------------------------------------------ client mapping */
+
+void
+GenericInterruptController::rememberClientLocked(IOService *nub, int source,
+    int intid)
+{
+	if (fClientCount >= kClientMax) {
+		return;
+	}
+	for (uint32_t i = 0; i < fClientCount; i++) {
+		if (fClients[i].nub == nub && fClients[i].source == source) {
+			fClients[i].intid = intid;
+			return;
+		}
+	}
+	fClients[fClientCount].nub = nub;
+	fClients[fClientCount].source = source;
+	fClients[fClientCount].intid = intid;
+	__atomic_store_n(&fClientCount, fClientCount + 1, __ATOMIC_RELEASE);
+}
+
+void
+GenericInterruptController::forgetClientLocked(IOService *nub, int source)
+{
+	uint32_t count = fClientCount;
+
+	for (uint32_t i = 0; i < count; i++) {
+		if (fClients[i].nub == nub && fClients[i].source == source) {
+			fClients[i] = fClients[count - 1];
+			__atomic_store_n(&fClientCount, count - 1, __ATOMIC_RELEASE);
+			return;
+		}
+	}
+}
+
+/*
+ * Interrupt-context lookup: no locks, no registry property access (that takes
+ * a mutex, and preemption is disabled here). Entries are only appended at
+ * registration and removed at unregister.
+ */
+int
+GenericInterruptController::intidForClient(IOService *nub, int source) const
+{
+	uint32_t count = __atomic_load_n(&fClientCount, __ATOMIC_ACQUIRE);
+
+	for (uint32_t i = 0; i < count; i++) {
+		if (fClients[i].nub == nub && fClients[i].source == source) {
+			return fClients[i].intid;
+		}
+	}
+
+	return -1;
+}
+
 /* ------------------------------------------- simplified subclass hooks */
 
 bool
@@ -633,7 +696,6 @@ GenericInterruptController::causeVector(IOInterruptVectorNumber vectorNumber,
 IOReturn
 GenericInterruptController::disableInterrupt(IOService *nub, int source)
 {
-	SourceSpec spec;
 	IOReturn rc;
 
 	if (!fReady) {
@@ -648,16 +710,18 @@ GenericInterruptController::disableInterrupt(IOService *nub, int source)
 		return rc;
 	}
 
-	/* Only public specifier data: cell 0 is the vector number. */
-	if (specFromNubProperties(nub, source, &spec) != kIOReturnSuccess) {
-		return kIOReturnSuccess;
-	}
-	if (spec.intid < GIC_INTID_SPI_FIRST || (int)spec.intid > fMaxIntID) {
+	/*
+	 * This runs from the driver's top half, i.e. with preemption disabled:
+	 * resolve the INTID from the registration cache, never from the
+	 * registry (getProperty takes a mutex).
+	 */
+	int intid = intidForClient(nub, source);
+	if (intid < GIC_INTID_SPI_FIRST || intid > fMaxIntID) {
 		return kIOReturnSuccess;
 	}
 
-	vectors[spec.intid].interruptDisabledHard = 1;
-	disableVectorHard(spec.intid, &vectors[spec.intid]);
+	vectors[intid].interruptDisabledHard = 1;
+	disableVectorHard(intid, &vectors[intid]);
 
 	return kIOReturnSuccess;
 }
@@ -698,17 +762,52 @@ GenericInterruptController::registerInterrupt(IOService *nub, int source,
 	if (spec.intid < GIC_INTID_SPI_FIRST || (int)spec.intid > fMaxIntID) {
 		return kIOReturnBadArgument;
 	}
+	/* Allocate outside controllerLock for the same reason as ensureSpec. */
+	IOLock *spareLock = IOLockAlloc();
+
+	if (!spareLock) {
+		return kIOReturnNoMemory;
+	}
 	IOSimpleLockLock(controllerLock);
 	if (!vectors[spec.intid].interruptLock) {
-		vectors[spec.intid].interruptLock = IOLockAlloc();
+		vectors[spec.intid].interruptLock = spareLock;
+		spareLock = NULL;
 	}
 	bool haveVectorLock = vectors[spec.intid].interruptLock != NULL;
 	IOSimpleLockUnlock(controllerLock);
+	if (spareLock) {
+		IOLockFree(spareLock);
+	}
 	if (!haveVectorLock) {
 		return kIOReturnNoMemory;
 	}
 
-	return super::registerInterrupt(nub, source, target, handler, refCon);
+	IOReturn registerRc = super::registerInterrupt(nub, source, target,
+	    handler, refCon);
+	if (registerRc == kIOReturnSuccess) {
+		IOSimpleLockLock(controllerLock);
+		rememberClientLocked(nub, source, (int)spec.intid);
+		IOSimpleLockUnlock(controllerLock);
+	}
+
+	return registerRc;
+}
+
+/* Forget the (nub, source) mapping once the base class has torn the vector
+ * down; the base class disables the source first, so the mask path still sees
+ * the entry. */
+IOReturn
+GenericInterruptController::unregisterInterrupt(IOService *nub, int source)
+{
+	IOReturn rc = super::unregisterInterrupt(nub, source);
+
+	if (rc == kIOReturnSuccess) {
+		IOSimpleLockLock(controllerLock);
+		forgetClientLocked(nub, source);
+		IOSimpleLockUnlock(controllerLock);
+	}
+
+	return rc;
 }
 
 
@@ -937,6 +1036,12 @@ GenericInterruptController::allocateTables(void)
 	fStats.handled = 0;
 	fStats.spurious = 0;
 	fStats.stray = 0;
+	fClientCount = 0;
+	for (unsigned int i = 0; i < kClientMax; i++) {
+		fClients[i].nub = NULL;
+		fClients[i].source = 0;
+		fClients[i].intid = 0;
+	}
 
 	vectors = IONewZero(IOInterruptVector, GIC_VECTOR_COUNT);
 	fSpecData = IONewZero(OSData *, GIC_VECTOR_COUNT);

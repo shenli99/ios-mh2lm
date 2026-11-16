@@ -68,6 +68,7 @@ public:
 	 * platform mask-and-wait (touch quiesce reads ISENABLER back), so this
 	 * override also writes ICENABLER synchronously. */
 	IOReturn disableInterrupt(IOService *nub, int source) APPLE_KEXT_OVERRIDE;
+	IOReturn unregisterInterrupt(IOService *nub, int source) APPLE_KEXT_OVERRIDE;
 
 
 
@@ -147,6 +148,21 @@ public:
 
 private:
 	IOReturn ensureSpec(uint32_t intid, uint32_t type, uint32_t flags);
+
+	/* Lock-free (nub, source) -> INTID cache for the interrupt-context mask
+	 * path: registry properties are mutex protected and cannot be read with
+	 * preemption disabled, which is exactly where disableInterrupt() runs. */
+	struct Client {
+		IOService *nub;
+		int source;
+		int intid;
+	};
+	enum { kClientMax = 64 };
+	Client fClients[kClientMax];
+	uint32_t fClientCount;
+	void rememberClientLocked(IOService *nub, int source, int intid);
+	void forgetClientLocked(IOService *nub, int source);
+	int intidForClient(IOService *nub, int source) const;
 	IOReturn specFromNubProperties(IOService *nub, int source,
 	    SourceSpec *spec) const;
 	int intidFromNubProperties(IOService *nub, int source) const;
