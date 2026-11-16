@@ -19,6 +19,7 @@
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/arm64/generic_interrupt_controller.h>
 
 extern task_t proc_task(proc_t);
 extern int hz;
@@ -67,10 +68,17 @@ sweet_sample_thread(__unused void *arg, __unused wait_result_t wr)
 	if (!PE_parse_boot_argn("sweetsample", sweet_sample_names, sizeof(sweet_sample_names))) {
 		strlcpy(sweet_sample_names, "SpringBoard,backboardd", sizeof(sweet_sample_names));
 	}
+	(void)tsleep(&chan, PZERO, "sweetsmp", 90 * hz);
+	/*
+	 * One-shot GIC inventory for the staged interrupt migration: by now the
+	 * deferred drivers (USB waits 15 s, TouchComm 20 s, the PMIC mux arms
+	 * its SPI when consumers attach after the root mount) have enabled
+	 * their sources. Read-only, and independent of whether sampling runs.
+	 */
+	gic_log_enabled("sample");
 	if (sweet_sample_names[0] == '-') {
 		return;
 	}
-	(void)tsleep(&chan, PZERO, "sweetsmp", 90 * hz);
 	for (int i = 0; i < 40; i++) {
 		printf("SMP --- sample %d\n", i);
 		proc_iterate(PROC_ALLPROCLIST, sweet_sample_proc, NULL, NULL, NULL);
