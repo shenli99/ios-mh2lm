@@ -223,20 +223,20 @@ GenericInterruptController::vectorAt(int intid) const
 
 
 /*
- * Record the standard 3-cell specifier <TYPE HWIRQ FLAGS> for one INTID.
+ * Record the 3-cell specifier <INTID TYPE FLAGS> for one INTID.
  * The dictionary is ours (no nub->_interruptSources access); controllerLock
  * protects its lazy creation together with the single-cell vector-number
  * table the base class reads.
  */
 /*
- * Record the standard 3-cell specifier <TYPE HWIRQ FLAGS> for one INTID in
+ * Record the 3-cell specifier <INTID TYPE FLAGS> for one INTID in
  * the controller's own dictionary. The base class' IOInterruptSources array is
  * not touched: the vector number it needs comes from the nub's own source
  * table, which IOService::resolveInterrupt() already filled.
  */
 IOReturn
 GenericInterruptController::ensureSpec(uint32_t intid, uint32_t type,
-    uint32_t hwirq, uint32_t flags)
+    uint32_t flags)
 {
 	uint32_t cells[GIC_ADT_CELLS];
 	OSData *specData;
@@ -247,8 +247,8 @@ GenericInterruptController::ensureSpec(uint32_t intid, uint32_t type,
 
 	IOSimpleLockLock(controllerLock);
 	if (!fSpecData[intid]) {
-		cells[0] = type;
-		cells[1] = hwirq;
+		cells[0] = intid;
+		cells[1] = type;
 		cells[2] = flags;
 		specData = OSData::withBytes(cells, sizeof(cells));
 		if (!specData) {
@@ -273,7 +273,6 @@ GenericInterruptController::specFromNubProperties(IOService *nub, int source,
 	OSArray *specifiers;
 	OSData *data;
 	const uint32_t *cells;
-	uint32_t intid;
 
 	if (!nub || !spec) {
 		return kIOReturnBadArgument;
@@ -293,19 +292,15 @@ GenericInterruptController::specFromNubProperties(IOService *nub, int source,
 	}
 
 	cells = (const uint32_t *)data->getBytesNoCopy();
-	spec->type = cells[0];
+	spec->intid = cells[0];
+	spec->type = cells[1];
 	spec->flags = cells[2];
-	switch (spec->type) {
-	case GIC_ADT_TYPE_SPI:
-		intid = GIC_ADT_HWIRQ_SPI_BASE + cells[1];
-		break;
-	case GIC_ADT_TYPE_PPI:
-		intid = GIC_ADT_HWIRQ_PPI_BASE + cells[1];
-		break;
-	default:
+	if (spec->type != GIC_ADT_TYPE_SPI && spec->type != GIC_ADT_TYPE_PPI) {
 		return kIOReturnBadArgument;
 	}
-	spec->intid = intid;
+	if (spec->intid > (uint32_t)fMaxIntID) {
+		return kIOReturnNoInterrupt;
+	}
 
 	return kIOReturnSuccess;
 }
@@ -406,7 +401,7 @@ GenericInterruptController::unmaskSPI(int intid)
  * The internal specifier handed to IOInterruptController is three cells
  * <INTID FLAGS TYPE>: the first cell is the vector number the base class
  * resolves, the other two are what the hooks need. The ADT-facing specifier a
- * device node carries is the standard <TYPE HWIRQ FLAGS>; resolveSpec()
+ * device node carries is <INTID TYPE FLAGS>; resolveSpec()
  * translates between the two.
  */
 
@@ -450,8 +445,7 @@ GenericInterruptController::resolveInterrupt(IOService *nub, int source)
 	if (rc != kIOReturnSuccess) {
 		return rc;
 	}
-	rc = ensureSpec(spec.intid, spec.type,
-	    spec.intid - GIC_ADT_HWIRQ_SPI_BASE, spec.flags);
+	rc = ensureSpec(spec.intid, spec.type, spec.flags);
 	if (rc != kIOReturnSuccess) {
 		return rc;
 	}
@@ -468,7 +462,7 @@ GenericInterruptController::resolveInterrupt(IOService *nub, int source)
  * nub == this   the internal three-cell specifier created by
  *               resolveInterrupt(), cell 0 is already the INTID.
  * real nub      the device's ADT specifier, standard three-cell
- *               <TYPE HWIRQ FLAGS>; the INTID is derived from it.
+ *               <INTID TYPE FLAGS>; cell 0 is the vector number.
  */
 IOReturn
 GenericInterruptController::resolveSpec(int vectorNumber, SourceSpec *spec)
@@ -490,16 +484,10 @@ GenericInterruptController::resolveSpec(int vectorNumber, SourceSpec *spec)
 	}
 
 	cells = (const uint32_t *)data->getBytesNoCopy();
-	spec->type = cells[0];
+	spec->intid = cells[0];
+	spec->type = cells[1];
 	spec->flags = cells[2];
-	switch (spec->type) {
-	case GIC_ADT_TYPE_SPI:
-		spec->intid = GIC_ADT_HWIRQ_SPI_BASE + cells[1];
-		break;
-	case GIC_ADT_TYPE_PPI:
-		spec->intid = GIC_ADT_HWIRQ_PPI_BASE + cells[1];
-		break;
-	default:
+	if (spec->type != GIC_ADT_TYPE_SPI && spec->type != GIC_ADT_TYPE_PPI) {
 		return kIOReturnBadArgument;
 	}
 

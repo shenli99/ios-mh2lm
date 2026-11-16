@@ -116,13 +116,13 @@ public:
 	/* Resolved hardware properties of one source. */
 	struct SourceSpec {
 		uint32_t intid;
-		uint32_t flags;
 		uint32_t type;
+		uint32_t flags;
 	};
 
 	/* Look a vector number up in the controller's own specifier
 	 * dictionary. The dictionary holds the standard 3-cell
-	 * <TYPE HWIRQ FLAGS> specifier; there is no private form. */
+	 * <INTID TYPE FLAGS> specifier; there is no private form. */
 	IOReturn resolveSpec(int vectorNumber, SourceSpec *spec);
 
 	/* Unregistered SPIs are counted and completed; masking them is opt-in
@@ -153,8 +153,7 @@ public:
 	static void setController(GenericInterruptController *controller);
 
 private:
-	IOReturn ensureSpec(uint32_t intid, uint32_t type, uint32_t hwirq,
-	    uint32_t flags);
+	IOReturn ensureSpec(uint32_t intid, uint32_t type, uint32_t flags);
 	IOReturn specFromNubProperties(IOService *nub, int source,
 	    SourceSpec *spec) const;
 	int intidFromNubProperties(IOService *nub, int source) const;

@@ -150,9 +150,10 @@ def build(seed=None, qemu=False, highmem=False, device='sweet', dram_size=None):
         # the arm binding stays so the node describes standard hardware.
         ('compatible', cstr('sweet,gicv3') + cstr('arm,gic-v3')),
         ('interrupt-controller', b''),
-        # Device interrupt specifiers: the standard 3-cell GIC binding,
-        # <TYPE HWIRQ FLAGS> (0 = SPI, HWIRQ = GIC INTID - 32, flags are the
-        # usual IRQ_TYPE_* values). GenericInterruptController parses it.
+        # Device interrupt specifiers, three cells <INTID TYPE FLAGS>:
+        # the interrupt number comes first because IOInterruptController
+        # takes the vector number from the first cell; TYPE is 0 (SPI) or 1
+        # (PPI), FLAGS are the usual IRQ_TYPE_* values.
         ('#interrupt-cells', u32(3)),
         ('virtual-timer-intid', u32(vtimer_intid)),
         ('reg', u64(gicd - SOC_BASE, gicd_size, gicr - SOC_BASE, gicr_size)),

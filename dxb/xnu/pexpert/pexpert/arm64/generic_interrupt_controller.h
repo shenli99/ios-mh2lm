@@ -106,25 +106,21 @@
 #define GIC_ADT_CONTROLLER_PREFIX  "IOInterruptController"
 
 /*
- * Interrupt specifier: the standard 3-cell GIC binding, which is what the
- * ADT "interrupts" property carries and what the controller documents:
+ * Interrupt specifier, three cells:
  *
- *     interrupts = <TYPE HWIRQ FLAGS>
+ *     interrupts = <INTID TYPE FLAGS>
  *
- * TYPE is GIC_ADT_TYPE_SPI (HWIRQ is the SPI number, GIC INTID = 32 + HWIRQ)
- * or GIC_ADT_TYPE_PPI. FLAGS uses the usual IRQ_TYPE_* values; only the
- * level/edge distinction matters to the distributor, priority and target stay
- * controller defaults (0xa0, boot CPU).
- *
- * The controller translates this into its internal vector data <INTID FLAGS
- * TYPE> before handing it to IOInterruptController, whose first cell is the
- * vector number.
+ * INTID is the GIC interrupt number and it comes first on purpose: the XNU
+ * parent class takes the vector number from the first cell of the specifier
+ * (IOInterruptController::registerInterrupt), while the Linux binding would
+ * put the type there. TYPE is GIC_ADT_TYPE_SPI/PPI, FLAGS uses the usual
+ * IRQ_TYPE_* values (only the level/edge distinction reaches the
+ * distributor); priority and target stay controller defaults (0xa0, boot
+ * CPU), exactly as before.
  */
 #define GIC_ADT_CELLS              3u
 #define GIC_ADT_TYPE_SPI           0u
 #define GIC_ADT_TYPE_PPI           1u
-#define GIC_ADT_HWIRQ_SPI_BASE     GIC_INTID_SPI_FIRST
-#define GIC_ADT_HWIRQ_PPI_BASE     GIC_INTID_PPI_FIRST
 
 #define GIC_ADT_FLAG_NONE          0x0u
 #define GIC_ADT_FLAG_EDGE_RISING   0x1u
