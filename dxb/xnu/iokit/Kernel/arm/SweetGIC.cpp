@@ -29,10 +29,6 @@
 #include "SweetGIC.h"
 
 #include <IOKit/IOLib.h>
-#include <machine/atomic.h>
-#include <arm64/instructions.h>
-#include <arm64/proc_reg.h>
-#include <pexpert/pexpert.h>
 #include <stdint.h>
 
 #define SWEET_LOG_SINK IOLog
