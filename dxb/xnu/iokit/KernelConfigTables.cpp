@@ -38,7 +38,7 @@ const char * gIOKernelConfigTables =
     "   {"
     "     'IOClass'         = GenericInterruptController;"
     "     'IOProviderClass' = IOPlatformDevice;"
-    "     'IONameMatch'     = 'sweet,gicv3';"
+    "     'IONameMatch'     = 'arm,gic-v3';"
     "   },"
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
     "   {"

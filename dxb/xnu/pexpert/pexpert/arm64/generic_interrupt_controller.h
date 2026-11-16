@@ -136,12 +136,9 @@
 #define GIC_SPEC_DEFAULT_PRIORITY  0xa0u
 
 /*
- * Interrupt handler signature, identical to IOInterruptHandler: the target
- * and refCon come from registration, nub is the registerer (NULL here) and
- * source is the INTID.
+ * There is no board-facing registration call: a device registers through
+ * IOService::registerInterrupt() and IOInterruptHandler is the handler type.
  */
-typedef void (*gic_handler_t)(void *target, void *refCon, void *nub,
-    int source);
 
 #ifdef __cplusplus
 extern "C" {
@@ -193,20 +190,11 @@ void gic_set_stray_policy(int mask);
 void gic_log_enabled(const char *tag);
 
 /*
- * Driver-facing registration, SPIs only (INTID 32..1019; SGIs and PPIs belong
- * to the platform for now and are refused with kIOReturnUnsupported). The
- * hardware properties (trigger, priority, target) come from the controller's
- * source table, not from the caller, which is where the ADT specifier will
- * plug in. The source stays masked until gic_enable_irq(), like
- * IOInterruptController. Returns an IOReturn value (kIOReturnSuccess == 0).
+ * There is deliberately no driver-facing registration entry here: a device
+ * registers its INTID through IOService::registerInterrupt(), and its ADT
+ * node carries the standard 3-cell specifier. See the header comment on the
+ * controller's resolveInterrupt().
  */
-int gic_register_irq(int intid, void *target, gic_handler_t handler,
-    void *refCon);
-int gic_unregister_irq(int intid);
-int gic_enable_irq(int intid);
-int gic_disable_irq(int intid);
-int gic_cause_irq(int intid);
-uint64_t gic_hits(int intid);
 
 #ifdef __cplusplus
 }

@@ -10,15 +10,11 @@
  *
  * The hardware side lives in the simplified-subclass hooks the base class
  * calls (initVector, enableVector, disableVectorHard, causeVector,
- * getVectorType); the source side is resolved by resolveSpec(), which today
- * reads a hardcoded per-INTID table and later will parse the ADT interrupt
- * specifier (see generic_interrupt_controller.h for the cell layout). The
- * registration entry points accept both worlds:
- *
- *   - hardcoded mode: the caller passes the INTID as `source` with a NULL nub
- *     (gic_register_irq()), so no ADT exists yet;
- *   - ADT mode: a nub is passed and the base class resolves the vector number
- *     through IOInterruptSpecifiers, with initVector() parsing the specifier.
+ * getVectorType); the source side is resolved by resolveSpec() from the
+ * controller's own specifier dictionary. Registration is the stock path: a
+ * device node's specifier comes from its public IOInterruptSpecifiers
+ * property, and the base class owns the vector number, the vector table and
+ * the per-vector lock.
  *
  * EOI is written exactly once per interrupt, by the layer that acknowledged
  * it: sleh_irq writes ICC_IAR1_EL1 and completes every INTID it dispatches
@@ -79,13 +75,11 @@ public:
 	 * mode (nub == NULL); with a nub the base class ADT path is used. */
 	IOReturn registerInterrupt(IOService *nub, int source, void *target,
 	    IOInterruptHandler handler, void *refCon) APPLE_KEXT_OVERRIDE;
-	IOReturn unregisterInterrupt(IOService *nub, int source)
-	    APPLE_KEXT_OVERRIDE;
-	IOReturn getInterruptType(IOService *nub, int source, int *interruptType)
-	    APPLE_KEXT_OVERRIDE;
-	IOReturn enableInterrupt(IOService *nub, int source) APPLE_KEXT_OVERRIDE;
-	IOReturn disableInterrupt(IOService *nub, int source) APPLE_KEXT_OVERRIDE;
-	IOReturn causeInterrupt(IOService *nub, int source) APPLE_KEXT_OVERRIDE;
+
+
+
+
+
 	IOInterruptAction getInterruptHandlerAddress(void) APPLE_KEXT_OVERRIDE;
 	IOReturn handleInterrupt(void *refCon, IOService *nub, int source)
 	    APPLE_KEXT_OVERRIDE;
