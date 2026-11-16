@@ -10,7 +10,7 @@ iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
 iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitcpp
 
 iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
-iokit/Kernel/arm/SweetGIC.cpp                                    optional iokitcpp
+iokit/Kernel/arm/GenericInterruptController.cpp                   optional iokitcpp
 iokit/Kernel/arm/SweetSpmiInterruptMux.cpp                       optional iokitcpp
 iokit/Kernel/arm/SweetSpmiMuxClient.cpp                          optional iokitcpp
 iokit/Kernel/arm/SweetPmicKeys.cpp                               optional iokitcpp

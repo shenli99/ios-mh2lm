@@ -1,19 +1,21 @@
 /*
- * GICv3 register layout for the sweet platform, plus the board-facing API of
- * the interrupt controller that owns the distributor.
+ * GICv3 register layout for the sweet platform, the interrupt specifier the
+ * ADT will carry, and the board-facing API of the controller that owns the
+ * distributor.
  *
  * The phone boots with TrustZone alive: Group 0 belongs to the secure world,
  * every interrupt the non-secure side receives is Group 1 and is taken as an
  * IRQ through ICC_IAR1_EL1. This header used to be duplicated in SWEET.h,
  * MH2LM.h and GUACAMOLE.h; it is the single definition now.
  *
- * SweetGIC (iokit/Kernel/arm/SweetGIC.cpp) is the only writer of these
- * registers outside pe_fiq.c: drivers register an INTID and ask for it to be
- * enabled, instead of programming GICD/GICR themselves.
+ * GenericInterruptController (iokit/Kernel/arm/GenericInterruptController.cpp)
+ * is an IOInterruptController subclass and the only writer of these registers
+ * outside pe_fiq.c: a driver registers an INTID and asks for it to be enabled
+ * instead of programming GICD/GICR itself.
  */
 
-#ifndef _PEXPERT_ARM64_SWEET_GIC_H
-#define _PEXPERT_ARM64_SWEET_GIC_H
+#ifndef _PEXPERT_ARM64_GENERIC_INTERRUPT_CONTROLLER_H
+#define _PEXPERT_ARM64_GENERIC_INTERRUPT_CONTROLLER_H
 
 /* ---------------------------------------------------------------- INTIDs */
 
@@ -92,20 +94,42 @@
 #include <stdint.h>
 
 /*
+ * Name the controller answers to. The ADT node that describes the GIC will
+ * carry this as its "name" so that a device's "interrupt-parent" resolves to
+ * this controller through IODTInterruptControllerName().
+ */
+#define GIC_ADT_CONTROLLER_NAME    "gicv3"
+
+/*
+ * Interrupt specifier. This is the shape the ADT "interrupts" property will
+ * carry once the generator emits it:
+ *
+ *     interrupts = <INTID TYPE PRIORITY TARGET>
+ *
+ * where TYPE is GIC_SPEC_TYPE_*, PRIORITY is 0 for the controller default and
+ * TARGET is the redistributor/CPU index (0 is the boot CPU). Until the ADT
+ * side exists the controller resolves the same fields from its hardcoded
+ * source table, so the hardware programming path is already the final one.
+ */
+#define GIC_SPEC_TYPE_LEVEL        0u
+#define GIC_SPEC_TYPE_EDGE         1u
+#define GIC_SPEC_DEFAULT_PRIORITY  0xa0u
+#define GIC_SPEC_CELLS             4u
+
+struct gic_interrupt_spec {
+	uint32_t intid;
+	uint32_t type;
+	uint32_t priority;
+	uint32_t target;
+};
+
+/*
  * Interrupt handler signature, identical to IOInterruptHandler: the target
  * and refCon come from registration, nub is the registerer (NULL here) and
  * source is the INTID.
  */
-typedef void (*sweet_gic_handler_t)(void *target, void *refCon, void *nub,
+typedef void (*gic_handler_t)(void *target, void *refCon, void *nub,
     int source);
-
-#define SWEET_GIC_DEFAULT_PRIORITY 0xa0u
-
-/* Registration options; bits 8..15 carry the priority. */
-#define SWEET_GIC_OPT_EDGE         0x00000001u   /* edge-sensitive; level is the default */
-#define SWEET_GIC_OPT_PRIORITY(p)  ((((uint32_t)(p)) & 0xffu) << 8)
-#define SWEET_GIC_OPT_PRIORITY_OF(o) (((o) >> 8) & 0xffu)
-#define SWEET_GIC_OPT_PRIORITY_MASK 0x0000ff00u
 
 #ifdef __cplusplus
 extern "C" {
@@ -122,12 +146,12 @@ uint64_t pe_gic_redistributor_base(void);
 uint64_t pe_gic_redistributor_size(void);
 
 /*
- * Install the one controller for this SoC and probe the distributor and the
- * redistributors. Returns 0 on success, 1 when already installed, negative
- * when the GIC windows are not available yet.
+ * Install the one controller for this SoC, bring it up and register it with
+ * the platform expert under GIC_ADT_CONTROLLER_NAME. Returns 0 on success,
+ * 1 when already installed, negative when the GIC windows are not available.
  */
-int sweet_gic_install(void);
-int sweet_gic_installed(void);
+int gic_install(void);
+int gic_installed(void);
 
 /*
  * Platform IRQ path: dispatch one INTID that was already acknowledged with
@@ -141,36 +165,37 @@ int sweet_gic_installed(void);
  * the completion and must write ICC_EOIR1_EL1 itself. Exactly one EOI per
  * interrupt, never two.
  */
-int sweet_gic_handle_irq(uint64_t iar);
+int gic_handle_irq(uint64_t iar);
 
 /*
  * Unregistered SPIs are counted and completed. Masking them is opt-in so a
  * staged migration can leave the legacy chain in front of the controller;
  * enable it once every live SPI is registered.
  */
-void sweet_gic_set_stray_policy(int mask);
+void gic_set_stray_policy(int mask);
 
 /*
  * Log the SPIs that currently have their distributor enable bit set. This is
  * the migration inventory while the legacy chain still owns the devices; the
  * call is read-only and returns immediately when no controller is installed.
  */
-void sweet_gic_log_enabled(const char *tag);
+void gic_log_enabled(const char *tag);
 
 /*
  * Driver-facing registration, SPIs only (INTID 32..1019; SGIs and PPIs belong
  * to the platform for now and are refused with kIOReturnUnsupported). The
- * controller programs group, priority, trigger and routing, but leaves the
- * source masked until sweet_gic_enable_irq() is called, mirroring
+ * hardware properties (trigger, priority, target) come from the controller's
+ * source table, not from the caller, which is where the ADT specifier will
+ * plug in. The source stays masked until gic_enable_irq(), like
  * IOInterruptController. Returns an IOReturn value (kIOReturnSuccess == 0).
  */
-int sweet_gic_register_irq(int intid, void *target,
-    sweet_gic_handler_t handler, void *refCon, uint32_t options);
-int sweet_gic_unregister_irq(int intid);
-int sweet_gic_enable_irq(int intid);
-int sweet_gic_disable_irq(int intid);
-int sweet_gic_cause_irq(int intid);
-uint64_t sweet_gic_hits(int intid);
+int gic_register_irq(int intid, void *target, gic_handler_t handler,
+    void *refCon);
+int gic_unregister_irq(int intid);
+int gic_enable_irq(int intid);
+int gic_disable_irq(int intid);
+int gic_cause_irq(int intid);
+uint64_t gic_hits(int intid);
 
 #ifdef __cplusplus
 }
@@ -178,4 +203,4 @@ uint64_t sweet_gic_hits(int intid);
 
 #endif /* ! ASSEMBLER */
 
-#endif /* ! _PEXPERT_ARM64_SWEET_GIC_H */
+#endif /* ! _PEXPERT_ARM64_GENERIC_INTERRUPT_CONTROLLER_H */

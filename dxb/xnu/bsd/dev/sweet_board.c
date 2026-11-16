@@ -4,7 +4,7 @@
 #if defined(ARM64_BOARD_CONFIG_SWEET)
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <pexpert/arm64/sweet_gic.h>
+#include <pexpert/arm64/generic_interrupt_controller.h>
 #include "sweet_spmi_mux.h"
 #include "sweet_log_level.h"
 
@@ -37,7 +37,7 @@ sweet_board_init(void)
 	 * sleh_irq: the controller sits behind it, so installing it here does
 	 * not disturb them.
 	 */
-	if (sweet_gic_install() < 0) {
+	if (gic_install() < 0) {
 		SWEET_LOG_ERROR("SWEET BOARD: GIC controller unavailable; legacy dispatch retained\n");
 	}
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
@@ -62,6 +62,6 @@ sweet_board_init(void)
 #endif
 	SWEET_LOG_INFO("SWEET BOARD: device init dispatched; storage remains root-owned\n");
 	/* Live SPI inventory for the staged interrupt migration. */
-	sweet_gic_log_enabled("board-init");
+	gic_log_enabled("board-init");
 }
 #endif /* ARM64_BOARD_CONFIG_SWEET */

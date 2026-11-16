@@ -77,7 +77,7 @@ find_gicr_pe_base()
 #if defined(SWEET)
 /*
  * The distributor and redistributor windows are mapped here, once for the
- * whole kernel; SweetGIC uses these instead of mapping the GIC a second
+ * whole kernel; GenericInterruptController uses these instead of mapping the GIC a second
  * time. All four stay zero until the boot CPU has parsed the GIC node.
  */
 uint64_t

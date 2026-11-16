@@ -55,7 +55,7 @@
 #include <pexpert/arm/protos.h>
 #include <pexpert/arm64/apple_arm64_regs.h>
 #include <pexpert/arm64/board_config.h>
-#include <pexpert/arm64/sweet_gic.h>   /* SPI dispatch helper for the SWEET path */
+#include <pexpert/arm64/generic_interrupt_controller.h>   /* SPI dispatch for the SWEET path */
 
 #include <vm/vm_page.h>
 #include <vm/pmap.h>
@@ -1917,8 +1917,8 @@ sleh_irq(arm_saved_state_t *state)
 		 * ICC_EOIR1_EL1 again -- exactly one EOI per interrupt. It
 		 * returns 0 for SGIs/PPIs and spurious INTIDs, which stay ours.
 		 */
-		if (!sweet_handled && sweet_gic_installed() &&
-		    sweet_gic_handle_irq(iar)) {
+		if (!sweet_handled && gic_installed() &&
+		    gic_handle_irq(iar)) {
 			sweet_completed = true;
 		}
 		if (!sweet_handled && !sweet_completed && cdp->interrupt_handler) {

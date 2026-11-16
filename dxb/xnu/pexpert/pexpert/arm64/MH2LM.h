@@ -50,6 +50,6 @@
 #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
 
 /* GICv3 register layout and the board-facing controller API. */
-#include <pexpert/arm64/sweet_gic.h>
+#include <pexpert/arm64/generic_interrupt_controller.h>
 
 #endif /* ! _PEXPERT_ARM64_MH2LM_H */
