@@ -78,6 +78,12 @@ public:
 	 * controller until every live SPI has registered. */
 	void setMaskStraySPIs(bool mask);
 
+	/* Log every SPI whose distributor enable bit is set. The migration
+	 * inventory cannot come from dispatch: while the legacy chain owns the
+	 * INTIDs they never reach the controller, so it has to be read out of
+	 * GICD_ISENABLER. Read-only. */
+	void logEnabledSPIs(const char *tag);
+
 	/* GIC steps. dispatch() and endOfInterrupt() leave completion to the
 	 * caller; handleInterrupt() does both and reports completion. */
 	uint32_t acknowledge(void);

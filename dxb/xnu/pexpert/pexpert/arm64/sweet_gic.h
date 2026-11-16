@@ -151,6 +151,13 @@ int sweet_gic_handle_irq(uint64_t iar);
 void sweet_gic_set_stray_policy(int mask);
 
 /*
+ * Log the SPIs that currently have their distributor enable bit set. This is
+ * the migration inventory while the legacy chain still owns the devices; the
+ * call is read-only and returns immediately when no controller is installed.
+ */
+void sweet_gic_log_enabled(const char *tag);
+
+/*
  * Driver-facing registration, SPIs only (INTID 32..1019; SGIs and PPIs belong
  * to the platform for now and are refused with kIOReturnUnsupported). The
  * controller programs group, priority, trigger and routing, but leaves the

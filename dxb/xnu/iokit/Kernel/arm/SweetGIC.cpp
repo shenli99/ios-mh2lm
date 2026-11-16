@@ -514,6 +514,58 @@ SweetGIC::setMaskStraySPIs(bool mask)
 	fMaskStraySPIs = mask;
 }
 
+/*
+ * Read-only inventory of the live SPIs. The dispatch path cannot supply this
+ * while the legacy chain is in front of the controller: those INTIDs are
+ * claimed before dispatch ever sees them. GICD_ISENABLER is the ground truth.
+ */
+void
+SweetGIC::logEnabledSPIs(const char *tag)
+{
+	uint32_t intids[64];
+	uint32_t count = 0;
+	uint32_t total = 0;
+	uint32_t firstWord = (uint32_t)GIC_INTID_SPI_FIRST / 32;
+	uint32_t lastWord = (uint32_t)fMaxIntID / 32;
+
+	if (!fReady) {
+		return;
+	}
+
+	for (uint32_t word = firstWord; word <= lastWord; word++) {
+		uint32_t enabled = gicdRead32(GICD_ISENABLER + 4u * word);
+
+		if (!enabled) {
+			continue;
+		}
+		for (uint32_t bit = 0; bit < 32; bit++) {
+			uint32_t intid = word * 32 + bit;
+
+			if ((enabled & (1u << bit)) == 0) {
+				continue;
+			}
+			if (intid < (uint32_t)GIC_INTID_SPI_FIRST ||
+			    intid > (uint32_t)fMaxIntID) {
+				continue;
+			}
+			total++;
+			if (count < sizeof(intids) / sizeof(intids[0])) {
+				intids[count++] = intid;
+			}
+		}
+	}
+
+	SWEET_LOG_INFO("SWEET GIC: %u enabled SPIs at %s (max-intid %d)\n",
+	    total, tag ? tag : "?", fMaxIntID);
+	for (uint32_t i = 0; i < count; i++) {
+		SWEET_LOG_INFO("SWEET GIC:   intid %u%s\n", intids[i],
+		    isRegistered((int)intids[i]) ? " registered" : "");
+	}
+	if (total > count) {
+		SWEET_LOG_INFO("SWEET GIC:   ... %u more\n", total - count);
+	}
+}
+
 /* ------------------------------------------------------------ dispatch */
 
 uint32_t
@@ -746,8 +798,14 @@ SweetGIC::start(void)
 	wanted = ctlr | GICD_CTLR_ARE_NS | GICD_CTLR_ENABLEGRP1A |
 	    GICD_CTLR_ENABLEGRP1;
 	if (wanted != ctlr) {
+		/*
+		 * Same bits the platform expert programs. In the non-secure
+		 * view with DS==0, EnableGrp1 (bit 0) is RES0, so the readback
+		 * is 0x12 (ARE_NS | ENABLEGRP1A) and not 0x13.
+		 */
 		gicdWrite32(GICD_CTLR, wanted);
 		(void)waitForRWP();
+		ctlr = gicdRead32(GICD_CTLR);
 	}
 
 	typer = gicdRead32(GICD_TYPER);
@@ -896,6 +954,14 @@ sweet_gic_cause_irq(int intid)
 	}
 
 	return sweetGIC->causeInterrupt(NULL, intid);
+}
+
+extern "C" void
+sweet_gic_log_enabled(const char *tag)
+{
+	if (sweetGIC) {
+		sweetGIC->logEnabledSPIs(tag);
+	}
 }
 
 extern "C" uint64_t

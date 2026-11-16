@@ -61,5 +61,7 @@ sweet_board_init(void)
 	sweet_display_probe_init();
 #endif
 	SWEET_LOG_INFO("SWEET BOARD: device init dispatched; storage remains root-owned\n");
+	/* Live SPI inventory for the staged interrupt migration. */
+	sweet_gic_log_enabled("board-init");
 }
 #endif /* ARM64_BOARD_CONFIG_SWEET */
