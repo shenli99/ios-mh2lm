@@ -168,16 +168,15 @@ int gic_install(void);
 int gic_installed(void);
 
 /*
- * The controller's standard IOInterruptAction, i.e. what
- * getInterruptHandlerAddress() returns: sleh_irq() dispatches through this
- * pointer, there is no controller-specific shortcut. The action takes the
- * vector number as `source` (for SPIs that is the INTID), runs the registered
- * handler and never touches ICC_EOIR1_EL1 -- the platform layer that
- * acknowledged the interrupt completes it.
+ * Platform dispatch: sleh_irq() read ICC_IAR1_EL1 and hands the INTID here.
+ * GenericInterruptController::dispatch() is the whole top level -- it looks
+ * the vector up, checks the registered state and the soft-disable flag, and
+ * runs the handler. C callers cannot invoke the C++ member directly, so this
+ * is a plain C entry that forwards to the singleton. It never touches
+ * ICC_EOIR1_EL1; the acknowledging layer completes the interrupt. No-op when
+ * no controller is installed.
  */
-typedef void (*gic_interrupt_action_t)(void *target, void *refCon, void *nub,
-    int source);
-gic_interrupt_action_t gic_interrupt_action(void);
+void gic_dispatch(uint32_t intid);
 
 /*
  * Unregistered SPIs are counted and completed. Masking them is opt-in so a

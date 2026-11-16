@@ -1911,17 +1911,14 @@ sleh_irq(arm_saved_state_t *state)
 		/*
 		 * Staged handover: the chain above still owns every driver that
 		 * has not migrated yet, and only an INTID it did not claim
-		 * reaches the GIC controller. Dispatch goes through the standard
-		 * IOInterruptAction the controller returns from
-		 * getInterruptHandlerAddress(); the action runs the registered
-		 * handler and does not touch ICC_EOIR1_EL1, so this path owns the
+		 * reaches the GIC controller. gic_dispatch() is the C entry to
+		 * GenericInterruptController::dispatch(), which does the whole top
+		 * level and never writes ICC_EOIR1_EL1: this path owns the
 		 * completion and writes it once, below.
 		 */
 		if (!sweet_handled) {
-			gic_interrupt_action_t action = gic_interrupt_action();
-
-			if (action) {
-				action(NULL, NULL, NULL, (int)intid);
+			if (gic_installed()) {
+				gic_dispatch((uint32_t)intid);
 			} else if (cdp->interrupt_handler) {
 				cdp->interrupt_handler(cdp->interrupt_target,
 				    cdp->interrupt_refCon,

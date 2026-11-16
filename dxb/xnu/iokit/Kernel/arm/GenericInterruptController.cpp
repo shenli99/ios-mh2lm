@@ -836,6 +836,10 @@ GenericInterruptController::dispatch(uint32_t intid)
 	void *refCon;
 	void *nub;
 
+	if (intid >= (uint32_t)GIC_INTID_SPI_FIRST) {
+		__atomic_add_fetch(&fStats.interrupts, 1u, __ATOMIC_RELAXED);
+	}
+
 	if (!vector) {
 		if (intid >= (uint32_t)GIC_INTID_SPI_FIRST) {
 			__atomic_add_fetch(&fStats.stray, 1u, __ATOMIC_RELAXED);
@@ -890,8 +894,6 @@ GenericInterruptController::handleInterrupt(void *refCon, IOService *nub,
 	    source >= (int)GIC_INTID_SPECIAL_FIRST) {
 		return kIOReturnInvalid;
 	}
-
-	__atomic_add_fetch(&fStats.interrupts, 1u, __ATOMIC_RELAXED);
 
 	return dispatch((uint32_t)source) ? kIOReturnSuccess :
 	       kIOReturnInvalid;
@@ -1455,14 +1457,12 @@ gic_installed(void)
 	return gIC ? 1 : 0;
 }
 
-extern "C" gic_interrupt_action_t
-gic_interrupt_action(void)
+extern "C" void
+gic_dispatch(uint32_t intid)
 {
-	if (!gIC) {
-		return NULL;
+	if (gIC) {
+		(void)gIC->dispatch(intid);
 	}
-
-	return (gic_interrupt_action_t)gIC->getInterruptHandlerAddress();
 }
 
 extern "C" void
