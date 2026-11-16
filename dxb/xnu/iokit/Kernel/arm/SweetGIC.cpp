@@ -238,7 +238,8 @@ SweetGIC::registerInterrupt(IOService *nub, int source, void *target,
 {
 	uint32_t opts = (uint32_t)options;
 	uint8_t priority = (uint8_t)SWEET_GIC_OPT_PRIORITY_OF(opts);
-	bool level = (opts & SWEET_GIC_OPT_LEVEL) != 0;
+	/* GIC reset value and all three current SPI users are level-high. */
+	bool level = (opts & SWEET_GIC_OPT_EDGE) == 0;
 	IOInterruptState interruptState;
 	SweetGICSourceExtra *extra;
 	IOInterruptVector *vector;
@@ -495,8 +496,8 @@ SweetGIC::setTriggerType(int source, bool level)
 	}
 
 	writeTrigger(source, level);
-	extra->options = level ? (extra->options | SWEET_GIC_OPT_LEVEL) :
-	    (extra->options & ~SWEET_GIC_OPT_LEVEL);
+	extra->options = level ? (extra->options & ~SWEET_GIC_OPT_EDGE) :
+	    (extra->options | SWEET_GIC_OPT_EDGE);
 
 	if (wasEnabled) {
 		synchronizeIO();

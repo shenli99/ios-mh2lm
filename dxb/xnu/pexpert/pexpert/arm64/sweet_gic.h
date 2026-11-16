@@ -102,7 +102,7 @@ typedef void (*sweet_gic_handler_t)(void *target, void *refCon, void *nub,
 #define SWEET_GIC_DEFAULT_PRIORITY 0xa0u
 
 /* Registration options; bits 8..15 carry the priority. */
-#define SWEET_GIC_OPT_LEVEL        0x00000001u   /* level-sensitive (default edge) */
+#define SWEET_GIC_OPT_EDGE         0x00000001u   /* edge-sensitive; level is the default */
 #define SWEET_GIC_OPT_PRIORITY(p)  ((((uint32_t)(p)) & 0xffu) << 8)
 #define SWEET_GIC_OPT_PRIORITY_OF(o) (((o) >> 8) & 0xffu)
 #define SWEET_GIC_OPT_PRIORITY_MASK 0x0000ff00u
