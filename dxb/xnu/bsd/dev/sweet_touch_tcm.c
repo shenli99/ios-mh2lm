@@ -1271,6 +1271,9 @@ ts_thread(void *arg __unused, wait_result_t wr __unused)
 	(void)PE_parse_boot_argn("sweettouchflip", &ts_flip, sizeof(ts_flip));
 	SWEET_LOG_INFO("SWEET TOUCH: TouchComm driver starting in %u s (flip %#x)\n", delay_s, ts_flip);
 	ts_wait(delay_s * 1000u);
+	/* The display lifecycle waits for this worker's token, so a boot that
+	 * never reaches this line is stuck before the panel comes up at all. */
+	SWEET_LOG_INFO("SWEET TOUCH: delay over after %u s; bringing the controller up\n", delay_s);
 
 	ts_tiles[TS_TILE_WEST] = ml_io_map(SWEET_DEV_TOUCH_NORTH_PA + 0x00100000u, 0x100000);
 	ts_tiles[TS_TILE_EAST] = ml_io_map(SWEET_DEV_TOUCH_NORTH_PA + 0x00500000u, 0x100000);
