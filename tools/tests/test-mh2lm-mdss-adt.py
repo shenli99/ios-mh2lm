@@ -22,7 +22,8 @@ ranges = struct.pack('<QQQ', 0, m.SOC_BASE, 0x100000000-m.SOC_BASE)
 root = node('device-tree', [('compatible', b'D22AP\0lge,mh2lm\0')], [
     node('chosen', [('random-seed', bytes(range(64)))]),
     node('arm-io', [('ranges', ranges)], [
-        node('gic', [('reg', struct.pack('<QQ', 0x17a00000-m.SOC_BASE, 0x10000))]),
+        node('gic', [('reg', struct.pack('<QQ', 0x17a00000-m.SOC_BASE, 0x10000)),
+                     ('AAPL,phandle', struct.pack('<I', 0x0d))]),
         node('disp0', [('device_type', b'display-subsystem\0'),
                        ('canvas-width', struct.pack('<I', 1125))])])])
 blob = adt.serialize(root)
@@ -30,7 +31,12 @@ result = m.derive(blob)
 r, end = adt.parse(result)
 assert end == len(result)
 arm = r.children[1]
-mdss = arm.children.pop()
+mdss = next(n for n in arm.children if n.name == 'mdss')
+# The pad controller node rides along; it must not perturb the display one.
+tlmm = next(n for n in arm.children if n.name == 'tlmm')
+assert tlmm.prop('compatible') == b'qcom,tlmm-sm8150\0'
+assert tlmm.prop('qcom,pin-count') == struct.pack('<I', 175)
+assert len(tlmm.prop('reg')) == 8 * 8
 baseline_regs = mdss.prop('reg')
 assert mdss.name == 'mdss' and mdss.prop('device_type') is None
 assert mdss.prop('interrupts') is None and mdss.prop('sweet,mdss-intid') == struct.pack('<I', 115)
@@ -39,8 +45,13 @@ translations = list(struct.iter_unpack('<QQQ', arm.prop('ranges')))
 for (addr, size), (expected, length) in zip(struct.iter_unpack('<QQ', mdss.prop('reg')), m.WINDOWS):
     hits = [parent+addr-child for child, parent, n in translations if child <= addr and addr+size <= child+n]
     assert hits == [expected] and size == length
-# Reverting only the intended range extension and node reproduces every byte.
+# Reverting only the intended range extension and the two added nodes
+# reproduces every byte of the input tree.
 arm.props = [(k, f, ranges if k == 'ranges' else v) for k, f, v in arm.props]
+arm.children = [n for n in arm.children if n.name not in ('mdss', 'tlmm')]
+# The GIC personality metadata is also added when missing; drop it too.
+gic = next(n for n in arm.children if n.name == 'gic')
+gic.props = [(k, f, v) for k, f, v in gic.props if k != '#interrupt-cells']
 assert adt.serialize(r) == blob
 for bad in [result, blob+b'bad', blob.replace(b'lge,mh2lm', b'bad,mh2lm')]:
     try:
@@ -178,8 +189,11 @@ for with_pins in (False, True):
         touch = r.children[1].children.pop()
         assert touch.name == 'panel-touch' and touch.prop('compatible') == b'sweet,touch-panel\0'
         assert touch.prop('sweet,touch-panel-abi') == struct.pack('<I', 1)
-        assert touch.prop('reg') is None and touch.prop('interrupts') is None
-        assert touch.prop('interrupt-parent') is None
+        assert touch.prop('reg') is None
+        # The facade registers SPI 240 through the nub, so the node carries the
+        # standard specifier and the GIC as its interrupt parent.
+        assert touch.prop('interrupt-parent') == struct.pack('<I', 0x0d)
+        assert touch.prop('interrupts') == struct.pack('<III', 240, 0, 4)
         assert adt.serialize(r) == m.derive(blob, display_resources=True,
                                           display_noc=with_noc, panel_pins=with_pins)
         original, _ = adt.parse(blob)
@@ -190,7 +204,7 @@ for with_pins in (False, True):
             pass
         else:
             raise AssertionError('accepted duplicate touch coordination service')
-print('PASS: optional touch coordination metadata nub, no second GPIO/GIC writer, pins/NoC composition, old ABI bytes preserved and duplicate rejection')
+print('PASS: optional touch coordination nub with its SPI 240 specifier, no second GPIO writer, pins/NoC composition, old ABI bytes preserved and duplicate rejection')
 
 # Exercise the user-facing CLI, including simultaneous pins/touch/NoC options.
 import subprocess

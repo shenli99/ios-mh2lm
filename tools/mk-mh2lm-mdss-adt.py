@@ -48,9 +48,12 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
         if '#interrupt-cells' not in props:
             gic.props.append(('#interrupt-cells', 0, struct.pack('<I', 3)))
         if 'redistributor' not in props:
-            reg = struct.unpack('<4Q', props['reg'])
-            gic.props.append(('redistributor', 0,
-                              struct.pack('<QQ', reg[2], reg[3])))
+            # Only a 4-cell reg (GICD + GICR windows) can supply the
+            # redistributor; a minimal audit tree may carry just GICD.
+            reg = struct.unpack('<%dQ' % (len(props['reg']) // 8), props['reg'])
+            if len(reg) >= 4:
+                gic.props.append(('redistributor', 0,
+                                  struct.pack('<QQ', reg[2], reg[3])))
     if any(n.name in ('mdss', 'display-rpmh', 'panel-pins', 'panel-touch') for n in arm.children):
         raise ValueError('display resource node already exists')
     # GCC's 0x10b000 page is below SOC_BASE. Add a disjoint low-PA alias;
@@ -60,6 +63,18 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
     def encode(windows):
         return b''.join(struct.pack('<QQ', pa-SOC_BASE if pa >= SOC_BASE else LOW_ALIAS+pa, size)
                         for pa, size in windows)
+    # TLMMGPIOController matches this node (IONameMatch qcom,tlmm-sm8150) and
+    # maps the four windows as its tile table. Idempotent: a base ADT that
+    # already carries the node is left alone.
+    if not any(n.name == 'tlmm' for n in arm.children):
+        tlmm = adt.Node()
+        tlmm.props = [('name', 0, b'tlmm\0'),
+                      ('compatible', 0, b'qcom,tlmm-sm8150\0'),
+                      ('gpio-controller', 0, b''),
+                      ('#gpio-cells', 0, struct.pack('<I', 2)),
+                      ('qcom,pin-count', 0, struct.pack('<I', 175)),
+                      ('reg', 0, encode(TLMM_WINDOWS))]
+        arm.children.append(tlmm)
     windows = list(WINDOWS)
     if display_resources:
         windows[1] = (windows[1][0], 0x20000)  # includes GDSC/clamp, never a second writer
@@ -127,18 +142,6 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             ('interrupts', 0, struct.pack('<III', 240, 0, 4)),
         ])
         arm.children.append(touch)
-    # TLMMGPIOController matches this node (IONameMatch qcom,tlmm-sm8150) and
-    # maps the four windows as its tile table. Idempotent: a base ADT that
-    # already carries the node is left alone.
-    if not any(n.name == 'tlmm' for n in arm.children):
-        tlmm = adt.Node()
-        tlmm.props = [('name', 0, b'tlmm\0'),
-                      ('compatible', 0, b'qcom,tlmm-sm8150\0'),
-                      ('gpio-controller', 0, b''),
-                      ('#gpio-cells', 0, struct.pack('<I', 2)),
-                      ('qcom,pin-count', 0, struct.pack('<I', 175)),
-                      ('reg', 0, encode(TLMM_WINDOWS))]
-        arm.children.append(tlmm)
     return adt.serialize(root)
 
 
