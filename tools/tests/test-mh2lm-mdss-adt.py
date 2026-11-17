@@ -141,8 +141,9 @@ mdss.props = [(k, f, v[:13*16] if k == 'reg' else v) for k, f, v in mdss.props i
 assert adt.serialize(r) == full
 print('PASS: sixteen disjoint MDSS windows, display RSC/TCS/wrapper split, unchanged v1 apps nub and removable NoC extension')
 
-# Panel pins are a separate restricted provider, never extra MDSS GPIO maps.
-# GPIO6 is SOUTH, GPIO8 NORTH; GPIO7 must not enter either page.
+# Panel pins are a separate restricted provider. The pads come from the TLMM
+# controller's exclusive handles, so this node must not carry tile windows: a
+# second mapper would be a second writer.
 for with_noc in (False, True):
     pins_blob = m.derive(blob, display_noc=with_noc, panel_pins=True)
     r, end = adt.parse(pins_blob)
@@ -152,21 +153,9 @@ for with_noc in (False, True):
     assert pins.name == 'panel-pins'
     assert pins.prop('compatible') == b'sweet,panel-pins\0'
     assert pins.prop('sweet,panel-pins-abi') == struct.pack('<I', 1)
+    assert pins.prop('reg') is None
     assert pins.prop('interrupts') is None and pins.prop('interrupt-parent') is None
     assert pins.prop('sweet,panel-profile') is None
-    wanted = ((0x03d06000, 0x1000), (0x03908000, 0x1000))
-    assert tuple(m.PANEL_PIN_WINDOWS) == wanted
-    windows = list(struct.iter_unpack('<QQ', pins.prop('reg')))
-    assert len(windows) == 2
-    translations = list(struct.iter_unpack('<QQQ', arm.prop('ranges')))
-    for (address, size), (pa, length) in zip(windows, wanted):
-        hits = [parent+address-base for base, parent, n in translations
-                if base <= address and address+size <= base+n]
-        assert hits == [pa] and size == length
-        assert not pa <= 0x03d07000 < pa+size
-        for other in arm.children[-2:]:
-            for a, n in struct.iter_unpack('<QQ', other.prop('reg')):
-                assert address+size <= a or a+n <= address
     assert adt.serialize(r) == (noc if with_noc else full)
     # Reject an existing pins nub even when it is the only extension present.
     original, _ = adt.parse(blob)
@@ -177,7 +166,7 @@ for with_noc in (False, True):
         pass
     else:
         raise AssertionError('accepted duplicate panel pin provider')
-print('PASS: optional GPIO6 SOUTH/GPIO8 NORTH provider ABI, exact two pages/no GPIO7, separate MDSS/RPMh maps, no identity/IRQ claims, NoC composition and byte-identical legacy ADTs')
+print('PASS: panel pin provider ABI with no tile windows (pads owned through TLMM), separate MDSS/RPMh maps, no identity/IRQ claims, NoC composition and byte-identical legacy ADTs')
 
 # Touch coordination owns no new GPIO/GIC mapping: the sole legacy worker
 # remains the hardware writer. Older outputs and pin service stay byte-identical.

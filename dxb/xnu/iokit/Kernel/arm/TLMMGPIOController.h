@@ -66,9 +66,25 @@ public:
 	IOReturn configure(unsigned int func, unsigned int pull, unsigned int drive,
 	    bool output, bool high);
 
-	/* Return the pin to the controller. Idempotent: a released handle keeps
-	 * failing every operation and frees itself normally. */
+	/* Read back the pad as this owner sees it: decoded fields plus the raw
+	 * CFG/IO/INTR_CFG registers. This is the read-back an exclusive owner
+	 * uses to verify its own writes; the plain-mode getter cannot be used
+	 * because it refuses the pins this handle owns. */
+	IOReturn getConfig(struct tlmm_pin_config *config);
+
+	/*
+	 * Return the pin to the controller. Idempotent: a released handle keeps
+	 * failing every operation and frees itself normally.
+	 *
+	 * Careful: this deliberately hides OSObject::release() (different
+	 * cv-qualifier, so it is not an override). A caller that also wants to
+	 * drop its reference must use put() rather than release() plus a
+	 * refcount release.
+	 */
 	void release(void);
+
+	/* Return the pin and drop this handle's reference in one step. */
+	void put(void);
 
 	unsigned int getPin(void) const { return fPin; }
 	const char *getOwner(void) const { return fOwner; }
@@ -80,7 +96,8 @@ private:
 	 * object twice, so a handle can never end up owning two pads.
 	 */
 	bool initWithPin(TLMMGPIOController *controller, unsigned int pin,
-	    vm_offset_t cfg, vm_offset_t io, const char *owner);
+	    vm_offset_t cfg, vm_offset_t io, vm_offset_t intr,
+	    const char *owner);
 
 	/* Controller teardown: the MMIO windows are going away, so the handle
 	 * must stop writing them instead of faulting on a stale address. */
@@ -90,11 +107,13 @@ private:
 	void writeCfg(uint32_t value);
 	uint32_t readIo(void) const;
 	void writeIo(uint32_t value);
+	uint32_t readIntrCfg(void) const;
 
 	TLMMGPIOController *fController;
 	const char *fOwner;
 	volatile uint32_t *fCfg;
 	volatile uint32_t *fIo;
+	volatile uint32_t *fIntr;
 	unsigned int fPin;
 	bool fValid;
 };

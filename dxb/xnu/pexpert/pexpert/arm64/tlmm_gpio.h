@@ -131,11 +131,20 @@ extern "C" {
 #define TLMM_GPIO_EOPNOTSUPP        (-95)
 
 struct tlmm_pin_config {
-	uint32_t func;
+	uint32_t func;          /* decoded CFG field set */
 	uint32_t pull;
 	uint32_t drive;
-	int      output;
-	int      high;
+	int      output;        /* CFG bit 9 (output enable) */
+	int      high;          /* IO bit 1 (output latch) */
+	/*
+	 * Raw registers. An exclusive owner still needs them: preserved bits
+	 * (EGPIO present/enable) and full-register readbacks are exactly what a
+	 * write-then-verify driver compares, and INTR_CFG is how it checks that
+	 * nobody enabled a pin interrupt behind its back.
+	 */
+	uint32_t cfg;
+	uint32_t io;
+	uint32_t intr_cfg;
 };
 
 /*

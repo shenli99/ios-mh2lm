@@ -1,11 +1,17 @@
 /* Register facts: LG pinctrl-sm8150.c / pinctrl-msm.c, sm8150-pinctrl.dtsi,
  * sm8150_common-panel.dtsi and lge_dsi_panel.c. Original gated/timer engine.
  * GPIO6 is SOUTH, GPIO8 NORTH. Neither GPIO7 nor any IRQ register is written.
+ *
+ * The pads belong to TLMMGPIOController: this service takes an exclusive
+ * AGPIO handle for each of them instead of mapping the two tile windows
+ * itself, so it is the only client that can drive them and the controller is
+ * the only mapper. The node keeps sweet,panel-pins-abi as its identity; its
+ * reg windows are gone.
  */
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
 #include "SweetPanelPins.h"
+#include "TLMMGPIOController.h"
 #include <IOKit/IOLib.h>
-#include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSData.h>
 #include <pexpert/pexpert.h>
 #include <kern/clock.h>
@@ -16,18 +22,24 @@ OSDefineMetaClassAndStructors(SweetPanelPinsClient,OSObject);
 /* Ownership latch only: free=0, owned=1, retired after any write=2. No pointer. */
 static unsigned panelPinsOwner;
 struct PanelPinsRequest { unsigned op; uint64_t client,token; uint64_t *out; SweetPanelPinStatus *status; };
-static const uint64_t panelPinsPA[2]={0x03d06000ULL,0x03908000ULL};
 static const uint32_t pinControlMask=0x3ffu, pinOutput=2u;
-uint32_t SweetPanelPins::read(vm_offset_t b,uint32_t o)
+/* GPIO6 = reset (SOUTH), GPIO8 = TE (NORTH); the pins are board constants,
+ * the addresses come from the controller's tile table. */
+enum { PanelPinReset = 0, PanelPinTE = 1 };
+static const unsigned panelPinNumber[2]={6u,8u};
+bool SweetPanelPins::readPin(unsigned n,struct tlmm_pin_config *cfg)
 {
- uint32_t v=*(volatile uint32_t *)(b+o);
- __asm__ volatile("dmb oshld" ::: "memory"); return v;
+ if (n>1 || !fPins[n]) return false;
+ return fPins[n]->getConfig(cfg)==kIOReturnSuccess;
 }
-void SweetPanelPins::write(vm_offset_t b,uint32_t o,uint32_t v)
+void SweetPanelPins::releasePins(void)
 {
- __asm__ volatile("dmb oshst" ::: "memory");
- *(volatile uint32_t *)(b+o)=v;
- __asm__ volatile("dsb osh" ::: "memory");
+ for (unsigned n=0;n<2;++n) {
+  AGPIO *pin=fPins[n];
+  if (!pin) continue;
+  fPins[n]=NULL;
+  pin->put(); /* returns the pad and drops our reference in one step */
+ }
 }
 uint64_t SweetPanelPins::nowNS(void)
 { uint64_t n=0; absolutetime_to_nanoseconds(mach_absolute_time(),&n); return n; }
@@ -36,19 +48,31 @@ bool SweetPanelPins::start(IOService *provider)
  int mode=0; (void)PE_parse_boot_argn("sweetpanelpins",&mode,sizeof(mode));
  if ((mode!=1 && mode!=2) || !IOService::start(provider)) return false;
  OSData *abi=OSDynamicCast(OSData,provider->getProperty("sweet,panel-pins-abi"));
- if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),"\1\0\0\0",4) ||
-     provider->getResources()!=kIOReturnSuccess) return false;
+ if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),"\1\0\0\0",4)) return false;
+ /*
+  * The pads come from the TLMM controller. tlmm is published before this node
+  * in the ADT, so it is normally already started; the bounded wait only covers
+  * a different publication order. There is deliberately no second writer to
+  * fall back to.
+  */
+ TLMMGPIOController *gpio=NULL;
+ for (unsigned n=0;n<20 && !(gpio=TLMMGPIOController::getController());++n) IOSleep(10);
+ if (!gpio) {
+  SWEET_LOG_ERROR("SWEET PANEL PINS: TLMM controller unavailable; pins untouched\n"); return false;
+ }
  unsigned expected=0;
  if (!__atomic_compare_exchange_n(&panelPinsOwner,&expected,1u,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
   SWEET_LOG_ERROR("SWEET PANEL PINS: owner live/retired; refused\n"); return false;
  }
  fClaimed=true; fMode=(unsigned)mode;
  for (unsigned n=0;n<2;++n) {
-  fMaps[n]=provider->mapDeviceMemoryWithIndex(n);
-  if (!fMaps[n] || fMaps[n]->getPhysicalAddress()!=panelPinsPA[n] || fMaps[n]->getLength()!=0x1000) {
-   SWEET_LOG_ERROR("SWEET PANEL PINS: GPIO6/8 ABI window %u mismatch\n",n); return false;
+  fPins[n]=gpio->acquirePin(panelPinNumber[n],"panel-pins");
+  if (!fPins[n]) {
+   SWEET_LOG_ERROR("SWEET PANEL PINS: gpio%u is not available from the TLMM controller\n",
+       panelPinNumber[n]);
+   releasePins();
+   return false;
   }
-  fBase[n]=fMaps[n]->getVirtualAddress();
  }
  fLoop=IOWorkLoop::workLoop(); fGate=IOCommandGate::commandGate(this);
  fTimer=IOTimerEventSource::timerEventSource(this,timerAction);
@@ -59,7 +83,7 @@ bool SweetPanelPins::start(IOService *provider)
  fTimerAdded=true; fAccepting=true;
  setProperty("SweetPanelPinsABI",1ULL,32);
  setProperty("SweetPanelPinsWritesEnabled",mode==2);
- SWEET_LOG_INFO("SWEET PANEL PINS: GPIO6/SOUTH reset, GPIO8/NORTH TE; mode=%u, no automatic pin access\n",fMode);
+ SWEET_LOG_INFO("SWEET PANEL PINS: GPIO6/SOUTH reset, GPIO8/NORTH TE; mode=%u, owned through the TLMM controller, no automatic pin access\n",fMode);
  registerService(); return true;
 }
 void SweetPanelPins::observe(unsigned pin,uint32_t offset,uint32_t want,uint32_t got,uint32_t mask,bool always)
@@ -71,15 +95,18 @@ void SweetPanelPins::observe(unsigned pin,uint32_t offset,uint32_t want,uint32_t
 }
 bool SweetPanelPins::sample(bool capture)
 {
+ struct tlmm_pin_config pin;
  for (unsigned n=0;n<2;++n) {
-  uint32_t ctl=read(fBase[n],0),irq=read(fBase[n],8);
+  if (!readPin(n,&pin)) return false;
+  uint32_t ctl=pin.cfg,irq=pin.intr_cfg;
   /* Preserve actual owner exclusions. Other CTL/IRQ echoes, including mux,
    * pull/drive and reserved fields, are diagnostic like Lineage pinctrl. */
   if (ctl==~0u || irq==~0u || (ctl&(1u<<12)) || (irq&1u)) return false;
   if (capture) {fControl[n]=ctl;fInterrupt[n]=irq;}
   else {observe(n,0,fControl[n],ctl,~0u);observe(n,8,fInterrupt[n],irq,~0u);}
  }
- uint32_t io=read(fBase[0],4);
+ if (!readPin(PanelPinReset,&pin)) return false;
+ uint32_t io=pin.io;
  if (capture) fOutput=io&pinOutput;
  else observe(0,4,fOutput,io,pinOutput);
  return true;
@@ -88,23 +115,36 @@ bool SweetPanelPins::writeControl(unsigned n,uint32_t bits)
 {
  /* RMW the current upper fields, as pinctrl-msm does. Do not replay an old
   * snapshot over unrelated fields that hardware may legitimately update. */
- uint32_t value=(read(fBase[n],0)&~pinControlMask)|bits;
- fTouched=true;write(fBase[n],0,value);
- observe(n,0,value,read(fBase[n],0),~0u,true);
+ struct tlmm_pin_config pin;
+ if (!readPin(n,&pin)) return false;
+ uint32_t value=(pin.cfg&~pinControlMask)|bits;
+ unsigned func=(bits>>TLMM_GPIO_MUX_SHIFT)&TLMM_GPIO_MUX_MASK;
+ unsigned pull=bits&TLMM_GPIO_PULL_MASK;
+ unsigned drive=(bits>>TLMM_GPIO_DRIVE_SHIFT)&TLMM_GPIO_DRIVE_MASK;
+ bool output=(bits&TLMM_GPIO_OE)!=0;
+ fTouched=true;
+ if (fPins[n]->configure(func,pull,drive,output,pin.high)!=kIOReturnSuccess) return false;
+ if (!readPin(n,&pin)) return false;
+ observe(n,0,value,pin.cfg,~0u,true);
  fControl[n]=value;return true;
 }
 bool SweetPanelPins::writeReset(bool high)
 {
  /* Lineage gpio_set_value has no latch/input echo gate. Record commanded
   * level separately from the raw observation; success is not voltage proof. */
- fTouched=true;write(fBase[0],4,high ? pinOutput : 0);
+ struct tlmm_pin_config pin;
+ fTouched=true;
+ if (fPins[PanelPinReset]->setValue(high)!=kIOReturnSuccess) return false;
  fOutput=high ? pinOutput : 0u;
- observe(0,4,high ? 3u : 0u,read(fBase[0],4),3u,true);
+ if (!readPin(PanelPinReset,&pin)) return false;
+ observe(0,4,high ? 3u : 0u,pin.io,3u,true);
  fStatus.resetKnown=false;return true;
 }
 void SweetPanelPins::observeLevel(bool high)
 {
- observe(0,4,high ? 3u : 0u,read(fBase[0],4),3u);
+ struct tlmm_pin_config pin;
+ if (!readPin(PanelPinReset,&pin)) return;
+ observe(0,4,high ? 3u : 0u,pin.io,3u);
  /* Input/latch samples never impose an extra follow deadline. */
 }
 IOReturn SweetPanelPins::action(OSObject *owner,void *arg,void *,void *,void *)
@@ -266,6 +306,8 @@ void SweetPanelPins::stop(IOService *p)
 {
  shutdown();
  if (fClient) SWEET_LOG_WARN("SWEET PANEL PINS: consumer %llu still attached at stop; no implicit pin transition\n",fClient);
+ /* Release, do not park: the levels stay as commanded, only ownership moves. */
+ releasePins();
  IOService::stop(p);
 }
 void SweetPanelPins::free(void)
@@ -273,7 +315,7 @@ void SweetPanelPins::free(void)
  shutdown();
  if (fGateAdded) { fLoop->removeEventSource(fGate); fGateAdded=false; }
  OSSafeReleaseNULL(fTimer); OSSafeReleaseNULL(fGate); OSSafeReleaseNULL(fLoop);
- for (unsigned n=0;n<2;++n) OSSafeReleaseNULL(fMaps[n]);
+ releasePins();
  if (fClaimed) { __atomic_store_n(&panelPinsOwner,fTouched ? 2u : 0u,__ATOMIC_RELEASE); fClaimed=false; }
  IOService::free();
 }

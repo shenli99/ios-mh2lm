@@ -78,17 +78,19 @@ sweet_sample_thread(__unused void *arg, __unused wait_result_t wr)
 	 */
 	gic_log_enabled("sample");
 	/*
-	 * Read-only cross-check of the pad controller. GPIO6/8 are programmed by
-	 * SweetPanelPins and GPIO54/122 by the touch worker, each through its own
-	 * register path, so what the controller reports back proves its tile and
-	 * slot arithmetic against independent writers: GPIO122 must read
-	 * func 0, pull 3, drive 3, output 0 (ts_gpio(122,0,3,3,false,false)).
+	 * Read-only cross-check of the pad controller. GPIO6/8 belong to
+	 * SweetPanelPins through an exclusive AGPIO handle, so the plain-mode
+	 * getter must refuse them with EBUSY: that refusal is the exclusivity
+	 * proof. GPIO54/122 still come from the touch worker's own register path,
+	 * so their values prove the tile and slot arithmetic against an
+	 * independent writer: GPIO122 must read func 0, pull 3, drive 3, output 0
+	 * (ts_gpio(122,0,3,3,false,false)).
 	 */
 	if (tlmm_gpio_available()) {
 		static const unsigned int pads[] = { 6, 8, 54, 122 };
 
 		for (unsigned int i = 0; i < sizeof pads / sizeof pads[0]; i++) {
-			struct tlmm_pin_config cfg = { 0, 0, 0, 0, 0 };
+			struct tlmm_pin_config cfg = { 0 };
 			int rc = gpio_get_config(pads[i], &cfg);
 
 			printf("SWEET TLMM: gpio%u rc=%d func=%u pull=%u drive=%u output=%d high=%d\n",

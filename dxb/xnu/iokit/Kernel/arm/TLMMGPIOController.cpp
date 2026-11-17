@@ -82,9 +82,9 @@ tlmmValidCfg(unsigned int func, unsigned int pull, unsigned int drive)
 
 bool
 AGPIO::initWithPin(TLMMGPIOController *controller, unsigned int pin,
-    vm_offset_t cfg, vm_offset_t io, const char *owner)
+    vm_offset_t cfg, vm_offset_t io, vm_offset_t intr, const char *owner)
 {
-	if (!controller || !owner || !owner[0] || !cfg || !io) {
+	if (!controller || !owner || !owner[0] || !cfg || !io || !intr) {
 		return false;
 	}
 	if (fValid) {
@@ -99,6 +99,7 @@ AGPIO::initWithPin(TLMMGPIOController *controller, unsigned int pin,
 	fOwner = owner;
 	fCfg = (volatile uint32_t *)cfg;
 	fIo = (volatile uint32_t *)io;
+	fIntr = (volatile uint32_t *)intr;
 	fPin = pin;
 	fValid = true;
 	return true;
@@ -148,20 +149,55 @@ AGPIO::writeIo(uint32_t value)
 	__asm__ volatile("dsb osh" ::: "memory");
 }
 
-IOReturn
-AGPIO::setValue(bool high)
+uint32_t
+AGPIO::readIntrCfg(void) const
 {
+	uint32_t value = *fIntr;
+
+	__asm__ volatile("dmb oshld" ::: "memory");
+	return value;
+}
+
+IOReturn
+AGPIO::getConfig(struct tlmm_pin_config *config)
+{
+	uint32_t cfg;
 	uint32_t io;
 
 	if (!fValid) {
 		return kIOReturnNotOpen;
 	}
-
-	io = readIo() & ~TLMM_GPIO_OUT;
-	if (high) {
-		io |= TLMM_GPIO_OUT;
+	if (!config) {
+		return kIOReturnBadArgument;
 	}
-	writeIo(io);
+
+	cfg = readCfg();
+	io = readIo();
+	config->cfg = cfg;
+	config->io = io;
+	config->intr_cfg = readIntrCfg();
+	config->func = (cfg >> TLMM_GPIO_MUX_SHIFT) & TLMM_GPIO_MUX_MASK;
+	config->pull = (cfg >> TLMM_GPIO_PULL_SHIFT) & TLMM_GPIO_PULL_MASK;
+	config->drive = (cfg >> TLMM_GPIO_DRIVE_SHIFT) & TLMM_GPIO_DRIVE_MASK;
+	config->output = (cfg & TLMM_GPIO_OE) != 0;
+	config->high = (io & TLMM_GPIO_OUT) != 0;
+	return kIOReturnSuccess;
+}
+
+IOReturn
+AGPIO::setValue(bool high)
+{
+	if (!fValid) {
+		return kIOReturnNotOpen;
+	}
+
+	/*
+	 * Write the latch alone. IO bit 0 is the pad level and read-only, so
+	 * there is nothing to preserve and one store is enough. An explicit level
+	 * command always writes, even when the value is unchanged: the caller
+	 * asked for the line to be driven, not left as it was found.
+	 */
+	writeIo(high ? TLMM_GPIO_OUT : 0u);
 	return kIOReturnSuccess;
 }
 
@@ -266,14 +302,16 @@ AGPIO::configure(unsigned int func, unsigned int pull, unsigned int drive,
 	/*
 	 * Latch the output level first: CFG bit 9 makes the pad an output the
 	 * moment it is written, so the level must already be the requested one.
+	 * Only write when the level really changes: a redundant store is a
+	 * spurious edge on the wire, and callers that re-assert a configuration
+	 * (activate keeps the inherited level) must not produce one.
 	 */
 	if (output) {
-		uint32_t io = readIo() & ~TLMM_GPIO_OUT;
+		uint32_t level = high ? TLMM_GPIO_OUT : 0u;
 
-		if (high) {
-			io |= TLMM_GPIO_OUT;
+		if ((readIo() & TLMM_GPIO_OUT) != level) {
+			writeIo(level);
 		}
-		writeIo(io);
 	}
 
 	cfg = (readCfg() & ~TLMM_GPIO_CFG_MASK) |
@@ -303,8 +341,18 @@ AGPIO::release(void)
 	fOwner = NULL;
 	fCfg = NULL;
 	fIo = NULL;
+	fIntr = NULL;
 
 	(void)controller->releasePin(pin, owner);
+}
+
+void
+AGPIO::put(void)
+{
+	/* release() drops the pad, then OSObject::release() drops the reference
+	 * (and frees this object when it was the last one). */
+	release();
+	OSObject::release();
 }
 
 void
@@ -315,6 +363,7 @@ AGPIO::invalidate(void)
 	fOwner = NULL;
 	fCfg = NULL;
 	fIo = NULL;
+	fIntr = NULL;
 }
 
 /* ----------------------------------------------------------- controller */
@@ -592,7 +641,7 @@ TLMMGPIOController::acquirePin(unsigned int pin, const char *owner)
 	handle = new AGPIO;
 	if (handle && !handle->initWithPin(this, pin,
 	    pinAddress(pin, TLMM_GPIO_CFG), pinAddress(pin, TLMM_GPIO_IO),
-	    owner)) {
+	    pinAddress(pin, TLMM_GPIO_INTR_CFG), owner)) {
 		handle->release();
 		handle = NULL;
 	}
@@ -840,6 +889,7 @@ TLMMGPIOController::getPinConfig(unsigned int pin, struct tlmm_pin_config *confi
 {
 	uint32_t cfg;
 	uint32_t io;
+	uint32_t intr;
 
 	if (!fLock || pin >= fPinCount || !config) {
 		return kIOReturnBadArgument;
@@ -852,8 +902,12 @@ TLMMGPIOController::getPinConfig(unsigned int pin, struct tlmm_pin_config *confi
 	}
 	cfg = tlmmRead32(pinAddress(pin, TLMM_GPIO_CFG));
 	io = tlmmRead32(pinAddress(pin, TLMM_GPIO_IO));
+	intr = tlmmRead32(pinAddress(pin, TLMM_GPIO_INTR_CFG));
 	IOLockUnlock(fLock);
 
+	config->cfg = cfg;
+	config->io = io;
+	config->intr_cfg = intr;
 	config->func = (cfg >> TLMM_GPIO_MUX_SHIFT) & TLMM_GPIO_MUX_MASK;
 	config->pull = (cfg >> TLMM_GPIO_PULL_SHIFT) & TLMM_GPIO_PULL_MASK;
 	config->drive = (cfg >> TLMM_GPIO_DRIVE_SHIFT) & TLMM_GPIO_DRIVE_MASK;

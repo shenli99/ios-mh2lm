@@ -15,7 +15,9 @@ WINDOWS = ((0x0010b000, 0x1000), (0x0af00000, 0x3000),
 IRQ_WINDOWS = ((0x0ae00000, 0x2000), (0x0ae6e800, 0x200), (0x17a00000, 0x10000))
 PHY_WINDOW = (0x0ae94400, 0x760)  # includes PLL0 +0x500; one owner/map
 RPMH_WINDOWS = ((0x18220000, 0x100), (0x18220d00, 0x3000), (0x0c3f000c, 8))
-PANEL_PIN_WINDOWS = ((0x03d06000, 0x1000), (0x03908000, 0x1000))  # GPIO6 SOUTH, GPIO8 NORTH
+# The panel reset/TE pads are owned through TLMMGPIOController's AGPIO
+# handles, so this node no longer carries their tile windows: the controller
+# is the only mapper of TLMM.
 NOC_WINDOWS = ((0x0af20000, 0x1c00), (0x0af21c00, 0x3000), (0x0af30000, 0x3fd4))
 # SM8150 TLMM: four 1 MiB tile windows (west, east, north, south). The pad
 # slot inside a tile is 0x1000 * global pin number, so a full 1 MiB window
@@ -120,7 +122,6 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
     if panel_pins:
         pins = adt.Node()
         pins.props = [('name', 0, b'panel-pins\0'), ('compatible', 0, b'sweet,panel-pins\0'),
-                      ('reg', 0, encode(PANEL_PIN_WINDOWS)),
                       ('sweet,panel-pins-abi', 0, struct.pack('<I', 1))]
         arm.children.append(pins)
     if panel_touch:

@@ -84,8 +84,8 @@ source = re.sub(r'^#include.*\n', '', rpmh_header+rpmh_source, flags=re.M)+sourc
 if (arm/'SweetPanelPins.h').exists():
     pins_header = (arm/'SweetPanelPins.h').read_text().replace('class SweetPanelPins :', 'struct SweetPanelPins :').replace('class SweetPanelPinsClient :', 'struct SweetPanelPinsClient :')
     pins_source = (arm/'SweetPanelPins.cpp').read_text()
-    pins_source = re.sub(r'uint32_t SweetPanelPins::read\([^\n]*\)\n\{.*?\n\}', 'uint32_t SweetPanelPins::read(vm_offset_t b,uint32_t o) { return readReg(b,o); }', pins_source, flags=re.S)
-    pins_source = re.sub(r'void SweetPanelPins::write\([^\n]*\)\n\{.*?\n\}', 'void SweetPanelPins::write(vm_offset_t b,uint32_t o,uint32_t v) { writeReg(b,o,v); }', pins_source, flags=re.S)
+    # No read/write rewrite here any more: the provider drives its pads through
+    # the AGPIO stub above, which already lands on readReg/writeReg.
     source = re.sub(r'^#include.*\n', '', pins_header+pins_source, flags=re.M)+source
 if (arm/'SweetTouchPanel.h').exists():
     touch_abi = (root/'bsd/dev/sweet_touch_panel.h').read_text()
@@ -109,7 +109,15 @@ old = old.replace('const uint32_t statuses = 0x51115501u;', '')
 old = old.replace('uint32_t irq = readReg(dsi, 0x110), status = readReg(dsi, 0x008), ack = readReg(dsi, 0x068);',
                   'irq=readReg(dsi,0x110); status=readReg(dsi,0x008); ack=readReg(dsi,0x068);')
 # Failure logging rereads are legacy too; source still executes their args.
-prelude = r'''
+# The shipped TLMM register home comes first: the pad provider's fixture below
+# decodes the same field masks.
+tlmm_home = root/'pexpert/pexpert/arm64/tlmm_gpio.h'
+tlmm_prelude = ''
+if tlmm_home.exists():
+    # <cstdint> first: this block sits above the fixture's own includes.
+    tlmm_prelude = '#include <cstdint>\n' + re.sub(
+        r'^#include.*\n', '', tlmm_home.read_text(), flags=re.M)
+prelude = tlmm_prelude + r'''
 #include <atomic>
 #include <cassert>
 #include <cstdarg>
@@ -136,7 +144,7 @@ using vm_offset_t=uintptr_t;
 // The fixture uses physical addresses as synthetic virtual addresses.
 static vm_offset_t ml_vtophys(vm_offset_t address){return address;}
 using IOReturn=int;
-constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4,kIOReturnBusy=5,kIOReturnNoMemory=6,kIOReturnAborted=7,kIOReturnNoResources=8,kIOReturnTimeout=9,kIOReturnNotFound=10,kIOReturnNotPermitted=11;
+constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4,kIOReturnBusy=5,kIOReturnNoMemory=6,kIOReturnAborted=7,kIOReturnNoResources=8,kIOReturnTimeout=9,kIOReturnNotFound=10,kIOReturnNotPermitted=11,kIOReturnNotOpen=12;
 using IOOptionBits=unsigned;using IOInterruptState=unsigned;
 constexpr unsigned SWEET_DEV_FB_H=2340,SWEET_DEV_FB_W=1080,SWEET_DEV_FB_PA=0x9d200000,SWEET_DEV_FB_STRIDE=4320;
 static unsigned live=0,liveMaps=0,rawBlocks=0;
@@ -321,6 +329,40 @@ static void writeReg(uintptr_t b,uint32_t o,uint32_t v){trace.push_back({true,b+
  if(irqMMIO&&b==0x17a00000&&o==0x20c){regs[b+o]|=v;return;}
  if(irqMMIO&&b==0x0ae6e800&&o==8){regs[b+4]&=~v;if(injectLateFrame){regs[b+4]|=4;injectLateFrame=false;}return;}
  regs[b+o]=v;if(b==bases[6]&&o==0x90){dmaFired=true;activeDMAFails=failNextDMAs>0;if(failNextDMAs)--failNextDMAs;}}
+// The pad provider now owns its pins through TLMMGPIOController; the fixture
+// supplies that controller (and the register constants from the shipped
+// header) so the same regs[] model records every write.
+static void IOSleep(unsigned ms){fakeTicks+=(uint64_t)ms*1000u;}
+struct AGPIO : OSObject {
+ unsigned pin=0;const char*owner=nullptr;bool valid=false;
+ static uintptr_t pinBase(unsigned p){return p==6?0x03d06000u:0x03908000u;}
+ IOReturn configure(unsigned func,unsigned pull,unsigned drive,bool output,bool high){
+  if(!valid)return kIOReturnNotOpen;
+  uintptr_t b=pinBase(pin);
+  if(output){uint32_t lvl=high?2u:0u;if((readReg(b,4)&2u)!=lvl)writeReg(b,4,lvl);}
+  writeReg(b,0,(readReg(b,0)&~0x3ffu)|((func<<2)|(pull&3u)|((drive&7u)<<6)|(output?0x200u:0)));
+  return kIOReturnSuccess;
+ }
+ IOReturn setValue(bool high){if(!valid)return kIOReturnNotOpen;
+  writeReg(pinBase(pin),4,high?2u:0u);return kIOReturnSuccess;}
+ bool getValue(){return (readReg(pinBase(pin),4)&1u)!=0;}
+ IOReturn getConfig(struct tlmm_pin_config *c){if(!valid||!c)return kIOReturnNotOpen;
+  uintptr_t b=pinBase(pin);c->cfg=readReg(b,0);c->io=readReg(b,4);c->intr_cfg=readReg(b,8);
+  c->func=(c->cfg>>2)&7u;c->pull=c->cfg&3u;c->drive=(c->cfg>>6)&7u;
+  c->output=(c->cfg&0x200u)!=0;c->high=(c->io&2u)!=0;return kIOReturnSuccess;}
+ void release(){valid=false;}
+ void put(){valid=false;this->OSObject::release();}
+};
+static bool tlmmAbsent=false;static unsigned tlmmBusyPin=0;
+struct TLMMGPIOController {
+ static TLMMGPIOController *getController(){
+  if(tlmmAbsent)return nullptr;
+  static TLMMGPIOController controller;return &controller;}
+ AGPIO *acquirePin(unsigned pin,const char*owner){
+  if(tlmmAbsent||pin!=6&&pin!=8||(tlmmBusyPin&&pin==tlmmBusyPin))return nullptr;
+  AGPIO*h=new AGPIO;h->pin=pin;h->owner=owner;h->valid=true;return h;}
+ IOReturn releasePin(unsigned,const char*){return kIOReturnSuccess;}
+};
 static void resetRegs(){trace.clear();regs.clear();dmaFired=false;dmaDone=true;lateError=false;
  failNextDMAs=0;activeDMAFails=false;
  regs[0x17a0ffe8]=0x30;regs[0x17a00004]=31;regs[0x17a00000]=2;

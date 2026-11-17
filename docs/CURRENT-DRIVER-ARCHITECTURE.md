@@ -956,7 +956,39 @@ GPIO54 为 `drive 3/output 1/high 1`，与触摸 worker 直接写 `0x03d7a000`�
 的位模式一致，等于用独立写手交叉验证了 tile 与槽位算式。整份日志 0 个 ERROR、0 panic，
 触摸 16 次 IRQ、mux 11 次、USB 14 组计数、面板 quiesce/resume 各一次，均与 b7 同级。
 
+### 第一个独占消费者：`SweetPanelPins`（2026-11-17）
+
+面板 reset/TE 的 GPIO6/GPIO8 已从"自带两个 `IOMemoryMap` 窗口 + 裸写寄存器"改成
+"向控制器要两个独占句柄"：
+
+- `start()` 里取 `TLMMGPIOController::getController()`，再
+  `acquirePin(6, "panel-pins")`、`acquirePin(8, "panel-pins")`；拿不到就
+  `SWEET_LOG_ERROR` 并 `return false`，**没有第二写手可以退化**。tlmm 节点在 ADT 里
+  排在本节点之前（实机日志也是 GIC 先于本节点启动），所以控制器此时一定在；仍保留
+  `20 × IOSleep(10)` 的有界等待，只为覆盖将来节点顺序变化的可能。
+- `sample()`/`writeControl()`/`writeReset()` 全部改走句柄：读回用新增的
+  `AGPIO::getConfig()`，写 CFG 用 `configure()`，写锁存用 `setValue()`。
+- `stop()`/`free()` 调 `releasePins()`：先 `release()` 归还 pin，再显式
+  `pin->OSObject::release()` 递减引用计数（`AGPIO::release()` 与
+  `OSObject::release()` 是不同签名的两个方法，不能混用）。
+- `sweet,panel-pins-abi` 保留，节点里的 `reg`（GPIO6 SOUTH / GPIO8 NORTH 两页）
+  删掉了：窗口只允许控制器映射，避免出现第二个写手。ADT 派生脚本和
+  `test-mh2lm-mdss-adt.py` 已同步改成"该节点没有 `reg`"。
+
+为此给 `AGPIO` 补了读回接口：`getConfig(struct tlmm_pin_config *)` 返回解码字段
+（func/pull/drive/output/high）**以及**原始 `cfg`/`io`/`intr_cfg`。原始值必须给：
+`SweetPanelPins` 的判据是"保留位（EGPIO present/enable）和整寄存器回读是否一致"，
+而普通模式的 `getPinConfig()` 对独占 pin 返回 `EBUSY`，独占者读不了自己的 pin。
+`configure()` 的锁存步骤也改成"电平真的变化才写"，重复下发同一配置不再产生一次
+多余的电平边沿（`Activate` 就是这种"重新声明继承电平"的用法）。
+
+测试：`test-mh2lm-panel-pins.py` 的故障矩阵从"窗口映射错/缺/短"换成"控制器缺失 /
+pin 被占 / ABI 缺失 / ABI 版本错 / 定时器创建失败 / 事件源挂载失败"，全部要求
+无 MMIO 且不留下未归还的 pin；共享夹具
+（`test-mh2lm-display-service.py` 的 prelude）新增 `TLMMGPIOController`/`AGPIO`
+桩，桩内部走原来的 `readReg`/`writeReg`，所以 `regs[]` 断言和另外十余个链式测试
+的写轨迹完全不变。本目录 `tools/tests/` 全套本地测试通过。
+
 尚未接管 `INTR_CFG`/`INTR_STATUS`：TLMM 汇总中断（SPI 208／INTID 240）仍归现有
-注册者，下一步才是把 pin 中断与汇总中断交给控制器。已有的 `SweetPanelPins` 和
-触摸 worker 仍直接写 GPIO6/8/122 的寄存器；它们迁移到 `acquirePin()` 之后，独占
-模型才覆盖全部消费者。
+注册者，下一步才是把 pin 中断与汇总中断交给控制器。触摸 worker 仍直接写
+GPIO54/59/122/152 和软件 I²C 的 55/56；它需要中断配置 API 才能整体迁移。

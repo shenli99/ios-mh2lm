@@ -9,6 +9,9 @@
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOLocks.h>
 
+class AGPIO;
+struct tlmm_pin_config;
+
 enum SweetPanelPinState { SweetPinsIdle, SweetPinsPending, SweetPinsActive,
  SweetPinsResetComplete, SweetPinsParked, SweetPinsFailed, SweetPinsStopped };
 struct SweetPanelPinStatus {
@@ -23,8 +26,7 @@ class SweetPanelPins : public IOService {
  IOWorkLoop *fLoop;
  IOCommandGate *fGate;
  IOTimerEventSource *fTimer;
- IOMemoryMap *fMaps[2];
- vm_offset_t fBase[2];
+ AGPIO *fPins[2];
  bool fGateAdded, fTimerAdded, fAccepting, fClaimed, fTouched, fPoisoned, fBusy;
  bool fConfigured, fParked;
  unsigned fMode, fOperation, fPhase, fDiagnosticCount;
@@ -35,8 +37,8 @@ class SweetPanelPins : public IOService {
  enum Operation { OpAttach, OpDetach, OpQuery, OpActivate, OpReset, OpPark, OpCancel, OpStop, OpQueryLow };
  enum Phase { Configure, HighConfirm, HighHold, LowConfirm, LowHold,
   FinalHighConfirm, FinalHighHold, Settle, ParkConfirm, ParkHold };
- static uint32_t read(vm_offset_t,uint32_t);
- static void write(vm_offset_t,uint32_t,uint32_t);
+ bool readPin(unsigned,struct tlmm_pin_config *);
+ void releasePins(void);
  static uint64_t nowNS(void);
  static IOReturn action(OSObject *,void *,void *,void *,void *);
  static void timerAction(OSObject *,IOTimerEventSource *);

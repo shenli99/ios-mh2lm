@@ -49,7 +49,11 @@ provider只接受一个consumer，有单调递增且不回绕的client ID、请�
 
 `--panel-pins`为ADT工具的可选扩展，隐含display-resources，可与display-noc组合。
 它不改变原有MDSS/RPMh映射索引或默认ADT字节；增加独立nub和LE u32
-`sweet,panel-pins-abi=1`，provider校验两个物理页及长度。没有自动panel profile或IRQ声明。
+`sweet,panel-pins-abi=1`。没有自动panel profile或IRQ声明。
+
+> 2026-11-17 起：该 nub **不再带 `reg`**。GPIO6/GPIO8 由 `TLMMGPIOController`
+> 通过 `acquirePin()` 交给 provider 独占，窗口只允许控制器映射；provider 拿不到
+> 控制器或 pin 被占就直接 `return false` 并打错误日志，不退化到第二写手。
 
 | 参数 | 行为 |
 | --- | --- |

@@ -31,6 +31,7 @@ static void fixtures(){
  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());queued.clear();panelPinsOwner=0;
  resetRegs();trace.clear();panelPinsMode=2;resourceMode=2;pinDrop=0;
  badMap=missingMap=shortMap=99;failTimerCreate=failEventAdd=0;
+ tlmmAbsent=false;tlmmBusyPin=0;
  regs[RESET]=0x40002c0;regs[RESET+4]=3;regs[RESET+8]=0x600;
  regs[TE]=0x2000005;regs[TE+8]=0x200;fakeTicks=1000000000;
 }
@@ -55,13 +56,16 @@ int main(){
  assert(s->attachConsumer(&other)==kIOReturnBusy&&!other);
  assert(s->detachConsumer(id)==0);other=attach(s);assert(other>id);assert(s->detachConsumer(other)==0);
  destroy(s,n);assert(panelPinsOwner==0);
- // Every mapped-page failure unwinds without MMIO; ABI validated first.
- for(unsigned fault=0;fault<11;++fault){fixtures();n=nub();
-  if(fault<2)badMap=fault;else if(fault<4)missingMap=fault-2;else if(fault<6)shortMap=fault-4;
-  else if(fault==6){n->properties.begin()->second->release();n->properties.clear();}
-  else if(fault==7){n->properties.begin()->second->release();uint32_t abi=2;n->properties.begin()->second=OSData::withBytes(&abi,4);}
-  else if(fault==8)failTimerCreate=timerCreates+1;
-  else failEventAdd=eventAdds+(fault==9?1:2);
+ // Every controller/ABI failure unwinds without MMIO and without leaving a
+ // pad claimed; the pads now come from the TLMM controller, not from windows.
+ for(unsigned fault=0;fault<7;++fault){fixtures();n=nub();
+  if(fault==0)tlmmAbsent=true;
+  else if(fault==1)tlmmBusyPin=6;
+  else if(fault==2)tlmmBusyPin=8;
+  else if(fault==3){n->properties.begin()->second->release();n->properties.clear();}
+  else if(fault==4){n->properties.begin()->second->release();uint32_t abi=2;n->properties.begin()->second=OSData::withBytes(&abi,4);}
+  else if(fault==5)failTimerCreate=timerCreates+1;
+  else failEventAdd=eventAdds+1;
   s=new SweetPanelPins();assert(!s->start(n)&&trace.empty());s->release();dropNub(n);assert(!live&&!liveMaps&&panelPinsOwner==0);
  }
  // Exclusive service and bounded, monotonically increasing client IDs/tokens.
@@ -129,6 +133,8 @@ int main(){
   if(fault==6)regs[TE+8]|=1;if(fault==7)regs[RESET+4]=2;if(fault==8)regs[RESET]&=~512u;
   assert(s->activate(id,&token)==0);tick(s,100,false);p=status(s,id,token);
   if(fault>=3&&fault<=6){assert(p.state==SweetPinsFailed&&!p.uncertain&&!writes());assert(s->detachConsumer(id)==0);destroy(s,n);assert(panelPinsOwner==0);}
+  /* One CFG store per pad: activate re-asserts the inherited latch level, so
+   * the change-only latch step in configure() writes nothing extra. */
   else{assert(p.state==SweetPinsActive&&!p.uncertain&&writes()==2);destroy(s,n);assert(panelPinsOwner==2);}
  }
  // Configuration and electrical echo mismatches print but never turn a
