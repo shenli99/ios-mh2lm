@@ -63,6 +63,8 @@ constexpr int kIOReturnIOError = 3;
 constexpr int kIOReturnUnsupported = 4;
 constexpr int kIOReturnBusy = 5;
 constexpr int kIOReturnNotPermitted = 6;
+constexpr int kIOReturnNoResources = 7;
+constexpr int kIOReturnNotFound = 8;
 
 struct OSObject {
     std::atomic<unsigned> refs{1};
@@ -89,6 +91,25 @@ struct IOMemoryMap : OSObject {
     uint64_t getLength() { return length; }
 };
 
+struct IOInterruptState { unsigned flags; };
+struct IOSimpleLock {
+    std::mutex mutex;
+    unsigned nest = 0;
+    void lock() { mutex.lock(); ++nest; }
+    void unlock() { --nest; mutex.unlock(); }
+};
+static IOSimpleLock *IOSimpleLockAlloc() { return new IOSimpleLock; }
+static void IOSimpleLockFree(IOSimpleLock *lock) { delete lock; }
+static IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock *lock) {
+    IOInterruptState state{0};
+    if (lock) { lock->lock(); }
+    return state;
+}
+static void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock *lock,
+    IOInterruptState) {
+    if (lock) { lock->unlock(); }
+}
+
 struct IOLock {
     std::recursive_mutex mutex;
 };
@@ -97,9 +118,24 @@ static void IOLockFree(IOLock *lock) { delete lock; }
 static void IOLockLock(IOLock *lock) { lock->mutex.lock(); }
 static void IOLockUnlock(IOLock *lock) { lock->mutex.unlock(); }
 
+typedef void (*IOInterruptAction)(void *, void *, void *, int);
+
 struct IOService : OSObject {
     std::vector<IOMemoryMap *> maps;
     std::vector<std::pair<std::string, OSObject *>> props;
+    /* One interrupt source, like the ADT nub a driver would register on. */
+    bool hasSpecifier = false;
+    bool registered = false;
+    bool lineEnabled = false;
+    bool enabled = true;      /* GICD_CTLR.EnableGrp1 stand-in */
+    int registeredSource = -1;
+    void *interruptAction = nullptr;
+    void *interruptTarget = nullptr;
+    int registerFailures = 0;
+    int registerCount = 0;
+    int unregisterCount = 0;
+    int disableCount = 0;
+    int enableCount = 0;
     virtual bool start(IOService *) { return true; }
     virtual void stop(IOService *) {}
     virtual void free() {}
@@ -115,7 +151,46 @@ struct IOService : OSObject {
         }
         return nullptr;
     }
+    bool propertyExists(const char *key) { return getProperty(key) != nullptr; }
+
+    int registerInterrupt(int source, OSObject *target, IOInterruptAction action,
+        void *refCon) {
+        (void)refCon;
+        (void)target;
+        if (!propertyExists("IOInterruptSpecifiers")) {
+            return kIOReturnBadArgument;
+        }
+        if (registerFailures) { --registerFailures; return kIOReturnBusy; }
+        registered = true;
+        registeredSource = source;
+        interruptAction = (void *)action;
+        interruptTarget = target;
+        ++registerCount;
+        lineEnabled = true;
+        return kIOReturnSuccess;
+    }
+    int unregisterInterrupt(int source) {
+        (void)source;
+        registered = false;
+        interruptAction = nullptr;
+        ++unregisterCount;
+        return kIOReturnSuccess;
+    }
+    int disableInterrupt(int source) {
+        (void)source;
+        ++disableCount;
+        lineEnabled = false;
+        return kIOReturnSuccess;
+    }
+    int enableInterrupt(int source) {
+        (void)source;
+        ++enableCount;
+        lineEnabled = true;
+        return kIOReturnSuccess;
+    }
 };
+
+
 
 static int logLevel = 0;
 extern "C" int sweet_log_level_enabled(unsigned level) { return (int)level <= logLevel; }
@@ -201,6 +276,150 @@ static void addRawReadOnlyProp(const std::vector<uint8_t> &bytes) {
     OSData *data = new OSData;
     data->bytes = bytes;
     gProvider.props.push_back({TLMM_ADT_READ_ONLY_PROP, data});
+}
+
+// ------------------------------------------------------ pad interrupts
+
+static unsigned gIrqHits = 0;
+static unsigned gIrqLastPin = 999;
+static bool gIrqDefer = false;
+
+static void irqHandler(unsigned int pin, void *refcon) {
+    (void)refcon;
+    ++gIrqHits;
+    gIrqLastPin = pin;
+    if (gIrqDefer) {
+        assert(tlmm_gpio_irq_mask(pin) == TLMM_GPIO_OK);
+    }
+}
+
+static void resetProvider(void) {
+    gProvider.maps.clear();
+    for (auto &entry : gProvider.props) {
+        if (entry.second) { entry.second->release(); }
+    }
+    gProvider.props.clear();
+    gProvider.registered = false;
+    gProvider.lineEnabled = false;
+    gProvider.enabled = true;
+    gProvider.registeredSource = -1;
+    gProvider.interruptAction = nullptr;
+    gProvider.interruptTarget = nullptr;
+    gProvider.registerFailures = 0;
+    gProvider.registerCount = 0;
+    gProvider.unregisterCount = 0;
+    gProvider.disableCount = 0;
+    gProvider.enableCount = 0;
+}
+
+static void addSpecifier(void) {
+    OSData *data = new OSData;
+    uint32_t cells[3] = {TLMM_SUMMARY_INTID, 0, 4};
+    data->bytes.assign((uint8_t *)cells, (uint8_t *)cells + sizeof(cells));
+    gProvider.props.push_back({"IOInterruptSpecifiers", data});
+}
+
+static void runSummaryAction() {
+    assert(gProvider.interruptAction != nullptr);
+    ((void (*)(void *, void *, void *, int))gProvider.interruptAction)(
+        gProvider.interruptTarget, nullptr, &gProvider, 0);
+}
+
+static void interruptCases(void) {
+    /* (1) No interrupt specifier on the ADT node: the claim fails and the
+     *     controller leaves the GIC alone, so the caller keeps its path. */
+    bringUp();
+    TLMMGPIOController off;
+    assert(off.init());
+    assert(off.start(&gProvider));
+    assert(off.requestPinIRQ(122, TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
+        kIOReturnNoResources);
+    assert(!gProvider.registered);
+    assert(tlmm_gpio_irq_claimed() == 0);
+    off.stop(&gProvider);
+
+    /* (2) Opted in: one claim, line masked until a pad is armed. */
+    resetProvider();
+    bringUp();
+    addSpecifier();
+    TLMMGPIOController on;
+    assert(on.init());
+    assert(on.start(&gProvider));
+    assert(!on.summaryClaimed());
+    setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_CFG, TLMM_GPIO_MUX_GPIO);
+    setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_CFG, 0);
+    gIrqHits = 0;
+    gIrqDefer = false;
+    assert(on.requestPinIRQ(122, TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
+        kIOReturnSuccess);
+    assert(on.summaryClaimed());
+    assert(gProvider.registerCount == 1 && gProvider.registered);
+    assert(gProvider.registeredSource == 0);
+    assert(!gProvider.lineEnabled);        /* masked at claim */
+    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_CFG) ==
+        TLMM_INTR_ROUTE_TARGET | TLMM_INTR_ROUTE_RAW);
+
+    /* (3) The client arms the pad and resumes: the line is released. Then
+     *     dispatch runs only asserting pads, acks status, and releases the
+     *     line again because the handler did not defer. */
+    assert(tlmm_gpio_irq_resume(122) == TLMM_GPIO_OK);
+    assert(gProvider.lineEnabled);
+    setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
+    runSummaryAction();
+    assert(gIrqHits == 1 && gIrqLastPin == 122);
+    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) == 0);
+    assert(gProvider.lineEnabled);
+
+    /* (4) A pad with no status must not call its handler. */
+    runSummaryAction();
+    assert(gIrqHits == 1);
+    /* Stray summary: counted, no handler, line released. */
+    assert(gProvider.lineEnabled);
+
+    /* (5) Deferred bottom half: the handler keeps the line, the worker's
+     *     resume releases it. */
+    gIrqDefer = true;
+    setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
+    runSummaryAction();
+    assert(gIrqHits == 2);
+    assert(!gProvider.lineEnabled);
+    assert(tlmm_gpio_irq_resume(122) == TLMM_GPIO_OK);
+    assert(gProvider.lineEnabled);
+    gIrqDefer = false;
+
+    /* (6) Two pads on the same line: the deferred pad keeps it masked until
+     *     the second one resumes, and each handler sees its own pin. */
+    setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_CFG, 0);
+    assert(on.requestPinIRQ(100, TLMM_IRQ_EDGE_RISING, irqHandler, nullptr) ==
+        kIOReturnSuccess);
+    gIrqDefer = true;
+    setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
+    setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
+    runSummaryAction();
+    assert(gIrqHits == 4);              /* both pads ran */
+    assert(!gProvider.lineEnabled);     /* both deferred */
+    assert(tlmm_gpio_irq_resume(122) == TLMM_GPIO_OK);
+    assert(!gProvider.lineEnabled);     /* pad 100 still holds the line */
+    assert(tlmm_gpio_irq_resume(100) == TLMM_GPIO_OK);
+    assert(gProvider.lineEnabled);
+    gIrqDefer = false;
+
+    /* (7) Ownership rules: a held pad, a read-only pad and a second request
+     *     on the same pad are all refused; free releases the line. */
+    assert(on.requestPinIRQ(122, TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
+        kIOReturnBusy);
+    assert(on.requestPinIRQ(96, TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
+        kIOReturnSuccess);
+    assert(tlmm_gpio_free_irq(96) == TLMM_GPIO_OK);
+    /* A pad cannot be both a handle and an interrupt owner. */
+    assert(on.acquirePin(122, "test") == nullptr);
+    assert(on.maskPinIRQ(7) == kIOReturnNotFound);
+
+    assert(on.freePinIRQ(122) == kIOReturnSuccess);
+    assert(on.freePinIRQ(100) == kIOReturnSuccess);
+    assert(!gProvider.registered);      /* last free released the summary */
+    assert(gProvider.unregisterCount == 1);
+    on.stop(&gProvider);
 }
 
 static void islandCases(void) {
@@ -466,9 +685,10 @@ int main(void) {
     /* Island-owned pads: readable, never controllable. Two sources, and the
      * answer must be the same for both. */
     islandCases();
+    interruptCases();
 
     printf("PASS: TLMM GPIO controller (tile map, exclusive AGPIO, plain mode, "
-        "write-exclusive/read-shared, island read-only, C API)\n");
+        "write-exclusive/read-shared, island read-only, pad interrupts, C API)\n");
     return 0;
 }
 '''

@@ -18,6 +18,14 @@ struct SweetTouchPanelStatus {
  IOReturn result;
  bool quiesced, ready, uncertain;
 };
+/*
+ * sweettouchpanel: 1 = binding only, 2 = native worker, 3 = 2 plus the
+ * delegated TLMM pad interrupt. Every consumer of the same boot argument must
+ * accept 3 too; when MDSS did not, the lifecycle refused to start.
+ */
+static inline bool sweetTouchPanelNative(int mode)
+{ return mode==2 || mode==3; }
+
 class SweetTouchPanel : public IOService {
  OSDeclareDefaultStructors(SweetTouchPanel);
  IOWorkLoop *fLoop;
@@ -26,6 +34,9 @@ class SweetTouchPanel : public IOService {
  bool fGateAdded, fTimerAdded, fAccepting, fBusy, fTouched, fPoisoned;
  IOService *fIRQProvider;
  bool fIRQRegistered;
+ /* INTID 240 is the TLMM summary line. When the controller owns it the
+  * interrupt is requested per pad and no GIC source touches this nub. */
+ bool fIRQViaTLMM;
  unsigned fMode;
  uint64_t fSession, fClient, fNextClient, fDeadline;
  SweetTouchPanelStatus fStatus;

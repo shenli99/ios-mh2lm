@@ -68,6 +68,13 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
     # TLMMGPIOController matches this node (IONameMatch qcom,tlmm-sm8150) and
     # maps the four windows as its tile table. Idempotent: a base ADT that
     # already carries the node is left alone.
+    def gic_phandle():
+        gic = next((n for n in arm.children if n.name == 'gic'), None)
+        if gic is None:
+            return 0
+        ph = dict((k, v) for k, f, v in gic.props).get('AAPL,phandle')
+        return struct.unpack('<I', ph)[0] if ph is not None and len(ph) == 4 else 0
+
     if not any(n.name == 'tlmm' for n in arm.children):
         tlmm = adt.Node()
         tlmm.props = [('name', 0, b'tlmm\0'),
@@ -76,6 +83,15 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
                       ('#gpio-cells', 0, struct.pack('<I', 2)),
                       ('qcom,pin-count', 0, struct.pack('<I', 175)),
                       ('reg', 0, encode(TLMM_WINDOWS))]
+        # The summary line: one GIC SPI aggregates every pad. Until the
+        # controller claims it, the client that asks for a pad interrupt owns
+        # it; sweetgpioirq=1 moves that ownership here.
+        ph = gic_phandle()
+        if ph:
+            tlmm.props.extend([
+                ('interrupt-parent', 0, struct.pack('<I', ph)),
+                ('interrupts', 0, struct.pack('<III', 240, 0, 4)),
+            ])
         arm.children.append(tlmm)
     windows = list(WINDOWS)
     if display_resources:
@@ -130,12 +146,9 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
                        ('sweet,touch-panel-abi', 0, struct.pack('<I', 1))]
         # The facade registers this GIC line through the provider nub; the
         # specifier is <INTID TYPE FLAGS> and the GIC is the interrupt parent.
-        gic = next((n for n in arm.children if n.name == 'gic'), None)
-        gic_ph = 0
-        if gic is not None:
-            ph = dict((k, v) for k, f, v in gic.props).get('AAPL,phandle')
-            if ph is not None and len(ph) == 4:
-                gic_ph = struct.unpack('<I', ph)[0]
+        # With sweetgpioirq=1 the TLMM controller owns the same line and this
+        # property is the fallback path only.
+        gic_ph = gic_phandle()
         if not gic_ph:
             raise ValueError('panel-touch needs the gic node and its phandle')
         touch.props.extend([

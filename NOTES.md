@@ -9787,3 +9787,15 @@ route；下一轮先补充这些取证并实现按 group 隔离候选，避免�
   只拒绝不分配；成功统一打 `command buffer preallocated once at startup outside the lifecycle gate pa=…`。
   回归：panel-supply-lifecycle 新增"运行期零分配 + 启动失败仅降级不致命"两段；其余显示/生命周期测试 PASS，
   `panel-profile-lifecycle` 为既有失败（stash 后同断言失败）。见 `scratch/irq-gic-0131/DSI-COMMAND-BUFFER.md`。
+
+## 2026-11-17 GPIO pad interrupts behind the TLMM controller
+
+INTID 240 is the TLMM summary (SPI 208), not a touch-only line. The touch
+top half used to register it on the ADT nub, ack pad status itself and mask the
+shared line in its top half; a second pad interrupt consumer would have been
+silenced by that mask. TLMMGPIOController now claims the line lazily on the
+first pad registration, demultiplexes INTR_STATUS, acks before the callback and
+keeps the line masked until the client resumes. Route bits (target KPSS, raw
+status) are the controller's; polarity/detect/enable stay with the client until
+the touch path is proven end to end. `sweettouchpanel=3` opts the touch facade
+into the pad path without spending a boot-arg byte (the line is 605/607).

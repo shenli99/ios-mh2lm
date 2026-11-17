@@ -836,7 +836,7 @@ bool SweetMDSS::setupTouchPanel(void)
 {
  int mode=0; (void)PE_parse_boot_argn("sweettouchpanel",&mode,sizeof(mode));
  if (!mode) return true;
- if ((mode!=1 && !sweetPanelPinsExclusive(mode)) || !fDisplayResourceMode) return false;
+ if ((mode!=1 && !sweetTouchPanelNative(mode)) || !fDisplayResourceMode) return false;
  fTouchPanelClient=SweetTouchPanelClient::withOwner(this,fLoop,touchPanelChanged);
  return fTouchPanelClient && fTouchPanelClient->watch();
 }

@@ -1,10 +1,25 @@
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
 #include "SweetTouchPanel.h"
+/* Pad-interrupt API; the mask/unmask helpers below are defined before the rest
+ * of the includes, so it has to come first. */
+#include <pexpert/arm64/tlmm_gpio.h>
 
 extern "C" void (*ts_irq_mask_fn)(void);
 extern "C" void (*ts_irq_unmask_fn)(void);
 
 static SweetTouchPanel *gTouchPanel;
+
+/*
+ * Pad-interrupt entry: the controller already masked the summary line and
+ * cleared this pad's status, so the existing top half runs unchanged.
+ */
+extern "C" void
+sweet_touch_tlmm_irq(unsigned int pin, void *refcon)
+{
+	(void)pin;
+	(void)refcon;
+	sweet_touch_irq_action(NULL, NULL, NULL, 0);
+}
 
 static void
 sweet_touch_panel_mask(void)
@@ -22,10 +37,18 @@ sweet_touch_panel_unmask(void)
 	}
 }
 
+/*
+ * Mask/unmask always go through whoever owns INTID 240. With the pad path the
+ * controller already masked the line for the dispatch; these calls only keep it
+ * masked until the worker stops, which is the same deferral as before, but the
+ * controller owns the GIC registers.
+ */
 void
 SweetTouchPanel::irqMask(void)
 {
-	if (fIRQProvider) {
+	if (fIRQViaTLMM) {
+		(void) tlmm_gpio_irq_mask(SWEET_TOUCH_IRQ_PIN);
+	} else if (fIRQProvider) {
 		(void) fIRQProvider->disableInterrupt(0);
 	}
 }
@@ -33,7 +56,9 @@ SweetTouchPanel::irqMask(void)
 void
 SweetTouchPanel::irqUnmask(void)
 {
-	if (fIRQProvider) {
+	if (fIRQViaTLMM) {
+		(void) tlmm_gpio_irq_resume(SWEET_TOUCH_IRQ_PIN);
+	} else if (fIRQProvider) {
 		(void) fIRQProvider->enableInterrupt(0);
 	}
 }
@@ -64,7 +89,9 @@ uint64_t SweetTouchPanel::nowNS(void)
 bool SweetTouchPanel::start(IOService *p)
 {
  int mode=0;(void)PE_parse_boot_argn("sweettouchpanel",&mode,sizeof(mode));
- if ((mode!=1 && mode!=2) || !IOService::start(p)) return false;
+ /* Mode 3 is mode 2 plus the delegated pad interrupt (the ATTENTION line is
+  * the TLMM summary, not a direct-connect GIC source). */
+ if ((mode!=1 && !sweetTouchPanelNative(mode)) || !IOService::start(p)) return false;
  OSData *abi=OSDynamicCast(OSData,p->getProperty("sweet,touch-panel-abi"));
  if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),"\1\0\0\0",4)) return false;
  if (sweet_touch_panel_open(&fSession)!=0) return false;
@@ -83,7 +110,20 @@ bool SweetTouchPanel::start(IOService *p)
   * the controller dispatch this driver instead of the old sleh predicate, and
   * the hooks below route enable/mask back through IOService::*Interrupt.
   */
- if (p->propertyExists("IOInterruptSpecifiers")) {
+ /*
+  * INTID 240 is the TLMM summary line, not a dedicated touch line. When the
+  * pin controller owns it, the pad interrupt is requested here and no GIC
+  * source is registered on this nub: one owner per line, per-pad status.
+  * Without sweetgpioirq=1 the request is unsupported and the proven nub path
+  * below stays in charge.
+  */
+ if (fMode==3 && tlmm_gpio_request_irq(SWEET_TOUCH_IRQ_PIN, TLMM_IRQ_LEVEL_LOW,
+     sweet_touch_tlmm_irq, this)==TLMM_GPIO_OK) {
+  fIRQViaTLMM=true;fIRQRegistered=true;
+  ts_irq_mask_fn=sweet_touch_panel_mask;
+  ts_irq_unmask_fn=sweet_touch_panel_unmask;
+  SWEET_LOG_INFO("SWEET TOUCH PANEL: ATTENTION pad gpio%u delegated to the TLMM summary line; no GIC source on the nub\n",SWEET_TOUCH_IRQ_PIN);
+ } else if (p->propertyExists("IOInterruptSpecifiers")) {
   if (p->registerInterrupt(0, NULL, (IOInterruptAction)sweet_touch_irq_action, NULL)==kIOReturnSuccess) {
    fIRQProvider=p;fIRQRegistered=true;
    ts_irq_mask_fn=sweet_touch_panel_mask;
@@ -96,7 +136,7 @@ bool SweetTouchPanel::start(IOService *p)
   SWEET_LOG_ERROR("SWEET TOUCH PANEL: ADT node has no interrupt specifier; touch IRQ unavailable\n");
  }
  setProperty("SweetTouchPanelABI",1ULL,32);
- setProperty("SweetTouchPanelWritesEnabled",mode==2);
+ setProperty("SweetTouchPanelWritesEnabled",sweetTouchPanelNative(mode));
  SWEET_LOG_INFO("SWEET TOUCH PANEL: native binding mode=%u; sole legacy worker retained, no automatic pause/resume\n",fMode);
  registerService();return true;
 }
@@ -221,12 +261,15 @@ bool SweetTouchPanel::willTerminate(IOService *p,IOOptionBits o)
 void SweetTouchPanel::stop(IOService *p)
 {
  shutdown();
- if (fIRQRegistered && fIRQProvider) {
+ if (fIRQRegistered) {
   if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
   if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
-  (void)fIRQProvider->disableInterrupt(0);
-  (void)fIRQProvider->unregisterInterrupt(0);
-  fIRQRegistered=false;fIRQProvider=NULL;
+  if (fIRQViaTLMM) (void)tlmm_gpio_free_irq(SWEET_TOUCH_IRQ_PIN);
+  else if (fIRQProvider) {
+   (void)fIRQProvider->disableInterrupt(0);
+   (void)fIRQProvider->unregisterInterrupt(0);
+  }
+  fIRQRegistered=false;fIRQProvider=NULL;fIRQViaTLMM=false;
  }
  if (fClient) SWEET_LOG_WARN("SWEET TOUCH PANEL: consumer still attached at stop; worker cancellation retained\n");
  IOService::stop(p);
@@ -234,12 +277,15 @@ void SweetTouchPanel::stop(IOService *p)
 void SweetTouchPanel::free(void)
 {
  shutdown();
- if (fIRQRegistered && fIRQProvider) {
+ if (fIRQRegistered) {
   if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
   if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
-  (void)fIRQProvider->disableInterrupt(0);
-  (void)fIRQProvider->unregisterInterrupt(0);
-  fIRQRegistered=false;fIRQProvider=NULL;
+  if (fIRQViaTLMM) (void)tlmm_gpio_free_irq(SWEET_TOUCH_IRQ_PIN);
+  else if (fIRQProvider) {
+   (void)fIRQProvider->disableInterrupt(0);
+   (void)fIRQProvider->unregisterInterrupt(0);
+  }
+  fIRQRegistered=false;fIRQProvider=NULL;fIRQViaTLMM=false;
  }
  if (gTouchPanel==this) gTouchPanel=NULL;
  if (fGateAdded) { fLoop->removeEventSource(fGate);fGateAdded=false; }

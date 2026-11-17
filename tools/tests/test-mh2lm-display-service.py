@@ -233,7 +233,8 @@ struct IOService : OSObject {
  virtual IOReturn setProperties(OSObject*){return 0;}
  virtual IOWorkLoop*getWorkLoop()const{return nullptr;}
  bool propertyExists(const char*k){return properties.count(k)!=0;}
- virtual IOReturn registerInterrupt(int,OSObject*,IOInterruptAction,void*){return kIOReturnUnsupported;}
+ static inline int interruptRegistrations=0;
+ virtual IOReturn registerInterrupt(int,OSObject*,IOInterruptAction,void*){++interruptRegistrations;return kIOReturnUnsupported;}
  virtual IOReturn enableInterrupt(int){return kIOReturnSuccess;}
  virtual IOReturn disableInterrupt(int){return kIOReturnSuccess;}
  virtual IOReturn unregisterInterrupt(int){return kIOReturnSuccess;}
@@ -354,6 +355,24 @@ struct AGPIO : OSObject {
  void put(){valid=false;this->OSObject::release();}
 };
 static bool tlmmAbsent=false;static unsigned tlmmBusyPin=0;
+/* Pad-interrupt C API. Off by default: every existing case keeps the proven
+   nub registration path. A test opts in with tlmmIrqOK=1 to exercise the
+   controller-owned summary line instead. */
+static int tlmmIrqOK=0,tlmmIrqPin=-1,tlmmIrqMasks=0,tlmmIrqResumes=0,tlmmIrqFree=0;
+static void (*tlmmIrqHandler)(unsigned int,void*)=nullptr;
+extern "C" int tlmm_gpio_request_irq(unsigned int pin,unsigned int detect,
+ tlmm_gpio_irq_handler handler,void *refcon){
+ (void)detect;(void)refcon;
+ if(!tlmmIrqOK||pin!=122)return TLMM_GPIO_EOPNOTSUPP;
+ tlmmIrqPin=(int)pin;tlmmIrqHandler=handler;return TLMM_GPIO_OK;}
+extern "C" int tlmm_gpio_free_irq(unsigned int pin){
+ if(tlmmIrqPin<0||pin!=(unsigned)tlmmIrqPin)return TLMM_GPIO_EINVAL;
+ tlmmIrqPin=-1;tlmmIrqHandler=nullptr;++tlmmIrqFree;return TLMM_GPIO_OK;}
+extern "C" int tlmm_gpio_irq_mask(unsigned int pin){
+ ++tlmmIrqMasks;return pin==122?TLMM_GPIO_OK:TLMM_GPIO_EINVAL;}
+extern "C" int tlmm_gpio_irq_resume(unsigned int pin){
+ ++tlmmIrqResumes;return pin==122?TLMM_GPIO_OK:TLMM_GPIO_EINVAL;}
+extern "C" int tlmm_gpio_irq_claimed(void){return tlmmIrqPin>=0;}
 struct TLMMGPIOController {
  static TLMMGPIOController *getController(){
   if(tlmmAbsent)return nullptr;

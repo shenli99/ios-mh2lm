@@ -546,7 +546,11 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
   # to a normal mode2 profile; it rewrites the inherited programming with the
   # same values, so the pads do not transition.
   PIN_MODE=${SWEET_PANEL_PINS_MODE:-2}
-  PANEL_ARGS="$PANEL_ARGS sweetfbpower=1 sweetmdssirq=2 sweetfbvsync=1 sweetfbown=2 sweetdsi=1 sweetdisplayresources=2 sweetdisplayclocks=1 sweetdisplaycore=2 sweetdisplaymanaged=1 sweetdsihost=1 sweetdsilink=2 sweetpanelpins=$PIN_MODE sweettouchpanel=2"
+  # SWEET_TOUCH_PANEL_MODE=3 keeps mode 2 and moves the ATTENTION pad to the
+  # TLMM summary line: the controller owns INTID 240 and the touch facade
+  # registers no GIC source. Default 2 keeps the proven per-driver path.
+  TOUCH_MODE=${SWEET_TOUCH_PANEL_MODE:-2}
+  PANEL_ARGS="$PANEL_ARGS sweetfbpower=1 sweetmdssirq=2 sweetfbvsync=1 sweetfbown=2 sweetdsi=1 sweetdisplayresources=2 sweetdisplayclocks=1 sweetdisplaycore=2 sweetdisplaymanaged=1 sweetdsihost=1 sweetdsilink=2 sweetpanelpins=$PIN_MODE sweettouchpanel=$TOUCH_MODE"
   if [ "$PANEL_PIPELINE" = '1' ]; then
    make_profile panel-pipeline "LG G8X - XNU independent pipeline rebuild (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=7" "$TMPDIR/pipeline.adt"
    printf 'kernel SHA256: %s\ncreated identity/pipeline profiles for %s; a31 retained baseline is separate\n' "$KERNEL_SHA256" "$LABEL"

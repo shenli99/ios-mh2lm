@@ -124,6 +124,11 @@ private:
 	bool fValid;
 };
 
+/* Registered pad interrupts: one GIC line (INTID 240) serves every pad, and
+ * a boot needs a handful at most. A fixed table keeps dispatch allocation
+ * free and lets the interrupt path run under a simple lock. */
+#define TLMM_IRQ_MAX 8u
+
 /*
  * The pin table entry. 'handle' is set only while an AGPIO owns the pad;
  * 'used' records that the kernel has driven or configured the pad at all,
@@ -182,6 +187,24 @@ public:
 
 	static TLMMGPIOController *getController(void);
 
+	/*
+	 * Pad interrupt registration. The controller owns the single GIC
+	 * summary line once the first pad asks for an interrupt; the caller
+	 * never names INTID 240 and never programs GIC registers. See
+	 * tlmm_gpio.h for the C API and the mask/resume contract.
+	 */
+	IOReturn requestPinIRQ(unsigned int pin, unsigned int detect,
+	    tlmm_gpio_irq_handler handler, void *refcon);
+	IOReturn freePinIRQ(unsigned int pin);
+	/* Interrupt-context safe. mask keeps the line for this pad; resume
+	 * releases it once no registered pad holds it. */
+	IOReturn maskPinIRQ(unsigned int pin);
+	IOReturn resumePinIRQ(unsigned int pin);
+	bool summaryClaimed(void) const { return fIrqClaimed; }
+	/* Interrupt action: dispatched by the GIC for the summary line. Public
+	 * because the action thunk has no friendship with this class. */
+	void dispatchSummary(void);
+
 private:
 	bool mapTiles(IOService *provider);
 	void readReadOnlyPins(IOService *provider);
@@ -190,11 +213,35 @@ private:
 	vm_offset_t pinAddress(unsigned int pin, uint32_t offset) const;
 	static unsigned int tileForPin(unsigned int pin);
 
+	bool claimSummary(void);
+	void releaseSummary(void);
+	void maskSummaryLocked(void);
+	void unmaskSummaryIfIdle(void);
+	uint32_t readIntrStatus(unsigned int pin) const;
+	void writeIntrStatus(unsigned int pin, uint32_t value);
+	int irqSlotForPin(unsigned int pin) const;
+
 	IOMemoryMap *fMaps[TLMM_TILE_COUNT];
 	vm_offset_t fTiles[TLMM_TILE_COUNT];
 	IOLock *fLock;
 	unsigned int fPinCount;
 	TLMMPinState fPins[TLMM_PIN_MAX];
+
+	/* Interrupt ownership. fIrqProvider is the ADT nub whose
+	 * IOInterruptSpecifiers names INTID 240; the controller registers the
+	 * action on it and masks through it, exactly like a driver would. */
+	IOService *fIrqProvider;
+	IOSimpleLock *fIrqLock;
+	bool fIrqClaimed;
+	bool fIrqMasked;
+	uint32_t fIrqClientMask;
+	unsigned int fIrqCount;
+	unsigned int fIrqPins[TLMM_IRQ_MAX];
+	tlmm_gpio_irq_handler fIrqHandlers[TLMM_IRQ_MAX];
+	void *fIrqRefcons[TLMM_IRQ_MAX];
+	int fIrqSlot[TLMM_PIN_MAX];
+	unsigned long fIrqDispatches;
+	unsigned long fIrqStrays;
 };
 
 #endif /* ! _IOKIT_ARM_TLMM_GPIO_CONTROLLER_H */

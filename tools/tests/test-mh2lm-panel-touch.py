@@ -100,6 +100,19 @@ static void boundedWrites(){for(auto&o:trace)if(o.write)assert(o.addr==TG+0x19c|
 '''
 tests = r'''
 int main(){
+ // Pad delegation: with sweetgpioirq=1 the TLMM controller owns INTID 240, so
+ // this facade requests the ATTENTION pad and registers nothing on the nub.
+ fixtures();touchPanelMode=3;tlmmIrqOK=1;tlmmIrqPin=-1;tlmmIrqMasks=tlmmIrqResumes=tlmmIrqFree=0;
+ IOService::interruptRegistrations=0;
+ auto*dn=nub();auto*ds=make(dn);
+ assert(tlmmIrqPin==122&&tlmmIrqHandler!=nullptr);
+ assert(IOService::interruptRegistrations==0);
+ ds->irqMask();assert(tlmmIrqMasks==1);
+ ds->irqUnmask();assert(tlmmIrqResumes==1);
+ ds->stop(dn);assert(tlmmIrqFree==1&&tlmmIrqPin<0);tlmmIrqOK=0;
+ ds->release();dropNub(dn);queued.clear();touchPanelMode=2;
+ assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
+
  // Default service absent; metadata mode never changes worker or maps hardware.
  fixtures();assert(!sweet_touch_irq(122));assert(sweet_touch_irq(240));
  assert(tcFixtureIRQState()==2&&!(regs[TG+0x11c]&TB));

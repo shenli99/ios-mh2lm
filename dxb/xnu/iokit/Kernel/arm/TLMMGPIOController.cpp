@@ -540,11 +540,42 @@ TLMMGPIOController::start(IOService *provider)
 	 * on, and an island-owned pad must already be refused by then. */
 	readReadOnlyPins(provider);
 
+	/*
+	 * Pad interrupts: the summary line (INTID 240) is claimed lazily, on
+	 * the first pad registration, so a boot that never uses a pad
+	 * interrupt leaves the GIC exactly as before. sweetgpioirq=1 opts in;
+	 * without it every registration returns unsupported and the client
+	 * keeps its own legacy path.
+	 */
+	/* Explicit init: the host fixture allocates on the stack, and a
+	 * half-initialised interrupt table must never be visible. */
+	fIrqProvider = provider;
+	fIrqClaimed = false;
+	fIrqMasked = false;
+	fIrqClientMask = 0;
+	fIrqCount = 0;
+	fIrqDispatches = 0;
+	fIrqStrays = 0;
+	for (i = 0; i < TLMM_IRQ_MAX; i++) {
+		fIrqPins[i] = 0;
+		fIrqHandlers[i] = NULL;
+		fIrqRefcons[i] = NULL;
+	}
+	fIrqLock = IOSimpleLockAlloc();
+	if (!fIrqLock) {
+		SWEET_LOG_ERROR("SWEET TLMM: cannot allocate the IRQ lock\n");
+		return false;
+	}
+	for (i = 0; i < TLMM_PIN_MAX; i++) {
+		fIrqSlot[i] = -1;
+	}
 	gTLMMController = this;
 	SWEET_LOG_INFO(
 	    "SWEET TLMM: %u pads; west=%#llx east=%#llx north=%#llx south=%#llx\n",
 	    fPinCount, fTiles[TLMM_TILE_WEST], fTiles[TLMM_TILE_EAST],
 	    fTiles[TLMM_TILE_NORTH], fTiles[TLMM_TILE_SOUTH]);
+	SWEET_LOG_INFO("SWEET TLMM: summary INTID %u is claimed on the first pad "
+	    "interrupt request, not at start\n", TLMM_SUMMARY_INTID);
 	registerService();
 	return true;
 }
@@ -568,6 +599,8 @@ TLMMGPIOController::stop(IOService *provider)
 		SWEET_LOG_WARN("SWEET TLMM: stopping with %u exclusive pads held\n",
 		    held);
 	}
+
+	releaseSummary();
 
 	/*
 	 * Invalidate every outstanding handle before the windows are released:
@@ -612,6 +645,10 @@ TLMMGPIOController::free(void)
 		IOLockFree(fLock);
 		fLock = NULL;
 	}
+	if (fIrqLock) {
+		IOSimpleLockFree(fIrqLock);
+		fIrqLock = NULL;
+	}
 	IOService::free();
 }
 
@@ -636,6 +673,17 @@ TLMMGPIOController::acquirePin(unsigned int pin, const char *owner)
 		IOLockUnlock(fLock);
 		SWEET_LOG_WARN("SWEET TLMM: gpio%u is owned by %s\n", pin,
 		    holder ? holder : "?");
+		return NULL;
+	}
+	/*
+	 * A pad whose interrupt is registered belongs to that interrupt owner:
+	 * handing out a handle too would let a second component reprogram the
+	 * pad under the handler. Same rule in the other direction below.
+	 */
+	if (fIrqSlot[pin] >= 0) {
+		IOLockUnlock(fLock);
+		SWEET_LOG_WARN("SWEET TLMM: gpio%u has a registered pad interrupt; "
+		    "no handle\n", pin);
 		return NULL;
 	}
 	/*
@@ -1049,6 +1097,340 @@ tlmmCResult(IOReturn status)
 	}
 }
 
+/* --------------------------------------------------------- pad interrupts */
+
+/*
+ * One GIC line, many pads. Ownership sits here so that a client cannot mask a
+ * line it does not own, and so that the per-pad status is read in the same
+ * place the pad is programmed. Dispatch order: mask the line, clear and serve
+ * every asserting pad, then release the line unless a handler asked to keep it
+ * (level-low pads such as touch ATTN defer their bottom half).
+ */
+extern "C" void
+sweet_tlmm_summary_irq(void *target, void *refCon, void *nub, int source)
+{
+	(void)refCon;
+	(void)nub;
+	(void)source;
+	if (target) {
+		((TLMMGPIOController *)target)->dispatchSummary();
+	}
+}
+
+uint32_t
+TLMMGPIOController::readIntrStatus(unsigned int pin) const
+{
+	volatile uint32_t *status;
+
+	status = (volatile uint32_t *)pinAddress(pin, TLMM_GPIO_INTR_STATUS);
+	return *status;
+}
+
+void
+TLMMGPIOController::writeIntrStatus(unsigned int pin, uint32_t value)
+{
+	volatile uint32_t *status;
+
+	status = (volatile uint32_t *)pinAddress(pin, TLMM_GPIO_INTR_STATUS);
+	*status = value;
+	__asm__ volatile("dsb osh" ::: "memory");
+}
+
+int
+TLMMGPIOController::irqSlotForPin(unsigned int pin) const
+{
+	if (pin >= fPinCount) {
+		return -1;
+	}
+	return __atomic_load_n(&fIrqSlot[pin], __ATOMIC_ACQUIRE);
+}
+
+void
+TLMMGPIOController::maskSummaryLocked(void)
+{
+	if (fIrqProvider && !fIrqMasked) {
+		(void)fIrqProvider->disableInterrupt(0);
+		fIrqMasked = true;
+	}
+}
+
+void
+TLMMGPIOController::unmaskSummaryIfIdle(void)
+{
+	if (!fIrqProvider || !fIrqMasked || fIrqClientMask != 0) {
+		return;
+	}
+	(void)fIrqProvider->enableInterrupt(0);
+	fIrqMasked = false;
+}
+
+bool
+TLMMGPIOController::claimSummary(void)
+{
+	IOReturn status;
+
+	if (fIrqClaimed) {
+		return true;
+	}
+	if (!fIrqProvider || !fIrqProvider->propertyExists("IOInterruptSpecifiers")) {
+		SWEET_LOG_ERROR("SWEET TLMM: no interrupt specifier on the ADT node; "
+		    "pad interrupts stay with the client\n");
+		return false;
+	}
+	status = fIrqProvider->registerInterrupt(0, this,
+	    (IOInterruptAction)sweet_tlmm_summary_irq, NULL);
+	if (status != kIOReturnSuccess) {
+		SWEET_LOG_ERROR("SWEET TLMM: INTID %u claim failed rc=%#x; pad "
+		    "interrupts stay with the client\n", TLMM_SUMMARY_INTID,
+		    (unsigned)status);
+		return false;
+	}
+	fIrqClaimed = true;
+	/* Start masked: a pad interrupt is only meaningful once a pad is armed,
+	 * and the client arms by calling resume. */
+	(void)fIrqProvider->disableInterrupt(0);
+	fIrqMasked = true;
+	SWEET_LOG_INFO("SWEET TLMM: summary INTID %u claimed for %u pads; "
+	    "line masked until a pad is armed\n", TLMM_SUMMARY_INTID, fIrqCount);
+	return true;
+}
+
+void
+TLMMGPIOController::releaseSummary(void)
+{
+	if (!fIrqClaimed || !fIrqProvider) {
+		return;
+	}
+	(void)fIrqProvider->disableInterrupt(0);
+	(void)fIrqProvider->unregisterInterrupt(0);
+	fIrqClaimed = false;
+	fIrqMasked = false;
+	SWEET_LOG_INFO("SWEET TLMM: summary INTID %u released; dispatches=%lu "
+	    "strays=%lu\n", TLMM_SUMMARY_INTID, fIrqDispatches, fIrqStrays);
+}
+
+void
+TLMMGPIOController::dispatchSummary(void)
+{
+	unsigned int pins[TLMM_IRQ_MAX];
+	tlmm_gpio_irq_handler handlers[TLMM_IRQ_MAX];
+	void *refcons[TLMM_IRQ_MAX];
+	unsigned int count;
+	unsigned int served = 0;
+	unsigned int i;
+	IOInterruptState saved;
+
+	if (!fIrqProvider || !fIrqLock) {
+		return;
+	}
+	/* Level line: mask first, so the aggregate cannot re-enter while the
+	 * status of every pad is being drained. */
+	(void)fIrqProvider->disableInterrupt(0);
+	fIrqMasked = true;
+
+	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	count = fIrqCount > TLMM_IRQ_MAX ? TLMM_IRQ_MAX : fIrqCount;
+	for (i = 0; i < count; i++) {
+		pins[i] = fIrqPins[i];
+		handlers[i] = fIrqHandlers[i];
+		refcons[i] = fIrqRefcons[i];
+	}
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+
+	for (i = 0; i < count; i++) {
+		uint32_t status;
+
+		if (!handlers[i]) {
+			continue;
+		}
+		status = readIntrStatus(pins[i]);
+		if (!(status & TLMM_INTR_STATUS_RAW)) {
+			continue;
+		}
+		/* Ack before the handler: a level pad that stays asserted must
+		 * re-arm the line through a second dispatch, not through a
+		 * status bit nobody cleared. */
+		writeIntrStatus(pins[i], status & ~TLMM_INTR_STATUS_RAW);
+		served++;
+		handlers[i](pins[i], refcons[i]);
+	}
+
+	fIrqDispatches++;
+	if (!served) {
+		fIrqStrays++;
+		if ((fIrqStrays & (fIrqStrays - 1)) == 0) {
+			SWEET_LOG_DEBUG("SWEET TLMM: summary without pad status; "
+			    "strays=%lu\n", fIrqStrays);
+		}
+	}
+
+	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	unmaskSummaryIfIdle();
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+}
+
+IOReturn
+TLMMGPIOController::requestPinIRQ(unsigned int pin, unsigned int detect,
+    tlmm_gpio_irq_handler handler, void *refcon)
+{
+	volatile uint32_t *intrCfg;
+	uint32_t cfg;
+	uint32_t want;
+	int slot;
+	unsigned int i;
+	IOInterruptState saved;
+
+	if (!handler || pin >= fPinCount || detect > TLMM_IRQ_EDGE_BOTH) {
+		return kIOReturnBadArgument;
+	}
+
+	IOLockLock(fLock);
+	if (pinReadOnlyLocked(pin)) {
+		IOLockUnlock(fLock);
+		SWEET_LOG_WARN("SWEET TLMM: gpio%u is island-owned; no pad "
+		    "interrupt\n", pin);
+		return kIOReturnUnsupported;
+	}
+	if (fPins[pin].exclusive || fIrqSlot[pin] >= 0) {
+		IOLockUnlock(fLock);
+		SWEET_LOG_WARN("SWEET TLMM: gpio%u already claimed (%s); no pad "
+		    "interrupt\n", pin, fPins[pin].exclusive ? "handle" : "irq");
+		return kIOReturnBusy;
+	}
+	IOLockUnlock(fLock);
+
+	if (!claimSummary()) {
+		return kIOReturnNoResources;
+	}
+
+	/*
+	 * Routing bits are the controller's: target KPSS and raw status are
+	 * what put the pad on the summary line at all. Polarity, detect and
+	 * the enable bit stay with the client until its own programming is
+	 * proven reproducible here; the request is recorded and logged so the
+	 * follow-up migration has the intent on record.
+	 */
+	intrCfg = (volatile uint32_t *)pinAddress(pin, TLMM_GPIO_INTR_CFG);
+	cfg = *intrCfg;
+	want = (cfg & ~(TLMM_INTR_ROUTE_TARGET | TLMM_INTR_ROUTE_RAW)) |
+	    TLMM_INTR_ROUTE_TARGET | TLMM_INTR_ROUTE_RAW;
+	if (want != cfg) {
+		__asm__ volatile("dmb oshst" ::: "memory");
+		*intrCfg = want;
+		__asm__ volatile("dsb osh" ::: "memory");
+	}
+	writeIntrStatus(pin, 0);
+
+	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	slot = -1;
+	for (i = 0; i < TLMM_IRQ_MAX; i++) {
+		if (!fIrqHandlers[i]) {
+			slot = (int)i;
+			break;
+		}
+	}
+	if (slot < 0) {
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+		SWEET_LOG_WARN("SWEET TLMM: pad interrupt table full (%u)\n",
+		    TLMM_IRQ_MAX);
+		return kIOReturnNoResources;
+	}
+	fIrqPins[slot] = pin;
+	fIrqHandlers[slot] = handler;
+	fIrqRefcons[slot] = refcon;
+	fIrqSlot[pin] = slot;
+	if ((unsigned int)slot + 1u > fIrqCount) {
+		fIrqCount = (unsigned int)slot + 1u;
+	}
+	/* The line stays masked until the client arms and calls resume. */
+	fIrqClientMask |= 1u << slot;
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+
+	cfg = *intrCfg;
+	SWEET_LOG_INFO("SWEET TLMM: gpio%u pad interrupt slot=%d detect=%u "
+	    "intr_cfg=%#x (route owned, pad config with the client)\n",
+	    pin, slot, detect, cfg);
+	return kIOReturnSuccess;
+}
+
+IOReturn
+TLMMGPIOController::freePinIRQ(unsigned int pin)
+{
+	int slot;
+	IOInterruptState saved;
+
+	if (pin >= fPinCount) {
+		return kIOReturnBadArgument;
+	}
+	slot = irqSlotForPin(pin);
+	if (slot < 0) {
+		return kIOReturnNotFound;
+	}
+
+	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	fIrqHandlers[slot] = NULL;
+	fIrqRefcons[slot] = NULL;
+	fIrqClientMask &= ~(1u << (unsigned int)slot);
+	__atomic_store_n(&fIrqSlot[pin], -1, __ATOMIC_RELEASE);
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+
+	SWEET_LOG_INFO("SWEET TLMM: gpio%u pad interrupt freed slot=%d\n", pin,
+	    slot);
+
+	/* Last registered pad: hand the line back so a boot that no longer uses
+	 * a pad interrupt leaves the GIC as it found it. */
+	{
+		bool any = false;
+		unsigned int i;
+
+		saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+		for (i = 0; i < TLMM_IRQ_MAX; i++) {
+			if (fIrqHandlers[i]) {
+				any = true;
+			}
+		}
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+		if (!any) {
+			releaseSummary();
+		}
+	}
+	return kIOReturnSuccess;
+}
+
+IOReturn
+TLMMGPIOController::maskPinIRQ(unsigned int pin)
+{
+	int slot;
+	IOInterruptState saved;
+
+	slot = irqSlotForPin(pin);
+	if (slot < 0) {
+		return kIOReturnNotFound;
+	}
+	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	fIrqClientMask |= 1u << (unsigned int)slot;
+	maskSummaryLocked();
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	return kIOReturnSuccess;
+}
+
+IOReturn
+TLMMGPIOController::resumePinIRQ(unsigned int pin)
+{
+	int slot;
+	IOInterruptState saved;
+
+	slot = irqSlotForPin(pin);
+	if (slot < 0) {
+		return kIOReturnNotFound;
+	}
+	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	fIrqClientMask &= ~(1u << (unsigned int)slot);
+	unmaskSummaryIfIdle();
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	return kIOReturnSuccess;
+}
+
 extern "C" int
 tlmm_gpio_available(void)
 {
@@ -1150,6 +1532,60 @@ gpio_set_config(unsigned int pin, unsigned int func, unsigned int pull,
 	}
 	return tlmmCResult(controller->setPinConfig(pin, func, pull, drive,
 	    output != 0, high != 0));
+}
+
+extern "C" int
+tlmm_gpio_request_irq(unsigned int pin, unsigned int detect,
+    tlmm_gpio_irq_handler handler, void *refcon)
+{
+	TLMMGPIOController *controller = TLMMGPIOController::getController();
+
+	if (!controller) {
+		return TLMM_GPIO_ENODEV;
+	}
+	return tlmmCResult(controller->requestPinIRQ(pin, detect, handler,
+	    refcon));
+}
+
+extern "C" int
+tlmm_gpio_free_irq(unsigned int pin)
+{
+	TLMMGPIOController *controller = TLMMGPIOController::getController();
+
+	if (!controller) {
+		return TLMM_GPIO_ENODEV;
+	}
+	return tlmmCResult(controller->freePinIRQ(pin));
+}
+
+extern "C" int
+tlmm_gpio_irq_mask(unsigned int pin)
+{
+	TLMMGPIOController *controller = TLMMGPIOController::getController();
+
+	if (!controller) {
+		return TLMM_GPIO_ENODEV;
+	}
+	return tlmmCResult(controller->maskPinIRQ(pin));
+}
+
+extern "C" int
+tlmm_gpio_irq_resume(unsigned int pin)
+{
+	TLMMGPIOController *controller = TLMMGPIOController::getController();
+
+	if (!controller) {
+		return TLMM_GPIO_ENODEV;
+	}
+	return tlmmCResult(controller->resumePinIRQ(pin));
+}
+
+extern "C" int
+tlmm_gpio_irq_claimed(void)
+{
+	TLMMGPIOController *controller = TLMMGPIOController::getController();
+
+	return (controller && controller->summaryClaimed()) ? 1 : 0;
 }
 
 extern "C" int

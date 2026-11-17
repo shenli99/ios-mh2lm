@@ -117,9 +117,18 @@ extern "C" {
 /* ---------------------------------------------------------- interrupt fields */
 
 /*
- * INTR_CFG/INTR_STATUS are not programmed by the GPIO controller yet: the
- * TLMM summary interrupt (SPI 208, INTID 240) is still owned by the driver
- * that asked for it. The fields are named here so the layout has one home.
+ * One GIC line (SPI 208, INTID 240) aggregates every pad. While a client owns
+ * that line directly nothing else can use a pad interrupt, and masking the
+ * line for one pad masks all of them. The controller therefore takes the
+ * summary line, demultiplexes it against each registered pad's INTR_STATUS and
+ * masks it for the duration of a dispatch; a client that needs the line to
+ * stay masked after its top half (deferred work, like the touch worker) calls
+ * tlmm_gpio_irq_mask() and later tlmm_gpio_irq_resume().
+ *
+ * Routing bits (target KPSS, raw status) belong to the controller: they are
+ * what makes the pad visible on the summary line at all. Polarity, detect and
+ * the enable bit stay with the client until its own programming is proven to
+ * be reproducible here.
  */
 #define TLMM_INTR_ENABLE            0x1u
 #define TLMM_INTR_POLARITY          0x2u
@@ -131,6 +140,8 @@ extern "C" {
 #define TLMM_INTR_TARGET_KPSS       3u
 #define TLMM_INTR_STATUS_RAW        0x1u
 #define TLMM_SUMMARY_INTID          240u
+#define TLMM_INTR_ROUTE_TARGET      0x60u    /* target=KPSS, bits 6:5 */
+#define TLMM_INTR_ROUTE_RAW         0x10u    /* raw status into INTR_STATUS */
 
 /* ------------------------------------------------------------ ADT binding */
 
@@ -153,6 +164,43 @@ extern "C" {
 #define TLMM_ADT_READ_ONLY_PROP     "sweet,read-only-pins"
 
 /* ------------------------------------------------------- C API (plain mode) */
+
+/* --------------------------------------------------- C API (pad interrupts) */
+
+/*
+ * Pad interrupts share one GIC line, so only one component can own it. This
+ * API is that owner: the caller does not see INTID 240, does not program GIC
+ * registers and does not mask a line it does not own.
+ *
+ * The line is claimed lazily on the first request and stays masked until the
+ * client resumes, which matches the probe/arm sequence of a level-low pad.
+ * A handler runs in interrupt context: no allocation, no sleeping and no
+ * MMIO outside the controller's own registers.
+ *
+ * The first registration claims the line; a boot that never asks for a pad
+ * interrupt leaves the GIC untouched. TLMM_GPIO_ENODEV means there is no
+ * controller, TLMM_GPIO_EOPNOTSUPP a refused pad; either way the caller keeps
+ * its own legacy path.
+ */
+#define TLMM_IRQ_LEVEL_HIGH         0u
+#define TLMM_IRQ_LEVEL_LOW          1u
+#define TLMM_IRQ_EDGE_RISING        2u
+#define TLMM_IRQ_EDGE_FALLING       3u
+#define TLMM_IRQ_EDGE_BOTH          4u
+
+typedef void (*tlmm_gpio_irq_handler)(unsigned int pin, void *refcon);
+
+/* 0 on success, otherwise -errno. */
+int tlmm_gpio_request_irq(unsigned int pin, unsigned int detect,
+    tlmm_gpio_irq_handler handler, void *refcon);
+int tlmm_gpio_free_irq(unsigned int pin);
+/* Interrupt-context safe: keeps the summary line masked for this pad. */
+int tlmm_gpio_irq_mask(unsigned int pin);
+/* Bottom half: clears this pad's mask and releases the line once no pad holds
+ * it. Bounded, nonblocking, safe from a workloop thread. */
+int tlmm_gpio_irq_resume(unsigned int pin);
+/* 1 once the controller owns the summary line, 0 otherwise. */
+int tlmm_gpio_irq_claimed(void);
 
 /* 0 on success, otherwise -errno. */
 #define TLMM_GPIO_OK                0
