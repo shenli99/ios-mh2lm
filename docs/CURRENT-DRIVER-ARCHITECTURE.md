@@ -944,6 +944,23 @@ qcom,tlmm-sm8150`），把 `reg` 的四段窗口按 west/east/north/south 顺序
   `xnu/pexpert/pexpert/arm64/tlmm_gpio.h`（`gpio_set_value`/`gpio_get_value`/
   `gpio_set_config` 等），返回 0 或 -errno，没有控制器时返回 `TLMM_GPIO_ENODEV`。
 
+### island 占用的 pad：只读
+
+island（always-on 子系统）驱动的 pad 对 AP 是"只能读、不能控制"的，控制器把这条
+做成硬规则而不是口头约定：
+
+- 判定有两个来源，任一成立即只读：① CFG bit 12（EGPIO enable）当前为 1——固件在
+  island 侧接管了这颗 pad，运行期就能看到；② 节点属性 `sweet,read-only-pins`
+  列出了它——island 拥有但还没打开 EGPIO 的 pad，在第一次访问前就应当是只读。
+- 只读 pad **不派发 `AGPIO`**：`acquirePin()` 返回 NULL 并打
+  `SWEET TLMM: gpio%u is island-owned; read-only, no handle`。没有句柄就没有
+  "过一会儿误写"的可能。
+- plain-mode 六个写入口返回 `kIOReturnUnsupported`，C API 对应
+  `TLMM_GPIO_EOPNOTSUPP`（-95）；读入口不变，`gpio_get_config()` 照样能拿到
+  该 pad 的真实状态。
+- `getPinOwner()` 对这类 pad 返回 `"island"`，诊断时不会误以为它空闲。
+- `gpio_is_read_only(pin)` 给 C 驱动一个探询入口（采样器已在用）。
+
 pin→tile 表是稀疏的（51–154 属 SOUTH，0–7/38 也是 SOUTH；低位 8–20/31–37 与
 169 以上属 NORTH），已按 `pinctrl-sm8150.c` 的 175 颗 pin 逐条核对。`configure()`
 先锁存输出电平再写 CFG bit 9，pin 变成输出时不会出现电平毛刺。

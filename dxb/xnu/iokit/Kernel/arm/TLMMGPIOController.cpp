@@ -534,7 +534,11 @@ TLMMGPIOController::start(IOService *provider)
 		fPins[i].pin = i;
 		fPins[i].used = false;
 		fPins[i].exclusive = false;
+		fPins[i].readOnly = false;
 	}
+	/* Before registerService(): the first consumer can be matched from here
+	 * on, and an island-owned pad must already be refused by then. */
+	readReadOnlyPins(provider);
 
 	gTLMMController = this;
 	SWEET_LOG_INFO(
@@ -634,6 +638,16 @@ TLMMGPIOController::acquirePin(unsigned int pin, const char *owner)
 		    holder ? holder : "?");
 		return NULL;
 	}
+	/*
+	 * The island drives this pad: hand out read access only. No AGPIO, so
+	 * there is no handle that could write it later by accident.
+	 */
+	if (pinReadOnlyLocked(pin)) {
+		IOLockUnlock(fLock);
+		SWEET_LOG_WARN("SWEET TLMM: gpio%u is island-owned; read-only, "
+		    "no handle\n", pin);
+		return NULL;
+	}
 	fPins[pin].exclusive = true;
 	fPins[pin].owner = owner;
 	IOLockUnlock(fLock);
@@ -660,6 +674,75 @@ TLMMGPIOController::acquirePin(unsigned int pin, const char *owner)
 		SWEET_LOG_ERROR("SWEET TLMM: no handle for gpio%u\n", pin);
 	}
 	return handle;
+}
+
+/*
+ * Island-owned pads. Two sources agree here:
+ *
+ *   - the ADT list (sweet,read-only-pins), for pads the firmware owns from
+ *     the start but has not steered through EGPIO yet;
+ *   - the live CFG bit 12, for pads the firmware enabled after we started.
+ *
+ * Either way the answer is the same: readable, never writable. Callers holding
+ * fLock use pinReadOnlyLocked(); everyone else goes through isPinReadOnly().
+ */
+bool
+TLMMGPIOController::pinReadOnlyLocked(unsigned int pin) const
+{
+	if (pin >= fPinCount || pin >= TLMM_PIN_MAX) {
+		return false;
+	}
+	if (fPins[pin].readOnly) {
+		return true;
+	}
+	return (tlmmRead32(pinAddress(pin, TLMM_GPIO_CFG)) &
+	    TLMM_GPIO_EGPIO_ENABLE) != 0;
+}
+
+bool
+TLMMGPIOController::isPinReadOnly(unsigned int pin) const
+{
+	bool readOnly;
+
+	if (!fLock || pin >= fPinCount) {
+		return false;
+	}
+	IOLockLock(fLock);
+	readOnly = pinReadOnlyLocked(pin);
+	IOLockUnlock(fLock);
+	return readOnly;
+}
+
+/* Parse the optional u32 array of declared island-owned pads. A malformed
+ * property is ignored: it is a hint, and the live EGPIO bit still protects. */
+void
+TLMMGPIOController::readReadOnlyPins(IOService *provider)
+{
+	OSData *data = OSDynamicCast(OSData,
+	    provider->getProperty(TLMM_ADT_READ_ONLY_PROP));
+	const uint32_t *pins;
+	unsigned int count;
+	unsigned int declared = 0;
+
+	if (!data) {
+		return;
+	}
+	if (data->getLength() % sizeof(uint32_t) != 0) {
+		SWEET_LOG_WARN("SWEET TLMM: %s is not a u32 array; ignored\n",
+		    TLMM_ADT_READ_ONLY_PROP);
+		return;
+	}
+	pins = (const uint32_t *)data->getBytesNoCopy();
+	count = data->getLength() / sizeof(uint32_t);
+	for (unsigned int i = 0; i < count; i++) {
+		if (pins[i] >= fPinCount || pins[i] >= TLMM_PIN_MAX) {
+			continue;
+		}
+		fPins[pins[i]].readOnly = true;
+		declared++;
+	}
+	SWEET_LOG_INFO("SWEET TLMM: %u pads declared island-owned (read-only)\n",
+	    declared);
 }
 
 IOReturn
@@ -695,7 +778,15 @@ TLMMGPIOController::getPinOwner(unsigned int pin) const
 	if (pin >= fPinCount) {
 		return NULL;
 	}
-	return fPins[pin].owner;
+	if (fPins[pin].owner) {
+		return fPins[pin].owner;
+	}
+	/* Diagnostic hint: a pad the island drives has no owner, but saying so is
+	 * more useful than reporting it free. */
+	if (fPins[pin].readOnly) {
+		return "island";
+	}
+	return NULL;
 }
 
 
@@ -712,7 +803,12 @@ TLMMGPIOController::setPinValue(unsigned int pin, bool high)
 	}
 
 	IOLockLock(fLock);
-	/* Write side of the split: an AGPIO owns every store to this pad. */
+	/* Write side of the split: an AGPIO owns every store to this pad, and an
+	 * island-owned pad accepts no store at all. */
+	if (pinReadOnlyLocked(pin)) {
+		IOLockUnlock(fLock);
+		return kIOReturnUnsupported;
+	}
 	if (fPins[pin].exclusive) {
 		IOLockUnlock(fLock);
 		return kIOReturnBusy;
@@ -756,6 +852,10 @@ TLMMGPIOController::setPinDirection(unsigned int pin, bool output)
 	}
 
 	IOLockLock(fLock);
+	if (pinReadOnlyLocked(pin)) {
+		IOLockUnlock(fLock);
+		return kIOReturnUnsupported;
+	}
 	if (fPins[pin].exclusive) {
 		IOLockUnlock(fLock);
 		return kIOReturnBusy;
@@ -782,6 +882,10 @@ TLMMGPIOController::setPinMux(unsigned int pin, unsigned int func)
 	}
 
 	IOLockLock(fLock);
+	if (pinReadOnlyLocked(pin)) {
+		IOLockUnlock(fLock);
+		return kIOReturnUnsupported;
+	}
 	if (fPins[pin].exclusive) {
 		IOLockUnlock(fLock);
 		return kIOReturnBusy;
@@ -807,6 +911,10 @@ TLMMGPIOController::setPinPull(unsigned int pin, unsigned int pull)
 	}
 
 	IOLockLock(fLock);
+	if (pinReadOnlyLocked(pin)) {
+		IOLockUnlock(fLock);
+		return kIOReturnUnsupported;
+	}
 	if (fPins[pin].exclusive) {
 		IOLockUnlock(fLock);
 		return kIOReturnBusy;
@@ -832,6 +940,10 @@ TLMMGPIOController::setPinDrive(unsigned int pin, unsigned int drive)
 	}
 
 	IOLockLock(fLock);
+	if (pinReadOnlyLocked(pin)) {
+		IOLockUnlock(fLock);
+		return kIOReturnUnsupported;
+	}
 	if (fPins[pin].exclusive) {
 		IOLockUnlock(fLock);
 		return kIOReturnBusy;
@@ -858,6 +970,10 @@ TLMMGPIOController::setPinConfig(unsigned int pin, unsigned int func,
 	}
 
 	IOLockLock(fLock);
+	if (pinReadOnlyLocked(pin)) {
+		IOLockUnlock(fLock);
+		return kIOReturnUnsupported;
+	}
 	if (fPins[pin].exclusive) {
 		IOLockUnlock(fLock);
 		return kIOReturnBusy;
@@ -922,8 +1038,10 @@ tlmmCResult(IOReturn status)
 	case kIOReturnBadArgument:
 		return TLMM_GPIO_EINVAL;
 	case kIOReturnNotOpen:
-	case kIOReturnUnsupported:
 		return TLMM_GPIO_ENODEV;
+	case kIOReturnUnsupported:
+		/* Island-owned pad: the controller exists, the write does not. */
+		return TLMM_GPIO_EOPNOTSUPP;
 	case kIOReturnNotPermitted:
 		return TLMM_GPIO_EBUSY;
 	default:
@@ -935,6 +1053,17 @@ extern "C" int
 tlmm_gpio_available(void)
 {
 	return TLMMGPIOController::getController() ? 1 : 0;
+}
+
+extern "C" int
+gpio_is_read_only(unsigned int pin)
+{
+	TLMMGPIOController *controller = TLMMGPIOController::getController();
+
+	if (!controller) {
+		return 0;
+	}
+	return controller->isPinReadOnly(pin) ? 1 : 0;
 }
 
 extern "C" int

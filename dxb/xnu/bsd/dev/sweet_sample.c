@@ -94,9 +94,9 @@ sweet_sample_thread(__unused void *arg, __unused wait_result_t wr)
 			struct tlmm_pin_config cfg = { 0 };
 			int rc = gpio_get_config(pads[i], &cfg);
 
-			printf("SWEET TLMM: gpio%u rc=%d func=%u pull=%u drive=%u output=%d high=%d\n",
+			printf("SWEET TLMM: gpio%u rc=%d func=%u pull=%u drive=%u output=%d high=%d readonly=%d\n",
 			    pads[i], rc, cfg.func, cfg.pull, cfg.drive, cfg.output,
-			    cfg.high);
+			    cfg.high, gpio_is_read_only(pads[i]));
 		}
 	} else {
 		printf("SWEET TLMM: no controller started; pads untouched\n");

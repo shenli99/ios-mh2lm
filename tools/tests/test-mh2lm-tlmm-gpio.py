@@ -190,6 +190,108 @@ static void expectTile(TLMMGPIOController *controller, unsigned pin,
     }
 }
 
+static void addReadOnlyProp(const std::vector<uint32_t> &pins) {
+    OSData *data = new OSData;
+    data->bytes.assign((const uint8_t *)pins.data(),
+        (const uint8_t *)pins.data() + pins.size() * 4);
+    gProvider.props.push_back({TLMM_ADT_READ_ONLY_PROP, data});
+}
+
+static void addRawReadOnlyProp(const std::vector<uint8_t> &bytes) {
+    OSData *data = new OSData;
+    data->bytes = bytes;
+    gProvider.props.push_back({TLMM_ADT_READ_ONLY_PROP, data});
+}
+
+static void islandCases(void) {
+    const uint32_t declared[] = {96, 100};
+
+    /* (1) ADT-declared: refused from the first access, before any EGPIO bit. */
+    bringUp();
+    addReadOnlyProp({declared[0], declared[1]});
+    TLMMGPIOController declaredController;
+    assert(declaredController.init());
+    assert(declaredController.start(&gProvider));
+    assert(declaredController.isPinReadOnly(96));
+    assert(declaredController.isPinReadOnly(100));
+    assert(!declaredController.isPinReadOnly(101));
+    assert(declaredController.acquirePin(96, "panel") == nullptr);
+    assert(strcmp(declaredController.getPinOwner(96), "island") == 0);
+    assert(declaredController.getPinOwner(54) == nullptr);
+    assert(declaredController.setPinValue(96, true) == kIOReturnUnsupported);
+    assert(declaredController.setPinDirection(96, true) == kIOReturnUnsupported);
+    assert(declaredController.setPinMux(96, 1) == kIOReturnUnsupported);
+    assert(declaredController.setPinPull(96, TLMM_GPIO_PULL_UP) == kIOReturnUnsupported);
+    assert(declaredController.setPinDrive(96, TLMM_GPIO_DRIVE_4MA) == kIOReturnUnsupported);
+    assert(declaredController.setPinConfig(96, 0, 0, TLMM_GPIO_DRIVE_4MA, 1, 1) ==
+        kIOReturnUnsupported);
+    assert(gpio_set_value(96, 1) == TLMM_GPIO_EOPNOTSUPP);
+    assert(gpio_set_config(96, 0, 0, 0, 1, 1) == TLMM_GPIO_EOPNOTSUPP);
+    assert(gpio_is_read_only(96) == 1);
+    assert(gpio_is_read_only(54) == 0);
+    /* Reads keep working and report the untouched hardware state. GPIO100 is
+     * in SOUTH; GPIO96 is declared only, so its tile is not touched here. */
+    setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_CFG,
+        TLMM_GPIO_PULL_KEEPER | TLMM_GPIO_MUX_GPIO | TLMM_GPIO_EGPIO_ENABLE);
+    setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_IO, TLMM_GPIO_IN);
+    struct tlmm_pin_config seen = {};
+    int high = 0;
+    assert(gpio_get_config(100, &seen) == TLMM_GPIO_OK);
+    assert(seen.pull == TLMM_GPIO_PULL_KEEPER && seen.output == 0);
+    assert(seen.cfg == tileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_CFG));
+    assert(gpio_get_value(100, &high) == TLMM_GPIO_OK && high == 1);
+    /* Nothing was written by any of the refused calls. */
+    assert(tileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_CFG) ==
+        (TLMM_GPIO_PULL_KEEPER | TLMM_GPIO_MUX_GPIO | TLMM_GPIO_EGPIO_ENABLE));
+    assert(tileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_IO) == TLMM_GPIO_IN);
+    assert(declaredController.acquirePin(100, "panel") == nullptr);
+    assert(declaredController.setPinConfig(100, 0, 0, TLMM_GPIO_DRIVE_2MA, 1, 0) ==
+        kIOReturnUnsupported);
+
+    /* (2) Live EGPIO enable: firmware claims a pad after we started. */
+    assert(declaredController.acquirePin(54, "touch") != nullptr);
+    declaredController.releasePin(54, "touch");
+    setTileReg(TLMM_TILE_SOUTH, 54, TLMM_GPIO_CFG, TLMM_GPIO_EGPIO_ENABLE);
+    assert(declaredController.isPinReadOnly(54));
+    assert(declaredController.acquirePin(54, "touch") == nullptr);
+    assert(declaredController.setPinValue(54, true) == kIOReturnUnsupported);
+    assert(gpio_set_direction(54, 1) == TLMM_GPIO_EOPNOTSUPP);
+    assert(tileReg(TLMM_TILE_SOUTH, 54, TLMM_GPIO_CFG) == TLMM_GPIO_EGPIO_ENABLE);
+    /* Cleared by firmware: the pad becomes controllable again. */
+    setTileReg(TLMM_TILE_SOUTH, 54, TLMM_GPIO_CFG, 0);
+    assert(!declaredController.isPinReadOnly(54));
+    assert(declaredController.acquirePin(54, "touch") != nullptr);
+    declaredController.releasePin(54, "touch");
+
+    /* (3) A malformed property is a no-op, not a crash and not a guess. This
+     * needs its own provider: getProperty() returns the first match, so the
+     * valid list above would shadow it. */
+    declaredController.stop(&gProvider);
+    /* Clear the live EGPIO bit case (1) left behind, so the assertions below
+     * test the malformed list alone. */
+    setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_CFG, 0);
+    setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_IO, 0);
+    IOService badProvider;
+    for (unsigned i = 0; i < 4; i++) {
+        badProvider.maps.push_back(gMaps[i]);
+    }
+    OSData *pinCount = new OSData;
+    uint32_t pins175 = 175;
+    pinCount->bytes.assign((uint8_t *)&pins175, (uint8_t *)&pins175 + 4);
+    badProvider.props.push_back({"qcom,pin-count", pinCount});
+    OSData *malformed = new OSData;
+    malformed->bytes = {0x60, 0x00, 0x00, 0x00, 0x64, 0x00};    /* 6 bytes */
+    badProvider.props.push_back({TLMM_ADT_READ_ONLY_PROP, malformed});
+    TLMMGPIOController malformedController;
+    assert(malformedController.init());
+    assert(malformedController.start(&badProvider));
+    assert(!malformedController.isPinReadOnly(96));
+    assert(!malformedController.isPinReadOnly(100));
+    assert(malformedController.acquirePin(96, "panel") != nullptr);
+    malformedController.releasePin(96, "panel");
+    malformedController.stop(&badProvider);
+}
+
 int main(void) {
     // No controller yet: the C API must stay inert.
     assert(tlmm_gpio_available() == 0);
@@ -359,8 +461,14 @@ int main(void) {
     assert(TLMMGPIOController::getController() == nullptr);
     assert(tlmm_gpio_available() == 0);
     assert(gpio_set_value(1, 1) == TLMM_GPIO_ENODEV);
+    assert(gpio_is_read_only(1) == 0);
 
-    printf("PASS: TLMM GPIO controller (tile map, exclusive AGPIO, plain mode, C API)\n");
+    /* Island-owned pads: readable, never controllable. Two sources, and the
+     * answer must be the same for both. */
+    islandCases();
+
+    printf("PASS: TLMM GPIO controller (tile map, exclusive AGPIO, plain mode, "
+        "write-exclusive/read-shared, island read-only, C API)\n");
     return 0;
 }
 '''

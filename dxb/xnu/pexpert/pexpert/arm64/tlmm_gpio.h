@@ -25,6 +25,11 @@
  * AGPIO owns a pad, acquirePin() returns NULL and every plain-mode writer
  * returns TLMM_GPIO_EBUSY, but gpio_get_value()/gpio_get_config() keep
  * working so a monitor can verify what the owner programmed.
+ *
+ * A pad the island drives (EGPIO enable in CFG, or listed in the node's
+ * sweet,read-only-pins) is read-only for this processor: acquirePin() refuses
+ * it and every plain-mode writer returns TLMM_GPIO_EOPNOTSUPP, while the
+ * readers keep reporting its state.
  */
 
 #ifndef _PEXPERT_ARM64_TLMM_GPIO_H
@@ -94,6 +99,16 @@ extern "C" {
 
 #define TLMM_GPIO_OE                0x200u
 
+/*
+ * Bits 11/12 belong to the embedded-GPIO (EGPIO) block, which is driven by the
+ * always-on island rather than by the application processor. ENABLE being set
+ * means the pad is steered by that island: the application processor can read
+ * it but must not program it. The controller therefore treats such a pad as
+ * read-only (no AGPIO is handed out and every plain-mode write is refused).
+ */
+#define TLMM_GPIO_EGPIO_PRESENT     0x800u
+#define TLMM_GPIO_EGPIO_ENABLE      0x1000u
+
 /* ------------------------------------------------------------- IO fields */
 
 #define TLMM_GPIO_IN                0x1u     /* pad level, read-only */
@@ -123,6 +138,12 @@ extern "C" {
 #define TLMM_ADT_COMPATIBLE         "qcom,tlmm-sm8150"
 #define TLMM_ADT_GPIO_CELLS         2u
 #define TLMM_ADT_PIN_COUNT_PROP     "qcom,pin-count"
+/*
+ * Optional u32 array on the tlmm node: pads the island owns but has not
+ * enabled yet. They are read-only from the first access, even before the
+ * EGPIO enable bit appears in CFG.
+ */
+#define TLMM_ADT_READ_ONLY_PROP     "sweet,read-only-pins"
 
 /* ------------------------------------------------------- C API (plain mode) */
 
@@ -164,6 +185,10 @@ struct tlmm_pin_config {
  * fallback, as the touch worker does today.
  */
 int tlmm_gpio_available(void);
+/* 1 when the island drives the pad (declared in the ADT or EGPIO-enabled in
+ * CFG): it can be read, but no handle and no write are available. 0 for a pad
+ * this processor may control, and also when no controller has started. */
+int gpio_is_read_only(unsigned int pin);
 int gpio_set_value(unsigned int pin, int high);
 int gpio_get_value(unsigned int pin, int *high);
 int gpio_set_direction(unsigned int pin, int output);

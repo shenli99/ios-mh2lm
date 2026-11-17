@@ -135,6 +135,9 @@ struct TLMMPinState {
 	unsigned int pin;
 	bool used;
 	bool exclusive;
+	/* Declared island-owned by the ADT. The live EGPIO enable bit is checked
+	 * separately, because firmware can set it after we start. */
+	bool readOnly;
 };
 
 class TLMMGPIOController : public IOService {
@@ -168,6 +171,11 @@ public:
 	IOReturn getPinConfig(unsigned int pin, struct tlmm_pin_config *config);
 
 	unsigned int getPinCount(void) const { return fPinCount; }
+
+	/* True when the island drives the pad: declared in the node's
+	 * sweet,read-only-pins list, or EGPIO enable is set in its CFG right now.
+	 * Such a pad can be read but never handed out or written. */
+	bool isPinReadOnly(unsigned int pin) const;
 	/* Diagnostics: the owner string of an exclusively held pad, or NULL.
 	 * Read without the state lock, so treat it as a hint. */
 	const char *getPinOwner(unsigned int pin) const;
@@ -176,6 +184,8 @@ public:
 
 private:
 	bool mapTiles(IOService *provider);
+	void readReadOnlyPins(IOService *provider);
+	bool pinReadOnlyLocked(unsigned int pin) const;
 	bool readPinCount(IOService *provider);
 	vm_offset_t pinAddress(unsigned int pin, uint32_t offset) const;
 	static unsigned int tileForPin(unsigned int pin);
