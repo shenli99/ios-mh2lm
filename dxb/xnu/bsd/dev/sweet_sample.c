@@ -20,6 +20,7 @@
 #include <kern/thread.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/arm64/generic_interrupt_controller.h>
+#include <pexpert/arm64/tlmm_gpio.h>
 
 extern task_t proc_task(proc_t);
 extern int hz;
@@ -76,6 +77,27 @@ sweet_sample_thread(__unused void *arg, __unused wait_result_t wr)
 	 * their sources. Read-only, and independent of whether sampling runs.
 	 */
 	gic_log_enabled("sample");
+	/*
+	 * Read-only cross-check of the pad controller. GPIO6/8 are programmed by
+	 * SweetPanelPins and GPIO54/122 by the touch worker, each through its own
+	 * register path, so what the controller reports back proves its tile and
+	 * slot arithmetic against independent writers: GPIO122 must read
+	 * func 0, pull 3, drive 3, output 0 (ts_gpio(122,0,3,3,false,false)).
+	 */
+	if (tlmm_gpio_available()) {
+		static const unsigned int pads[] = { 6, 8, 54, 122 };
+
+		for (unsigned int i = 0; i < sizeof pads / sizeof pads[0]; i++) {
+			struct tlmm_pin_config cfg = { 0, 0, 0, 0, 0 };
+			int rc = gpio_get_config(pads[i], &cfg);
+
+			printf("SWEET TLMM: gpio%u rc=%d func=%u pull=%u drive=%u output=%d high=%d\n",
+			    pads[i], rc, cfg.func, cfg.pull, cfg.drive, cfg.output,
+			    cfg.high);
+		}
+	} else {
+		printf("SWEET TLMM: no controller started; pads untouched\n");
+	}
 	if (sweet_sample_names[0] == '-') {
 		return;
 	}
