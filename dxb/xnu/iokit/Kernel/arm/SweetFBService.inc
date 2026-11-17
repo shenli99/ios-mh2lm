@@ -245,6 +245,11 @@ IOReturn
 AppleCLCD::requestPanelPower(bool off)
 {
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ /* One line per request: the 0121b10 freeze showed a power key whose request
+  * never reached a provider and left no trace at all. */
+ SWEET_LOG_INFO("SWEET FB POWER PATH: off=%u coordinated=%u fault=%u stopped=%u\n",
+     off ? 1u : 0u, fPanelLifecycleRequested ? 1u : 0u,
+     fPanelLifecycleFault ? 1u : 0u, fServiceStopped ? 1u : 0u);
  if (fPanelLifecycleRequested) return requestCoordinatedPower(off);
  uint64_t start=mach_absolute_time(), elapsed;
  bool changed=fPowerOff!=off;
@@ -288,19 +293,41 @@ AppleCLCD::requestPanelPower(bool off)
 IOReturn AppleCLCD::requestCoordinatedPower(bool off)
 {
  fPanelLifecycleDesiredOff=off;
- if (fPanelLifecycleFault || fServiceStopped) return kIOReturnNotReady;
- if (fPanelLifecycleBackend) return kIOReturnSuccess;
- if (off==fPanelLifecycleDisplayOff) return kIOReturnSuccess;
+ /* Every early return here is a decision the panel cannot see; name each one. */
+ if (fPanelLifecycleFault || fServiceStopped) {
+  SWEET_LOG_INFO("SWEET FB PANEL: coordinated off=%u refused: fault=%u stopped=%u\n",
+      off ? 1u : 0u, fPanelLifecycleFault ? 1u : 0u, fServiceStopped ? 1u : 0u);
+  return kIOReturnNotReady;
+ }
+ if (fPanelLifecycleBackend) {
+  SWEET_LOG_INFO("SWEET FB PANEL: coordinated off=%u already pending token=%llu\n",
+      off ? 1u : 0u, (unsigned long long)fPanelLifecycleToken);
+  return kIOReturnSuccess;
+ }
+ if (off==fPanelLifecycleDisplayOff) {
+  SWEET_LOG_INFO("SWEET FB PANEL: coordinated off=%u is the current state\n",off ? 1u : 0u);
+  return kIOReturnSuccess;
+ }
  SweetDisplayBackend *b=fDisplayClient->copyBackend();
  IOReturn rc=kIOReturnNotReady;uint64_t token=0;
- if (b && (!fPanelLifecyclePipeline || (b->panelLifecycleCapabilities()&SweetPanelPipelineRebuild)) &&
-     (!fPanelLifecycleSupplyCycle || (b->panelLifecycleCapabilities()&SweetPanelSupplyCycle)) &&
-     (!fPanelLifecycleLinkCycle || (b->panelLifecycleCapabilities()&SweetPanelLinkPowerCycle)) &&
-     (!fPanelLifecycleDataParking || (b->panelLifecycleCapabilities()&SweetPanelDataParking)) &&
-     (!fPanelLifecycleFull || (b->panelLifecycleCapabilities()&SweetPanelRetainedSleepReset)) &&
-     (b->panelLifecycleCapabilities()&(1u<<(off ? SweetPanelDisplayOff : SweetPanelDisplayOn))))
+ uint32_t need=(1u<<(off ? SweetPanelDisplayOff : SweetPanelDisplayOn)) |
+     (fPanelLifecyclePipeline ? SweetPanelPipelineRebuild : 0u) |
+     (fPanelLifecycleSupplyCycle ? SweetPanelSupplyCycle : 0u) |
+     (fPanelLifecycleLinkCycle ? SweetPanelLinkPowerCycle : 0u) |
+     (fPanelLifecycleDataParking ? SweetPanelDataParking : 0u) |
+     (fPanelLifecycleFull ? SweetPanelRetainedSleepReset : 0u);
+ if (!b) {
+  SWEET_LOG_INFO("SWEET FB PANEL: coordinated off=%u has no display backend; refusing\n",
+      off ? 1u : 0u);
+ } else if ((b->panelLifecycleCapabilities()&need)!=need) {
+  SWEET_LOG_INFO("SWEET FB PANEL: coordinated off=%u capability miss have=%#x need=%#x; refusing\n",
+      off ? 1u : 0u, (unsigned)b->panelLifecycleCapabilities(), (unsigned)need);
+ }
+ if (b && (b->panelLifecycleCapabilities()&need)==need)
   rc=b->beginPanelLifecycle(off ? SweetPanelDisplayOff : SweetPanelDisplayOn,&token);
  if (rc==kIOReturnSuccess && token) {
+  SWEET_LOG_INFO("SWEET FB PANEL: coordinated off=%u admitted token=%llu need=%#x\n",
+      off ? 1u : 0u, (unsigned long long)token, (unsigned)need);
   fPanelLifecycleBackend=b;fPanelLifecycleToken=token;fPanelLifecycleRequestOff=off;fPanelLifecycleStart=mach_absolute_time();
   fPowerOff=true;fHardwareVsyncActive=false;fFadeStep=0;
   if (fPerf.enabled) fPerf.lastPresentNS=0;

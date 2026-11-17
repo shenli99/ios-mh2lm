@@ -998,6 +998,23 @@ timer 因此无法触发，整条显示栈永久停住（`allocate/prepare enter
   `SWEET MDSS DSI: command buffer preallocated once at startup outside the lifecycle gate pa=…`，
   实机判据即"启动之后不再出现 `command buffer allocate/prepare enter`"。
 
+### 电源请求必须留痕（2026-11-17）
+
+0121b10 那次"按电源键后画面锁死"最难查的一点，是 `requestCoordinatedPower()` 有四个
+**静默**早退分支（fault/stopped、已在等 token、状态未变、无后端或缺能力），日志里一条都不留。
+现在每个请求和每个拒绝都会打一行：
+
+```
+SWEET FB POWER PATH: off=1 coordinated=1 fault=0 stopped=0
+SWEET FB PANEL: coordinated off=1 has no display backend; refusing
+SWEET FB PANEL: coordinated off=1 capability miss have=0x7 need=0x3f; refusing
+SWEET FB PANEL: coordinated off=1 admitted token=2 need=0x3f
+SWEET FB PANEL: coordinated off=1 refused: fault=1 stopped=0
+```
+
+能力检查也从六个并列条件改成"算出 need 掩码再比"，语义完全等价，但拒绝时能直接给出
+`have/need`。判断顺序不变：先 fault/stop，再 in-flight，再同态，最后才取后端。
+
 ### 写路径自检：`sweetpanelpins=3`（2026-11-17）
 
 `=3` 等价于 `=2` 再加一次启动期自检：provider 拿到两个句柄后，把每颗 pad 的
