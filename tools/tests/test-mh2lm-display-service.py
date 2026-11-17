@@ -337,6 +337,11 @@ extern "C" int sweet_touch_panel_open(uint64_t*p){*p=0;return EAGAIN;}
 extern "C" int sweet_touch_panel_close(uint64_t){assert(false);return EINVAL;}
 extern "C" int sweet_touch_panel_request(uint64_t,unsigned,uint64_t*){assert(false);return EINVAL;}
 extern "C" int sweet_touch_panel_snapshot(uint64_t,uint64_t,struct sweet_touch_panel_status*){assert(false);return EINVAL;}
+/* The worker half of the facade contract (sweet_touch_tcm.c): the facade
+   registers this top half and installs the two GIC ownership hooks. */
+extern "C" void (*ts_irq_mask_fn)(void) = nullptr;
+extern "C" void (*ts_irq_unmask_fn)(void) = nullptr;
+extern "C" void sweet_touch_irq_action(void*,void*,void*,int) {}
 #endif
 '''
 pool_fixture = r'''
