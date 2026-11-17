@@ -920,3 +920,36 @@ IRQ 已验证的事实。详细实施和验收仍由 `IRQ-FRAMEBUFFER-PLAN.md`
 `IRQ-FRAMEBUFFER-PLAN.md`。本次仅做架构核对和文档记录，没有改变内核代码。
 
 </details>
+
+## TLMM GPIO 控制器（2026-11-17，本地测试通过，未实机）
+
+`TLMMGPIOController`（`xnu/iokit/Kernel/arm/TLMMGPIOController.{h,cpp}`）是 SM8150
+TLMM 的唯一寄存器写入者。它匹配 ADT `/arm-io/tlmm` 节点（`IONameMatch
+qcom,tlmm-sm8150`），把 `reg` 的四段窗口按 west/east/north/south 顺序映射，启动时
+校验四段窗口的相对间距、以及 175 颗 pin 的槽位是否都落在各自窗口内，通过后才允许
+任何 pin 访问。
+
+两种访问模式：
+
+- 独占句柄 `AGPIO`：`acquirePin(pin, owner)` 返回 OSObject，构造时已缓存该 pin 的
+  CFG/IO 寄存器指针，方法内不再做 pin→tile 查找、不加锁，全部带 `dmb oshst`/
+  `dsb osh`/`dmb oshld` 屏障。同一 pin 二次 acquire 返回 NULL；`release()` 归还，
+  `free()` 兜底归还；控制器 `stop()` 会先把仍在外的句柄置为无效，避免它继续写
+  即将解除映射的窗口。
+- 普通模式：`setPinValue`/`getPinValue`/`setPinDirection`/`setPinMux`/`setPinPull`/
+  `setPinDrive`/`setPinConfig`/`getPinConfig`，内部在状态锁下做 pin→tile 寻址，
+  遇到独占 pin 返回 `kIOReturnBusy`。C 入口在
+  `xnu/pexpert/pexpert/arm64/tlmm_gpio.h`（`gpio_set_value`/`gpio_get_value`/
+  `gpio_set_config` 等），返回 0 或 -errno，没有控制器时返回 `TLMM_GPIO_ENODEV`。
+
+pin→tile 表是稀疏的（51–154 属 SOUTH，0–7/38 也是 SOUTH；低位 8–20/31–37 与
+169 以上属 NORTH），已按 `pinctrl-sm8150.c` 的 175 颗 pin 逐条核对。`configure()`
+先锁存输出电平再写 CFG bit 9，pin 变成输出时不会出现电平毛刺。
+
+ADT 由 `tools/mk-mh2lm-mdss-adt.py` 在派生时补 `tlmm` 节点（四段 1 MiB 窗口、
+`#gpio-cells = 2`、`qcom,pin-count = 175`），base ADT 不需要改。
+
+尚未接管 `INTR_CFG`/`INTR_STATUS`：TLMM 汇总中断（SPI 208／INTID 240）仍归现有
+注册者，下一步才是把 pin 中断与汇总中断交给控制器。已有的 `SweetPanelPins` 和
+触摸 worker 仍直接写 GPIO6/8/122 的寄存器；它们迁移到 `acquirePin()` 之后，独占
+模型才覆盖全部消费者。
