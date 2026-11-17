@@ -84,7 +84,7 @@ bool SweetPanelPins::start(IOService *provider)
   * without changing a single bit of the pads. */
  bool selftest=mode==3;
  if (selftest) mode=2;
- if ((mode!=1 && mode!=2) || !IOService::start(provider)) return false;
+ if ((mode!=1 && !sweetPanelPinsExclusive(mode)) || !IOService::start(provider)) return false;
  OSData *abi=OSDynamicCast(OSData,provider->getProperty("sweet,panel-pins-abi"));
  if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),"\1\0\0\0",4)) return false;
  /*

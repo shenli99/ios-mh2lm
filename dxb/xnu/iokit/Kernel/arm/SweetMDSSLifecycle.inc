@@ -36,10 +36,10 @@ bool SweetMDSS::setupLifecycle(IOService *provider)
  (void)PE_parse_boot_argn("sweetpanelpins",&pins,sizeof(pins));
  if ((mode!=1 && mode!=2 && mode!=3 && mode!=4 && mode!=5 && mode!=6 && mode!=7) || touch!=2 || own!=2 || !fTouchPanelClient || !fManagedEnabled ||
      !fDsiEnabled || !fPanelPowerEnabled || fIrqMode!=2) return false;
- if (mode>=2 && (!fPanelProfile || pins!=2 || !fPanelPinsClient ||
+ if (mode>=2 && (!fPanelProfile || !sweetPanelPinsExclusive(pins) || !fPanelPinsClient ||
      !sweet_dsi_sequence_valid(fPanelProfile->on,fPanelProfile->onSize,NULL) ||
      !sweet_dsi_sequence_valid(fPanelProfile->off,fPanelProfile->offSize,NULL))) {
-  SWEET_LOG_ERROR("SWEET PANEL: profile lifecycle requires live-ABL profile and pins2; refused before side effects\n");
+  SWEET_LOG_ERROR("SWEET PANEL: profile lifecycle requires live-ABL profile and pins2-or-3; refused before side effects\n");
   return false;
  }
  fLifecycleLineage=mode==2 || mode==7;

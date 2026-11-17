@@ -197,6 +197,20 @@ int main(){
   if(fault==1){assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)==0&&token);h.wakePixels();}
   else assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)!=0&&!token&&writes()==before);
  }
+ // sweetpanelpins=3 is "exclusive handle + startup self-test". The provider
+ // accepted it while MDSS refused it, so MDSS never published, the framebuffer
+ // kept a dead lifecycle backend and the 0121b10 power key froze the picture.
+ // Both consumers must accept 3 exactly like 2, and still refuse 4.
+ for(unsigned pins:{2u,3u}){warmFixture();coreFixture();hostFixture();linkFixture();touchSetup();
+  panelPinsMode=pins;auto*d=displayNub();auto*m=new SweetMDSS();assert(m->start(d));
+  assert(m->fLifecycleFull&&m->fPanelPinsClient);
+  m->release();queued.clear();dropNub(d);
+  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());mdssClockWriter=mdssNoCWriter=0;}
+ {warmFixture();coreFixture();hostFixture();linkFixture();touchSetup();
+  panelPinsMode=4;auto*d=displayNub();auto*m=new SweetMDSS();assert(!m->start(d));
+  m->release();queued.clear();dropNub(d);
+  assert(!writes()&&!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());mdssClockWriter=mdssNoCWriter=0;}
+
  // The DSI command buffer is a startup, one-shot allocation outside the
  // lifecycle gate for every mode, not only Lineage. Mode 6 used to allocate
  // inside the gate at the first OFF table and blocked the whole workloop.

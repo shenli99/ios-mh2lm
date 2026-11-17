@@ -21,6 +21,16 @@ struct SweetPanelPinStatus {
  /* resetKnown/resetHigh describe the commanded sequence, not measured voltage. */
  bool uncertain, resetKnown, resetHigh;
 };
+/*
+ * sweetpanelpins: 1 = binding only, 2 = exclusive handle, 3 = 2 plus the
+ * one-shot handle write self-test. Producers and consumers read the same boot
+ * argument, so every consumer must accept 3 too; when MDSS did not, it refused
+ * to start, the framebuffer kept a dead lifecycle backend, and a power key
+ * left the picture frozen with no way back.
+ */
+static inline bool sweetPanelPinsExclusive(int mode)
+{ return mode==2 || mode==3; }
+
 class SweetPanelPins : public IOService {
  OSDeclareDefaultStructors(SweetPanelPins);
  IOWorkLoop *fLoop;
