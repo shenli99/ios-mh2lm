@@ -142,6 +142,7 @@ extern "C" {
 #define TLMM_SUMMARY_INTID          240u
 #define TLMM_INTR_ROUTE_TARGET      0x60u    /* target=KPSS, bits 6:5 */
 #define TLMM_INTR_ROUTE_RAW         0x10u    /* raw status into INTR_STATUS */
+#define TLMM_INTR_ROUTE_MASK        (0xe0u | TLMM_INTR_ROUTE_RAW)  /* target[7:5] + raw */
 
 /* ------------------------------------------------------------ ADT binding */
 

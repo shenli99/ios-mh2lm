@@ -215,8 +215,7 @@ private:
 
 	bool claimSummary(void);
 	void releaseSummary(void);
-	void maskSummaryLocked(void);
-	void unmaskSummaryIfIdle(void);
+	void setSummaryMasked(bool masked);
 	uint32_t readIntrStatus(unsigned int pin) const;
 	void writeIntrStatus(unsigned int pin, uint32_t value);
 	int irqSlotForPin(unsigned int pin) const;

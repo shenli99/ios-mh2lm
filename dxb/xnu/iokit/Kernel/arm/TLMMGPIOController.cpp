@@ -1148,23 +1148,40 @@ TLMMGPIOController::irqSlotForPin(unsigned int pin) const
 	return __atomic_load_n(&fIrqSlot[pin], __ATOMIC_ACQUIRE);
 }
 
+/*
+ * The controller's enable/disable are IOInterruptController entry points and
+ * may take IOLocks, so they must never run inside a spin-lock section (or with
+ * interrupts disabled): the state flip happens under fIrqLock, the call itself
+ * happens after the lock is dropped. That ordering is also what makes a
+ * recursive acquisition impossible no matter what the provider does.
+ */
 void
-TLMMGPIOController::maskSummaryLocked(void)
+TLMMGPIOController::setSummaryMasked(bool masked)
 {
-	if (fIrqProvider && !fIrqMasked) {
-		(void)fIrqProvider->disableInterrupt(0);
-		fIrqMasked = true;
-	}
-}
+	IOInterruptState saved;
+	bool act = false;
 
-void
-TLMMGPIOController::unmaskSummaryIfIdle(void)
-{
-	if (!fIrqProvider || !fIrqMasked || fIrqClientMask != 0) {
+	if (!fIrqProvider) {
 		return;
 	}
-	(void)fIrqProvider->enableInterrupt(0);
-	fIrqMasked = false;
+	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	if (masked && !fIrqMasked) {
+		fIrqMasked = true;
+		act = true;
+	} else if (!masked && fIrqMasked && fIrqClientMask == 0) {
+		fIrqMasked = false;
+		act = true;
+	}
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+
+	if (!act) {
+		return;
+	}
+	if (masked) {
+		(void)fIrqProvider->disableInterrupt(0);
+	} else {
+		(void)fIrqProvider->enableInterrupt(0);
+	}
 }
 
 bool
@@ -1228,8 +1245,7 @@ TLMMGPIOController::dispatchSummary(void)
 	}
 	/* Level line: mask first, so the aggregate cannot re-enter while the
 	 * status of every pad is being drained. */
-	(void)fIrqProvider->disableInterrupt(0);
-	fIrqMasked = true;
+	setSummaryMasked(true);
 
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	count = fIrqCount > TLMM_IRQ_MAX ? TLMM_IRQ_MAX : fIrqCount;
@@ -1267,9 +1283,7 @@ TLMMGPIOController::dispatchSummary(void)
 		}
 	}
 
-	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
-	unmaskSummaryIfIdle();
-	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	setSummaryMasked(false);
 }
 
 IOReturn
@@ -1315,8 +1329,8 @@ TLMMGPIOController::requestPinIRQ(unsigned int pin, unsigned int detect,
 	 */
 	intrCfg = (volatile uint32_t *)pinAddress(pin, TLMM_GPIO_INTR_CFG);
 	cfg = *intrCfg;
-	want = (cfg & ~(TLMM_INTR_ROUTE_TARGET | TLMM_INTR_ROUTE_RAW)) |
-	    TLMM_INTR_ROUTE_TARGET | TLMM_INTR_ROUTE_RAW;
+	want = (cfg & ~TLMM_INTR_ROUTE_MASK) |
+	    (TLMM_INTR_TARGET_KPSS << TLMM_INTR_TARGET_SHIFT) | TLMM_INTR_ROUTE_RAW;
 	if (want != cfg) {
 		__asm__ volatile("dmb oshst" ::: "memory");
 		*intrCfg = want;
@@ -1412,8 +1426,8 @@ TLMMGPIOController::maskPinIRQ(unsigned int pin)
 	}
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	fIrqClientMask |= 1u << (unsigned int)slot;
-	maskSummaryLocked();
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	setSummaryMasked(true);
 	return kIOReturnSuccess;
 }
 
@@ -1429,8 +1443,8 @@ TLMMGPIOController::resumePinIRQ(unsigned int pin)
 	}
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	fIrqClientMask &= ~(1u << (unsigned int)slot);
-	unmaskSummaryIfIdle();
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	setSummaryMasked(false);
 	return kIOReturnSuccess;
 }
 
