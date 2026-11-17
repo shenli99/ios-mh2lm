@@ -141,6 +141,8 @@ public:
 	IOReturn getPinConfig(unsigned int pin, struct tlmm_pin_config *config);
 
 	unsigned int getPinCount(void) const { return fPinCount; }
+	/* Diagnostics: the owner string of an exclusively held pad, or NULL.
+	 * Read without the state lock, so treat it as a hint. */
 	const char *getPinOwner(unsigned int pin) const;
 
 	static TLMMGPIOController *getController(void);
