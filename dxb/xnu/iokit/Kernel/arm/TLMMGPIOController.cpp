@@ -1092,6 +1092,9 @@ tlmmCResult(IOReturn status)
 		return TLMM_GPIO_EOPNOTSUPP;
 	case kIOReturnNotPermitted:
 		return TLMM_GPIO_EBUSY;
+	case kIOReturnNoResources:
+		/* No pad slot left, or the summary line could not be claimed. */
+		return TLMM_GPIO_ENOSPC;
 	default:
 		return TLMM_GPIO_EIO;
 	}

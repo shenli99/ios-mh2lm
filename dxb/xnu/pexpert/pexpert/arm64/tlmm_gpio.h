@@ -209,6 +209,7 @@ int tlmm_gpio_irq_claimed(void);
 #define TLMM_GPIO_ENODEV            (-19)
 #define TLMM_GPIO_EINVAL            (-22)
 #define TLMM_GPIO_EOPNOTSUPP        (-95)
+#define TLMM_GPIO_ENOSPC            (-28)   /* no pad slot, or no summary line */
 
 struct tlmm_pin_config {
 	uint32_t func;          /* decoded CFG field set */
