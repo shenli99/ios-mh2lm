@@ -921,7 +921,7 @@ IRQ 已验证的事实。详细实施和验收仍由 `IRQ-FRAMEBUFFER-PLAN.md`
 
 </details>
 
-## TLMM GPIO 控制器（2026-11-17，本地测试通过，未实机）
+## TLMM GPIO 控制器（2026-11-17，0121b8 实机通过）
 
 `TLMMGPIOController`（`xnu/iokit/Kernel/arm/TLMMGPIOController.{h,cpp}`）是 SM8150
 TLMM 的唯一寄存器写入者。它匹配 ADT `/arm-io/tlmm` 节点（`IONameMatch
@@ -948,6 +948,13 @@ pin→tile 表是稀疏的（51–154 属 SOUTH，0–7/38 也是 SOUTH；低位
 
 ADT 由 `tools/mk-mh2lm-mdss-adt.py` 在派生时补 `tlmm` 节点（四段 1 MiB 窗口、
 `#gpio-cells = 2`、`qcom,pin-count = 175`），base ADT 不需要改。
+
+0121b8 实机证据（`logs/sweetlog-0121b8.txt`）：启动第 77 行
+`SWEET TLMM: 175 pads; west/east/north/south=…` 说明节点匹配、四段窗口映射且几何
+自检通过；90 s 采样里控制器读回的 GPIO122 为 `func 0/pull 3/drive 3/output 0`、
+GPIO54 为 `drive 3/output 1/high 1`，与触摸 worker 直接写 `0x03d7a000`、`0x03d54000`
+的位模式一致，等于用独立写手交叉验证了 tile 与槽位算式。整份日志 0 个 ERROR、0 panic，
+触摸 16 次 IRQ、mux 11 次、USB 14 组计数、面板 quiesce/resume 各一次，均与 b7 同级。
 
 尚未接管 `INTR_CFG`/`INTR_STATUS`：TLMM 汇总中断（SPI 208／INTID 240）仍归现有
 注册者，下一步才是把 pin 中断与汇总中断交给控制器。已有的 `SweetPanelPins` 和
