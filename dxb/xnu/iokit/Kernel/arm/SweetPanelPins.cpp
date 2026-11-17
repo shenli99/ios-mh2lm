@@ -32,6 +32,39 @@ bool SweetPanelPins::readPin(unsigned n,struct tlmm_pin_config *cfg)
  if (n>1 || !fPins[n]) return false;
  return fPins[n]->getConfig(cfg)==kIOReturnSuccess;
 }
+/*
+ * Write-path self-test. Every value written here is the value the pad already
+ * holds: the CFG is rewritten with its own field set and the latch with its
+ * own level. The handle's writers therefore run for real - MMIO through the
+ * cached pointers, read-modify-write of CFG, the store barrier - while the pad
+ * itself sees no transition, so a panel in a live state cannot be disturbed.
+ */
+bool SweetPanelPins::selfTest(void)
+{
+ for (unsigned n=0;n<2;++n) {
+  struct tlmm_pin_config before,after;
+  if (!readPin(n,&before)) return false;
+  fTouched=true;
+  if (fPins[n]->configure(before.func,before.pull,before.drive,
+      before.output!=0,before.high!=0)!=kIOReturnSuccess) return false;
+  if (!readPin(n,&after)) return false;
+  bool cfgOk=after.cfg==before.cfg;
+  SWEET_LOG_INFO("SWEET PANEL PINS SELFTEST: gpio%u cfg want=%#x got=%#x ok=%u\n",
+      panelPinNumber[n],before.cfg,after.cfg,cfgOk);
+  if (!cfgOk) return false;
+  if (before.output) {
+   if (fPins[n]->setValue(before.high!=0)!=kIOReturnSuccess) return false;
+   if (!readPin(n,&after)) return false;
+   bool latchOk=after.high==before.high;
+   SWEET_LOG_INFO("SWEET PANEL PINS SELFTEST: gpio%u latch want=%d got=%d ok=%u\n",
+       panelPinNumber[n],before.high,after.high,latchOk);
+   if (!latchOk) return false;
+  }
+ }
+ SWEET_LOG_INFO("SWEET PANEL PINS SELFTEST: both pads rewritten identically; "
+     "handle write path proven, no pin transition\n");
+ return true;
+}
 void SweetPanelPins::releasePins(void)
 {
  for (unsigned n=0;n<2;++n) {
@@ -46,6 +79,11 @@ uint64_t SweetPanelPins::nowNS(void)
 bool SweetPanelPins::start(IOService *provider)
 {
  int mode=0; (void)PE_parse_boot_argn("sweetpanelpins",&mode,sizeof(mode));
+ /* Mode 3 is mode 2 plus a one-shot rewrite of the inherited programming,
+  * which is how the exclusive handle's write path is proven on hardware
+  * without changing a single bit of the pads. */
+ bool selftest=mode==3;
+ if (selftest) mode=2;
  if ((mode!=1 && mode!=2) || !IOService::start(provider)) return false;
  OSData *abi=OSDynamicCast(OSData,provider->getProperty("sweet,panel-pins-abi"));
  if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),"\1\0\0\0",4)) return false;
@@ -82,6 +120,10 @@ bool SweetPanelPins::start(IOService *provider)
  if (fLoop->addEventSource(fTimer)!=kIOReturnSuccess) return false;
  fTimerAdded=true; fAccepting=true;
  setProperty("SweetPanelPinsABI",1ULL,32);
+ if (selftest && !selfTest()) {
+  SWEET_LOG_ERROR("SWEET PANEL PINS: handle write self-test failed; provider withdrawn\n");
+  return false;
+ }
  setProperty("SweetPanelPinsWritesEnabled",mode==2);
  SWEET_LOG_INFO("SWEET PANEL PINS: GPIO6/SOUTH reset, GPIO8/NORTH TE; mode=%u, owned through the TLMM controller, no automatic pin access\n",fMode);
  registerService(); return true;

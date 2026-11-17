@@ -542,7 +542,11 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
   PANEL_ARGS="$FB_ARGS sweetmdss=1 sweetfbservice=1 sweetmdssirqprobe=0 sweetfbperf=1"
   make_profile panel-identity "LG G8X - XNU live ABL panel selection, metadata only (${LABEL})" \
    "$PANEL_ARGS sweetfbpower=0 sweetmdssirq=0 sweetfbvsync=0 sweetfbown=0 sweetdsi=0 sweetdisplayresources=1 sweetdisplayclocks=0 sweetdisplaycore=0 sweetdisplaymanaged=0 sweetdsihost=0 sweetdsilink=0 sweetpanelpins=0 sweettouchpanel=0 sweetpanellifecycle=0" "$TMPDIR/identity.adt"
-  PANEL_ARGS="$PANEL_ARGS sweetfbpower=1 sweetmdssirq=2 sweetfbvsync=1 sweetfbown=2 sweetdsi=1 sweetdisplayresources=2 sweetdisplayclocks=1 sweetdisplaycore=2 sweetdisplaymanaged=1 sweetdsihost=1 sweetdsilink=2 sweetpanelpins=2 sweettouchpanel=2"
+  # SWEET_PANEL_PINS_MODE=3 adds the provider's one-shot handle write self-test
+  # to a normal mode2 profile; it rewrites the inherited programming with the
+  # same values, so the pads do not transition.
+  PIN_MODE=${SWEET_PANEL_PINS_MODE:-2}
+  PANEL_ARGS="$PANEL_ARGS sweetfbpower=1 sweetmdssirq=2 sweetfbvsync=1 sweetfbown=2 sweetdsi=1 sweetdisplayresources=2 sweetdisplayclocks=1 sweetdisplaycore=2 sweetdisplaymanaged=1 sweetdsihost=1 sweetdsilink=2 sweetpanelpins=$PIN_MODE sweettouchpanel=2"
   if [ "$PANEL_PIPELINE" = '1' ]; then
    make_profile panel-pipeline "LG G8X - XNU independent pipeline rebuild (${LABEL})" "$PANEL_ARGS sweetpanellifecycle=7" "$TMPDIR/pipeline.adt"
    printf 'kernel SHA256: %s\ncreated identity/pipeline profiles for %s; a31 retained baseline is separate\n' "$KERNEL_SHA256" "$LABEL"

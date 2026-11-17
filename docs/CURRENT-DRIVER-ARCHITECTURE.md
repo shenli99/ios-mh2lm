@@ -980,6 +980,27 @@ GPIO54 为 `drive 3/output 1/high 1`，与触摸 worker 直接写 `0x03d7a000`�
 的位模式一致，等于用独立写手交叉验证了 tile 与槽位算式。整份日志 0 个 ERROR、0 panic，
 触摸 16 次 IRQ、mux 11 次、USB 14 组计数、面板 quiesce/resume 各一次，均与 b7 同级。
 
+### 写路径自检：`sweetpanelpins=3`（2026-11-17）
+
+`=3` 等价于 `=2` 再加一次启动期自检：provider 拿到两个句柄后，把每颗 pad 的
+**当前** CFG 字段集和锁存电平原样写回去，再读回比对，打印
+
+```
+SWEET PANEL PINS SELFTEST: gpio6 cfg want=… got=… ok=1
+SWEET PANEL PINS SELFTEST: gpio6 latch want=… got=… ok=1
+SWEET PANEL PINS SELFTEST: gpio8 cfg want=… got=… ok=1
+SWEET PANEL PINS SELFTEST: both pads rewritten identically; handle write path proven, no pin transition
+```
+
+因为写的值就是寄存器里已有的值（CFG 走 read-modify-write 保留高位，锁存只在电平
+变化时才写，自检写的是同一个电平），pad **不产生任何跳变**——但它确实走了
+`AGPIO` 的缓存指针、`configure()` 的 RMW、写屏障和 `getConfig()` 回读。
+这是在不打断面板的前提下证明"句柄真的能写"的手段；失败就
+`SWEET PANEL PINS: handle write self-test failed; provider withdrawn` 并拒绝启动。
+
+打包侧开关：`SWEET_PANEL_PINS_MODE=3 tools/mk-mh2lm-event-matrix.sh … --panel-pipeline`。
+注意它需要接受 `=3` 的内核（b9 及以前只认 1/2，会直接不启动 provider）。
+
 ### 第一个独占消费者：`SweetPanelPins`（2026-11-17）
 
 面板 reset/TE 的 GPIO6/GPIO8 已从"自带两个 `IOMemoryMap` 窗口 + 裸写寄存器"改成

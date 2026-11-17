@@ -38,6 +38,7 @@ class SweetPanelPins : public IOService {
  enum Phase { Configure, HighConfirm, HighHold, LowConfirm, LowHold,
   FinalHighConfirm, FinalHighHold, Settle, ParkConfirm, ParkHold };
  bool readPin(unsigned,struct tlmm_pin_config *);
+ bool selfTest(void);
  void releasePins(void);
  static uint64_t nowNS(void);
  static IOReturn action(OSObject *,void *,void *,void *,void *);

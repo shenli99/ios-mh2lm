@@ -56,6 +56,20 @@ int main(){
  assert(s->attachConsumer(&other)==kIOReturnBusy&&!other);
  assert(s->detachConsumer(id)==0);other=attach(s);assert(other>id);assert(s->detachConsumer(other)==0);
  destroy(s,n);assert(panelPinsOwner==0);
+ // Mode 3 rewrites the inherited programming through the handle: the same
+ // values go to the same pads, so the write path runs on real MMIO while not
+ // a single pad bit changes. This is the hardware proof hook for AGPIO.
+ fixtures();panelPinsMode=3;n=nub();
+ uint32_t beforeCfg6=regs[RESET],beforeIo6=regs[RESET+4],beforeCfg8=regs[TE];
+ s=new SweetPanelPins();assert(s->start(n));assert(!trace.empty());
+ std::vector<Op> w;for(auto&o:trace)if(o.write)w.push_back(o);
+ assert(w.size()==3);                                  // 2x CFG rewrite + 1x latch rewrite
+ assert(w[0].addr==RESET&&w[1].addr==RESET+4&&w[2].addr==TE);
+ assert(w[0].value==beforeCfg6&&w[1].value==(beforeIo6&2u)&&w[2].value==beforeCfg8);
+ assert(regs[RESET]==beforeCfg6&&regs[RESET+4]==beforeIo6&&regs[TE]==beforeCfg8);
+ id=attach(s);                                  // the self-test does not consume a token
+ assert(s->detachConsumer(id)==0);destroy(s,n);assert(panelPinsOwner==2);
+
  // Every controller/ABI failure unwinds without MMIO and without leaving a
  // pad claimed; the pads now come from the TLMM controller, not from windows.
  for(unsigned fault=0;fault<7;++fault){fixtures();n=nub();
