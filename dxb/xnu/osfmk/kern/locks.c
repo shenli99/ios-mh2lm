@@ -549,8 +549,21 @@ hw_lock_lock_contended(
 
 	if (HW_LOCK_STATE_TO_THREAD(lock->lock_data) ==
 	    HW_LOCK_STATE_TO_THREAD(data) && LOCK_CORRECTNESS_PANIC()) {
+#ifdef SWEET
+		/*
+		 * MH2LM: a recursive acquisition is almost always a kext bug, and
+		 * the stock message names the thread and the lock but not the code
+		 * that re-locked it. The return address is the only handle that
+		 * survives without a debugger; it resolves against the kernel
+		 * symbol table. lock_rw.c already uses the same builtin.
+		 */
+		panic("hwlock: thread %p is trying to lock %p recursively, caller %p",
+		    HW_LOCK_STATE_TO_THREAD(data), lock,
+		    (void *)__builtin_return_address(0));
+#else
 		panic("hwlock: thread %p is trying to lock %p recursively",
 		    HW_LOCK_STATE_TO_THREAD(data), lock);
+#endif
 	}
 
 #if CONFIG_DTRACE || LOCK_STATS
