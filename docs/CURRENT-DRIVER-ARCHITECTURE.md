@@ -980,6 +980,24 @@ GPIO54 为 `drive 3/output 1/high 1`，与触摸 worker 直接写 `0x03d7a000`�
 的位模式一致，等于用独立写手交叉验证了 tile 与槽位算式。整份日志 0 个 ERROR、0 panic，
 触摸 16 次 IRQ、mux 11 次、USB 14 组计数、面板 quiesce/resume 各一次，均与 b7 同级。
 
+### DSI 命令缓冲：启动期一次分配，序列器永不分配（2026-11-17）
+
+`prepareDSICommandBuffer()` 只在 `SweetMDSS::start()`、`registerService()` 之前调用一次
+（`fDsiEnabled` 即为前提），**对所有模式**都成立，不再只对 Lineage。理由是这块 4 KiB
+物理连续分配本身可能阻塞：a32/mode7 与 mode6 唤醒都卡在 `IOBufferMemoryDescriptor::
+inTaskWithPhysicalMask` 内部，而此时调用点正持着 MDSS 命令门，同 workloop 上的 lifecycle
+timer 因此无法触发，整条显示栈永久停住（`allocate/prepare enter` 之后再无任何一行）。
+
+规则：
+
+- 启动期、一次性、gate 外——失败时 Lineage 是硬失败，非 Lineage 记 `WARN` 并降级；
+- `dsiBeginAction()` 里**不允许**分配：缺缓冲一律
+  `SWEET_LOG_ERROR("… command buffer absent inside the gate; refused, never allocated here")`
+  并返回 `kIOReturnNotReady`，让周期干净失败而不是阻塞；
+- 成功时统一打印
+  `SWEET MDSS DSI: command buffer preallocated once at startup outside the lifecycle gate pa=…`，
+  实机判据即"启动之后不再出现 `command buffer allocate/prepare enter`"。
+
 ### 写路径自检：`sweetpanelpins=3`（2026-11-17）
 
 `=3` 等价于 `=2` 再加一次启动期自检：provider 拿到两个句柄后，把每颗 pad 的

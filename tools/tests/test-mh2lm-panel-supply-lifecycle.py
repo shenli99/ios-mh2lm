@@ -197,6 +197,31 @@ int main(){
   if(fault==1){assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)==0&&token);h.wakePixels();}
   else assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&token)!=0&&!token&&writes()==before);
  }
+ // The DSI command buffer is a startup, one-shot allocation outside the
+ // lifecycle gate for every mode, not only Lineage. Mode 6 used to allocate
+ // inside the gate at the first OFF table and blocked the whole workloop.
+ {Harness h;ready(h);
+  assert(h.m->fDsiBuffer&&h.m->fDsiPrepared&&!h.m->fDsiDisplayEngine&&!h.m->fDsiTransferEngine);
+  auto allocations=dsiAllocations,prepares=dsiPrepares;
+  dsiMemoryFault=1;                        // any late allocation would fail
+  supplyPark(h);
+  uint64_t on=0;assert(h.m->beginPanelLifecycle(SweetPanelDisplayOn,&on)==0&&on);
+  h.wakePixels();
+  assert(h.m->fDsiBuffer&&h.m->fDsiPrepared);
+  assert(dsiAllocations==allocations&&dsiPrepares==prepares);
+  dsiMemoryFault=0;}
+ // A startup allocation failure is not fatal in a non-Lineage mode: start
+ // succeeds without a buffer and a full OFF is refused, cleanly, instead of
+ // allocating inside the gate and blocking the workloop (a32 / mode6 wake).
+ {dsiMemoryFault=1;Harness h;ready(h);
+  assert(!h.m->fDsiBuffer&&!h.m->fDsiPrepared&&!h.m->fDsiDisplayEngine);
+  auto allocations=dsiAllocations;
+  const uint8_t cmd[]={5,1,0,0,0,0,1,0x29};uint64_t token=7;
+  assert(h.m->beginDSISequence(cmd,sizeof(cmd),&token)!=kIOReturnSuccess&&!token);
+  assert(dsiAllocations==allocations);
+  h.power(SweetPanelDisplayOff);supplyFailed(h);
+  assert(dsiAllocations==allocations&&h.m->fLifecycle.uncertain);
+  dsiMemoryFault=0;}
  puts("PASS: actual mode6 four profiles x three supply cycles; suspend pinctrl/reset-low before link shutdown, VDDI/VPNL typed votes, shared L3/L5/ARC/config/boot retained, resource/link/host/reset/ON/pixel/TCM recovery, no fallback and zero objects/maps/allocations/notifications after reboot");
 }
 '''

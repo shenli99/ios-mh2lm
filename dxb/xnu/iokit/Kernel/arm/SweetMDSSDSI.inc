@@ -169,12 +169,15 @@ SweetMDSS::dsiBeginAction(OSObject *owner,void *arg,void *output,void *hs,void *
  s->traceWake("dsi-timer-enter",needsDMA);
  if (s->fDsiNextToken==~(uint64_t)0 || !s->setupDSI()) return kIOReturnNoResources;
  s->traceWake("dsi-timer-return");
- /* Preparation is required for FIFO too, as in dsi_host_transfer. Lineage
-  * modes must already own the startup buffer; never allocate in OFF/ON. */
- if (s->fLifecycleLineage) {
-  if (!s->fDsiBuffer || !s->fDsiPrepared) return kIOReturnNotReady;
- } else {
-  IOReturn rc=s->prepareDSICommandBuffer();if (rc!=kIOReturnSuccess) return rc;
+ /* Preparation is required for FIFO too, as in dsi_host_transfer. The single
+  * buffer is allocated once at startup, outside this gate, for every mode. A
+  * sequence that would need one is refused here: allocating inside the gate
+  * blocked the whole MDSS workloop (a32, then mode6 wake) and nothing could
+  * recover, because the lifecycle timer runs on that same workloop. */
+ if (!s->fDsiBuffer || !s->fDsiPrepared) {
+  SWEET_LOG_ERROR("SWEET MDSS DSI: command buffer absent inside the gate; "
+      "refused, never allocated here\n");
+  return kIOReturnNotReady;
  }
  s->traceWake("dsi-arm-enter");
  data->retain(); s->fDsiSequence=data; s->fDsiOffset=0; s->fDsiHS=hs!=NULL;

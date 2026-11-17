@@ -9778,3 +9778,12 @@ route；下一轮先补充这些取证并实现按 group 隔离候选，避免�
 位停掉无关 consumer。
 
 </details>
+
+- **DSI 命令缓冲改为"启动期一次分配"（2026-11-17）：** 实机 mode6 电源键息屏复现了 a32 的老故障：
+  `SWEET MDSS DSI: command buffer allocate/prepare enter bytes=4096` 之后整机停住（扫描 IRQ 已 paused、
+  触摸已 quiesce、`SWEET PANEL: begin token=2 operation=2` 已受理）。原因是 0223 的启动期预分配只对
+  `fLifecycleLineage`（mode 2/7）生效，非 Lineage 仍在 gate 内做会阻塞的 4 KiB 物理连续分配。
+  修复：`start()` 对所有 `fDsiEnabled` 模式在 registerService 之前一次分配；`dsiBeginAction()` 缺缓冲
+  只拒绝不分配；成功统一打 `command buffer preallocated once at startup outside the lifecycle gate pa=…`。
+  回归：panel-supply-lifecycle 新增"运行期零分配 + 启动失败仅降级不致命"两段；其余显示/生命周期测试 PASS，
+  `panel-profile-lifecycle` 为既有失败（stash 后同断言失败）。见 `scratch/irq-gic-0131/DSI-COMMAND-BUFFER.md`。

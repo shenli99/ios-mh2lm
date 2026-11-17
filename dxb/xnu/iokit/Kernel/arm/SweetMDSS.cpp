@@ -684,12 +684,27 @@ SweetMDSS::start(IOService *provider)
  if (!setupPanelPins()) return false;
  if (!setupTouchPanel()) return false;
  if (!setupLifecycle(provider)) return false;
+ /*
+  * One 4KiB command buffer for every mode that can reach the DSI sequencer,
+  * not only Lineage. The physical allocation can block, so it happens here,
+  * once, before the backend is published and outside the lifecycle gate; the
+  * sequencer itself never allocates. a32 and the mode6 wake hung inside the
+  * gate on exactly this allocation, and no lifecycle timer could fire.
+  */
+ if (fDsiEnabled) {
+  IOReturn dsiBuffer=prepareDSICommandBuffer();   /* one shot, never retried later */
+  if (dsiBuffer!=kIOReturnSuccess) {
+   if (fLifecycleLineage) return false;
+   /* No buffer means long DCS sequences are refused, never allocated later. */
+   SWEET_LOG_WARN("SWEET MDSS DSI: startup command buffer unavailable rc=%#x; "
+       "long DCS sequences will be refused, not allocated inside the gate\n",(unsigned)dsiBuffer);
+  } else {
+   SWEET_LOG_INFO("SWEET MDSS DSI: command buffer preallocated once at startup "
+       "outside the lifecycle gate pa=%#llx; the sequencer never allocates\n",
+       fDsiPhysical);
+  }
+ }
  if (fLifecycleLineage) {
-  /* Lineage retains one 4KiB command buffer even for short commands. Our
-   * physical allocation can block: do it before publishing to consumers,
-   * outside the lifecycle gate, instead of Linux's first-transfer lazy GEM.
-   * No DMA address is exposed here; each long packet rechecks its route. */
-  if (prepareDSICommandBuffer()!=kIOReturnSuccess) return false;
   fDsiDisplayEngine=true; /* adopt the already active continuous splash */
   SWEET_LOG_INFO("SWEET MDSS DSI CLOCK: per-transfer leases enabled; shared BOOT/core retained\n");
   SWEET_LOG_INFO("SWEET MDSS CLIENT CLOCK: DSI prepare/post-enable/pre-disable and MDP scan/stop enabled; shared core floor retained\n");
