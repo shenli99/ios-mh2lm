@@ -148,6 +148,9 @@ IOWorkLoop::init()
 		}
 		IOSimpleLockInit(workToDoLock);
 		workToDo = false;
+#ifdef SWEET
+		printf("SWEET IOWORKLOOP: workToDo lock %p\n", workToDoLock);
+#endif
 	}
 
 	IOStatisticsRegisterCounter();
