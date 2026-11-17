@@ -950,8 +950,13 @@ island（always-on 子系统）驱动的 pad 对 AP 是"只能读、不能控制
 做成硬规则而不是口头约定：
 
 - 判定有两个来源，任一成立即只读：① CFG bit 12（EGPIO enable）当前为 1——固件在
-  island 侧接管了这颗 pad，运行期就能看到；② 节点属性 `sweet,read-only-pins`
-  列出了它——island 拥有但还没打开 EGPIO 的 pad，在第一次访问前就应当是只读。
+  island 侧接管了这颗 pad，运行期就能看到，**这是目前实际生效的唯一来源**；
+  ② 节点属性 `sweet,read-only-pins` 列出了它——island 拥有但还没打开 EGPIO 的 pad，
+  在第一次访问前就应当是只读。
+- 第②项解析保留但不产出：island 的 pin 名单目前拿不到，派生脚本不生成该属性，
+  节点里也就没有它。保留它是为了将来当"软屏蔽"用——任何时候要禁止某个 pad 被
+  驱动，只需把它列进这个属性，不需要再发明第二套机制；两个来源是叠加关系，
+  表里的项永远不会覆盖运行期的 EGPIO 位。
 - 只读 pad **不派发 `AGPIO`**：`acquirePin()` 返回 NULL 并打
   `SWEET TLMM: gpio%u is island-owned; read-only, no handle`。没有句柄就没有
   "过一会儿误写"的可能。

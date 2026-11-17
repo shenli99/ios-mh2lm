@@ -141,7 +141,14 @@ extern "C" {
 /*
  * Optional u32 array on the tlmm node: pads the island owns but has not
  * enabled yet. They are read-only from the first access, even before the
- * EGPIO enable bit appears in CFG.
+ * EGPIO enable bit appears in CFG. Entries add to that live bit; they never
+ * override it.
+ *
+ * No such data is available today, so the derive script does not emit it and
+ * the live EGPIO bit is the only source in practice. The parse stays because
+ * the list is the natural place for a soft block later: a pad we must not
+ * drive for any reason can be listed here without inventing a second
+ * mechanism.
  */
 #define TLMM_ADT_READ_ONLY_PROP     "sweet,read-only-pins"
 
