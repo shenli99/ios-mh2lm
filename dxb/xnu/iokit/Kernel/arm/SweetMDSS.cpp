@@ -691,21 +691,29 @@ SweetMDSS::start(IOService *provider)
   * sequencer itself never allocates. a32 and the mode6 wake hung inside the
   * gate on exactly this allocation, and no lifecycle timer could fire.
   */
- if (fDsiEnabled) {
-  IOReturn dsiBuffer=prepareDSICommandBuffer();   /* one shot, never retried later */
-  if (dsiBuffer!=kIOReturnSuccess) {
-   if (fLifecycleLineage) return false;
-   /* No buffer means long DCS sequences are refused, never allocated later. */
+ if (fDsiEnabled && !fLifecycleLineage) {
+  /* Non-Lineage modes reach the same sequencer, so they get the same one-shot
+   * startup buffer outside the gate. Losing it only degrades them to refusing
+   * long DCS sequences; start is not failed for a mode that may never need it. */
+  IOReturn dsiBuffer=prepareDSICommandBuffer();
+  if (dsiBuffer!=kIOReturnSuccess)
    SWEET_LOG_WARN("SWEET MDSS DSI: startup command buffer unavailable rc=%#x; "
        "long DCS sequences will be refused, not allocated inside the gate\n",(unsigned)dsiBuffer);
-  } else {
+  else
    SWEET_LOG_INFO("SWEET MDSS DSI: command buffer preallocated once at startup "
        "outside the lifecycle gate pa=%#llx; the sequencer never allocates\n",
        fDsiPhysical);
-  }
  }
  if (fLifecycleLineage) {
+  /* Lineage retains one 4KiB command buffer even for short commands. Our
+   * physical allocation can block: do it before publishing to consumers,
+   * outside the lifecycle gate, instead of Linux's first-transfer lazy GEM.
+   * No DMA address is exposed here; each long packet rechecks its route. */
+  if (prepareDSICommandBuffer()!=kIOReturnSuccess) return false;
   fDsiDisplayEngine=true; /* adopt the already active continuous splash */
+  SWEET_LOG_INFO("SWEET MDSS DSI: command buffer preallocated once at startup "
+      "outside the lifecycle gate pa=%#llx; the sequencer never allocates\n",
+      fDsiPhysical);
   SWEET_LOG_INFO("SWEET MDSS DSI CLOCK: per-transfer leases enabled; shared BOOT/core retained\n");
   SWEET_LOG_INFO("SWEET MDSS CLIENT CLOCK: DSI prepare/post-enable/pre-disable and MDP scan/stop enabled; shared core floor retained\n");
  }
