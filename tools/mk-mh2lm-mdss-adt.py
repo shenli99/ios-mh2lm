@@ -17,6 +17,11 @@ PHY_WINDOW = (0x0ae94400, 0x760)  # includes PLL0 +0x500; one owner/map
 RPMH_WINDOWS = ((0x18220000, 0x100), (0x18220d00, 0x3000), (0x0c3f000c, 8))
 PANEL_PIN_WINDOWS = ((0x03d06000, 0x1000), (0x03908000, 0x1000))  # GPIO6 SOUTH, GPIO8 NORTH
 NOC_WINDOWS = ((0x0af20000, 0x1c00), (0x0af21c00, 0x3000), (0x0af30000, 0x3fd4))
+# SM8150 TLMM: four 1 MiB tile windows (west, east, north, south). The pad
+# slot inside a tile is 0x1000 * global pin number, so a full 1 MiB window
+# covers every pad the 175-pad table can reach.
+TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
+                (0x03900000, 0x100000), (0x03d00000, 0x100000))
 
 
 def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False):
@@ -122,6 +127,18 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             ('interrupts', 0, struct.pack('<III', 240, 0, 4)),
         ])
         arm.children.append(touch)
+    # TLMMGPIOController matches this node (IONameMatch qcom,tlmm-sm8150) and
+    # maps the four windows as its tile table. Idempotent: a base ADT that
+    # already carries the node is left alone.
+    if not any(n.name == 'tlmm' for n in arm.children):
+        tlmm = adt.Node()
+        tlmm.props = [('name', 0, b'tlmm\0'),
+                      ('compatible', 0, b'qcom,tlmm-sm8150\0'),
+                      ('gpio-controller', 0, b''),
+                      ('#gpio-cells', 0, struct.pack('<I', 2)),
+                      ('qcom,pin-count', 0, struct.pack('<I', 175)),
+                      ('reg', 0, encode(TLMM_WINDOWS))]
+        arm.children.append(tlmm)
     return adt.serialize(root)
 
 

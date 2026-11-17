@@ -67,6 +67,9 @@ prelude = r'''
 #define SWEET_LOG_ERROR(...) ((void)0)
 static std::vector<int> calls;
 static bool muxFail, keysDisabled, keyFail, adcFail;
+/* GIC controller entry points the board calls before the children. */
+int gic_install() { return 0; }
+void gic_log_enabled(const char *) {}
 int sweet_spmi_mux_start() { calls.push_back(1); return muxFail ? -1 : 0; }
 int sweet_adc5_init() { calls.push_back(7); return adcFail ? -1 : 0; }
 void sweet_keys_init() {

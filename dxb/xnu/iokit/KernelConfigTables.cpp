@@ -40,6 +40,11 @@ const char * gIOKernelConfigTables =
     "     'IOProviderClass' = IOPlatformDevice;"
     "     'IONameMatch'     = 'arm,gic-v3';"
     "   },"
+    "   {"
+    "     'IOClass'         = TLMMGPIOController;"
+    "     'IOProviderClass' = IOPlatformDevice;"
+    "     'IONameMatch'     = 'qcom,tlmm-sm8150';"
+    "   },"
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
     "   {"
     "     'IOClass'         = SweetTouchPanel;"

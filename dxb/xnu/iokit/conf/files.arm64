@@ -11,6 +11,7 @@ iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitc
 
 iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
 iokit/Kernel/arm/GenericInterruptController.cpp                   optional iokitcpp
+iokit/Kernel/arm/TLMMGPIOController.cpp                          optional iokitcpp
 iokit/Kernel/arm/SweetSpmiInterruptMux.cpp                       optional iokitcpp
 iokit/Kernel/arm/SweetSpmiMuxClient.cpp                          optional iokitcpp
 iokit/Kernel/arm/SweetPmicKeys.cpp                               optional iokitcpp

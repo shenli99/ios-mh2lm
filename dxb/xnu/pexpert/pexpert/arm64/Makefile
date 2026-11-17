@@ -22,7 +22,8 @@ PRIVATE_KERNELFILES = \
 	GUACAMOLE.h \
 	MH2LM.h \
 	sweet_dev.h \
-	generic_interrupt_controller.h
+	generic_interrupt_controller.h \
+	tlmm_gpio.h
 
 
 # Headers installed into System.framework/PrivateHeaders (userspace internal SDK only).
