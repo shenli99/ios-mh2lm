@@ -346,7 +346,15 @@ IORWLockGetMachLock( IORWLock * lock)
 IOSimpleLock *
 IOSimpleLockAlloc( void )
 {
-	return lck_spin_alloc_init( IOLockGroup, LCK_ATTR_NULL);
+	IOSimpleLock *lock = lck_spin_alloc_init( IOLockGroup, LCK_ATTR_NULL);
+
+#ifdef SWEET
+	/* A recursive-acquisition panic prints the lock pointer; logging every
+	 * allocation makes that pointer identifiable after the fact. */
+	printf("SWEET IOLOCK: simple lock %p allocated\n", lock);
+#endif
+
+	return lock;
 }
 
 void

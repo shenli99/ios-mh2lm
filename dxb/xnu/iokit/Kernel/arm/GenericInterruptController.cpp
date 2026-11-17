@@ -1053,6 +1053,7 @@ GenericInterruptController::allocateTables(void)
 	    !controllerLock) {
 		return false;
 	}
+	SWEET_LOG_INFO("SWEET GIC: controller lock %p\n", controllerLock);
 
 	return true;
 }

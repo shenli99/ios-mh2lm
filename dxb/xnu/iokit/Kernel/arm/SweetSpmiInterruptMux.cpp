@@ -1116,6 +1116,7 @@ irqDispatchLock(void)
 		}
 		if (__atomic_compare_exchange_n(&irqLock, &lock, candidate, false,
 		    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+			SWEET_LOG_INFO("SWEET SPMI: irq lock %p\n", candidate);
 			lock = candidate;
 		} else {
 			IOSimpleLockFree(candidate);

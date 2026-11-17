@@ -96,7 +96,10 @@ static IOSimpleLock *rpmh_irq_lock(void)
  if (!lock) {
   IOSimpleLock *candidate=IOSimpleLockAlloc();
   if (!candidate) return NULL;
-  if (__atomic_compare_exchange_n(&rpmhIRQDispatch,&lock,candidate,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) lock=candidate;
+  if (__atomic_compare_exchange_n(&rpmhIRQDispatch,&lock,candidate,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
+   SWEET_LOG_INFO("SWEET RPMH: irq lock %p\n",candidate);
+   lock=candidate;
+  }
   else IOSimpleLockFree(candidate);
  }
  return lock;

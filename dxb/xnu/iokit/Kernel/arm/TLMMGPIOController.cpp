@@ -566,6 +566,7 @@ TLMMGPIOController::start(IOService *provider)
 		SWEET_LOG_ERROR("SWEET TLMM: cannot allocate the IRQ lock\n");
 		return false;
 	}
+	SWEET_LOG_INFO("SWEET TLMM: pad IRQ lock %p\n", fIrqLock);
 	for (i = 0; i < TLMM_PIN_MAX; i++) {
 		fIrqSlot[i] = -1;
 	}
