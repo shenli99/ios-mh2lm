@@ -232,12 +232,22 @@ int main(void) {
     assert((uintptr_t)gTiles[TLMM_TILE_SOUTH].data() + 122 * 0x1000 + 0x8 ==
            (uintptr_t)gTiles[TLMM_TILE_SOUTH].data() + 0x7a008);
 
-    // Exclusive handle, double acquire, plain mode refused.
+    // Exclusive write, shared read. While the handle lives no other driver
+    // can acquire the pad and every plain-mode writer is refused, but both
+    // plain-mode readers keep working: that is how a monitor cross-checks an
+    // owner's programming.
     AGPIO *touch = controller.acquirePin(54, "touch");
     assert(touch && touch->isValid());
     assert(touch->getPin() == 54);
     assert(strcmp(touch->getOwner(), "touch") == 0);
     assert(controller.acquirePin(54, "other") == nullptr);
+    assert(controller.setPinValue(54, 1) == kIOReturnBusy);
+    assert(controller.setPinDirection(54, true) == kIOReturnBusy);
+    assert(controller.setPinMux(54, TLMM_GPIO_MUX_GPIO) == kIOReturnBusy);
+    assert(controller.setPinPull(54, TLMM_GPIO_PULL_UP) == kIOReturnBusy);
+    assert(controller.setPinDrive(54, TLMM_GPIO_DRIVE_8MA) == kIOReturnBusy);
+    assert(controller.setPinConfig(54, TLMM_GPIO_MUX_GPIO, TLMM_GPIO_PULL_UP,
+        TLMM_GPIO_DRIVE_8MA, true, true) == kIOReturnBusy);
     assert(gpio_set_value(54, 1) == TLMM_GPIO_EBUSY);
     assert(gpio_set_config(54, 0, 0, 0, 0, 0) == TLMM_GPIO_EBUSY);
     assert(controller.getPinOwner(54) != nullptr);
@@ -273,6 +283,23 @@ int main(void) {
     assert(touch->getValue());
     setTileReg(TLMM_TILE_SOUTH, 54, TLMM_GPIO_IO, 0);
     assert(!touch->getValue());
+
+    // The shared-read side sees exactly what the handle programmed, while the
+    // write side stays refused for as long as the handle exists.
+    struct tlmm_pin_config seen = {};
+    bool seenHigh = false;
+
+    assert(controller.getPinConfig(54, &seen) == kIOReturnSuccess);
+    assert(seen.func == 3 && seen.pull == TLMM_GPIO_PULL_DOWN &&
+        seen.drive == TLMM_GPIO_DRIVE_2MA && seen.output == 1);
+    assert(seen.cfg == tileReg(TLMM_TILE_SOUTH, 54, TLMM_GPIO_CFG));
+    setTileReg(TLMM_TILE_SOUTH, 54, TLMM_GPIO_IO, TLMM_GPIO_IN);
+    assert(controller.getPinValue(54, &seenHigh) == kIOReturnSuccess && seenHigh);
+    int seenInt = 0;
+    assert(gpio_get_value(54, &seenInt) == TLMM_GPIO_OK && seenInt == 1);
+    assert(gpio_get_config(54, &seen) == TLMM_GPIO_OK &&
+        seen.func == 3 && seen.output == 1);
+    assert(gpio_set_direction(54, 0) == TLMM_GPIO_EBUSY);
 
     // Direction toggles only bit 9.
     assert(touch->setDirection(false) == kIOReturnSuccess);

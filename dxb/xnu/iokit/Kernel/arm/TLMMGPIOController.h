@@ -8,15 +8,21 @@
  * copy of the tile bases, so every other driver goes through one of two
  * access paths:
  *
- *   AGPIO — acquirePin() hands out an OSObject that cached the pad's CFG and
- *   IO addresses when it was created. Its methods write those pointers
- *   directly: no tile lookup, no lock, no controller call. The pin stays
- *   exclusive to the handle until release() (or free()) returns it, and no
- *   other caller can acquire it in the meantime.
+ *   AGPIO — acquirePin() hands out an OSObject that cached the pad's CFG,
+ *   IO and INTR_CFG addresses when it was created. Its methods write those
+ *   pointers directly: no tile lookup, no lock, no controller call.
+ *
+ * The rule between the two paths is exclusive write, shared read:
+ *
+ *   - A pin with a live AGPIO cannot be acquired again, and every plain-mode
+ *     writer refuses it (kIOReturnBusy). Neither another driver nor the
+ *     plain hardware path can take control of the pad while the handle lives.
+ *   - Reading is always allowed: getPinValue()/getPinConfig() keep working on
+ *     an owned pin, which is how a monitor cross-checks an owner's writes.
+ *     Reads have no side effects, so sharing them costs nothing.
  *
  *   Plain mode — setPinValue()/getPinValue()/setPinDirection()/
- *   setPinConfig()/... take a pin number, resolve the tile, and refuse pads
- *   that an AGPIO holds (kIOReturnBusy). The C API in
+ *   setPinConfig()/... take a pin number and resolve the tile. The C API in
  *   <pexpert/pexpert/arm64/tlmm_gpio.h> is the C-visible form of this path.
  *
  * Register layout and field masks live in that pexpert header; this one only
@@ -148,7 +154,9 @@ public:
 	 * convention), because AGPIO keeps the pointer rather than copying it. */
 	IOReturn releasePin(unsigned int pin, const char *owner);
 
-	/* Plain mode: kIOReturnBusy when an AGPIO holds the pad. */
+	/* Plain mode. Writers return kIOReturnBusy when an AGPIO holds the pad;
+	 * the two readers below always work, because an owned pad stays readable
+	 * for diagnostics and cross-checks. */
 	IOReturn setPinValue(unsigned int pin, bool high);
 	IOReturn getPinValue(unsigned int pin, bool *high);
 	IOReturn setPinDirection(unsigned int pin, bool output);

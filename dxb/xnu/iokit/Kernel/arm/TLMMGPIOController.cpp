@@ -712,6 +712,7 @@ TLMMGPIOController::setPinValue(unsigned int pin, bool high)
 	}
 
 	IOLockLock(fLock);
+	/* Write side of the split: an AGPIO owns every store to this pad. */
 	if (fPins[pin].exclusive) {
 		IOLockUnlock(fLock);
 		return kIOReturnBusy;
@@ -737,10 +738,6 @@ TLMMGPIOController::getPinValue(unsigned int pin, bool *high)
 	}
 
 	IOLockLock(fLock);
-	if (fPins[pin].exclusive) {
-		IOLockUnlock(fLock);
-		return kIOReturnBusy;
-	}
 	io = tlmmRead32(pinAddress(pin, TLMM_GPIO_IO));
 	IOLockUnlock(fLock);
 
@@ -896,10 +893,6 @@ TLMMGPIOController::getPinConfig(unsigned int pin, struct tlmm_pin_config *confi
 	}
 
 	IOLockLock(fLock);
-	if (fPins[pin].exclusive) {
-		IOLockUnlock(fLock);
-		return kIOReturnBusy;
-	}
 	cfg = tlmmRead32(pinAddress(pin, TLMM_GPIO_CFG));
 	io = tlmmRead32(pinAddress(pin, TLMM_GPIO_IO));
 	intr = tlmmRead32(pinAddress(pin, TLMM_GPIO_INTR_CFG));

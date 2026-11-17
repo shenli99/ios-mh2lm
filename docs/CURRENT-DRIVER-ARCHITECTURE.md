@@ -937,8 +937,10 @@ qcom,tlmm-sm8150`），把 `reg` 的四段窗口按 west/east/north/south 顺序
   `free()` 兜底归还；控制器 `stop()` 会先把仍在外的句柄置为无效，避免它继续写
   即将解除映射的窗口。
 - 普通模式：`setPinValue`/`getPinValue`/`setPinDirection`/`setPinMux`/`setPinPull`/
-  `setPinDrive`/`setPinConfig`/`getPinConfig`，内部在状态锁下做 pin→tile 寻址，
-  遇到独占 pin 返回 `kIOReturnBusy`。C 入口在
+  `setPinDrive`/`setPinConfig`/`getPinConfig`，内部在状态锁下做 pin→tile 寻址。
+  **写独占、读共享**：独占 pin 上所有 plain-mode 写入口返回 `kIOReturnBusy`，
+  但 `getPinValue`/`getPinConfig` 照常工作——读无副作用，是监视者交叉验证所有者
+  写值的唯一途径。C 入口在
   `xnu/pexpert/pexpert/arm64/tlmm_gpio.h`（`gpio_set_value`/`gpio_get_value`/
   `gpio_set_config` 等），返回 0 或 -errno，没有控制器时返回 `TLMM_GPIO_ENODEV`。
 
@@ -968,6 +970,8 @@ GPIO54 为 `drive 3/output 1/high 1`，与触摸 worker 直接写 `0x03d7a000`�
   `20 × IOSleep(10)` 的有界等待，只为覆盖将来节点顺序变化的可能。
 - `sample()`/`writeControl()`/`writeReset()` 全部改走句柄：读回用新增的
   `AGPIO::getConfig()`，写 CFG 用 `configure()`，写锁存用 `setValue()`。
+- 读者不受影响：90 s 采样里的 `gpio_get_config(6/8)` 仍能读回面板 provider
+  编程的位模式，只是任何 `gpio_set_*` 会被 `EBUSY` 拒绝——独占只锁"控制权"。
 - `stop()`/`free()` 调 `releasePins()`：先 `release()` 归还 pin，再显式
   `pin->OSObject::release()` 递减引用计数（`AGPIO::release()` 与
   `OSObject::release()` 是不同签名的两个方法，不能混用）。
@@ -978,7 +982,7 @@ GPIO54 为 `drive 3/output 1/high 1`，与触摸 worker 直接写 `0x03d7a000`�
 为此给 `AGPIO` 补了读回接口：`getConfig(struct tlmm_pin_config *)` 返回解码字段
 （func/pull/drive/output/high）**以及**原始 `cfg`/`io`/`intr_cfg`。原始值必须给：
 `SweetPanelPins` 的判据是"保留位（EGPIO present/enable）和整寄存器回读是否一致"，
-而普通模式的 `getPinConfig()` 对独占 pin 返回 `EBUSY`，独占者读不了自己的 pin。
+它需要在一次调用里拿到与写入口径一致的整寄存器快照。
 `configure()` 的锁存步骤也改成"电平真的变化才写"，重复下发同一配置不再产生一次
 多余的电平边沿（`Activate` 就是这种"重新声明继承电平"的用法）。
 

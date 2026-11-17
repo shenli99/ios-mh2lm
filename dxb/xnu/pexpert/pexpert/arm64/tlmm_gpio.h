@@ -17,10 +17,14 @@
  * embedded-GPIO block and are deliberately preserved.
  *
  * TLMMGPIOController (iokit/Kernel/arm/TLMMGPIOController.cpp) is the only
- * writer of these registers. A driver either takes an exclusive AGPIO handle
- * from acquirePin() (the handle caches the two register pointers and never
- * searches again) or uses the plain-mode C API below, which refuses pins that
- * an exclusive owner holds.
+ * mapper of these registers. A driver either takes an exclusive AGPIO handle
+ * from acquirePin() (the handle caches the register pointers and never
+ * searches again) or uses the plain-mode C API below.
+ *
+ * The rule between the two paths is exclusive write, shared read: while an
+ * AGPIO owns a pad, acquirePin() returns NULL and every plain-mode writer
+ * returns TLMM_GPIO_EBUSY, but gpio_get_value()/gpio_get_config() keep
+ * working so a monitor can verify what the owner programmed.
  */
 
 #ifndef _PEXPERT_ARM64_TLMM_GPIO_H
@@ -149,9 +153,11 @@ struct tlmm_pin_config {
 
 /*
  * Plain-mode access for C callers that cannot hold an OSObject. Every call is
- * a pin->tile lookup, a register read/modify/write and a check that no
- * exclusive AGPIO owns the pad (TLMM_GPIO_EBUSY when one does). None of these
- * are safe from interrupt context: an exclusive-check lock may sleep.
+ * a pin->tile lookup and a register access under the controller's state lock.
+ * Writers check that no exclusive AGPIO owns the pad first (TLMM_GPIO_EBUSY
+ * when one does); gpio_get_value()/gpio_get_config() do not, because reading
+ * an owned pad is how a monitor cross-checks it. None of these are safe from
+ * interrupt context: the state lock may sleep.
  *
  * When no controller has started (no ADT node, or the driver failed to map
  * its windows) every call returns TLMM_GPIO_ENODEV; callers keep their own

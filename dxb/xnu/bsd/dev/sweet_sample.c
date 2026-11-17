@@ -79,11 +79,12 @@ sweet_sample_thread(__unused void *arg, __unused wait_result_t wr)
 	gic_log_enabled("sample");
 	/*
 	 * Read-only cross-check of the pad controller. GPIO6/8 belong to
-	 * SweetPanelPins through an exclusive AGPIO handle, so the plain-mode
-	 * getter must refuse them with EBUSY: that refusal is the exclusivity
-	 * proof. GPIO54/122 still come from the touch worker's own register path,
-	 * so their values prove the tile and slot arithmetic against an
-	 * independent writer: GPIO122 must read func 0, pull 3, drive 3, output 0
+	 * SweetPanelPins through an exclusive AGPIO handle, so these reads prove
+	 * the write-exclusive/read-shared split: the values come back even though
+	 * a gpio_set_* on the same pads would be refused with EBUSY. GPIO54/122
+	 * come from the touch worker's own register path, so their values prove
+	 * the tile and slot arithmetic against an independent writer: GPIO122
+	 * must read func 0, pull 3, drive 3, output 0
 	 * (ts_gpio(122,0,3,3,false,false)).
 	 */
 	if (tlmm_gpio_available()) {
