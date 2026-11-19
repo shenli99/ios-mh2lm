@@ -1267,6 +1267,13 @@ TLMMGPIOController::unmaskSummaryLine(void)
 	if (fGicd) {
 		fGicd[0x100u / 4u + word] |= bit;
 		fGicd[0x180u / 4u + word] &= ~bit;
+		/* Read back once: a line that silently stays disabled is the failure
+		 * this ownership split exists to prevent, so name it if it happens. */
+		if (!(fGicd[0x100u / 4u + word] & bit)) {
+			SWEET_LOG_ERROR("SWEET TLMM: summary INTID %u did not enable "
+			    "(ISENABLER=%#x); pad interrupts stay off\n",
+			    TLMM_SUMMARY_INTID, fGicd[0x100u / 4u + word]);
+		}
 	} else if (fIrqProvider) {
 		(void)fIrqProvider->enableInterrupt(0);
 	}
