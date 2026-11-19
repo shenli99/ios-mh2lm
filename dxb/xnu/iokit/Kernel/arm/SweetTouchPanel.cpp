@@ -5,13 +5,8 @@
 #include <pexpert/arm64/tlmm_gpio.h>
 #include "TLMMGPIOController.h"
 
-extern "C" void (*ts_irq_mask_fn)(void);
-extern "C" void (*ts_irq_unmask_fn)(void);
-/* The worker masks and re-arms the distributor bit itself; the shared
- * controller's disableInterrupt cannot run at interrupt level. */
-extern "C" void sweet_touch_irq_own_line(void);
-extern "C" void sweet_touch_irq_delegate_line(unsigned);
-extern "C" void sweet_touch_irq_release_line(void);
+/* Worker entry points and the mask hooks come from sweet_touch_panel.h; the
+ * local externs here only used to duplicate them. */
 
 static SweetTouchPanel *gTouchPanel;
 

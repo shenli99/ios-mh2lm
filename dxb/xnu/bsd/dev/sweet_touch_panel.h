@@ -22,6 +22,13 @@ struct sweet_touch_panel_status { uint64_t token; unsigned state, available; };
  * the worker keeps the legacy raw GICD path.
  */
 void sweet_touch_irq_action(void *target, void *refCon, void *nub, int source);
+/* Worker-side entry points, declared once here so no caller has to repeat a
+ * local prototype (and no build warns that one is missing). */
+bool sweet_touch_irq(unsigned int intid);
+void sweet_touch_irq_own_line(void);
+void sweet_touch_irq_release_line(void);
+void sweet_touch_irq_delegate_line(unsigned delegated);
+
 /* Pad path: the facade installs mask/unmask/ack so the worker never writes a
  * pad register it does not own. NULL keeps the legacy raw distributor path. */
 extern void (*ts_irq_mask_fn)(void);
