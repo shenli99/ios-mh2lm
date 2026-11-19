@@ -661,3 +661,51 @@ HID 是 `touch 0 down at 310,213` **没有配对的 up**——触点一直按着
   pad 即使 status 置位也不派发」。`panel-touch`/`display-service`/
   `panel-lifecycle` 全绿，CI marker 151/151。
 
+## BUG-016：同一个 summary 位有两个写入者，线会被永久关掉；中断入口改为句柄
+
+`0121b18 gpioirq`：一两次触摸后彻底无反应。b18 的日志（`late=0`、`16 down /
+16 up` 配对）说明丢包那半修好了，剩下的是一次**永久性**的线失效：
+
+- 计数停在 `hits=400`，之后 1400 行日志里 worker 再没打印过 counters，也再没
+  被唤醒——不是“读不到包”，是**中断不再到达**；
+- 面板/管线仍在跑（`own-active=1`、`cpu-presents` 增长），所以不是显示侧。
+
+根因是所有权分裂。`TLMMGPIOController::setSummaryMasked()` 用
+`fIrqProvider->enable/disableInterrupt(0)` 记账，而 worker 的
+`sweet_touch_irq()` 在上半部重入分支里直接写 `GICD_ICENABLER`。两次写入同一个
+位、只有一方记账：TLMM 以为线是开着的（`fIrqMasked == false`），于是 worker
+解屏蔽时的 `setSummaryMasked(false)` 变成空操作，raw 写下的那一位再也没人打开。
+另外每个触摸包都要经过 provider 两趟（`disableInterrupt`/`enableInterrupt` +
+`ts_gic_wait()` 的 RWP 轮询），这既是延迟来源，也把上面那个竞态的窗口撑大了。
+
+修复（一个所有者一个寄存器）：
+
+- **summary 线归控制器**：`maskSummaryLine()`/`unmaskSummaryLine()` 直接写
+  `GICD_ICENABLER/ISENABLER` 的 INTID 240 位（`ml_io_map_unmappable(0x17a00000)`，
+  映射失败时回退到 provider，日志会写明 fallback）。`claimSummary()` 只经
+  provider `enableInterrupt(0)` 一次（清掉控制器的软关位，这是 BUG-013 的教训），
+  之后线的开合全由 distributor 位决定——每个包从“2 次 provider 往返”变成
+  “2 次寄存器写”。
+- **pad 归句柄**：`AGPIO::setInterrupt()/disableInterrupt()/maskInterrupt()/
+  resumeInterrupt()/ackInterrupt()`，`maskInterrupt()` 只清本 pad 的
+  `INTR_CFG.ENABLE`（共享 summary 因此对这一个 pad 退让，status 锁存留给
+  owner 读），`resumeInterrupt()` 先 ack 陈旧锁存再置位。`requestPinIRQ()` 现在
+  只接受**持有该 pad 的句柄**，否则 `kIOReturnNotPermitted`——
+  `tlmm_gpio_request_irq/free_irq/irq_mask/irq_resume/irq_claimed` 五个 C
+  入口全部删除，接口规则从“约定”变成类型约束。
+- **worker 不再写共享位**：`ts_irq_ack_pad()` 走 `ts_irq_ack_fn` 句柄钩子，
+  `sweet_touch_irq()` 在 delegated 模式不再写 `ICENABLER`。
+- 单测：`test-mh2lm-tlmm-gpio.py` 的 pad 中断用例整体改为句柄模型，并断言
+  “provider 只在 claim 时 enable 一次（`enableCount==1 && disableCount==0`）”、
+  “deferred pad 的 status 留给 client”、“未 arm 的 pad 不派发”；
+  `test-mh2lm-display-service.py` 的桩把 AGPIO 中断方法补齐（panel-touch 复用
+  同一 prelude）。tlmm-gpio / panel-touch / display-service / display-core /
+  panel-lifecycle / supply / parking / combined-suspend / link-power-cycle /
+  command-* / link-lp-clock 全绿，CI marker 151/151。
+  `panel-profile-lifecycle` 仍红，但那是既有问题（display-off 阶段
+  `SWEET MDSS SCANOUT: FAILED resource participant lost`，与本次改动无关，
+  已用退回到 `61fbf17` 的源码复测确认）。
+- 附带修掉一个只在测试里暴露的初始化缺陷：`fGicd` 未在 `start()` 清零，
+  栈上构造的控制器会读到一个野生指针（内核里 `init()` 会清零，所以只在
+  fixture 崩溃）。
+
