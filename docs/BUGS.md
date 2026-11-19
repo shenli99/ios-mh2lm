@@ -462,5 +462,53 @@ tlmm/panel/display 三套全绿。b14 内核早于本修复，不能用来验证
   参考一致。
 - 附带结论：UniXNU 真正加载的是 ramdisk 里的
   `EFI/UniXNU/Payloads/kernel.macho`（以及配套 `.adt`）；Android boot 镜像
-  的 kernel 槽是旧 Mu-Silicium blob（gzip 头，解压出 3145840 字节，不是
-  Mach-O），既不能用来判断内核版本，也不能改它来换内核。
+  的 kernel 槽不是内核，但它**不是无用填充**：那是 BootShim 加 Mu UEFI
+  固件卷的 gzip 流（解压 3145840 字节，含 `_FVH`），刷镜像就等于换固件。
+  详见 BUG-012。
+
+## BUG-012：r2 镜像把固件槽换成了旧 blob，DarwinBoot 面板选择链整体失效
+
+`0121b15r2 baseline` 进桌面但显示停在 ABL 预置画面，触摸不工作，按电源键
+卡住。日志（`logs/sweetlog-0121b15-2.txt`）关键两行：
+
+```
+[INFO] SWEET PANEL: ABL selection source=0 profile=0; not a physical DDIC ID
+[INFO] SWEET TOUCH IRQ: software-pending probe hits=0 clear=1 pending=0 active=0
+```
+
+随后是 `profile lifecycle requires live-ABL profile and pins2-or-3; refused
+before side effects`、`setup failed; touch disabled`，没有 pipeline/lineage/
+DSI/lifecycle，也没有任何 panic（BUG-010 的递归修复仍成立）。
+
+- 排除设备树内容：r2 镜像与 b14 镜像的 `Payloads/kernel.macho.adt`
+  逐字节相同（`cmp` 干净，都是 `a9e4f371…`、23140 字节）；
+  `/tmp/slottest/t` 用真实的 `panel_handoff.c` 跑
+  `mh2lm_panel_adt_has_slot()`，两份都是 1，审计基线是 0。
+- 排除 DarwinBoot 顺序：`DarwinBoot.c` 第 609 行从 ramdisk 读 `.adt` 到
+  pool，第 618 行 `PopulatePanelSelection(Tree,TreeSize)` 改的就是这块缓冲，
+  第 697 行 `CopyMem` 把它写进 `Args->DeviceTree`。同样的树、同样的顺序在
+  b12/b13/b14 上都能得到 `source=2 profile=4`。
+- 根因：**Android boot 镜像的 kernel 槽是 BootShim + Mu UEFI 固件卷**，刷
+  镜像同时刷固件。b12–b14 三个镜像该槽都是 ABI608 固件
+  `27e7a1d1a3f9421af18d02f216e4e7d651137d42f2955be775f9142f118ea480`
+  （1987136 字节）；`mk16k-0121b15.sh` 却写了
+  `out-bs/kernel-32m.blob`——`80b40a0f…`、2111336 字节、2026-10-31 的旧
+  固件，比 DarwinBoot 面板选择钩子（`boot-support/0001-mh2lm-darwinboot-
+  panel-selection.patch`）还早。旧固件的 DarwinBoot 仍然读 ADT、仍然把
+  `sweet,panel-identity` 交给内核，但从不填 96 字节记录，内核看到全零 →
+  `mh2lm_panel_source_status()` 返回 `MH_PANEL_UNFILLED`（0）。
+- 为什么以前的镜像没暴露：`27e7a1d1…` 从 0121a14 起就在用，脚本注释却写着
+  「kernel 槽是过期 Mu blob，不是真正运行的东西」，于是把固件当填充物替换
+  掉了。
+- 修复：`out-bs/mk16k-0121b15r3.sh` 固定
+  `FW_BLOB=out-bs/panel-uefi-0121a14-bootargs608/kernel-panel.blob`，断言
+  sha256 等于 `27e7a1d1…`，日志里同时打印固件哈希与长度。
+  `boot-16k-0121b15r3-{baseline,gpioirq}-panel-pipeline.img` 分别为
+  `a083712c…`、`7d2fbc7e…`，1987136 字节固件槽、`a9e4f371…` 设备树、
+  `e822fae6…` 内核，与 b14 镜像只差内核。
+- 验收：`SWEET PANEL: ABL selection source=2 profile=4`、
+  `SWEET MDSS PIPELINE: mode7 …`、`SWEET PANEL LINEAGE`、
+  `lifecycle mode=7 …`。触摸探针（`hits=?`）与电源键随本轮一起复测；固件
+  恢复后若仍 `hits=0`，才按内核侧向量 240 的分发/屏蔽状态继续查。
+- 结论：任何「只换内核」的镜像都必须保留固件槽里的正确 blob；反过来说，
+  固件更新也要以新 blob 的形式随 boot 镜像一起进。
