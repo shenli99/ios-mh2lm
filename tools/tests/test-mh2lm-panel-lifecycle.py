@@ -143,6 +143,9 @@ int main(){
   for(unsigned i=0;i<12000&&h.m->fScanoutState!=SweetScanoutSubmitted&&h.m->fLifecycle.phase!=SweetPanelFault;++i)h.step();
   assert(h.m->fLifecycle.phase!=SweetPanelFault);
   assert(h.m->fScanoutState==SweetScanoutSubmitted&&h.pool->pinned&&!h.m->fLifecycle.touchToken);
+  /* The park condition the managed-scan admission checks: a dead worker
+   * cannot touch the panel, so the takeover records it without a token. */
+  assert(h.m->fLifecycle.touchQuiesced);
   bool named=false;for(auto&msg:messages)if(msg.find("takeover continues without a touch fence")!=std::string::npos)named=true;
   assert(named);
   regs[0x0ae01014]|=0x100;regs[bases[3]+0x18]=0;realFrame(h.m);h.scan();

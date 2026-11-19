@@ -1249,17 +1249,38 @@ TLMMGPIOController::mapDistributor(void)
 	return true;
 }
 
+/*
+ * The distributor is device memory: a store is posted, so a load issued right
+ * after it can still return the old value. Both registers are write-1-set, so
+ * the zero half of each write is a hardware no-op; it exists only so the
+ * fixture's plain buffer tracks the same state a real distributor reports.
+ */
+void
+TLMMGPIOController::gicdWrite(uint32_t offset, uint32_t value)
+{
+	__asm__ volatile("dmb oshst" ::: "memory");
+	*(volatile uint32_t *)((vm_offset_t)fGicd + offset) = value;
+	__asm__ volatile("dsb osh" ::: "memory");
+}
+
+uint32_t
+TLMMGPIOController::gicdRead(uint32_t offset)
+{
+	uint32_t value = *(volatile uint32_t *)((vm_offset_t)fGicd + offset);
+	__asm__ volatile("dmb oshld" ::: "memory");
+	return value;
+}
+
 void
 TLMMGPIOController::maskSummaryLine(void)
 {
-	uint32_t word = TLMM_IRQ_WORD(TLMM_SUMMARY_INTID) / 4u;
 	uint32_t bit = TLMM_IRQ_BIT(TLMM_SUMMARY_INTID);
+	uint32_t enable = 0x100u + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID);
+	uint32_t disable = 0x180u + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID);
 
 	if (fGicd) {
-		/* W1S pair, with the read-back a real distributor shows: enabling
-		 * reads 0 and disabling reads 1 for the same bit. */
-		fGicd[0x180u / 4u + word] |= bit;
-		fGicd[0x100u / 4u + word] &= ~bit;
+		gicdWrite(enable, gicdRead(enable) & ~bit); /* W1S: 0 is a no-op */
+		gicdWrite(disable, bit);
 	} else if (fIrqProvider) {
 		(void)fIrqProvider->disableInterrupt(0);
 	}
@@ -1268,18 +1289,20 @@ TLMMGPIOController::maskSummaryLine(void)
 void
 TLMMGPIOController::unmaskSummaryLine(void)
 {
-	uint32_t word = TLMM_IRQ_WORD(TLMM_SUMMARY_INTID) / 4u;
 	uint32_t bit = TLMM_IRQ_BIT(TLMM_SUMMARY_INTID);
+	uint32_t enable = 0x100u + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID);
+	uint32_t disable = 0x180u + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID);
 
 	if (fGicd) {
-		fGicd[0x100u / 4u + word] |= bit;
-		fGicd[0x180u / 4u + word] &= ~bit;
-		/* Read back once: a line that silently stays disabled is the failure
-		 * this ownership split exists to prevent, so name it if it happens. */
-		if (!(fGicd[0x100u / 4u + word] & bit)) {
+		gicdWrite(enable, gicdRead(enable) | bit);
+		gicdWrite(disable, 0u); /* W1S: 0 is a no-op */
+		/* The dsb above means this read is now the truth, not a posted-write
+		 * ghost. A line that stays disabled is the failure this ownership
+		 * split exists to prevent, so name it if it happens. */
+		if (!(gicdRead(enable) & bit)) {
 			SWEET_LOG_ERROR("SWEET TLMM: summary INTID %u did not enable "
 			    "(ISENABLER=%#x); pad interrupts stay off\n",
-			    TLMM_SUMMARY_INTID, fGicd[0x100u / 4u + word]);
+			    TLMM_SUMMARY_INTID, gicdRead(enable));
 		}
 	} else if (fIrqProvider) {
 		(void)fIrqProvider->enableInterrupt(0);
@@ -1622,7 +1645,9 @@ TLMMGPIOController::maskPinIRQ(unsigned int pin)
 	{
 		vm_offset_t intrCfg = pinAddress(pin, TLMM_GPIO_INTR_CFG);
 		if (intrCfg) {
-			*(volatile uint32_t *)intrCfg &= ~TLMM_INTR_ENABLE;
+			/* Barrier helpers: the worker reads this bit back right after
+			 * resume, and a posted pad write would read stale. */
+			tlmmWrite32(intrCfg, tlmmRead32(intrCfg) & ~TLMM_INTR_ENABLE);
 		}
 	}
 	setSummaryMasked(true);
@@ -1658,7 +1683,7 @@ TLMMGPIOController::pinIRQEnabled(unsigned int pin) const
 		return false;
 	}
 	intrCfg = pinAddress(pin, TLMM_GPIO_INTR_CFG);
-	return intrCfg && ((*(volatile uint32_t *)intrCfg) & TLMM_INTR_ENABLE) != 0;
+	return intrCfg && (tlmmRead32(intrCfg) & TLMM_INTR_ENABLE) != 0;
 }
 
 IOReturn
@@ -1680,7 +1705,7 @@ TLMMGPIOController::resumePinIRQ(unsigned int pin)
 		 * the first dispatch look like a duplicate, so drop it here. */
 		(void)ackPinIRQ(pin);
 		if (intrCfg) {
-			*(volatile uint32_t *)intrCfg |= TLMM_INTR_ENABLE;
+			tlmmWrite32(intrCfg, tlmmRead32(intrCfg) | TLMM_INTR_ENABLE);
 		}
 	}
 	setSummaryMasked(false);

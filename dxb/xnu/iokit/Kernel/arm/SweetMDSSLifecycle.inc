@@ -130,7 +130,7 @@ bool SweetMDSS::lifecycleParticipants(void)
  SweetPanelPins *p=fPanelPinsClient ? fPanelPinsClient->copyBackend() : NULL;
  bool ok=t==fTouchPanel && r==fRPMh && p==fPanelPins && (!p || !p->isInactive()) &&
      (!fLifecycleFull || (fPanelProfile && p && fPanelPinsConsumer));
- if (ok && fLifecycle.touchQuiesced) {
+ if (ok && fLifecycle.touchQuiesced && fLifecycle.touchToken) {
   SweetTouchPanelStatus fence={};
   ok=t->copyStatus(fTouchPanelConsumer,fLifecycle.touchToken,&fence)==kIOReturnSuccess &&
       fence.token==fLifecycle.touchToken && fence.quiesced && !fence.ready && !fence.uncertain && fence.result==kIOReturnSuccess;
@@ -408,10 +408,12 @@ SweetMDSS::takeoverAdmitsWithoutTouch(void)
  if (fLifecycle.operation!=SweetPanelTakeover || fLifecycle.touchToken) return false;
  bool failed=false;
  if (!fTouchPanel || fTouchPanel->copyWorkerFailed(&failed)!=kIOReturnSuccess || !failed) return false;
- /* touchQuiesced stays false: that field is a fence proof, and there is no
-  * fence here. lifecycleParticipants() therefore skips its fence check, and
-  * nothing downstream reads a claim that was never established. */
+ /* The flag is the "no touch interference" condition, not a token receipt: a
+  * worker that died before going live cannot touch the panel, so it holds --
+  * and the managed-scan admission below relies on exactly that. A fence is
+  * only verified when a token exists to verify. */
  SWEET_LOG_WARN("SWEET PANEL: touch worker failed before going live; takeover continues without a touch fence\n");
+ fLifecycle.touchQuiesced=true;
  return true;
 }
 

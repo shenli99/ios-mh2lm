@@ -246,6 +246,9 @@ private:
 	bool mapDistributor(void);
 	void maskSummaryLine(void);
 	void unmaskSummaryLine(void);
+	/* Device-memory access with the barriers a posted write needs. */
+	void gicdWrite(uint32_t offset, uint32_t value);
+	uint32_t gicdRead(uint32_t offset);
 	uint32_t readIntrStatus(unsigned int pin) const;
 	void writeIntrStatus(unsigned int pin, uint32_t value);
 	int irqSlotForPin(unsigned int pin) const;
