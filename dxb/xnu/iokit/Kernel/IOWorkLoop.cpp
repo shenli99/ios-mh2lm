@@ -432,6 +432,13 @@ abort:
 /* virtual */ void
 IOWorkLoop::threadMain()
 {
+#ifdef SWEET
+	/* The recursive-lock panic names a thread; printing the loop's own
+	 * thread here and the touch worker's in ts_thread() lets the panic line
+	 * be matched against a known owner instead of an anonymous pointer. */
+	printf("SWEET IOWORKLOOP: thread %p running loop %p\n",
+	    (void *)IOThreadSelf(), this);
+#endif
 restartThread:
 	do {
 		if (!runEventSources()) {

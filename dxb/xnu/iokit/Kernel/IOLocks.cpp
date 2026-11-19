@@ -351,7 +351,8 @@ IOSimpleLockAlloc( void )
 #ifdef SWEET
 	/* A recursive-acquisition panic prints the lock pointer; logging every
 	 * allocation makes that pointer identifiable after the fact. */
-	printf("SWEET IOLOCK: simple lock %p allocated\n", lock);
+	printf("SWEET IOLOCK: simple lock %p allocated by %p\n", lock,
+	    (void *)__builtin_return_address(0));
 #endif
 
 	return lock;

@@ -1269,7 +1269,8 @@ ts_thread(void *arg __unused, wait_result_t wr __unused)
 	unsigned delay_s = 20;
 	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
 	(void)PE_parse_boot_argn("sweettouchflip", &ts_flip, sizeof(ts_flip));
-	SWEET_LOG_INFO("SWEET TOUCH: TouchComm driver starting in %u s (flip %#x)\n", delay_s, ts_flip);
+	SWEET_LOG_INFO("SWEET TOUCH: worker thread %p; TouchComm driver starting in %u s (flip %#x)\n",
+	    current_thread(), delay_s, ts_flip);
 	ts_wait(delay_s * 1000u);
 	/* The display lifecycle waits for this worker's token, so a boot that
 	 * never reaches this line is stuck before the panel comes up at all. */
