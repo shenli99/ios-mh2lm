@@ -588,3 +588,44 @@ SpringBoard（日志里有 `exec InCallService`、`SWEET AKS: SpringBoard sel=27
   ready; takeover quiesce token=…`、`SWEET FB HANDOFF: active A=…`、
   `SWEET FB PERF: own-active=1`。
 
+## BUG-014：mode 3 把 summary SPI 当成自己的线，接管一被拒就整块面板冻结
+
+`0121b16 gpioirq`（`sweettouchpanel=3`）进不了桌面。面板准入其实全过了
+（`ABL selection source=2 profile=4`、`lifecycle mode=7`、
+`ATTENTION pad gpio122 delegated to the TLMM summary line; no GIC source on
+the nub`），触摸探针这次也是 `hits=1 clear=1 pending-after=0`、`armed
+gpio=122 intid=240`。断在接管那一步：
+
+```
+[ERROR] SWEET PANEL: token=1 failed rc=0xe00002e2 touch startup quiesce refused
+[ERROR] SWEET FB HANDOFF: FAILED provider rc=0 state=4 hardware-reachable=0; pixels frozen
+```
+
+`0xe00002e2` = `kIOReturnNotPermitted`，来自
+`SweetTouchPanel::action()` 里一句写死的
+`if (s->fMode!=2) return kIOReturnNotPermitted;`。mode 3 的定义是「mode 2
+加派生的 pad 中断」，`sweetTouchPanelNative()` 在别处都接受 2 和 3，只有
+这一处把 3 当成「只绑定」——于是 quiesce/resume 全被拒，接管失败，面板
+Fault。基线（mode 2）同一条路径正常，所以只在 gpioirq 暴露。
+
+修掉端口闸之后暴露第二处：`ts_panel_mask()` 的排空判据要求
+`GICD_ISENABLER` 自己的位清零。mode 3 里这条 SPI 归 TLMM 控制器，是**多个
+pad 共用的 summary 线**，关掉它会掐掉别的 pad——正确的「我这条线静了」的
+证据是 pad 的 `TS_INTR_CFG.ENABLE` 已清零（读回已校验）。
+
+- 修复一：`if (!sweetTouchPanelNative(s->fMode)) return kIOReturnNotPermitted;`
+  —— mode 1 仍然只做元数据，mode 2/3 都允许 worker 操作。
+- 修复二：`sweet_touch_irq_delegate_line(1)`（facade 在 mode 3 分支里调用，
+  stop/free 清 0）。worker 侧因此在
+  ① `ts_panel_mask()` 排空时不再要求 summary 位清零；
+  ② resume 前置条件同样放宽；
+  ③ resume 时**不清**共享线的 `ICPENDR`（那会吞掉别的 pad 的挂起中断，
+  本 pad 的挂起由 `ts_irq_arm()` 的 pad status ack 负责）。
+- 单测：`test-mh2lm-panel-touch.py` 在原有的 mode 3 委托用例后加一组
+  「mode 3 quiesce → identify → resume → ready」，先红后绿；
+  mode 1 的 `kIOReturnNotPermitted` 断言保留不变。
+  `test-mh2lm-display-service.py` 的桩补上 `sweet_touch_irq_delegate_line`。
+- 附带结论：这条路正是 P2' 的方向——触摸只拥有 ATTN pad，summary SPI 归
+  `TLMMGPIOController`。剩下的手工 `TS_INTR_CFG` 读写应当在后续把
+  pad 的 enable/ack 全部交给 `tlmm_gpio_irq_mask/resume` 后再删掉。
+
