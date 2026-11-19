@@ -394,6 +394,39 @@ void SweetMDSS::lifecycleTimerAction(OSObject *owner,IOTimerEventSource *sender)
  s->advanceLifecycle();
  if (s->lifecycleBusy()) sender->setTimeoutMS(s->fLifecycle.phase==SweetPanelTouchPause && !s->fLifecycle.touchToken ? 50 : 1);
 }
+/*
+ * The first takeover is the only lifecycle with no touch work outstanding: it
+ * adopts the running scanout before any display-off/on request exists. A touch
+ * worker that failed before going live can never publish a quiesce token, so
+ * waiting out the startup bound would fault the panel and freeze pixels for a
+ * touch fault. Proceed without the fence, name it, and keep the rule for
+ * DisplayOff/DisplayOn untouched: those still require a real token.
+ */
+bool
+SweetMDSS::takeoverAdmitsWithoutTouch(void)
+{
+ if (fLifecycle.operation!=SweetPanelTakeover || fLifecycle.touchToken) return false;
+ bool failed=false;
+ if (!fTouchPanel || fTouchPanel->copyWorkerFailed(&failed)!=kIOReturnSuccess || !failed) return false;
+ /* touchQuiesced stays false: that field is a fence proof, and there is no
+  * fence here. lifecycleParticipants() therefore skips its fence check, and
+  * nothing downstream reads a claim that was never established. */
+ SWEET_LOG_WARN("SWEET PANEL: touch worker failed before going live; takeover continues without a touch fence\n");
+ return true;
+}
+
+bool
+SweetMDSS::beginTakeoverContinuation(uint64_t now)
+{
+ fLifecycleInternal=true;
+ IOReturn rc=scanoutBeginAction(this,fLifecyclePool,fVsyncChannel,NULL,NULL);
+ fLifecycleInternal=false;
+ if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"takeover continuation refused");return false;}
+ fLifecycle.phase=SweetPanelTakeoverPending;fLifecycleStepDeadline=now+5000000000ULL;
+ publishLifecycle();
+ return true;
+}
+
 void SweetMDSS::advanceLifecycle(void)
 {
  bool pinPhase=fLifecycle.phase==SweetPanelPinActivate || fLifecycle.phase==SweetPanelPinReset;
@@ -404,8 +437,9 @@ void SweetMDSS::advanceLifecycle(void)
  if (now>=fLifecycleDeadline || now>=fLifecycleStepDeadline) {
   SWEET_LOG_ERROR("SWEET PANEL: deadline token=%llu operation=%u phase=%u command=%llu completed=%u/%u\n",
       fLifecycle.token,fLifecycle.operation,fLifecycle.phase,fLifecycle.commandToken,fDsiStatus.completed,fDsiStatus.total);
-  finishLifecycle(kIOReturnTimeout,fLifecycle.phase==SweetPanelTouchPause && !fLifecycle.touchToken ?
-      "touch worker startup deadline" : "lifecycle deadline");return;
+  bool touchStart=fLifecycle.phase==SweetPanelTouchPause && !fLifecycle.touchToken;
+  if (touchStart && takeoverAdmitsWithoutTouch()) { (void)beginTakeoverContinuation(now); return; }
+  finishLifecycle(kIOReturnTimeout,touchStart ? "touch worker startup deadline" : "lifecycle deadline");return;
  }
  if (lifecycleSupplyPhase()) {advanceLifecycleSupply();return;}
  if (fLifecycle.phase==SweetPanelTouchPause || fLifecycle.phase==SweetPanelTouchResume) {
@@ -414,7 +448,12 @@ void SweetMDSS::advanceLifecycle(void)
    bool available=false;
    IOReturn rc=fTouchPanel->copyWorkerAvailable(&available);
    if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"touch startup provider unavailable");return;}
-   if (!available) return; /* Software snapshot only; no transport/MMIO poll. */
+   if (!available) {
+    /* Software snapshot only; no transport/MMIO poll. A failed worker will
+     * never become available, so the adoption proceeds without it. */
+    if (takeoverAdmitsWithoutTouch()) (void)beginTakeoverContinuation(now);
+    return;
+   }
    uint64_t touch=0;rc=fTouchPanel->quiesce(fTouchPanelConsumer,&touch);
    if (rc!=kIOReturnSuccess || !touch) {finishLifecycle(rc ? rc : kIOReturnIOError,"touch startup quiesce refused");return;}
    fLifecycle.touchToken=touch;fLifecycleDeadline=now+16000000000ULL;
@@ -435,11 +474,7 @@ void SweetMDSS::advanceLifecycle(void)
   if (!t.quiesced || t.ready) {finishLifecycle(kIOReturnIOError,"touch pause proof absent");return;}
   fLifecycle.touchQuiesced=true;
   if (fLifecycle.operation==SweetPanelTakeover) {
-   fLifecycleInternal=true;
-   IOReturn rc=scanoutBeginAction(this,fLifecyclePool,fVsyncChannel,NULL,NULL);
-   fLifecycleInternal=false;
-   if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"takeover continuation refused");return;}
-   fLifecycle.phase=SweetPanelTakeoverPending;fLifecycleStepDeadline=now+5000000000ULL;
+   if (!beginTakeoverContinuation(now)) return;
   } else {
    fLifecycleTE=dp_rd(dp_intf1,0x288);fLifecycleAuto=dp_rd(dp_intf1,0x2b4);
    dp_wr(dp_intf1,0x288,fLifecycleTE&~(1u<<20));dp_wr(dp_intf1,0x2b4,0);

@@ -265,6 +265,26 @@ ts_irq_unmask_raw(void)
 	ts_gic_wr(0x100u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
 }
 
+static void ts_irq_mask(void);
+static void ts_irq_unmask(void);
+
+/*
+ * The distributor bit and the controller's software disable are two flags.
+ * registerInterrupt() leaves the vector soft disabled; only the controller's
+ * enableInterrupt() clears that flag, and dispatch() refuses a vector while it
+ * is set. A raw ISENABLER write is therefore not an enable: the probe is the
+ * first enable, so it must pass through the owner exactly like ts_irq_arm().
+ * Repeated calls are no-ops in IOSharedInterruptController::enableInterrupt.
+ */
+static void
+ts_irq_enable_through_owner(void)
+{
+	if (ts_irq_line_owned && ts_irq_unmask_fn) {
+		ts_irq_unmask_fn();
+	}
+	ts_irq_unmask();
+}
+
 static void
 ts_irq_mask(void)
 {
@@ -340,7 +360,7 @@ ts_gic_probe(void)
 	}
 	__atomic_store_n(&ts_irq_probe_hits, 0u, __ATOMIC_RELEASE);
 	__atomic_store_n(&ts_irq_state, 4u, __ATOMIC_RELEASE);
-	ts_irq_unmask();
+	ts_irq_enable_through_owner();
 	if (!ts_gic_wait() || (ts_gic_rd(0x100u + off) & TS_IRQ_BIT) == 0) {
 		__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
 		ts_irq_mask();
@@ -354,6 +374,10 @@ ts_gic_probe(void)
 		}
 		delay(100);
 	}
+	/* Read before clearing: a bit still pending means the distributor
+	 * accepted the request and no handler ever ran (dispatch refused), not
+	 * that the line was never signalled. */
+	uint32_t pendingAfter = ts_gic_rd(0x200u + off) & TS_IRQ_BIT;
 	__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
 	ts_irq_mask();
 	ts_gic_wr(0x280u + off, TS_IRQ_BIT);
@@ -371,8 +395,9 @@ ts_gic_probe(void)
 		}
 	}
 	unsigned hits = __atomic_load_n(&ts_irq_probe_hits, __ATOMIC_ACQUIRE);
-	SWEET_LOG_INFO("SWEET TOUCH IRQ: software-pending probe hits=%u clear=%u pending=%u active=%u\n",
-	    hits, clear ? 1 : 0, pending ? 1 : 0, active ? 1 : 0);
+	SWEET_LOG_INFO("SWEET TOUCH IRQ: software-pending probe hits=%u clear=%u pending=%u active=%u pending-after=%u\n",
+	    hits, clear ? 1 : 0, pending ? 1 : 0, active ? 1 : 0,
+	    pendingAfter ? 1 : 0);
 	return hits == 1u && clear;
 }
 
@@ -469,12 +494,8 @@ ts_irq_arm(void)
 	}
 	if (ts_panel_interrupted()) return false;
  __atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
-	/* The owner enables the source once so the shared controller starts
-	 * dispatching to this handler; from here the distributor bit is ours. */
-	if (ts_irq_line_owned && ts_irq_unmask_fn) {
-		ts_irq_unmask_fn();
-	}
-	ts_irq_unmask();
+	/* Same owner-first enable as the probe; the distributor bit stays ours. */
+	ts_irq_enable_through_owner();
 	bool waited = ts_gic_wait();
 	bool enabled = (ts_gic_rd(0x100u + 4u * TS_IRQ_WORD) & TS_IRQ_BIT) != 0;
 	unsigned state = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);

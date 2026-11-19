@@ -251,6 +251,16 @@ IOReturn SweetTouchPanel::quiesce(uint64_t id,uint64_t *token) { return request(
 IOReturn SweetTouchPanel::resume(uint64_t id,uint64_t *token) { return request(OpResume,id,token); }
 IOReturn SweetTouchPanel::detachConsumer(uint64_t id)
 { TouchPanelRequest r={};r.op=OpDetach;r.client=id;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+/* A worker that exits before going live publishes SWEET_TOUCH_FAILED and
+ * clears availability; it never recovers, so callers may stop waiting. */
+IOReturn SweetTouchPanel::copyWorkerFailed(bool *failed)
+{ if (!failed) return kIOReturnBadArgument;*failed=false;
+  if (!fSession) return kIOReturnNotReady;
+  sweet_touch_panel_status p={};
+  int rc=sweet_touch_panel_snapshot(fSession,0,&p);
+  if (rc) return touchPanelReturn(rc);
+  *failed=!p.available && p.state==(unsigned)SWEET_TOUCH_FAILED;
+  return kIOReturnSuccess; }
 IOReturn SweetTouchPanel::copyWorkerAvailable(bool *available)
 { if (!available) return kIOReturnBadArgument;*available=false;TouchPanelRequest r={};r.op=OpInfo;r.available=available;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
 IOReturn SweetTouchPanel::copyStatus(uint64_t id,uint64_t token,SweetTouchPanelStatus *status)

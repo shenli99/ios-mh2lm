@@ -136,6 +136,17 @@ int main(){
   trace.clear();tcFixtureOnline(1);h.life();h.scan();assert(trace.empty()&&!(tcFixtureFrame()>>4));
   assert(!h.m->fManagedStarted&&h.m->fLifecycle.token==token);
  }
+ // A worker that failed before going live publishes SWEET_TOUCH_FAILED and
+ // never becomes available, so it can never publish a fence either. The first
+ // takeover adopts the scanout anyway: a touch fault may not freeze pixels.
+ {Harness h;tcFixtureFail();h.begin();
+  for(unsigned i=0;i<12000&&h.m->fScanoutState!=SweetScanoutSubmitted&&h.m->fLifecycle.phase!=SweetPanelFault;++i)h.step();
+  assert(h.m->fLifecycle.phase!=SweetPanelFault);
+  assert(h.m->fScanoutState==SweetScanoutSubmitted&&h.pool->pinned&&!h.m->fLifecycle.touchToken);
+  bool named=false;for(auto&msg:messages)if(msg.find("takeover continues without a touch fence")!=std::string::npos)named=true;
+  assert(named);
+  regs[0x0ae01014]|=0x100;regs[bases[3]+0x18]=0;realFrame(h.m);h.scan();
+  assert(h.m->fScanoutState==SweetScanoutActive);}
  // Native interest replays newest brightness after lifecycle, no busy-loop retry
  // or consumer gate callback from MDSS. The actual backlight and DCS code run.
  {Harness h;h.takeover();auto*bl=new AppleARMBacklight();assert(bl->start(h.d));

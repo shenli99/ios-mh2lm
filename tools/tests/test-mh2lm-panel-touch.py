@@ -22,7 +22,7 @@ extern "C" {
 void tcFixtureReboot();void tcFixtureOnline(unsigned);unsigned tcFixtureStep();
 void tcFixtureWait();void tcFixtureIRQWait();unsigned tcFixtureIRQState();
 uint64_t tcFixtureFrame();uint64_t tcFixtureOwner();void tcFixtureContact(unsigned);
-void tcFixtureTokenLimit();void tcFixtureSessionLimit();bool sweet_touch_irq(unsigned);
+void tcFixtureTokenLimit();void tcFixtureSessionLimit();void tcFixtureFail();bool sweet_touch_irq(unsigned);
 extern void (*ts_irq_mask_fn)(void);void sweet_touch_irq_own_line(void);
 void sweet_touch_irq_release_line(void);
 }

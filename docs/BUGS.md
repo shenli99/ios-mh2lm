@@ -522,3 +522,69 @@ DSI/lifecycle，也没有任何 panic（BUG-010 的递归修复仍成立）。
   恢复后若仍 `hits=0`，才按内核侧向量 240 的分发/屏蔽状态继续查。
 - 结论：任何「只换内核」的镜像都必须保留固件槽里的正确 blob；反过来说，
   固件更新也要以新 blob 的形式随 boot 镜像一起进。
+
+## BUG-013：触摸探针只写了 distributor，控制器始终软关；随后 30 s 超时冻结整个面板
+
+`0121b15r3 baseline` 刷入后屏幕停在启动日志画面，系统本身已经走到
+SpringBoard（日志里有 `exec InCallService`、`SWEET AKS: SpringBoard sel=27`
+和 124 次 `SWEET FB PERF` 拷贝），所以「卡在日志页」不是内核挂死，而是
+**画面从未被接管**。真正的失败链在日志里只有四行：
+
+```
+[INFO] SWEET FB HANDOFF: FAILED provider rc=0 state=4 hardware-reachable=0
+[ERROR] SWEET PANEL: deadline token=1 operation=1 phase=1 command=0 completed=0/0
+[ERROR] SWEET PANEL: token=1 failed rc=0xe00002d6 touch worker startup deadline
+[ERROR] SWEET FB PANEL: lifecycle admission failed rc=0xe00002d8; pixels frozen
+```
+
+- 显示侧：`SWEET PANEL: ABL selection source=2 profile=4`、
+  `lifecycle mode=7`、`SWEET MDSS PIPELINE: mode7 … rebuild enabled`、
+  `SWEET FB HANDOFF: F4 v2 accepted; awaiting provider transfer` 全部出现，
+  说明固件与设备树这次都是对的（BUG-012 已修）。
+- 首次扫描接管走的是 `beginLifecycle(SweetPanelTakeover)`，它必须先向
+  touch worker 要一个 quiesce token；worker 20 s 后启动，30 s 内没上线就
+  `touch worker startup deadline` → 生命周期 Fault →
+  `scanoutStatusAction` 把状态报成 `SweetScanoutFailed=4` →
+  `scanoutStep` 收到 `rc=0 state=4 hardware-reachable=0` →
+  `fOwnScanoutFailed=1`，`SWEET FB PERF: own-active=0 cpu-presents=0`，
+  之后每次 `coordinated off` 都会被 `fault=1` 拒掉。
+- 触摸侧：`SWEET TOUCH: TouchComm ready …` 之后紧跟
+  `SWEET TOUCH IRQ: software-pending probe hits=0 clear=1 pending=0 active=0`
+  → `SWEET TOUCH IRQ: setup failed; touch disabled`。worker 因此从未
+  `ts_panel_live=1`。
+- 根因（b12 起的回归）：b11 的探针走
+  `ts_irq_unmask_fn` → `IOService::enableInterrupt(0)` →
+  `IOSharedInterruptController::enableInterrupt`，它清掉
+  `vector->interruptDisabledSoft`；b12 引入「独占这条线」后
+  `ts_irq_unmask()` 改成只写 `GICD_ISENABLER`，而
+  `IOSharedInterruptController::registerInterrupt` 明确把新向量置为
+  **软关**（`vector->interruptDisabledSoft = 1`）。于是 distributor 位是开的、
+  软件位是关的，`GenericInterruptController::dispatch()` 在
+  `vector->interruptDisabledSoft` 分支里直接 mask 并返回，**不调用
+  `sweet_touch_irq_action`**，探针永远 hits=0。
+  b11 是最后一个探针 `hits=1` 的版本；b13-3 连探针日志都没有，b14 没跑到
+  20 s，b15-2/b15-3 是 hits=0。
+- 修复一（根因）：`sweet_touch_tcm.c` 新增
+  `ts_irq_enable_through_owner()`——探针与 `ts_irq_arm()` 都先经
+  provider 钩子 enable 一次（清软关位），再写 raw distributor。
+  `enableInterrupt` 对已使能向量是幂等空操作，所以重复调用不改变计数。
+- 修复二（止血）：`SweetMDSS::takeoverAdmitsWithoutTouch()` 只在
+  **首次 takeover** 且 touch worker 已发布 `SWEET_TOUCH_FAILED`
+  （`SweetTouchPanel::copyWorkerFailed()`，读
+  `sweet_touch_panel_snapshot(session,0,·)`）时放行，日志写明
+  `takeover continues without a touch fence`；`touchQuiesced` 保持 false
+  ——它是栅栏证据，没有栅栏就不能置位。DisplayOff/DisplayOn 仍必须拿真
+  token，一个字都没放宽。
+- 探针日志新增 `pending-after=%u`：读在清 `ICPENDR` 之前。仍 pending
+  表示「distributor 收了，但没人处理」（dispatch 拒绝），与「线没送来」
+  是两种完全不同的故障，省掉下一次盲猜。
+- 单测：`test-mh2lm-panel-lifecycle.py` 新增
+  `tcFixtureFail()`（照 worker 退出路径：清 available 并 publish FAILED）
+  驱动「worker 上线前失败 → takeover 不带栅栏继续，scanout 到 Active」；
+  worker 只是慢的旧用例仍要求 `kIOReturnTimeout`。
+  `pending-after` 字段由 `test-mh2lm-panel-touch.py` 的探针用例覆盖。
+- 验收：`SWEET TOUCH IRQ: software-pending probe hits=1 clear=1
+  pending-after=0`、`armed gpio=122 intid=240`、`SWEET PANEL: touch worker
+  ready; takeover quiesce token=…`、`SWEET FB HANDOFF: active A=…`、
+  `SWEET FB PERF: own-active=1`。
+

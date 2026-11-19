@@ -544,6 +544,8 @@ class SweetMDSS : public SweetDisplayBackend {
  bool lifecycleRecordSupply(const SweetRPMhStatus &);
  void lifecycleCancelSupply(void);
  IOReturn beginLifecycle(unsigned,SweetScanoutPool *,uint64_t *);
+ bool takeoverAdmitsWithoutTouch(void);
+ bool beginTakeoverContinuation(uint64_t);
  void advanceLifecycle(void);
  void finishLifecycle(IOReturn,const char *,bool = false);
  void publishLifecycle(void);

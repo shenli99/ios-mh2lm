@@ -59,6 +59,7 @@ public:
  IOReturn attachConsumer(uint64_t *);
  IOReturn detachConsumer(uint64_t);
  IOReturn copyWorkerAvailable(bool *);
+ IOReturn copyWorkerFailed(bool *);
  IOReturn copyStatus(uint64_t,uint64_t,SweetTouchPanelStatus *);
  /* Asynchronous worker operations, no MMIO in caller/provider. quiesced means
   * worker boundary + peripheral/GIC masked/active drained + HID contacts up.

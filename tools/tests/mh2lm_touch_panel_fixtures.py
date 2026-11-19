@@ -81,6 +81,13 @@ uint64_t tcFixtureOwner(void){return __atomic_load_n(&ts_panel_owner,__ATOMIC_AC
 void tcFixtureContact(unsigned finger){ts_prev[finger].active=1;ts_px[finger]=12;ts_py[finger]=34;}
 void tcFixtureTokenLimit(void){ts_panel_frame=(TS_PANEL_LIMIT<<4)|SWEET_TOUCH_RUNNING;}
 void tcFixtureSessionLimit(void){ts_panel_serial=TS_PANEL_LIMIT;}
+/* The worker's own exit path: it clears availability and publishes FAILED.
+ * A consumed session never recovers, so callers may treat it as terminal. */
+void tcFixtureFail(void){
+ __atomic_store_n(&ts_panel_live,0u,__ATOMIC_RELEASE);
+ uint64_t f=__atomic_load_n(&ts_panel_frame,__ATOMIC_ACQUIRE);
+ ts_panel_publish(f,SWEET_TOUCH_FAILED);
+}
 '''
 
 def actual_worker(root):
