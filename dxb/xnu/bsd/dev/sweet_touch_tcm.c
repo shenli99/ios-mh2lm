@@ -229,6 +229,30 @@ ts_gic_rd64(unsigned off)
 void (*ts_irq_mask_fn)(void);
 void (*ts_irq_unmask_fn)(void);
 
+/*
+ * Interrupt-level ownership of the distributor bit. The facade's mask is
+ * IOService::disableInterrupt(), which walks the shared interrupt controller:
+ * IOSharedInterruptController::disableInterrupt takes controllerLock, and its
+ * dispatch path already holds that lock when a vector is soft-disabled, so the
+ * acquisition is a recursive hwlock and panics (caller ...disableInterrupt+0x4c).
+ * A line that belongs to this driver alone does not need that lock: the
+ * distributor bit is the same mask, written directly, and the worker re-arms it
+ * the same way. The facade still enables the source once, in ts_irq_arm().
+ */
+static bool ts_irq_line_owned;
+
+void
+sweet_touch_irq_own_line(void)
+{
+	ts_irq_line_owned = true;
+}
+
+void
+sweet_touch_irq_release_line(void)
+{
+	ts_irq_line_owned = false;
+}
+
 static void
 ts_irq_mask_raw(void)
 {
@@ -244,7 +268,9 @@ ts_irq_unmask_raw(void)
 static void
 ts_irq_mask(void)
 {
-	if (ts_irq_mask_fn) {
+	if (ts_irq_line_owned && ts_gicd) {
+		ts_irq_mask_raw();
+	} else if (ts_irq_mask_fn) {
 		ts_irq_mask_fn();
 	} else {
 		ts_irq_mask_raw();
@@ -254,7 +280,9 @@ ts_irq_mask(void)
 static void
 ts_irq_unmask(void)
 {
-	if (ts_irq_unmask_fn) {
+	if (ts_irq_line_owned && ts_gicd) {
+		ts_irq_unmask_raw();
+	} else if (ts_irq_unmask_fn) {
 		ts_irq_unmask_fn();
 	} else {
 		ts_irq_unmask_raw();
@@ -441,6 +469,11 @@ ts_irq_arm(void)
 	}
 	if (ts_panel_interrupted()) return false;
  __atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
+	/* The owner enables the source once so the shared controller starts
+	 * dispatching to this handler; from here the distributor bit is ours. */
+	if (ts_irq_line_owned && ts_irq_unmask_fn) {
+		ts_irq_unmask_fn();
+	}
 	ts_irq_unmask();
 	bool waited = ts_gic_wait();
 	bool enabled = (ts_gic_rd(0x100u + 4u * TS_IRQ_WORD) & TS_IRQ_BIT) != 0;

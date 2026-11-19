@@ -6,6 +6,10 @@
 
 extern "C" void (*ts_irq_mask_fn)(void);
 extern "C" void (*ts_irq_unmask_fn)(void);
+/* The worker masks and re-arms the distributor bit itself; the shared
+ * controller's disableInterrupt cannot run at interrupt level. */
+extern "C" void sweet_touch_irq_own_line(void);
+extern "C" void sweet_touch_irq_release_line(void);
 
 static SweetTouchPanel *gTouchPanel;
 
@@ -128,6 +132,9 @@ bool SweetTouchPanel::start(IOService *p)
    fIRQProvider=p;fIRQRegistered=true;
    ts_irq_mask_fn=sweet_touch_panel_mask;
    ts_irq_unmask_fn=sweet_touch_panel_unmask;
+   /* INTID 240 is this nub's own source: the worker keeps its distributor
+    * bit, because masking through the shared controller re-enters its lock. */
+   sweet_touch_irq_own_line();
    SWEET_LOG_INFO("SWEET TOUCH PANEL: GIC source registered on the ADT nub\n");
   } else {
    SWEET_LOG_ERROR("SWEET TOUCH PANEL: GIC registration failed; touch IRQ unavailable\n");
@@ -262,6 +269,7 @@ void SweetTouchPanel::stop(IOService *p)
 {
  shutdown();
  if (fIRQRegistered) {
+  sweet_touch_irq_release_line();
   if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
   if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
   if (fIRQViaTLMM) (void)tlmm_gpio_free_irq(SWEET_TOUCH_IRQ_PIN);
@@ -278,6 +286,7 @@ void SweetTouchPanel::free(void)
 {
  shutdown();
  if (fIRQRegistered) {
+  sweet_touch_irq_release_line();
   if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
   if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
   if (fIRQViaTLMM) (void)tlmm_gpio_free_irq(SWEET_TOUCH_IRQ_PIN);

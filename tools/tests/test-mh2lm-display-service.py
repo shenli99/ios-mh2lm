@@ -403,6 +403,10 @@ extern "C" int sweet_touch_panel_snapshot(uint64_t,uint64_t,struct sweet_touch_p
 extern "C" void (*ts_irq_mask_fn)(void) = nullptr;
 extern "C" void (*ts_irq_unmask_fn)(void) = nullptr;
 extern "C" void sweet_touch_irq_action(void*,void*,void*,int) {}
+/* Distributor-bit ownership handover: the facade tells the worker that its
+   own mask takes a spin lock and must not run at interrupt level. */
+extern "C" void sweet_touch_irq_own_line(void) {}
+extern "C" void sweet_touch_irq_release_line(void) {}
 #endif
 '''
 pool_fixture = r'''

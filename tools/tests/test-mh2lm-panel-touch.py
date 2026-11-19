@@ -23,10 +23,14 @@ void tcFixtureReboot();void tcFixtureOnline(unsigned);unsigned tcFixtureStep();
 void tcFixtureWait();void tcFixtureIRQWait();unsigned tcFixtureIRQState();
 uint64_t tcFixtureFrame();uint64_t tcFixtureOwner();void tcFixtureContact(unsigned);
 void tcFixtureTokenLimit();void tcFixtureSessionLimit();bool sweet_touch_irq(unsigned);
+extern void (*ts_irq_mask_fn)(void);void sweet_touch_irq_own_line(void);
+void sweet_touch_irq_release_line(void);
 }
 static constexpr uintptr_t TG=0x17a00000,TP=0x03d7a000;
 static constexpr uint32_t TB=1u<<16;
 static unsigned busReads,busWrites,ups,blocks,clears,wakes;
+static unsigned facadeMasks;
+static void facadeMask(void){++facadeMasks;}
 static bool dropMask,keepEnabled,keepPending;
 static unsigned firmwareFault,sleepScale;
 static std::deque<std::vector<uint8_t>> wire;
@@ -116,6 +120,15 @@ int main(){
  // Default service absent; metadata mode never changes worker or maps hardware.
  fixtures();assert(!sweet_touch_irq(122));assert(sweet_touch_irq(240));
  assert(tcFixtureIRQState()==2&&!(regs[TG+0x11c]&TB));
+ // Interrupt-level ownership: once the facade hands the distributor bit over,
+ // the ISR masks the line itself and never calls the provider hook -- that path
+ // is IOService::disableInterrupt, whose shared controller re-enters its own
+ // spin lock on the interrupt thread (recursive hwlock panic).
+ fixtures();sweet_touch_irq_own_line();ts_irq_mask_fn=facadeMask;facadeMasks=0;
+ assert(sweet_touch_irq(240));assert(facadeMasks==0&&!(regs[TG+0x11c]&TB)&&tcFixtureIRQState()==2);
+ fixtures();sweet_touch_irq_release_line();ts_irq_mask_fn=facadeMask;facadeMasks=0;
+ assert(sweet_touch_irq(240));assert(facadeMasks==1);
+ fixtures();ts_irq_mask_fn=nullptr;
  fixtures();touchPanelMode=0;auto*n=nub();auto*s=new SweetTouchPanel();assert(!s->start(n));s->release();dropNub(n);assert(!tcFixtureOwner()&&trace.empty());
  fixtures();touchPanelMode=1;n=nub();s=make(n);auto id=attach(s);uint64_t token=123,other=0;bool available=false;
  assert(s->copyWorkerAvailable(&available)==0&&available);

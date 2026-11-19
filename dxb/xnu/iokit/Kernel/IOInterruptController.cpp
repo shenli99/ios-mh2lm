@@ -843,11 +843,23 @@ IOSharedInterruptController::handleInterrupt(void * /*refCon*/,
 
 	// if any of the vectors are dissabled, then dissable this controller.
 	IOSimpleLockLock(controllerLock);
-	if (vectorsEnabled != vectorsRegistered) {
-		nub->disableInterrupt(0);
+	bool disableController = (vectorsEnabled != vectorsRegistered);
+	if (disableController) {
 		controllerDisabled = 1;
 	}
 	IOSimpleLockUnlock(controllerLock);
+	/*
+	 * MH2LM: the disable request leaves the lock scope. When this nub's
+	 * interrupt source points back at this controller -- which is how
+	 * registerInterrupt() fills it in -- nub->disableInterrupt(0) re-enters
+	 * IOSharedInterruptController::disableInterrupt, whose first act is
+	 * IOSimpleLockLockDisableInterrupt(controllerLock). Calling it with the
+	 * lock held makes that a recursive hwlock acquisition on the interrupt
+	 * thread, which panics.
+	 */
+	if (disableController) {
+		nub->disableInterrupt(0);
+	}
 
 	return kIOReturnSuccess;
 }
