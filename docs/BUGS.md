@@ -500,12 +500,22 @@ DSI/lifecycle，也没有任何 panic（BUG-010 的递归修复仍成立）。
 - 为什么以前的镜像没暴露：`27e7a1d1…` 从 0121a14 起就在用，脚本注释却写着
   「kernel 槽是过期 Mu blob，不是真正运行的东西」，于是把固件当填充物替换
   掉了。
+- 二进制证据：固件 blob 解压后是 3145728 字节的 FV，内部两个 FFS 文件——
+  `9AFFB503-…` DXE 驱动（a14 57272 字节 / 32m 69560 字节）与
+  `9E21FD93-…` 嵌套固件卷（962557 / 1082849 字节，LZMA 压缩）。
+  解出嵌套卷后，a14 blob 里 `MHPANEL1` 出现 1 次（正是
+  `boot-support/panel-handoff/panel_identity.h` 写的记录头），
+  `kernel-32m.blob` 里 `MHPANEL1` 出现 0 次——补丁根本不在旧固件里。
 - 修复：`out-bs/mk16k-0121b15r3.sh` 固定
   `FW_BLOB=out-bs/panel-uefi-0121a14-bootargs608/kernel-panel.blob`，断言
-  sha256 等于 `27e7a1d1…`，日志里同时打印固件哈希与长度。
+  sha256 等于 `27e7a1d1…`，并用新工具
+  `out-bs/check-firmware-panel-hook.py`（解析 FV/FFS/LZMA 嵌套卷、找
+  `MHPANEL1`）把「钩子在不在」当作比 sha 更本质的门槛；out-bs 下四个候选
+  blob 里只有 a14 与 0201-final 通过。
   `boot-16k-0121b15r3-{baseline,gpioirq}-panel-pipeline.img` 分别为
-  `a083712c…`、`7d2fbc7e…`，1987136 字节固件槽、`a9e4f371…` 设备树、
-  `e822fae6…` 内核，与 b14 镜像只差内核。
+  `b9c9ec11…`、`2f79ef12…`，1987136 字节固件槽、`a9e4f371…` 设备树、
+  `e822fae6…` 内核、605 字节 boot 参数（`sweettouchpanel=2`/`=3`），与
+  b14 镜像只差内核。
 - 验收：`SWEET PANEL: ABL selection source=2 profile=4`、
   `SWEET MDSS PIPELINE: mode7 …`、`SWEET PANEL LINEAGE`、
   `lifecycle mode=7 …`。触摸探针（`hits=?`）与电源键随本轮一起复测；固件
