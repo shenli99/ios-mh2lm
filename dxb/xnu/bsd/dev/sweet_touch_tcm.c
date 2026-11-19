@@ -116,6 +116,9 @@ static int ts_chan;
 /* 0: inactive; 1: armed; 2: worker pending; 3: failed;
  * 4: bounded GIC software-pending probe; 5: panel-coordination parked. */
 static volatile unsigned ts_irq_state, ts_irq_hits, ts_irq_probe_hits;
+/* Wakes where the controller had already dropped ATTENTION but its pad latch
+ * still held a packet: the exact case that used to be acked and thrown away. */
+static unsigned ts_irq_late;
 static vm_offset_t ts_gicd;
 static int ts_irq_chan;
 static bool ts_irq_ready;
@@ -1419,8 +1422,15 @@ ts_thread(void *arg __unused, wait_result_t wr __unused)
 		    TS_INTR_STATUS) & 1u;
 		attn_low += attn;
 		bool did_message = false, did_report = false;
-		/* Once woken by an IRQ, drain while ATTN remains low. */
-		if (attn) {
+		/* A woken worker can find ATTN already high: the controller deasserts
+		 * between the interrupt and this sample, and a fast controller does it
+		 * within the wakeup latency. The pad's latched status keeps that
+		 * evidence. Acking it without a read drops the packet, and a lost "up"
+		 * holds the contact down for good, which is what makes the UI go deaf
+		 * after one or two touches. Drain while either says data is queued. */
+		bool pending = attn || pinStatus != 0;
+		if (!attn && pinStatus) ts_irq_late++;
+		if (pending) {
 			if (tcm.version == 2) {
 				tcm.command = 0x0a;
 			}
@@ -1464,10 +1474,11 @@ ts_thread(void *arg __unused, wait_result_t wr __unused)
 		if ((++ticks % 50u) == 0u) {
 			SWEET_LOG_DEBUG("SWEET TOUCH: state reports=%u events=%u attn-low=%u i2c-errors=%u\n",
 			    reports, ts_events, attn_low, ts_i2c_errors);
-			SWEET_LOG_INFO("SWEET TOUCH IRQ: counters hits=%u empty=%u pin-status=%u attn=%u\n",
+			SWEET_LOG_INFO("SWEET TOUCH IRQ: counters hits=%u empty=%u pin-status=%u attn=%u late=%u\n",
 			    __atomic_load_n(&ts_irq_hits, __ATOMIC_ACQUIRE),
-			    ts_irq_empty, pinStatus, attn ? 1 : 0);
+			    ts_irq_empty, pinStatus, attn ? 1 : 0, ts_irq_late);
 		}
+		vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
 		if (irqState == 2u) {
 			if (!did_message && ++ts_irq_empty >= 16u) {
 				ts_irq_fail("16 empty IRQ wakeups");
@@ -1476,9 +1487,7 @@ ts_thread(void *arg __unused, wait_result_t wr __unused)
 			if (did_message) {
 				ts_irq_empty = 0;
 			}
-			vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
 			uint32_t status = ts_rd(tile, TS_INTR_STATUS);
-			ts_wr(tile, TS_INTR_STATUS, status & ~1u);
 			if (observed <= 16u || (observed & 255u) == 0) {
 				SWEET_LOG_INFO("SWEET TOUCH IRQ: hit irq=%u status=%#x attn=%u reports=%u\n",
 				    observed, status, attn ? 1 : 0, reports);
@@ -1486,8 +1495,15 @@ ts_thread(void *arg __unused, wait_result_t wr __unused)
 			__atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
 			ts_irq_unmask();
 		}
-		if ((ts_gpio_io_rd(TS_PIN_IRQ) & 1u) == 0) {
-			continue;
+		/* One ack per pass, whatever the top-half state: a latched status that
+		 * nobody clears would spin this loop. Clearing it before the re-check
+		 * makes a packet that landed in the meantime show up as a fresh latch. */
+		{
+			uint32_t status = ts_rd(tile, TS_INTR_STATUS);
+			if (status & 1u) ts_wr(tile, TS_INTR_STATUS, status & ~1u);
+			bool queued = (ts_gpio_io_rd(TS_PIN_IRQ) & 1u) == 0 ||
+			    (ts_rd(tile, TS_INTR_STATUS) & 1u) != 0;
+			if (queued) continue;
 		}
 		ts_irq_wait(observed);
 	}

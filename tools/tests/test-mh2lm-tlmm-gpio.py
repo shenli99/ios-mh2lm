@@ -377,22 +377,37 @@ static void interruptCases(void) {
     assert(gProvider.lineEnabled);
 
     /* (5) Deferred bottom half: the handler keeps the line, the worker's
-     *     resume releases it. */
+     *     resume releases it. The pad status must survive for the worker: it
+     *     is the only evidence that a packet is queued once the controller
+     *     deasserts ATTENTION before the worker samples the pin. */
     gIrqDefer = true;
     setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     runSummaryAction();
     assert(gIrqHits == 2);
     assert(!gProvider.lineEnabled);
+    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) ==
+        TLMM_INTR_STATUS_RAW);
     assert(tlmm_gpio_irq_resume(122) == TLMM_GPIO_OK);
     assert(gProvider.lineEnabled);
+    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) ==
+        TLMM_INTR_STATUS_RAW);      /* the client acks its own pad */
+    setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, 0);
     gIrqDefer = false;
 
     /* (6) Two pads on the same line: the deferred pad keeps it masked until
-     *     the second one resumes, and each handler sees its own pin. */
+     *     the second one resumes, and each handler sees its own pin. A pad that
+     *     never resumed stays client-masked: its status is not dispatched. */
     setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_CFG, 0);
     assert(on.requestPinIRQ(100, TLMM_IRQ_EDGE_RISING, irqHandler, nullptr) ==
         kIOReturnSuccess);
     gIrqDefer = true;
+    setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
+    runSummaryAction();
+    assert(gIrqHits == 2);              /* the never-armed pad stays quiet */
+    assert(tileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS) ==
+        TLMM_INTR_STATUS_RAW);
+    assert(on.resumePinIRQ(100) == kIOReturnSuccess);
+    assert(gProvider.lineEnabled);
     setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     runSummaryAction();

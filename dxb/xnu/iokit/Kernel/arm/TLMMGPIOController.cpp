@@ -1267,12 +1267,34 @@ TLMMGPIOController::dispatchSummary(void)
 		if (!(status & TLMM_INTR_STATUS_RAW)) {
 			continue;
 		}
-		/* Ack before the handler: a level pad that stays asserted must
-		 * re-arm the line through a second dispatch, not through a
-		 * status bit nobody cleared. */
-		writeIntrStatus(pins[i], status & ~TLMM_INTR_STATUS_RAW);
+		/* A client-masked pad is quiet: its latched status belongs to the
+		 * worker that owns it, and one packet must not run the handler twice.
+		 * The summary itself is already masked, so this costs no interrupt. */
+		bool masked;
+		saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+		masked = ((fIrqClientMask >> i) & 1u) != 0;
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+		if (masked) {
+			continue;
+		}
 		served++;
 		handlers[i](pins[i], refcons[i]);
+		/* The client owns this pad's status, not the summary. A handler that
+		 * deferred to its own worker (it masked the pad) needs the latch as
+		 * the only surviving evidence that a packet is queued: clearing it
+		 * here loses the packet whenever the controller deasserts ATTENTION
+		 * before the worker samples the pin. Only a handler that kept no
+		 * claim (no client mask) lets the controller ack for it. */
+		bool deferred;
+		saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+		deferred = ((fIrqClientMask >> i) & 1u) != 0; /* snapshot index == slot */
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+		if (!deferred) {
+			uint32_t after = readIntrStatus(pins[i]);
+			if (after & TLMM_INTR_STATUS_RAW) {
+				writeIntrStatus(pins[i], after & ~TLMM_INTR_STATUS_RAW);
+			}
+		}
 	}
 
 	fIrqDispatches++;
