@@ -750,6 +750,12 @@ int main(void) {
 
 
 def main():
+    shipped = (Path(__file__).parent.parent.parent /
+               'dxb/xnu/iokit/Kernel/arm/TLMMGPIOController.cpp').read_text()
+    # The host fixture defines VM_WIMG_IO itself, so a source that forgot the
+    # kernel header compiled here and failed on CI. Check the include instead.
+    assert '#include <vm/memory_types.h>' in shipped
+    assert '#include <machine/machine_routines.h>' in shipped
     source = (PRELUDE +
               'extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned);\n' +
               strip_includes(HEADER_C) + strip_includes(HEADER_CPP) +

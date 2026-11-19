@@ -27,6 +27,10 @@
 #include "TLMMGPIOController.h"
 #include <IOKit/IOLib.h>
 #include <libkern/libkern.h>
+/* Distributor mapping: VM_WIMG_IO and ml_io_map_unmappable(), the same two
+ * headers the SPMI mux includes for its own GICD map. */
+#include <vm/memory_types.h>
+#include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 #define SWEET_LOG_SINK IOLog
 #include "../../../bsd/dev/sweet_log_level.h"
