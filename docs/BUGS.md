@@ -629,3 +629,35 @@ pad 共用的 summary 线**，关掉它会掐掉别的 pad——正确的「我�
   `TLMMGPIOController`。剩下的手工 `TS_INTR_CFG` 读写应当在后续把
   pad 的 enable/ack 全部交给 `tlmm_gpio_irq_mask/resume` 后再删掉。
 
+## BUG-015：mode 3 把 pad 的「有数据」证据提前消掉，丢包后触点卡在按下状态
+
+`0121b17 gpioirq` 能进桌面、触摸能工作，但「进桌面或亮屏后正常一两次触摸
+就失灵」，而且滑动明显变卡。日志 `logs/sweetlog-0121b17.txt` 里没有
+`FAILED`、没有 `empty`、`hits` 一路涨到 399、`reports` 到 451，最后一条
+HID 是 `touch 0 down at 310,213` **没有配对的 up**——触点一直按着，UI 之后
+的所有触摸都被当成同一按下处理，表现就是“死了”。
+
+- 触发条件：mode 2 下判据是 `attn`（实时引脚）为低；worker 被唤醒要经过
+  调度，等它跑起来时控制器可能已经把 ATTENTION 拉高（一两个包就拉高是
+  正常的），于是 `if (attn)` 整段被跳过，**包没读就被 ack 掉了**。
+- 为什么 mode 3 更严重：`TLMMGPIOController::dispatchSummary()` 在调用
+  handler **之前**就把 pad 的 `INTR_STATUS` ack 掉了（原注释说“让 level
+  pad 通过第二次 dispatch 重新武装”）。于是进入 handler 时，mode 2 里还能
+  靠 status 锁存保住的那点证据也没了，worker 只剩“实时引脚”一个判据；
+  一次丢包 = 一次 up 丢失 = 触点永久按下。mode 2 稍好是因为 status 锁存还
+  在，但同一条竞态一样存在。
+- 修复一（TLMM，所有权归位）：`dispatchSummary()` 不再先 ack。先调用
+  handler；如果该 pad 在此刻被 client 置了掩码（“deferred”，worker 还没
+  读完），**保留 status 不动**——那是“有包待读”的唯一证据；只有 handler
+  没有留下任何 claim 时，控制器才替它 ack。另外，client-masked 的 pad
+  直接跳过，一个包不会让 handler 跑第二次。
+- 修复二（worker，判据换成锁存）：`pending = attn || pinStatus != 0`，
+  循环尾也用「引脚低 **或** status 置位」作为继续排空的判据，并在每轮
+  末尾统一 ack（否则一个没人清的锁存位会把循环转死）。
+- 诊断：counters 行新增 `late=`，统计「被唤醒时引脚已高、但锁存位还在」
+  的次数——正是以前会丢包的那一类。下一次日志能直接说明修复是否在救场。
+- 单测：`test-mh2lm-tlmm-gpio.py` 的 deferred 用例改为断言 pad status
+  在 dispatch 后仍然保留、并且由 client 自己 ack；新增「从未 resume 的
+  pad 即使 status 置位也不派发」。`panel-touch`/`display-service`/
+  `panel-lifecycle` 全绿，CI marker 151/151。
+
