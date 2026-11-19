@@ -26,6 +26,7 @@ struct SweetTouchPanelStatus {
 static inline bool sweetTouchPanelNative(int mode)
 { return mode==2 || mode==3; }
 
+class AGPIO;
 class SweetTouchPanel : public IOService {
  OSDeclareDefaultStructors(SweetTouchPanel);
  IOWorkLoop *fLoop;
@@ -33,6 +34,9 @@ class SweetTouchPanel : public IOService {
  IOTimerEventSource *fTimer;
  bool fGateAdded, fTimerAdded, fAccepting, fBusy, fTouched, fPoisoned;
  IOService *fIRQProvider;
+ /* Pad path: the exclusive handle that owns gpio122, including its
+  * interrupt enable bit and status latch. NULL on the nub path. */
+ AGPIO *fIRQPin;
  bool fIRQRegistered;
  /* INTID 240 is the TLMM summary line. When the controller owns it the
   * interrupt is requested per pad and no GIC source touches this nub. */
@@ -56,6 +60,8 @@ public:
  /* GIC line ownership; called by the worker's C hooks. */
  void irqMask(void);
  void irqUnmask(void);
+ /* Pad path only: the handle owns this pad's status latch. */
+ void irqAck(void);
  IOReturn attachConsumer(uint64_t *);
  IOReturn detachConsumer(uint64_t);
  IOReturn copyWorkerAvailable(bool *);

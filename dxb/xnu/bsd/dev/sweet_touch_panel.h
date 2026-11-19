@@ -22,6 +22,11 @@ struct sweet_touch_panel_status { uint64_t token; unsigned state, available; };
  * the worker keeps the legacy raw GICD path.
  */
 void sweet_touch_irq_action(void *target, void *refCon, void *nub, int source);
+/* Pad path: the facade installs mask/unmask/ack so the worker never writes a
+ * pad register it does not own. NULL keeps the legacy raw distributor path. */
+extern void (*ts_irq_mask_fn)(void);
+extern void (*ts_irq_unmask_fn)(void);
+extern void (*ts_irq_ack_fn)(void);
 /* ATTN pad: the touch interrupt is a TLMM pad, not a direct-connect GIC line.
  * The pad number lives here so the worker and the IOService cannot drift. */
 #define SWEET_TOUCH_IRQ_PIN 122u

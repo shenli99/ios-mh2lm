@@ -3,6 +3,7 @@
 /* Pad-interrupt API; the mask/unmask helpers below are defined before the rest
  * of the includes, so it has to come first. */
 #include <pexpert/arm64/tlmm_gpio.h>
+#include "TLMMGPIOController.h"
 
 extern "C" void (*ts_irq_mask_fn)(void);
 extern "C" void (*ts_irq_unmask_fn)(void);
@@ -42,6 +43,14 @@ sweet_touch_panel_unmask(void)
 	}
 }
 
+static void
+sweet_touch_panel_ack(void)
+{
+	if (gTouchPanel) {
+		gTouchPanel->irqAck();
+	}
+}
+
 /*
  * Mask/unmask always go through whoever owns INTID 240. With the pad path the
  * controller already masked the line for the dispatch; these calls only keep it
@@ -51,8 +60,10 @@ sweet_touch_panel_unmask(void)
 void
 SweetTouchPanel::irqMask(void)
 {
-	if (fIRQViaTLMM) {
-		(void) tlmm_gpio_irq_mask(SWEET_TOUCH_IRQ_PIN);
+	/* Pad path: the handle owns the pad's interrupt enable bit, so masking
+	 * cannot name a pin this object does not hold. */
+	if (fIRQViaTLMM && fIRQPin) {
+		(void) fIRQPin->maskInterrupt();
 	} else if (fIRQProvider) {
 		(void) fIRQProvider->disableInterrupt(0);
 	}
@@ -61,10 +72,18 @@ SweetTouchPanel::irqMask(void)
 void
 SweetTouchPanel::irqUnmask(void)
 {
-	if (fIRQViaTLMM) {
-		(void) tlmm_gpio_irq_resume(SWEET_TOUCH_IRQ_PIN);
+	if (fIRQViaTLMM && fIRQPin) {
+		(void) fIRQPin->resumeInterrupt();
 	} else if (fIRQProvider) {
 		(void) fIRQProvider->enableInterrupt(0);
+	}
+}
+
+void
+SweetTouchPanel::irqAck(void)
+{
+	if (fIRQViaTLMM && fIRQPin) {
+		(void) fIRQPin->ackInterrupt();
 	}
 }
 #include <IOKit/IOLib.h>
@@ -122,14 +141,19 @@ bool SweetTouchPanel::start(IOService *p)
   * Without sweetgpioirq=1 the request is unsupported and the proven nub path
   * below stays in charge.
   */
- if (fMode==3 && tlmm_gpio_request_irq(SWEET_TOUCH_IRQ_PIN, TLMM_IRQ_LEVEL_LOW,
-     sweet_touch_tlmm_irq, this)==TLMM_GPIO_OK) {
+ TLMMGPIOController *pinController = TLMMGPIOController::getController();
+ if (fMode==3 && pinController &&
+     (fIRQPin=pinController->acquirePin(SWEET_TOUCH_IRQ_PIN,
+      "sweet-touch-attention"))!=NULL &&
+     fIRQPin->setInterrupt(TLMM_IRQ_LEVEL_LOW, sweet_touch_tlmm_irq,
+      this)==kIOReturnSuccess) {
   fIRQViaTLMM=true;fIRQRegistered=true;
   /* The summary SPI belongs to the pin controller; this facade owns the pad. */
   sweet_touch_irq_delegate_line(1);
   ts_irq_mask_fn=sweet_touch_panel_mask;
   ts_irq_unmask_fn=sweet_touch_panel_unmask;
-  SWEET_LOG_INFO("SWEET TOUCH PANEL: ATTENTION pad gpio%u delegated to the TLMM summary line; no GIC source on the nub\n",SWEET_TOUCH_IRQ_PIN);
+  ts_irq_ack_fn=sweet_touch_panel_ack;
+  SWEET_LOG_INFO("SWEET TOUCH PANEL: ATTENTION pad gpio%u claimed through its AGPIO handle and delegated to the TLMM summary line; no GIC source on the nub\n",SWEET_TOUCH_IRQ_PIN);
  } else if (p->propertyExists("IOInterruptSpecifiers")) {
   if (p->registerInterrupt(0, NULL, (IOInterruptAction)sweet_touch_irq_action, NULL)==kIOReturnSuccess) {
    fIRQProvider=p;fIRQRegistered=true;
@@ -145,6 +169,9 @@ bool SweetTouchPanel::start(IOService *p)
  } else {
   SWEET_LOG_ERROR("SWEET TOUCH PANEL: ADT node has no interrupt specifier; touch IRQ unavailable\n");
  }
+ /* A pad handle that did not end up owning the interrupt must go back: the
+  * nub path above and the pad path are exclusive, never both. */
+ if (!fIRQViaTLMM && fIRQPin) { fIRQPin->put(); fIRQPin=NULL; }
  setProperty("SweetTouchPanelABI",1ULL,32);
  setProperty("SweetTouchPanelWritesEnabled",sweetTouchPanelNative(mode));
  SWEET_LOG_INFO("SWEET TOUCH PANEL: native binding mode=%u; sole legacy worker retained, no automatic pause/resume\n",fMode);
@@ -288,7 +315,11 @@ void SweetTouchPanel::stop(IOService *p)
   sweet_touch_irq_release_line();
   if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
   if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
-  if (fIRQViaTLMM) { sweet_touch_irq_delegate_line(0); (void)tlmm_gpio_free_irq(SWEET_TOUCH_IRQ_PIN); }
+  if (fIRQViaTLMM) {
+   sweet_touch_irq_delegate_line(0);
+   if (ts_irq_ack_fn==sweet_touch_panel_ack) ts_irq_ack_fn=NULL;
+   if (fIRQPin) { (void)fIRQPin->disableInterrupt(); fIRQPin->put(); fIRQPin=NULL; }
+  }
   else if (fIRQProvider) {
    (void)fIRQProvider->disableInterrupt(0);
    (void)fIRQProvider->unregisterInterrupt(0);
@@ -305,7 +336,11 @@ void SweetTouchPanel::free(void)
   sweet_touch_irq_release_line();
   if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
   if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
-  if (fIRQViaTLMM) { sweet_touch_irq_delegate_line(0); (void)tlmm_gpio_free_irq(SWEET_TOUCH_IRQ_PIN); }
+  if (fIRQViaTLMM) {
+   sweet_touch_irq_delegate_line(0);
+   if (ts_irq_ack_fn==sweet_touch_panel_ack) ts_irq_ack_fn=NULL;
+   if (fIRQPin) { (void)fIRQPin->disableInterrupt(); fIRQPin->put(); fIRQPin=NULL; }
+  }
   else if (fIRQProvider) {
    (void)fIRQProvider->disableInterrupt(0);
    (void)fIRQProvider->unregisterInterrupt(0);

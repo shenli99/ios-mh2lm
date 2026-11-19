@@ -79,6 +79,25 @@ public:
 	IOReturn getConfig(struct tlmm_pin_config *config);
 
 	/*
+	 * Pad interrupt. Only the handle that owns the pad may claim one: the
+	 * interrupt lives in that pad's INTR_CFG/INTR_STATUS and its enable bit,
+	 * while the controller owns the summary SPI every pad shares. There is
+	 * no pin-number entry point any more, so "an interrupt needs the pad"
+	 * is a type-level rule rather than a convention.
+	 */
+	IOReturn setInterrupt(unsigned int detect, tlmm_gpio_irq_handler handler,
+	    void *refcon);
+	IOReturn disableInterrupt(void);
+
+	/* Interrupt-context safe. mask clears this pad's enable bit, so the
+	 * shared summary deasserts without touching any other pad; resume acks
+	 * the stale status and re-arms; ack clears the pad status latch. */
+	IOReturn maskInterrupt(void);
+	IOReturn resumeInterrupt(void);
+	IOReturn ackInterrupt(void);
+	bool interruptEnabled(void) const;
+
+	/*
 	 * Return the pin to the controller. Idempotent: a released handle keeps
 	 * failing every operation and frees itself normally.
 	 *
@@ -193,13 +212,19 @@ public:
 	 * never names INTID 240 and never programs GIC registers. See
 	 * tlmm_gpio.h for the C API and the mask/resume contract.
 	 */
-	IOReturn requestPinIRQ(unsigned int pin, unsigned int detect,
+	/* Both take the handle that owns the pad: the pad's interrupt
+	 * registers belong to that handle, and there is no pin-number form. */
+	IOReturn requestPinIRQ(AGPIO *owner, unsigned int detect,
 	    tlmm_gpio_irq_handler handler, void *refcon);
+	IOReturn releasePinIRQ(AGPIO *owner);
+	/* Teardown helper: releases by pin once the handle is going away. */
 	IOReturn freePinIRQ(unsigned int pin);
 	/* Interrupt-context safe. mask keeps the line for this pad; resume
 	 * releases it once no registered pad holds it. */
 	IOReturn maskPinIRQ(unsigned int pin);
 	IOReturn resumePinIRQ(unsigned int pin);
+	IOReturn ackPinIRQ(unsigned int pin);
+	bool pinIRQEnabled(unsigned int pin) const;
 	bool summaryClaimed(void) const { return fIrqClaimed; }
 	/* Interrupt action: dispatched by the GIC for the summary line. Public
 	 * because the action thunk has no friendship with this class. */
@@ -216,12 +241,18 @@ private:
 	bool claimSummary(void);
 	void releaseSummary(void);
 	void setSummaryMasked(bool masked);
+	/* The summary line is this controller's own SPI; toggling it needs two
+	 * distributor writes, not a provider round-trip with its RWP waits. */
+	bool mapDistributor(void);
+	void maskSummaryLine(void);
+	void unmaskSummaryLine(void);
 	uint32_t readIntrStatus(unsigned int pin) const;
 	void writeIntrStatus(unsigned int pin, uint32_t value);
 	int irqSlotForPin(unsigned int pin) const;
 
 	IOMemoryMap *fMaps[TLMM_TILE_COUNT];
 	vm_offset_t fTiles[TLMM_TILE_COUNT];
+	volatile uint32_t *fGicd;
 	IOLock *fLock;
 	unsigned int fPinCount;
 	TLMMPinState fPins[TLMM_PIN_MAX];

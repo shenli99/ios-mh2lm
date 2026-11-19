@@ -123,7 +123,7 @@ extern "C" {
  * summary line, demultiplexes it against each registered pad's INTR_STATUS and
  * masks it for the duration of a dispatch; a client that needs the line to
  * stay masked after its top half (deferred work, like the touch worker) calls
- * tlmm_gpio_irq_mask() and later tlmm_gpio_irq_resume().
+ * AGPIO::maskInterrupt() and later AGPIO::resumeInterrupt().
  *
  * Routing bits (target KPSS, raw status) belong to the controller: they are
  * what makes the pad visible on the summary line at all. Polarity, detect and
@@ -191,17 +191,15 @@ extern "C" {
 
 typedef void (*tlmm_gpio_irq_handler)(unsigned int pin, void *refcon);
 
-/* 0 on success, otherwise -errno. */
-int tlmm_gpio_request_irq(unsigned int pin, unsigned int detect,
-    tlmm_gpio_irq_handler handler, void *refcon);
-int tlmm_gpio_free_irq(unsigned int pin);
-/* Interrupt-context safe: keeps the summary line masked for this pad. */
-int tlmm_gpio_irq_mask(unsigned int pin);
-/* Bottom half: clears this pad's mask and releases the line once no pad holds
- * it. Bounded, nonblocking, safe from a workloop thread. */
-int tlmm_gpio_irq_resume(unsigned int pin);
-/* 1 once the controller owns the summary line, 0 otherwise. */
-int tlmm_gpio_irq_claimed(void);
+/*
+ * There is no pin-number entry point on purpose. A pad interrupt lives in the
+ * pad's INTR_CFG/INTR_STATUS and its enable bit, so it is claimed through the
+ * AGPIO that owns the pad (TLMMGPIOController.h: setInterrupt(), maskInterrupt(),
+ * resumeInterrupt(), ackInterrupt(), disableInterrupt()). That makes "an
+ * interrupt needs the pad" a type-level rule instead of a convention, and it
+ * leaves exactly one writer for each register: the handle for the pad, the
+ * controller for the shared summary SPI.
+ */
 
 /* 0 on success, otherwise -errno. */
 #define TLMM_GPIO_OK                0

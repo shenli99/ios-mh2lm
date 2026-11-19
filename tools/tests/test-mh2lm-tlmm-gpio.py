@@ -54,6 +54,8 @@ PRELUDE = r'''
 #define OSDynamicCast(t, p) dynamic_cast<t *>(p)
 
 using vm_offset_t = uintptr_t;
+using vm_size_t = size_t;
+#define VM_WIMG_IO 7u
 using IOPhysicalAddress = uintptr_t;
 using IOReturn = int;
 constexpr int kIOReturnSuccess = 0;
@@ -166,7 +168,6 @@ struct IOService : OSObject {
         interruptAction = (void *)action;
         interruptTarget = target;
         ++registerCount;
-        lineEnabled = true;
         return kIOReturnSuccess;
     }
     int unregisterInterrupt(int source) {
@@ -185,7 +186,6 @@ struct IOService : OSObject {
     int enableInterrupt(int source) {
         (void)source;
         ++enableCount;
-        lineEnabled = true;
         return kIOReturnSuccess;
     }
 };
@@ -220,6 +220,23 @@ static IOService gProvider;
 static const uintptr_t kTilePhys[4] = {
     0x03100000, 0x03500000, 0x03900000, 0x03d00000
 };
+
+/* The controller owns the summary SPI now: it toggles the distributor bit
+ * itself instead of a provider round-trip per packet. The fixture models the
+ * two W1S registers the way a real distributor reads back. */
+static std::vector<uint8_t> gGicd;
+extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t physical, vm_size_t size,
+    unsigned flags) {
+    (void)flags;
+    if (physical != 0x17a00000) { return 0; }
+    gGicd.assign(size, 0);
+    return (vm_offset_t)gGicd.data();
+}
+static uint32_t gicdWord(uint32_t off) {
+    return gGicd.empty() ? 0 : *(volatile uint32_t *)(gGicd.data() + off);
+}
+static bool gicdLineEnabled() { return (gicdWord(0x11c) & (1u << 16)) != 0; }
+static bool gicdLineMasked() { return (gicdWord(0x19c) & (1u << 16)) != 0; }
 
 static uint32_t tileReg(unsigned tile, unsigned pin, uint32_t offset) {
     return *(volatile uint32_t *)(gTiles[tile].data() + pin * 0x1000 + offset);
@@ -284,12 +301,17 @@ static unsigned gIrqHits = 0;
 static unsigned gIrqLastPin = 999;
 static bool gIrqDefer = false;
 
+static AGPIO *gIrqPins[200];
+
 static void irqHandler(unsigned int pin, void *refcon) {
     (void)refcon;
     ++gIrqHits;
     gIrqLastPin = pin;
     if (gIrqDefer) {
-        assert(tlmm_gpio_irq_mask(pin) == TLMM_GPIO_OK);
+        /* The handler masks through the handle it belongs to, never by pin. */
+        AGPIO *handle = pin < 200 ? gIrqPins[pin] : nullptr;
+        assert(handle && handle->getPin() == pin);
+        assert(handle->maskInterrupt() == kIOReturnSuccess);
     }
 }
 
@@ -328,17 +350,24 @@ static void runSummaryAction() {
 static void interruptCases(void) {
     /* (1) No interrupt specifier on the ADT node: the claim fails and the
      *     controller leaves the GIC alone, so the caller keeps its path. */
+    resetProvider();
     bringUp();
     TLMMGPIOController off;
     assert(off.init());
     assert(off.start(&gProvider));
-    assert(off.requestPinIRQ(122, TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
-        kIOReturnNoResources);
-    assert(!gProvider.registered);
-    assert(tlmm_gpio_irq_claimed() == 0);
+    {
+        AGPIO *pin = off.acquirePin(122, "irq-test");
+        assert(pin);
+        assert(pin->setInterrupt(TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
+            kIOReturnNoResources);
+        assert(!off.summaryClaimed());
+        assert(!gProvider.registered);
+        pin->put();
+    }
     off.stop(&gProvider);
 
-    /* (2) Opted in: one claim, line masked until a pad is armed. */
+    /* (2) Opted in: one claim, line masked until a pad is armed. The pad is
+     *     claimed through its handle: no pin-number entry point exists. */
     resetProvider();
     bringUp();
     addSpecifier();
@@ -350,55 +379,61 @@ static void interruptCases(void) {
     setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_CFG, 0);
     gIrqHits = 0;
     gIrqDefer = false;
-    assert(on.requestPinIRQ(122, TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
+    AGPIO *pin = on.acquirePin(122, "irq-test");
+    assert(pin);
+    gIrqPins[122] = pin;
+    assert(pin->setInterrupt(TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
         kIOReturnSuccess);
     assert(on.summaryClaimed());
     assert(gProvider.registerCount == 1 && gProvider.registered);
     assert(gProvider.registeredSource == 0);
-    assert(!gProvider.lineEnabled);        /* masked at claim */
+    assert(!gicdLineEnabled() && gicdLineMasked());  /* masked at claim */
     assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_CFG) ==
         TLMM_INTR_ROUTE_TARGET | TLMM_INTR_ROUTE_RAW);
+    assert(!pin->interruptEnabled());
 
-    /* (3) The client arms the pad and resumes: the line is released. Then
-     *     dispatch runs only asserting pads, acks status, and releases the
-     *     line again because the handler did not defer. */
-    assert(tlmm_gpio_irq_resume(122) == TLMM_GPIO_OK);
-    assert(gProvider.lineEnabled);
+    /* (3) The handle arms the pad: the distributor bit is released, and the
+     *     alias with the provider is over -- one enable at claim, none after. */
+    assert(pin->resumeInterrupt() == kIOReturnSuccess);
+    assert(gicdLineEnabled() && !gicdLineMasked());
+    assert(pin->interruptEnabled());
+    assert(gProvider.enableCount == 1);
     setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     runSummaryAction();
     assert(gIrqHits == 1 && gIrqLastPin == 122);
     assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) == 0);
-    assert(gProvider.lineEnabled);
+    assert(gicdLineEnabled());
+    assert(gProvider.enableCount == 1 && gProvider.disableCount == 0);
 
     /* (4) A pad with no status must not call its handler. */
     runSummaryAction();
     assert(gIrqHits == 1);
-    /* Stray summary: counted, no handler, line released. */
-    assert(gProvider.lineEnabled);
+    assert(gicdLineEnabled());
 
-    /* (5) Deferred bottom half: the handler keeps the line, the worker's
-     *     resume releases it. The pad status must survive for the worker: it
-     *     is the only evidence that a packet is queued once the controller
-     *     deasserts ATTENTION before the worker samples the pin. */
+    /* (5) Deferred bottom half: the handler masks through its own handle and
+     *     the pad status survives for the worker that will read it. */
     gIrqDefer = true;
     setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     runSummaryAction();
     assert(gIrqHits == 2);
-    assert(!gProvider.lineEnabled);
+    assert(!gicdLineEnabled());
+    assert(!pin->interruptEnabled());
     assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) ==
         TLMM_INTR_STATUS_RAW);
-    assert(tlmm_gpio_irq_resume(122) == TLMM_GPIO_OK);
-    assert(gProvider.lineEnabled);
-    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) ==
-        TLMM_INTR_STATUS_RAW);      /* the client acks its own pad */
-    setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, 0);
+    assert(pin->resumeInterrupt() == kIOReturnSuccess);
+    assert(gicdLineEnabled() && pin->interruptEnabled());
+    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) == 0);
+          /* resume acks the stale latch before re-arming */
     gIrqDefer = false;
 
     /* (6) Two pads on the same line: the deferred pad keeps it masked until
-     *     the second one resumes, and each handler sees its own pin. A pad that
-     *     never resumed stays client-masked: its status is not dispatched. */
+     *     the second one resumes. A pad that never armed stays quiet: its
+     *     status is not dispatched while its owner holds the mask. */
     setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_CFG, 0);
-    assert(on.requestPinIRQ(100, TLMM_IRQ_EDGE_RISING, irqHandler, nullptr) ==
+    AGPIO *pin100 = on.acquirePin(100, "irq-test-100");
+    assert(pin100);
+    gIrqPins[100] = pin100;
+    assert(pin100->setInterrupt(TLMM_IRQ_EDGE_RISING, irqHandler, nullptr) ==
         kIOReturnSuccess);
     gIrqDefer = true;
     setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
@@ -406,32 +441,37 @@ static void interruptCases(void) {
     assert(gIrqHits == 2);              /* the never-armed pad stays quiet */
     assert(tileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS) ==
         TLMM_INTR_STATUS_RAW);
-    assert(on.resumePinIRQ(100) == kIOReturnSuccess);
-    assert(gProvider.lineEnabled);
+    assert(pin100->resumeInterrupt() == kIOReturnSuccess);
+    assert(gicdLineEnabled());
     setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     runSummaryAction();
     assert(gIrqHits == 4);              /* both pads ran */
-    assert(!gProvider.lineEnabled);     /* both deferred */
-    assert(tlmm_gpio_irq_resume(122) == TLMM_GPIO_OK);
-    assert(!gProvider.lineEnabled);     /* pad 100 still holds the line */
-    assert(tlmm_gpio_irq_resume(100) == TLMM_GPIO_OK);
-    assert(gProvider.lineEnabled);
+    assert(!gicdLineEnabled());         /* both deferred */
+    assert(pin->resumeInterrupt() == kIOReturnSuccess);
+    assert(!gicdLineEnabled());         /* pad 100 still holds the line */
+    assert(pin100->resumeInterrupt() == kIOReturnSuccess);
+    assert(gicdLineEnabled());
     gIrqDefer = false;
 
-    /* (7) Ownership rules: a held pad, a read-only pad and a second request
-     *     on the same pad are all refused; free releases the line. */
-    assert(on.requestPinIRQ(122, TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
-        kIOReturnBusy);
-    assert(on.requestPinIRQ(96, TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
-        kIOReturnSuccess);
-    assert(tlmm_gpio_free_irq(96) == TLMM_GPIO_OK);
-    /* A pad cannot be both a handle and an interrupt owner. */
+    /* (7) Ownership rules: a held pad and a second request on the same pad are
+     *     refused, and the interrupt dies with its handle. */
     assert(on.acquirePin(122, "test") == nullptr);
+    assert(on.requestPinIRQ(nullptr, TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
+        kIOReturnBadArgument);
+    AGPIO *pin96 = on.acquirePin(96, "irq-test-96");
+    assert(pin96);
+    assert(pin96->setInterrupt(TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
+        kIOReturnSuccess);
+    assert(pin96->disableInterrupt() == kIOReturnSuccess);
+    pin96->put();
     assert(on.maskPinIRQ(7) == kIOReturnNotFound);
 
-    assert(on.freePinIRQ(122) == kIOReturnSuccess);
-    assert(on.freePinIRQ(100) == kIOReturnSuccess);
+    assert(pin->disableInterrupt() == kIOReturnSuccess);
+    pin->put();
+    assert(pin100->disableInterrupt() == kIOReturnSuccess);
+    pin100->put();
+    gIrqPins[122] = gIrqPins[100] = nullptr;
     assert(!gProvider.registered);      /* last free released the summary */
     assert(gProvider.unregisterCount == 1);
     on.stop(&gProvider);
@@ -710,7 +750,9 @@ int main(void) {
 
 
 def main():
-    source = (PRELUDE + strip_includes(HEADER_C) + strip_includes(HEADER_CPP) +
+    source = (PRELUDE +
+              'extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned);\n' +
+              strip_includes(HEADER_C) + strip_includes(HEADER_CPP) +
               strip_barriers(strip_includes(SOURCE)) + FIXTURE)
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / 'test.cpp'

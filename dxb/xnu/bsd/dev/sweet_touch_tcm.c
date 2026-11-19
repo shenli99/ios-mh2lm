@@ -231,6 +231,7 @@ ts_gic_rd64(unsigned off)
  */
 void (*ts_irq_mask_fn)(void);
 void (*ts_irq_unmask_fn)(void);
+void (*ts_irq_ack_fn)(void);
 
 /*
  * Interrupt-level ownership of the distributor bit. The facade's mask is
@@ -319,6 +320,27 @@ ts_irq_unmask(void)
 		ts_irq_unmask_fn();
 	} else {
 		ts_irq_unmask_raw();
+	}
+}
+
+/*
+ * Clear the ATTENTION pad's status latch. In the pad path the handle that owns
+ * the pad acks it; the worker must not write INTR_STATUS directly then, because
+ * the controller leaves that latch for the owner on purpose.
+ */
+static void
+ts_irq_ack_pad(void)
+{
+	if (ts_irq_line_delegated && ts_irq_ack_fn) {
+		ts_irq_ack_fn();
+		return;
+	}
+	{
+		vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
+		uint32_t status = ts_rd(tile, TS_INTR_STATUS);
+		if (status & 1u) {
+			ts_wr(tile, TS_INTR_STATUS, status & ~1u);
+		}
 	}
 }
 
@@ -440,7 +462,12 @@ sweet_touch_irq(unsigned int intid)
   * before QUIESCED was published; a late callback cannot unpark the worker. */
  if (expected == 5u) return true;
  if (expected == 2u || expected == 3u) {
-		ts_gic_wr(0x180u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+		/* A delegated run has no distributor bit of its own: the pad mask
+		 * above already quiets this pad, and ICENABLER here would silently
+		 * disable the shared summary line behind its owner's back. */
+		if (!ts_irq_line_delegated) {
+			ts_gic_wr(0x180u + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+		}
 		return true;
 	}
 	return false;
@@ -1499,8 +1526,7 @@ ts_thread(void *arg __unused, wait_result_t wr __unused)
 		 * nobody clears would spin this loop. Clearing it before the re-check
 		 * makes a packet that landed in the meantime show up as a fresh latch. */
 		{
-			uint32_t status = ts_rd(tile, TS_INTR_STATUS);
-			if (status & 1u) ts_wr(tile, TS_INTR_STATUS, status & ~1u);
+			ts_irq_ack_pad();
 			bool queued = (ts_gpio_io_rd(TS_PIN_IRQ) & 1u) == 0 ||
 			    (ts_rd(tile, TS_INTR_STATUS) & 1u) != 0;
 			if (queued) continue;

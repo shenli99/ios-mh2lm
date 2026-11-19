@@ -158,6 +158,64 @@ AGPIO::readIntrCfg(void) const
 	return value;
 }
 
+/* INTID of the TLMM summary SPI: hardware SPI 208 on this SoC. */
+#define TLMM_GICD_PA        0x17a00000u
+#define TLMM_GICD_SIZE      0x10000u
+#define TLMM_IRQ_WORD(id)   (4u * ((id) / 32u))
+#define TLMM_IRQ_BIT(id)    (1u << ((id) % 32u))
+
+IOReturn
+AGPIO::setInterrupt(unsigned int detect, tlmm_gpio_irq_handler handler,
+    void *refcon)
+{
+	if (!fValid || !fController) {
+		return kIOReturnNotOpen;
+	}
+	return fController->requestPinIRQ(this, detect, handler, refcon);
+}
+
+IOReturn
+AGPIO::disableInterrupt(void)
+{
+	if (!fValid || !fController) {
+		return kIOReturnNotOpen;
+	}
+	return fController->releasePinIRQ(this);
+}
+
+IOReturn
+AGPIO::maskInterrupt(void)
+{
+	if (!fValid || !fController) {
+		return kIOReturnNotOpen;
+	}
+	return fController->maskPinIRQ(fPin);
+}
+
+IOReturn
+AGPIO::resumeInterrupt(void)
+{
+	if (!fValid || !fController) {
+		return kIOReturnNotOpen;
+	}
+	return fController->resumePinIRQ(fPin);
+}
+
+IOReturn
+AGPIO::ackInterrupt(void)
+{
+	if (!fValid || !fController) {
+		return kIOReturnNotOpen;
+	}
+	return fController->ackPinIRQ(fPin);
+}
+
+bool
+AGPIO::interruptEnabled(void) const
+{
+	return fValid && fController && fController->pinIRQEnabled(fPin);
+}
+
 IOReturn
 AGPIO::getConfig(struct tlmm_pin_config *config)
 {
@@ -550,6 +608,7 @@ TLMMGPIOController::start(IOService *provider)
 	/* Explicit init: the host fixture allocates on the stack, and a
 	 * half-initialised interrupt table must never be visible. */
 	fIrqProvider = provider;
+	fGicd = NULL;
 	fIrqClaimed = false;
 	fIrqMasked = false;
 	fIrqClientMask = 0;
@@ -1156,6 +1215,63 @@ TLMMGPIOController::irqSlotForPin(unsigned int pin) const
  * happens after the lock is dropped. That ordering is also what makes a
  * recursive acquisition impossible no matter what the provider does.
  */
+/*
+ * The summary SPI belongs to this controller, so holding and releasing it is
+ * two distributor writes. Going back through the provider per packet cost a
+ * vector bookkeeping pass plus two RWP waits, and -- worse -- it let two
+ * writers share one bit: a client that wrote ICENABLER directly left
+ * fIrqMasked untouched, so the matching enable became a no-op and the line
+ * stayed dead. One owner, one writer.
+ */
+bool
+TLMMGPIOController::mapDistributor(void)
+{
+	vm_offset_t va;
+
+	if (fGicd) {
+		return true;
+	}
+	va = ml_io_map_unmappable((vm_offset_t)TLMM_GICD_PA, TLMM_GICD_SIZE,
+	    VM_WIMG_IO);
+	if (!va) {
+		SWEET_LOG_WARN("SWEET TLMM: distributor map failed; the summary "
+		    "line falls back to provider enable/disable\n");
+		return false;
+	}
+	fGicd = (volatile uint32_t *)va;
+	return true;
+}
+
+void
+TLMMGPIOController::maskSummaryLine(void)
+{
+	uint32_t word = TLMM_IRQ_WORD(TLMM_SUMMARY_INTID) / 4u;
+	uint32_t bit = TLMM_IRQ_BIT(TLMM_SUMMARY_INTID);
+
+	if (fGicd) {
+		/* W1S pair, with the read-back a real distributor shows: enabling
+		 * reads 0 and disabling reads 1 for the same bit. */
+		fGicd[0x180u / 4u + word] |= bit;
+		fGicd[0x100u / 4u + word] &= ~bit;
+	} else if (fIrqProvider) {
+		(void)fIrqProvider->disableInterrupt(0);
+	}
+}
+
+void
+TLMMGPIOController::unmaskSummaryLine(void)
+{
+	uint32_t word = TLMM_IRQ_WORD(TLMM_SUMMARY_INTID) / 4u;
+	uint32_t bit = TLMM_IRQ_BIT(TLMM_SUMMARY_INTID);
+
+	if (fGicd) {
+		fGicd[0x100u / 4u + word] |= bit;
+		fGicd[0x180u / 4u + word] &= ~bit;
+	} else if (fIrqProvider) {
+		(void)fIrqProvider->enableInterrupt(0);
+	}
+}
+
 void
 TLMMGPIOController::setSummaryMasked(bool masked)
 {
@@ -1179,9 +1295,9 @@ TLMMGPIOController::setSummaryMasked(bool masked)
 		return;
 	}
 	if (masked) {
-		(void)fIrqProvider->disableInterrupt(0);
+		maskSummaryLine();
 	} else {
-		(void)fIrqProvider->enableInterrupt(0);
+		unmaskSummaryLine();
 	}
 }
 
@@ -1198,6 +1314,7 @@ TLMMGPIOController::claimSummary(void)
 		    "pad interrupts stay with the client\n");
 		return false;
 	}
+	(void)mapDistributor();
 	status = fIrqProvider->registerInterrupt(0, this,
 	    (IOInterruptAction)sweet_tlmm_summary_irq, NULL);
 	if (status != kIOReturnSuccess) {
@@ -1206,13 +1323,19 @@ TLMMGPIOController::claimSummary(void)
 		    (unsigned)status);
 		return false;
 	}
+	/* The controller has to clear its own software disable exactly once;
+	 * a distributor write never does (that omission refused every dispatch
+	 * until BUG-013). After that the line is held by the distributor bit,
+	 * which this controller owns, rather than by the provider's vector. */
 	fIrqClaimed = true;
+	(void)fIrqProvider->enableInterrupt(0);
 	/* Start masked: a pad interrupt is only meaningful once a pad is armed,
 	 * and the client arms by calling resume. */
-	(void)fIrqProvider->disableInterrupt(0);
+	maskSummaryLine();
 	fIrqMasked = true;
 	SWEET_LOG_INFO("SWEET TLMM: summary INTID %u claimed for %u pads; "
-	    "line masked until a pad is armed\n", TLMM_SUMMARY_INTID, fIrqCount);
+	    "provider enabled once, the distributor bit is ours (%s)\n",
+	    TLMM_SUMMARY_INTID, fIrqCount, fGicd ? "mapped" : "provider fallback");
 	return true;
 }
 
@@ -1222,6 +1345,7 @@ TLMMGPIOController::releaseSummary(void)
 	if (!fIrqClaimed || !fIrqProvider) {
 		return;
 	}
+	maskSummaryLine();
 	(void)fIrqProvider->disableInterrupt(0);
 	(void)fIrqProvider->unregisterInterrupt(0);
 	fIrqClaimed = false;
@@ -1310,7 +1434,7 @@ TLMMGPIOController::dispatchSummary(void)
 }
 
 IOReturn
-TLMMGPIOController::requestPinIRQ(unsigned int pin, unsigned int detect,
+TLMMGPIOController::requestPinIRQ(AGPIO *owner, unsigned int detect,
     tlmm_gpio_irq_handler handler, void *refcon)
 {
 	volatile uint32_t *intrCfg;
@@ -1318,23 +1442,39 @@ TLMMGPIOController::requestPinIRQ(unsigned int pin, unsigned int detect,
 	uint32_t want;
 	int slot;
 	unsigned int i;
+	unsigned int pin;
+	bool mine;
 	IOInterruptState saved;
 
-	if (!handler || pin >= fPinCount || detect > TLMM_IRQ_EDGE_BOTH) {
+	if (!owner || !owner->isValid() || !handler ||
+	    detect > TLMM_IRQ_EDGE_BOTH) {
+		return kIOReturnBadArgument;
+	}
+	pin = owner->getPin();
+	if (pin >= fPinCount) {
 		return kIOReturnBadArgument;
 	}
 
+	/* The claim must come from the handle that owns the pad: without that,
+	 * a pin number would be enough to take over someone else's pad. */
 	IOLockLock(fLock);
+	mine = fPins[pin].exclusive && fPins[pin].handle == owner;
+	if (!mine) {
+		IOLockUnlock(fLock);
+		SWEET_LOG_WARN("SWEET TLMM: gpio%u is not owned by this handle; "
+		    "no pad interrupt\n", pin);
+		return kIOReturnNotPermitted;
+	}
 	if (pinReadOnlyLocked(pin)) {
 		IOLockUnlock(fLock);
 		SWEET_LOG_WARN("SWEET TLMM: gpio%u is island-owned; no pad "
 		    "interrupt\n", pin);
 		return kIOReturnUnsupported;
 	}
-	if (fPins[pin].exclusive || fIrqSlot[pin] >= 0) {
+	if (fIrqSlot[pin] >= 0) {
 		IOLockUnlock(fLock);
-		SWEET_LOG_WARN("SWEET TLMM: gpio%u already claimed (%s); no pad "
-		    "interrupt\n", pin, fPins[pin].exclusive ? "handle" : "irq");
+		SWEET_LOG_WARN("SWEET TLMM: gpio%u already has a pad interrupt\n",
+		    pin);
 		return kIOReturnBusy;
 	}
 	IOLockUnlock(fLock);
@@ -1394,6 +1534,18 @@ TLMMGPIOController::requestPinIRQ(unsigned int pin, unsigned int detect,
 }
 
 IOReturn
+TLMMGPIOController::releasePinIRQ(AGPIO *owner)
+{
+	unsigned int pin;
+
+	if (!owner || !owner->isValid()) {
+		return kIOReturnNotOpen;
+	}
+	pin = owner->getPin();
+	return freePinIRQ(pin);
+}
+
+IOReturn
 TLMMGPIOController::freePinIRQ(unsigned int pin)
 {
 	int slot;
@@ -1450,8 +1602,49 @@ TLMMGPIOController::maskPinIRQ(unsigned int pin)
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	fIrqClientMask |= 1u << (unsigned int)slot;
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	/* Clear this pad's own enable bit first: the status latch below stays
+	 * readable for the client, and the shared summary deasserts for this pad
+	 * without touching any other one. */
+	{
+		vm_offset_t intrCfg = pinAddress(pin, TLMM_GPIO_INTR_CFG);
+		if (intrCfg) {
+			*(volatile uint32_t *)intrCfg &= ~TLMM_INTR_ENABLE;
+		}
+	}
 	setSummaryMasked(true);
 	return kIOReturnSuccess;
+}
+
+/*
+ * Clear this pad's status latch. The client that owns the pad acks it (the
+ * latch is its evidence that a packet is queued), so the controller only
+ * offers the register write; it never acks behind the client's back.
+ */
+IOReturn
+TLMMGPIOController::ackPinIRQ(unsigned int pin)
+{
+	uint32_t status;
+
+	if (irqSlotForPin(pin) < 0) {
+		return kIOReturnNotFound;
+	}
+	status = readIntrStatus(pin);
+	if (status & TLMM_INTR_STATUS_RAW) {
+		writeIntrStatus(pin, status & ~TLMM_INTR_STATUS_RAW);
+	}
+	return kIOReturnSuccess;
+}
+
+bool
+TLMMGPIOController::pinIRQEnabled(unsigned int pin) const
+{
+	vm_offset_t intrCfg;
+
+	if (irqSlotForPin(pin) < 0) {
+		return false;
+	}
+	intrCfg = pinAddress(pin, TLMM_GPIO_INTR_CFG);
+	return intrCfg && ((*(volatile uint32_t *)intrCfg) & TLMM_INTR_ENABLE) != 0;
 }
 
 IOReturn
@@ -1467,6 +1660,15 @@ TLMMGPIOController::resumePinIRQ(unsigned int pin)
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	fIrqClientMask &= ~(1u << (unsigned int)slot);
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	{
+		vm_offset_t intrCfg = pinAddress(pin, TLMM_GPIO_INTR_CFG);
+		/* A level pad re-asserts immediately; the stale latch would make
+		 * the first dispatch look like a duplicate, so drop it here. */
+		(void)ackPinIRQ(pin);
+		if (intrCfg) {
+			*(volatile uint32_t *)intrCfg |= TLMM_INTR_ENABLE;
+		}
+	}
 	setSummaryMasked(false);
 	return kIOReturnSuccess;
 }
@@ -1574,59 +1776,10 @@ gpio_set_config(unsigned int pin, unsigned int func, unsigned int pull,
 	    output != 0, high != 0));
 }
 
-extern "C" int
-tlmm_gpio_request_irq(unsigned int pin, unsigned int detect,
-    tlmm_gpio_irq_handler handler, void *refcon)
-{
-	TLMMGPIOController *controller = TLMMGPIOController::getController();
 
-	if (!controller) {
-		return TLMM_GPIO_ENODEV;
-	}
-	return tlmmCResult(controller->requestPinIRQ(pin, detect, handler,
-	    refcon));
-}
 
-extern "C" int
-tlmm_gpio_free_irq(unsigned int pin)
-{
-	TLMMGPIOController *controller = TLMMGPIOController::getController();
 
-	if (!controller) {
-		return TLMM_GPIO_ENODEV;
-	}
-	return tlmmCResult(controller->freePinIRQ(pin));
-}
 
-extern "C" int
-tlmm_gpio_irq_mask(unsigned int pin)
-{
-	TLMMGPIOController *controller = TLMMGPIOController::getController();
-
-	if (!controller) {
-		return TLMM_GPIO_ENODEV;
-	}
-	return tlmmCResult(controller->maskPinIRQ(pin));
-}
-
-extern "C" int
-tlmm_gpio_irq_resume(unsigned int pin)
-{
-	TLMMGPIOController *controller = TLMMGPIOController::getController();
-
-	if (!controller) {
-		return TLMM_GPIO_ENODEV;
-	}
-	return tlmmCResult(controller->resumePinIRQ(pin));
-}
-
-extern "C" int
-tlmm_gpio_irq_claimed(void)
-{
-	TLMMGPIOController *controller = TLMMGPIOController::getController();
-
-	return (controller && controller->summaryClaimed()) ? 1 : 0;
-}
 
 extern "C" int
 gpio_get_config(unsigned int pin, struct tlmm_pin_config *config)

@@ -334,6 +334,13 @@ static void writeReg(uintptr_t b,uint32_t o,uint32_t v){trace.push_back({true,b+
 // supplies that controller (and the register constants from the shipped
 // header) so the same regs[] model records every write.
 static void IOSleep(unsigned ms){fakeTicks+=(uint64_t)ms*1000u;}
+static bool tlmmAbsent=false;static unsigned tlmmBusyPin=0;
+/* Pad interrupt, handle-only. Off by default: every existing case keeps the
+   proven nub registration path. A test opts in with tlmmIrqOK=1 to exercise
+   the controller-owned summary line through the pad handle. */
+static int tlmmIrqOK=0,tlmmIrqPin=-1,tlmmIrqMasks=0,tlmmIrqResumes=0,tlmmIrqFree=0;
+static void (*tlmmIrqHandler)(unsigned int,void*)=nullptr;
+
 struct AGPIO : OSObject {
  unsigned pin=0;const char*owner=nullptr;bool valid=false;
  static uintptr_t pinBase(unsigned p){return p==6?0x03d06000u:0x03908000u;}
@@ -351,34 +358,30 @@ struct AGPIO : OSObject {
   uintptr_t b=pinBase(pin);c->cfg=readReg(b,0);c->io=readReg(b,4);c->intr_cfg=readReg(b,8);
   c->func=(c->cfg>>2)&7u;c->pull=c->cfg&3u;c->drive=(c->cfg>>6)&7u;
   c->output=(c->cfg&0x200u)!=0;c->high=(c->io&2u)!=0;return kIOReturnSuccess;}
+ /* Pad interrupt through the handle: there is no pin-number entry point. */
+ IOReturn setInterrupt(unsigned detect,tlmm_gpio_irq_handler handler,void *refcon){
+  (void)detect;(void)refcon;
+  if(!valid)return kIOReturnNotOpen;
+  if(!tlmmIrqOK||pin!=122)return kIOReturnUnsupported;
+  tlmmIrqPin=(int)pin;tlmmIrqHandler=handler;return kIOReturnSuccess;}
+ IOReturn disableInterrupt(){
+  if(!valid)return kIOReturnNotOpen;
+  if(tlmmIrqPin==(int)pin){tlmmIrqPin=-1;tlmmIrqHandler=nullptr;++tlmmIrqFree;}
+  return kIOReturnSuccess;}
+ IOReturn maskInterrupt(){if(!valid)return kIOReturnNotOpen;++tlmmIrqMasks;return kIOReturnSuccess;}
+ IOReturn resumeInterrupt(){if(!valid)return kIOReturnNotOpen;++tlmmIrqResumes;return kIOReturnSuccess;}
+ IOReturn ackInterrupt(){if(!valid)return kIOReturnNotOpen;return kIOReturnSuccess;}
+ bool interruptEnabled() const{return tlmmIrqPin==(int)pin;}
  void release(){valid=false;}
  void put(){valid=false;this->OSObject::release();}
 };
-static bool tlmmAbsent=false;static unsigned tlmmBusyPin=0;
-/* Pad-interrupt C API. Off by default: every existing case keeps the proven
-   nub registration path. A test opts in with tlmmIrqOK=1 to exercise the
-   controller-owned summary line instead. */
-static int tlmmIrqOK=0,tlmmIrqPin=-1,tlmmIrqMasks=0,tlmmIrqResumes=0,tlmmIrqFree=0;
-static void (*tlmmIrqHandler)(unsigned int,void*)=nullptr;
-extern "C" int tlmm_gpio_request_irq(unsigned int pin,unsigned int detect,
- tlmm_gpio_irq_handler handler,void *refcon){
- (void)detect;(void)refcon;
- if(!tlmmIrqOK||pin!=122)return TLMM_GPIO_EOPNOTSUPP;
- tlmmIrqPin=(int)pin;tlmmIrqHandler=handler;return TLMM_GPIO_OK;}
-extern "C" int tlmm_gpio_free_irq(unsigned int pin){
- if(tlmmIrqPin<0||pin!=(unsigned)tlmmIrqPin)return TLMM_GPIO_EINVAL;
- tlmmIrqPin=-1;tlmmIrqHandler=nullptr;++tlmmIrqFree;return TLMM_GPIO_OK;}
-extern "C" int tlmm_gpio_irq_mask(unsigned int pin){
- ++tlmmIrqMasks;return pin==122?TLMM_GPIO_OK:TLMM_GPIO_EINVAL;}
-extern "C" int tlmm_gpio_irq_resume(unsigned int pin){
- ++tlmmIrqResumes;return pin==122?TLMM_GPIO_OK:TLMM_GPIO_EINVAL;}
-extern "C" int tlmm_gpio_irq_claimed(void){return tlmmIrqPin>=0;}
 struct TLMMGPIOController {
  static TLMMGPIOController *getController(){
   if(tlmmAbsent)return nullptr;
   static TLMMGPIOController controller;return &controller;}
  AGPIO *acquirePin(unsigned pin,const char*owner){
-  if(tlmmAbsent||pin!=6&&pin!=8||(tlmmBusyPin&&pin==tlmmBusyPin))return nullptr;
+  const bool padIrq=tlmmIrqOK&&pin==122;
+  if(tlmmAbsent||(pin!=6&&pin!=8&&!padIrq)||(tlmmBusyPin&&pin==tlmmBusyPin))return nullptr;
   AGPIO*h=new AGPIO;h->pin=pin;h->owner=owner;h->valid=true;return h;}
  IOReturn releasePin(unsigned,const char*){return kIOReturnSuccess;}
 };
@@ -402,6 +405,7 @@ extern "C" int sweet_touch_panel_snapshot(uint64_t,uint64_t,struct sweet_touch_p
    registers this top half and installs the two GIC ownership hooks. */
 extern "C" void (*ts_irq_mask_fn)(void) = nullptr;
 extern "C" void (*ts_irq_unmask_fn)(void) = nullptr;
+extern "C" void (*ts_irq_ack_fn)(void) = nullptr;
 extern "C" void sweet_touch_irq_action(void*,void*,void*,int) {}
 /* Distributor-bit ownership handover: the facade tells the worker that its
    own mask takes a spin lock and must not run at interrupt level. */
