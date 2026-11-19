@@ -115,6 +115,19 @@ int main(){
  ds->irqUnmask();assert(tlmmIrqResumes==1);
  ds->stop(dn);assert(tlmmIrqFree==1&&tlmmIrqPin<0);tlmmIrqOK=0;
  ds->release();dropNub(dn);queued.clear();touchPanelMode=2;
+ // Mode 3 is mode 2 plus the pad interrupt: the worker operations the panel
+ // lifecycle depends on must stay permitted, only the IRQ delegate changes.
+ // A hardcoded fMode==2 refused the takeover quiesce with NotPermitted and
+ // faulted the panel (BUG-014).
+ fixtures();touchPanelMode=3;tlmmIrqOK=1;tlmmIrqPin=-1;tlmmIrqMasks=tlmmIrqResumes=0;
+ {auto*pn=nub();auto*ps=make(pn);auto pid=attach(ps);
+  uint64_t pt=pause(ps,pid);assert(pt);
+  identify();
+  uint64_t rt=0;assert(ps->resume(pid,&rt)==0&&rt);assert(tcFixtureStep()==0);timer(ps);
+  auto rp=status(ps,pid,rt);assert(rp.ready&&!rp.quiesced&&rp.result==0);
+  destroy(ps,pn);}
+ tlmmIrqOK=0;touchPanelMode=2;
+ assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
 
  // Default service absent; metadata mode never changes worker or maps hardware.

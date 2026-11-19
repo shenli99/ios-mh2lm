@@ -240,6 +240,10 @@ void (*ts_irq_unmask_fn)(void);
  * the same way. The facade still enables the source once, in ts_irq_arm().
  */
 static bool ts_irq_line_owned;
+/* Mode 3: the TLMM controller owns the summary SPI and demuxes the ATTENTION
+ * pad. This worker only owns the pad, so masking must not require the shared
+ * GIC line to be disabled: every other pad on that line stays live. */
+static bool ts_irq_line_delegated;
 
 void
 sweet_touch_irq_own_line(void)
@@ -251,6 +255,12 @@ void
 sweet_touch_irq_release_line(void)
 {
 	ts_irq_line_owned = false;
+}
+
+void
+sweet_touch_irq_delegate_line(unsigned delegated)
+{
+	ts_irq_line_delegated = delegated != 0;
 }
 
 static void
@@ -1230,8 +1240,12 @@ static bool ts_panel_mask(void)
   if (readback!=ts_panel_pin_cfg) {
    SWEET_LOG_ERROR("SWEET TOUCH PANEL: GPIO122 disable mismatch want=%#x read=%#x\n",ts_panel_pin_cfg,readback);return false;
   }
-  if (!(ts_gic_rd(0)&(1u<<31)) &&
-      !(ts_gic_rd(0x100u+4u*TS_IRQ_WORD)&TS_IRQ_BIT) &&
+  /* The pad readback above proves this worker's line is disabled. A delegated
+   * run leaves the shared summary SPI enabled for the other pads, so only an
+   * owned line has to see its own distributor bit clear. */
+  bool lineQuiet=ts_irq_line_delegated ||
+      !(ts_gic_rd(0x100u+4u*TS_IRQ_WORD)&TS_IRQ_BIT);
+  if (!(ts_gic_rd(0)&(1u<<31)) && lineQuiet &&
       !(ts_gic_rd(0x300u+4u*TS_IRQ_WORD)&TS_IRQ_BIT)) return true;
   if (n!=20) ts_wait(1);
  }
@@ -1268,7 +1282,7 @@ static unsigned ts_panel_step(void)
   unsigned old_x=tcm.max_x,old_y=tcm.max_y;
   ok=__atomic_load_n(&ts_irq_state,__ATOMIC_ACQUIRE)==5u &&
       ts_rd(tile,TS_INTR_CFG)==ts_panel_pin_cfg &&
-      !(ts_gic_rd(0x100u+4u*TS_IRQ_WORD)&TS_IRQ_BIT);
+      (ts_irq_line_delegated || !(ts_gic_rd(0x100u+4u*TS_IRQ_WORD)&TS_IRQ_BIT));
   if (ok) {
    int rc=tcm_start();
    ok=rc==0 && tcm.ready && tcm.max_x==old_x && tcm.max_y==old_y;
@@ -1278,9 +1292,13 @@ static unsigned ts_panel_step(void)
   }
   if (ok && !ts_panel_interrupted()) {
    /* Source still disabled: discard stale summary pending, then enable the
-    * level source only after fresh application/format readback has succeeded. */
-   ts_gic_wr(0x280u+4u*TS_IRQ_WORD,TS_IRQ_BIT);
-   ok=ts_gic_wait() && !(ts_gic_rd(0x200u+4u*TS_IRQ_WORD)&TS_IRQ_BIT);
+    * level source only after fresh application/format readback has succeeded.
+    * A delegated run never clears the shared pending bit: it also carries the
+    * other pads, and the pad status ack in ts_irq_arm() is its own latch. */
+   if (!ts_irq_line_delegated) {
+    ts_gic_wr(0x280u+4u*TS_IRQ_WORD,TS_IRQ_BIT);
+    ok=ts_gic_wait() && !(ts_gic_rd(0x200u+4u*TS_IRQ_WORD)&TS_IRQ_BIT);
+   }
    ts_irq_empty=ts_irq_no_progress=0;
    if (ok && !ts_panel_interrupted()) ok=ts_irq_arm();
   }

@@ -9,6 +9,7 @@ extern "C" void (*ts_irq_unmask_fn)(void);
 /* The worker masks and re-arms the distributor bit itself; the shared
  * controller's disableInterrupt cannot run at interrupt level. */
 extern "C" void sweet_touch_irq_own_line(void);
+extern "C" void sweet_touch_irq_delegate_line(unsigned);
 extern "C" void sweet_touch_irq_release_line(void);
 
 static SweetTouchPanel *gTouchPanel;
@@ -124,6 +125,8 @@ bool SweetTouchPanel::start(IOService *p)
  if (fMode==3 && tlmm_gpio_request_irq(SWEET_TOUCH_IRQ_PIN, TLMM_IRQ_LEVEL_LOW,
      sweet_touch_tlmm_irq, this)==TLMM_GPIO_OK) {
   fIRQViaTLMM=true;fIRQRegistered=true;
+  /* The summary SPI belongs to the pin controller; this facade owns the pad. */
+  sweet_touch_irq_delegate_line(1);
   ts_irq_mask_fn=sweet_touch_panel_mask;
   ts_irq_unmask_fn=sweet_touch_panel_unmask;
   SWEET_LOG_INFO("SWEET TOUCH PANEL: ATTENTION pad gpio%u delegated to the TLMM summary line; no GIC source on the nub\n",SWEET_TOUCH_IRQ_PIN);
@@ -216,7 +219,10 @@ IOReturn SweetTouchPanel::action(OSObject *owner,void *arg,void *,void *,void *)
   if (s->fBusy || s->fPoisoned || s->fStatus.quiesced) return kIOReturnBusy;
   s->fClient=0;s->fStatus={};return kIOReturnSuccess;
  }
- if (s->fMode!=2) return kIOReturnNotPermitted;
+ /* Mode 3 is mode 2 plus the delegated pad interrupt; only the IRQ delegate
+  * differs, so the worker operations the panel lifecycle needs stay permitted.
+  * Mode 1 remains metadata-only. */
+ if (!sweetTouchPanelNative(s->fMode)) return kIOReturnNotPermitted;
  if (s->fPoisoned) return kIOReturnNotReady;
  if (s->fBusy) return kIOReturnBusy;
  uint64_t token=0;
@@ -282,7 +288,7 @@ void SweetTouchPanel::stop(IOService *p)
   sweet_touch_irq_release_line();
   if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
   if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
-  if (fIRQViaTLMM) (void)tlmm_gpio_free_irq(SWEET_TOUCH_IRQ_PIN);
+  if (fIRQViaTLMM) { sweet_touch_irq_delegate_line(0); (void)tlmm_gpio_free_irq(SWEET_TOUCH_IRQ_PIN); }
   else if (fIRQProvider) {
    (void)fIRQProvider->disableInterrupt(0);
    (void)fIRQProvider->unregisterInterrupt(0);
@@ -299,7 +305,7 @@ void SweetTouchPanel::free(void)
   sweet_touch_irq_release_line();
   if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
   if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
-  if (fIRQViaTLMM) (void)tlmm_gpio_free_irq(SWEET_TOUCH_IRQ_PIN);
+  if (fIRQViaTLMM) { sweet_touch_irq_delegate_line(0); (void)tlmm_gpio_free_irq(SWEET_TOUCH_IRQ_PIN); }
   else if (fIRQProvider) {
    (void)fIRQProvider->disableInterrupt(0);
    (void)fIRQProvider->unregisterInterrupt(0);

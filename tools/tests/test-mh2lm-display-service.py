@@ -406,6 +406,7 @@ extern "C" void sweet_touch_irq_action(void*,void*,void*,int) {}
 /* Distributor-bit ownership handover: the facade tells the worker that its
    own mask takes a spin lock and must not run at interrupt level. */
 extern "C" void sweet_touch_irq_own_line(void) {}
+extern "C" void sweet_touch_irq_delegate_line(unsigned) {}
 extern "C" void sweet_touch_irq_release_line(void) {}
 #endif
 '''
