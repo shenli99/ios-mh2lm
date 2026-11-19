@@ -556,7 +556,14 @@ hw_lock_lock_contended(
 		 * that re-locked it. The return address is the only handle that
 		 * survives without a debugger; it resolves against the kernel
 		 * symbol table. lock_rw.c already uses the same builtin.
+		 *
+		 * The screen copy needs a photograph, the ring buffer does not:
+		 * print the same facts to the kernel log so exporting it after the
+		 * reboot is enough.
 		 */
+		printf("SWEET LOCK: recursive hwlock %p thread %p caller %p\n",
+		    lock, HW_LOCK_STATE_TO_THREAD(data),
+		    (void *)__builtin_return_address(0));
 		panic("hwlock: thread %p is trying to lock %p recursively, caller %p",
 		    HW_LOCK_STATE_TO_THREAD(data), lock,
 		    (void *)__builtin_return_address(0));
