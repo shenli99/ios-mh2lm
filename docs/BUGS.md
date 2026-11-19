@@ -626,8 +626,7 @@ pad 共用的 summary 线**，关掉它会掐掉别的 pad——正确的「我�
   mode 1 的 `kIOReturnNotPermitted` 断言保留不变。
   `test-mh2lm-display-service.py` 的桩补上 `sweet_touch_irq_delegate_line`。
 - 附带结论：这条路正是 P2' 的方向——触摸只拥有 ATTN pad，summary SPI 归
-  `TLMMGPIOController`。剩下的手工 `TS_INTR_CFG` 读写应当在后续把
-  pad 的 enable/ack 全部交给 `tlmm_gpio_irq_mask/resume` 后再删掉。
+  `TLMMGPIOController`。剩下的手工 `TS_INTR_CFG` 读写改由句柄承担，见 BUG-016。
 
 ## BUG-015：mode 3 把 pad 的「有数据」证据提前消掉，丢包后触点卡在按下状态
 

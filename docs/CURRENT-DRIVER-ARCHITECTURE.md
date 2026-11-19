@@ -1005,36 +1005,38 @@ timer 因此无法触发，整条显示栈永久停住（`allocate/prepare enter
 里自己做 pad 级 ACK、并在 top half 里 mask 整条共享线——第二个 GPIO 中断消费者一出现
 就会被误屏蔽。
 
-现在：
+现在（2026-11-19 定型：一个寄存器一个写入者）：
 
-- `TLMMGPIOController` 在**第一次** pad 注册时懒认领该线（`registerInterrupt(0,…)`，
-  认领后立即 mask，等到客户端 `resume` 才放行），启动时不动 GIC；
-- dispatch 顺序固定为 `mask → 逐个读 INTR_STATUS → 清 raw 位（W1C）→ 回调`，
-  回调里要延迟处理就调 `tlmm_gpio_irq_mask(pin)`，worker 完成后
-  `tlmm_gpio_irq_resume(pin)`（最后一个 pad 释放时把线还给 GIC）；
-- 归属规则双向：有 pad 中断的 pad 不再发 `AGPIO`，有 `AGPIO` 的 pad 不允许注册中断，
-  island/只读 pad 直接拒绝；
-- 路由位（target=KPSS、raw status）归控制器；**极性/边沿/使能位暂时仍归客户端**，
-  等触摸路径完成迁移、拿到实机证据后再收过来——touch 的 `ts_irq_arm()` 现在写的
-  0x70 正是这两位的组合，重复写入是幂等的。
+- `TLMMGPIOController` 在**第一次** pad 注册时懒认领该线（`registerInterrupt(0,…)`），
+  经 provider `enableInterrupt(0)` **一次**清掉控制器的软关位（raw 写 distributor
+  永远不会清它，BUG-013 的教训），之后线的开合由本控制器直写
+  `GICD_ICENABLER/ISENABLER` 的 INTID 240 位，启动时不动 GIC；
+- dispatch 顺序固定为 `逐个读 INTR_STATUS → 回调 → 未 deferred 才替客户端 ack`。
+  client-masked 的 pad 直接跳过；deferred pad 的 status 锁存**留给客户端**，
+  这是“有包待读”的唯一证据（`ATTENTION` 引脚会先掉，BUG-015）；
+- 归属规则：pad 的 `INTR_CFG.ENABLE`、`INTR_STATUS`、极性/边沿**归句柄**；
+  路由位与共享 summary SPI **归控制器**。两条都不再有第二个写入者；
+- island/只读 pad 直接拒绝；中断只能从持有该 pad 的句柄索取。
 
-客户端接口（`pexpert/pextpert/arm64/tlmm_gpio.h`，C 形式与 `gpio_set_value` 同族）：
+客户端接口（`iokit/Kernel/arm/TLMMGPIOController.h`，句柄方法；C 入口已删除）：
 
-```c
-int tlmm_gpio_request_irq(unsigned pin, unsigned detect,
-    tlmm_gpio_irq_handler handler, void *refcon);
-int tlmm_gpio_free_irq(unsigned pin);
-int tlmm_gpio_irq_mask(unsigned pin);   /* 中断上下文安全 */
-int tlmm_gpio_irq_resume(unsigned pin);
-int tlmm_gpio_irq_claimed(void);
+```cpp
+AGPIO *pin = TLMMGPIOController::getController()->acquirePin(122, "owner");
+pin->setInterrupt(TLMM_IRQ_LEVEL_LOW, handler, this);  /* 只接受持有该 pad 的句柄 */
+pin->maskInterrupt();    /* 中断上下文安全：只清本 pad 的 ENABLE */
+pin->resumeInterrupt();  /* 先 ack 陈旧锁存，再置位 */
+pin->ackInterrupt();     /* 清本 pad 的 status 锁存 */
+pin->disableInterrupt(); /* 释放中断（随后 put() 归还 pad） */
 ```
 
 触摸侧只加了一个模式值，**不占 boot arg 字节**：`sweettouchpanel=3` = 2 + 委托
 （`sweetTouchPanelNative(mode)` 与 `sweetPanelPinsExclusive(mode)` 同样的"消费者必须
 一致"规则：`SweetTouchPanel::start`、`SweetMDSS::setupTouchPanel`、
 `setupLifecycle` 三处共用同一判据——上一轮 `sweetpanelpins=3` 的教训）。
-模式 3 下 `SweetTouchPanel` 不再在 nub 上注册 GIC source，`irqMask/irqUnmask` 走
-`tlmm_gpio_irq_mask/resume`；模式 2 保持既有路径，作为回退。
+模式 3 下 `SweetTouchPanel` 先 `acquirePin(122)` 再 `setInterrupt(...)`，不在 nub 上
+注册 GIC source；`irqMask/irqUnmask/irqAck` 走句柄方法，worker 通过
+`ts_irq_mask_fn/ts_irq_unmask_fn/ts_irq_ack_fn` 三个钩子调用，自己不再写共享
+distributor 位。模式 2 保持既有路径，作为回退。
 
 ### 电源请求必须留痕（2026-11-17）
 
