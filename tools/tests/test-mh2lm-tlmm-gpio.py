@@ -755,7 +755,9 @@ def main():
     # The host fixture defines VM_WIMG_IO itself, so a source that forgot the
     # kernel header compiled here and failed on CI. Check the include instead.
     assert '#include <vm/memory_types.h>' in shipped
-    assert '#include <machine/machine_routines.h>' in shipped
+    # machine/machine_routines.h does not export this KPI, so the source has
+    # to declare it itself -- exactly what the SPMI mux does.
+    assert 'extern "C" vm_offset_t ml_io_map_unmappable' in shipped
     source = (PRELUDE +
               'extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned);\n' +
               strip_includes(HEADER_C) + strip_includes(HEADER_CPP) +

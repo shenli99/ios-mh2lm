@@ -27,11 +27,14 @@
 #include "TLMMGPIOController.h"
 #include <IOKit/IOLib.h>
 #include <libkern/libkern.h>
-/* Distributor mapping: VM_WIMG_IO and ml_io_map_unmappable(), the same two
- * headers the SPMI mux includes for its own GICD map. */
+/* Distributor mapping: VM_WIMG_IO comes from this header; the map KPI below
+ * is not exported by machine/machine_routines.h, so it is declared here the
+ * same way the SPMI mux declares it for its own GICD map. */
 #include <vm/memory_types.h>
-#include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
+
+extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys, vm_size_t size,
+    unsigned int flags);
 #define SWEET_LOG_SINK IOLog
 #include "../../../bsd/dev/sweet_log_level.h"
 

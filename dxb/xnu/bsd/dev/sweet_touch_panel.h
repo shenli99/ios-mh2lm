@@ -6,6 +6,8 @@
 #ifndef SWEET_TOUCH_PANEL_H
 #define SWEET_TOUCH_PANEL_H
 #include <sys/types.h>
+/* bool in the prototypes below, exactly like bsd/dev/sweet_keys.h. */
+#include <stdbool.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
