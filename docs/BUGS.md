@@ -708,3 +708,50 @@ HID 是 `touch 0 down at 310,213` **没有配对的 up**——触点一直按着
   栈上构造的控制器会读到一个野生指针（内核里 `init()` 会清零，所以只在
   fixture 崩溃）。
 
+## BUG-017：设备内存写没有 dsb，读回是旧值；接管绕过触摸后又被 MDP 准入拦住
+
+`0121b21 gpioirq` 没进桌面。两个独立的错都在这一版暴露：
+
+**一、线“没使能”，其实是一次旧读。** 日志：
+
+```
+[INFO] SWEET TLMM: summary INTID 240 claimed for 0 pads; provider enabled once, the distributor bit is ours (mapped)
+[ERROR] SWEET TLMM: summary INTID 240 did not enable (ISENABLER=0); pad interrupts stay off
+[ERROR] SWEET TOUCH IRQ: GIC probe enable failed
+```
+
+关键的不对称：claim 时 raw 写的 **ICENABLER 生效了**（否则…线上还是 provider 开着的，读回该是 1），
+而 resume 时紧接着读回的 ISENABLER 是 0。同一次开机里同一个地址，
+一次“等了很久再读”是对的、一次“写完立刻读”是 0——这不是映射错，是
+**posted write 加立即 load**：`VM_WIMG_IO` 不是 strongly-ordered，store 还在写缓冲里，
+随后的 load 就返回了旧值。`tlmmWrite32()` 本来带 `dsb osh`，但我为了在 fixture 里
+模拟 W1S 语义用了裸指针 `|=`/`&=`，把屏障丢了。
+
+- 修：新增 `gicdWrite()/gicdRead()`（`dmb oshst` → store → `dsb osh` / load → `dmb oshld`），
+  两个寄存器都用它们；pad 的 `INTR_CFG.ENABLE` 开关也从裸指针改成
+  `tlmmWrite32()/tlmmRead32()`——worker 在 resume 后立刻读回这一位，同样的坑。
+- 附带：读回失败仍然打 ERROR（这是唯一能“点名”线死掉的地方），但现在它是真的。
+
+**二、绕过触摸后，MDP 准入还需要“触摸已停”。** 触摸 worker 因为上一条死掉后，
+BUG-015 的兜底让接管继续，然后：
+
+```
+[INFO] SWEET MDSS RESOURCES: warm takeover paused; LDO -> ARC Turbo -> core-profile2 -> NoC -> DSI0 clock
+[ERROR] SWEET MDSS RESOURCES: FAILED initial MDP scan resource admission rc=0xe00002eb rails=0xf token=0 NoC=1 clock=3
+[ERROR] SWEET MDSS SCANOUT: FAILED initial MDP scan resource admission touched=0
+```
+
+`0xe00002eb` = `kIOReturnAborted`，来源是 `startMDPClient()` 失败 →
+`cancelScanout()`。它要求 `fLifecycle.touchQuiesced`，而我的兜底故意**没有**置位
+（当时的理由是“没有 token 就不能声称有栅栏”）。这个理由只对“token 收据”成立；
+`touchQuiesced` 真正的含义是“触摸不会碰面板”，而一个在 live 之前就退出的 worker
+恰好满足这一条——它的线程已经不在了。
+
+- 修：兜底里置 `fLifecycle.touchQuiesced=true`，同时把
+  `lifecycleParticipants()` 的栅栏复核改成**只有存在 token 时才复核**
+  （没有 token 就没有可复核的对象，但仍然检查“participants 都在”）。
+- 单测：`test-mh2lm-panel-lifecycle.py` 的失败 worker 用例新增断言
+  `fLifecycle.touchQuiesced` 为真（这正是 MDP 准入依赖的那条）。
+
+CI marker 151/151；tlmm-gpio / panel-touch / panel-lifecycle / display-service 全绿。
+
