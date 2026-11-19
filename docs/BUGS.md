@@ -24,6 +24,7 @@
 | BUG-008 | 首次亮度状态 | 刚进桌面滑条与亮度不符，拖动后及唤醒后正常 | 未修；确认未知初始亮度被发布成最大值，UI因果待取证 | 显示首次接管/亮度发布欠项 |
 | BUG-009 | 音量指示 | 按键HUD与控制中心滑条不一致 | 未修；音量类别/路由与状态来源待核实 | 输入已送达，未证明实际输出音量异常 |
 | BUG-010 | 触摸 IRQ / 共享中断控制器 | 每次触摸中断都带走 `IOSharedInterruptController::disableInterrupt`，同一线程重入 `controllerLock` 触发递归 hwlock panic | 代码已修复（3018be8）；b15 实机待验 | 触摸中断后系统 panic，桌面无触摸 |
+| BUG-011 | 打包 / 设备树（ADT） | 0121b15 镜像嵌入了未派生的基础 ADT，`sweet,mdss`/`panel-pins`/`touch-panel` 节点全部缺失，面板与触摸 nub 不匹配，scanout 退化为 ABL 预置像素并在第一次 coordinated off 冻结 | 已修复；脚本改为现场派生并加节点/参考哈希守卫，r2 镜像重打 | 无触摸、无 MDSS 后端、进桌面后画面冻结 |
 
 ## BUG-001：USB 多次插拔后无法识别
 
@@ -393,6 +394,11 @@ BUG-008/009原话、源码SHA与日志证据见[a37实机记录](PANEL-D1-0121A3
 返回地址。同一线程已经持有 `controllerLock`，因此是重入，而不是别的锁。
 状态：**代码已修复（3018be8）；b15 实机待验**。
 
+> 0121b15 baseline 首次实机启动**不能**作为本条验收：那次镜像的设备树没有
+> `panel-touch` 节点（见 BUG-011），`SweetTouchPanel` 根本没 start，
+> 触摸在 20 s 后报 `setup failed; touch disabled`，走的不是本条路径。
+> 验收要用 `boot-16k-0121b15r2-*`（内核同 b15，设备树同 b14）。
+
 因果链：`handleInterrupt()` 先分派向量、再在 `IOSimpleLockLock(controllerLock)`
 下比较 `vectorsEnabled != vectorsRegistered`。触摸上半部调用
 `IOService::disableInterrupt(0)` 后 `vectorsEnabled` 减一，
@@ -423,3 +429,38 @@ tlmm/panel/display 三套全绿。b14 内核早于本修复，不能用来验证
 
 验收：`sweettouchpanel=2` 下 20 s 后第一次触摸不再 panic，日志出现逐次
 `SWEET TOUCH IRQ: hit`；`sweettouchpanel=3` pad 路径同时复测。
+
+## BUG-011：b15 镜像嵌入了未派生的基础 ADT，面板/触摸节点缺失
+
+0121b15 baseline 镜像进桌面后卡死。日志里没有 panic，也没有一条
+`SWEET MDSS`、`SWEET MDSS DSI`、`SWEET PANEL PINS`、`SWEET TOUCH PANEL`
+行；20 s 后触摸起来时只有
+`[ERROR] SWEET TOUCH IRQ: setup failed; touch disabled`，
+显示侧末尾是
+`SWEET FB PANEL: coordinated off=1 has no display backend; refusing`
+→ `lifecycle admission failed rc=0xe00002d8; pixels frozen`
+→ 下一次 `coordinated off=0 refused: fault=1 stopped=0`。
+
+- 内核无关证据：镜像 ramdisk 里的 `Payloads/kernel.macho` 与
+  `scratch/artifact-0121b15/kernel.development.mh2lm` 逐字节一致
+  （sha256 `e822fae6…`），修复符号 `_sweet_touch_irq_own_line` 在位。
+- 设备树证据：该镜像的 `Payloads/kernel.macho.adt` sha256
+  `a4c2dafd…`、21172 字节，`strings` 里查不到 `sweet,mdss`、
+  `sweet,panel-pins`、`sweet,touch-panel`；而 0121b12/b13/b14 三个版本的
+  镜像全是 `a9e4f371…`、23140 字节，四类节点齐全。
+- 根因：打包脚本直接 `mcopy` 了 `out-bs/adt-16k-3g.adt`。那是**审计基线**
+  （只有 `lge,mh2lm` 根节点），派生树要由
+  `tools/mk-mh2lm-mdss-adt.py --panel-identity --panel-pins
+  --panel-pipeline --panel-touch --rpmh-irq` 生成。基线缺节点时不会报错，
+  UniXNU 照常启动：MDSS/DSI 不匹配、`panel-pins` 与 `panel-touch` 不存在，
+  `SweetTouchPanel` 从未 start（所以日志里没有
+  `GIC source registered on the ADT nub`），framebuffer 退回 ABL 预置像素，
+  等第一次 coordinated off 时没有后端接管，画面冻结。
+- 修复：`out-bs/mk16k-0121b15.sh` 现场派生设备树，检查四个节点，
+  并断言 sha256 等于 `a9e4f371…`（b12–b14 的参考值）；不满足就拒绝打包。
+  重新打出的 `boot-16k-0121b15r2-*` 镜像内核与 b15 一致、设备树与 b14
+  参考一致。
+- 附带结论：UniXNU 真正加载的是 ramdisk 里的
+  `EFI/UniXNU/Payloads/kernel.macho`（以及配套 `.adt`）；Android boot 镜像
+  的 kernel 槽是旧 Mu-Silicium blob（gzip 头，解压出 3145840 字节，不是
+  Mach-O），既不能用来判断内核版本，也不能改它来换内核。
