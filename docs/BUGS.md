@@ -23,6 +23,7 @@
 | BUG-007 | 唤醒画面 / 锁屏切换 | 点亮屏幕先短暂显示息屏前画面，再切换锁屏 | a37用户明确报告未复现；未证实修复，继续暂缓 | 持续观察后续版本，不能由硬件新帧证明锁屏就绪 |
 | BUG-008 | 首次亮度状态 | 刚进桌面滑条与亮度不符，拖动后及唤醒后正常 | 未修；确认未知初始亮度被发布成最大值，UI因果待取证 | 显示首次接管/亮度发布欠项 |
 | BUG-009 | 音量指示 | 按键HUD与控制中心滑条不一致 | 未修；音量类别/路由与状态来源待核实 | 输入已送达，未证明实际输出音量异常 |
+| BUG-010 | 触摸 IRQ / 共享中断控制器 | 每次触摸中断都带走 `IOSharedInterruptController::disableInterrupt`，同一线程重入 `controllerLock` 触发递归 hwlock panic | 代码已修复（3018be8）；b15 实机待验 | 触摸中断后系统 panic，桌面无触摸 |
 
 ## BUG-001：USB 多次插拔后无法识别
 
@@ -381,3 +382,44 @@ USB4084/4090、4181/4187及8971/8976行有音量减0xea按下/松开，4173/4179
 后续先在明确同一媒体/音频路由下对照两处状态、按键及拖动前后读值，再决定修复层次。与ESC0和显示主线分开登记，本轮没有改变按键或音频行为。
 
 BUG-008/009原话、源码SHA与日志证据见[a37实机记录](PANEL-D1-0121A37.md)和 `scratch/artifact-0121a37/wake-user-input.json`、`startup-ui-review.json`。
+
+## BUG-010：触摸中断在共享控制器上重入自旋锁导致 panic
+
+2026-11-18，0121b11–b14 上每次触摸中断后都 panic
+`hwlock: thread ... is trying to lock ... recursively`。b14 把递归方
+地址写进日志：`caller 0xfffffe0007a3aa9c` 反汇编落在
+`__ZN27IOSharedInterruptController16disableInterruptEP9IOServicei + 0x4c`，
+即 `IOSimpleLockLockDisableInterrupt(controllerLock)` 的 `lck_spin_lock`
+返回地址。同一线程已经持有 `controllerLock`，因此是重入，而不是别的锁。
+状态：**代码已修复（3018be8）；b15 实机待验**。
+
+因果链：`handleInterrupt()` 先分派向量、再在 `IOSimpleLockLock(controllerLock)`
+下比较 `vectorsEnabled != vectorsRegistered`。触摸上半部调用
+`IOService::disableInterrupt(0)` 后 `vectorsEnabled` 减一，
+`registerInterrupt()` 又把控制器自己写进 nub 的 `interruptSources`，于是
+收尾的 `nub->disableInterrupt(0)` 回到同一个 `IOSharedInterruptController`，
+其 `disableInterrupt` 第一步就取 `controllerLock`——同线程重入，panic。
+所以只要上半部软关一次向量，收尾块必然重入；这与 TLMM pad 代理无关
+（b11 里完全没有 pad 中断代码的内核同样 panic），也与创建者是谁无关。
+
+修复分两层，互不依赖：
+
+- 触摸专用线（`sweettouchpanel=2`，INTID 240 只属于这个 nub）由 C 侧
+  守位：`sweet_touch_irq_own_line()` 之后，`ts_irq_mask()`/`ts_irq_unmask()`
+  直接写 `GICD_ICENABLER`/`GICD_ISENABLER`——与 provider 写的是同一个
+  寄存器，但不取锁、不改 `vectorsEnabled`，收尾块因此不再触发。facade 在
+  `ts_irq_arm()` 里仍调用一次 `enableInterrupt(0)`，共享控制器才会开始投递；
+  `stop()`/`free()` 用 `sweet_touch_irq_release_line()` 交还。开关中断都在
+  线程或中断上下文完成，没有锁。
+- 上游 `handleInterrupt()` 把 `nub->disableInterrupt(0)` 挪出
+  `controllerLock` 范围（`controllerDisabled` 仍在锁内记账）。即使别的向量
+  在同一共享控制器上被软关，也不会再重入。TLMM pad 路径不改：它的
+  mask 本来就不取锁。
+
+单测：`tools/tests/test-mh2lm-panel-touch.py` 断言守位后上半部走
+distributor、不调用 provider 钩子；交还后钩子恢复调用。
+`test-mh2lm-display-service.py` 的桩补上两个新导出。CI marker 151/151，
+tlmm/panel/display 三套全绿。b14 内核早于本修复，不能用来验证。
+
+验收：`sweettouchpanel=2` 下 20 s 后第一次触摸不再 panic，日志出现逐次
+`SWEET TOUCH IRQ: hit`；`sweettouchpanel=3` pad 路径同时复测。
