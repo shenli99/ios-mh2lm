@@ -111,3 +111,14 @@ prepare 的触发类型来自注册slot；支持high/low/rising/falling/both，�
 证据：工作区scratch/artifact-0121b27/packaging-verification.json。候选源码仍92b633f；本次没有生产代码变更。下一步用户临时启动gpioirq，确认桌面/触摸/原显示生命周期并导出sweetlog-0121b27.bin；当前尚无实机结果。
 
 等待期间仓库外scratch/gpio-irq-staged/characterize-stage3.py复现了该候选仍保留的首包问题：正常arm成功state1/cfg0x71；CFG读取前callback已deferred则失败state3/cfg0x70/status1；没有callback但ENABLE0则仍拒绝。这是明确的后续批次依赖线索，不是通过测试；未将容错夹入本候选。
+
+
+## b27 实机结果：第2批未通过，进入第3批验证依赖
+
+收到logs/sweetlog-0121b27.bin；项目解码器报告total459424/flush10，未绕环。mode3、claim/AGPIO路径存在；日志3897行TouchComm ready，3898行summary did not enable读回ERROR，3899行GIC probe enable failed，3900行worker setup failed。尚未到达arm handle enable检查，不能把本次首错改称b25的arm失败。
+
+随后3903行按已死触摸继续接管，4442行touch resume admission失败，4456行FB明确pixels frozen。错误后仍有用户态日志。这是显示状态机主动拒绝继续的证据，日志末尾不是故障PC。
+
+仓库外scratch/gpio-irq-staged/characterize-probe-window.py在实际worker/service上对照复现：使能读回前已有回调时probe-hits1/ENABLE0被拒；无回调且ENABLE0时probe-hits0也被拒。设备当前失败日志未打印probe-hits，故早到回调是有测试证据的候选因果，并未证明排除真实写失败或RWP问题。
+
+根据固定计划第26行的依赖条款，先封存第2批代码和实机失败，再以独立第3批处理早到回调验证。第3批必须让早到回调和真正未使能可区分：先读硬件快照再acquire软件状态/计数，保留错误分支与pending/active清理；不增加逐包GIC轮询，不改显示降级或叶子化。不得称第2批已单独通过实机。
