@@ -6,7 +6,7 @@
 
 验证：六种双线程确定交错、相邻IRQ本位隔离、map失败无provider动作、IRQ/锁内不打印/阻塞/provider调用断言及INFO阈值下WARN一次均通过；TLMM/真实worker-service/panel-lifecycle/display-service四套回归通过；TLMM ARM64 TU成功；marker151/0、diff --check通过。第4批生产仅TLMMGPIOController.cpp/h，C worker/service/GIC/display执行代码与b28不变。
 
-NEXT：用户push full-source运行CircleCI，下载logs/xnu-kernel-0121b29.gz和logs/xnu-buildtree-0121b29.gz；agent逐文件核验后用out-bs/mk16k-0121b29.sh打包。实际b28已被locked helper符号门禁拒绝。当前无b29产物/镜像/设备结果；保留b28镜像，实机桌面/连续触摸/两轮OFF-ON后才进入第5批叶子化。详见docs/GPIO-IRQ-STAGE4-MMIO-ORDER.md。以下是较早交接。
+NEXT更新：b29两包已到，5300源码匹配0312a41，kernel SHA 05b9fce017aa37379144d9ff770517e929033ae6d9e12f16d771cf82b3daa836。两个镜像打包及最终FAT/固件/ADT/参数回读通过，gpioirq SHA 31cd1bf007bb7d90303aad063a68f9f0743f75352c4b678013265f0231afe139、baseline SHA 1be49cf3f7a7d4ce1fec787f7a1e65328f295fb37e37af3defe7f498929be4d0。原b28启动参数逐词保持，新锁域/诊断门禁通过。无需再跑CI；用户fastboot boot b29 gpioirq、连续触摸和两轮OFF-ON后导出sweetlog-0121b29.bin，当前仍未实机验收；保留b28镜像，实机桌面/连续触摸/两轮OFF-ON后才进入第5批叶子化。详见docs/GPIO-IRQ-STAGE4-MMIO-ORDER.md。以下是较早交接。
 
 ## 当前交接更新（2026-11-20，b28两轮普通OFF/ON及醒后触摸通过）
 

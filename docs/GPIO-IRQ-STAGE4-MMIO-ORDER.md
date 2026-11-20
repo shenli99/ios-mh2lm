@@ -41,3 +41,19 @@ fixture在provider入口、日志输出、thread_block处断言未持IRQ锁。pr
 候选尚未CI/实机；用户push full-source、下载b29 kernel/buildtree后agent核验打包。验收同b28：桌面、连续触摸/抬起/滑动、两轮普通OFF/ON和醒后触摸。旧逐包ERROR预期不再出现；若有一次snapshot WARN只当线索，probe/arm/setup失败仍须定位，不强行通过。
 
 本批仍保持一颗pad deferred时整条summary关闭，**尚未叶子化**。第5批叶子策略、第6批stray隔离、失败触摸的显示降级仍未实施。b28原镜像保留为回退；b29通过实机之前不推进下一批生产改动。
+
+
+## b29 下载及镜像交付（2026-11-20）
+
+kernel/buildtree已到，5300个XNU源码文件与0312a41逐文件一致（0缺失/0差异）。内核17879760字节，SHA256 05b9fce017aa37379144d9ff770517e929033ae6d9e12f16d771cf82b3daa836，与包内SHA256SUMS匹配。未另行核验CI run ID或全量云端build日志。
+
+两镜像均35545088字节。重新解析最终Android v1头并抽取FAT中的kernel/ADT/TOML：内核和派生ADT摘要匹配，ABI608固件SHA256 27e7a1d1a3f9421af18d02f216e4e7d651137d42f2955be775f9142f118ea480和面板MHPANEL1钩子通过；ADT SHA256 a9e4f37151162be9244b2e701b2e60063d85d4c424e8842c5bbf9b8d62391875。每档启动参数与对应b28逐词相同，两档只差touch mode。
+
+| 镜像 | SHA256 |
+|---|---|
+| out-bs/boot-16k-0121b29-gpioirq-panel-pipeline.img | 31cd1bf007bb7d90303aad063a68f9f0743f75352c4b678013265f0231afe139 |
+| out-bs/boot-16k-0121b29-baseline-panel-pipeline.img | 1be49cf3f7a7d4ce1fec787f7a1e65328f295fb37e37af3defe7f498929be4d0 |
+
+新locked-helper符号与诊断文案在二进制中通过门禁；最终FAT内核也含probe/arm和新snapshot标记，旧逐包`summary INTID %u did not enable`字面量已不存在。核验记录：工作区scratch/artifact-0121b29/packaging-verification.json。
+
+下一步用户临时启动gpioirq，确认桌面、连续点击/抬起/滑动、两轮OFF/ON和醒后触摸，导出sweetlog-0121b29.bin。无需再跑CI，当前未实机验收；b28镜像保持回退。本次只打包/核验/记录，未修改生产代码或推进第5批。
