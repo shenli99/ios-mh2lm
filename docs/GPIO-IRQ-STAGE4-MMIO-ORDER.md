@@ -57,3 +57,18 @@ kernel/buildtree已到，5300个XNU源码文件与0312a41逐文件一致（0缺�
 新locked-helper符号与诊断文案在二进制中通过门禁；最终FAT内核也含probe/arm和新snapshot标记，旧逐包`summary INTID %u did not enable`字面量已不存在。核验记录：工作区scratch/artifact-0121b29/packaging-verification.json。
 
 下一步用户临时启动gpioirq，确认桌面、连续点击/抬起/滑动、两轮OFF/ON和醒后触摸，导出sweetlog-0121b29.bin。无需再跑CI，当前未实机验收；b28镜像保持回退。本次只打包/核验/记录，未修改生产代码或推进第5批。
+
+
+## b29 第4批普通功能实机验收通过（2026-11-20）
+
+用户报告正常进入桌面、没发现异常。logs/sweetlog-0121b29.bin SHA256 be26cd20f59749533eff5d9766c8d2ceb9eb20c3f255b3d4ef63b9418905b0b0；header version1/ring4194304/total2912151/flush26，未绕环，正确解码37231行。工作区机器可读审计：scratch/artifact-0121b29/device-log-review.json。
+
+- 启动touch probe3939行hits1/clear1/pending0/active0；3940 armed，3942 touch worker ready；4484首次接管complete，4491 HANDOFF active。
+- 全日志46 down/46 up，逐finger配对顺序正确、末尾无未释放触点；16479行达到同时10指峰值，16526行前全部抬起。这是同一GPIO122触摸设备的多指报告，不是多GPIO summary客户端并行测试。
+- OFF/ON第一轮：显示token2/operation2在18698行完成，token3/operation3在19513行完成；第二轮token4 OFF/20001行、token5 ON/20505行；第三轮token6 OFF/20732行、token7 ON/21232行。每轮均有ULPS退出、新帧、HS亮度、触摸armed及app/format verified。前两轮紧接下一次OFF，未记录夹在两轮之间的物理触点；第三轮醒后有21284/21313和36270/36310两对down/up。
+- 最后计数36299行hits372/empty0/late0。probe/arm/setup/touch resume/HANDOFF失败、panel deadline、panic(cpu均0；无SYSTEM_OFF末尾，不宣称完整关机覆盖。
+- 整份ERROR0；WARN共5条，全部在启动接管前（3条既有scanout review、2条USB ep0），OFF以后WARN0。旧逐包summary错误0、新snapshot诊断WARN0。
+
+结论：第4批修正保留了普通启动、十指输入和三轮普通OFF/ON，满足固定计划的下一批门槛。b29/0312a41生产逻辑成为新的已验回退基线，b28仍保留。本次通过不证明所有跨核交错已在设备逐一触发，不证明多pad叶子化、长期稳定或物理rail-off；这些边界不因普通验收而扩大。
+
+下一步第5批只改变pad deferred期间对共享summary的屏蔽范围；先写两个GPIO客户端的确定回归（A暂停而B仍可服务、A锁存保留及恢复），再单独实现/构建/实机验收。claim开线时机、prepare时机、stray全pad普查/清扫和显示流程不夹带。

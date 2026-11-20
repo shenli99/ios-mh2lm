@@ -1,5 +1,13 @@
 # iOS 16 on LG G8X (mh2lm / SM8150) — working notes
 
+## 当前交接更新（2026-11-20，b29普通功能验收通过，进入第5批叶子掩码）
+
+用户确认桌面正常、未见异常。b29日志SHA be26cd20f59749533eff5d9766c8d2ceb9eb20c3f255b3d4ef63b9418905b0b0，total2912151/flush26/未绕环/37231行。46 down/46 up、同指配对正确、无遗留触点、峰值同时10指（同一个gpio122设备，不是多GPIO并行）。显示token2 OFF/token3 ON、token4 OFF/token5 ON、token6 OFF/token7 ON三轮完整，均有新帧/亮度/ULPS/touch rearmed和app-format恢复；末轮醒后有触摸。最后hits372/empty0/late0。ERROR0、snapshot WARN0、旧summary ERROR0；5条WARN全是启动已有scanout-review/USB ep0，OFF后WARN0。
+
+第4批满足普通实机验收门槛，0312a41/b29生产逻辑为新已验回退，保留b28/b29镜像。证据docs/GPIO-IRQ-STAGE4-MMIO-ORDER.md及scratch/artifact-0121b29/device-log-review.json。
+
+NEXT：第5批先构造两个独立GPIO客户端，A deferred时B仍能派发，A锁存保留且resume正常；只改变客户端mask影响范围，不混改claim/prepare时机、stray全pad清扫或显示。当前尚未第5批生产修改。第6批异常隔离及独立显示降级继续待做；普通路径通过不证明所有硬件交错/长稳/物理rail-off。以下交接是历史。
+
 ## 当前交接更新（2026-11-20，第4批状态/MMIO写序本地完成，b29待CI/实机）
 
 以实机通过桌面/触摸/两轮OFF-ON的b28/999989b为基线。第4批已用确定交错复现旧summary软件状态与硬件位不一致（同write-one别名模型下b28负对照仍失败），修正为client mask/pad CFG-STATUS/summary写共用fIrqLock；provider调用/日志/RWP等待不入锁。prepare/ACK/注销与恢复的晚到写也纳入相同锁域。GICD只写INTID240本位，避免共享字read-modify-write复活邻位；fixture在MMIO边界模拟write-one别名，不改生产屏障迁就数组。无直接map则在provider注册前拒绝TLMM IRQ，client保留旧路径。旧逐包ERROR替换为线程上下文、锁外一次性诊断WARN，不改变b28 probe/arm真实失败验证。
