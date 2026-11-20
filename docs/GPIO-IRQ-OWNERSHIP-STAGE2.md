@@ -95,3 +95,19 @@ prepare 的触发类型来自注册slot；支持high/low/rising/falling/both，�
 已知首包竞态可能在本批暴露：正常callback已经将pad ENABLE清0时，旧arm验证仍可能报handle enable readback。若出现，应保留第2批实测失败，不把它改名为本批已验；再以单独第3批提交处理明确依赖。不得为强行通过本批而关闭检查或恢复第二个裸寄存器写者。
 
 第2批在收到实机结果前保持“本地完成、待验”，不推进第3批生产改动。后续仍包括真实硬件多pad及异常中断验证，不把单触摸桌面等同于叶子化完成。
+
+
+## b27 下载及镜像核验（2026-11-20）
+
+下载构建树的5300个XNU源码文件与92b633f逐文件匹配，0缺失/0差异。kernel.development.mh2lm为17863232字节，SHA256 e9371b6dba8698429b77a21cdefd37bd048731792092277fb6470c6e2bec9f70，与包内SHA256SUMS一致。没有独立CI run ID，源码核验不等于云端run元数据核验。
+
+两镜像均35545088字节。固件SHA256 27e7a1d1a3f9421af18d02f216e4e7d651137d42f2955be775f9142f118ea480，面板钩子存在；ADT SHA256 a9e4f37151162be9244b2e701b2e60063d85d4c424e8842c5bbf9b8d62391875。最终Android v1镜像重新抽取FAT内核/ADT/TOML并核验，参数只差sweettouchpanel=3/2，显示参数保持。
+
+| 镜像 | SHA256 |
+|---|---|
+| out-bs/boot-16k-0121b27-gpioirq-panel-pipeline.img | a791480f95814a4bbaddd20a3d1f242e4a61c9d3f519ebdb3556fa8fec339ad8 |
+| out-bs/boot-16k-0121b27-baseline-panel-pipeline.img | e8bf056468c799fd68b903c215254073d2f9a4796bd742fc490250506b3cdf32 |
+
+证据：工作区scratch/artifact-0121b27/packaging-verification.json。候选源码仍92b633f；本次没有生产代码变更。下一步用户临时启动gpioirq，确认桌面/触摸/原显示生命周期并导出sweetlog-0121b27.bin；当前尚无实机结果。
+
+等待期间仓库外scratch/gpio-irq-staged/characterize-stage3.py复现了该候选仍保留的首包问题：正常arm成功state1/cfg0x71；CFG读取前callback已deferred则失败state3/cfg0x70/status1；没有callback但ENABLE0则仍拒绝。这是明确的后续批次依赖线索，不是通过测试；未将容错夹入本候选。
