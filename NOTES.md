@@ -1,5 +1,9 @@
 # iOS 16 on LG G8X (mh2lm / SM8150) — working notes
 
+## 当前交接更新（2026-11-21，b30镜像已交付，等待第5批实机）
+
+5300 个 XNU 源文件与生产提交 b76005f 一致。b30 的 mode3/mode2 镜像已打包并回读；内核摘要匹配归档清单，叶子模式标记存在，固件/ADT/启动参数与对应 b29 相同。核验见 [第5批记录](docs/GPIO-IRQ-STAGE5-LEAF-MASK.md)。先用 fastboot boot 测 b30 gpioirq，验桌面、连续触摸、两轮 OFF/ON 及醒后触摸，再导出 sweetlog-0121b30.bin。不需新 CI；仍未实机验收，不推进第6批。
+
 ## 当前交接更新（2026-11-20，第5批客户端叶子掩码本地完成，b30待CI/实机）
 
 以b29/0312a41已验生产逻辑为基线，第5批实现普通client mask只清本pad ENABLE、不再等worker持整线；保留dispatch短mask/深度门控、第一次resume才开线、原prepare位置。新slot关继承ENABLE匹配软件masked；快worker在callback返回前resume的新锁存由mask epoch保护不被尾部ACK。原island不可写时的整线安全hold独立于普通client mask，peer/probe/slot复用不能绕过；不做stray全pad普查或清扫。
