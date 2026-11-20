@@ -6,7 +6,7 @@
 
 计划入口：[GPIO 中断分批实施](docs/GPIO-IRQ-IMPLEMENTATION-PLAN.md)。批次1已完成：[b22 基线核验](docs/GPIO-IRQ-BASELINE-B22.md)，三套 TLMM/真实触摸worker/显示生命周期回归 PASS，CI marker151/0，已有镜像回读 SHA 一致。此批没有生产代码变更，无需新 CI 或重测原 b22。
 
-NEXT：批次2只做句柄所有权收口，先审计 arm/fail/probe/park/resume/cancel/exit 全部路径；保持 b22 整线门控、claim开线时序、显示流程。批次3首包竞态、批次4状态写序、批次5叶子化、批次6异常处理及独立显示降级依次进行，不夹带。每批单独提交/验证，实机验收后才推进下一批生产改动。用户负责push、下载、设备；agent负责实现、核验、打包。较早 CURRENT/NEXT 为历史。
+NEXT：批次2进行中；2a先完成live IRQ释放边界：direct releasePin拒绝仍注册slot，AGPIO释放先注销，freePinIRQ先mask再移除slot且不ACK锁存。新增测试在b22失败、修正后通过；三套回归、ARM64 TLMM TU、marker151/0。尚未迁移worker写入，尚未证明并发在途callback已排空；2a无需单独构建，完成2b再整批交付。2b继续审计并迁移 arm/fail/probe/park/resume/cancel/exit，保持 b22 整线门控、claim开线时序、显示流程。批次3首包竞态、批次4状态写序、批次5叶子化、批次6异常处理及独立显示降级依次进行，不夹带。每批单独提交/验证，实机验收后才推进下一批生产改动。用户负责push、下载、设备；agent负责实现、核验、打包。较早 CURRENT/NEXT 为历史。
 
 ## Agent handoff / active work (2026-11-15, documentation synchronized after a39 acceptance)
 

@@ -463,9 +463,40 @@ static void interruptCases(void) {
     assert(pin96);
     assert(pin96->setInterrupt(TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
         kIOReturnSuccess);
+    assert(pin96->resumeInterrupt() == kIOReturnSuccess);
+    assert(pin96->interruptEnabled());
+    setTileReg(TLMM_TILE_NORTH, 96, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
+    assert(on.releasePin(96, "irq-test-96") == kIOReturnBusy);
+    assert(pin96->isValid());
+    assert(on.acquirePin(96, "new-owner") == nullptr);
     assert(pin96->disableInterrupt() == kIOReturnSuccess);
+    assert(!pin96->interruptEnabled());
+    assert((tileReg(TLMM_TILE_NORTH, 96, TLMM_GPIO_INTR_CFG) & TLMM_INTR_ENABLE) == 0);
+    assert(tileReg(TLMM_TILE_NORTH, 96, TLMM_GPIO_INTR_STATUS) == TLMM_INTR_STATUS_RAW);
+    unsigned beforeFreeDispatch = gIrqHits;
+    runSummaryAction();
+    assert(gIrqHits == beforeFreeDispatch); /* removed handler cannot run */
     pin96->put();
+    AGPIO *new96 = on.acquirePin(96, "new-owner");
+    assert(new96 && new96->isValid());
+    new96->put();
     assert(on.maskPinIRQ(7) == kIOReturnNotFound);
+
+    /* Dropping a handle retires its live interrupt before another owner can
+     * acquire the pad, even if the caller forgot disableInterrupt(). */
+    AGPIO *droppedIRQ = on.acquirePin(99, "dropped-irq");
+    assert(droppedIRQ);
+    assert(droppedIRQ->setInterrupt(TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
+        kIOReturnSuccess);
+    assert(droppedIRQ->resumeInterrupt() == kIOReturnSuccess);
+    droppedIRQ->put();
+    assert((tileReg(TLMM_TILE_SOUTH, 99, TLMM_GPIO_INTR_CFG) & TLMM_INTR_ENABLE) == 0);
+    AGPIO *new99 = on.acquirePin(99, "replacement-irq");
+    assert(new99);
+    assert(new99->setInterrupt(TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
+        kIOReturnSuccess);
+    assert(new99->disableInterrupt() == kIOReturnSuccess);
+    new99->put();
 
     assert(pin->disableInterrupt() == kIOReturnSuccess);
     pin->put();

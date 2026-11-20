@@ -396,8 +396,13 @@ AGPIO::release(void)
 		return;
 	}
 
-	/* Invalidate first: a concurrent method sees an inert handle, and the
-	 * controller frees the table slot knowing no user can write it again. */
+	/* Returning the handle also retires its interrupt before the pad becomes
+	 * available to another owner. Direct releasePin() refuses live slots. */
+	if (fController) {
+		(void)fController->releasePinIRQ(this);
+	}
+	/* The caller serializes this handle's lifecycle against its methods.
+	 * Invalidate before returning the now-unregistered pad to the table. */
 	fValid = false;
 	controller = fController;
 	owner = fOwner;
@@ -877,6 +882,12 @@ TLMMGPIOController::releasePin(unsigned int pin, const char *owner)
 		IOLockUnlock(fLock);
 		SWEET_LOG_ERROR("SWEET TLMM: gpio%u released by a non-owner\n", pin);
 		return kIOReturnNotPermitted;
+	}
+	if (irqSlotForPin(pin) >= 0) {
+		IOLockUnlock(fLock);
+		SWEET_LOG_WARN("SWEET TLMM: gpio%u released with a live pad interrupt; "
+		    "disableInterrupt() first\n", pin);
+		return kIOReturnBusy;
 	}
 	fPins[pin].handle = NULL;
 	fPins[pin].owner = NULL;
@@ -1596,6 +1607,10 @@ TLMMGPIOController::freePinIRQ(unsigned int pin)
 		return kIOReturnNotFound;
 	}
 
+	/* Stop this pad contributing before removing the slot that services it.
+	 * Retain the b22 summary gate; another pad's resume decides when it opens.
+	 * Do not ack here: unregistration is not permission to consume a packet. */
+	(void)maskPinIRQ(pin);
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	fIrqHandlers[slot] = NULL;
 	fIrqRefcons[slot] = NULL;

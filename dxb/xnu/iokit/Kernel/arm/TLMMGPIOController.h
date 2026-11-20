@@ -108,7 +108,9 @@ public:
 	 */
 	void release(void);
 
-	/* Return the pin and drop this handle's reference in one step. */
+	/* Return the pin and drop this handle's reference in one step. Any live
+	 * pad interrupt is masked and unregistered before the pad is returned.
+	 * The owner must serialize teardown against methods and callbacks. */
 	void put(void);
 
 	unsigned int getPin(void) const { return fPin; }

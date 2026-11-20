@@ -42,4 +42,14 @@
 
 ## 当前进度
 
-批次1：核验并记录。批次2：尚未修改生产逻辑。后续批次：未实施。
+批次1：已完成并提交 60e1906。批次2：进行中，先完成 2a 释放边界（见下）；2b worker 寄存器写入迁移尚未实施。后续批次：未实施。
+
+### 批次2a：注册所有权必须持续到注销
+
+发现：b22 的 `releasePin()` 可以把仍注册着 IRQ 的 pad 交给新 owner；`freePinIRQ()` 删除 slot 前未清 pad ENABLE，可能留下没有 slot 服务的贡献者。
+
+本地修正：direct `releasePin()` 拒绝 live slot；`AGPIO::release/put/free` 在归还前调用注销；注销先走原有 maskPinIRQ，再移除槽位，不 ACK 待处理锁存。保持 b22 的整线门控，未改正常 claim/dispatch/resume、worker、显示或 firmware。
+
+验证：新增 live release 拒绝、注销后 ENABLE=0 且 status 保留、后续 dispatch 不再调用已删 handler、直接 drop handle 后可重新注册的用例；同一新增测试在原始 b22 的 live release 断言处失败，修正后 PASS。TLMM、真实触摸 worker、panel-lifecycle 回归及 ARM64 TLMM TU 通过；CI marker151/0。生命周期由 owner 串行化；本用例不证明已在执行的并发回调已经排空，也未修复 mask/MMIO 状态写序。
+
+2a 是批次2内部的独立提交，不要求现在构建或实机；待2b及整批审查完成，再交付批次2单一候选，验收后才进入批次3。
