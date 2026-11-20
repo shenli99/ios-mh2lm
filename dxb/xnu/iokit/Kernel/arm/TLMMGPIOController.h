@@ -116,9 +116,9 @@ public:
 	 */
 	void release(void);
 
-	/* Return the pin and drop this handle's reference in one step. Any live
-	 * pad interrupt is masked and unregistered before the pad is returned.
-	 * The owner must serialize teardown against methods and callbacks. */
+	/* Thread context only. Mask/unregister and drain dispatch snapshots before
+	 * returning the pad. IRQ-context put is refused and retains its reference.
+	 * The owner must serialize teardown against its non-callback methods. */
 	void put(void);
 
 	unsigned int getPin(void) const { return fPin; }
@@ -231,6 +231,8 @@ public:
 	IOReturn setProbePending(AGPIO *owner, bool pending);
 	/* Teardown helper: releases by pin once the handle is going away. */
 	IOReturn freePinIRQ(unsigned int pin);
+	/* Registration/teardown are thread-context operations. Successful
+	 * unregister drains every dispatch snapshot that could hold the refcon. */
 	/* Interrupt-context safe. mask keeps the line for this pad; resume
 	 * releases it once no registered pad holds it. */
 	IOReturn maskPinIRQ(unsigned int pin);
@@ -243,6 +245,8 @@ public:
 	void dispatchSummary(void);
 
 private:
+	IOReturn requestPinIRQLocked(AGPIO *, unsigned int, tlmm_gpio_irq_handler, void *);
+	IOReturn freePinIRQLocked(unsigned int pin);
 	bool mapTiles(IOService *provider);
 	void readReadOnlyPins(IOService *provider);
 	bool pinReadOnlyLocked(unsigned int pin) const;
@@ -278,13 +282,17 @@ private:
 	 * action on it and masks through it, exactly like a driver would. */
 	IOService *fIrqProvider;
 	IOSimpleLock *fIrqLock;
+	IOLock *fIrqRegistrationLock;
 	bool fIrqClaimed;
+	bool fIrqStopping;
 	bool fIrqMasked;
 	uint32_t fIrqClientMask;
 	unsigned int fIrqCount;
 	int fProbeSlot;
 	unsigned int fIrqPins[TLMM_IRQ_MAX];
 	unsigned int fIrqDetect[TLMM_IRQ_MAX];
+	unsigned int fIrqInFlight[TLMM_IRQ_MAX];
+	bool fIrqRetiring[TLMM_IRQ_MAX];
 	tlmm_gpio_irq_handler fIrqHandlers[TLMM_IRQ_MAX];
 	void *fIrqRefcons[TLMM_IRQ_MAX];
 	int fIrqSlot[TLMM_PIN_MAX];

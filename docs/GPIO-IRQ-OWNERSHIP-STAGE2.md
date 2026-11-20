@@ -31,7 +31,7 @@ prepare 的触发类型来自注册slot；支持high/low/rising/falling/both，�
 
 1. delegated arm最后仍检查ENABLE读回，正常首包可能在读取前将其mask。没有把批次3的state2容错夹进本批。新句柄迁移不应因测试只跑静态时序而被称为实机稳定。
 2. 软件探针pending写入已在2c收回summary owner（见下）；探针整体仍沿b22的enable/mask与读回顺序，不证明软件注入会制造某个pad的硬件status。
-3. 2a阻止归还live注册，却未为已在dispatch快照中的handler提供排空协议；服务撤销/并发调用的生命周期还要核对。钩子撤销后拒绝裸写，不等于已经消除了所有跨核生命周期竞态。
+3. pad dispatch快照的注销排空已在2d实现并本地验证（见下）。服务的全局worker钩子仍需独立排空，不能把GPIO回调排空等同于worker钩子也不在使用service/handle。
 4. 新prepare与island检查不保证能与固件瞬时抢占进行跨域原子仲裁，仅尊重可观测所有权；不自动清扫其它pad。
 
 以上事项须在批次2总审查中列明处置；2b为批次2内部提交，当前不要求CI/刷机，也不推进批次3生产代码。
@@ -48,3 +48,17 @@ prepare 的触发类型来自注册slot；支持high/low/rising/falling/both，�
 - TLMM、触摸、panel-lifecycle、display-service四套回归通过；TLMM/SweetTouchPanel/C worker三个ARM64 TU通过；marker151/0与diff --check通过。
 
 2c没有修改summary claim/dispatch门控或显示执行流程；只是确定共享pending写入者及诊断准入边界。批次2仍剩在途callback的注销排空协议。当前不要求CI/刷机、不启动批次3。
+
+
+## 2d：注销等待 pad dispatch 快照排空
+
+- 派发在第一次接触summary硬件前，于fIrqLock下为每个有效slot快照增加在途引用；引用保持到回调、ACK判断及summary尾部都结束。无可进入slot的dispatch直接返回。
+- 线程注销先将slot标记retiring并置client mask，阻止新快照；mask pad后，在同一IRQ锁下检查在途引用与assert_wait。恢复中断、释放spinlock后才thread_block；dispatch尾部归零并唤醒，不丢block前到达的完成。
+- 等待中保留handler/refcon、slot和pad所有权。retiring时resume拒绝；待全部快照完成后才能清slot和归还pad。无“超时即允许释放”分支；handler必须遵守IRQ中不阻塞的合同。
+- 注册/注销经独立线程mutex串行，避免最后一slot注销summary与新注册交错。IRQ上下文注册/注销明确拒绝；typed AGPIO::put在拒绝时保留handle/reference，必须由线程重试。生命周期不得经OSObject基类强行释放绕过typed put合同。
+- 控制器stop先关闭注册，按slot排空，再注销summary和失效handle。此证据针对已进入pad dispatch快照的回调；上游GenericInterruptController在对象销毁前的vector/target寿命仍是平台生命周期前提，不能把这里的测试当成完整GIC控制器热拔插证明。
+- 测试用真实控制器和两个线程，分别hold正在执行回调、hold同一快照前面的回调以注销后续slot、在hold期间停止controller；每种再覆盖完成先于thread_block的早到wake。注销等待时旧owner保留、resume拒绝、锁存保留；解除hold后才允许新owner注册。无sleep轮询。
+- 在2c原实现上移除IRQ拒绝用例以隔离排空检查，线程测试于“回调未结束却注销返回”的断言失败；2d通过同一交错。另测IRQ disable/put拒绝及引用保留。
+- TLMM、touch、panel-lifecycle、display-service四套回归PASS；三个ARM64 TU通过；marker151/0；diff --check通过。summary的整线门控规则未改，dispatch多了生命周期引用记账，未开启叶子化或显示流程更改。
+
+第2批总审查接下来需完成触摸service全局worker钩子的在途调用保护，并检查与stop/free的顺序。2d不单独要求CI或刷机；仍未启动第3批生产修正。

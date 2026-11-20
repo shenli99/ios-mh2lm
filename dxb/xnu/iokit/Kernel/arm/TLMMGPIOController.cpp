@@ -27,6 +27,7 @@
 #include "TLMMGPIOController.h"
 #include <IOKit/IOLib.h>
 #include <IOKit/IOPlatformExpert.h>
+#include <kern/sched_prim.h>
 #include <libkern/libkern.h>
 /* Distributor mapping: VM_WIMG_IO comes from this header; the map KPI below
  * is not exported by machine/machine_routines.h, so it is declared here the
@@ -418,7 +419,12 @@ AGPIO::release(void)
 	/* Returning the handle also retires its interrupt before the pad becomes
 	 * available to another owner. Direct releasePin() refuses live slots. */
 	if (fController) {
-		(void)fController->releasePinIRQ(this);
+		IOReturn rc = fController->releasePinIRQ(this);
+		if (rc != kIOReturnSuccess && rc != kIOReturnNotFound) {
+			SWEET_LOG_WARN("SWEET TLMM: gpio%u release refused rc=%#x; handle retained\n",
+			    fPin, (unsigned)rc);
+			return;
+		}
 	}
 	/* The caller serializes this handle's lifecycle against its methods.
 	 * Invalidate before returning the now-unregistered pad to the table. */
@@ -441,6 +447,7 @@ AGPIO::put(void)
 	/* release() drops the pad, then OSObject::release() drops the reference
 	 * (and frees this object when it was the last one). */
 	release();
+	if (fValid) return; /* refused IRQ-context teardown retains its reference */
 	OSObject::release();
 }
 
@@ -641,6 +648,7 @@ TLMMGPIOController::start(IOService *provider)
 	fIrqProvider = provider;
 	fGicd = NULL;
 	fIrqClaimed = false;
+	fIrqStopping = false;
 	fIrqMasked = false;
 	fIrqClientMask = 0;
 	fIrqCount = 0;
@@ -649,9 +657,13 @@ TLMMGPIOController::start(IOService *provider)
 	fIrqStrays = 0;
 	for (i = 0; i < TLMM_IRQ_MAX; i++) {
 		fIrqPins[i] = 0;
+		fIrqInFlight[i] = 0;
+		fIrqRetiring[i] = false;
 		fIrqHandlers[i] = NULL;
 		fIrqRefcons[i] = NULL;
 	}
+	fIrqRegistrationLock = IOLockAlloc();
+	if (!fIrqRegistrationLock) return false;
 	fIrqLock = IOSimpleLockAlloc();
 	if (!fIrqLock) {
 		SWEET_LOG_ERROR("SWEET TLMM: cannot allocate the IRQ lock\n");
@@ -692,7 +704,22 @@ TLMMGPIOController::stop(IOService *provider)
 		    held);
 	}
 
-	releaseSummary();
+	/* Stop registration before draining every pad snapshot. IRQ callbacks
+	 * never take this sleeping lifecycle lock. Keep mappings and handles
+	 * valid until the final callback/tail has released its references. */
+	if (fIrqRegistrationLock && fIrqLock) {
+		IOLockLock(fIrqRegistrationLock);
+		IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+		fIrqStopping = true;
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+		for (i = 0; i < fPinCount; ++i) {
+			if (irqSlotForPin(i) >= 0) (void)freePinIRQLocked(i);
+		}
+		releaseSummary();
+		IOLockUnlock(fIrqRegistrationLock);
+	} else {
+		releaseSummary();
+	}
 
 	/*
 	 * Invalidate every outstanding handle before the windows are released:
@@ -736,6 +763,10 @@ TLMMGPIOController::free(void)
 	if (fLock) {
 		IOLockFree(fLock);
 		fLock = NULL;
+	}
+	if (fIrqRegistrationLock) {
+		IOLockFree(fIrqRegistrationLock);
+		fIrqRegistrationLock = NULL;
 	}
 	if (fIrqLock) {
 		IOSimpleLockFree(fIrqLock);
@@ -1445,18 +1476,24 @@ TLMMGPIOController::dispatchSummary(void)
 	if (!fIrqProvider || !fIrqLock) {
 		return;
 	}
-	/* Level line: mask first, so the aggregate cannot re-enter while the
-	 * status of every pad is being drained. */
-	setSummaryMasked(true);
-
+	/* Reserve each snapshot before touching the line. Unregister either
+	 * closes this admission first, or waits through our complete tail. */
+	bool admitted = false;
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	count = fIrqCount > TLMM_IRQ_MAX ? TLMM_IRQ_MAX : fIrqCount;
 	for (i = 0; i < count; i++) {
 		pins[i] = fIrqPins[i];
-		handlers[i] = fIrqHandlers[i];
+		handlers[i] = fIrqRetiring[i] ? NULL : fIrqHandlers[i];
 		refcons[i] = fIrqRefcons[i];
+		if (handlers[i]) {
+			++fIrqInFlight[i];
+			admitted = true;
+		}
 	}
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	if (!admitted) return;
+	/* Preserve b22 whole-line gating; this is not leaf masking. */
+	setSummaryMasked(true);
 
 	for (i = 0; i < count; i++) {
 		uint32_t status;
@@ -1473,7 +1510,7 @@ TLMMGPIOController::dispatchSummary(void)
 		 * The summary itself is already masked, so this costs no interrupt. */
 		bool masked;
 		saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
-		masked = ((fIrqClientMask >> i) & 1u) != 0;
+		masked = fIrqRetiring[i] || ((fIrqClientMask >> i) & 1u) != 0;
 		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 		if (masked) {
 			continue;
@@ -1488,7 +1525,7 @@ TLMMGPIOController::dispatchSummary(void)
 		 * claim (no client mask) lets the controller ack for it. */
 		bool deferred;
 		saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
-		deferred = ((fIrqClientMask >> i) & 1u) != 0; /* snapshot index == slot */
+		deferred = fIrqRetiring[i] || ((fIrqClientMask >> i) & 1u) != 0; /* snapshot index == slot */
 		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 		if (!deferred) {
 			uint32_t after = readIntrStatus(pins[i]);
@@ -1508,10 +1545,32 @@ TLMMGPIOController::dispatchSummary(void)
 	}
 
 	setSummaryMasked(false);
+	/* A snapshot holds the callback/refcon until ALL per-dispatch work is
+	 * finished, including the tail. Unregister cannot reuse the slot or
+	 * release the last summary registration before these references drain. */
+	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	for (i = 0; i < count; ++i) {
+		if (handlers[i] && --fIrqInFlight[i] == 0 && fIrqRetiring[i]) {
+			thread_wakeup((event_t)&fIrqInFlight[i]);
+		}
+	}
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 }
 
 IOReturn
 TLMMGPIOController::requestPinIRQ(AGPIO *owner, unsigned int detect,
+    tlmm_gpio_irq_handler handler, void *refcon)
+{
+	if (getPlatform()->atInterruptLevel()) return kIOReturnNotPermitted;
+	IOLockLock(fIrqRegistrationLock);
+	IOReturn rc = fIrqStopping ? kIOReturnNotOpen :
+	    requestPinIRQLocked(owner, detect, handler, refcon);
+	IOLockUnlock(fIrqRegistrationLock);
+	return rc;
+}
+
+IOReturn
+TLMMGPIOController::requestPinIRQLocked(AGPIO *owner, unsigned int detect,
     tlmm_gpio_irq_handler handler, void *refcon)
 {
 	volatile uint32_t *intrCfg;
@@ -1736,6 +1795,16 @@ TLMMGPIOController::releasePinIRQ(AGPIO *owner)
 IOReturn
 TLMMGPIOController::freePinIRQ(unsigned int pin)
 {
+	if (getPlatform()->atInterruptLevel()) return kIOReturnNotPermitted;
+	IOLockLock(fIrqRegistrationLock);
+	IOReturn rc = freePinIRQLocked(pin);
+	IOLockUnlock(fIrqRegistrationLock);
+	return rc;
+}
+
+IOReturn
+TLMMGPIOController::freePinIRQLocked(unsigned int pin)
+{
 	int slot;
 	IOInterruptState saved;
 
@@ -1747,11 +1816,25 @@ TLMMGPIOController::freePinIRQ(unsigned int pin)
 		return kIOReturnNotFound;
 	}
 
-	/* Stop this pad contributing before removing the slot that services it.
-	 * Retain the b22 summary gate; another pad's resume decides when it opens.
-	 * Do not ack here: unregistration is not permission to consume a packet. */
+	/* Close admission before masking hardware. A snapshot already holding
+	 * this slot may finish its callback, but no new snapshot can acquire it.
+	 * Registration is serialized separately, outside all top halves. */
+	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	fIrqRetiring[slot] = true;
+	fIrqClientMask |= 1u << (unsigned int)slot;
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	(void)maskPinIRQ(pin);
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	while (fIrqInFlight[slot] != 0) {
+		/* Register the wait while holding the same IRQ lock used by the
+		 * dispatch tail's decrement/wakeup, so an early completion is kept.
+		 * Drop the spinlock and restore IRQs BEFORE blocking. No timeout
+		 * can authorize freeing a still-referenced callback target. */
+		(void)assert_wait((event_t)&fIrqInFlight[slot], THREAD_UNINT);
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+		thread_block(THREAD_CONTINUE_NULL);
+		saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	}
 	if (fProbeSlot == slot) {
 		/* Cancel an abandoned sole-client probe before the slot is reused. */
 		gicdWrite(0x280u + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID),
@@ -1760,6 +1843,7 @@ TLMMGPIOController::freePinIRQ(unsigned int pin)
 	}
 	fIrqHandlers[slot] = NULL;
 	fIrqRefcons[slot] = NULL;
+	fIrqRetiring[slot] = false;
 	fIrqClientMask &= ~(1u << (unsigned int)slot);
 	__atomic_store_n(&fIrqSlot[pin], -1, __ATOMIC_RELEASE);
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
@@ -1869,6 +1953,10 @@ TLMMGPIOController::resumePinIRQ(unsigned int pin)
 		return kIOReturnUnsupported;
 	}
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	if (fIrqStopping || fIrqRetiring[slot]) {
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+		return kIOReturnNotOpen;
+	}
 	fIrqClientMask &= ~(1u << (unsigned int)slot);
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	{

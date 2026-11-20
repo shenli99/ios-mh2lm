@@ -36,12 +36,17 @@ def strip_barriers(text):
 
 
 PRELUDE = r'''
-static bool fixtureAtInterrupt = false;
+static thread_local bool fixtureAtInterrupt = false;
 struct FixturePlatform { bool atInterruptLevel() const { return fixtureAtInterrupt; } };
 static FixturePlatform fixturePlatform;
 static FixturePlatform *getPlatform() { return &fixturePlatform; }
 
 #include <atomic>
+#include <condition_variable>
+#include <thread>
+#include <memory>
+#include <map>
+#include <functional>
 #include <cassert>
 #include <cstdarg>
 #include <cstdint>
@@ -124,6 +129,44 @@ static IOLock *IOLockAlloc() { return new IOLock; }
 static void IOLockFree(IOLock *lock) { delete lock; }
 static void IOLockLock(IOLock *lock) { lock->mutex.lock(); }
 static void IOLockUnlock(IOLock *lock) { lock->mutex.unlock(); }
+
+
+// Wait-event adapter: registration is separate from blocking, preserving a
+// wakeup that arrives after assert_wait but before thread_block.
+using event_t = void *;
+constexpr int THREAD_UNINT = 0;
+#define THREAD_CONTINUE_NULL nullptr
+struct WaitEvent { std::mutex mutex; std::condition_variable cv; unsigned sequence=0; };
+static std::mutex waitEventsLock;
+static std::map<void *, std::shared_ptr<WaitEvent>> waitEvents;
+static thread_local std::shared_ptr<WaitEvent> waitingEvent;
+static thread_local unsigned waitingSequence;
+static std::function<void()> waitRegisteredHook, beforeBlockHook;
+static std::shared_ptr<WaitEvent> eventFor(void *key) {
+    std::lock_guard<std::mutex> guard(waitEventsLock);
+    auto &entry = waitEvents[key];
+    if (!entry) entry = std::make_shared<WaitEvent>();
+    return entry;
+}
+static int assert_wait(event_t key, int) {
+    waitingEvent=eventFor(key);
+    {std::lock_guard<std::mutex> guard(waitingEvent->mutex);
+     waitingSequence=waitingEvent->sequence;}
+    if(waitRegisteredHook)waitRegisteredHook();
+    return 0;
+}
+static int thread_block(void *) {
+    if(beforeBlockHook)beforeBlockHook();
+    auto event=waitingEvent;
+    std::unique_lock<std::mutex> lock(event->mutex);
+    event->cv.wait(lock,[&]{return event->sequence!=waitingSequence;});
+    waitingEvent.reset();return 0;
+}
+static void thread_wakeup(event_t key) {
+    auto event=eventFor(key);
+    std::lock_guard<std::mutex> guard(event->mutex);
+    ++event->sequence;event->cv.notify_all();
+}
 
 typedef void (*IOInterruptAction)(void *, void *, void *, int);
 
@@ -390,6 +433,11 @@ static void interruptCases(void) {
     assert(pin->setInterrupt(TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) ==
         kIOReturnSuccess);
     assert(on.summaryClaimed());
+    fixtureAtInterrupt=true;
+    assert(pin->disableInterrupt()==kIOReturnNotPermitted);
+    unsigned heldRefs=pin->refs.load();pin->put();
+    assert(pin->isValid()&&pin->refs.load()==heldRefs);
+    fixtureAtInterrupt=false;
     assert(gProvider.registerCount == 1 && gProvider.registered);
     assert(gProvider.registeredSource == 0);
     assert(!gicdLineEnabled() && gicdLineMasked());  /* masked at claim */
@@ -570,6 +618,91 @@ static void interruptCases(void) {
         p->put(); // cancel reservation through unregister, with no live callback
         assert(gicdWord(0x29c) == (1u << 16));
         prepared.stop(&gProvider);
+    }
+}
+
+struct DrainCase {
+    std::mutex lock;
+    std::condition_variable cv;
+    bool entered=false, release=false, waitArmed=false, dispatched=false;
+    std::atomic<bool> retired{false};
+    std::atomic<unsigned> secondCalls{0};
+    AGPIO *first=nullptr;
+};
+static void heldCallback(unsigned, void *arg) {
+    auto &c=*static_cast<DrainCase *>(arg);
+    assert(c.first->disableInterrupt()==kIOReturnNotPermitted);
+    std::unique_lock<std::mutex> lock(c.lock);
+    c.entered=true;c.cv.notify_all();
+    c.cv.wait(lock,[&]{return c.release;});
+}
+static void secondCallback(unsigned, void *arg) {
+    ++static_cast<DrainCase *>(arg)->secondCalls;
+}
+static void teardownCases() {
+    // Retire either an executing callback or a later callback already reserved
+    // in the same snapshot. Repeat with completion before thread_block begins.
+    for (unsigned scenario : {0u,1u,2u}) for (bool earlyWake : {false,true}) {
+        bool retireSecond=scenario==1, stopController=scenario==2;
+        resetProvider();bringUp();addSpecifier();
+        TLMMGPIOController on;assert(on.init()&&on.start(&gProvider));
+        DrainCase c;
+        c.first=on.acquirePin(122,"drain-first");
+        AGPIO *second=retireSecond?on.acquirePin(100,"drain-second"):nullptr;
+        assert(c.first && c.first->setInterrupt(TLMM_IRQ_LEVEL_LOW,heldCallback,&c)==0);
+        if(second)assert(second->setInterrupt(TLMM_IRQ_LEVEL_LOW,secondCallback,&c)==0);
+        assert(c.first->resumeInterrupt()==0);
+        if(second)assert(second->resumeInterrupt()==0);
+        setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS,TLMM_INTR_STATUS_RAW);
+        if(second)setTileReg(TLMM_TILE_SOUTH,100,TLMM_GPIO_INTR_STATUS,TLMM_INTR_STATUS_RAW);
+        AGPIO *target=second?second:c.first;
+        std::atomic<bool> finished{false};
+        waitRegisteredHook=[&]{std::lock_guard<std::mutex> guard(c.lock);c.waitArmed=true;c.cv.notify_all();};
+        beforeBlockHook=[&]{
+            if(!earlyWake)return;
+            std::unique_lock<std::mutex> lock(c.lock);
+            c.release=true;c.cv.notify_all();
+            c.cv.wait(lock,[&]{return c.dispatched;});
+        };
+        std::thread irq([&]{
+            fixtureAtInterrupt=true;runSummaryAction();fixtureAtInterrupt=false;
+            std::lock_guard<std::mutex> guard(c.lock);c.dispatched=true;c.cv.notify_all();
+        });
+        {std::unique_lock<std::mutex> lock(c.lock);c.cv.wait(lock,[&]{return c.entered;});}
+        std::thread teardown([&]{
+            if(stopController)on.stop(&gProvider);
+            else assert(target->disableInterrupt()==0);
+            finished=true;
+            std::lock_guard<std::mutex> guard(c.lock);c.cv.notify_all();
+        });
+        {std::unique_lock<std::mutex> lock(c.lock);
+         c.cv.wait(lock,[&]{return c.waitArmed||finished.load();});
+         assert(c.waitArmed); /* teardown must not return while callback is held */
+        }
+        if(!earlyWake){
+            assert(!finished.load());
+            assert(target->resumeInterrupt()==kIOReturnNotOpen);
+            assert(on.acquirePin(target->getPin(),"competing-owner")==nullptr);
+            std::lock_guard<std::mutex> guard(c.lock);c.release=true;c.cv.notify_all();
+        }
+        irq.join();teardown.join();
+        assert(finished.load()&&c.dispatched&&c.secondCalls==0);
+        // The retired target's pending latch is not consumed by unregister.
+        unsigned pin=target->getPin();
+        assert(tileReg(TLMM_TILE_SOUTH,pin,TLMM_GPIO_INTR_STATUS)==TLMM_INTR_STATUS_RAW);
+        if(stopController) {
+            assert(!target->isValid());target->put();
+            waitRegisteredHook=nullptr;beforeBlockHook=nullptr;
+            continue;
+        }
+        target->put();
+        AGPIO *replacement=on.acquirePin(pin,"replacement-owner");
+        assert(replacement);
+        assert(replacement->setInterrupt(TLMM_IRQ_LEVEL_LOW,secondCallback,&c)==0);
+        assert(replacement->disableInterrupt()==0);replacement->put();
+        if(second){assert(c.first->disableInterrupt()==0);c.first->put();}
+        waitRegisteredHook=nullptr;beforeBlockHook=nullptr;
+        on.stop(&gProvider);
     }
 }
 
@@ -837,6 +970,7 @@ int main(void) {
      * answer must be the same for both. */
     islandCases();
     interruptCases();
+    teardownCases();
 
     printf("PASS: TLMM GPIO controller (tile map, exclusive AGPIO, plain mode, "
         "write-exclusive/read-shared, island read-only, pad interrupts, C API)\n");
