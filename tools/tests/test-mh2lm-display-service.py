@@ -371,6 +371,10 @@ struct AGPIO : OSObject {
   if(!valid)return kIOReturnNotOpen;
   if(tlmmIrqPin==(int)pin){tlmmIrqPin=-1;tlmmIrqHandler=nullptr;++tlmmIrqFree;}
   return kIOReturnSuccess;}
+ IOReturn setProbePending(bool pending){if(!valid)return kIOReturnNotOpen;
+  if(pending)regs[0x17a0021c]|=1u<<16;
+  else regs[0x17a0021c]&=~(1u<<16);
+  return kIOReturnSuccess;}
  IOReturn prepareInterrupt(){if(!valid)return kIOReturnNotOpen;
   writeReg(pinBase(pin),8,(readReg(pinBase(pin),8)&~0xffu)|0x70u);
   writeReg(pinBase(pin),12,readReg(pinBase(pin),12)&~1u);
@@ -420,6 +424,7 @@ extern "C" void (*ts_irq_mask_fn)(void) = nullptr;
 extern "C" void (*ts_irq_unmask_fn)(void) = nullptr;
 extern "C" void (*ts_irq_ack_fn)(void) = nullptr;
 extern "C" bool (*ts_irq_prepare_fn)(void) = nullptr;
+extern "C" bool (*ts_irq_probe_pending_fn)(bool) = nullptr;
 extern "C" uint32_t (*ts_irq_cfg_fn)(void) = nullptr;
 extern "C" void sweet_touch_irq_action(void*,void*,void*,int) {}
 /* Distributor-bit ownership handover: the facade tells the worker that its

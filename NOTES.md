@@ -6,7 +6,7 @@
 
 计划入口：[GPIO 中断分批实施](docs/GPIO-IRQ-IMPLEMENTATION-PLAN.md)。批次1已完成：[b22 基线核验](docs/GPIO-IRQ-BASELINE-B22.md)，三套 TLMM/真实触摸worker/显示生命周期回归 PASS，CI marker151/0，已有镜像回读 SHA 一致。此批没有生产代码变更，无需新 CI 或重测原 b22。
 
-NEXT：批次2进行中；2a（66b7f82）live IRQ释放边界已完成，2b pad写入迁移本地通过：AGPIO prepare在worker原arm位置配置触发/清旧锁存，fail/park/resume/exit经句柄，撤销服务后保持delegated且缺hook拒绝裸写。运行期island pad写入拒绝。四套回归、三个ARM64 TU、marker151/0通过，summary策略五个函数与2a逐字不变，显示执行代码未改。详见[批次2记录](docs/GPIO-IRQ-OWNERSHIP-STAGE2.md)。下一步只做批次2总审查剩余项：worker软件探针对共享ISPENDR/ICPENDR的写入，以及注销时在途dispatch快照callback排空协议；不能声称所有权已全部收口。首包ENABLE读回竞态刻意保留到批次3，不夹带state2容错。2b不单独要求CI/刷机，完成整批后验收；未实机通过前不进入批次3生产改动。用户负责push、下载、设备；agent负责实现、核验、打包。较早CURRENT/NEXT为历史。
+NEXT：批次2进行中；2a（66b7f82）live IRQ释放边界已完成，2b pad写入迁移本地通过：AGPIO prepare在worker原arm位置配置触发/清旧锁存，fail/park/resume/exit经句柄，撤销服务后保持delegated且缺hook拒绝裸写。运行期island pad写入拒绝。四套回归、三个ARM64 TU、marker151/0通过，summary策略五个函数与2a逐字不变，显示执行代码未改。详见[批次2记录](docs/GPIO-IRQ-OWNERSHIP-STAGE2.md)。2c已将软件探针pending写入收回summary owner：只允许持有句柄的sole-client线程诊断，预留期间拒绝新增客户端，结束/注销由owner清pending；worker缺hook不退回裸写。真实控制器的单/多client、IRQ上下文、遗留预留清理负例，以及禁止mode3 worker直接写四种GICD寄存器的断言通过。四套回归、三个ARM64 TU、marker151/0通过。下一步只做批次2剩余在途dispatch快照callback排空协议；不能声称所有权已全部收口。首包ENABLE读回竞态刻意保留到批次3，不夹带state2容错。2b不单独要求CI/刷机，完成整批后验收；未实机通过前不进入批次3生产改动。用户负责push、下载、设备；agent负责实现、核验、打包。较早CURRENT/NEXT为历史。
 
 ## Agent handoff / active work (2026-11-15, documentation synchronized after a39 acceptance)
 

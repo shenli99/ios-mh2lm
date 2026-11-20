@@ -417,6 +417,23 @@ static void interruptCases(void) {
     assert(!gicdLineEnabled());
     setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_CFG, TLMM_GPIO_MUX_GPIO);
 
+    // Only the summary owner may write pending, on behalf of the sole pad.
+    assert(pin->setProbePending(false) == kIOReturnNotPermitted);
+    fixtureAtInterrupt = true;
+    assert(pin->setProbePending(true) == kIOReturnNotPermitted);
+    fixtureAtInterrupt = false;
+    assert(pin->setProbePending(true) == kIOReturnSuccess);
+    assert(gicdWord(0x21c) == (1u << 16));
+    assert(pin->setProbePending(true) == kIOReturnBusy);
+    AGPIO *probeOther = on.acquirePin(98, "probe-other");
+    assert(probeOther);
+    uint32_t untouched98 = tileReg(TLMM_TILE_SOUTH, 98, TLMM_GPIO_INTR_CFG);
+    assert(probeOther->setInterrupt(TLMM_IRQ_LEVEL_LOW, irqHandler, nullptr) == kIOReturnBusy);
+    assert(tileReg(TLMM_TILE_SOUTH, 98, TLMM_GPIO_INTR_CFG) == untouched98);
+    assert(pin->setProbePending(false) == kIOReturnSuccess);
+    assert(gicdWord(0x29c) == (1u << 16));
+    probeOther->put();
+
     /* (3) The handle arms the pad: the distributor bit is released, and the
      *     alias with the provider is over -- one enable at claim, none after. */
     assert(pin->resumeInterrupt() == kIOReturnSuccess);
@@ -468,6 +485,8 @@ static void interruptCases(void) {
     assert(tileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS) ==
         TLMM_INTR_STATUS_RAW);
     assert(pin100->resumeInterrupt() == kIOReturnSuccess);
+    assert(pin->setProbePending(true) == kIOReturnBusy); // shared line, no injection
+    assert(pin100->setProbePending(true) == kIOReturnBusy);
     assert(gicdLineEnabled());
     setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
@@ -547,7 +566,10 @@ static void interruptCases(void) {
         assert(p->prepareInterrupt() == kIOReturnSuccess);
         assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_CFG) == (0xab00u | expected[detect]));
         assert(!gicdLineEnabled());
-        p->put();prepared.stop(&gProvider);
+        assert(p->setProbePending(true) == kIOReturnSuccess);
+        p->put(); // cancel reservation through unregister, with no live callback
+        assert(gicdWord(0x29c) == (1u << 16));
+        prepared.stop(&gProvider);
     }
 }
 

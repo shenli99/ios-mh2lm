@@ -192,6 +192,15 @@ AGPIO::prepareInterrupt(void)
 }
 
 IOReturn
+AGPIO::setProbePending(bool pending)
+{
+	if (!fValid || !fController) {
+		return kIOReturnNotOpen;
+	}
+	return fController->setProbePending(this, pending);
+}
+
+IOReturn
 AGPIO::disableInterrupt(void)
 {
 	if (!fValid || !fController) {
@@ -635,6 +644,7 @@ TLMMGPIOController::start(IOService *provider)
 	fIrqMasked = false;
 	fIrqClientMask = 0;
 	fIrqCount = 0;
+	fProbeSlot = -1;
 	fIrqDispatches = 0;
 	fIrqStrays = 0;
 	for (i = 0; i < TLMM_IRQ_MAX; i++) {
@@ -1550,6 +1560,17 @@ TLMMGPIOController::requestPinIRQ(AGPIO *owner, unsigned int detect,
 		return kIOReturnNoResources;
 	}
 
+	/* Serialize publication against a sole-client software probe reservation.
+	 * claimSummary() remains outside the sleeping pin-state lock. */
+	IOLockLock(fLock);
+	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	bool probing = fProbeSlot >= 0;
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	if (probing) {
+		IOLockUnlock(fLock);
+		return kIOReturnBusy;
+	}
+
 	/*
 	 * Routing bits are the controller's: target KPSS and raw status are
 	 * what put the pad on the summary line at all. Polarity, detect and
@@ -1578,6 +1599,7 @@ TLMMGPIOController::requestPinIRQ(AGPIO *owner, unsigned int detect,
 	}
 	if (slot < 0) {
 		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+		IOLockUnlock(fLock);
 		SWEET_LOG_WARN("SWEET TLMM: pad interrupt table full (%u)\n",
 		    TLMM_IRQ_MAX);
 		return kIOReturnNoResources;
@@ -1593,6 +1615,7 @@ TLMMGPIOController::requestPinIRQ(AGPIO *owner, unsigned int detect,
 	/* The line stays masked until the client arms and calls resume. */
 	fIrqClientMask |= 1u << slot;
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	IOLockUnlock(fLock);
 
 	cfg = *intrCfg;
 	SWEET_LOG_INFO("SWEET TLMM: gpio%u pad interrupt slot=%d detect=%u "
@@ -1658,6 +1681,47 @@ TLMMGPIOController::preparePinIRQ(AGPIO *owner)
 }
 
 IOReturn
+TLMMGPIOController::setProbePending(AGPIO *owner, bool pending)
+{
+	if (!owner || !owner->isValid()) {
+		return kIOReturnNotOpen;
+	}
+	if (getPlatform()->atInterruptLevel()) {
+		return kIOReturnNotPermitted;
+	}
+	unsigned int pin = owner->getPin();
+	if (pin >= fPinCount) return kIOReturnBadArgument;
+	IOLockLock(fLock);
+	if (!fPins[pin].exclusive || fPins[pin].handle != owner) {
+		IOLockUnlock(fLock);
+		return kIOReturnNotPermitted;
+	}
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	int slot = irqSlotForPin(pin);
+	unsigned int clients = 0;
+	for (unsigned int i = 0; i < TLMM_IRQ_MAX; ++i) {
+		if (fIrqHandlers[i]) ++clients;
+	}
+	IOReturn rc = kIOReturnSuccess;
+	if (slot < 0 || !fIrqClaimed) rc = kIOReturnNotFound;
+	else if (!fGicd) rc = kIOReturnUnsupported;
+	else if (clients != 1 || (pending && fProbeSlot >= 0)) rc = kIOReturnBusy;
+	else if (!pending && fProbeSlot != slot) rc = kIOReturnNotPermitted;
+	if (rc == kIOReturnSuccess) {
+		/* Keep reservation checks and the single write together. No RWP
+		 * polling or provider call under this IRQ lock; the thread caller
+		 * retains its existing probe drain/readback protocol. */
+		if (pending) fProbeSlot = slot;
+		gicdWrite((pending ? 0x200u : 0x280u) + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID),
+		    TLMM_IRQ_BIT(TLMM_SUMMARY_INTID));
+		if (!pending) fProbeSlot = -1;
+	}
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	IOLockUnlock(fLock);
+	return rc;
+}
+
+IOReturn
 TLMMGPIOController::releasePinIRQ(AGPIO *owner)
 {
 	unsigned int pin;
@@ -1688,6 +1752,12 @@ TLMMGPIOController::freePinIRQ(unsigned int pin)
 	 * Do not ack here: unregistration is not permission to consume a packet. */
 	(void)maskPinIRQ(pin);
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	if (fProbeSlot == slot) {
+		/* Cancel an abandoned sole-client probe before the slot is reused. */
+		gicdWrite(0x280u + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID),
+		    TLMM_IRQ_BIT(TLMM_SUMMARY_INTID));
+		fProbeSlot = -1;
+	}
 	fIrqHandlers[slot] = NULL;
 	fIrqRefcons[slot] = NULL;
 	fIrqClientMask &= ~(1u << (unsigned int)slot);

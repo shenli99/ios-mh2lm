@@ -39,6 +39,7 @@ extern void (*ts_irq_ack_fn)(void);
 /* Delegated pad setup at the worker's original arm point; missing hooks
  * fail closed rather than falling back to unowned register writes. */
 extern bool (*ts_irq_prepare_fn)(void);
+extern bool (*ts_irq_probe_pending_fn)(bool pending);
 extern uint32_t (*ts_irq_cfg_fn)(void);
 /* ATTN pad: the touch interrupt is a TLMM pad, not a direct-connect GIC line.
  * The pad number lives here so the worker and the IOService cannot drift. */

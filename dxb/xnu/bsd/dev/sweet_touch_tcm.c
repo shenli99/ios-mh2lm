@@ -233,6 +233,7 @@ void (*ts_irq_mask_fn)(void);
 void (*ts_irq_unmask_fn)(void);
 void (*ts_irq_ack_fn)(void);
 bool (*ts_irq_prepare_fn)(void);
+bool (*ts_irq_probe_pending_fn)(bool pending);
 uint32_t (*ts_irq_cfg_fn)(void);
 
 /*
@@ -401,6 +402,16 @@ ts_gic_configure(void)
 }
 
 static bool
+ts_irq_probe_pending(bool pending)
+{
+	if (ts_irq_line_delegated) {
+		return ts_irq_probe_pending_fn && ts_irq_probe_pending_fn(pending);
+	}
+	ts_gic_wr((pending ? 0x200u : 0x280u) + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
+	return true;
+}
+
+static bool
 ts_gic_probe(void)
 {
 	unsigned off = 4u * TS_IRQ_WORD;
@@ -421,7 +432,12 @@ ts_gic_probe(void)
 		SWEET_LOG_ERROR("SWEET TOUCH IRQ: GIC probe enable failed\n");
 		return false;
 	}
-	ts_gic_wr(0x200u + off, TS_IRQ_BIT);
+	if (!ts_irq_probe_pending(true)) {
+		__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
+		ts_irq_mask();
+		SWEET_LOG_ERROR("SWEET TOUCH IRQ: software probe owner refused pending injection\n");
+		return false;
+	}
 	for (unsigned i = 0; i < 1000; ++i) {
 		if (__atomic_load_n(&ts_irq_probe_hits, __ATOMIC_ACQUIRE)) {
 			break;
@@ -434,8 +450,8 @@ ts_gic_probe(void)
 	uint32_t pendingAfter = ts_gic_rd(0x200u + off) & TS_IRQ_BIT;
 	__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
 	ts_irq_mask();
-	ts_gic_wr(0x280u + off, TS_IRQ_BIT);
-	bool clear = ts_gic_wait();
+	bool cleared = ts_irq_probe_pending(false);
+	bool clear = cleared && ts_gic_wait();
 	for (unsigned i = 0; clear && i < 1000; ++i) {
 		pending = ts_gic_rd(0x200u + off) & TS_IRQ_BIT;
 		active = ts_gic_rd(0x300u + off) & TS_IRQ_BIT;

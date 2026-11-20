@@ -30,8 +30,21 @@ prepare 的触发类型来自注册slot；支持high/low/rising/falling/both，�
 ## 明确保留的风险/未完成事项
 
 1. delegated arm最后仍检查ENABLE读回，正常首包可能在读取前将其mask。没有把批次3的state2容错夹进本批。新句柄迁移不应因测试只跑静态时序而被称为实机稳定。
-2. `ts_gic_probe()`仍由worker执行共享ISPENDR/ICPENDR软件探针；enable/mask已走owner，但pending写入仍需决定是否迁至summary owner。不能声称mode3已经完全不写GICD。
+2. 软件探针pending写入已在2c收回summary owner（见下）；探针整体仍沿b22的enable/mask与读回顺序，不证明软件注入会制造某个pad的硬件status。
 3. 2a阻止归还live注册，却未为已在dispatch快照中的handler提供排空协议；服务撤销/并发调用的生命周期还要核对。钩子撤销后拒绝裸写，不等于已经消除了所有跨核生命周期竞态。
 4. 新prepare与island检查不保证能与固件瞬时抢占进行跨域原子仲裁，仅尊重可观测所有权；不自动清扫其它pad。
 
 以上事项须在批次2总审查中列明处置；2b为批次2内部提交，当前不要求CI/刷机，也不推进批次3生产代码。
+
+
+## 2c：软件探针 pending 写入归 summary owner
+
+- AGPIO::setProbePending(bool) 请求summary控制器执行ISPENDR/ICPENDR写入；仅允许线程上下文、真实持有者、已注册slot、映射可用且只有一个已注册客户端。
+- true建立探针预留，重复true拒绝；false仅允许同slot已建立的预留。预留期间新增客户端在任何pad寄存器写入前被拒绝；注册发布与预留检查通过fLock/fIrqLock串行化。
+- 注销清理该slot遗留的预留并由owner清pending，不让新owner继承软件注入。
+- worker mode3仅通过service/AGPIO钩子请求pending操作，缺hook报错或返回false；mode2保留原始写入。原探针enable/mask、等待预算和pending/active读回不变；不增加全pad扫描。
+- C worker MMIO测试边界进一步禁止mode3直接写GICD ISENABLER/ICENABLER/ISPENDR/ICPENDR；通过钩子的单客户端操作通过，撤销后拒绝；并不代替真实GIC硬件探针验收。
+- 真实控制器测试覆盖单客户端成功、IRQ上下文拒绝、无预留清除拒绝、重复注入拒绝、预留期间注册拒绝且pad不变、多pad拒绝，以及handle遗忘结束探针时注销清理。
+- TLMM、触摸、panel-lifecycle、display-service四套回归通过；TLMM/SweetTouchPanel/C worker三个ARM64 TU通过；marker151/0与diff --check通过。
+
+2c没有修改summary claim/dispatch门控或显示执行流程；只是确定共享pending写入者及诊断准入边界。批次2仍剩在途callback的注销排空协议。当前不要求CI/刷机、不启动批次3。

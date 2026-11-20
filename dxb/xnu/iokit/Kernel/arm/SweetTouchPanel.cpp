@@ -44,6 +44,12 @@ sweet_touch_panel_prepare(void)
 	return gTouchPanel && gTouchPanel->irqPrepare();
 }
 
+static bool
+sweet_touch_panel_probe_pending(bool pending)
+{
+	return gTouchPanel && gTouchPanel->irqProbePending(pending);
+}
+
 static uint32_t
 sweet_touch_panel_configuration(void)
 {
@@ -98,6 +104,13 @@ SweetTouchPanel::irqPrepare(void)
 {
 	return fIRQViaTLMM && fIRQPin &&
 	       fIRQPin->prepareInterrupt() == kIOReturnSuccess;
+}
+
+bool
+SweetTouchPanel::irqProbePending(bool pending)
+{
+	return fIRQViaTLMM && fIRQPin &&
+	       fIRQPin->setProbePending(pending) == kIOReturnSuccess;
 }
 
 uint32_t
@@ -179,6 +192,7 @@ bool SweetTouchPanel::start(IOService *p)
   ts_irq_unmask_fn=sweet_touch_panel_unmask;
   ts_irq_ack_fn=sweet_touch_panel_ack;
   ts_irq_prepare_fn=sweet_touch_panel_prepare;
+  ts_irq_probe_pending_fn=sweet_touch_panel_probe_pending;
   ts_irq_cfg_fn=sweet_touch_panel_configuration;
   SWEET_LOG_INFO("SWEET TOUCH PANEL: ATTENTION pad gpio%u claimed through its AGPIO handle and delegated to the TLMM summary line; no GIC source on the nub\n",SWEET_TOUCH_IRQ_PIN);
  } else if (p->propertyExists("IOInterruptSpecifiers")) {
@@ -346,6 +360,7 @@ void SweetTouchPanel::stop(IOService *p)
    /* The cancelled worker must never regain raw register ownership after
     * its handle is returned; keep delegated mode latched until reboot. */
    if (ts_irq_prepare_fn==sweet_touch_panel_prepare) ts_irq_prepare_fn=NULL;
+   if (ts_irq_probe_pending_fn==sweet_touch_panel_probe_pending) ts_irq_probe_pending_fn=NULL;
    if (ts_irq_cfg_fn==sweet_touch_panel_configuration) ts_irq_cfg_fn=NULL;
    if (ts_irq_ack_fn==sweet_touch_panel_ack) ts_irq_ack_fn=NULL;
    if (fIRQPin) { (void)fIRQPin->disableInterrupt(); fIRQPin->put(); fIRQPin=NULL; }
@@ -370,6 +385,7 @@ void SweetTouchPanel::free(void)
    /* The cancelled worker must never regain raw register ownership after
     * its handle is returned; keep delegated mode latched until reboot. */
    if (ts_irq_prepare_fn==sweet_touch_panel_prepare) ts_irq_prepare_fn=NULL;
+   if (ts_irq_probe_pending_fn==sweet_touch_panel_probe_pending) ts_irq_probe_pending_fn=NULL;
    if (ts_irq_cfg_fn==sweet_touch_panel_configuration) ts_irq_cfg_fn=NULL;
    if (ts_irq_ack_fn==sweet_touch_panel_ack) ts_irq_ack_fn=NULL;
    if (fIRQPin) { (void)fIRQPin->disableInterrupt(); fIRQPin->put(); fIRQPin=NULL; }

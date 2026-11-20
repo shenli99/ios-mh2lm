@@ -92,6 +92,10 @@ public:
 	 * trigger and clear its stale latch, but do not enable the pad or line.
 	 * Keeping preparation separate preserves the client's arm-time ordering. */
 	IOReturn prepareInterrupt(void);
+	/* Diagnostic only, thread context: the controller may inject/clear a
+	 * summary pending bit only while this is its sole registered pad.
+	 * true reserves that probe; false clears and ends the reservation. */
+	IOReturn setProbePending(bool pending);
 
 	/* Interrupt-context safe. mask clears this pad's enable bit, so the
 	 * shared summary deasserts without touching any other pad; resume acks
@@ -224,6 +228,7 @@ public:
 	    tlmm_gpio_irq_handler handler, void *refcon);
 	IOReturn releasePinIRQ(AGPIO *owner);
 	IOReturn preparePinIRQ(AGPIO *owner);
+	IOReturn setProbePending(AGPIO *owner, bool pending);
 	/* Teardown helper: releases by pin once the handle is going away. */
 	IOReturn freePinIRQ(unsigned int pin);
 	/* Interrupt-context safe. mask keeps the line for this pad; resume
@@ -277,6 +282,7 @@ private:
 	bool fIrqMasked;
 	uint32_t fIrqClientMask;
 	unsigned int fIrqCount;
+	int fProbeSlot;
 	unsigned int fIrqPins[TLMM_IRQ_MAX];
 	unsigned int fIrqDetect[TLMM_IRQ_MAX];
 	tlmm_gpio_irq_handler fIrqHandlers[TLMM_IRQ_MAX];

@@ -63,6 +63,7 @@ public:
  /* Pad path only: the handle owns this pad's status latch. */
  void irqAck(void);
  bool irqPrepare(void);
+ bool irqProbePending(bool);
  uint32_t irqConfiguration(void);
  IOReturn attachConsumer(uint64_t *);
  IOReturn detachConsumer(uint64_t);
