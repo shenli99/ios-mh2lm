@@ -42,7 +42,7 @@
 
 ## 当前进度
 
-批次1：已完成并提交60e1906。批次2：进行中，2a释放边界已提交66b7f82；2b pad写入迁移本地通过，见[批次2记录](GPIO-IRQ-OWNERSHIP-STAGE2.md)。2c软件探针pending已收回summary owner并本地验证；2d pad dispatch快照、2e service worker钩子排空均本地验证；批次2本地汇总核验已完成，候选0121b27待CI/实机；内部提交2a–2e作为一次整批候选交付，不要求当前子步骤CI/刷机。后续批次：未实施。
+批次1已完成。批次2a–2e本地完成并交付0121b27，实机在GIC probe enable检查失败，不能标记通过。依据上面的依赖条款，已用单独批次3修正probe/arm早到callback验证，候选0121b28本地通过，等待CI/实机；不混改TLMM/显示。证据见[第2批](GPIO-IRQ-OWNERSHIP-STAGE2.md)及[第3批](GPIO-IRQ-STAGE3-EARLY-CALLBACK.md)。批次4–6及独立显示降级未实施。
 
 ### 批次2a：注册所有权必须持续到注销
 

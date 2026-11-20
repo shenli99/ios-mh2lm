@@ -430,11 +430,25 @@ ts_gic_probe(void)
 	__atomic_store_n(&ts_irq_probe_hits, 0u, __ATOMIC_RELEASE);
 	__atomic_store_n(&ts_irq_state, 4u, __ATOMIC_RELEASE);
 	ts_irq_enable_through_owner();
-	if (!ts_gic_wait() || (ts_gic_rd(0x100u + off) & TS_IRQ_BIT) == 0) {
+	/* An IRQ delivered by resume can already have masked the source. Read
+	 * hardware first, then acquire the callback's release-published counter.
+	 * A completed callback proves delivery, not that the line stays enabled. */
+	bool enableWaited = ts_gic_wait();
+	uint32_t enableReadback = ts_gic_rd(0x100u + off);
+	unsigned earlyHits = __atomic_load_n(&ts_irq_probe_hits, __ATOMIC_ACQUIRE);
+	if (!enableWaited || (!(enableReadback & TS_IRQ_BIT) && earlyHits != 1u)) {
 		__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
 		ts_irq_mask();
-		SWEET_LOG_ERROR("SWEET TOUCH IRQ: GIC probe enable failed\n");
+		SWEET_LOG_ERROR("SWEET TOUCH IRQ: GIC probe enable failed "
+		    "waited=%u enabled=%u probe-hits=%u cfg=%#x\n",
+		    enableWaited ? 1u : 0u, (enableReadback & TS_IRQ_BIT) ? 1u : 0u,
+		    earlyHits, ts_irq_pad_cfg());
 		return false;
+	}
+	if (earlyHits) {
+		SWEET_LOG_INFO("SWEET TOUCH IRQ: probe observed early callback "
+		    "hits=%u enabled=%u; pending/active drain still required\n",
+		    earlyHits, (enableReadback & TS_IRQ_BIT) ? 1u : 0u);
 	}
 	if (!ts_irq_probe_pending(true)) {
 		__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
@@ -604,11 +618,22 @@ ts_irq_arm(void)
 			return false;
 		}
 	} else {
+		/* The top half publishes deferred before it masks this pad. Acquire
+		 * state AFTER the config read, not the earlier GIC snapshot. Never
+		 * re-enable or ack a packet already handed to this worker. */
 		uint32_t padCfg = ts_irq_pad_cfg();
-		if (padCfg == ~0u || !(padCfg & 1u)) {
-			/* First-packet readback races are a separate stage. */
+		unsigned padState = __atomic_load_n(&ts_irq_state, __ATOMIC_ACQUIRE);
+		if (padCfg == ~0u || (padState != 1u && padState != 2u) ||
+		    (!(padCfg & 1u) && padState != 2u)) {
+			SWEET_LOG_ERROR("SWEET TOUCH IRQ: handle arm rejected "
+			    "cfg=%#x state=%u\n", padCfg, padState);
 			ts_irq_fail("handle enable readback");
 			return false;
+		}
+		if (padState == 2u) {
+			SWEET_LOG_INFO("SWEET TOUCH IRQ: arm observed deferred packet "
+			    "cfg=%#x state=%u; worker will drain the latched status\n",
+			    padCfg, padState);
 		}
 	}
 	SWEET_LOG_INFO("SWEET TOUCH IRQ: armed gpio=%u intid=%u cfg=%#x status=%#x attn=%u\n",

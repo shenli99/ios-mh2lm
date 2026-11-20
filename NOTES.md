@@ -1,5 +1,13 @@
 # iOS 16 on LG G8X (mh2lm / SM8150) — working notes
 
+## 当前交接更新（2026-11-20，b27失败；单独第3批b28本地通过）
+
+b27日志total459424/flush10：TouchComm ready后GIC probe enable failed，随后触摸死亡/显示resume admission失败/FB冻结。未到arm检查；现场没有probe-hits快照，不能唯一归因早到callback。详细证据见docs/GPIO-IRQ-OWNERSHIP-STAGE2.md；第2批未单独实机通过。
+
+按固定计划依赖条款，第3批单独修正probe/arm读回：硬件快照之后acquire软件计数/状态；probe只在已有一次callback证据时允许ENABLE0，原RWP及最终pending/active drain/hits验证保留；arm允许state2 deferred锁存，不重新使能、不ACK。真正无callback ENABLE0、终止state、active未退、RWP busy负例仍拒绝。旧b27 worker在新early-probe测试失败，修正后四套回归/C ARM64 TU/marker151/0通过。生产只改sweet_touch_tcm.c，未改TLMM/显示/GIC策略。
+
+NEXT：用户push full-source，下载logs/xnu-kernel-0121b28.gz和logs/xnu-buildtree-0121b28.gz；agent逐文件核对并用out-bs/mk16k-0121b28.sh打包，真实b27已被该脚本新日志标记门禁拒绝。本地尚无b28产物/镜像/实机。验收probe通过→armed（state2时cfg可0x70）→worker ready→HANDOFF active→桌面连续触摸。先等依赖验收，不推进批次4–6或显示降级。详见docs/GPIO-IRQ-STAGE3-EARLY-CALLBACK.md。下面是较早交接历史。
+
 ## 当前交接（2026-11-20，回退实际b22后固定分批计划）
 
 用户要求直接回退仓库；已 hard reset 到真正实机 b22 的 830fa52，5300 个 XNU 源码与 b22 buildtree 一致。b23–b26 已退出当前分支，禁止整批重新合入。用户随后授权固定计划、逐项实施。

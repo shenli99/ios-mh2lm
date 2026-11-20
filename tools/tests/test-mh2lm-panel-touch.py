@@ -21,7 +21,7 @@ fixture = r'''
 extern "C" {
 void tcFixtureReboot();void tcFixtureOnline(unsigned);unsigned tcFixtureStep();
 void tcFixtureWait();void tcFixtureIRQWait();unsigned tcFixtureIRQState();
-unsigned tcFixturePending(unsigned);unsigned tcFixtureArm();unsigned tcFixtureDelegated();void tcFixtureIRQFail();void tcFixtureAck();
+unsigned tcFixtureProbe();unsigned tcFixtureProbeHits();unsigned tcFixturePending(unsigned);unsigned tcFixtureArm();unsigned tcFixtureDelegated();void tcFixtureIRQFail();void tcFixtureAck();
 uint64_t tcFixtureFrame();uint64_t tcFixtureOwner();void tcFixtureContact(unsigned);
 void tcFixtureTokenLimit();void tcFixtureSessionLimit();void tcFixtureFail();bool sweet_touch_irq(unsigned);
 extern void (*ts_irq_mask_fn)(void);void sweet_touch_irq_own_line(void);
@@ -35,6 +35,7 @@ static unsigned facadeMasks;
 static void facadeMask(void){++facadeMasks;}
 static bool dropMask,keepEnabled,keepPending;
 static unsigned firmwareFault,sleepScale;
+static std::function<void(uintptr_t,uint32_t)> touchReadHook;
 static std::deque<std::vector<uint8_t>> wire;
 static std::vector<unsigned> commands;
 static std::function<void()>waitHook,busHook,armHook;
@@ -48,7 +49,7 @@ extern "C" void touchBlock(){++blocks;if(sleepUntil>fakeTicks)fakeTicks=sleepUnt
 extern "C" void touchWake(void*){++wakes;}
 extern "C" void touchLog(const char*,...){}
 extern "C" void touchHID(int finger,int down,int x,int y){assert(!down&&x==12&&y==34);++ups;hidIDs.push_back(finger);}
-extern "C" uint32_t touchRead(uintptr_t b,uint32_t o){return readReg(b,o);}
+extern "C" uint32_t touchRead(uintptr_t b,uint32_t o){if(touchReadHook)touchReadHook(b,o);return readReg(b,o);}
 extern "C" void touchWrite(uintptr_t b,uint32_t o,uint32_t v){
  // This boundary is the C worker, not the AGPIO stub's writeReg boundary.
  // A delegated worker must not bypass its handle, including fail/cancel paths.
@@ -157,6 +158,42 @@ int main(){
  tlmmIrqOK=0;touchPanelMode=2;
  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
+
+ // Stage 3: probe enable may have already delivered its callback before
+ // ISENABLER is sampled. A no-callback zero-enable still fails. Exercise the
+ // real C probe and retain the original pending/active drain requirement.
+ for(unsigned scenario:{0u,1u,2u,3u}){
+  fixtures();touchPanelMode=3;tlmmIrqOK=1;tlmmIrqPin=-1;
+  auto*n=nub();auto*s=make(n);s->irqMask();regs[TG+0x21c]=0;
+  bool injected=false;
+  touchReadHook=[&](uintptr_t b,uint32_t o){
+   if(injected||b!=TG||o!=0x11c||tcFixtureIRQState()!=4u)return;
+   injected=true;
+   if(scenario==1)regs[TG+0x11c]&=~TB; // no callback: genuine failed enable
+   else {regs[TP+12]=1;tlmmIrqHandler(122,nullptr);}
+   if(scenario==2)regs[TG+0x31c]=TB; // callback alone is not a drain fence
+   if(scenario==3)regs[TG]|=1u<<31; // callback alone cannot waive RWP timeout
+  };
+  bool ok=tcFixtureProbe();assert(injected&&ok==(scenario==0));
+  assert(tcFixtureProbeHits()==(scenario==1?0u:1u));
+  assert(!(regs[TP+8]&1u)&&!(regs[TG+0x11c]&TB));
+  touchReadHook=nullptr;destroy(s,n);tlmmIrqOK=0;
+ }
+ // Stage 3: CFG first then current state, preserving the pending packet.
+ for(unsigned scenario:{0u,1u,2u}){
+  fixtures();touchPanelMode=3;tlmmIrqOK=1;tlmmIrqPin=-1;
+  auto*n=nub();auto*s=make(n);s->irqMask();bool injected=false;
+  padConfigReadHook=[&]{
+   if(injected)return;injected=true;
+   if(scenario==0){regs[TP+12]=1;tlmmIrqHandler(122,nullptr);}
+   else if(scenario==1)regs[TP+8]&=~1u;
+   else {tcFixtureIRQFail();regs[TP+8]|=1u;}
+  };
+  assert(tcFixtureArm()==(scenario==0));
+  assert(tcFixtureIRQState()==(scenario==0?2u:3u));
+  if(scenario==0)assert(regs[TP+12]==1u&&!(regs[TP+8]&1u));
+  padConfigReadHook=nullptr;destroy(s,n);tlmmIrqOK=0;
+ }
 
  // Hold a real global worker hook inside AGPIO::getConfig while stop/free
  // closes admission. A later hook is rejected, but the earlier call retains

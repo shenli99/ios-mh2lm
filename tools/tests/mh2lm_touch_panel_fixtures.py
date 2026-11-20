@@ -84,6 +84,8 @@ unsigned tcFixtureDelegated(void){return ts_irq_line_delegated;}
 void tcFixtureIRQFail(void){ts_irq_fail("injected");}
 void tcFixtureAck(void){ts_irq_ack_pad();}
 unsigned tcFixturePending(unsigned on){return ts_irq_probe_pending(on!=0);}
+unsigned tcFixtureProbe(void){return ts_gic_probe();}
+unsigned tcFixtureProbeHits(void){return ts_irq_probe_hits;}
 uint64_t tcFixtureFrame(void){return __atomic_load_n(&ts_panel_frame,__ATOMIC_ACQUIRE);}
 uint64_t tcFixtureOwner(void){return __atomic_load_n(&ts_panel_owner,__ATOMIC_ACQUIRE);}
 void tcFixtureContact(unsigned finger){ts_prev[finger].active=1;ts_px[finger]=12;ts_py[finger]=34;}
