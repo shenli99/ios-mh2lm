@@ -4,11 +4,82 @@
  * of the includes, so it has to come first. */
 #include <pexpert/arm64/tlmm_gpio.h>
 #include "TLMMGPIOController.h"
+#include <IOKit/IOLib.h>
+#include <kern/sched_prim.h>
 
 /* Worker entry points and the mask hooks come from sweet_touch_panel.h; the
  * local externs here only used to duplicate them. */
 
 static SweetTouchPanel *gTouchPanel;
+/* The singleton binding lock lives for the kernel's lifetime: a stable hook
+ * can still be entered after the service has detached. It must never follow
+ * a freed lock or regain permission to access raw registers. */
+static IOSimpleLock *gTouchHookLock;
+static unsigned gTouchHookReaders;
+static bool gTouchHooksClosing;
+
+static SweetTouchPanel *
+sweet_touch_hook_enter(void)
+{
+	IOSimpleLock *lock = __atomic_load_n(&gTouchHookLock, __ATOMIC_ACQUIRE);
+	if (!lock) return NULL;
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(lock);
+	SweetTouchPanel *panel = gTouchHooksClosing ? NULL : gTouchPanel;
+	if (panel) ++gTouchHookReaders;
+	IOSimpleLockUnlockEnableInterrupt(lock, saved);
+	return panel;
+}
+
+static void
+sweet_touch_hook_leave(void)
+{
+	IOSimpleLock *lock = __atomic_load_n(&gTouchHookLock, __ATOMIC_ACQUIRE);
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(lock);
+	if (--gTouchHookReaders == 0 && gTouchHooksClosing) {
+		thread_wakeup((event_t)&gTouchHookReaders);
+	}
+	IOSimpleLockUnlockEnableInterrupt(lock, saved);
+}
+
+static bool
+sweet_touch_hook_bind(SweetTouchPanel *panel)
+{
+	/* Only the service holding sweet_touch_panel_open's exclusive session
+	 * can reach binding; publish its permanent lock before any hook pointer. */
+	IOSimpleLock *lock = __atomic_load_n(&gTouchHookLock, __ATOMIC_ACQUIRE);
+	if (!lock) {
+		lock = IOSimpleLockAlloc();
+		if (!lock) return false;
+		__atomic_store_n(&gTouchHookLock, lock, __ATOMIC_RELEASE);
+	}
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(lock);
+	bool available = !gTouchPanel && !gTouchHooksClosing;
+	if (available) gTouchPanel = panel;
+	IOSimpleLockUnlockEnableInterrupt(lock, saved);
+	return available;
+}
+
+static void
+sweet_touch_hook_detach(SweetTouchPanel *panel)
+{
+	IOSimpleLock *lock = __atomic_load_n(&gTouchHookLock, __ATOMIC_ACQUIRE);
+	if (!lock) return;
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(lock);
+	if (gTouchPanel != panel) {
+		IOSimpleLockUnlockEnableInterrupt(lock, saved);
+		return;
+	}
+	gTouchHooksClosing = true;
+	while (gTouchHookReaders != 0) {
+		(void)assert_wait((event_t)&gTouchHookReaders, THREAD_UNINT);
+		IOSimpleLockUnlockEnableInterrupt(lock, saved);
+		thread_block(THREAD_CONTINUE_NULL);
+		saved = IOSimpleLockLockDisableInterrupt(lock);
+	}
+	gTouchPanel = NULL;
+	gTouchHooksClosing = false;
+	IOSimpleLockUnlockEnableInterrupt(lock, saved);
+}
 
 /*
  * Pad-interrupt entry: the controller already masked the summary line and
@@ -25,43 +96,58 @@ sweet_touch_tlmm_irq(unsigned int pin, void *refcon)
 static void
 sweet_touch_panel_mask(void)
 {
-	if (gTouchPanel) {
-		gTouchPanel->irqMask();
-	}
+	SweetTouchPanel *panel = sweet_touch_hook_enter();
+	if (!panel) return;
+	panel->irqMask();
+	sweet_touch_hook_leave();
 }
 
 static void
 sweet_touch_panel_unmask(void)
 {
-	if (gTouchPanel) {
-		gTouchPanel->irqUnmask();
-	}
+	SweetTouchPanel *panel = sweet_touch_hook_enter();
+	if (!panel) return;
+	panel->irqUnmask();
+	sweet_touch_hook_leave();
 }
 
 static bool
 sweet_touch_panel_prepare(void)
 {
-	return gTouchPanel && gTouchPanel->irqPrepare();
+	SweetTouchPanel *panel = sweet_touch_hook_enter();
+	if (!panel) return false;
+	bool result = panel->irqPrepare();
+	sweet_touch_hook_leave();
+	return result;
 }
 
 static bool
 sweet_touch_panel_probe_pending(bool pending)
 {
-	return gTouchPanel && gTouchPanel->irqProbePending(pending);
+	SweetTouchPanel *panel = sweet_touch_hook_enter();
+	if (!panel) return false;
+	bool result = panel->irqProbePending(pending);
+	sweet_touch_hook_leave();
+	return result;
 }
 
 static uint32_t
 sweet_touch_panel_configuration(void)
 {
-	return gTouchPanel ? gTouchPanel->irqConfiguration() : ~0u;
+	SweetTouchPanel *panel = sweet_touch_hook_enter();
+	if (!panel) return ~0u;
+	uint32_t result = panel->irqConfiguration();
+	sweet_touch_hook_leave();
+	return result;
 }
 
 static void
 sweet_touch_panel_ack(void)
 {
-	if (gTouchPanel) {
-		gTouchPanel->irqAck();
-	}
+	SweetTouchPanel *panel = sweet_touch_hook_enter();
+	if (!panel) return;
+	panel->irqAck();
+	sweet_touch_hook_leave();
 }
 
 /*
@@ -165,7 +251,7 @@ bool SweetTouchPanel::start(IOService *p)
  fGateAdded=true;
  if (fLoop->addEventSource(fTimer)!=kIOReturnSuccess) return false;
  fTimerAdded=true;fAccepting=true;
- gTouchPanel=this;
+
  /*
   * The ADT node carries <INTID TYPE FLAGS> plus interrupt-parent; the provider
   * (its IOPlatformDevice nub) owns the resolved source. Registering here makes
@@ -188,18 +274,10 @@ bool SweetTouchPanel::start(IOService *p)
   fIRQViaTLMM=true;fIRQRegistered=true;
   /* The summary SPI belongs to the pin controller; this facade owns the pad. */
   sweet_touch_irq_delegate_line(1);
-  ts_irq_mask_fn=sweet_touch_panel_mask;
-  ts_irq_unmask_fn=sweet_touch_panel_unmask;
-  ts_irq_ack_fn=sweet_touch_panel_ack;
-  ts_irq_prepare_fn=sweet_touch_panel_prepare;
-  ts_irq_probe_pending_fn=sweet_touch_panel_probe_pending;
-  ts_irq_cfg_fn=sweet_touch_panel_configuration;
   SWEET_LOG_INFO("SWEET TOUCH PANEL: ATTENTION pad gpio%u claimed through its AGPIO handle and delegated to the TLMM summary line; no GIC source on the nub\n",SWEET_TOUCH_IRQ_PIN);
  } else if (p->propertyExists("IOInterruptSpecifiers")) {
   if (p->registerInterrupt(0, NULL, (IOInterruptAction)sweet_touch_irq_action, NULL)==kIOReturnSuccess) {
    fIRQProvider=p;fIRQRegistered=true;
-   ts_irq_mask_fn=sweet_touch_panel_mask;
-   ts_irq_unmask_fn=sweet_touch_panel_unmask;
    /* INTID 240 is this nub's own source: the worker keeps its distributor
     * bit, because masking through the shared controller re-enters its lock. */
    sweet_touch_irq_own_line();
@@ -213,6 +291,20 @@ bool SweetTouchPanel::start(IOService *p)
  /* A pad handle that did not end up owning the interrupt must go back: the
   * nub path above and the pad path are exclusive, never both. */
  if (!fIRQViaTLMM && fIRQPin) { fIRQPin->put(); fIRQPin=NULL; }
+ if (!sweet_touch_hook_bind(this)) return false;
+ if (fIRQRegistered) {
+  /* Function pointers are stable after installation. Detach gates the binding
+   * and drains readers instead of racing the worker with pointer removal. */
+  __atomic_store_n(&ts_irq_mask_fn,sweet_touch_panel_mask,__ATOMIC_RELEASE);
+  __atomic_store_n(&ts_irq_unmask_fn,sweet_touch_panel_unmask,__ATOMIC_RELEASE);
+  if (fIRQViaTLMM) {
+   __atomic_store_n(&ts_irq_ack_fn,sweet_touch_panel_ack,__ATOMIC_RELEASE);
+   __atomic_store_n(&ts_irq_prepare_fn,sweet_touch_panel_prepare,__ATOMIC_RELEASE);
+   __atomic_store_n(&ts_irq_probe_pending_fn,sweet_touch_panel_probe_pending,__ATOMIC_RELEASE);
+   __atomic_store_n(&ts_irq_cfg_fn,sweet_touch_panel_configuration,__ATOMIC_RELEASE);
+  }
+ }
+
  setProperty("SweetTouchPanelABI",1ULL,32);
  setProperty("SweetTouchPanelWritesEnabled",sweetTouchPanelNative(mode));
  SWEET_LOG_INFO("SWEET TOUCH PANEL: native binding mode=%u; sole legacy worker retained, no automatic pause/resume\n",fMode);
@@ -352,17 +444,12 @@ bool SweetTouchPanel::willTerminate(IOService *p,IOOptionBits o)
 void SweetTouchPanel::stop(IOService *p)
 {
  shutdown();
+ sweet_touch_hook_detach(this);
  if (fIRQRegistered) {
   sweet_touch_irq_release_line();
-  if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
-  if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
   if (fIRQViaTLMM) {
    /* The cancelled worker must never regain raw register ownership after
     * its handle is returned; keep delegated mode latched until reboot. */
-   if (ts_irq_prepare_fn==sweet_touch_panel_prepare) ts_irq_prepare_fn=NULL;
-   if (ts_irq_probe_pending_fn==sweet_touch_panel_probe_pending) ts_irq_probe_pending_fn=NULL;
-   if (ts_irq_cfg_fn==sweet_touch_panel_configuration) ts_irq_cfg_fn=NULL;
-   if (ts_irq_ack_fn==sweet_touch_panel_ack) ts_irq_ack_fn=NULL;
    if (fIRQPin) { (void)fIRQPin->disableInterrupt(); fIRQPin->put(); fIRQPin=NULL; }
   }
   else if (fIRQProvider) {
@@ -377,17 +464,12 @@ void SweetTouchPanel::stop(IOService *p)
 void SweetTouchPanel::free(void)
 {
  shutdown();
+ sweet_touch_hook_detach(this);
  if (fIRQRegistered) {
   sweet_touch_irq_release_line();
-  if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
-  if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
   if (fIRQViaTLMM) {
    /* The cancelled worker must never regain raw register ownership after
     * its handle is returned; keep delegated mode latched until reboot. */
-   if (ts_irq_prepare_fn==sweet_touch_panel_prepare) ts_irq_prepare_fn=NULL;
-   if (ts_irq_probe_pending_fn==sweet_touch_panel_probe_pending) ts_irq_probe_pending_fn=NULL;
-   if (ts_irq_cfg_fn==sweet_touch_panel_configuration) ts_irq_cfg_fn=NULL;
-   if (ts_irq_ack_fn==sweet_touch_panel_ack) ts_irq_ack_fn=NULL;
    if (fIRQPin) { (void)fIRQPin->disableInterrupt(); fIRQPin->put(); fIRQPin=NULL; }
   }
   else if (fIRQProvider) {
@@ -396,7 +478,6 @@ void SweetTouchPanel::free(void)
   }
   fIRQRegistered=false;fIRQProvider=NULL;fIRQViaTLMM=false;
  }
- if (gTouchPanel==this) gTouchPanel=NULL;
  if (fGateAdded) { fLoop->removeEventSource(fGate);fGateAdded=false; }
  OSSafeReleaseNULL(fTimer);OSSafeReleaseNULL(fGate);OSSafeReleaseNULL(fLoop);
  IOService::free();

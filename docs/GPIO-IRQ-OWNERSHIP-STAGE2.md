@@ -31,7 +31,7 @@ prepare 的触发类型来自注册slot；支持high/low/rising/falling/both，�
 
 1. delegated arm最后仍检查ENABLE读回，正常首包可能在读取前将其mask。没有把批次3的state2容错夹进本批。新句柄迁移不应因测试只跑静态时序而被称为实机稳定。
 2. 软件探针pending写入已在2c收回summary owner（见下）；探针整体仍沿b22的enable/mask与读回顺序，不证明软件注入会制造某个pad的硬件status。
-3. pad dispatch快照的注销排空已在2d实现并本地验证（见下）。服务的全局worker钩子仍需独立排空，不能把GPIO回调排空等同于worker钩子也不在使用service/handle。
+3. pad dispatch快照的注销排空已在2d实现并本地验证（见下）。service全局worker钩子已在2e独立排空，具体合同见下；不能据此宣称任意外部调用者都可无视owner序列化约束。
 4. 新prepare与island检查不保证能与固件瞬时抢占进行跨域原子仲裁，仅尊重可观测所有权；不自动清扫其它pad。
 
 以上事项须在批次2总审查中列明处置；2b为批次2内部提交，当前不要求CI/刷机，也不推进批次3生产代码。
@@ -62,3 +62,19 @@ prepare 的触发类型来自注册slot；支持high/low/rising/falling/both，�
 - TLMM、touch、panel-lifecycle、display-service四套回归PASS；三个ARM64 TU通过；marker151/0；diff --check通过。summary的整线门控规则未改，dispatch多了生命周期引用记账，未开启叶子化或显示流程更改。
 
 第2批总审查接下来需完成触摸service全局worker钩子的在途调用保护，并检查与stop/free的顺序。2d不单独要求CI或刷机；仍未启动第3批生产修正。
+
+
+## 2e：service 的 worker 钩子绑定与在途调用
+
+- 六个全局钩子mask/unmask/ACK/prepare/probe/config不再通过无锁gTouchPanel直接调用。每次从永久绑定锁下获取一次service访问额度，执行时不持spinlock，返回时减计数；closing期间新调用不进入。
+- stop/free先执行原shutdown取消协议，再关闭绑定入口。仍有钩子调用时，在同锁下assert_wait，解锁恢复IRQ后thread_block，最后一个reader唤醒；排空后才允许注销IRQ和归还AGPIO。等待时不持worker会访问的fLock/command gate，不在IRQ上下文做生命周期等待。
+- 钩子函数地址安装后保持稳定；worker用acquire原子快照调用，避免检查全局指针后重新加载。detach撤销的是绑定对象，不是并发移除函数地址；持有旧函数指针在释放后调用，返回无绑定默认值/不写寄存器。
+- 绑定锁是kernel常驻单worker facade的永久对象，不随service释放。当前不支持模块卸载或任意多worker；初始化依赖sweet_touch_panel_open已有唯一session约束。service生命周期方法由IOKit线程上下文串行；禁止在钩子自身内部递归stop/free。
+- 测试在真实service调用到AGPIO::getConfig时hold钩子，同时另线程stop或free，确认入口关闭、旧调用返回前不能释放、新调用拒绝、旧调用完成后才能结束；各覆盖early wake。旧2d的service在相同用例的waitArmed断言失败，2e通过；含ASan/UBSan。
+- 完整touch、TLMM、panel-lifecycle、display-service回归通过；三个ARM64 TU成功；CI marker151/0；diff --check通过。显示MDSS/Lifecycle及GenericInterruptController文件与b22无执行差异。
+
+## 第2批交付前总审查状态
+
+本地已覆盖：pad写入者、共享probe pending写入者、slot注册/释放、dispatch快照寿命、service钩子寿命及服务撤销后禁止raw fallback。仍须在最终候选上跑汇总核验并确认build/打包门禁，然后才给用户一个第2批候选做实机验收。所有2a–2e仍属于同一主题的内部提交，不是要求用户五次刷机。
+
+首包ENABLE读回竞态、mask/resume软件/硬件写序、多pad整线阻塞、stray隔离、失败触摸后的显示降级，仍按固定计划分别留到后续批次；没有借本轮通过宣称它们解决。正常GPIO mask/resume仍要求owner不与注销并发（退休拒绝不是该类任意交错的完整MMIO原子协议，写序由批次4处理）。第2批本地完成不等于设备通过，也不能据此推进第3批生产改动。

@@ -42,7 +42,7 @@
 
 ## 当前进度
 
-批次1：已完成并提交60e1906。批次2：进行中，2a释放边界已提交66b7f82；2b pad写入迁移本地通过，见[批次2记录](GPIO-IRQ-OWNERSHIP-STAGE2.md)。2c软件探针pending已收回summary owner并本地验证；2d pad dispatch快照排空已本地验证；批次2总审查仍需处理触摸service worker钩子的在途调用保护，不要求当前子步骤CI/刷机。后续批次：未实施。
+批次1：已完成并提交60e1906。批次2：进行中，2a释放边界已提交66b7f82；2b pad写入迁移本地通过，见[批次2记录](GPIO-IRQ-OWNERSHIP-STAGE2.md)。2c软件探针pending已收回summary owner并本地验证；2d pad dispatch快照、2e service worker钩子排空均本地验证；批次2进行最终候选汇总核验与交付准备，不要求当前子步骤CI/刷机。后续批次：未实施。
 
 ### 批次2a：注册所有权必须持续到注销
 

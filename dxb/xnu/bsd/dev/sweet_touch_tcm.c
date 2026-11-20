@@ -296,23 +296,23 @@ static void ts_irq_unmask(void);
 static void
 ts_irq_enable_through_owner(void)
 {
-	if (ts_irq_line_owned && ts_irq_unmask_fn) {
-		ts_irq_unmask_fn();
-	}
+	void (*unmask)(void) = __atomic_load_n(&ts_irq_unmask_fn, __ATOMIC_ACQUIRE);
+	if (ts_irq_line_owned && unmask) unmask();
 	ts_irq_unmask();
 }
 
 static void
 ts_irq_mask(void)
 {
+	void (*hook)(void) = __atomic_load_n(&ts_irq_mask_fn, __ATOMIC_ACQUIRE);
 	if (ts_irq_line_delegated) {
-		if (ts_irq_mask_fn) ts_irq_mask_fn();
+		if (hook) hook();
 		return;
 	}
 	if (ts_irq_line_owned && ts_gicd) {
 		ts_irq_mask_raw();
-	} else if (ts_irq_mask_fn) {
-		ts_irq_mask_fn();
+	} else if (hook) {
+		hook();
 	} else {
 		ts_irq_mask_raw();
 	}
@@ -321,14 +321,15 @@ ts_irq_mask(void)
 static void
 ts_irq_unmask(void)
 {
+	void (*hook)(void) = __atomic_load_n(&ts_irq_unmask_fn, __ATOMIC_ACQUIRE);
 	if (ts_irq_line_delegated) {
-		if (ts_irq_unmask_fn) ts_irq_unmask_fn();
+		if (hook) hook();
 		return;
 	}
 	if (ts_irq_line_owned && ts_gicd) {
 		ts_irq_unmask_raw();
-	} else if (ts_irq_unmask_fn) {
-		ts_irq_unmask_fn();
+	} else if (hook) {
+		hook();
 	} else {
 		ts_irq_unmask_raw();
 	}
@@ -343,7 +344,8 @@ static uint32_t
 ts_irq_pad_cfg(void)
 {
 	if (ts_irq_line_delegated) {
-		return ts_irq_cfg_fn ? ts_irq_cfg_fn() : ~0u;
+		uint32_t (*hook)(void) = __atomic_load_n(&ts_irq_cfg_fn, __ATOMIC_ACQUIRE);
+		return hook ? hook() : ~0u;
 	}
 	return ts_rd(ts_tiles[ts_tile(TS_PIN_IRQ)], TS_INTR_CFG);
 }
@@ -352,7 +354,8 @@ static void
 ts_irq_ack_pad(void)
 {
 	if (ts_irq_line_delegated) {
-		if (ts_irq_ack_fn) ts_irq_ack_fn();
+		void (*hook)(void) = __atomic_load_n(&ts_irq_ack_fn, __ATOMIC_ACQUIRE);
+		if (hook) hook();
 		return;
 	}
 	{
@@ -405,7 +408,8 @@ static bool
 ts_irq_probe_pending(bool pending)
 {
 	if (ts_irq_line_delegated) {
-		return ts_irq_probe_pending_fn && ts_irq_probe_pending_fn(pending);
+		bool (*hook)(bool) = __atomic_load_n(&ts_irq_probe_pending_fn, __ATOMIC_ACQUIRE);
+		return hook && hook(pending);
 	}
 	ts_gic_wr((pending ? 0x200u : 0x280u) + 4u * TS_IRQ_WORD, TS_IRQ_BIT);
 	return true;
@@ -561,7 +565,9 @@ ts_irq_arm(void)
 	if (ts_irq_line_delegated) {
 		/* Prepare at the same arm point as the legacy programming below,
 		 * not at claim during display bring-up. The handle owns all writes. */
-		if (!ts_irq_prepare_fn || !ts_irq_cfg_fn || !ts_irq_prepare_fn()) {
+		bool (*prepare)(void) = __atomic_load_n(&ts_irq_prepare_fn, __ATOMIC_ACQUIRE);
+		uint32_t (*config)(void) = __atomic_load_n(&ts_irq_cfg_fn, __ATOMIC_ACQUIRE);
+		if (!prepare || !config || !prepare()) {
 			ts_irq_fail("handle preparation");
 			return false;
 		}

@@ -158,6 +158,50 @@ int main(){
  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
 
+ // Hold a real global worker hook inside AGPIO::getConfig while stop/free
+ // closes admission. A later hook is rejected, but the earlier call retains
+ // access until it returns; early wake before thread_block must not be lost.
+ for(bool releaseService:{false,true})for(bool earlyWake:{false,true}){
+  fixtures();touchPanelMode=3;tlmmIrqOK=1;tlmmIrqPin=-1;
+  auto*hn=nub();auto*hs=make(hn);
+  std::mutex lock;std::condition_variable cv;
+  bool entered=false,allowReturn=false,waitArmed=false,readerDone=false;
+  std::atomic<bool> retired{false};uint32_t seen=~0u;
+  padConfigReadHook=[&]{
+   std::unique_lock<std::mutex> guard(lock);entered=true;cv.notify_all();
+   cv.wait(guard,[&]{return allowReturn;});
+  };
+  waitRegisteredHook=[&]{std::lock_guard<std::mutex> guard(lock);waitArmed=true;cv.notify_all();};
+  beforeBlockHook=[&]{
+   if(!earlyWake)return;
+   std::unique_lock<std::mutex> guard(lock);allowReturn=true;cv.notify_all();
+   cv.wait(guard,[&]{return readerDone;});
+  };
+  auto configHook=__atomic_load_n(&ts_irq_cfg_fn,__ATOMIC_ACQUIRE);
+  auto prepareHook=__atomic_load_n(&ts_irq_prepare_fn,__ATOMIC_ACQUIRE);
+  std::thread reader([&]{seen=configHook();
+   std::lock_guard<std::mutex> guard(lock);readerDone=true;cv.notify_all();});
+  {std::unique_lock<std::mutex> guard(lock);cv.wait(guard,[&]{return entered;});}
+  std::thread retire([&]{
+   if(releaseService)hs->release();else hs->stop(hn);
+   retired=true;std::lock_guard<std::mutex> guard(lock);cv.notify_all();
+  });
+  {std::unique_lock<std::mutex> guard(lock);
+   cv.wait(guard,[&]{return waitArmed||retired.load();});
+   assert(waitArmed); // may not return/free before the held hook finishes
+  }
+  if(!earlyWake){
+   assert(!retired.load());assert(configHook()==~0u&&!prepareHook());
+   std::lock_guard<std::mutex> guard(lock);allowReturn=true;cv.notify_all();
+  }
+  reader.join();retire.join();assert(retired.load()&&seen==0x71u);
+  auto count=trace.size();assert(configHook()==~0u&&!prepareHook());
+  assert(trace.size()==count); // stale function pointers remain safe after free
+  padConfigReadHook=nullptr;waitRegisteredHook=nullptr;beforeBlockHook=nullptr;
+  if(!releaseService)hs->release();dropNub(hn);queued.clear();
+  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());tlmmIrqOK=0;
+ }
+
  // Default service absent; metadata mode never changes worker or maps hardware.
  fixtures();assert(!sweet_touch_irq(122));assert(sweet_touch_irq(240));
  assert(tcFixtureIRQState()==2&&!(regs[TG+0x11c]&TB));

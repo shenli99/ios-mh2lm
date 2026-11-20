@@ -125,6 +125,8 @@ prelude = tlmm_prelude + r'''
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <memory>
+#include <functional>
 #include <string>
 #include <mutex>
 #include <condition_variable>
@@ -146,6 +148,44 @@ static vm_offset_t ml_vtophys(vm_offset_t address){return address;}
 using IOReturn=int;
 constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4,kIOReturnBusy=5,kIOReturnNoMemory=6,kIOReturnAborted=7,kIOReturnNoResources=8,kIOReturnTimeout=9,kIOReturnNotFound=10,kIOReturnNotPermitted=11,kIOReturnNotOpen=12;
 using IOOptionBits=unsigned;using IOInterruptState=unsigned;
+// Wait-event adapter: registration is separate from blocking, preserving a
+// wakeup that arrives after assert_wait but before thread_block.
+using event_t = void *;
+constexpr int THREAD_UNINT = 0;
+#define THREAD_CONTINUE_NULL nullptr
+struct WaitEvent { std::mutex mutex; std::condition_variable cv; unsigned sequence=0; };
+static std::mutex waitEventsLock;
+static std::map<void *, std::shared_ptr<WaitEvent>> waitEvents;
+static thread_local std::shared_ptr<WaitEvent> waitingEvent;
+static thread_local unsigned waitingSequence;
+static std::function<void()> waitRegisteredHook, beforeBlockHook;
+static std::shared_ptr<WaitEvent> eventFor(void *key) {
+    std::lock_guard<std::mutex> guard(waitEventsLock);
+    auto &entry = waitEvents[key];
+    if (!entry) entry = std::make_shared<WaitEvent>();
+    return entry;
+}
+static int assert_wait(event_t key, int) {
+    waitingEvent=eventFor(key);
+    {std::lock_guard<std::mutex> guard(waitingEvent->mutex);
+     waitingSequence=waitingEvent->sequence;}
+    if(waitRegisteredHook)waitRegisteredHook();
+    return 0;
+}
+static int thread_block(void *) {
+    if(beforeBlockHook)beforeBlockHook();
+    auto event=waitingEvent;
+    std::unique_lock<std::mutex> lock(event->mutex);
+    event->cv.wait(lock,[&]{return event->sequence!=waitingSequence;});
+    waitingEvent.reset();return 0;
+}
+static void thread_wakeup(event_t key) {
+    auto event=eventFor(key);
+    std::lock_guard<std::mutex> guard(event->mutex);
+    ++event->sequence;event->cv.notify_all();
+}
+
+
 constexpr unsigned SWEET_DEV_FB_H=2340,SWEET_DEV_FB_W=1080,SWEET_DEV_FB_PA=0x9d200000,SWEET_DEV_FB_STRIDE=4320;
 static unsigned live=0,liveMaps=0,rawBlocks=0;
 static void*IOMallocData(size_t n){void*p=malloc(n);if(p)++rawBlocks;return p;}
@@ -339,6 +379,7 @@ static bool tlmmAbsent=false;static unsigned tlmmBusyPin=0;
    proven nub registration path. A test opts in with tlmmIrqOK=1 to exercise
    the controller-owned summary line through the pad handle. */
 static int tlmmIrqOK=0,tlmmIrqPin=-1,tlmmIrqMasks=0,tlmmIrqResumes=0,tlmmIrqFree=0;
+static std::function<void()> padConfigReadHook;
 static void (*tlmmIrqHandler)(unsigned int,void*)=nullptr;
 
 struct AGPIO : OSObject {
@@ -358,6 +399,7 @@ struct AGPIO : OSObject {
   writeReg(pinBase(pin),4,high?2u:0u);return kIOReturnSuccess;}
  bool getValue(){return (readReg(pinBase(pin),4)&1u)!=0;}
  IOReturn getConfig(struct tlmm_pin_config *c){if(!valid||!c)return kIOReturnNotOpen;
+  if(pin==122&&padConfigReadHook)padConfigReadHook();
   uintptr_t b=pinBase(pin);c->cfg=readReg(b,0);c->io=readReg(b,4);c->intr_cfg=readReg(b,8);
   c->func=(c->cfg>>2)&7u;c->pull=c->cfg&3u;c->drive=(c->cfg>>6)&7u;
   c->output=(c->cfg&0x200u)!=0;c->high=(c->io&2u)!=0;return kIOReturnSuccess;}
