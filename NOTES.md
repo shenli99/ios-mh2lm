@@ -1,5 +1,11 @@
 # iOS 16 on LG G8X (mh2lm / SM8150) — working notes
 
+## 当前交接更新（2026-11-20，b28两轮普通OFF/ON及醒后触摸通过）
+
+补充sweetlog-0121b28-1.bin SHA a27470effa25fcc723fc600755c4040c8793b37a528842ee709d5c0228ef8613，total1537509/flush12；两轮显示token2 OFF/token3 ON与token4 OFF/token5 ON全部complete，generation2/3均有ULPS退出/新帧/HS亮度及touch重新armed/token4/6 app-format verified；各轮醒后有配对触点。全日志8 down/8 up，最后hits244/empty0/late0，无worker/probe/arm/resume/HANDOFF失败，OFF后WARN0。16条ERROR均旧summary读回诊断，保留不静默。前份桌面/19对触摸日志证据保持。
+
+第2+3批b28组合达到普通功能门槛，b27单独失败历史不变；新已验回退基线是b28/999989b生产逻辑，原b22/b28镜像均保留。NEXT：开始第4批软件/硬件状态写序，先构造确定交错复现，再单独实现/测试/实机验收；不同时叶子化、重写异常清扫或显示流程。证据见docs/GPIO-IRQ-STAGE3-EARLY-CALLBACK.md和scratch/artifact-0121b28/wake-log-review.json。未证明长稳、多pad硬件并行或物理rail-off。较早待补OFF/ON的交接均为历史。
+
 ## 当前交接更新（2026-11-20，b28桌面及基本触摸通过，OFF/ON待补）
 
 用户确认成功进入桌面。b28日志SHA daee054ae46e91f62c003255e598f7f069a03058628ca41cbb95b097f5aa2071，total1318778/flush11，未绕环；3929行实际出现probe early callback hits1/enabled0，3930 probe清理成功，3931/4484 pad armed，4486 takeover complete，4491 HANDOFF active。HID19 down/19 up，顺序配对正确、无未释放触点，最后IRQ hits590/empty0/late0。worker setup/probe/handle/resume/HANDOFF失败均0。49条ERROR全是b22原有summary使能读回诊断，不能据其文本判线停用；不静默抹掉。arm-deferred日志本轮0，未实机覆盖该分支。

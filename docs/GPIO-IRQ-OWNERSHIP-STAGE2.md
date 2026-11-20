@@ -122,3 +122,8 @@ prepare 的触发类型来自注册slot；支持high/low/rising/falling/both，�
 仓库外scratch/gpio-irq-staged/characterize-probe-window.py在实际worker/service上对照复现：使能读回前已有回调时probe-hits1/ENABLE0被拒；无回调且ENABLE0时probe-hits0也被拒。设备当前失败日志未打印probe-hits，故早到回调是有测试证据的候选因果，并未证明排除真实写失败或RWP问题。
 
 根据固定计划第26行的依赖条款，先封存第2批代码和实机失败，再以独立第3批处理早到回调验证。第3批必须让早到回调和真正未使能可区分：先读硬件快照再acquire软件状态/计数，保留错误分支与pending/active清理；不增加逐包GIC轮询，不改显示降级或叶子化。不得称第2批已单独通过实机。
+
+
+## 组合验收补齐
+
+b28在第3批单独修正验证后，用户确认桌面，首份日志19对touch/hits590；补充sweetlog-0121b28-1.bin含两轮OFF/ON及各轮醒后触摸、8对触点/hits244/empty0/late0。完成证据见[第3批验收](GPIO-IRQ-STAGE3-EARLY-CALLBACK.md)。因此第2+3批组合满足普通功能验收门槛；b27单独失败历史不变。注销并发/多pad等主机测试证据与设备普通路径通过分别保留，不相互替代。

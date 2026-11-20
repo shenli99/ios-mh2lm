@@ -67,3 +67,24 @@ arm delegated分支：先读CFG，再acquire当前IRQ state。允许state1且ENA
 覆盖边界：仅观察到初次接管operation1，没有完整DisplayOff/DisplayOn完成链，没有SYSTEM_OFF尾部；用户桌面反馈和本日志足以确认首次启动/基本触摸通过，不足以完成固定计划要求的OFF/ON或长期稳定、多pad并行验收。arm的deferred分支本轮0次，只有主机回归证据。
 
 因此第2批+第3批组合获得首次启动/基本触摸实机证据，第2批b27独立失败历史保持。b28可作为当前已验启动/触摸回退候选；在同版补一次正常息屏/唤醒并再次确认触摸前，不推进第4批生产改动，无需重编同版。
+
+
+## b28 两轮普通 OFF/ON 验收通过（2026-11-20）
+
+用户提供sweetlog-0121b28-1.bin，确认本轮包含息屏/亮起。SHA256 a27470effa25fcc723fc600755c4040c8793b37a528842ee709d5c0228ef8613，total1537509/flush12，未绕环，正确解码19326行；工作区证据scratch/artifact-0121b28/wake-log-review.json。这是另一份从启动开始的日志，IRQ计数不与此前hits590相加。
+
+| 事件 | 完成证据 |
+|---|---|
+| 初次接管 | 4513行token1/operation1 complete；4518行HANDOFF active |
+| 第一次OFF | 14916行触摸token3 quiesced；15047行显示token2/operation2 complete，parked1/data-parked1/link-down1 |
+| 第一次ON | generation2，ULPS退出、新帧、HS亮度完成；15845触摸armed，15846触摸token4恢复，15847显示token3/operation3 complete；15858 owned resume verified |
+| 第一次醒后触摸 | 15959 down / 16003 up |
+| 第二次OFF | 16512触摸token5 quiesced；16569显示token4/operation2 complete |
+| 第二次ON | generation3，ULPS退出、新帧、HS亮度完成；17091触摸armed，17092触摸token6恢复，17093显示token5/operation3 complete；17098硬件vsync活动 |
+| 第二次醒后触摸 | 17500/17531、18183/18251两对down/up |
+
+全日志8 down/8 up，触点顺序合法、末尾无未释放触点；最后计数hits244/empty0/late0。probe-enable、handle-arm、worker-setup、touch-resume-admission、HANDOFF失败、panel deadline和panic(cpu均0；第一次OFF完成后WARN0。
+
+仍保留16条ERROR，全部为b22遗留summary使能读回措辞；其后触摸/显示有持续完成证据，不能据该行断言永久关线。没有在验收时删除这项诊断。
+
+结论：第2批所有权收口 + 第3批验证修正的b28组合，通过首次启动、基本触摸和两轮普通mode7 OFF/ON，满足进入第4批的实机门槛。b27独立失败历史保持；arm-deferred分支本轮未专门实机命中，仍由主机注入回归覆盖。此结果不证明长期稳定、多pad叶子化、物理rail-off或完整共享core掉电。保留b22与b28原镜像；后续第4批以999989b生产逻辑为新增已验基线。
