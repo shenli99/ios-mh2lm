@@ -6,7 +6,7 @@ b27日志total459424/flush10：TouchComm ready后GIC probe enable failed，随�
 
 按固定计划依赖条款，第3批单独修正probe/arm读回：硬件快照之后acquire软件计数/状态；probe只在已有一次callback证据时允许ENABLE0，原RWP及最终pending/active drain/hits验证保留；arm允许state2 deferred锁存，不重新使能、不ACK。真正无callback ENABLE0、终止state、active未退、RWP busy负例仍拒绝。旧b27 worker在新early-probe测试失败，修正后四套回归/C ARM64 TU/marker151/0通过。生产只改sweet_touch_tcm.c，未改TLMM/显示/GIC策略。
 
-NEXT：用户push full-source，下载logs/xnu-kernel-0121b28.gz和logs/xnu-buildtree-0121b28.gz；agent逐文件核对并用out-bs/mk16k-0121b28.sh打包，真实b27已被该脚本新日志标记门禁拒绝。本地尚无b28产物/镜像/实机。验收probe通过→armed（state2时cfg可0x70）→worker ready→HANDOFF active→桌面连续触摸。先等依赖验收，不推进批次4–6或显示降级。详见docs/GPIO-IRQ-STAGE3-EARLY-CALLBACK.md。下面是较早交接历史。
+NEXT更新：b28两包已下载，5300源码与999989b逐文件一致，内核SHA af987bd08d93e809bcf6fa42c94c3f133cab2c07bf0ef5c796ba4a4fb66e0305。b28两个镜像已打包并从最终镜像回读核验，gpioirq SHA 22fba647dec15d6b4e25fb342ba64b6d0a688f42ba0e0da7f979f3831f594701，baseline SHA 8ff2fcd4244da5a645a813ec9aa9af0a34df6c33d9c8c33c8503b87d75f311ab；ABI608固件/ADT/新probe-arm标记正确，显示参数不变。无需新CI；用户先fastboot boot b28 gpioirq验桌面/触摸/原OFF-ON并导出sweetlog-0121b28.bin，当前未实机验收。验收probe通过→armed（state2时cfg可0x70）→worker ready→HANDOFF active→桌面连续触摸。先等依赖验收，不推进批次4–6或显示降级。详见docs/GPIO-IRQ-STAGE3-EARLY-CALLBACK.md。下面是较早交接历史。
 
 ## 当前交接（2026-11-20，回退实际b22后固定分批计划）
 

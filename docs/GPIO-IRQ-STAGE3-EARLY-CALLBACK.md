@@ -34,3 +34,17 @@ arm delegated分支：先读CFG，再acquire当前IRQ state。允许state1且ENA
 用户push full-source下载b28 kernel/buildtree后，agent核对打包再验：TouchComm ready → probe成功/排空 → armed（若有deferred日志cfg可为0x70）→ touch worker ready → FB HANDOFF active → 桌面及连续按下/抬起/滑动。若再次probe失败，新增快照用于区分无callback/真超时，不强行忽略错误。当前无b28内核/镜像/实机结果，不声称修复所有历史故障。
 
 批次4软件/MMIO写序、批次5叶子掩码、批次6异常路径及独立显示降级保持未实施；等本批依赖实机结果后再推进。
+
+
+## b28 产物和镜像交付（2026-11-20）
+
+收到kernel/buildtree，两包完整读取；5300个XNU源码文件与999989b逐文件一致，0缺失/0差异。内核17879616字节，SHA256 af987bd08d93e809bcf6fa42c94c3f133cab2c07bf0ef5c796ba4a4fb66e0305，与包内SHA256SUMS匹配。没有另行核验CI run ID，不能声称云端元数据已验证。
+
+最终Android v1镜像均35545088字节，重新抽取FAT内核/ADT/TOML回读通过，新probe/arm四组标记存在；ABI608固件SHA256 27e7a1d1a3f9421af18d02f216e4e7d651137d42f2955be775f9142f118ea480及MHPANEL1钩子通过；ADT SHA256 a9e4f37151162be9244b2e701b2e60063d85d4c424e8842c5bbf9b8d62391875。两镜像参数只差touch mode，显示参数不变。
+
+| 镜像 | SHA256 |
+|---|---|
+| out-bs/boot-16k-0121b28-gpioirq-panel-pipeline.img | 22fba647dec15d6b4e25fb342ba64b6d0a688f42ba0e0da7f979f3831f594701 |
+| out-bs/boot-16k-0121b28-baseline-panel-pipeline.img | 8ff2fcd4244da5a645a813ec9aa9af0a34df6c33d9c8c33c8503b87d75f311ab |
+
+核验记录在工作区scratch/artifact-0121b28/packaging-verification.json。下一步用户临时启动gpioirq，验证桌面和连续触摸，再原有OFF/ON，导出sweetlog-0121b28.bin。不要求新CI，当前无实机结果。若失败，以新增waited/enabled/probe-hits/cfg/state快照定位，不因字面量存在宣称问题已修复。
