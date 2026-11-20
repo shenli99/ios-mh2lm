@@ -62,6 +62,8 @@ public:
  void irqUnmask(void);
  /* Pad path only: the handle owns this pad's status latch. */
  void irqAck(void);
+ bool irqPrepare(void);
+ uint32_t irqConfiguration(void);
  IOReturn attachConsumer(uint64_t *);
  IOReturn detachConsumer(uint64_t);
  IOReturn copyWorkerAvailable(bool *);

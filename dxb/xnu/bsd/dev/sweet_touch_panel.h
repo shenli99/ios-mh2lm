@@ -36,6 +36,10 @@ void sweet_touch_irq_delegate_line(unsigned delegated);
 extern void (*ts_irq_mask_fn)(void);
 extern void (*ts_irq_unmask_fn)(void);
 extern void (*ts_irq_ack_fn)(void);
+/* Delegated pad setup at the worker's original arm point; missing hooks
+ * fail closed rather than falling back to unowned register writes. */
+extern bool (*ts_irq_prepare_fn)(void);
+extern uint32_t (*ts_irq_cfg_fn)(void);
 /* ATTN pad: the touch interrupt is a TLMM pad, not a direct-connect GIC line.
  * The pad number lives here so the worker and the IOService cannot drift. */
 #define SWEET_TOUCH_IRQ_PIN 122u

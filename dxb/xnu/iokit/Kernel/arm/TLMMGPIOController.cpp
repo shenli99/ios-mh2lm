@@ -26,6 +26,7 @@
 
 #include "TLMMGPIOController.h"
 #include <IOKit/IOLib.h>
+#include <IOKit/IOPlatformExpert.h>
 #include <libkern/libkern.h>
 /* Distributor mapping: VM_WIMG_IO comes from this header; the map KPI below
  * is not exported by machine/machine_routines.h, so it is declared here the
@@ -179,6 +180,15 @@ AGPIO::setInterrupt(unsigned int detect, tlmm_gpio_irq_handler handler,
 		return kIOReturnNotOpen;
 	}
 	return fController->requestPinIRQ(this, detect, handler, refcon);
+}
+
+IOReturn
+AGPIO::prepareInterrupt(void)
+{
+	if (!fValid || !fController) {
+		return kIOReturnNotOpen;
+	}
+	return fController->preparePinIRQ(this);
 }
 
 IOReturn
@@ -1217,6 +1227,15 @@ TLMMGPIOController::writeIntrStatus(unsigned int pin, uint32_t value)
 	__asm__ volatile("dsb osh" ::: "memory");
 }
 
+bool
+TLMMGPIOController::irqPinReadOnly(unsigned int pin) const
+{
+	/* The ADT flag is immutable after start. This live check must not take
+	 * the sleeping pin-state lock when called from a pad's top half. */
+	return fPins[pin].readOnly ||
+	       (tlmmRead32(pinAddress(pin, TLMM_GPIO_CFG)) & TLMM_GPIO_EGPIO_ENABLE);
+}
+
 int
 TLMMGPIOController::irqSlotForPin(unsigned int pin) const
 {
@@ -1564,6 +1583,7 @@ TLMMGPIOController::requestPinIRQ(AGPIO *owner, unsigned int detect,
 		return kIOReturnNoResources;
 	}
 	fIrqPins[slot] = pin;
+	fIrqDetect[slot] = detect;
 	fIrqHandlers[slot] = handler;
 	fIrqRefcons[slot] = refcon;
 	fIrqSlot[pin] = slot;
@@ -1579,6 +1599,62 @@ TLMMGPIOController::requestPinIRQ(AGPIO *owner, unsigned int detect,
 	    "intr_cfg=%#x (route owned, pad config with the client)\n",
 	    pin, slot, detect, cfg);
 	return kIOReturnSuccess;
+}
+
+IOReturn
+TLMMGPIOController::preparePinIRQ(AGPIO *owner)
+{
+	if (!owner || !owner->isValid()) {
+		return kIOReturnBadArgument;
+	}
+	if (getPlatform()->atInterruptLevel()) {
+		return kIOReturnNotPermitted;
+	}
+	unsigned int pin = owner->getPin();
+	if (pin >= fPinCount) {
+		return kIOReturnBadArgument;
+	}
+	IOLockLock(fLock);
+	if (!fPins[pin].exclusive || fPins[pin].handle != owner) {
+		IOLockUnlock(fLock);
+		return kIOReturnNotPermitted;
+	}
+	if (pinReadOnlyLocked(pin)) {
+		IOLockUnlock(fLock);
+		return kIOReturnUnsupported;
+	}
+	int slot = irqSlotForPin(pin);
+	if (slot < 0) {
+		IOLockUnlock(fLock);
+		return kIOReturnNotFound;
+	}
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	bool masked = (fIrqClientMask & (1u << (unsigned int)slot)) != 0;
+	unsigned int detect = fIrqDetect[slot];
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	if (!masked) {
+		IOLockUnlock(fLock);
+		return kIOReturnBusy;
+	}
+
+	uint32_t trigger = 0;
+	switch (detect) {
+	case TLMM_IRQ_LEVEL_HIGH: trigger = TLMM_INTR_POLARITY; break;
+	case TLMM_IRQ_LEVEL_LOW: break;
+	case TLMM_IRQ_EDGE_RISING:
+		trigger = TLMM_INTR_POLARITY | (1u << TLMM_INTR_DETECT_SHIFT); break;
+	case TLMM_IRQ_EDGE_FALLING: trigger = 1u << TLMM_INTR_DETECT_SHIFT; break;
+	case TLMM_IRQ_EDGE_BOTH: trigger = 3u << TLMM_INTR_DETECT_SHIFT; break;
+	}
+	vm_offset_t address = pinAddress(pin, TLMM_GPIO_INTR_CFG);
+	uint32_t want = (tlmmRead32(address) & ~0xffu) |
+	    TLMM_INTR_ROUTE_TARGET | TLMM_INTR_ROUTE_RAW | trigger;
+	tlmmWrite32(address, want);
+	uint32_t status = readIntrStatus(pin);
+	writeIntrStatus(pin, status & ~TLMM_INTR_STATUS_RAW);
+	bool matched = (tlmmRead32(address) & 0xffu) == (want & 0xffu);
+	IOLockUnlock(fLock);
+	return matched ? kIOReturnSuccess : kIOReturnIOError;
 }
 
 IOReturn
@@ -1654,6 +1730,11 @@ TLMMGPIOController::maskPinIRQ(unsigned int pin)
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	fIrqClientMask |= 1u << (unsigned int)slot;
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	if (irqPinReadOnly(pin)) {
+		/* Gate the summary, but never write a pad now owned by island. */
+		setSummaryMasked(true);
+		return kIOReturnUnsupported;
+	}
 	/* Clear this pad's own enable bit first: the status latch below stays
 	 * readable for the client, and the shared summary deasserts for this pad
 	 * without touching any other one. */
@@ -1681,6 +1762,9 @@ TLMMGPIOController::ackPinIRQ(unsigned int pin)
 
 	if (irqSlotForPin(pin) < 0) {
 		return kIOReturnNotFound;
+	}
+	if (irqPinReadOnly(pin)) {
+		return kIOReturnUnsupported;
 	}
 	status = readIntrStatus(pin);
 	if (status & TLMM_INTR_STATUS_RAW) {
@@ -1710,6 +1794,9 @@ TLMMGPIOController::resumePinIRQ(unsigned int pin)
 	slot = irqSlotForPin(pin);
 	if (slot < 0) {
 		return kIOReturnNotFound;
+	}
+	if (irqPinReadOnly(pin)) {
+		return kIOReturnUnsupported;
 	}
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	fIrqClientMask &= ~(1u << (unsigned int)slot);

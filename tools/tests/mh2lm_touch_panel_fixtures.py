@@ -67,6 +67,9 @@ void tcFixtureReboot(void){
  for(unsigned n=0;n<4;++n)ts_tiles[n]=b[n];ts_gicd=TS_GICD_PA;
  ts_irq_ready=true;ts_irq_hits=ts_irq_probe_hits=0;ts_irq_state=1;
  ts_irq_empty=ts_irq_no_progress=0;
+ ts_irq_line_owned=ts_irq_line_delegated=false;
+ ts_irq_mask_fn=ts_irq_unmask_fn=ts_irq_ack_fn=NULL;
+ ts_irq_prepare_fn=NULL;ts_irq_cfg_fn=NULL;
  memset(&tcm,0,sizeof(tcm));tcm.ready=1;tcm.max_x=1080;tcm.max_y=2340;
  memset(ts_now,0,sizeof(ts_now));memset(ts_prev,0,sizeof(ts_prev));
  ts_panel_publish(0,SWEET_TOUCH_RUNNING);ts_panel_live=1;
@@ -76,6 +79,10 @@ unsigned tcFixtureStep(void){return ts_panel_step();}
 void tcFixtureWait(void){ts_panel_wait();}
 void tcFixtureIRQWait(void){ts_irq_wait(__atomic_load_n(&ts_irq_hits,__ATOMIC_ACQUIRE));}
 unsigned tcFixtureIRQState(void){return __atomic_load_n(&ts_irq_state,__ATOMIC_ACQUIRE);}
+unsigned tcFixtureArm(void){return ts_irq_arm();}
+unsigned tcFixtureDelegated(void){return ts_irq_line_delegated;}
+void tcFixtureIRQFail(void){ts_irq_fail("injected");}
+void tcFixtureAck(void){ts_irq_ack_pad();}
 uint64_t tcFixtureFrame(void){return __atomic_load_n(&ts_panel_frame,__ATOMIC_ACQUIRE);}
 uint64_t tcFixtureOwner(void){return __atomic_load_n(&ts_panel_owner,__ATOMIC_ACQUIRE);}
 void tcFixtureContact(unsigned finger){ts_prev[finger].active=1;ts_px[finger]=12;ts_py[finger]=34;}

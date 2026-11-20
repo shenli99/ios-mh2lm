@@ -232,6 +232,8 @@ ts_gic_rd64(unsigned off)
 void (*ts_irq_mask_fn)(void);
 void (*ts_irq_unmask_fn)(void);
 void (*ts_irq_ack_fn)(void);
+bool (*ts_irq_prepare_fn)(void);
+uint32_t (*ts_irq_cfg_fn)(void);
 
 /*
  * Interrupt-level ownership of the distributor bit. The facade's mask is
@@ -245,8 +247,8 @@ void (*ts_irq_ack_fn)(void);
  */
 static bool ts_irq_line_owned;
 /* Mode 3: the TLMM controller owns the summary SPI and demuxes the ATTENTION
- * pad. This worker only owns the pad, so masking must not require the shared
- * GIC line to be disabled: every other pad on that line stays live. */
+ * pad. This worker asks its handle for pad operations; the controller retains
+ * the b22 whole-summary gate until the later leaf-masking stage. */
 static bool ts_irq_line_delegated;
 
 void
@@ -302,6 +304,10 @@ ts_irq_enable_through_owner(void)
 static void
 ts_irq_mask(void)
 {
+	if (ts_irq_line_delegated) {
+		if (ts_irq_mask_fn) ts_irq_mask_fn();
+		return;
+	}
 	if (ts_irq_line_owned && ts_gicd) {
 		ts_irq_mask_raw();
 	} else if (ts_irq_mask_fn) {
@@ -314,6 +320,10 @@ ts_irq_mask(void)
 static void
 ts_irq_unmask(void)
 {
+	if (ts_irq_line_delegated) {
+		if (ts_irq_unmask_fn) ts_irq_unmask_fn();
+		return;
+	}
 	if (ts_irq_line_owned && ts_gicd) {
 		ts_irq_unmask_raw();
 	} else if (ts_irq_unmask_fn) {
@@ -328,11 +338,20 @@ ts_irq_unmask(void)
  * the pad acks it; the worker must not write INTR_STATUS directly then, because
  * the controller leaves that latch for the owner on purpose.
  */
+static uint32_t
+ts_irq_pad_cfg(void)
+{
+	if (ts_irq_line_delegated) {
+		return ts_irq_cfg_fn ? ts_irq_cfg_fn() : ~0u;
+	}
+	return ts_rd(ts_tiles[ts_tile(TS_PIN_IRQ)], TS_INTR_CFG);
+}
+
 static void
 ts_irq_ack_pad(void)
 {
-	if (ts_irq_line_delegated && ts_irq_ack_fn) {
-		ts_irq_ack_fn();
+	if (ts_irq_line_delegated) {
+		if (ts_irq_ack_fn) ts_irq_ack_fn();
 		return;
 	}
 	{
@@ -385,7 +404,7 @@ static bool
 ts_gic_probe(void)
 {
 	unsigned off = 4u * TS_IRQ_WORD;
-	uint32_t pinCfg = ts_rd(ts_tiles[ts_tile(TS_PIN_IRQ)], TS_INTR_CFG);
+	uint32_t pinCfg = ts_irq_pad_cfg();
 	uint32_t pending = ts_gic_rd(0x200u + off) & TS_IRQ_BIT;
 	uint32_t active = ts_gic_rd(0x300u + off) & TS_IRQ_BIT;
 	if ((pinCfg & 1u) || pending || active) {
@@ -504,9 +523,11 @@ static void
 ts_irq_fail(const char *reason)
 {
 	__atomic_store_n(&ts_irq_state, 3u, __ATOMIC_RELEASE);
-	vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
-	ts_wr(tile, TS_INTR_CFG, ts_rd(tile, TS_INTR_CFG) & ~1u);
-	if (ts_gicd) {
+	if (!ts_irq_line_delegated) {
+		vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
+		ts_wr(tile, TS_INTR_CFG, ts_rd(tile, TS_INTR_CFG) & ~1u);
+	}
+	if (ts_gicd || ts_irq_line_delegated) {
 		ts_irq_mask();
 	}
 	SWEET_LOG_ERROR("SWEET TOUCH IRQ: FAILED %s hits=%u empty=%u; touch stopped\n",
@@ -520,17 +541,27 @@ ts_irq_arm(void)
 		return false;
 	}
 	vm_offset_t tile = ts_tiles[ts_tile(TS_PIN_IRQ)];
-	uint32_t cfg = ts_rd(tile, TS_INTR_CFG);
-	/* Linux SM8150 TLMM: target=KPSS 3, raw status on, level low,
-	 * pin interrupt disabled until the GIC callback and worker are ready. */
-	cfg = (cfg & ~0xffu) | (3u << 5) | (1u << 4);
-	ts_wr(tile, TS_INTR_CFG, cfg);
-	uint32_t status = ts_rd(tile, TS_INTR_STATUS);
-	ts_wr(tile, TS_INTR_STATUS, status & ~1u);
-	uint32_t readback = ts_rd(tile, TS_INTR_CFG);
-	if ((readback & 0xffu) != (cfg & 0xffu)) {
-		ts_irq_fail("TLMM config readback");
-		return false;
+	uint32_t cfg = 0;
+	if (ts_irq_line_delegated) {
+		/* Prepare at the same arm point as the legacy programming below,
+		 * not at claim during display bring-up. The handle owns all writes. */
+		if (!ts_irq_prepare_fn || !ts_irq_cfg_fn || !ts_irq_prepare_fn()) {
+			ts_irq_fail("handle preparation");
+			return false;
+		}
+	} else {
+		cfg = ts_rd(tile, TS_INTR_CFG);
+		/* Linux SM8150 TLMM: target=KPSS 3, raw status on, level low,
+		 * pin interrupt disabled until the GIC callback and worker are ready. */
+		cfg = (cfg & ~0xffu) | (3u << 5) | (1u << 4);
+		ts_wr(tile, TS_INTR_CFG, cfg);
+		uint32_t status = ts_rd(tile, TS_INTR_STATUS);
+		ts_wr(tile, TS_INTR_STATUS, status & ~1u);
+		uint32_t readback = ts_rd(tile, TS_INTR_CFG);
+		if ((readback & 0xffu) != (cfg & 0xffu)) {
+			ts_irq_fail("TLMM config readback");
+			return false;
+		}
 	}
 	if (ts_panel_interrupted()) return false;
  __atomic_store_n(&ts_irq_state, 1u, __ATOMIC_RELEASE);
@@ -544,13 +575,22 @@ ts_irq_arm(void)
 		return false;
 	}
 	if (ts_panel_interrupted()) return false;
-	ts_wr(tile, TS_INTR_CFG, cfg | 1u);
-	if ((ts_rd(tile, TS_INTR_CFG) & 1u) == 0) {
-		ts_irq_fail("TLMM enable readback");
-		return false;
+	if (!ts_irq_line_delegated) {
+		ts_wr(tile, TS_INTR_CFG, cfg | 1u);
+		if ((ts_rd(tile, TS_INTR_CFG) & 1u) == 0) {
+			ts_irq_fail("TLMM enable readback");
+			return false;
+		}
+	} else {
+		uint32_t padCfg = ts_irq_pad_cfg();
+		if (padCfg == ~0u || !(padCfg & 1u)) {
+			/* First-packet readback races are a separate stage. */
+			ts_irq_fail("handle enable readback");
+			return false;
+		}
 	}
 	SWEET_LOG_INFO("SWEET TOUCH IRQ: armed gpio=%u intid=%u cfg=%#x status=%#x attn=%u\n",
-	    TS_PIN_IRQ, TS_IRQ_INTID, ts_rd(tile, TS_INTR_CFG),
+	    TS_PIN_IRQ, TS_IRQ_INTID, ts_irq_pad_cfg(),
 	    ts_rd(tile, TS_INTR_STATUS), ts_gpio_io_rd(TS_PIN_IRQ) & 1u);
 	return true;
 }
@@ -1257,16 +1297,16 @@ static bool ts_panel_mask(void)
 {
  __atomic_store_n(&ts_irq_state,5u,__ATOMIC_RELEASE);
  vm_offset_t tile=ts_tiles[ts_tile(TS_PIN_IRQ)];
- uint32_t config=ts_rd(tile,TS_INTR_CFG);
+ uint32_t config=ts_irq_pad_cfg();
  if (config==~0u) {
   ts_irq_mask();
   SWEET_LOG_ERROR("SWEET TOUCH PANEL: GPIO122 IRQ configuration unreadable\n");return false;
  }
  ts_panel_pin_cfg=config&~1u;
- ts_wr(tile,TS_INTR_CFG,ts_panel_pin_cfg);
+ if (!ts_irq_line_delegated) ts_wr(tile,TS_INTR_CFG,ts_panel_pin_cfg);
  ts_irq_mask();
  for (unsigned n=0;n<21;++n) {
-  uint32_t readback=ts_rd(tile,TS_INTR_CFG);
+  uint32_t readback=ts_irq_pad_cfg();
   if (readback!=ts_panel_pin_cfg) {
    SWEET_LOG_ERROR("SWEET TOUCH PANEL: GPIO122 disable mismatch want=%#x read=%#x\n",ts_panel_pin_cfg,readback);return false;
   }
@@ -1311,7 +1351,7 @@ static unsigned ts_panel_step(void)
   vm_offset_t tile=ts_tiles[ts_tile(TS_PIN_IRQ)];
   unsigned old_x=tcm.max_x,old_y=tcm.max_y;
   ok=__atomic_load_n(&ts_irq_state,__ATOMIC_ACQUIRE)==5u &&
-      ts_rd(tile,TS_INTR_CFG)==ts_panel_pin_cfg &&
+      ts_irq_pad_cfg()==ts_panel_pin_cfg &&
       (ts_irq_line_delegated || !(ts_gic_rd(0x100u+4u*TS_IRQ_WORD)&TS_IRQ_BIT));
   if (ok) {
    int rc=tcm_start();
@@ -1537,6 +1577,7 @@ irq_stop:
 	ts_release_all();
 
 out:
+ if (ts_irq_line_delegated) ts_irq_mask();
  __atomic_store_n(&ts_panel_live,0u,__ATOMIC_RELEASE);
  uint64_t frame=__atomic_load_n(&ts_panel_frame,__ATOMIC_ACQUIRE);
  if ((frame&15u)!=SWEET_TOUCH_STOPPED) ts_panel_publish(frame,SWEET_TOUCH_FAILED);

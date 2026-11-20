@@ -21,9 +21,11 @@ fixture = r'''
 extern "C" {
 void tcFixtureReboot();void tcFixtureOnline(unsigned);unsigned tcFixtureStep();
 void tcFixtureWait();void tcFixtureIRQWait();unsigned tcFixtureIRQState();
+unsigned tcFixtureArm();unsigned tcFixtureDelegated();void tcFixtureIRQFail();void tcFixtureAck();
 uint64_t tcFixtureFrame();uint64_t tcFixtureOwner();void tcFixtureContact(unsigned);
 void tcFixtureTokenLimit();void tcFixtureSessionLimit();void tcFixtureFail();bool sweet_touch_irq(unsigned);
 extern void (*ts_irq_mask_fn)(void);void sweet_touch_irq_own_line(void);
+extern bool (*ts_irq_prepare_fn)(void);extern uint32_t (*ts_irq_cfg_fn)(void);
 void sweet_touch_irq_release_line(void);
 }
 static constexpr uintptr_t TG=0x17a00000,TP=0x03d7a000;
@@ -48,6 +50,9 @@ extern "C" void touchLog(const char*,...){}
 extern "C" void touchHID(int finger,int down,int x,int y){assert(!down&&x==12&&y==34);++ups;hidIDs.push_back(finger);}
 extern "C" uint32_t touchRead(uintptr_t b,uint32_t o){return readReg(b,o);}
 extern "C" void touchWrite(uintptr_t b,uint32_t o,uint32_t v){
+ // This boundary is the C worker, not the AGPIO stub's writeReg boundary.
+ // A delegated worker must not bypass its handle, including fail/cancel paths.
+ if(tcFixtureDelegated()) assert(!(b==0x03d00000&&(o==0x7a008||o==0x7a00c)));
  trace.push_back({true,b+o,v});
  if(b==TG&&o==0x19c){if(!keepEnabled)regs[TG+0x11c]&=~v;return;}
  if(b==TG&&o==0x11c){if(armHook){auto f=armHook;armHook=nullptr;f();}regs[b+o]|=v;return;}
@@ -126,6 +131,23 @@ int main(){
   uint64_t rt=0;assert(ps->resume(pid,&rt)==0&&rt);assert(tcFixtureStep()==0);timer(ps);
   auto rp=status(ps,pid,rt);assert(rp.ready&&!rp.quiesced&&rp.result==0);
   destroy(ps,pn);}
+ tlmmIrqOK=0;touchPanelMode=2;
+ // Arm/fail and ACK run through the handle, while missing hooks after stop
+ // cannot silently recover raw register ownership. The touchWrite adapter
+ // asserts that no delegated C-worker path writes pad CFG/STATUS directly.
+ fixtures();touchPanelMode=3;tlmmIrqOK=1;tlmmIrqPin=-1;
+ {auto*pn=nub();auto*ps=make(pn);
+  ps->irqMask();assert(tcFixtureArm()&&tcFixtureIRQState()==1u);
+  assert((regs[TP+8]&0xffu)==0x71u);
+  regs[TP+12]=1;tcFixtureAck();assert(regs[TP+12]==0);
+  tcFixtureIRQFail();assert(tcFixtureIRQState()==3u&&!(regs[TP+8]&1u));
+  auto pid=attach(ps);uint64_t requested=0;
+  assert(ps->quiesce(pid,&requested)==0&&requested); // cancellation is now pending
+  ps->stop(pn);auto count=trace.size();
+  assert(!tcFixtureArm());tcFixtureAck();tcFixtureIRQFail();
+  assert(tcFixtureStep()==2u);
+  assert(trace.size()==count); // no hooks, no raw fallback, even after stop
+  ps->release();dropNub(pn);queued.clear();}
  tlmmIrqOK=0;touchPanelMode=2;
  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
  assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());

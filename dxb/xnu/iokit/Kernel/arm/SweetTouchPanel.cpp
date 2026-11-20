@@ -12,7 +12,7 @@ static SweetTouchPanel *gTouchPanel;
 
 /*
  * Pad-interrupt entry: the controller already masked the summary line and
- * cleared this pad's status, so the existing top half runs unchanged.
+ * leaves a deferred pad's latch to its worker, so the top half runs unchanged.
  */
 extern "C" void
 sweet_touch_tlmm_irq(unsigned int pin, void *refcon)
@@ -36,6 +36,18 @@ sweet_touch_panel_unmask(void)
 	if (gTouchPanel) {
 		gTouchPanel->irqUnmask();
 	}
+}
+
+static bool
+sweet_touch_panel_prepare(void)
+{
+	return gTouchPanel && gTouchPanel->irqPrepare();
+}
+
+static uint32_t
+sweet_touch_panel_configuration(void)
+{
+	return gTouchPanel ? gTouchPanel->irqConfiguration() : ~0u;
 }
 
 static void
@@ -81,6 +93,24 @@ SweetTouchPanel::irqAck(void)
 		(void) fIRQPin->ackInterrupt();
 	}
 }
+bool
+SweetTouchPanel::irqPrepare(void)
+{
+	return fIRQViaTLMM && fIRQPin &&
+	       fIRQPin->prepareInterrupt() == kIOReturnSuccess;
+}
+
+uint32_t
+SweetTouchPanel::irqConfiguration(void)
+{
+	struct tlmm_pin_config config;
+	if (fIRQViaTLMM && fIRQPin &&
+	    fIRQPin->getConfig(&config) == kIOReturnSuccess) {
+		return config.intr_cfg;
+	}
+	return ~0u;
+}
+
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSData.h>
 #include <sys/errno.h>
@@ -148,6 +178,8 @@ bool SweetTouchPanel::start(IOService *p)
   ts_irq_mask_fn=sweet_touch_panel_mask;
   ts_irq_unmask_fn=sweet_touch_panel_unmask;
   ts_irq_ack_fn=sweet_touch_panel_ack;
+  ts_irq_prepare_fn=sweet_touch_panel_prepare;
+  ts_irq_cfg_fn=sweet_touch_panel_configuration;
   SWEET_LOG_INFO("SWEET TOUCH PANEL: ATTENTION pad gpio%u claimed through its AGPIO handle and delegated to the TLMM summary line; no GIC source on the nub\n",SWEET_TOUCH_IRQ_PIN);
  } else if (p->propertyExists("IOInterruptSpecifiers")) {
   if (p->registerInterrupt(0, NULL, (IOInterruptAction)sweet_touch_irq_action, NULL)==kIOReturnSuccess) {
@@ -311,7 +343,10 @@ void SweetTouchPanel::stop(IOService *p)
   if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
   if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
   if (fIRQViaTLMM) {
-   sweet_touch_irq_delegate_line(0);
+   /* The cancelled worker must never regain raw register ownership after
+    * its handle is returned; keep delegated mode latched until reboot. */
+   if (ts_irq_prepare_fn==sweet_touch_panel_prepare) ts_irq_prepare_fn=NULL;
+   if (ts_irq_cfg_fn==sweet_touch_panel_configuration) ts_irq_cfg_fn=NULL;
    if (ts_irq_ack_fn==sweet_touch_panel_ack) ts_irq_ack_fn=NULL;
    if (fIRQPin) { (void)fIRQPin->disableInterrupt(); fIRQPin->put(); fIRQPin=NULL; }
   }
@@ -332,7 +367,10 @@ void SweetTouchPanel::free(void)
   if (ts_irq_mask_fn==sweet_touch_panel_mask) ts_irq_mask_fn=NULL;
   if (ts_irq_unmask_fn==sweet_touch_panel_unmask) ts_irq_unmask_fn=NULL;
   if (fIRQViaTLMM) {
-   sweet_touch_irq_delegate_line(0);
+   /* The cancelled worker must never regain raw register ownership after
+    * its handle is returned; keep delegated mode latched until reboot. */
+   if (ts_irq_prepare_fn==sweet_touch_panel_prepare) ts_irq_prepare_fn=NULL;
+   if (ts_irq_cfg_fn==sweet_touch_panel_configuration) ts_irq_cfg_fn=NULL;
    if (ts_irq_ack_fn==sweet_touch_panel_ack) ts_irq_ack_fn=NULL;
    if (fIRQPin) { (void)fIRQPin->disableInterrupt(); fIRQPin->put(); fIRQPin=NULL; }
   }

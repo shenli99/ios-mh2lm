@@ -36,6 +36,11 @@ def strip_barriers(text):
 
 
 PRELUDE = r'''
+static bool fixtureAtInterrupt = false;
+struct FixturePlatform { bool atInterruptLevel() const { return fixtureAtInterrupt; } };
+static FixturePlatform fixturePlatform;
+static FixturePlatform *getPlatform() { return &fixturePlatform; }
+
 #include <atomic>
 #include <cassert>
 #include <cstdarg>
@@ -392,11 +397,32 @@ static void interruptCases(void) {
         TLMM_INTR_ROUTE_TARGET | TLMM_INTR_ROUTE_RAW);
     assert(!pin->interruptEnabled());
 
+    // Preparing at arm time owns trigger writes without changing claim time.
+    setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
+    assert(pin->prepareInterrupt() == kIOReturnSuccess);
+    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_CFG) == 0x70u);
+    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) == 0);
+    assert(!gicdLineEnabled());
+    fixtureAtInterrupt = true;
+    assert(pin->prepareInterrupt() == kIOReturnNotPermitted);
+    fixtureAtInterrupt = false;
+    setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_CFG, TLMM_GPIO_EGPIO_ENABLE);
+    assert(pin->prepareInterrupt() == kIOReturnUnsupported);
+    setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
+    assert(pin->maskInterrupt() == kIOReturnUnsupported);
+    assert(pin->resumeInterrupt() == kIOReturnUnsupported);
+    assert(pin->ackInterrupt() == kIOReturnUnsupported);
+    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_CFG) == 0x70u);
+    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) == TLMM_INTR_STATUS_RAW);
+    assert(!gicdLineEnabled());
+    setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_CFG, TLMM_GPIO_MUX_GPIO);
+
     /* (3) The handle arms the pad: the distributor bit is released, and the
      *     alias with the provider is over -- one enable at claim, none after. */
     assert(pin->resumeInterrupt() == kIOReturnSuccess);
     assert(gicdLineEnabled() && !gicdLineMasked());
     assert(pin->interruptEnabled());
+    assert(pin->prepareInterrupt() == kIOReturnBusy); // no reconfiguration live
     assert(gProvider.enableCount == 1);
     setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     runSummaryAction();
@@ -470,6 +496,7 @@ static void interruptCases(void) {
     assert(pin96->isValid());
     assert(on.acquirePin(96, "new-owner") == nullptr);
     assert(pin96->disableInterrupt() == kIOReturnSuccess);
+    assert(pin96->prepareInterrupt() == kIOReturnNotFound);
     assert(!pin96->interruptEnabled());
     assert((tileReg(TLMM_TILE_NORTH, 96, TLMM_GPIO_INTR_CFG) & TLMM_INTR_ENABLE) == 0);
     assert(tileReg(TLMM_TILE_NORTH, 96, TLMM_GPIO_INTR_STATUS) == TLMM_INTR_STATUS_RAW);
@@ -506,6 +533,22 @@ static void interruptCases(void) {
     assert(!gProvider.registered);      /* last free released the summary */
     assert(gProvider.unregisterCount == 1);
     on.stop(&gProvider);
+
+    // Trigger encodings are hardware expectations, separate from the worker.
+    const uint32_t expected[] = {0x72u, 0x70u, 0x76u, 0x74u, 0x7cu};
+    for (unsigned detect = 0; detect <= TLMM_IRQ_EDGE_BOTH; ++detect) {
+        resetProvider();bringUp();addSpecifier();
+        TLMMGPIOController prepared;
+        assert(prepared.init() && prepared.start(&gProvider));
+        AGPIO *p = prepared.acquirePin(122, "prepare-test");
+        assert(p && p->prepareInterrupt() == kIOReturnNotFound);
+        assert(p->setInterrupt(detect, irqHandler, nullptr) == kIOReturnSuccess);
+        setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_CFG, 0xab00u | 0x72u);
+        assert(p->prepareInterrupt() == kIOReturnSuccess);
+        assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_CFG) == (0xab00u | expected[detect]));
+        assert(!gicdLineEnabled());
+        p->put();prepared.stop(&gProvider);
+    }
 }
 
 static void islandCases(void) {
@@ -786,6 +829,8 @@ def main():
     # The host fixture defines VM_WIMG_IO itself, so a source that forgot the
     # kernel header compiled here and failed on CI. Check the include instead.
     assert '#include <vm/memory_types.h>' in shipped
+    # The host platform stub must not hide an incomplete kernel platform type.
+    assert '#include <IOKit/IOPlatformExpert.h>' in shipped
     # machine/machine_routines.h does not export this KPI, so the source has
     # to declare it itself -- exactly what the SPMI mux does.
     assert 'extern "C" vm_offset_t ml_io_map_unmappable' in shipped

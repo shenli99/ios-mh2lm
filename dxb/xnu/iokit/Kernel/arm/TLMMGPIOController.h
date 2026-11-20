@@ -88,6 +88,10 @@ public:
 	IOReturn setInterrupt(unsigned int detect, tlmm_gpio_irq_handler handler,
 	    void *refcon);
 	IOReturn disableInterrupt(void);
+	/* Thread context, while this client is masked: program the registered
+	 * trigger and clear its stale latch, but do not enable the pad or line.
+	 * Keeping preparation separate preserves the client's arm-time ordering. */
+	IOReturn prepareInterrupt(void);
 
 	/* Interrupt-context safe. mask clears this pad's enable bit, so the
 	 * shared summary deasserts without touching any other pad; resume acks
@@ -219,6 +223,7 @@ public:
 	IOReturn requestPinIRQ(AGPIO *owner, unsigned int detect,
 	    tlmm_gpio_irq_handler handler, void *refcon);
 	IOReturn releasePinIRQ(AGPIO *owner);
+	IOReturn preparePinIRQ(AGPIO *owner);
 	/* Teardown helper: releases by pin once the handle is going away. */
 	IOReturn freePinIRQ(unsigned int pin);
 	/* Interrupt-context safe. mask keeps the line for this pad; resume
@@ -254,6 +259,7 @@ private:
 	uint32_t readIntrStatus(unsigned int pin) const;
 	void writeIntrStatus(unsigned int pin, uint32_t value);
 	int irqSlotForPin(unsigned int pin) const;
+	bool irqPinReadOnly(unsigned int pin) const;
 
 	IOMemoryMap *fMaps[TLMM_TILE_COUNT];
 	vm_offset_t fTiles[TLMM_TILE_COUNT];
@@ -272,6 +278,7 @@ private:
 	uint32_t fIrqClientMask;
 	unsigned int fIrqCount;
 	unsigned int fIrqPins[TLMM_IRQ_MAX];
+	unsigned int fIrqDetect[TLMM_IRQ_MAX];
 	tlmm_gpio_irq_handler fIrqHandlers[TLMM_IRQ_MAX];
 	void *fIrqRefcons[TLMM_IRQ_MAX];
 	int fIrqSlot[TLMM_PIN_MAX];

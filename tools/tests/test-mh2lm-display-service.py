@@ -343,7 +343,10 @@ static void (*tlmmIrqHandler)(unsigned int,void*)=nullptr;
 
 struct AGPIO : OSObject {
  unsigned pin=0;const char*owner=nullptr;bool valid=false;
- static uintptr_t pinBase(unsigned p){return p==6?0x03d06000u:0x03908000u;}
+ static uintptr_t pinBase(unsigned p){
+  if(p==6)return 0x03d06000u;
+  if(p==122)return 0x03d7a000u;
+  return 0x03908000u;}
  IOReturn configure(unsigned func,unsigned pull,unsigned drive,bool output,bool high){
   if(!valid)return kIOReturnNotOpen;
   uintptr_t b=pinBase(pin);
@@ -368,9 +371,19 @@ struct AGPIO : OSObject {
   if(!valid)return kIOReturnNotOpen;
   if(tlmmIrqPin==(int)pin){tlmmIrqPin=-1;tlmmIrqHandler=nullptr;++tlmmIrqFree;}
   return kIOReturnSuccess;}
- IOReturn maskInterrupt(){if(!valid)return kIOReturnNotOpen;++tlmmIrqMasks;return kIOReturnSuccess;}
- IOReturn resumeInterrupt(){if(!valid)return kIOReturnNotOpen;++tlmmIrqResumes;return kIOReturnSuccess;}
- IOReturn ackInterrupt(){if(!valid)return kIOReturnNotOpen;return kIOReturnSuccess;}
+ IOReturn prepareInterrupt(){if(!valid)return kIOReturnNotOpen;
+  writeReg(pinBase(pin),8,(readReg(pinBase(pin),8)&~0xffu)|0x70u);
+  writeReg(pinBase(pin),12,readReg(pinBase(pin),12)&~1u);
+  return kIOReturnSuccess;}
+ IOReturn maskInterrupt(){if(!valid)return kIOReturnNotOpen;
+  ++tlmmIrqMasks;writeReg(pinBase(pin),8,readReg(pinBase(pin),8)&~1u);
+  regs[0x17a0011c]&=~(1u<<16);return kIOReturnSuccess;}
+ IOReturn resumeInterrupt(){if(!valid)return kIOReturnNotOpen;
+  ++tlmmIrqResumes;writeReg(pinBase(pin),12,readReg(pinBase(pin),12)&~1u);
+  writeReg(pinBase(pin),8,readReg(pinBase(pin),8)|1u);
+  regs[0x17a0011c]|=1u<<16;return kIOReturnSuccess;}
+ IOReturn ackInterrupt(){if(!valid)return kIOReturnNotOpen;
+  writeReg(pinBase(pin),12,readReg(pinBase(pin),12)&~1u);return kIOReturnSuccess;}
  bool interruptEnabled() const{return tlmmIrqPin==(int)pin;}
  void release(){valid=false;}
  void put(){valid=false;this->OSObject::release();}
@@ -406,6 +419,8 @@ extern "C" int sweet_touch_panel_snapshot(uint64_t,uint64_t,struct sweet_touch_p
 extern "C" void (*ts_irq_mask_fn)(void) = nullptr;
 extern "C" void (*ts_irq_unmask_fn)(void) = nullptr;
 extern "C" void (*ts_irq_ack_fn)(void) = nullptr;
+extern "C" bool (*ts_irq_prepare_fn)(void) = nullptr;
+extern "C" uint32_t (*ts_irq_cfg_fn)(void) = nullptr;
 extern "C" void sweet_touch_irq_action(void*,void*,void*,int) {}
 /* Distributor-bit ownership handover: the facade tells the worker that its
    own mask takes a spin lock and must not run at interrupt level. */
