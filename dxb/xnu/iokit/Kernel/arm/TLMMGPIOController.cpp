@@ -651,6 +651,9 @@ TLMMGPIOController::start(IOService *provider)
 	fIrqStopping = false;
 	fIrqMasked = false;
 	fSummaryReadbackWarned = false;
+	fSummaryArmed = false;
+	fSummaryDispatchDepth = 0;
+	fIrqSummaryHolds = 0;
 	fIrqClientMask = 0;
 	fIrqCount = 0;
 	fProbeSlot = -1;
@@ -659,6 +662,7 @@ TLMMGPIOController::start(IOService *provider)
 	for (i = 0; i < TLMM_IRQ_MAX; i++) {
 		fIrqPins[i] = 0;
 		fIrqInFlight[i] = 0;
+		fIrqMaskEpoch[i] = 0;
 		fIrqRetiring[i] = false;
 		fIrqHandlers[i] = NULL;
 		fIrqRefcons[i] = NULL;
@@ -1361,10 +1365,18 @@ TLMMGPIOController::setSummaryMaskedLocked(bool masked)
 		fIrqMasked = true;
 		return true;
 	}
-	if (!masked && fIrqMasked && fIrqClientMask == 0) {
-		unmaskSummaryLine();
-		fIrqMasked = false;
-		return true;
+	if (!masked && fIrqMasked && fSummaryArmed &&
+	    fSummaryDispatchDepth == 0 && fIrqSummaryHolds == 0 && !fIrqStopping) {
+		/* A last-client unregister must not reopen the line between its
+		 * dispatch drain and provider teardown. Masked clients still count;
+		 * retiring clients do not. This bounded slot check performs no MMIO. */
+		for (unsigned int i = 0; i < TLMM_IRQ_MAX; ++i) {
+			if (fIrqHandlers[i] && !fIrqRetiring[i]) {
+				unmaskSummaryLine();
+				fIrqMasked = false;
+				return true;
+			}
+		}
 	}
 	return false;
 }
@@ -1431,6 +1443,9 @@ TLMMGPIOController::claimSummary(void)
 	 * which this controller owns, rather than by the provider's vector. */
 	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	fIrqClaimed = true;
+	fSummaryArmed = false;
+	fSummaryDispatchDepth = 0;
+	fIrqSummaryHolds = 0;
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	(void)fIrqProvider->enableInterrupt(0);
 	/* Same b28 order: provider enabled once, then leave the line masked.
@@ -1440,7 +1455,8 @@ TLMMGPIOController::claimSummary(void)
 	fIrqMasked = true;
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	SWEET_LOG_INFO("SWEET TLMM: summary INTID %u claimed for %u pads; "
-	    "provider enabled once, the distributor bit is ours (%s)\n",
+	    "provider enabled once, the distributor bit is ours (%s); "
+	    "client masks are leaf-only; dispatch gate retained\n",
 	    TLMM_SUMMARY_INTID, fIrqCount, fGicd ? "mapped" : "provider fallback");
 	return true;
 }
@@ -1460,6 +1476,8 @@ TLMMGPIOController::releaseSummary(void)
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	fIrqClaimed = false;
 	fIrqMasked = false;
+	fSummaryArmed = false;
+	fIrqSummaryHolds = 0;
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	SWEET_LOG_INFO("SWEET TLMM: summary INTID %u released; dispatches=%lu "
 	    "strays=%lu\n", TLMM_SUMMARY_INTID, fIrqDispatches, fIrqStrays);
@@ -1493,10 +1511,14 @@ TLMMGPIOController::dispatchSummary(void)
 			admitted = true;
 		}
 	}
+	if (admitted) {
+		++fSummaryDispatchDepth;
+		/* Retain the short top-half gate for this stage. Client workers no
+		 * longer hold it after dispatch: their own pad ENABLE is the mask. */
+		(void)setSummaryMaskedLocked(true);
+	}
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	if (!admitted) return;
-	/* Preserve b22 whole-line gating; this is not leaf masking. */
-	setSummaryMasked(true);
 
 	for (i = 0; i < count; i++) {
 		uint32_t status;
@@ -1512,8 +1534,10 @@ TLMMGPIOController::dispatchSummary(void)
 		 * worker that owns it, and one packet must not run the handler twice.
 		 * The summary itself is already masked, so this costs no interrupt. */
 		bool masked;
+		uint64_t maskEpoch;
 		saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 		masked = fIrqRetiring[i] || ((fIrqClientMask >> i) & 1u) != 0;
+		maskEpoch = fIrqMaskEpoch[i];
 		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 		if (masked) {
 			continue;
@@ -1528,7 +1552,11 @@ TLMMGPIOController::dispatchSummary(void)
 		 * claim (no client mask) lets the controller ack for it. */
 		bool deferred;
 		saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
-		deferred = fIrqRetiring[i] || ((fIrqClientMask >> i) & 1u) != 0; /* snapshot index == slot */
+		/* A worker can have resumed on another CPU before the callback
+		 * returns. Preserve any newer latch if this handler ever masked;
+		 * current ENABLE/client-mask alone cannot identify that handoff. */
+		deferred = fIrqRetiring[i] || ((fIrqClientMask >> i) & 1u) != 0 ||
+		    fIrqMaskEpoch[i] != maskEpoch; /* snapshot index == slot */
 		if (!deferred && !irqPinReadOnly(pins[i])) {
 			uint32_t after = readIntrStatus(pins[i]);
 			if (after & TLMM_INTR_STATUS_RAW) {
@@ -1547,11 +1575,12 @@ TLMMGPIOController::dispatchSummary(void)
 		}
 	}
 
-	setSummaryMasked(false);
 	/* A snapshot holds the callback/refcon until ALL per-dispatch work is
 	 * finished, including the tail. Unregister cannot reuse the slot or
 	 * release the last summary registration before these references drain. */
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	--fSummaryDispatchDepth;
+	(void)setSummaryMaskedLocked(false);
 	for (i = 0; i < count; ++i) {
 		if (handlers[i] && --fIrqInFlight[i] == 0 && fIrqRetiring[i]) {
 			thread_wakeup((event_t)&fIrqInFlight[i]);
@@ -1642,7 +1671,11 @@ TLMMGPIOController::requestPinIRQLocked(AGPIO *owner, unsigned int detect,
 	 */
 	intrCfg = (volatile uint32_t *)pinAddress(pin, TLMM_GPIO_INTR_CFG);
 	cfg = *intrCfg;
-	want = (cfg & ~TLMM_INTR_ROUTE_MASK) |
+	/* A newly registered slot starts client-masked. Match that in hardware
+	 * even if firmware left ENABLE set; an unarmed slot must not contribute
+	 * while a peer keeps the shared line open. Trigger preparation stays at
+	 * the later prepareInterrupt() call. */
+	want = (cfg & ~(TLMM_INTR_ROUTE_MASK | TLMM_INTR_ENABLE)) |
 	    (TLMM_INTR_TARGET_KPSS << TLMM_INTR_TARGET_SHIFT) | TLMM_INTR_ROUTE_RAW;
 	if (want != cfg) {
 		__asm__ volatile("dmb oshst" ::: "memory");
@@ -1654,7 +1687,7 @@ TLMMGPIOController::requestPinIRQLocked(AGPIO *owner, unsigned int detect,
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	slot = -1;
 	for (i = 0; i < TLMM_IRQ_MAX; i++) {
-		if (!fIrqHandlers[i]) {
+		if (!fIrqHandlers[i] && !(fIrqSummaryHolds & (1u << i))) {
 			slot = (int)i;
 			break;
 		}
@@ -1674,7 +1707,8 @@ TLMMGPIOController::requestPinIRQLocked(AGPIO *owner, unsigned int detect,
 	if ((unsigned int)slot + 1u > fIrqCount) {
 		fIrqCount = (unsigned int)slot + 1u;
 	}
-	/* The line stays masked until the client arms and calls resume. */
+	/* A new pad stays masked until its resume. The summary may already be
+	 * serving a peer, so this slot's client bit must not hold that line. */
 	fIrqClientMask |= 1u << slot;
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	IOLockUnlock(fLock);
@@ -1768,8 +1802,9 @@ TLMMGPIOController::setProbePending(AGPIO *owner, bool pending)
 	IOReturn rc = kIOReturnSuccess;
 	if (slot < 0 || !fIrqClaimed) rc = kIOReturnNotFound;
 	else if (!fGicd) rc = kIOReturnUnsupported;
-	else if (clients != 1 || (pending && fProbeSlot >= 0)) rc = kIOReturnBusy;
 	else if (!pending && fProbeSlot != slot) rc = kIOReturnNotPermitted;
+	else if (fIrqSummaryHolds) rc = kIOReturnBusy;
+	else if (clients != 1 || (pending && fProbeSlot >= 0)) rc = kIOReturnBusy;
 	if (rc == kIOReturnSuccess) {
 		/* Keep reservation checks and the single write together. No RWP
 		 * polling or provider call under this IRQ lock; the thread caller
@@ -1885,13 +1920,25 @@ TLMMGPIOController::maskPinIRQ(unsigned int pin)
 		return kIOReturnNotFound;
 	}
 	fIrqClientMask |= 1u << (unsigned int)slot;
+	++fIrqMaskEpoch[slot];
 	bool readOnly = irqPinReadOnly(pin);
+	bool changed = false;
 	if (!readOnly) {
 		vm_offset_t cfg = pinAddress(pin, TLMM_GPIO_INTR_CFG);
 		tlmmWrite32(cfg, tlmmRead32(cfg) & ~TLMM_INTR_ENABLE);
+		bool held = (fIrqSummaryHolds & (1u << (unsigned int)slot)) != 0;
+		fIrqSummaryHolds &= ~(1u << (unsigned int)slot);
+		if (held) changed = setSummaryMaskedLocked(false);
+	} else {
+		/* Cannot prove this pad quiet without writing island-owned MMIO.
+		 * Preserve the existing fail-closed whole-line behavior, separately
+		 * from ordinary client masking. A retired held slot is not reused
+		 * until the last summary registration is released. */
+		fIrqSummaryHolds |= 1u << (unsigned int)slot;
+		(void)setSummaryMaskedLocked(true);
 	}
-	(void)setSummaryMaskedLocked(true);
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	if (changed) reportSummaryReadback();
 	return readOnly ? kIOReturnUnsupported : kIOReturnSuccess;
 }
 
@@ -1959,6 +2006,8 @@ TLMMGPIOController::resumePinIRQ(unsigned int pin)
 	vm_offset_t cfg = pinAddress(pin, TLMM_GPIO_INTR_CFG);
 	tlmmWrite32(cfg, tlmmRead32(cfg) | TLMM_INTR_ENABLE);
 	fIrqClientMask &= ~(1u << (unsigned int)slot);
+	fIrqSummaryHolds &= ~(1u << (unsigned int)slot);
+	fSummaryArmed = true;
 	bool changed = setSummaryMaskedLocked(false);
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	if (changed) reportSummaryReadback();

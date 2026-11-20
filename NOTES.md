@@ -1,5 +1,13 @@
 # iOS 16 on LG G8X (mh2lm / SM8150) — working notes
 
+## 当前交接更新（2026-11-20，第5批客户端叶子掩码本地完成，b30待CI/实机）
+
+以b29/0312a41已验生产逻辑为基线，第5批实现普通client mask只清本pad ENABLE、不再等worker持整线；保留dispatch短mask/深度门控、第一次resume才开线、原prepare位置。新slot关继承ENABLE匹配软件masked；快worker在callback返回前resume的新锁存由mask epoch保护不被尾部ACK。原island不可写时的整线安全hold独立于普通client mask，peer/probe/slot复用不能绕过；不做stray全pad普查或清扫。
+
+双GPIO aggregate模型覆盖A deferred/B继续、各自锁存、两pad masked无贡献、未resume late slot、继承ENABLE晚注册、快worker重arm新包、island hold与注销复用；同测试b29在A deferred后line期望断言失败。四套回归、TLMM ARM64 TU、marker151/0及diff --check通过；worker C/facade/GIC/显示执行源与b29不变。扩大fixture曾暴露OSObject未模拟内核零填充，仅修正host分配模型；不混入生产。详见docs/GPIO-IRQ-STAGE5-LEAF-MASK.md。
+
+NEXT：用户push full-source运行CircleCI，下载logs/xnu-kernel-0121b30.gz和logs/xnu-buildtree-0121b30.gz；agent全量核对后用out-bs/mk16k-0121b30.sh打包。旧b29被leaf标记门禁拒绝；当前无b30镜像/实机。验桌面、连续滑动/多指/全部抬起、两轮OFF-ON/醒后触摸；单硬件触摸消费者普通验收不是多GPIO硬件并行证明。b29镜像保留回退，b30验收前不推进第6批或显示降级。以下为历史。
+
 ## 当前交接更新（2026-11-20，b29普通功能验收通过，进入第5批叶子掩码）
 
 用户确认桌面正常、未见异常。b29日志SHA be26cd20f59749533eff5d9766c8d2ceb9eb20c3f255b3d4ef63b9418905b0b0，total2912151/flush26/未绕环/37231行。46 down/46 up、同指配对正确、无遗留触点、峰值同时10指（同一个gpio122设备，不是多GPIO并行）。显示token2 OFF/token3 ON、token4 OFF/token5 ON、token6 OFF/token7 ON三轮完整，均有新帧/亮度/ULPS/touch rearmed和app-format恢复；末轮醒后有触摸。最后hits372/empty0/late0。ERROR0、snapshot WARN0、旧summary ERROR0；5条WARN全是启动已有scanout-review/USB ep0，OFF后WARN0。

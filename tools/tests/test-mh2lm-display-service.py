@@ -408,7 +408,9 @@ struct AGPIO : OSObject {
   (void)detect;(void)refcon;
   if(!valid)return kIOReturnNotOpen;
   if(!tlmmIrqOK||pin!=122)return kIOReturnUnsupported;
-  tlmmIrqPin=(int)pin;tlmmIrqHandler=handler;return kIOReturnSuccess;}
+  tlmmIrqPin=(int)pin;tlmmIrqHandler=handler;
+  regs[pinBase(pin)+8]&=~1u; // newly registered client starts pad-masked
+  return kIOReturnSuccess;}
  IOReturn disableInterrupt(){
   if(!valid)return kIOReturnNotOpen;
   if(tlmmIrqPin==(int)pin){tlmmIrqPin=-1;tlmmIrqHandler=nullptr;++tlmmIrqFree;}
@@ -423,7 +425,7 @@ struct AGPIO : OSObject {
   return kIOReturnSuccess;}
  IOReturn maskInterrupt(){if(!valid)return kIOReturnNotOpen;
   ++tlmmIrqMasks;writeReg(pinBase(pin),8,readReg(pinBase(pin),8)&~1u);
-  regs[0x17a0011c]&=~(1u<<16);return kIOReturnSuccess;}
+  return kIOReturnSuccess;} // normal leaf mask leaves the summary enabled
  IOReturn resumeInterrupt(){if(!valid)return kIOReturnNotOpen;
   ++tlmmIrqResumes;writeReg(pinBase(pin),12,readReg(pinBase(pin),12)&~1u);
   writeReg(pinBase(pin),8,readReg(pinBase(pin),8)|1u);

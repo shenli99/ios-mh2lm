@@ -90,6 +90,12 @@ constexpr int kIOReturnNoResources = 7;
 constexpr int kIOReturnNotFound = 8;
 
 struct OSObject {
+    // Kernel OSObject allocations are zero-filled before derived init. Model
+    // that contract so a larger fixture does not depend on recycled heap bytes.
+    static void *operator new(size_t bytes) {
+        void *p=::operator new(bytes);std::memset(p,0,bytes);return p;
+    }
+    static void operator delete(void *p) { ::operator delete(p); }
     std::atomic<unsigned> refs{1};
     OSObject() = default;
     virtual ~OSObject() {}
@@ -518,6 +524,8 @@ static void interruptCases(void) {
     assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) == TLMM_INTR_STATUS_RAW);
     assert(!gicdLineEnabled());
     setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_CFG, TLMM_GPIO_MUX_GPIO);
+    assert(pin->maskInterrupt()==0); // original owner proves its pad quiet again
+    assert(!gicdLineEnabled()); // never armed: recovery does not start the line
 
     // Only the summary owner may write pending, on behalf of the sole pad.
     assert(pin->setProbePending(false) == kIOReturnNotPermitted);
@@ -561,7 +569,7 @@ static void interruptCases(void) {
     setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     runSummaryAction();
     assert(gIrqHits == 2);
-    assert(!gicdLineEnabled());
+    assert(gicdLineEnabled()); // worker holds its pad, not the shared line
     assert(!pin->interruptEnabled());
     assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) ==
         TLMM_INTR_STATUS_RAW);
@@ -571,9 +579,8 @@ static void interruptCases(void) {
           /* resume acks the stale latch before re-arming */
     gIrqDefer = false;
 
-    /* (6) Two pads on the same line: the deferred pad keeps it masked until
-     *     the second one resumes. A pad that never armed stays quiet: its
-     *     status is not dispatched while its owner holds the mask. */
+    /* (6) Two independent leaf masks. A never-armed pad stays quiet, but
+     *     neither it nor a deferred worker can hold a peer's summary line. */
     setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_CFG, 0);
     AGPIO *pin100 = on.acquirePin(100, "irq-test-100");
     assert(pin100);
@@ -594,9 +601,9 @@ static void interruptCases(void) {
     setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     runSummaryAction();
     assert(gIrqHits == 4);              /* both pads ran */
-    assert(!gicdLineEnabled());         /* both deferred */
+    assert(gicdLineEnabled());          /* both pad-masked, no contribution */
     assert(pin->resumeInterrupt() == kIOReturnSuccess);
-    assert(!gicdLineEnabled());         /* pad 100 still holds the line */
+    assert(gicdLineEnabled());          /* pad 100 cannot hold a peer */
     assert(pin100->resumeInterrupt() == kIOReturnSuccess);
     assert(gicdLineEnabled());
     gIrqDefer = false;
@@ -789,8 +796,12 @@ void orderingCases() {
         else on.setSummaryMasked(!firstMasks);
         {std::lock_guard<std::mutex> guard(lock);proceed=true;cv.notify_all();}
         a.join();
-        assert(on.fIrqMasked==!firstMasks);
-        assert(gicdLineEnabled()==firstMasks);
+        if(!padOperation){
+            assert(on.fIrqMasked==!firstMasks);
+            assert(gicdLineEnabled()==firstMasks);
+        } else {
+            assert(!on.fIrqMasked&&gicdLineEnabled()); // client mask is leaf-only
+        }
         if(padOperation){
             assert(pin->interruptEnabled()==firstMasks);
             assert(((on.fIrqClientMask&1u)==0)==firstMasks);
@@ -840,6 +851,134 @@ void orderingCases() {
     assert(pin->interruptEnabled());
     pin->put();sampled.stop(&gProvider);
 
+}
+
+struct LeafClient { AGPIO *pin; unsigned hits=0; bool defer=false; bool rearm=false; };
+static void leafHandler(unsigned,void *arg) {
+    auto &c=*static_cast<LeafClient *>(arg);
+    assert(!gicdLineEnabled()); // keep the short top-half dispatch gate
+    ++c.hits;
+    if(c.defer)assert(c.pin->maskInterrupt()==0);
+    if(c.rearm) {
+        // Model a worker on another CPU completing before the callback returns.
+        assert(c.pin->resumeInterrupt()==0);
+        assert(!gicdLineEnabled()); // the dispatch gate, not the client mask
+        setTileReg(TLMM_TILE_SOUTH,c.pin->getPin(),TLMM_GPIO_INTR_STATUS,1);
+    }
+}
+static bool deliverLeafSummary() {
+    if(!gicdLineEnabled())return false;
+    // Independent two-device aggregate model: a status latch remains readable
+    // while masked, but only ENABLE contributes to the summary signal.
+    bool pending=false;
+    for(unsigned pin:{122u,100u}) {
+        pending |= (tileReg(TLMM_TILE_SOUTH,pin,TLMM_GPIO_INTR_CFG)&TLMM_INTR_ENABLE) &&
+                   (tileReg(TLMM_TILE_SOUTH,pin,TLMM_GPIO_INTR_STATUS)&TLMM_INTR_STATUS_RAW);
+    }
+    if(pending)runSummaryAction();
+    return pending;
+}
+static void leafCases() {
+    resetProvider();bringUp();addSpecifier();
+    TLMMGPIOController on;assert(on.init()&&on.start(&gProvider));
+    LeafClient a{on.acquirePin(122,"leaf-A")},b{on.acquirePin(100,"leaf-B")};
+    assert(a.pin&&b.pin);
+    assert(a.pin->setInterrupt(TLMM_IRQ_LEVEL_LOW,leafHandler,&a)==0);
+    assert(b.pin->setInterrupt(TLMM_IRQ_EDGE_RISING,leafHandler,&b)==0);
+    assert(a.pin->prepareInterrupt()==0&&b.pin->prepareInterrupt()==0);
+    assert(!gicdLineEnabled()); // claim and prepare still leave it masked
+    assert(a.pin->resumeInterrupt()==0&&b.pin->resumeInterrupt()==0);
+    a.defer=true;
+    setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS,1);
+    assert(deliverLeafSummary()&&a.hits==1);
+    assert(gicdLineEnabled()); // old b29 stalls B here for A's worker
+    assert(!a.pin->interruptEnabled()&&b.pin->interruptEnabled());
+    setTileReg(TLMM_TILE_SOUTH,100,TLMM_GPIO_INTR_STATUS,1);
+    assert(deliverLeafSummary()&&b.hits==1&&a.hits==1);
+    assert(tileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS)==1); // A owns its latch
+    assert(tileReg(TLMM_TILE_SOUTH,100,TLMM_GPIO_INTR_STATUS)==0);
+    b.defer=true;
+    setTileReg(TLMM_TILE_SOUTH,100,TLMM_GPIO_INTR_STATUS,1);
+    assert(deliverLeafSummary()&&b.hits==2);
+    assert(gicdLineEnabled()&&!deliverLeafSummary()); // both pad-masked, no storm
+    assert(a.pin->resumeInterrupt()==0);
+    assert(gicdLineEnabled()&&a.pin->interruptEnabled()&&!b.pin->interruptEnabled());
+    assert(tileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS)==0);
+    assert(tileReg(TLMM_TILE_SOUTH,100,TLMM_GPIO_INTR_STATUS)==1);
+    a.defer=false;
+    setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS,1);
+    assert(deliverLeafSummary()&&a.hits==2&&b.hits==2);
+    assert(tileReg(TLMM_TILE_SOUTH,100,TLMM_GPIO_INTR_STATUS)==1);
+    assert(b.pin->resumeInterrupt()==0);
+    assert(tileReg(TLMM_TILE_SOUTH,100,TLMM_GPIO_INTR_STATUS)==0);
+    assert(a.pin->maskInterrupt()==0);
+    assert(a.pin->disableInterrupt()==0);a.pin->put();
+    b.defer=false;
+    setTileReg(TLMM_TILE_SOUTH,100,TLMM_GPIO_INTR_STATUS,1);
+    assert(deliverLeafSummary()&&b.hits==3);
+    assert(gProvider.enableCount==1&&gProvider.disableCount==0);
+    b.pin->put();assert(!gicdLineEnabled());on.stop(&gProvider);
+
+    // A fast worker can mask/rearm while its callback is still returning. The
+    // controller must not ACK a newer packet just because the mask is now 0.
+    resetProvider();bringUp();addSpecifier();
+    TLMMGPIOController fast;assert(fast.init()&&fast.start(&gProvider));
+    LeafClient c{fast.acquirePin(122,"fast-worker")};assert(c.pin);
+    assert(c.pin->setInterrupt(TLMM_IRQ_LEVEL_LOW,leafHandler,&c)==0);
+    assert(c.pin->prepareInterrupt()==0&&c.pin->resumeInterrupt()==0);
+    c.defer=true;c.rearm=true;
+    setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS,1);
+    assert(deliverLeafSummary()&&c.hits==1);
+    assert(tileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS)==1);
+    c.defer=false;c.rearm=false;
+    assert(deliverLeafSummary()&&c.hits==2);
+    assert(tileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS)==0);
+    c.pin->put();fast.stop(&gProvider);
+
+    // A never-resumed slot must not stop an already armed peer, including a
+    // registration published after that peer started receiving interrupts.
+    resetProvider();bringUp();addSpecifier();
+    TLMMGPIOController late;assert(late.init()&&late.start(&gProvider));
+    LeafClient first{late.acquirePin(122,"first")},quiet{late.acquirePin(100,"quiet")};
+    assert(first.pin->setInterrupt(TLMM_IRQ_LEVEL_LOW,leafHandler,&first)==0);
+    assert(first.pin->prepareInterrupt()==0&&first.pin->resumeInterrupt()==0);
+    setTileReg(TLMM_TILE_SOUTH,100,TLMM_GPIO_INTR_CFG,0x73u); // inherited ENABLE
+    assert(quiet.pin->setInterrupt(TLMM_IRQ_EDGE_RISING,leafHandler,&quiet)==0);
+    assert(tileReg(TLMM_TILE_SOUTH,100,TLMM_GPIO_INTR_CFG)==0x72u);
+    assert(gicdLineEnabled()); // peer remains live during late registration
+    assert(quiet.pin->prepareInterrupt()==0);
+    setTileReg(TLMM_TILE_SOUTH,100,TLMM_GPIO_INTR_STATUS,1);
+    for(unsigned n=1;n<=3;++n){
+        setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS,1);
+        assert(deliverLeafSummary()&&first.hits==n&&quiet.hits==0&&gicdLineEnabled());
+        assert(tileReg(TLMM_TILE_SOUTH,100,TLMM_GPIO_INTR_STATUS)==1);
+    }
+    quiet.pin->put();first.pin->put();late.stop(&gProvider);
+
+    // Unwritable island-owned pads are an exceptional whole-line safety hold,
+    // not an ordinary leaf mask. A peer must never reopen that unsafe line.
+    resetProvider();bringUp();addSpecifier();
+    TLMMGPIOController safety;assert(safety.init()&&safety.start(&gProvider));
+    AGPIO *sa=safety.acquirePin(122,"island-A"),*sb=safety.acquirePin(100,"peer-B");
+    assert(sa&&sb&&sa->setInterrupt(TLMM_IRQ_LEVEL_LOW,leafHandler,nullptr)==0);
+    assert(sb->setInterrupt(TLMM_IRQ_LEVEL_LOW,leafHandler,nullptr)==0);
+    assert(sa->prepareInterrupt()==0&&sb->prepareInterrupt()==0);
+    assert(sa->resumeInterrupt()==0&&sb->resumeInterrupt()==0);
+    setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_CFG,TLMM_GPIO_EGPIO_ENABLE);
+    uint32_t cfg122=tileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_CFG);
+    assert(sa->maskInterrupt()==kIOReturnUnsupported&&!gicdLineEnabled());
+    assert(tileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_CFG)==cfg122);
+    assert(sb->resumeInterrupt()==0&&!gicdLineEnabled());
+    setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_CFG,0);
+    assert(sa->resumeInterrupt()==0&&gicdLineEnabled()); // original owner recovered
+    setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_CFG,TLMM_GPIO_EGPIO_ENABLE);
+    assert(sa->maskInterrupt()==kIOReturnUnsupported);
+    assert(sa->disableInterrupt()==0);sa->put();
+    assert(sb->setProbePending(true)==kIOReturnBusy); // unresolved contributor
+    AGPIO *sc=safety.acquirePin(98,"new-peer");assert(sc);
+    assert(sc->setInterrupt(TLMM_IRQ_LEVEL_LOW,leafHandler,nullptr)==0);
+    assert(sc->prepareInterrupt()==0&&sc->resumeInterrupt()==0&&!gicdLineEnabled());
+    sc->put();sb->put();assert(!gicdLineEnabled());safety.stop(&gProvider);
 }
 
 static void islandCases(void) {
@@ -1108,6 +1247,7 @@ int main(void) {
     interruptCases();
     teardownCases();
     orderingCases();
+    leafCases();
 
     printf("PASS: TLMM GPIO controller (tile map, exclusive AGPIO, plain mode, "
         "write-exclusive/read-shared, island read-only, pad interrupts, C API)\n");

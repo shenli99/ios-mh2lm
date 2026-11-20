@@ -97,9 +97,10 @@ public:
 	 * true reserves that probe; false clears and ends the reservation. */
 	IOReturn setProbePending(bool pending);
 
-	/* Interrupt-context safe. The current whole-line policy clears this pad's
-	 * ENABLE and holds the summary; resume acks stale status and releases the
-	 * line only when all client masks clear. ACK consumes this pad's latch. */
+	/* Interrupt-context safe. Ordinary mask clears only this pad's ENABLE;
+	 * a deferred worker does not stall peers. Resume acks stale status and
+	 * re-arms the pad; ACK consumes its latch. A short controller dispatch
+	 * gate and fail-closed unmaskable-pad safety holds are independent. */
 	IOReturn maskInterrupt(void);
 	IOReturn resumeInterrupt(void);
 	IOReturn ackInterrupt(void);
@@ -233,8 +234,8 @@ public:
 	IOReturn freePinIRQ(unsigned int pin);
 	/* Registration/teardown are thread-context operations. Successful
 	 * unregister drains every dispatch snapshot that could hold the refcon. */
-	/* Interrupt-context safe. mask keeps the line for this pad; resume
-	 * releases it once no registered pad holds it. */
+	/* Interrupt-context safe. Normal client masks are leaf-only. The first
+	 * real resume starts the summary; no worker can bypass a dispatch gate. */
 	IOReturn maskPinIRQ(unsigned int pin);
 	IOReturn resumePinIRQ(unsigned int pin);
 	IOReturn ackPinIRQ(unsigned int pin);
@@ -290,12 +291,16 @@ private:
 	bool fIrqStopping;
 	bool fIrqMasked;
 	bool fSummaryReadbackWarned;
+	bool fSummaryArmed; /* first real pad resume, not claim */
+	unsigned int fSummaryDispatchDepth;
+	uint32_t fIrqSummaryHolds; /* unmaskable/island pad safety holds */
 	uint32_t fIrqClientMask;
 	unsigned int fIrqCount;
 	int fProbeSlot;
 	unsigned int fIrqPins[TLMM_IRQ_MAX];
 	unsigned int fIrqDetect[TLMM_IRQ_MAX];
 	unsigned int fIrqInFlight[TLMM_IRQ_MAX];
+	uint64_t fIrqMaskEpoch[TLMM_IRQ_MAX];
 	bool fIrqRetiring[TLMM_IRQ_MAX];
 	tlmm_gpio_irq_handler fIrqHandlers[TLMM_IRQ_MAX];
 	void *fIrqRefcons[TLMM_IRQ_MAX];

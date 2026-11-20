@@ -176,7 +176,8 @@ int main(){
   };
   bool ok=tcFixtureProbe();assert(injected&&ok==(scenario==0));
   assert(tcFixtureProbeHits()==(scenario==1?0u:1u));
-  assert(!(regs[TP+8]&1u)&&!(regs[TG+0x11c]&TB));
+  assert(!(regs[TP+8]&1u));
+  assert(((regs[TG+0x11c]&TB)!=0)==(scenario!=1)); // only real enable failure is 0
   touchReadHook=nullptr;destroy(s,n);tlmmIrqOK=0;
  }
  // Stage 3: CFG first then current state, preserving the pending packet.
@@ -231,7 +232,7 @@ int main(){
    assert(!retired.load());assert(configHook()==~0u&&!prepareHook());
    std::lock_guard<std::mutex> guard(lock);allowReturn=true;cv.notify_all();
   }
-  reader.join();retire.join();assert(retired.load()&&seen==0x71u);
+  reader.join();retire.join();assert(retired.load()&&seen==0x70u); // not armed yet
   auto count=trace.size();assert(configHook()==~0u&&!prepareHook());
   assert(trace.size()==count); // stale function pointers remain safe after free
   padConfigReadHook=nullptr;waitRegisteredHook=nullptr;beforeBlockHook=nullptr;

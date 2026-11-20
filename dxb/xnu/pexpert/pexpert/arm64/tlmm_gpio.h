@@ -121,14 +121,13 @@ extern "C" {
  * that line directly nothing else can use a pad interrupt, and masking the
  * line for one pad masks all of them. The controller therefore takes the
  * summary line, demultiplexes it against each registered pad's INTR_STATUS and
- * masks it for the duration of a dispatch; a client that needs the line to
- * stay masked after its top half (deferred work, like the touch worker) calls
- * AGPIO::maskInterrupt() and later AGPIO::resumeInterrupt().
+ * masks it only for a short dispatch. Deferred clients mask their own pad
+ * ENABLE through AGPIO::maskInterrupt(), leaving other armed pads live after
+ * dispatch; AGPIO::resumeInterrupt() acks the owned latch and re-arms it.
  *
- * Routing bits (target KPSS, raw status) belong to the controller: they are
- * what makes the pad visible on the summary line at all. Polarity, detect and
- * the enable bit stay with the client until its own programming is proven to
- * be reproducible here.
+ * Routing, trigger, enable and status stores all go through the pad handle or
+ * its controller. Trigger preparation stays at the client's arm-time call;
+ * registration does not move that work into display bring-up.
  */
 #define TLMM_INTR_ENABLE            0x1u
 #define TLMM_INTR_POLARITY          0x2u
