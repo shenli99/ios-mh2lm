@@ -650,6 +650,7 @@ TLMMGPIOController::start(IOService *provider)
 	fIrqClaimed = false;
 	fIrqStopping = false;
 	fIrqMasked = false;
+	fSummaryReadbackWarned = false;
 	fIrqClientMask = 0;
 	fIrqCount = 0;
 	fProbeSlot = -1;
@@ -1252,20 +1253,13 @@ sweet_tlmm_summary_irq(void *target, void *refCon, void *nub, int source)
 uint32_t
 TLMMGPIOController::readIntrStatus(unsigned int pin) const
 {
-	volatile uint32_t *status;
-
-	status = (volatile uint32_t *)pinAddress(pin, TLMM_GPIO_INTR_STATUS);
-	return *status;
+	return tlmmRead32(pinAddress(pin, TLMM_GPIO_INTR_STATUS));
 }
 
 void
 TLMMGPIOController::writeIntrStatus(unsigned int pin, uint32_t value)
 {
-	volatile uint32_t *status;
-
-	status = (volatile uint32_t *)pinAddress(pin, TLMM_GPIO_INTR_STATUS);
-	*status = value;
-	__asm__ volatile("dsb osh" ::: "memory");
+	tlmmWrite32(pinAddress(pin, TLMM_GPIO_INTR_STATUS), value);
 }
 
 bool
@@ -1287,11 +1281,11 @@ TLMMGPIOController::irqSlotForPin(unsigned int pin) const
 }
 
 /*
- * The controller's enable/disable are IOInterruptController entry points and
- * may take IOLocks, so they must never run inside a spin-lock section (or with
- * interrupts disabled): the state flip happens under fIrqLock, the call itself
- * happens after the lock is dropped. That ordering is also what makes a
- * recursive acquisition impossible no matter what the provider does.
+ * Provider calls may sleep or re-enter controller locks. Pad IRQ registration
+ * therefore requires a direct distributor map: IRQ gating and its software
+ * bookkeeping share fIrqLock, with only bounded MMIO inside the critical
+ * section. A failed map refuses this path before provider registration; the
+ * client can retain its legacy source rather than invoke provider under lock.
  */
 /*
  * The summary SPI belongs to this controller, so holding and releasing it is
@@ -1312,20 +1306,18 @@ TLMMGPIOController::mapDistributor(void)
 	va = ml_io_map_unmappable((vm_offset_t)TLMM_GICD_PA, TLMM_GICD_SIZE,
 	    VM_WIMG_IO);
 	if (!va) {
-		SWEET_LOG_WARN("SWEET TLMM: distributor map failed; the summary "
-		    "line falls back to provider enable/disable\n");
+		SWEET_LOG_WARN("SWEET TLMM: distributor map failed; pad IRQ registration "
+		    "refused before claim; client retains its legacy source\n");
 		return false;
 	}
 	fGicd = (volatile uint32_t *)va;
 	return true;
 }
 
-/*
- * The distributor is device memory: a store is posted, so a load issued right
- * after it can still return the old value. Both registers are write-1-set, so
- * the zero half of each write is a hardware no-op; it exists only so the
- * fixture's plain buffer tracks the same state a real distributor reports.
- */
+/* Device-memory barriers remain at the MMIO boundary. Enable/disable are
+ * write-one aliases: write only this controller's bit, never read/modify/write
+ * a whole shared word (which could resurrect a neighbour another driver just
+ * disabled). The host fixture models those aliases at this boundary. */
 void
 TLMMGPIOController::gicdWrite(uint32_t offset, uint32_t value)
 {
@@ -1346,15 +1338,9 @@ void
 TLMMGPIOController::maskSummaryLine(void)
 {
 	uint32_t bit = TLMM_IRQ_BIT(TLMM_SUMMARY_INTID);
-	uint32_t enable = 0x100u + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID);
 	uint32_t disable = 0x180u + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID);
 
-	if (fGicd) {
-		gicdWrite(enable, gicdRead(enable) & ~bit); /* W1S: 0 is a no-op */
-		gicdWrite(disable, bit);
-	} else if (fIrqProvider) {
-		(void)fIrqProvider->disableInterrupt(0);
-	}
+	if (fGicd) gicdWrite(disable, bit);
 }
 
 void
@@ -1362,51 +1348,59 @@ TLMMGPIOController::unmaskSummaryLine(void)
 {
 	uint32_t bit = TLMM_IRQ_BIT(TLMM_SUMMARY_INTID);
 	uint32_t enable = 0x100u + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID);
-	uint32_t disable = 0x180u + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID);
 
-	if (fGicd) {
-		gicdWrite(enable, gicdRead(enable) | bit);
-		gicdWrite(disable, 0u); /* W1S: 0 is a no-op */
-		/* The dsb above means this read is now the truth, not a posted-write
-		 * ghost. A line that stays disabled is the failure this ownership
-		 * split exists to prevent, so name it if it happens. */
-		if (!(gicdRead(enable) & bit)) {
-			SWEET_LOG_ERROR("SWEET TLMM: summary INTID %u did not enable "
-			    "(ISENABLER=%#x); pad interrupts stay off\n",
-			    TLMM_SUMMARY_INTID, gicdRead(enable));
-		}
-	} else if (fIrqProvider) {
-		(void)fIrqProvider->enableInterrupt(0);
+	if (fGicd) gicdWrite(enable, bit);
+}
+
+bool
+TLMMGPIOController::setSummaryMaskedLocked(bool masked)
+{
+	if (!fIrqProvider || !fGicd || !fIrqClaimed) return false;
+	if (masked && !fIrqMasked) {
+		maskSummaryLine();
+		fIrqMasked = true;
+		return true;
+	}
+	if (!masked && fIrqMasked && fIrqClientMask == 0) {
+		unmaskSummaryLine();
+		fIrqMasked = false;
+		return true;
+	}
+	return false;
+}
+
+void
+TLMMGPIOController::reportSummaryReadback(void)
+{
+	/* Logging stays out of the IRQ/spinlock path. A concurrent callback may
+	 * have re-masked the source, so skip that case and never treat a single
+	 * hardware snapshot as proof of failed delivery (b28 measured this). */
+	if (getPlatform()->atInterruptLevel()) return;
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	if (!fGicd || !fIrqClaimed || fIrqMasked || fSummaryReadbackWarned) {
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+		return;
+	}
+	uint32_t enabled = gicdRead(0x100u + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID));
+	bool report = !(enabled & TLMM_IRQ_BIT(TLMM_SUMMARY_INTID));
+	uint32_t ctlr = report ? gicdRead(0) : 0;
+	if (report) fSummaryReadbackWarned = true;
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	if (report) {
+		SWEET_LOG_WARN("SWEET TLMM: summary INTID %u enable snapshot is 0 "
+		    "(ISENABLER=%#x ctlr=%#x); diagnostic only, not delivery proof; "
+		    "reported once\n", TLMM_SUMMARY_INTID, enabled, ctlr);
 	}
 }
 
 void
 TLMMGPIOController::setSummaryMasked(bool masked)
 {
-	IOInterruptState saved;
-	bool act = false;
-
-	if (!fIrqProvider) {
-		return;
-	}
-	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
-	if (masked && !fIrqMasked) {
-		fIrqMasked = true;
-		act = true;
-	} else if (!masked && fIrqMasked && fIrqClientMask == 0) {
-		fIrqMasked = false;
-		act = true;
-	}
+	if (!fIrqProvider || !fIrqLock) return;
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	bool changed = setSummaryMaskedLocked(masked);
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
-
-	if (!act) {
-		return;
-	}
-	if (masked) {
-		maskSummaryLine();
-	} else {
-		unmaskSummaryLine();
-	}
+	if (changed && !masked) reportSummaryReadback();
 }
 
 bool
@@ -1422,7 +1416,7 @@ TLMMGPIOController::claimSummary(void)
 		    "pad interrupts stay with the client\n");
 		return false;
 	}
-	(void)mapDistributor();
+	if (!mapDistributor()) return false;
 	status = fIrqProvider->registerInterrupt(0, this,
 	    (IOInterruptAction)sweet_tlmm_summary_irq, NULL);
 	if (status != kIOReturnSuccess) {
@@ -1435,12 +1429,16 @@ TLMMGPIOController::claimSummary(void)
 	 * a distributor write never does (that omission refused every dispatch
 	 * until BUG-013). After that the line is held by the distributor bit,
 	 * which this controller owns, rather than by the provider's vector. */
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	fIrqClaimed = true;
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	(void)fIrqProvider->enableInterrupt(0);
-	/* Start masked: a pad interrupt is only meaningful once a pad is armed,
-	 * and the client arms by calling resume. */
+	/* Same b28 order: provider enabled once, then leave the line masked.
+	 * Only the state plus its MMIO stores move into the shared IRQ lock. */
+	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	maskSummaryLine();
 	fIrqMasked = true;
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	SWEET_LOG_INFO("SWEET TLMM: summary INTID %u claimed for %u pads; "
 	    "provider enabled once, the distributor bit is ours (%s)\n",
 	    TLMM_SUMMARY_INTID, fIrqCount, fGicd ? "mapped" : "provider fallback");
@@ -1453,11 +1451,16 @@ TLMMGPIOController::releaseSummary(void)
 	if (!fIrqClaimed || !fIrqProvider) {
 		return;
 	}
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	maskSummaryLine();
+	fIrqMasked = true;
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	(void)fIrqProvider->disableInterrupt(0);
 	(void)fIrqProvider->unregisterInterrupt(0);
+	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	fIrqClaimed = false;
 	fIrqMasked = false;
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	SWEET_LOG_INFO("SWEET TLMM: summary INTID %u released; dispatches=%lu "
 	    "strays=%lu\n", TLMM_SUMMARY_INTID, fIrqDispatches, fIrqStrays);
 }
@@ -1526,13 +1529,13 @@ TLMMGPIOController::dispatchSummary(void)
 		bool deferred;
 		saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 		deferred = fIrqRetiring[i] || ((fIrqClientMask >> i) & 1u) != 0; /* snapshot index == slot */
-		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
-		if (!deferred) {
+		if (!deferred && !irqPinReadOnly(pins[i])) {
 			uint32_t after = readIntrStatus(pins[i]);
 			if (after & TLMM_INTR_STATUS_RAW) {
 				writeIntrStatus(pins[i], after & ~TLMM_INTR_STATUS_RAW);
 			}
 		}
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	}
 
 	fIrqDispatches++;
@@ -1713,8 +1716,8 @@ TLMMGPIOController::preparePinIRQ(AGPIO *owner)
 	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	bool masked = (fIrqClientMask & (1u << (unsigned int)slot)) != 0;
 	unsigned int detect = fIrqDetect[slot];
-	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
-	if (!masked) {
+	if (!masked || fIrqStopping || fIrqRetiring[slot]) {
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 		IOLockUnlock(fLock);
 		return kIOReturnBusy;
 	}
@@ -1735,6 +1738,7 @@ TLMMGPIOController::preparePinIRQ(AGPIO *owner)
 	uint32_t status = readIntrStatus(pin);
 	writeIntrStatus(pin, status & ~TLMM_INTR_STATUS_RAW);
 	bool matched = (tlmmRead32(address) & 0xffu) == (want & 0xffu);
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	IOLockUnlock(fLock);
 	return matched ? kIOReturnSuccess : kIOReturnIOError;
 }
@@ -1874,34 +1878,21 @@ TLMMGPIOController::freePinIRQLocked(unsigned int pin)
 IOReturn
 TLMMGPIOController::maskPinIRQ(unsigned int pin)
 {
-	int slot;
-	IOInterruptState saved;
-
-	slot = irqSlotForPin(pin);
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	int slot = irqSlotForPin(pin);
 	if (slot < 0) {
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 		return kIOReturnNotFound;
 	}
-	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	fIrqClientMask |= 1u << (unsigned int)slot;
+	bool readOnly = irqPinReadOnly(pin);
+	if (!readOnly) {
+		vm_offset_t cfg = pinAddress(pin, TLMM_GPIO_INTR_CFG);
+		tlmmWrite32(cfg, tlmmRead32(cfg) & ~TLMM_INTR_ENABLE);
+	}
+	(void)setSummaryMaskedLocked(true);
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
-	if (irqPinReadOnly(pin)) {
-		/* Gate the summary, but never write a pad now owned by island. */
-		setSummaryMasked(true);
-		return kIOReturnUnsupported;
-	}
-	/* Clear this pad's own enable bit first: the status latch below stays
-	 * readable for the client, and the shared summary deasserts for this pad
-	 * without touching any other one. */
-	{
-		vm_offset_t intrCfg = pinAddress(pin, TLMM_GPIO_INTR_CFG);
-		if (intrCfg) {
-			/* Barrier helpers: the worker reads this bit back right after
-			 * resume, and a posted pad write would read stale. */
-			tlmmWrite32(intrCfg, tlmmRead32(intrCfg) & ~TLMM_INTR_ENABLE);
-		}
-	}
-	setSummaryMasked(true);
-	return kIOReturnSuccess;
+	return readOnly ? kIOReturnUnsupported : kIOReturnSuccess;
 }
 
 /*
@@ -1912,18 +1903,20 @@ TLMMGPIOController::maskPinIRQ(unsigned int pin)
 IOReturn
 TLMMGPIOController::ackPinIRQ(unsigned int pin)
 {
-	uint32_t status;
-
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	if (irqSlotForPin(pin) < 0) {
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 		return kIOReturnNotFound;
 	}
 	if (irqPinReadOnly(pin)) {
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 		return kIOReturnUnsupported;
 	}
-	status = readIntrStatus(pin);
+	uint32_t status = readIntrStatus(pin);
 	if (status & TLMM_INTR_STATUS_RAW) {
 		writeIntrStatus(pin, status & ~TLMM_INTR_STATUS_RAW);
 	}
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	return kIOReturnSuccess;
 }
 
@@ -1942,33 +1935,33 @@ TLMMGPIOController::pinIRQEnabled(unsigned int pin) const
 IOReturn
 TLMMGPIOController::resumePinIRQ(unsigned int pin)
 {
-	int slot;
-	IOInterruptState saved;
-
-	slot = irqSlotForPin(pin);
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	int slot = irqSlotForPin(pin);
 	if (slot < 0) {
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 		return kIOReturnNotFound;
 	}
-	if (irqPinReadOnly(pin)) {
-		return kIOReturnUnsupported;
-	}
-	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	if (fIrqStopping || fIrqRetiring[slot]) {
 		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 		return kIOReturnNotOpen;
 	}
-	fIrqClientMask &= ~(1u << (unsigned int)slot);
-	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
-	{
-		vm_offset_t intrCfg = pinAddress(pin, TLMM_GPIO_INTR_CFG);
-		/* A level pad re-asserts immediately; the stale latch would make
-		 * the first dispatch look like a duplicate, so drop it here. */
-		(void)ackPinIRQ(pin);
-		if (intrCfg) {
-			tlmmWrite32(intrCfg, tlmmRead32(intrCfg) | TLMM_INTR_ENABLE);
-		}
+	if (irqPinReadOnly(pin)) {
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+		return kIOReturnUnsupported;
 	}
-	setSummaryMasked(false);
+	/* One transaction with mask/ack/prepare: clear stale latch, enable the
+	 * pad, then release this client gate. No opposite operation may leave a
+	 * late MMIO store after a newer software state has already committed. */
+	uint32_t status = readIntrStatus(pin);
+	if (status & TLMM_INTR_STATUS_RAW) {
+		writeIntrStatus(pin, status & ~TLMM_INTR_STATUS_RAW);
+	}
+	vm_offset_t cfg = pinAddress(pin, TLMM_GPIO_INTR_CFG);
+	tlmmWrite32(cfg, tlmmRead32(cfg) | TLMM_INTR_ENABLE);
+	fIrqClientMask &= ~(1u << (unsigned int)slot);
+	bool changed = setSummaryMaskedLocked(false);
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	if (changed) reportSummaryReadback();
 	return kIOReturnSuccess;
 }
 

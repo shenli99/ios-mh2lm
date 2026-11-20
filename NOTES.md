@@ -1,5 +1,13 @@
 # iOS 16 on LG G8X (mh2lm / SM8150) — working notes
 
+## 当前交接更新（2026-11-20，第4批状态/MMIO写序本地完成，b29待CI/实机）
+
+以实机通过桌面/触摸/两轮OFF-ON的b28/999989b为基线。第4批已用确定交错复现旧summary软件状态与硬件位不一致（同write-one别名模型下b28负对照仍失败），修正为client mask/pad CFG-STATUS/summary写共用fIrqLock；provider调用/日志/RWP等待不入锁。prepare/ACK/注销与恢复的晚到写也纳入相同锁域。GICD只写INTID240本位，避免共享字read-modify-write复活邻位；fixture在MMIO边界模拟write-one别名，不改生产屏障迁就数组。无直接map则在provider注册前拒绝TLMM IRQ，client保留旧路径。旧逐包ERROR替换为线程上下文、锁外一次性诊断WARN，不改变b28 probe/arm真实失败验证。
+
+验证：六种双线程确定交错、相邻IRQ本位隔离、map失败无provider动作、IRQ/锁内不打印/阻塞/provider调用断言及INFO阈值下WARN一次均通过；TLMM/真实worker-service/panel-lifecycle/display-service四套回归通过；TLMM ARM64 TU成功；marker151/0、diff --check通过。第4批生产仅TLMMGPIOController.cpp/h，C worker/service/GIC/display执行代码与b28不变。
+
+NEXT：用户push full-source运行CircleCI，下载logs/xnu-kernel-0121b29.gz和logs/xnu-buildtree-0121b29.gz；agent逐文件核验后用out-bs/mk16k-0121b29.sh打包。实际b28已被locked helper符号门禁拒绝。当前无b29产物/镜像/设备结果；保留b28镜像，实机桌面/连续触摸/两轮OFF-ON后才进入第5批叶子化。详见docs/GPIO-IRQ-STAGE4-MMIO-ORDER.md。以下是较早交接。
+
 ## 当前交接更新（2026-11-20，b28两轮普通OFF/ON及醒后触摸通过）
 
 补充sweetlog-0121b28-1.bin SHA a27470effa25fcc723fc600755c4040c8793b37a528842ee709d5c0228ef8613，total1537509/flush12；两轮显示token2 OFF/token3 ON与token4 OFF/token5 ON全部complete，generation2/3均有ULPS退出/新帧/HS亮度及touch重新armed/token4/6 app-format verified；各轮醒后有配对触点。全日志8 down/8 up，最后hits244/empty0/late0，无worker/probe/arm/resume/HANDOFF失败，OFF后WARN0。16条ERROR均旧summary读回诊断，保留不静默。前份桌面/19对触摸日志证据保持。

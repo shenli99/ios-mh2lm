@@ -97,9 +97,9 @@ public:
 	 * true reserves that probe; false clears and ends the reservation. */
 	IOReturn setProbePending(bool pending);
 
-	/* Interrupt-context safe. mask clears this pad's enable bit, so the
-	 * shared summary deasserts without touching any other pad; resume acks
-	 * the stale status and re-arms; ack clears the pad status latch. */
+	/* Interrupt-context safe. The current whole-line policy clears this pad's
+	 * ENABLE and holds the summary; resume acks stale status and releases the
+	 * line only when all client masks clear. ACK consumes this pad's latch. */
 	IOReturn maskInterrupt(void);
 	IOReturn resumeInterrupt(void);
 	IOReturn ackInterrupt(void);
@@ -257,8 +257,11 @@ private:
 	bool claimSummary(void);
 	void releaseSummary(void);
 	void setSummaryMasked(bool masked);
-	/* The summary line is this controller's own SPI; toggling it needs two
-	 * distributor writes, not a provider round-trip with its RWP waits. */
+	/* fIrqLock held: only finite MMIO/barriers; never provider/log/wait. */
+	bool setSummaryMaskedLocked(bool masked);
+	void reportSummaryReadback(void);
+	/* One owned-bit write to the distributor alias per transition. No provider
+	 * round-trip, RWP wait or logging is allowed under fIrqLock. */
 	bool mapDistributor(void);
 	void maskSummaryLine(void);
 	void unmaskSummaryLine(void);
@@ -286,6 +289,7 @@ private:
 	bool fIrqClaimed;
 	bool fIrqStopping;
 	bool fIrqMasked;
+	bool fSummaryReadbackWarned;
 	uint32_t fIrqClientMask;
 	unsigned int fIrqCount;
 	int fProbeSlot;

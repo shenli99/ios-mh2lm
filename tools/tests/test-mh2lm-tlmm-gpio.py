@@ -24,7 +24,17 @@ pex = root / 'pexpert/pexpert/arm64'
 
 HEADER_C = (pex / 'tlmm_gpio.h').read_text()
 HEADER_CPP = (arm / 'TLMMGPIOController.h').read_text()
+# Fixture-only access to the bookkeeping whose hardware consistency we check.
+HEADER_CPP = HEADER_CPP.replace('class TLMMGPIOController : public IOService {',
+    'class TLMMGPIOController : public IOService {\n friend void orderingCases();')
+
 SOURCE = (arm / 'TLMMGPIOController.cpp').read_text()
+# Model write-one GIC aliases at the MMIO boundary, never by changing the
+# kernel's register writes to appease a plain host byte buffer.
+store = '*(volatile uint32_t *)((vm_offset_t)fGicd + offset) = value;'
+assert SOURCE.count(store) == 1
+SOURCE = SOURCE.replace(store, 'fixtureGicdWrite((vm_offset_t)fGicd, offset, value);')
+
 
 
 def strip_includes(text):
@@ -65,6 +75,7 @@ static FixturePlatform *getPlatform() { return &fixturePlatform; }
 
 using vm_offset_t = uintptr_t;
 using vm_size_t = size_t;
+static void fixtureGicdWrite(vm_offset_t, uint32_t, uint32_t);
 #define VM_WIMG_IO 7u
 using IOPhysicalAddress = uintptr_t;
 using IOReturn = int;
@@ -103,6 +114,8 @@ struct IOMemoryMap : OSObject {
     uint64_t getLength() { return length; }
 };
 
+static thread_local std::function<void()> afterSimpleUnlock;
+static thread_local unsigned simpleLockDepth=0;
 struct IOInterruptState { unsigned flags; };
 struct IOSimpleLock {
     std::mutex mutex;
@@ -114,12 +127,15 @@ static IOSimpleLock *IOSimpleLockAlloc() { return new IOSimpleLock; }
 static void IOSimpleLockFree(IOSimpleLock *lock) { delete lock; }
 static IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock *lock) {
     IOInterruptState state{0};
-    if (lock) { lock->lock(); }
+    if (lock) { lock->lock(); ++simpleLockDepth; }
     return state;
 }
 static void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock *lock,
     IOInterruptState) {
-    if (lock) { lock->unlock(); }
+    if (lock) { --simpleLockDepth; lock->unlock(); }
+    if (afterSimpleUnlock) {
+        auto hook=std::move(afterSimpleUnlock);afterSimpleUnlock=nullptr;hook();
+    }
 }
 
 struct IOLock {
@@ -156,6 +172,7 @@ static int assert_wait(event_t key, int) {
     return 0;
 }
 static int thread_block(void *) {
+    assert(simpleLockDepth==0);
     if(beforeBlockHook)beforeBlockHook();
     auto event=waitingEvent;
     std::unique_lock<std::mutex> lock(event->mutex);
@@ -207,6 +224,7 @@ struct IOService : OSObject {
         void *refCon) {
         (void)refCon;
         (void)target;
+        assert(simpleLockDepth==0);
         if (!propertyExists("IOInterruptSpecifiers")) {
             return kIOReturnBadArgument;
         }
@@ -220,6 +238,7 @@ struct IOService : OSObject {
     }
     int unregisterInterrupt(int source) {
         (void)source;
+        assert(simpleLockDepth==0);
         registered = false;
         interruptAction = nullptr;
         ++unregisterCount;
@@ -227,12 +246,14 @@ struct IOService : OSObject {
     }
     int disableInterrupt(int source) {
         (void)source;
+        assert(simpleLockDepth==0);
         ++disableCount;
         lineEnabled = false;
         return kIOReturnSuccess;
     }
     int enableInterrupt(int source) {
         (void)source;
+        assert(simpleLockDepth==0);
         ++enableCount;
         return kIOReturnSuccess;
     }
@@ -240,7 +261,7 @@ struct IOService : OSObject {
 
 
 
-static int logLevel = 0;
+static int logLevel = 2; // device default: INFO visible, DEBUG filtered
 extern "C" int sweet_log_level_enabled(unsigned level) { return (int)level <= logLevel; }
 static void IOLog(const char *fmt, ...) {
     va_list args;
@@ -251,10 +272,10 @@ static void IOLog(const char *fmt, ...) {
 
 // bsd/dev/sweet_log_level.h, whose include the fixture strips.
 extern "C" int sweet_log_level_enabled(unsigned level);
-#define SWEET_LOG_ERROR(...) do { printf("[ERROR] " __VA_ARGS__); } while (0)
-#define SWEET_LOG_WARN(...) do { if (sweet_log_level_enabled(1u)) { printf("[WARN] " __VA_ARGS__); } } while (0)
-#define SWEET_LOG_INFO(...) do { if (sweet_log_level_enabled(2u)) { printf("[INFO] " __VA_ARGS__); } } while (0)
-#define SWEET_LOG_DEBUG(...) do { if (sweet_log_level_enabled(3u)) { printf("[DEBUG] " __VA_ARGS__); } } while (0)
+#define SWEET_LOG_ERROR(...) do { assert(simpleLockDepth==0); printf("[ERROR] " __VA_ARGS__); } while (0)
+#define SWEET_LOG_WARN(...) do { if (sweet_log_level_enabled(1u)) { assert(simpleLockDepth==0); printf("[WARN] " __VA_ARGS__); } } while (0)
+#define SWEET_LOG_INFO(...) do { if (sweet_log_level_enabled(2u)) { assert(simpleLockDepth==0); printf("[INFO] " __VA_ARGS__); } } while (0)
+#define SWEET_LOG_DEBUG(...) do { if (sweet_log_level_enabled(3u)) { assert(simpleLockDepth==0); printf("[DEBUG] " __VA_ARGS__); } } while (0)
 '''
 
 FIXTURE = r'''
@@ -273,15 +294,28 @@ static const uintptr_t kTilePhys[4] = {
  * itself instead of a provider round-trip per packet. The fixture models the
  * two W1S registers the way a real distributor reads back. */
 static std::vector<uint8_t> gGicd;
+static bool fixtureFailGicMap=false;
 extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t physical, vm_size_t size,
     unsigned flags) {
     (void)flags;
-    if (physical != 0x17a00000) { return 0; }
+    if (physical != 0x17a00000 || fixtureFailGicMap) { return 0; }
     gGicd.assign(size, 0);
     return (vm_offset_t)gGicd.data();
 }
 static uint32_t gicdWord(uint32_t off) {
     return gGicd.empty() ? 0 : *(volatile uint32_t *)(gGicd.data() + off);
+}
+static void fixtureGicdWrite(vm_offset_t base,uint32_t off,uint32_t value) {
+    assert(base==(vm_offset_t)gGicd.data());
+    assert(value==(1u<<16)); // only the owned INTID240 bit, never its neighbours
+    auto word=[&](uint32_t offset)->volatile uint32_t& {
+        return *(volatile uint32_t *)(base+offset);
+    };
+    if(off==0x11c){word(0x11c)=word(0x11c)|value;word(0x19c)=word(0x19c)&~value;}
+    else if(off==0x19c){word(0x11c)=word(0x11c)&~value;word(0x19c)=word(0x19c)|value;}
+    else if(off==0x21c){word(0x21c)=word(0x21c)|value;}
+    else if(off==0x29c){word(0x21c)=word(0x21c)&~value;word(0x29c)=value;}
+    else assert(false);
 }
 static bool gicdLineEnabled() { return (gicdWord(0x11c) & (1u << 16)) != 0; }
 static bool gicdLineMasked() { return (gicdWord(0x19c) & (1u << 16)) != 0; }
@@ -414,6 +448,21 @@ static void interruptCases(void) {
     }
     off.stop(&gProvider);
 
+    // Direct MMIO is required before this controller publishes a summary
+    // handler. A missing map must not quietly call provider under an IRQ lock.
+    resetProvider();bringUp();addSpecifier();
+    {
+        TLMMGPIOController unmapped;
+        assert(unmapped.init()&&unmapped.start(&gProvider));
+        AGPIO *pin=unmapped.acquirePin(122,"map-failure");assert(pin);
+        fixtureFailGicMap=true;
+        assert(pin->setInterrupt(TLMM_IRQ_LEVEL_LOW,irqHandler,nullptr)==kIOReturnNoResources);
+        assert(!unmapped.summaryClaimed()&&!gProvider.registered);
+        assert(gProvider.registerCount==0&&gProvider.enableCount==0&&gProvider.disableCount==0);
+        fixtureFailGicMap=false;
+        pin->put();unmapped.stop(&gProvider);
+    }
+
     /* (2) Opted in: one claim, line masked until a pad is armed. The pad is
      *     claimed through its handle: no pin-number entry point exists. */
     resetProvider();
@@ -444,6 +493,11 @@ static void interruptCases(void) {
     assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_CFG) ==
         TLMM_INTR_ROUTE_TARGET | TLMM_INTR_ROUTE_RAW);
     assert(!pin->interruptEnabled());
+
+    // INTID242 is independently enabled by another owner in the same word.
+    // All TLMM gate transitions below must leave its bit alone.
+    const uint32_t neighbour = 1u << 18;
+    *(volatile uint32_t *)(gGicd.data()+0x11c) |= neighbour;
 
     // Preparing at arm time owns trigger writes without changing claim time.
     setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
@@ -599,6 +653,7 @@ static void interruptCases(void) {
     gIrqPins[122] = gIrqPins[100] = nullptr;
     assert(!gProvider.registered);      /* last free released the summary */
     assert(gProvider.unregisterCount == 1);
+    assert(gicdWord(0x11c)&neighbour);
     on.stop(&gProvider);
 
     // Trigger encodings are hardware expectations, separate from the worker.
@@ -704,6 +759,87 @@ static void teardownCases() {
         waitRegisteredHook=nullptr;beforeBlockHook=nullptr;
         on.stop(&gProvider);
     }
+}
+
+void orderingCases() {
+    // Pause A at the software/hardware boundary that was outside fIrqLock.
+    // B completes the opposite operation before A returns. State and hardware
+    // must reflect the same ordering, for both line-only and per-pad paths.
+    for(bool padOperation:{false,true})for(bool firstMasks:{false,true}) {
+        resetProvider();bringUp();addSpecifier();
+        TLMMGPIOController on;assert(on.init()&&on.start(&gProvider));
+        AGPIO *pin=on.acquirePin(122,"ordering-owner");assert(pin);
+        assert(pin->setInterrupt(TLMM_IRQ_LEVEL_LOW,irqHandler,nullptr)==0);
+        assert(pin->prepareInterrupt()==0&&pin->resumeInterrupt()==0);
+        if(!firstMasks) {
+            if(padOperation)assert(pin->maskInterrupt()==0);
+            else on.setSummaryMasked(true);
+        }
+        std::mutex lock;std::condition_variable cv;bool paused=false,proceed=false;
+        std::thread a([&]{
+            afterSimpleUnlock=[&]{
+                std::unique_lock<std::mutex> guard(lock);paused=true;cv.notify_all();
+                cv.wait(guard,[&]{return proceed;});
+            };
+            if(padOperation)assert((firstMasks?pin->maskInterrupt():pin->resumeInterrupt())==0);
+            else on.setSummaryMasked(firstMasks);
+        });
+        {std::unique_lock<std::mutex> guard(lock);cv.wait(guard,[&]{return paused;});}
+        if(padOperation)assert((firstMasks?pin->resumeInterrupt():pin->maskInterrupt())==0);
+        else on.setSummaryMasked(!firstMasks);
+        {std::lock_guard<std::mutex> guard(lock);proceed=true;cv.notify_all();}
+        a.join();
+        assert(on.fIrqMasked==!firstMasks);
+        assert(gicdLineEnabled()==firstMasks);
+        if(padOperation){
+            assert(pin->interruptEnabled()==firstMasks);
+            assert(((on.fIrqClientMask&1u)==0)==firstMasks);
+        }
+        pin->put();on.stop(&gProvider);
+    }
+    // prepare/resume and resume/retire must not leave a late ENABLE/config
+    // store after the newer operation has returned.
+    for(bool retire:{false,true}) {
+        resetProvider();bringUp();addSpecifier();
+        TLMMGPIOController on;assert(on.init()&&on.start(&gProvider));
+        AGPIO *pin=on.acquirePin(122,"prepare-retire-owner");assert(pin);
+        assert(pin->setInterrupt(TLMM_IRQ_LEVEL_LOW,irqHandler,nullptr)==0);
+        assert(pin->prepareInterrupt()==0);
+        std::mutex lock;std::condition_variable cv;bool paused=false,proceed=false;
+        std::thread a([&]{
+            afterSimpleUnlock=[&]{
+                std::unique_lock<std::mutex> guard(lock);paused=true;cv.notify_all();
+                cv.wait(guard,[&]{return proceed;});
+            };
+            if(retire)assert(pin->resumeInterrupt()==0);
+            else assert(pin->prepareInterrupt()==0);
+        });
+        {std::unique_lock<std::mutex> guard(lock);cv.wait(guard,[&]{return paused;});}
+        if(retire)assert(pin->disableInterrupt()==0);
+        else assert(pin->resumeInterrupt()==0);
+        {std::lock_guard<std::mutex> guard(lock);proceed=true;cv.notify_all();}
+        a.join();
+        assert(((tileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_CFG)&TLMM_INTR_ENABLE)!=0)==!retire);
+        assert(gicdLineEnabled()==!retire);
+        if(!retire)assert(on.fIrqClientMask==0&&!on.fIrqMasked);
+        pin->put();on.stop(&gProvider);
+    }
+    // A zero enable snapshot is diagnostic, not permission to fail a live
+    // client. It must not print from IRQ context or while holding the lock.
+    resetProvider();bringUp();addSpecifier();
+    TLMMGPIOController sampled;assert(sampled.init()&&sampled.start(&gProvider));
+    AGPIO *pin=sampled.acquirePin(122,"readback-owner");assert(pin);
+    assert(pin->setInterrupt(TLMM_IRQ_LEVEL_LOW,irqHandler,nullptr)==0);
+    assert(pin->prepareInterrupt()==0&&pin->resumeInterrupt()==0);
+    *(volatile uint32_t *)(gGicd.data()+0x11c)=0; // independent delayed snapshot
+    fixtureAtInterrupt=true;sampled.reportSummaryReadback();
+    assert(!sampled.fSummaryReadbackWarned);
+    fixtureAtInterrupt=false;sampled.reportSummaryReadback();
+    assert(sampled.fSummaryReadbackWarned);
+    sampled.reportSummaryReadback(); // once-only; never reconfigure the pad
+    assert(pin->interruptEnabled());
+    pin->put();sampled.stop(&gProvider);
+
 }
 
 static void islandCases(void) {
@@ -971,6 +1107,7 @@ int main(void) {
     islandCases();
     interruptCases();
     teardownCases();
+    orderingCases();
 
     printf("PASS: TLMM GPIO controller (tile map, exclusive AGPIO, plain mode, "
         "write-exclusive/read-shared, island read-only, pad interrupts, C API)\n");
@@ -1008,6 +1145,8 @@ def main():
         run = subprocess.run([str(binary)], text=True,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         print(run.stdout, end='')
+        if run.returncode == 0:
+            assert run.stdout.count('diagnostic only, not delivery proof') == 1
         return run.returncode
 
 
