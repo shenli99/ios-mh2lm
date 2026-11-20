@@ -1,5 +1,13 @@
 # iOS 16 on LG G8X (mh2lm / SM8150) — working notes
 
+## 当前交接（2026-11-20，回退实际b22后固定分批计划）
+
+用户要求直接回退仓库；已 hard reset 到真正实机 b22 的 830fa52，5300 个 XNU 源码与 b22 buildtree 一致。b23–b26 已退出当前分支，禁止整批重新合入。用户随后授权固定计划、逐项实施。
+
+计划入口：[GPIO 中断分批实施](docs/GPIO-IRQ-IMPLEMENTATION-PLAN.md)。批次1已完成：[b22 基线核验](docs/GPIO-IRQ-BASELINE-B22.md)，三套 TLMM/真实触摸worker/显示生命周期回归 PASS，CI marker151/0，已有镜像回读 SHA 一致。此批没有生产代码变更，无需新 CI 或重测原 b22。
+
+NEXT：批次2只做句柄所有权收口，先审计 arm/fail/probe/park/resume/cancel/exit 全部路径；保持 b22 整线门控、claim开线时序、显示流程。批次3首包竞态、批次4状态写序、批次5叶子化、批次6异常处理及独立显示降级依次进行，不夹带。每批单独提交/验证，实机验收后才推进下一批生产改动。用户负责push、下载、设备；agent负责实现、核验、打包。较早 CURRENT/NEXT 为历史。
+
 ## Agent handoff / active work (2026-11-15, documentation synchronized after a39 acceptance)
 
 **CURRENT：接续codex-session-25.md最后的文档更新请求，统一入口、构建/架构与计划到a39/0229已验收状态。** 中英文README改为MH2LM，新增[STATUS](docs/STATUS.md)和[文档索引](docs/README.md)；修正文档中的旧M3阻塞、guacamole/sweet构建命令、软件vsync/ABL扫描现状及0169重复待测要求。三份显示计划正文先列当前阶段，原版本流水折叠保留；旧架构/启动记录也明确标为历史。工作区README/AI-GUIDE/STATUS/PLAN/索引/环境/相关旧布局条目同步。
