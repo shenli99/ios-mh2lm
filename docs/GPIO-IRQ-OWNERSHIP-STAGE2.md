@@ -78,3 +78,20 @@ prepare 的触发类型来自注册slot；支持high/low/rising/falling/both，�
 本地已覆盖：pad写入者、共享probe pending写入者、slot注册/释放、dispatch快照寿命、service钩子寿命及服务撤销后禁止raw fallback。仍须在最终候选上跑汇总核验并确认build/打包门禁，然后才给用户一个第2批候选做实机验收。所有2a–2e仍属于同一主题的内部提交，不是要求用户五次刷机。
 
 首包ENABLE读回竞态、mask/resume软件/硬件写序、多pad整线阻塞、stray隔离、失败触摸后的显示降级，仍按固定计划分别留到后续批次；没有借本轮通过宣称它们解决。正常GPIO mask/resume仍要求owner不与注销并发（退休拒绝不是该类任意交错的完整MMIO原子协议，写序由批次4处理）。第2批本地完成不等于设备通过，也不能据此推进第3批生产改动。
+
+
+## 汇总交付候选：0121b27（仅第2批，本地完成，待CI/实机）
+
+生产提交：2a 66b7f82、2b 3575577、2c bb37387、2d 3bb3632、2e 867eb71；基础为真正b22/830fa52。本批不含旧b23–b26整包、不含第3批首包容错，也不修第4批summary写序或第5批叶子策略。
+
+最终本地证据：四套TLMM/真实C worker+service/生命周期/display-service回归PASS；三个ARM64 TU成功；marker151/failing0；diff --check通过。2d与2e的双线程用例均有旧实现失败对照；ASan/UBSan仅检查主机适配范围，不是完整硬件或数据竞态证明。
+
+工作区 out-bs/mk16k-0121b27.sh 已就绪：固定ABI608固件及面板钩子、派生ADT、mode2/mode3参数；检查prepare/probe/排空相关符号和字面量。真实旧b22在prepareInterrupt符号门禁处被拒，未生成伪b27镜像。新CI下载后仍须逐文件比较构建树，不能靠符号/string门禁证明并发补丁完整存在。
+
+用户推送full-source后运行CircleCI，保存新产物为logs/xnu-kernel-0121b27.gz与logs/xnu-buildtree-0121b27.gz；agent核对再打包。当前没有b27内核或镜像，未push、未触发CI、未操作设备。
+
+实机验收顺序：gpioirq mode3优先，核对claim模式、TouchComm ready、probe结果、armed、touch worker ready、FB HANDOFF active、桌面、连续点击/抬起/滑动及原有OFF/ON。mode2镜像是同内核对照而非不使用240。保留本次原始sweetlog；按4096字节头块解码。
+
+已知首包竞态可能在本批暴露：正常callback已经将pad ENABLE清0时，旧arm验证仍可能报handle enable readback。若出现，应保留第2批实测失败，不把它改名为本批已验；再以单独第3批提交处理明确依赖。不得为强行通过本批而关闭检查或恢复第二个裸寄存器写者。
+
+第2批在收到实机结果前保持“本地完成、待验”，不推进第3批生产改动。后续仍包括真实硬件多pad及异常中断验证，不把单触摸桌面等同于叶子化完成。
