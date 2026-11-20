@@ -1,5 +1,11 @@
 # iOS 16 on LG G8X (mh2lm / SM8150) — working notes
 
+## 当前交接更新（2026-11-20，b28桌面及基本触摸通过，OFF/ON待补）
+
+用户确认成功进入桌面。b28日志SHA daee054ae46e91f62c003255e598f7f069a03058628ca41cbb95b097f5aa2071，total1318778/flush11，未绕环；3929行实际出现probe early callback hits1/enabled0，3930 probe清理成功，3931/4484 pad armed，4486 takeover complete，4491 HANDOFF active。HID19 down/19 up，顺序配对正确、无未释放触点，最后IRQ hits590/empty0/late0。worker setup/probe/handle/resume/HANDOFF失败均0。49条ERROR全是b22原有summary使能读回诊断，不能据其文本判线停用；不静默抹掉。arm-deferred日志本轮0，未实机覆盖该分支。
+
+NEXT：保持b28生产代码/镜像；用户在同版补一次正常息屏/唤醒、醒后触摸，导出新日志。现日志只有首次takeover operation1，没有完整OFF/ON，不能宣称整批生命周期验收结束或开始第4批生产改动。无需重编b28。详见docs/GPIO-IRQ-STAGE3-EARLY-CALLBACK.md及工作区scratch/artifact-0121b28/device-log-review.json。b27独立失败历史不变；第2+3批组合的启动/基本触摸得到证据，不等于多pad叶子掩码通过。以下为较早交接。
+
 ## 当前交接更新（2026-11-20，b27失败；单独第3批b28本地通过）
 
 b27日志total459424/flush10：TouchComm ready后GIC probe enable failed，随后触摸死亡/显示resume admission失败/FB冻结。未到arm检查；现场没有probe-hits快照，不能唯一归因早到callback。详细证据见docs/GPIO-IRQ-OWNERSHIP-STAGE2.md；第2批未单独实机通过。

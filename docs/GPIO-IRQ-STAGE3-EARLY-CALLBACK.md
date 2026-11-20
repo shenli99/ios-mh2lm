@@ -48,3 +48,22 @@ arm delegated分支：先读CFG，再acquire当前IRQ state。允许state1且ENA
 | out-bs/boot-16k-0121b28-baseline-panel-pipeline.img | 8ff2fcd4244da5a645a813ec9aa9af0a34df6c33d9c8c33c8503b87d75f311ab |
 
 核验记录在工作区scratch/artifact-0121b28/packaging-verification.json。下一步用户临时启动gpioirq，验证桌面和连续触摸，再原有OFF/ON，导出sweetlog-0121b28.bin。不要求新CI，当前无实机结果。若失败，以新增waited/enabled/probe-hits/cfg/state快照定位，不因字面量存在宣称问题已修复。
+
+
+## b28 首次启动与基本触摸实机通过（OFF/ON待补）
+
+用户反馈“成功进入桌面”。原始日志logs/sweetlog-0121b28.bin SHA256 daee054ae46e91f62c003255e598f7f069a03058628ca41cbb95b097f5aa2071；header version1/ring4194304/total1318778/flush11，未绕环。使用项目解码器，17260行。工作区审计报告为scratch/artifact-0121b28/device-log-review.json。
+
+确定的完成链：
+
+- 3927 TouchComm ready；3929 `probe observed early callback hits=1 enabled=0`。这直接确认本轮真实设备出现了“回调已执行、使能读回已为0”的窗口；不能反向断言缺少快照的b27一定同因。
+- 3930 touch software-pending probe hits1/clear1/pending0/active0；3931 pad armed cfg0x71；3933 worker ready/quiesce token1。
+- 4484恢复后再次armed，4485 app/format verified，4486 takeover token1 complete；4491 FB HANDOFF active，后续own-active1及正CPU呈现统计持续存在。
+- HID 19 down/19 up，逐finger顺序合法，无重复down/无前置down的up，末尾无未释放触点；最后IRQ计数（15724行）hits590/empty0/late0，最后HID up在15747行。
+- GIC probe enable failed、handle enable readback失败、handle arm rejected、setup failed、touch resume admission和FB HANDOFF FAILED均0条。
+
+保留诊断异常：49条ERROR全部是b22保留下来的`summary INTID 240 did not enable (ISENABLER=0); pad interrupts stay off`。相邻early-callback证据及后续触摸持续工作说明不能把该硬件快照等同于使能失败；本轮没有删除日志或声称所有读回0都由同一种原因造成。该诊断措辞与实际控制流不符，后续单独修正，不混入本次验收。
+
+覆盖边界：仅观察到初次接管operation1，没有完整DisplayOff/DisplayOn完成链，没有SYSTEM_OFF尾部；用户桌面反馈和本日志足以确认首次启动/基本触摸通过，不足以完成固定计划要求的OFF/ON或长期稳定、多pad并行验收。arm的deferred分支本轮0次，只有主机回归证据。
+
+因此第2批+第3批组合获得首次启动/基本触摸实机证据，第2批b27独立失败历史保持。b28可作为当前已验启动/触摸回退候选；在同版补一次正常息屏/唤醒并再次确认触摸前，不推进第4批生产改动，无需重编同版。

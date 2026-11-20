@@ -42,7 +42,7 @@
 
 ## 当前进度
 
-批次1已完成。批次2a–2e本地完成并交付0121b27，实机在GIC probe enable检查失败，不能标记通过。依据上面的依赖条款，已用单独批次3修正probe/arm早到callback验证，候选0121b28本地通过，等待CI/实机；不混改TLMM/显示。证据见[第2批](GPIO-IRQ-OWNERSHIP-STAGE2.md)及[第3批](GPIO-IRQ-STAGE3-EARLY-CALLBACK.md)。批次4–6及独立显示降级未实施。
+批次1已完成。批次2a–2e本地完成并交付0121b27，实机在GIC probe enable检查失败，不能标记通过。依据上面的依赖条款，已用单独批次3修正probe/arm早到callback验证，0121b28首次启动/基本触摸已实机通过（19 down/19 up、hits590/empty0/late0），仍缺完整OFF/ON覆盖；不混改TLMM/显示。证据见[第2批](GPIO-IRQ-OWNERSHIP-STAGE2.md)及[第3批](GPIO-IRQ-STAGE3-EARLY-CALLBACK.md)。批次4–6及独立显示降级未实施。
 
 ### 批次2a：注册所有权必须持续到注销
 
