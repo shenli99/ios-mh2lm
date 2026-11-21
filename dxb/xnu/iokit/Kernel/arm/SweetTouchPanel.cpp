@@ -361,6 +361,13 @@ IOReturn SweetTouchPanel::action(OSObject *owner,void *arg,void *,void *,void *)
   return kIOReturnSuccess;
  }
  if (!s->fAccepting || s->isInactive()) return kIOReturnNotReady;
+ if (r.op==OpFailed) {
+  if (!s->fSession) return kIOReturnNotReady;
+  sweet_touch_panel_status p={};
+  IOReturn rc=touchPanelReturn(sweet_touch_panel_snapshot(s->fSession,0,&p));
+  *r.available=rc==kIOReturnSuccess && !p.available && p.state==(unsigned)SWEET_TOUCH_FAILED;
+  return rc;
+ }
  if (r.op==OpInfo) {
   sweet_touch_panel_status p={};
   IOReturn rc=touchPanelReturn(sweet_touch_panel_snapshot(s->fSession,0,&p));
@@ -417,16 +424,10 @@ IOReturn SweetTouchPanel::quiesce(uint64_t id,uint64_t *token) { return request(
 IOReturn SweetTouchPanel::resume(uint64_t id,uint64_t *token) { return request(OpResume,id,token); }
 IOReturn SweetTouchPanel::detachConsumer(uint64_t id)
 { TouchPanelRequest r={};r.op=OpDetach;r.client=id;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
-/* A worker that exits before going live publishes SWEET_TOUCH_FAILED and
- * clears availability; it never recovers, so callers may stop waiting. */
+/* The worker's terminal exit clears availability. Query under the same gate
+ * as close/stop so a retained provider cannot expose a retired session. */
 IOReturn SweetTouchPanel::copyWorkerFailed(bool *failed)
-{ if (!failed) return kIOReturnBadArgument;*failed=false;
-  if (!fSession) return kIOReturnNotReady;
-  sweet_touch_panel_status p={};
-  int rc=sweet_touch_panel_snapshot(fSession,0,&p);
-  if (rc) return touchPanelReturn(rc);
-  *failed=!p.available && p.state==(unsigned)SWEET_TOUCH_FAILED;
-  return kIOReturnSuccess; }
+{ if (!failed) return kIOReturnBadArgument;*failed=false;TouchPanelRequest r={};r.op=OpFailed;r.available=failed;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
 IOReturn SweetTouchPanel::copyWorkerAvailable(bool *available)
 { if (!available) return kIOReturnBadArgument;*available=false;TouchPanelRequest r={};r.op=OpInfo;r.available=available;return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
 IOReturn SweetTouchPanel::copyStatus(uint64_t id,uint64_t token,SweetTouchPanelStatus *status)

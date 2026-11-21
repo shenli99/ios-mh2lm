@@ -135,6 +135,11 @@ bool SweetMDSS::lifecycleParticipants(void)
   ok=t->copyStatus(fTouchPanelConsumer,fLifecycle.touchToken,&fence)==kIOReturnSuccess &&
       fence.token==fLifecycle.touchToken && fence.quiesced && !fence.ready && !fence.uncertain && fence.result==kIOReturnSuccess;
  }
+ if (ok && fLifecycle.touchQuiesced && !fLifecycle.touchToken) {
+  bool failed=false;
+  ok=fLifecycle.operation==SweetPanelTakeover &&
+      t->copyWorkerFailed(&failed)==kIOReturnSuccess && failed;
+ }
  if (ok && fLifecycleSupplyCycle && fLifecycle.resetHeldLow) {
   SweetPanelPinStatus pin={};
   ok=p && p->copyLowStatus(fPanelPinsConsumer,fLifecycle.pinToken,&pin)==kIOReturnSuccess;
@@ -397,7 +402,7 @@ void SweetMDSS::lifecycleTimerAction(OSObject *owner,IOTimerEventSource *sender)
 /*
  * The first takeover is the only lifecycle with no touch work outstanding: it
  * adopts the running scanout before any display-off/on request exists. A touch
- * worker that failed before going live can never publish a quiesce token, so
+ * worker that terminated before accepting a fence cannot publish its token, so
  * waiting out the startup bound would fault the panel and freeze pixels for a
  * touch fault. Proceed without the fence, name it, and keep the rule for
  * DisplayOff/DisplayOn untouched: those still require a real token.
@@ -409,10 +414,9 @@ SweetMDSS::takeoverAdmitsWithoutTouch(void)
  bool failed=false;
  if (!fTouchPanel || fTouchPanel->copyWorkerFailed(&failed)!=kIOReturnSuccess || !failed) return false;
  /* The flag is the "no touch interference" condition, not a token receipt: a
-  * worker that died before going live cannot touch the panel, so it holds --
+  * terminal worker with no outstanding request cannot touch the panel, so it holds --
   * and the managed-scan admission below relies on exactly that. A fence is
   * only verified when a token exists to verify. */
- SWEET_LOG_WARN("SWEET PANEL: touch worker failed before going live; takeover continues without a touch fence\n");
  fLifecycle.touchQuiesced=true;
  return true;
 }
@@ -420,10 +424,22 @@ SweetMDSS::takeoverAdmitsWithoutTouch(void)
 bool
 SweetMDSS::beginTakeoverContinuation(uint64_t now)
 {
+ if (!fLifecycle.touchToken) {
+  /* The touch gate may have waited past the startup cutoff. Re-sample after
+   * its terminal-state query, before any display request or new budget. */
+  now=scanout_now();
+  if (now>=fLifecycleDeadline) {finishLifecycle(kIOReturnTimeout,"touch worker startup deadline");return false;}
+ }
  fLifecycleInternal=true;
  IOReturn rc=scanoutBeginAction(this,fLifecyclePool,fVsyncChannel,NULL,NULL);
  fLifecycleInternal=false;
  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"takeover continuation refused");return false;}
+ /* Terminal startup failure has no quiesce admission to start this budget.
+  * Give first adoption its normal bound even at the end of the startup wait. */
+ if (!fLifecycle.touchToken) {
+  fLifecycleDeadline=now+16000000000ULL;
+  SWEET_LOG_WARN("SWEET PANEL: touch worker terminated before first fence; takeover continues without a touch fence\n");
+ }
  fLifecycle.phase=SweetPanelTakeoverPending;fLifecycleStepDeadline=now+5000000000ULL;
  publishLifecycle();
  return true;
@@ -440,7 +456,6 @@ void SweetMDSS::advanceLifecycle(void)
   SWEET_LOG_ERROR("SWEET PANEL: deadline token=%llu operation=%u phase=%u command=%llu completed=%u/%u\n",
       fLifecycle.token,fLifecycle.operation,fLifecycle.phase,fLifecycle.commandToken,fDsiStatus.completed,fDsiStatus.total);
   bool touchStart=fLifecycle.phase==SweetPanelTouchPause && !fLifecycle.touchToken;
-  if (touchStart && takeoverAdmitsWithoutTouch()) { (void)beginTakeoverContinuation(now); return; }
   finishLifecycle(kIOReturnTimeout,touchStart ? "touch worker startup deadline" : "lifecycle deadline");return;
  }
  if (lifecycleSupplyPhase()) {advanceLifecycleSupply();return;}
@@ -668,6 +683,14 @@ void SweetMDSS::advanceLifecycle(void)
  if (!postEnableDisplayClients()) {finishLifecycle(kIOReturnNotReady,"DSI post-enable resource handoff");return;}
  /* A retained rail lease plus fresh pixel transfer precedes touch recovery.
   * This is NOT a proof that reset/shared-rail power-cycling is safe. */
+ /* Only the admitted terminal-startup case has no touch work to resume.
+  * lifecycleParticipants() rechecks that proof on every advance. Keep the
+  * resources, fresh pixels and post-enable handoff above as completion gates. */
+ if (fLifecycle.operation==SweetPanelTakeover && !fLifecycle.touchToken) {
+  if (!fLifecycle.touchQuiesced) {finishLifecycle(kIOReturnNotReady,"touch absence proof lost");return;}
+  SWEET_LOG_WARN("SWEET PANEL: takeover complete without touch; terminal worker failure retained, OFF/ON still require a touch fence\n");
+  finishLifecycle(kIOReturnSuccess,"takeover ready without touch");return;
+ }
  uint64_t touch=0;IOReturn rc=fTouchPanel->resume(fTouchPanelConsumer,&touch);
  if (rc!=kIOReturnSuccess) {finishLifecycle(rc,"touch resume admission");return;}
  fLifecycle.touchToken=touch;fLifecycle.touchQuiesced=false;fLifecycle.phase=SweetPanelTouchResume;

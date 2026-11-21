@@ -139,17 +139,48 @@ int main(){
  // A worker that failed before going live publishes SWEET_TOUCH_FAILED and
  // never becomes available, so it can never publish a fence either. The first
  // takeover adopts the scanout anyway: a touch fault may not freeze pixels.
- {Harness h;tcFixtureFail();h.begin();
+ for(unsigned when=0;when<3;++when){Harness h;tcFixtureOnline(0);
+  if(!when)tcFixtureFail();h.begin();auto token=h.m->fLifecycle.token;
+  if(when){fakeTicks+=when==1?8000000000ULL:29999000000ULL;tcFixtureFail();}h.life();
+  auto touchFrame=tcFixtureFrame();
   for(unsigned i=0;i<12000&&h.m->fScanoutState!=SweetScanoutSubmitted&&h.m->fLifecycle.phase!=SweetPanelFault;++i)h.step();
   assert(h.m->fLifecycle.phase!=SweetPanelFault);
   assert(h.m->fScanoutState==SweetScanoutSubmitted&&h.pool->pinned&&!h.m->fLifecycle.touchToken);
-  /* The park condition the managed-scan admission checks: a dead worker
-   * cannot touch the panel, so the takeover records it without a token. */
-  assert(h.m->fLifecycle.touchQuiesced);
+  assert(h.m->fLifecycle.touchQuiesced&&h.m->fLifecycle.token==token);
+  assert(h.m->fLifecycleDeadline>fakeTicks);
   bool named=false;for(auto&msg:messages)if(msg.find("takeover continues without a touch fence")!=std::string::npos)named=true;
   assert(named);
-  regs[0x0ae01014]|=0x100;regs[bases[3]+0x18]=0;realFrame(h.m);h.scan();
-  assert(h.m->fScanoutState==SweetScanoutActive);}
+  // Degradation still needs a real fresh transfer AND frame completion.
+  SweetScanoutStatus s{};h.life();assert(h.m->scanoutStatus(h.pool,&s)==0&&s.state==SweetScanoutCoordinating);
+  regs[bases[3]+0x18]=0;realFrame(h.m);h.scan();h.life();
+  assert(state(h).phase==SweetPanelTakeoverPending&&h.m->scanoutStatus(h.pool,&s)==0&&s.state==SweetScanoutCoordinating);
+  regs[0x0ae01014]|=0x100;h.scan();h.life();
+  assert(state(h).phase==SweetPanelComplete&&state(h).result==0&&!state(h).uncertain);
+  assert(state(h).pixelsComplete&&state(h).resourcesHeld&&h.m->fLifecycle.touchQuiesced&&!h.m->fLifecycle.touchToken);
+  assert(h.m->scanoutStatus(h.pool,&s)==0&&s.state==SweetScanoutActive);
+  assert(tcFixtureFrame()==touchFrame&&!h.t->fTouched&&!h.t->fStatus.token&&commands.empty()&&!busReads&&!busWrites);
+  // A terminal startup failure authorizes first adoption only, never OFF/ON.
+  for(unsigned op:{unsigned(SweetPanelDisplayOff),unsigned(SweetPanelDisplayOn)}){
+   auto before=trace.size();uint64_t rejected=99;
+   assert(h.m->beginPanelLifecycle(op,&rejected)==kIOReturnNotReady&&!rejected&&trace.size()==before);}
+ }
+ // The 30s startup cutoff also rejects a terminal result first seen late.
+ {Harness h;tcFixtureOnline(0);h.begin();fakeTicks+=30000000001ULL;tcFixtureFail();
+  h.life();fault(h);assert(!h.m->fManagedStarted&&!sourceWritten()&&!h.m->fLifecycle.touchToken);}
+ // A no-token participant must remain the same terminal worker. Losing that
+ // proof cannot silently create a touch request or complete the generation.
+ for(unsigned bad=0;bad<4;++bad){Harness h;tcFixtureFail();h.begin();
+  for(unsigned i=0;i<12000&&h.m->fScanoutState!=SweetScanoutSubmitted&&h.m->fLifecycle.phase!=SweetPanelFault;++i)h.step();
+  assert(h.m->fScanoutState==SweetScanoutSubmitted);
+  if(bad==0)tcFixtureOnline(1);
+  if(bad==1)h.t->stop(h.tn);
+  if(bad==2)h.m->cancelPanelLifecycle(h.m->fLifecycle.token);
+  if(bad==3)SweetTouchPanelClient::terminated(h.m->fTouchPanelClient,nullptr,h.t,nullptr);
+  h.life();fault(h);assert(!h.m->fLifecycle.touchToken&&!h.t->fTouched&&commands.empty());
+ }
+ // Failure after accepting a real touch fence is never startup degradation.
+ {Harness h;h.begin();h.until(SweetMDSS::ManagedRails);assert(h.m->fLifecycle.touchToken);
+  tcFixtureFail();h.life();fault(h);assert(!sourceWritten());}
  // Native interest replays newest brightness after lifecycle, no busy-loop retry
  // or consumer gate callback from MDSS. The actual backlight and DCS code run.
  {Harness h;h.takeover();auto*bl=new AppleARMBacklight();assert(bl->start(h.d));

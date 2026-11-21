@@ -44,7 +44,7 @@ class SweetTouchPanel : public IOService {
  unsigned fMode;
  uint64_t fSession, fClient, fNextClient, fDeadline;
  SweetTouchPanelStatus fStatus;
- enum Operation { OpAttach, OpDetach, OpQuery, OpQuiesce, OpResume, OpStop, OpInfo, OpCancel };
+ enum Operation { OpAttach, OpDetach, OpQuery, OpQuiesce, OpResume, OpStop, OpInfo, OpCancel, OpFailed };
  static IOReturn action(OSObject *,void *,void *,void *,void *);
  static void timerAction(OSObject *,IOTimerEventSource *);
  static uint64_t nowNS(void);
