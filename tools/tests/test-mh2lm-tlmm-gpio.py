@@ -131,7 +131,9 @@ struct IOMemoryMap : OSObject {
 
 static thread_local std::function<void()> afterSimpleUnlock;
 static thread_local unsigned simpleLockDepth=0;
-struct IOInterruptState { unsigned flags; };
+static thread_local bool fixtureInterruptsEnabled=true;
+static bool ml_get_interrupts_enabled() { return fixtureInterruptsEnabled; }
+struct IOInterruptState { bool enabled; };
 struct IOSimpleLock {
     std::mutex mutex;
     unsigned nest = 0;
@@ -141,13 +143,15 @@ struct IOSimpleLock {
 static IOSimpleLock *IOSimpleLockAlloc() { return new IOSimpleLock; }
 static void IOSimpleLockFree(IOSimpleLock *lock) { delete lock; }
 static IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock *lock) {
-    IOInterruptState state{0};
+    IOInterruptState state{fixtureInterruptsEnabled};
+    fixtureInterruptsEnabled=false;
     if (lock) { lock->lock(); ++simpleLockDepth; }
     return state;
 }
 static void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock *lock,
-    IOInterruptState) {
+    IOInterruptState saved) {
     if (lock) { --simpleLockDepth; lock->unlock(); }
+    fixtureInterruptsEnabled=saved.enabled;
     if (afterSimpleUnlock) {
         auto hook=std::move(afterSimpleUnlock);afterSimpleUnlock=nullptr;hook();
     }
@@ -198,6 +202,51 @@ static void thread_wakeup(event_t key) {
     auto event=eventFor(key);
     std::lock_guard<std::mutex> guard(event->mutex);
     ++event->sequence;event->cv.notify_all();
+}
+
+// Queue a callout without running it inline. The test drains it separately
+// with CPU interrupts enabled, as the kernel thread-call worker would.
+using thread_call_param_t = void *;
+using thread_call_func_t = void (*)(thread_call_param_t, thread_call_param_t);
+struct FixtureThreadCall { thread_call_func_t func; thread_call_param_t owner; bool queued=false; };
+using thread_call_t = FixtureThreadCall *;
+constexpr unsigned THREAD_CALL_PRIORITY_KERNEL=0, THREAD_CALL_OPTIONS_ONCE=1;
+static std::vector<thread_call_t> strayCallouts;
+static thread_call_t thread_call_allocate_with_options(thread_call_func_t func,
+    thread_call_param_t owner, unsigned priority, unsigned flags) {
+    assert(fixtureInterruptsEnabled && priority==THREAD_CALL_PRIORITY_KERNEL);
+    assert(flags==THREAD_CALL_OPTIONS_ONCE);
+    auto call=new FixtureThreadCall{func, owner};
+    strayCallouts.push_back(call);
+    return call;
+}
+static bool thread_call_enter(thread_call_t call) {
+    assert(call && simpleLockDepth==1 && !fixtureInterruptsEnabled);
+    bool wasQueued=call->queued;
+    call->queued=true;
+    return wasQueued;
+}
+static bool thread_call_cancel_wait(thread_call_t call) {
+    assert(fixtureInterruptsEnabled && !fixtureAtInterrupt && !simpleLockDepth);
+    bool wasQueued=call->queued;
+    call->queued=false;
+    return wasQueued;
+}
+static bool thread_call_free(thread_call_t call) {
+    assert(!call->queued);
+    for (auto it=strayCallouts.begin();it!=strayCallouts.end();++it) {
+        if (*it==call) { strayCallouts.erase(it); delete call; return true; }
+    }
+    assert(false);
+    return false;
+}
+static unsigned drainStrayCallouts() {
+    assert(fixtureInterruptsEnabled && !fixtureAtInterrupt && !simpleLockDepth);
+    unsigned ran=0;
+    for (auto call:strayCallouts) {
+        if (call->queued) { call->queued=false; call->func(call->owner,nullptr); ++ran; }
+    }
+    return ran;
 }
 
 typedef void (*IOInterruptAction)(void *, void *, void *, int);
@@ -272,8 +321,12 @@ struct IOService : OSObject {
         assert(simpleLockDepth==0);
         ++enableCount;
         if (dispatchOnEnable) {
+            assert(fixtureInterruptsEnabled && !fixtureAtInterrupt);
             fixtureAtInterrupt = true;
+            fixtureInterruptsEnabled = false;
             ((IOInterruptAction)interruptAction)(interruptTarget, nullptr, this, source);
+            assert(!fixtureInterruptsEnabled);
+            fixtureInterruptsEnabled = true;
             fixtureAtInterrupt = false;
         }
         return kIOReturnSuccess;
@@ -298,6 +351,8 @@ static std::mutex warnLogLock;
 static std::vector<std::string> warnLog;
 static void fixtureWarn(const char *fmt, ...) {
     assert(simpleLockDepth==0);
+    if (!fixtureInterruptsEnabled || fixtureAtInterrupt) fprintf(stderr, "Unsafe WARN format: %s", fmt);
+    assert(fixtureInterruptsEnabled && !fixtureAtInterrupt && "console I/O requires enabled interrupts");
     char message[1024];va_list ap;va_start(ap,fmt);vsnprintf(message,sizeof(message),fmt,ap);va_end(ap);
     std::lock_guard<std::mutex> guard(warnLogLock);warnLog.emplace_back(message);printf("[WARN] %s",message);
 }
@@ -466,8 +521,12 @@ static void addSpecifier(void) {
 
 static void runSummaryAction() {
     assert(gProvider.interruptAction != nullptr);
+    bool saved=fixtureInterruptsEnabled;
+    fixtureInterruptsEnabled=false;
     ((void (*)(void *, void *, void *, int))gProvider.interruptAction)(
         gProvider.interruptTarget, nullptr, &gProvider, 0);
+    assert(!fixtureInterruptsEnabled);
+    fixtureInterruptsEnabled=saved;
 }
 
 static void interruptCases(void) {
@@ -524,9 +583,11 @@ static void interruptCases(void) {
         kIOReturnSuccess);
     assert(on.summaryClaimed());
     fixtureAtInterrupt=true;
+    fixtureInterruptsEnabled=false;
     assert(pin->disableInterrupt()==kIOReturnNotPermitted);
     unsigned heldRefs=pin->refs.load();pin->put();
     assert(pin->isValid()&&pin->refs.load()==heldRefs);
+    fixtureInterruptsEnabled=true;
     fixtureAtInterrupt=false;
     assert(gProvider.registerCount == 1 && gProvider.registered);
     assert(gProvider.registeredSource == 0);
@@ -1048,7 +1109,8 @@ void strayCases() {
     assert(gIrqHits==0&&!gicdLineEnabled()); // b30 must fail here
     assert(padWrites==0&&padReads==1&&summaryEnables==enables);
     #ifndef FIXTURE_STRAY_BASELINE
-    assert(on.summaryStrays()==1&&warnLog.size()==warns+1);
+    assert(on.summaryStrays()==1&&warnLog.size()==warns);
+    assert(drainStrayCallouts()==1&&warnLog.size()==warns+1);
     assert(warnLog.back().find("line held masked")!=std::string::npos);
     assert(warnLog.back().back()=='\n'); // real newline, not literal backslash-n
     // Persistent external level can deliver only while the summary is enabled.
@@ -1063,6 +1125,9 @@ void strayCases() {
     assert(padReads==reads&&padWrites==0&&gIrqHits==0);
     assert(on.summaryStrays()==1&&summaryEnables==enables&&warnLog.size()==warns+1);
     for(unsigned i=0;i<4;i++)assert(gTiles[i]==before[i]);
+    fixtureInterruptsEnabled=false; // thread context can also have IRQs disabled
+    assert(on.resolveSummaryStray(true,1,1)==kIOReturnNotPermitted);
+    fixtureInterruptsEnabled=true;
     assert(on.resolveSummaryStray(false,1,1)==kIOReturnNotPermitted);
     assert(on.resolveSummaryStray(true,1,0)==kIOReturnBadArgument);
     assert(on.resolveSummaryStray(true,2,1)==kIOReturnBusy); // stale confirmation
@@ -1121,13 +1186,17 @@ void strayCases() {
     #endif
     tracePads=false;on.stop(&gProvider);
     #ifndef FIXTURE_STRAY_BASELINE
+    assert(drainStrayCallouts()==0); // stop canceled the second incident's queued call
     assert(gProvider.unregisterCount==1 && !gProvider.registered);
     // A callback in the provider-enable window predates the first slot.
     resetProvider();bringUp();addSpecifier();gProvider.dispatchOnEnable=true;
     TLMMGPIOController early;assert(early.init()&&early.start(&gProvider));
     pin=early.acquirePin(122,"claim-window");assert(pin);
+    warns=warnLog.size();
     assert(pin->setInterrupt(TLMM_IRQ_LEVEL_LOW,irqHandler,nullptr)==0);
-    assert(early.summaryStrays()==1&&gicdLineMasked());
+    assert(early.summaryStrays()==1&&gicdLineMasked()&&warnLog.size()==warns);
+    assert(drainStrayCallouts()==1&&warnLog.size()==warns+1);
+    assert(warnLog.back().find("pads=0")!=std::string::npos);
     assert(pin->prepareInterrupt()==0&&pin->resumeInterrupt()==0&&!gicdLineEnabled());
     pin->put();early.stop(&gProvider);
     #endif
@@ -1402,6 +1471,7 @@ int main(void) {
     orderingCases();
     leafCases();
     strayCases();
+    assert(strayCallouts.empty());
 
     printf("PASS: TLMM GPIO controller (tile map, exclusive AGPIO, plain mode, "
         "write-exclusive/read-shared, island read-only, pad interrupts, C API)\n");
@@ -1421,6 +1491,10 @@ def main():
     # machine/machine_routines.h does not export this KPI, so the source has
     # to declare it itself -- exactly what the SPMI mux does.
     assert 'extern "C" vm_offset_t ml_io_map_unmappable' in shipped
+    assert '#include <kern/thread_call.h>' in (Path(__file__).resolve().parents[2] /
+        'dxb/xnu/iokit/Kernel/arm/TLMMGPIOController.h').read_text()
+    assert 'thread_call_allocate_with_options(reportStray' in shipped
+    assert 'resolution (deferred diagnostic)' in shipped
     source = (('#define FIXTURE_STRAY_BASELINE 1\n' if isolation_only else '') + PRELUDE +
               'extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned);\n' +
               strip_includes(HEADER_C) + strip_includes(HEADER_CPP) +

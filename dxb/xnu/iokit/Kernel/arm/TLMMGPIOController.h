@@ -38,6 +38,7 @@
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <pexpert/arm64/tlmm_gpio.h>
+#include <kern/thread_call.h>
 
 class TLMMGPIOController;
 
@@ -267,6 +268,8 @@ private:
 	/* fIrqLock held: only finite MMIO/barriers; never provider/log/wait. */
 	bool setSummaryMaskedLocked(bool masked);
 	void reportSummaryReadback(void);
+	void holdStrayLocked(unsigned int registeredPads);
+	static void reportStray(thread_call_param_t owner, thread_call_param_t);
 	/* One owned-bit write to the distributor alias per transition. No provider
 	 * round-trip, RWP wait or logging is allowed under fIrqLock. */
 	bool mapDistributor(void);
@@ -314,6 +317,10 @@ private:
 	int fIrqSlot[TLMM_PIN_MAX];
 	unsigned long fIrqDispatches;
 	unsigned long fIrqStrays;
+	thread_call_t fStrayCall;
+	unsigned long fStrayLogDispatches;
+	unsigned long fStrayLogSequence;
+	unsigned int fStrayLogPads;
 };
 
 #endif /* ! _IOKIT_ARM_TLMM_GPIO_CONTROLLER_H */

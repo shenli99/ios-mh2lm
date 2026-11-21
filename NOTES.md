@@ -1,4 +1,10 @@
-# 当前交接（2026-11-21，第6批 b31 镜像已交付，待实机）
+# 当前交接（2026-11-21，第6批 b31r1 修复待构建）
+
+0121b31 实机启动触发 `panic(cpu 0 caller ...): console i/o from interrupt-disabled context @serial_console.c:168`。host 已复现与设备报错一致的缺陷：b31 的 stray WARN 位于硬中断回调，释放 TLMM 自旋锁不等于开启 CPU 中断；`SWEET_LOG_WARN` 通过 IOLog 写 console，触发 serial_console 保护。b31r1 已将 stray WARN 改为预分配 thread call，IRQ 仅记录快照，线程上下文输出。AGPIO 中断关闭时的拒绝日志、summary readback 和 freePinIRQ 也加入中断状态门禁。当前没有 b31 全栈或原始日志，未确认是哪次 summary 投递以及最初的 stray 来源。
+
+b31r1 本地 TLMM、触摸 worker/service、panel-lifecycle、display-service、log-levels 回归和 ARM64 TLMM 单文件编译通过。b31 原始源码的 console 上下文负对照已失败于预期断言，b30 原始源码的隔离负对照仍失败于预期隔离断言。需要新的 CircleCI full-source 产物，不能用 b31 镜像复测。下一步下载 `logs/xnu-kernel-0121b31r1.gz` 和 `logs/xnu-buildtree-0121b31r1.gz`，核对、打包并重新实机验证。
+
+## 第6批 b31 交付（2026-11-21）
 
 GPIO summary stray 隔离与显式线程恢复已在本地完成。b30 上的确定性负对照在 stray 后 summary 保持屏蔽的断言失败。b31 通过 TLMM、触摸 worker/service、面板生命周期、显示服务和日志等级回归，ARM64 TLMM 单文件编译通过，现有 CI 源码 marker 154/154。详见[第6批合同与验证](docs/GPIO-IRQ-STAGE6-STRAY-CONTRACT.md)和工作区 `scratch/gpio-irq-stage6/`。生产改动仅在 TLMM。显式恢复入口目前没有生产调用者，设备发生 hold 后可重启恢复。
 

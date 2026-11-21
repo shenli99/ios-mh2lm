@@ -421,8 +421,10 @@ AGPIO::release(void)
 	if (fController) {
 		IOReturn rc = fController->releasePinIRQ(this);
 		if (rc != kIOReturnSuccess && rc != kIOReturnNotFound) {
-			SWEET_LOG_WARN("SWEET TLMM: gpio%u release refused rc=%#x; handle retained\n",
-			    fPin, (unsigned)rc);
+			if (ml_get_interrupts_enabled()) {
+				SWEET_LOG_WARN("SWEET TLMM: gpio%u release refused rc=%#x; handle retained\n",
+				    fPin, (unsigned)rc);
+			}
 			return;
 		}
 	}
@@ -660,6 +662,8 @@ TLMMGPIOController::start(IOService *provider)
 	fProbeSlot = -1;
 	fIrqDispatches = 0;
 	fIrqStrays = 0;
+	fStrayCall = NULL;
+	fStrayLogSequence = 0;
 	for (i = 0; i < TLMM_IRQ_MAX; i++) {
 		fIrqPins[i] = 0;
 		fIrqInFlight[i] = 0;
@@ -678,6 +682,12 @@ TLMMGPIOController::start(IOService *provider)
 	SWEET_LOG_INFO("SWEET TLMM: pad IRQ lock %p\n", fIrqLock);
 	for (i = 0; i < TLMM_PIN_MAX; i++) {
 		fIrqSlot[i] = -1;
+	}
+	fStrayCall = thread_call_allocate_with_options(reportStray, this,
+	    THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+	if (!fStrayCall) {
+		SWEET_LOG_ERROR("SWEET TLMM: cannot allocate the stray diagnostic call\n");
+		return false;
 	}
 	gTLMMController = this;
 	SWEET_LOG_INFO(
@@ -726,6 +736,13 @@ TLMMGPIOController::stop(IOService *provider)
 	} else {
 		releaseSummary();
 	}
+	/* Admission is closed under fIrqLock. Drain the thread call before
+	 * invalidating handles or releasing the controller's storage. */
+	if (fStrayCall) {
+		thread_call_cancel_wait(fStrayCall);
+		thread_call_free(fStrayCall);
+		fStrayCall = NULL;
+	}
 
 	/*
 	 * Invalidate every outstanding handle before the windows are released:
@@ -758,6 +775,11 @@ TLMMGPIOController::free(void)
 
 	if (gTLMMController == this) {
 		gTLMMController = NULL;
+	}
+	if (fStrayCall) {
+		thread_call_cancel_wait(fStrayCall);
+		thread_call_free(fStrayCall);
+		fStrayCall = NULL;
 	}
 	for (i = 0; i < TLMM_TILE_COUNT; i++) {
 		if (fMaps[i]) {
@@ -1389,7 +1411,7 @@ TLMMGPIOController::reportSummaryReadback(void)
 	/* Logging stays out of the IRQ/spinlock path. A concurrent callback may
 	 * have re-masked the source, so skip that case and never treat a single
 	 * hardware snapshot as proof of failed delivery (b28 measured this). */
-	if (getPlatform()->atInterruptLevel()) return;
+	if (getPlatform()->atInterruptLevel() || !ml_get_interrupts_enabled()) return;
 	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	if (!fGicd || !fIrqClaimed || fIrqMasked || fSummaryReadbackWarned) {
 		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
@@ -1486,6 +1508,39 @@ TLMMGPIOController::releaseSummary(void)
 }
 
 void
+TLMMGPIOController::holdStrayLocked(unsigned int registeredPads)
+{
+	++fIrqStrays;
+	fIrqStrayHeld = true;
+	(void)setSummaryMaskedLocked(true);
+	if (!fIrqStopping && (fIrqStrays & (fIrqStrays - 1)) == 0) {
+		/* One snapshot, coalesced if the thread call is already pending.
+		 * Queue under the admission lock so stop cannot miss an enqueue. */
+		fStrayLogDispatches = fIrqDispatches;
+		fStrayLogSequence = fIrqStrays;
+		fStrayLogPads = registeredPads;
+		thread_call_enter(fStrayCall);
+	}
+}
+
+void
+TLMMGPIOController::reportStray(thread_call_param_t owner, thread_call_param_t)
+{
+	TLMMGPIOController *controller = static_cast<TLMMGPIOController *>(owner);
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(controller->fIrqLock);
+	unsigned long sequence = controller->fStrayLogSequence;
+	unsigned long dispatches = controller->fStrayLogDispatches;
+	unsigned int pads = controller->fStrayLogPads;
+	controller->fStrayLogSequence = 0;
+	IOSimpleLockUnlockEnableInterrupt(controller->fIrqLock, saved);
+	if (sequence) {
+		SWEET_LOG_WARN("SWEET TLMM: summary line asserted with no serviced pad; "
+		    "dispatches=%lu strays=%lu pads=%u; line held masked for thread "
+		    "resolution (deferred diagnostic)\n", dispatches, sequence, pads);
+	}
+}
+
+void
 TLMMGPIOController::dispatchSummary(void)
 {
 	unsigned int pins[TLMM_IRQ_MAX];
@@ -1493,8 +1548,6 @@ TLMMGPIOController::dispatchSummary(void)
 	void *refcons[TLMM_IRQ_MAX];
 	unsigned int count;
 	unsigned int served = 0;
-	bool strayWarn = false;
-	unsigned long dispatches = 0, strays = 0;
 	unsigned int registeredPads = 0;
 	unsigned int i;
 	IOInterruptState saved;
@@ -1523,22 +1576,14 @@ TLMMGPIOController::dispatchSummary(void)
 		/* An already-masked teardown callback has no live target. During
 		 * the provider-enable window, quarantine even without any pad. */
 		if (!fIrqMasked) {
-			dispatches = ++fIrqDispatches;
-			strays = ++fIrqStrays;
-			fIrqStrayHeld = true;
-			(void)setSummaryMaskedLocked(true);
+			++fIrqDispatches;
+			holdStrayLocked(0);
 		}
 		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
-		if (strays && (strays & (strays - 1)) == 0) {
-			SWEET_LOG_WARN("SWEET TLMM: summary line asserted with no serviced pad; "
-			    "dispatches=%lu strays=%lu pads=0; line held masked for thread "
-			    "resolution\n", dispatches, strays);
-		}
 		return;
 	}
 	++fSummaryDispatchDepth;
-	/* Retain the short top-half gate. Even a claim-window callback with no
-	 * slots must leave a persistent hold rather than repeatedly EOI a level. */
+	/* Keep the summary masked through all callbacks and their tail. */
 	(void)setSummaryMaskedLocked(true);
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 
@@ -1592,23 +1637,8 @@ TLMMGPIOController::dispatchSummary(void)
 	 * finished, including the tail. Unregister cannot reuse the slot or
 	 * release the last summary registration before these references drain. */
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
-	fIrqDispatches++;
-	if (!served) {
-		fIrqStrays++;
-		fIrqStrayHeld = true;
-		(void)setSummaryMaskedLocked(true);
-		strayWarn = (fIrqStrays & (fIrqStrays - 1)) == 0;
-	}
-	dispatches = fIrqDispatches;
-	strays = fIrqStrays;
-	if (strayWarn) {
-		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
-		SWEET_LOG_WARN("SWEET TLMM: summary line asserted with no serviced pad; "
-		    "dispatches=%lu strays=%lu pads=%u; line held masked for thread "
-		    "resolution\n", dispatches, strays, registeredPads);
-		/* Keep the snapshot and dispatch depth through the diagnostic. */
-		saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
-	}
+	++fIrqDispatches;
+	if (!served) holdStrayLocked(registeredPads);
 	--fSummaryDispatchDepth;
 	(void)setSummaryMaskedLocked(false);
 	for (i = 0; i < count; ++i) {
@@ -1633,7 +1663,8 @@ IOReturn
 TLMMGPIOController::resolveSummaryStray(bool externalCleared,
     unsigned long straySequence, unsigned int confirmationSource)
 {
-	if (getPlatform()->atInterruptLevel() || !externalCleared)
+	if (getPlatform()->atInterruptLevel() || !ml_get_interrupts_enabled() ||
+	    !externalCleared)
 		return kIOReturnNotPermitted;
 	if (!straySequence || !confirmationSource) return kIOReturnBadArgument;
 	if (!fIrqRegistrationLock || !fIrqLock) return kIOReturnNotOpen;
@@ -1919,7 +1950,8 @@ TLMMGPIOController::releasePinIRQ(AGPIO *owner)
 IOReturn
 TLMMGPIOController::freePinIRQ(unsigned int pin)
 {
-	if (getPlatform()->atInterruptLevel()) return kIOReturnNotPermitted;
+	if (getPlatform()->atInterruptLevel() || !ml_get_interrupts_enabled())
+		return kIOReturnNotPermitted;
 	IOLockLock(fIrqRegistrationLock);
 	IOReturn rc = freePinIRQLocked(pin);
 	IOLockUnlock(fIrqRegistrationLock);
