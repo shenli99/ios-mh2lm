@@ -4,7 +4,9 @@
 
 b32成为最新普通运行基线，保留b31r2/b30回退。没有命中无触摸降级分支，真正终态故障显示降级仍仅host覆盖；第6批持续异常电平/显式恢复等边界不变。本轮只日志/文档，无需重编、重打包或重测同版，源日志SHA `7a365e0ea3844b541ed9c6e3dfc95721536cdf4ff36218d96bc866bac1deceea`；证据 `scratch/artifact-0121b32/device-log-review.json`。
 
-NEXT：独立显示降级批次普通回归收口；下一批先审查SweetI2CController / SweetI2CDevice / SweetTouchComm职责与接口，再按小批次推进总线层和触摸C++迁移，不把未覆盖的故障实机写成已验。本轮尚无总线/C++生产变更，无待下载的新内核。
+TLMM能力记录：[已实现、功能缺口与源码待修项](docs/TLMM-CAPABILITIES-AND-GAPS.md)。普通GPIO/独占句柄/共享IRQ主体已具备；TLMM-C01为MUX仅三位而参考需四位，TLMM-C02为已持有AGPIO普通写快路径未统一检查运行期island接管。两项均源码已核实、未修复、未实机复现；PM/系统唤醒、命名状态、逻辑极性/开漏、去抖等作为扩展缺口分列。当前8个IRQ槽位不等于只能操作8个GPIO，host多pad/故障证据不冒充硬件证明。
+
+后续范围分开：TLMM-C01/C02属于控制器待修项；SweetI2CController / SweetI2CDevice / SweetTouchComm及触摸C++迁移是独立后续，不是TLMM本体未实现功能。本轮按用户要求只做记录/入口同步，没有驱动、测试、CI、固件或镜像变更，无需重跑b32，也没有新内核待下载。
 
 ## b32两档镜像交付（2026-11-21，以下待实机步骤已完成）
 

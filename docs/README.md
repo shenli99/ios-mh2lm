@@ -9,6 +9,7 @@
 | 构建、产物核对、打包和取日志 | [BUILD-GUIDE](BUILD-GUIDE.md) |
 | 当前驱动职责与依赖 | [驱动架构](CURRENT-DRIVER-ARCHITECTURE.md) |
 | 四大目标和执行顺序 | [IRQ／显示／日志／电源路线](IRQ-FRAMEBUFFER-PLAN.md) |
+| TLMM 已实现能力、常用缺口与源码待修项 | [TLMM能力清单](TLMM-CAPABILITIES-AND-GAPS.md) |
 | GPIO 中断当前批次 | [分批计划](GPIO-IRQ-IMPLEMENTATION-PLAN.md) → [第6批 stray 合同与验证](GPIO-IRQ-STAGE6-STRAY-CONTRACT.md) |
 | 触摸终止后的首次显示降级 | [b32合同、本地证据与交付](DISPLAY-TOUCH-FAILURE-FALLBACK.md) |
 | 显示F0–F7阶段 | [显示重构计划](FRAMEBUFFER-PANEL-PLAN.md) |

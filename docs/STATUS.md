@@ -21,6 +21,7 @@ LG G8X（mh2lm，SM8150）已经运行 iPhone X／D22AP 的 iOS 16.7.16 用户�
 | 部分 | 已有能力与证据 | 尚未完成 |
 |---|---|---|
 | 启动与用户态 | LG ABL → Mu-Silicium → UniXNU／DarwinBoot → XNU → UFS／HFS+ → SpringBoard；8核、16K页、3 GiB配置窗口 | 完整手机功能；当前测试不是重新安装根卷 |
+| TLMM GPIO控制器 | 普通GPIO、独占句柄、共享pad IRQ与叶子屏蔽主体已实现，当前消费者普通路径已验；[能力清单](TLMM-CAPABILITIES-AND-GAPS.md) | TLMM-C01 MUX字段与TLMM-C02运行期island写保护未修；PM/系统唤醒、命名状态、逻辑极性/开漏、去抖等未扩展 |
 | 输入与USB | 按键、TouchComm触摸、DWC3 CDC-ACM日志使用IRQ；[基线与边界](IRQ-FRAMEBUFFER-PLAN.md) | 通用I²C／USB／中断控制器架构、完整设备终止与重匹配 |
 | 电池 | runtime3已实际完成充电至100%、CC→CV→硬件截止，见[电池计划](BATTERY-IMPLEMENTATION-PLAN.md) | 0169温度路由归属/挂接已验、实际触发未观察到；回充与关机尾日志按用户决定暂缓，温区/上报及完整睡眠仍未全覆盖 |
 | 显示缓冲与刷新 | 当前mode7扫描驱动持有的A缓冲，固定VIG0→LM0→PP0→INTF1管线、硬件RD_PTR约60Hz；CPU仍约30Hz原地拷贝 | F5零拷贝／surface直扫、逐帧提交和复用同步；60Hz扫描不等于60Hz UI |
@@ -47,7 +48,7 @@ LG G8X（mh2lm，SM8150）已经运行 iPhone X／D22AP 的 iOS 16.7.16 用户�
 
 内核由CircleCI构建，配置位于 `.github/workflows/circleci.yml`；用户push并下载kernel／buildtree，agent核对源码、标记和SHA后沿ABI608固件打包，再回读镜像。GitHub Actions、旧sweet／guacamole shim及FV内512KiB载荷均非当前MH2LM操作路线。
 
-显示专项 a39 验收已完成，GPIO 第6批 b31r2 普通验收通过，无需重测同版。b32普通实机验收已完成，无需新CI或重测同版。下一批先审查总线层职责/接口与分批迁移边界，再推进实现；真正故障降级的实机未覆盖状态保持。所有 sudo、push 和 fastboot 操作按[构建指南](BUILD-GUIDE.md)分工执行。
+显示专项 a39 验收已完成，GPIO 第6批 b31r2 普通验收通过，无需重测同版。b32普通实机验收已完成，无需新CI或重测同版。TLMM已实现/缺失与C01/C02源码待修项已单独记录；总线层及触摸C++迁移是独立后续，不与控制器收口混批。真正故障降级的实机未覆盖状态保持。所有 sudo、push 和 fastboot 操作按[构建指南](BUILD-GUIDE.md)分工执行。
 
 ## 文档使用规则
 
