@@ -1,6 +1,6 @@
 # MH2LM 文档入口
 
-更新：2026-11-15。目标设备是LG G8X（mh2lm／SM8150）；sweet和guacamole是继承来源，不能直接套用其机型参数或刷写命令。
+更新：2026-11-21。目标设备是LG G8X（mh2lm／SM8150）；sweet和guacamole是继承来源，不能直接套用其机型参数或刷写命令。
 
 | 要查什么 | 入口 |
 |---|---|
@@ -10,6 +10,7 @@
 | 当前驱动职责与依赖 | [驱动架构](CURRENT-DRIVER-ARCHITECTURE.md) |
 | 四大目标和执行顺序 | [IRQ／显示／日志／电源路线](IRQ-FRAMEBUFFER-PLAN.md) |
 | GPIO 中断当前批次 | [分批计划](GPIO-IRQ-IMPLEMENTATION-PLAN.md) → [第6批 stray 合同与验证](GPIO-IRQ-STAGE6-STRAY-CONTRACT.md) |
+| 触摸终止后的首次显示降级 | [b32合同、本地证据与交付](DISPLAY-TOUCH-FAILURE-FALLBACK.md) |
 | 显示F0–F7阶段 | [显示重构计划](FRAMEBUFFER-PANEL-PLAN.md) |
 | 完整面板驱动PD0–PD5 | [独立初始化计划](PANEL-FULL-DRIVER-PLAN.md) |
 | C08六项状态、DSI／MDP引用 | [外层引用与范围](PANEL-LINEAGE-DISPLAY-CLIENT-CLOCKS.md) |

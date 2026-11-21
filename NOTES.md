@@ -1,4 +1,12 @@
-# 当前交接（2026-11-21，b31r2 普通实机验收通过）
+# 当前交接（2026-11-21，独立显示降级 b32 本地完成，待 CI）
+
+接续 GPIO 分批计划的独立显示降级任务，提交 `b3f735b`。旧测试只检查内部 scanout active，补最终 lifecycle complete 断言后 b31r2 确定失败；本次让首次接管在未接纳 touch token、启动截止前确认 worker 终态时，仍经新帧、资源与 post-enable 门槛后完成。终态查询经 touch gate 与 stop/close 串行，查询后重采时间，30秒启动截止不放宽。真实触摸已有 token 的失败和 OFF/ON fence 保持。详见[合同、证据与交付](docs/DISPLAY-TOUCH-FAILURE-FALLBACK.md)。
+
+9组相关回归、MDSS/TouchPanel ARM64单编译、154/154现有源码marker及差异检查通过；两份TU告警与基线分别1642/1152不变。额外旧profile-lifecycle在基线和本版均同位置ESC0停钟失败，单列未修复，后续lineage-wake/pipeline及真实MDSS→FB回归通过。工作区证据 `scratch/display-touch-fallback-b32/`；生产仅Lifecycle.inc与TouchPanel.cpp/h，不改C worker、TLMM/GIC、framebuffer、总线、CI、固件、ADT或参数。
+
+NEXT：用户push `full-source`，下载 `logs/xnu-kernel-0121b32.gz`、`logs/xnu-buildtree-0121b32.gz`（尽量附CI run ID/构建日志）；agent全量核对后使用工作区 `out-bs/mk16k-0121b32.sh` 打包回读。脚本语法及真实b31r2旧核拒绝已验，尚无b32内核/镜像/实机。本批普通验收先mode3桌面/触摸/两轮OFF-ON/醒后触摸，留 `logs/sweetlog-0121b32.bin`；真正终态降级仍待实机证据，没有新强制失败开关。b31r2保持最新已验，b30回退；持续异常电平/显式恢复和总线/C++迁移边界保持，不提前推进下一批。
+
+## b31r2 普通实机验收通过（2026-11-21）
 
 用户确认进桌面、未发现异常。b31r2 / `5e1680b` mode 3 持久日志 version1/ring4194304/total1662598/flush13，共21161行。3903 实机命中一次软件探针排空，3904 探针 hits=1、clear=1，3905 正式 armed，4540 首次接管 complete。两轮普通 OFF/ON 均完成且恢复触摸 IRQ；69 down/69 up、峰值十指、无未释放触点，末轮唤醒后有3对触点。第一轮 ON 后至第二轮 OFF 前没有 HID 接触记录，不声称该段实测输入。最后 hits524/empty0/late0，先前一次 empty1 已回落；无 ERROR、panic 或 TLMM stray hold WARN。详见[验收记录](docs/GPIO-IRQ-STAGE6-STRAY-CONTRACT.md#b31r2-实机验收)。
 
