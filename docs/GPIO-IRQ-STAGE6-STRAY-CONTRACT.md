@@ -18,6 +18,15 @@
 
 ## CI 与实机验收
 
-用户 push 后以现有 CircleCI full-source 配置构建，将两份包保存为 `logs/xnu-kernel-0121b31.gz` 和 `logs/xnu-buildtree-0121b31.gz`。逐文件核对构建树和内核 SHA，再用工作区 `out-bs/mk16k-0121b31.sh` 打包并回读 ABI608 两档最终镜像。脚本已用真实 b30 内核验证拒绝旧版，无 b31 镜像或实机结果。
+2026-11-21 收到 CircleCI full-source 的 kernel 和 buildtree。两个 gzip 归档完整，5300 个 XNU 文件与 `adddfb2` 逐一吻合，154 个源码标记命中。内核 17863520 字节，SHA256 `2aaa23b3c98b422bb83a2a0544b07c197d6f23ca14c5c3c7b5baf039ec84816d`，与归档清单一致，含本批隔离和恢复标记。CI run ID 与完整构建日志未提供。
+
+两档 ABI608 镜像打包并回读 Android v1 header 和 FAT 内核、ADT、TOML。各档固件、ADT 和启动参数与对应 b30 镜像一致，参数 605 字节，符合 607 字节上限。每份镜像 35545088 字节。
+
+| 镜像 | SHA256 |
+|---|---|
+| `out-bs/boot-16k-0121b31-gpioirq-panel-pipeline.img`（mode 3） | `217f04ff6c23b3af2b077af58058cb8536c20dbcef14718b9d2bcfdc5f7238f5` |
+| `out-bs/boot-16k-0121b31-baseline-panel-pipeline.img`（mode 2） | `1231178b398a7c4c65bc618215e8570748dfcafb03dc8c2032c7f9c9ffd44769` |
+
+工作区 `scratch/artifact-0121b31/artifact-verification.json` 和 `scratch/artifact-0121b31/packaging-verification.json` 保存归档与镜像核验结果。实机验收待完成。
 
 先用 mode 3 临时启动，验证桌面、连续触摸、多指与全部抬起、两轮普通 OFF/ON 和醒后触摸。核对软件探针、武装、接管、IRQ 统计以及是否出现 stray WARN。若观察到异常，保存原始持久日志与设备表现，再审查隔离效果。持续异常电平和显式恢复仍需安全的设备证据。保留 b30 已验镜像回退。
