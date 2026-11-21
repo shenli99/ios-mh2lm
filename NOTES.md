@@ -1,8 +1,8 @@
-# 当前交接（2026-11-21，第6批 b31r1 修复待构建）
+# 当前交接（2026-11-21，第6批 b31r1 镜像已交付，待实机）
 
 0121b31 实机启动触发 `panic(cpu 0 caller ...): console i/o from interrupt-disabled context @serial_console.c:168`。host 已复现与设备报错一致的缺陷：b31 的 stray WARN 位于硬中断回调，释放 TLMM 自旋锁不等于开启 CPU 中断；`SWEET_LOG_WARN` 通过 IOLog 写 console，触发 serial_console 保护。b31r1 已将 stray WARN 改为预分配 thread call，IRQ 仅记录快照，线程上下文输出。AGPIO 中断关闭时的拒绝日志、summary readback 和 freePinIRQ 也加入中断状态门禁。当前没有 b31 全栈或原始日志，未确认是哪次 summary 投递以及最初的 stray 来源。
 
-b31r1 本地 TLMM、触摸 worker/service、panel-lifecycle、display-service、log-levels 回归和 ARM64 TLMM 单文件编译通过。b31 原始源码的 console 上下文负对照已失败于预期断言，b30 原始源码的隔离负对照仍失败于预期隔离断言。需要新的 CircleCI full-source 产物，不能用 b31 镜像复测。下一步下载 `logs/xnu-kernel-0121b31r1.gz` 和 `logs/xnu-buildtree-0121b31r1.gz`，核对、打包并重新实机验证。
+b31r1 本地 TLMM、触摸 worker/service、panel-lifecycle、display-service、log-levels 回归和 ARM64 TLMM 单文件编译通过。b31 原始源码的 console 上下文负对照已失败于预期断言，b30 原始源码的隔离负对照仍失败于预期隔离断言。b31r1 两份 CircleCI 归档已核对，5300 个 XNU 文件与 `edece98` 一致，内核含线程输出标记。两档 ABI608 最终镜像已回读，固件、ADT 和启动参数与对应 b30/b31 一致。下一步仅用 b31r1 mode 3 临时启动，先观察是否再出现 console panic，再验桌面、触摸和两轮 OFF/ON，导出 `logs/sweetlog-0121b31r1.bin`。若失败，保留完整 panic backtrace/日志并退回 b30，不重测原 b31。见[修复版交付记录](docs/GPIO-IRQ-STAGE6-STRAY-CONTRACT.md#b31r1-镜像交付)。
 
 ## 第6批 b31 交付（2026-11-21）
 

@@ -20,7 +20,7 @@ b31r1 将 thread call 在控制器启动时预分配。IRQ 只更新计数、保
 
 ### 修复验证
 
-host fixture 在日志 sink 前断言中断已开启。b31 原始源码在 summary stray WARN 处按预期触发该断言，b31r1 的 TLMM、触摸、面板生命周期、显示服务和日志等级回归以及 ARM64 单文件编译通过。b31r1 需要新的 CircleCI 构建，旧 b31 镜像不能用于这次实机复测。
+host fixture 在日志 sink 前断言中断已开启。b31 原始源码在 summary stray WARN 处按预期触发该断言，b31r1 的 TLMM、触摸、面板生命周期、显示服务和日志等级回归以及 ARM64 单文件编译通过。旧 b31 镜像不能用于修复版复测。
 
 
 - TLMM 确定性 fixture 对持续外部贡献者建模，验证首次无状态 dispatch 后 summary 保持屏蔽，重复请求无 pad 访问、无 unmask、无额外 handler 或 WARN。在设备 INFO 阈值可见 WARN，并校验 MMIO 访问只涉及已注册 slot。覆盖显式恢复成功、恢复拒绝、正常 owned 派发恢复、claim 窗口、最后注销及重注册。
@@ -41,3 +41,16 @@ host fixture 在日志 sink 前断言中断已开启。b31 原始源码在 summa
 工作区 `scratch/artifact-0121b31/artifact-verification.json` 和 `scratch/artifact-0121b31/packaging-verification.json` 保存归档与镜像核验结果。b31 实机报上述 panic，验收未通过；以下步骤用于修复版。
 
 先用 mode 3 临时启动，验证桌面、连续触摸、多指与全部抬起、两轮普通 OFF/ON 和醒后触摸。核对软件探针、武装、接管、IRQ 统计以及是否出现 stray WARN。若观察到异常，保存原始持久日志与设备表现，再审查隔离效果。持续异常电平和显式恢复仍需安全的设备证据。保留 b30 已验镜像回退。
+
+### b31r1 镜像交付
+
+2026-11-21 核对两份 CircleCI 下载归档：gzip 完整，5300 个 XNU 文件匹配修复提交 `edece98`，154 个源码标记命中。内核 17863640 字节，SHA256 `20c42e6df362c3f942a6578e539032ccdb89513f575381a48cab9e2e97095f19`，与包内清单一致，确认含 `resolution (deferred diagnostic)`。未取得 CI run ID 或完整构建日志。
+
+两档最终镜像各 35545088 字节，回读 Android header v1、32 MiB FAT16 和其中的内核、ADT、TOML。固件、ADT 与启动参数均和对应 b30/b31 一致，命令行各 605 字节。证据在工作区 `scratch/artifact-0121b31r1/packaging-verification.json`。
+
+| 镜像 | SHA256 |
+|---|---|
+| `out-bs/boot-16k-0121b31r1-gpioirq-panel-pipeline.img`（mode 3） | `8e7b420c86a8205865befb9881a4900299f8a05a363becfd25293469f8d9f74a` |
+| `out-bs/boot-16k-0121b31r1-baseline-panel-pipeline.img`（mode 2） | `505d4c00dfb0265a8b1efae4ae113d3007d6318700b2be9f1fdb420a2f7d1af4` |
+
+先临时启动 mode 3。核对 console panic 是否重现；可进入桌面且触摸正常时，再测连续触摸、多指全部抬起和两轮普通 OFF/ON。请导出 `logs/sweetlog-0121b31r1.bin`，若发生 panic 保留完整 backtrace。若有 deferred stray WARN 但触摸不工作，保留日志，不把“没有 panic”当作功能通过。b30 为已验回退。实机结果未取得。
