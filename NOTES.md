@@ -1,4 +1,10 @@
-# 当前交接（2026-11-21，b31r2 镜像已交付，待实机）
+# 当前交接（2026-11-21，b31r2 普通实机验收通过）
+
+用户确认进桌面、未发现异常。b31r2 / `5e1680b` mode 3 持久日志 version1/ring4194304/total1662598/flush13，共21161行。3903 实机命中一次软件探针排空，3904 探针 hits=1、clear=1，3905 正式 armed，4540 首次接管 complete。两轮普通 OFF/ON 均完成且恢复触摸 IRQ；69 down/69 up、峰值十指、无未释放触点，末轮唤醒后有3对触点。第一轮 ON 后至第二轮 OFF 前没有 HID 接触记录，不声称该段实测输入。最后 hits524/empty0/late0，先前一次 empty1 已回落；无 ERROR、panic 或 TLMM stray hold WARN。详见[验收记录](docs/GPIO-IRQ-STAGE6-STRAY-CONTRACT.md#b31r2-实机验收)。
+
+b31r2 成为最新已验普通路径版本，保留 b30 回退。本轮仅日志核验和文档提交，不需为此重建或重测同版。受控持续异常电平/显式恢复的硬件验证仍未覆盖；独立显示降级、总线与 C++ 迁移未在本轮开始。
+
+## b31r2 交付与 b31r1 失败回顾（2026-11-21）
 
 用户报告 b31r1 停在日志画面超过两分钟，USB 成功启动。持久日志 version1/ring4194304/total459371/flush15，标准解码5825行。SpringBoard 已 exec，USB ACM 已配置。TouchComm ready 后，dispatches=2/strays=1/pads=1 的延迟 WARN 表明 INTID240 已 hold；软件探针 hits=1、clear=1，正式武装却因 GIC enable readback 停止。显示已有一帧硬件传输，但 touch resume admission 拒绝，FB handoff 明确冻结；之后仍有用户态活动。日志没有记录 console panic，不能由 WARN 排序确认第2次投递来源。详见[实机审计](docs/GPIO-IRQ-STAGE6-STRAY-CONTRACT.md#b31r1-实机失败与-b31r2-候选)。
 
