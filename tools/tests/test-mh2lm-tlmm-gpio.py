@@ -1091,6 +1091,67 @@ static void leafCases() {
     sc->put();sb->put();assert(!gicdLineEnabled());safety.stop(&gProvider);
 }
 
+// Match the worker's early probe path: the first pad callback masks the leaf,
+// then the worker still asks the owner to raise and drain software pending.
+static void probeStrayCases() {
+    enum class Case { Clean, Second, Canceled, Unmasked, LateInjection };
+    for (auto test : {Case::Clean, Case::Second, Case::Canceled,
+                      Case::Unmasked, Case::LateInjection}) {
+        resetProvider();bringUp();addSpecifier();
+        TLMMGPIOController on;assert(on.init()&&on.start(&gProvider));
+        AGPIO *pin=on.acquirePin(122,"probe-stray-owner");assert(pin);
+        gIrqPins[122]=pin;gIrqHits=0;gIrqDefer=true;
+        assert(pin->setInterrupt(TLMM_IRQ_LEVEL_LOW,irqHandler,nullptr)==0);
+        assert(pin->resumeInterrupt()==0);
+        bool firstHit=test!=Case::Unmasked;
+        if(firstHit) {
+            setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS,1);
+            runSummaryAction();
+            assert(gIrqHits==1 && !pin->interruptEnabled() && gicdLineEnabled());
+        }
+        if(test!=Case::LateInjection)
+            assert(pin->setProbePending(true)==0 && (gicdWord(0x21c)&(1u<<16)));
+        if(test==Case::Canceled) assert(pin->setProbePending(false)==0);
+        // A GIC acknowledge can consume software pending. The owned latch
+        // may still be set, but this masked client cannot run again.
+        *reinterpret_cast<uint32_t *>(gGicd.data()+0x21c) &= ~(1u<<16);
+        if(test==Case::LateInjection) {
+            // Force injection on a thread after the IRQ's snapshot, not
+            // before: a new reservation cannot explain an older delivery.
+            afterSimpleUnlock=[&]{
+                std::thread worker([&]{assert(pin->setProbePending(true)==0);});
+                worker.join();
+            };
+        }
+        auto warns=warnLog.size();
+        tracePads=true;padReads=padWrites=0;
+        runSummaryAction();
+        const unsigned expectedHits=firstHit?1:0;
+        assert(gIrqHits==expectedHits && padWrites==0);
+        if(test==Case::Clean || test==Case::Second) {
+            assert(gicdLineEnabled() && on.summaryStrays()==0); // b31r1 fails here
+            assert(drainStrayCallouts()==0 && warnLog.size()==warns);
+        }
+        if(test==Case::Clean) {
+            assert(pin->setProbePending(false)==0);
+            assert(tileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS)==1);
+            assert(pin->prepareInterrupt()==0 && pin->resumeInterrupt()==0);
+            gIrqDefer=false;
+            setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS,1);
+            runSummaryAction();
+            assert(gIrqHits==2 && gicdLineEnabled() && on.summaryStrays()==0);
+        } else {
+            if(test==Case::Second) runSummaryAction();
+            assert(!gicdLineEnabled() && on.summaryStrays()==1 && gIrqHits==expectedHits);
+            assert(padWrites==0 && tileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS)==expectedHits);
+            assert(drainStrayCallouts()==1 && warnLog.size()==warns+1);
+            if(test!=Case::Canceled) assert(pin->setProbePending(false)==0);
+            assert(pin->resumeInterrupt()==0 && !gicdLineEnabled());
+        }
+        tracePads=false;pin->put();gIrqPins[122]=nullptr;gIrqDefer=false;on.stop(&gProvider);
+    }
+}
+
 void strayCases() {
     resetProvider();bringUp();addSpecifier();
     TLMMGPIOController on;assert(on.init()&&on.start(&gProvider));
@@ -1471,6 +1532,7 @@ int main(void) {
     orderingCases();
     leafCases();
     strayCases();
+    probeStrayCases();
     assert(strayCallouts.empty());
 
     printf("PASS: TLMM GPIO controller (tile map, exclusive AGPIO, plain mode, "

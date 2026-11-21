@@ -307,6 +307,8 @@ private:
 	uint32_t fIrqClientMask;
 	unsigned int fIrqCount;
 	int fProbeSlot;
+	uint64_t fProbeSequence;
+	bool fProbeDeliveryPending;
 	unsigned int fIrqPins[TLMM_IRQ_MAX];
 	unsigned int fIrqDetect[TLMM_IRQ_MAX];
 	unsigned int fIrqInFlight[TLMM_IRQ_MAX];

@@ -1,4 +1,10 @@
-# 当前交接（2026-11-21，第6批 b31r1 镜像已交付，待实机）
+# 当前交接（2026-11-21，b31r1 实机未通过，b31r2 本地通过）
+
+用户报告 b31r1 停在日志画面超过两分钟，USB 成功启动。持久日志 version1/ring4194304/total459371/flush15，标准解码5825行。SpringBoard 已 exec，USB ACM 已配置。TouchComm ready 后，dispatches=2/strays=1/pads=1 的延迟 WARN 表明 INTID240 已 hold；软件探针 hits=1、clear=1，正式武装却因 GIC enable readback 停止。显示已有一帧硬件传输，但 touch resume admission 拒绝，FB handoff 明确冻结；之后仍有用户态活动。日志没有记录 console panic，不能由 WARN 排序确认第2次投递来源。详见[实机审计](docs/GPIO-IRQ-STAGE6-STRAY-CONTRACT.md#b31r1-实机失败与-b31r2-候选)。
+
+b31r2 仅 TLMM：当前 sole-client 软件探针在已屏蔽 leaf 的情况下最多排空一次未服务投递，不伪造回调，不清 pad 锁存，无通用 unmask。真实 stray 仍 hold，WARN 仍在线程输出。最终 fixture 对 b31r1 在预期断言失败；五组 host 回归、ARM64 TLMM TU、154/154 marker 通过。下一步由用户推送 full-source，下载 b31r2 kernel/buildtree，再核对、打包和实机；未改 C worker、显示降级或总线。b30 仍是已验回退。工作区打包门禁 `out-bs/mk16k-0121b31r2.sh` 已拒绝旧 b31r1。
+
+## 第6批 b31r1 交付（2026-11-21）
 
 0121b31 实机启动触发 `panic(cpu 0 caller ...): console i/o from interrupt-disabled context @serial_console.c:168`。host 已复现与设备报错一致的缺陷：b31 的 stray WARN 位于硬中断回调，释放 TLMM 自旋锁不等于开启 CPU 中断；`SWEET_LOG_WARN` 通过 IOLog 写 console，触发 serial_console 保护。b31r1 已将 stray WARN 改为预分配 thread call，IRQ 仅记录快照，线程上下文输出。AGPIO 中断关闭时的拒绝日志、summary readback 和 freePinIRQ 也加入中断状态门禁。当前没有 b31 全栈或原始日志，未确认是哪次 summary 投递以及最初的 stray 来源。
 

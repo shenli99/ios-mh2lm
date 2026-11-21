@@ -4,7 +4,7 @@
 
 ## 故障合同
 
-- `stray` 表示一次已接纳的 summary dispatch 没有调用任何未屏蔽、已注册的 handler（`served == 0`）。原因可能是 client-masked 锁存、陈旧 pending、时序或外部贡献者。计数没有提供具体 pad 的归因。
+- `stray` 表示一次已接纳的 summary dispatch 没有调用任何未屏蔽、已注册的 handler（`served == 0`）。原因可能是 client-masked 锁存、陈旧 pending、时序或外部贡献者。b31r2 将当前软件探针满足单次排空条件的投递单独分类，其他未服务投递仍隔离。计数没有提供具体 pad 的归因。
 - IRQ 路径在既有短门控上保留 INTID 240 的 mask，在 IRQ 锁内记录计数和持久 hold，在 IRQ 中提交有界诊断快照，线程回调在开中断时输出 WARN（1、2、4……次，排队快照可合并）。hold 期间排队或重复的 callback 直接退出。provider 开线窗口没有 slot 时同样隔离。IRQ 路径只使用已注册 slot 的快照和本控制器的 GICD 位，无全 pad 普查、未持有或 island pad 写入、provider 调用及 RWP 等待。
 - 普通 resume、晚注册和客户端注销均不能解除 hold。最后一个 slot 注销也保留已屏蔽的 provider claim，防止同一 SPI 被另一条路径重新启用。stop 释放 claim，下一次 start 重置状态。
 - 显式恢复是内部 C++ 诊断入口。调用者必须持有控制器引用，在非 IRQ 上下文提供外部清除确认、当前 stray 序号和非零确认来源编号。控制器核对当前 claim 和映射、armed 与 masked 状态，并拒绝停止、在途 dispatch、retiring slot、client mask、island hold 或活动软件探针。只有注册的 AGPIO slot 参与检查，运行期转为只读或仍有锁存均拒绝恢复。检查和开线在同一 IRQ 锁事务内。恢复日志记录来源与序号。台账里的确认是调用者声明，硬件外部状态由诊断调用者验证。
@@ -53,4 +53,14 @@ host fixture 在日志 sink 前断言中断已开启。b31 原始源码在 summa
 | `out-bs/boot-16k-0121b31r1-gpioirq-panel-pipeline.img`（mode 3） | `8e7b420c86a8205865befb9881a4900299f8a05a363becfd25293469f8d9f74a` |
 | `out-bs/boot-16k-0121b31r1-baseline-panel-pipeline.img`（mode 2） | `505d4c00dfb0265a8b1efae4ae113d3007d6318700b2be9f1fdb420a2f7d1af4` |
 
-先临时启动 mode 3。核对 console panic 是否重现；可进入桌面且触摸正常时，再测连续触摸、多指全部抬起和两轮普通 OFF/ON。请导出 `logs/sweetlog-0121b31r1.bin`，若发生 panic 保留完整 backtrace。若有 deferred stray WARN 但触摸不工作，保留日志，不把“没有 panic”当作功能通过。b30 为已验回退。实机结果未取得。
+先临时启动 mode 3。核对 console panic 是否重现；可进入桌面且触摸正常时，再测连续触摸、多指全部抬起和两轮普通 OFF/ON。请导出 `logs/sweetlog-0121b31r1.bin`，若发生 panic 保留完整 backtrace。若有 deferred stray WARN 但触摸不工作，保留日志，不把“没有 panic”当作功能通过。b30 为已验回退。b31r1 结果见下。
+
+### b31r1 实机失败与 b31r2 候选
+
+用户看到日志画面冻结超过两分钟，USB 启动成功。原始 `logs/sweetlog-0121b31r1.bin` SHA256 `8115d3d0fdf0664a7f7d8f57abe749830011b552f61286e6702547e323016b5b`；标准解码 version1/ring4194304/total459371/flush15，5825行。证据见工作区 `scratch/artifact-0121b31r1/device-log-review.json`。
+
+- 行772 SpringBoard 已 exec；3129 USB ACM endpoints configured；3929 TouchComm ready。
+- 行3930 TLMM deferred WARN：dispatches=2 / strays=1 / pads=1，INTID240 隔离；3931 软件探针 hits=1、clear=1、pending/active 均为零；3932–3933 正式武装读回失败，触摸停止。WARN 在诊断线程输出，不能据其文本次序确定第2次投递是否就是软件 pending 或陈旧电平。
+- 行4470 显示已观察到硬件传输；4475 touch resume admission 失败，4480 FB HANDOFF 明确冻结画面；其后仍有 SpringBoard 与其他用户态事件。未捕获 panic；末行不代表卡死 PC。
+
+b31r2 的确定性夹具模拟先命中后屏蔽 leaf、再注入软件 pending。真实 b31r1 代码错误地 hold；b31r2 允许在当前预留内对已屏蔽 sole client 排空一次未服务投递。该机会绑定到投递入口所见的预留序号；不调用第二次 handler、不写 pad、不清既有 stray hold，不扩大到未屏蔽、过期、晚注入或额外投递。清除软件 pending 时在正常线程输出 `one masked-client software probe delivery drained`，证明消费了软件预留，不证明硬件贡献者身份。五组回归、ARM64 单文件和 154 个源码标记通过；负对照和打包旧版拒绝证据见工作区 `scratch/gpio-irq-b31r2/`。未改显示降级或 C worker，总线不在本批。下一步验证 b31r2 的真实探针/武装、桌面、触摸和两轮普通 OFF/ON；如仍有 hold，先采集实证，不放宽隔离或去扫 pad。当前无 b31r2 CI 产物或镜像。

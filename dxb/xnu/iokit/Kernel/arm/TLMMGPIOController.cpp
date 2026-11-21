@@ -660,6 +660,8 @@ TLMMGPIOController::start(IOService *provider)
 	fIrqClientMask = 0;
 	fIrqCount = 0;
 	fProbeSlot = -1;
+	fProbeSequence = 0;
+	fProbeDeliveryPending = false;
 	fIrqDispatches = 0;
 	fIrqStrays = 0;
 	fStrayCall = NULL;
@@ -1582,6 +1584,12 @@ TLMMGPIOController::dispatchSummary(void)
 		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 		return;
 	}
+	/* Only a dispatch admitted after injection can use its one-shot credit.
+	 * Remember the reservation identity; a cancel/reinject cannot lend it
+	 * to an older snapshot. No pending bit survives every GIC acknowledge. */
+	int probeSlot = fProbeDeliveryPending && fProbeSlot >= 0 &&
+	    (fIrqClientMask & (1u << fProbeSlot)) ? fProbeSlot : -1;
+	uint64_t probeSequence = fProbeSequence;
 	++fSummaryDispatchDepth;
 	/* Keep the summary masked through all callbacks and their tail. */
 	(void)setSummaryMaskedLocked(true);
@@ -1638,7 +1646,22 @@ TLMMGPIOController::dispatchSummary(void)
 	 * release the last summary registration before these references drain. */
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
 	++fIrqDispatches;
-	if (!served) holdStrayLocked(registeredPads);
+	if (!served) {
+		/* A sole client may have already handled an early probe callback
+		 * and masked its leaf before the explicit software-pending IRQ.
+		 * Drain at most one such delivery without touching its latch or
+		 * fabricating a handler call. A reservation alone is not enough. */
+		if (registeredPads == 1 && probeSlot >= 0 &&
+		    (unsigned int)probeSlot < count && handlers[probeSlot] &&
+		    probeSlot == fProbeSlot && probeSequence == fProbeSequence &&
+		    fProbeDeliveryPending && !fIrqRetiring[probeSlot] &&
+		    (fIrqClientMask & (1u << probeSlot)) && !fIrqSummaryHolds &&
+		    fSummaryArmed && !fIrqStopping) {
+			fProbeDeliveryPending = false;
+		} else {
+			holdStrayLocked(registeredPads);
+		}
+	}
 	--fSummaryDispatchDepth;
 	(void)setSummaryMaskedLocked(false);
 	for (i = 0; i < count; ++i) {
@@ -1899,7 +1922,7 @@ TLMMGPIOController::setProbePending(AGPIO *owner, bool pending)
 	if (!owner || !owner->isValid()) {
 		return kIOReturnNotOpen;
 	}
-	if (getPlatform()->atInterruptLevel()) {
+	if (getPlatform()->atInterruptLevel() || !ml_get_interrupts_enabled()) {
 		return kIOReturnNotPermitted;
 	}
 	unsigned int pin = owner->getPin();
@@ -1916,6 +1939,7 @@ TLMMGPIOController::setProbePending(AGPIO *owner, bool pending)
 		if (fIrqHandlers[i]) ++clients;
 	}
 	IOReturn rc = kIOReturnSuccess;
+	bool drained = false;
 	if (slot < 0 || !fIrqClaimed) rc = kIOReturnNotFound;
 	else if (!fGicd) rc = kIOReturnUnsupported;
 	else if (!pending && fProbeSlot != slot) rc = kIOReturnNotPermitted;
@@ -1925,13 +1949,24 @@ TLMMGPIOController::setProbePending(AGPIO *owner, bool pending)
 		/* Keep reservation checks and the single write together. No RWP
 		 * polling or provider call under this IRQ lock; the thread caller
 		 * retains its existing probe drain/readback protocol. */
-		if (pending) fProbeSlot = slot;
+		if (pending) {
+			fProbeSlot = slot;
+			++fProbeSequence;
+			fProbeDeliveryPending = true;
+		}
 		gicdWrite((pending ? 0x200u : 0x280u) + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID),
 		    TLMM_IRQ_BIT(TLMM_SUMMARY_INTID));
-		if (!pending) fProbeSlot = -1;
+		if (!pending) {
+			drained = !fProbeDeliveryPending;
+			fProbeDeliveryPending = false;
+			fProbeSlot = -1;
+		}
 	}
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	IOLockUnlock(fLock);
+	if (drained) {
+		SWEET_LOG_INFO("SWEET TLMM: one masked-client software probe delivery drained gpio%u\n", pin);
+	}
 	return rc;
 }
 
@@ -1996,6 +2031,7 @@ TLMMGPIOController::freePinIRQLocked(unsigned int pin)
 		gicdWrite(0x280u + TLMM_IRQ_WORD(TLMM_SUMMARY_INTID),
 		    TLMM_IRQ_BIT(TLMM_SUMMARY_INTID));
 		fProbeSlot = -1;
+		fProbeDeliveryPending = false;
 	}
 	fIrqHandlers[slot] = NULL;
 	fIrqRefcons[slot] = NULL;
