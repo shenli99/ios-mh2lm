@@ -4,7 +4,7 @@
 
 ## 当前交付
 
-**独立显示降级 0121b32 / `b3f735b` 本地完成，待 CI 与实机。** 首次接管采样已确认触摸终止且未接纳 token 时，通过新帧/资源/post-enable 后到最终 complete；查询与 stop 串行，启动截止保持。9组相关回归、两份ARM64 TU及154/154源码marker通过；旧profile-lifecycle的基线同位失败单列。尚无b32内核或镜像。[实现、证据与下一步](DISPLAY-TOUCH-FAILURE-FALLBACK.md)
+**独立显示降级 0121b32 / `b3f735b` 两档镜像已交付，待实机。** 5300源码、内核SHA与154/154标记已核对；最终ABI608镜像的固件/ADT/605字节参数与b31r2一致。首次降级到complete、查询同步和硬启动截止的9组本地回归及两份ARM64 TU已通过；旧fixture同位失败单列。b32未实机验收。[实现、证据与下一步](DISPLAY-TOUCH-FAILURE-FALLBACK.md#b32-镜像交付2026-11-21)
 
 **最新触摸 IRQ 普通实机基线为 0121b31r2 / `5e1680b`**，命中单次探针排空，桌面、触摸和两轮普通 OFF/ON 通过；b30 保留为回退。[第6批实机证据](GPIO-IRQ-STAGE6-STRAY-CONTRACT.md#b31r2-实机验收)
 
@@ -47,7 +47,7 @@ LG G8X（mh2lm，SM8150）已经运行 iPhone X／D22AP 的 iOS 16.7.16 用户�
 
 内核由CircleCI构建，配置位于 `.github/workflows/circleci.yml`；用户push并下载kernel／buildtree，agent核对源码、标记和SHA后沿ABI608固件打包，再回读镜像。GitHub Actions、旧sweet／guacamole shim及FV内512KiB载荷均非当前MH2LM操作路线。
 
-显示专项 a39 验收已完成，GPIO 第6批 b31r2 普通验收通过，无需重测同版。下一步由用户 push `full-source`，下载包含 `b3f735b` 的 b32 kernel/buildtree；agent核对后打包。b32未通过CI/实机前不推进总线或触摸C++迁移。所有 sudo、push 和 fastboot 操作按[构建指南](BUILD-GUIDE.md)分工执行。
+显示专项 a39 验收已完成，GPIO 第6批 b31r2 普通验收通过，无需重测同版。b32归档和两档镜像核对已完成，无需新CI；下一步用户临时启动gpioirq档，验桌面/触摸及两轮OFF/ON并导出日志。b32未实机验收前不推进总线或触摸C++迁移。所有 sudo、push 和 fastboot 操作按[构建指南](BUILD-GUIDE.md)分工执行。
 
 ## 文档使用规则
 

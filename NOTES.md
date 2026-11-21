@@ -1,4 +1,12 @@
-# 当前交接（2026-11-21，独立显示降级 b32 本地完成，待 CI）
+# 当前交接（2026-11-21，b32两档镜像已交付，待实机）
+
+0121b32两份CircleCI归档完整，5300份XNU源码与 `b3f735b` 逐一一致，现有154/154源码marker及b32新内核标记命中。内核17863608字节，SHA256 `cc50524ad13a191f354b4927627a1e618e56fd46325f370235a944dc38b29856`，匹配包内清单。未提供CI run ID/完整构建日志。详见[交付、摘要与验收](docs/DISPLAY-TOUCH-FAILURE-FALLBACK.md#b32-镜像交付2026-11-21)。
+
+两档ABI608最终镜像已回读Android v1头、固件和FAT中的kernel/ADT/TOML；固件、ADT及各档605字节参数与b31r2一致，两档只差触摸mode3/2，b31r2旧镜像SHA保持。gpioirq镜像SHA `5946904dff1b20a26e52f4f0d5041e4ea4cc59d7b813542d7ed6e0ccabbc4e99`；baseline SHA `ccb184972caf7a4d2ded3f81d896fe7055e9b28d1adeceb1a808f4674244dc08`。证据 `scratch/artifact-0121b32/packaging-verification.json`。
+
+NEXT：无需新CI，用户先fastboot boot `out-bs/boot-16k-0121b32-gpioirq-panel-pipeline.img`，验桌面、连续触摸、多指全部抬起、两轮普通OFF/ON和醒后触摸，导出 `logs/sweetlog-0121b32.bin`。核对armed→首次complete/FB active与两轮完整完成；正常worker不应命中无触摸降级WARN。当前没有b32实机结果，真正故障降级仍未覆盖；b31r2为最新已验、b30回退，不提前推进总线/C++。本次仅归档核对/打包/记录，不改生产源码或设备。
+
+## b32本地实现与验证（2026-11-21，以下待CI步骤已完成）
 
 接续 GPIO 分批计划的独立显示降级任务，提交 `b3f735b`。旧测试只检查内部 scanout active，补最终 lifecycle complete 断言后 b31r2 确定失败；本次让首次接管在未接纳 touch token、启动截止前确认 worker 终态时，仍经新帧、资源与 post-enable 门槛后完成。终态查询经 touch gate 与 stop/close 串行，查询后重采时间，30秒启动截止不放宽。真实触摸已有 token 的失败和 OFF/ON fence 保持。详见[合同、证据与交付](docs/DISPLAY-TOUCH-FAILURE-FALLBACK.md)。
 
