@@ -9,6 +9,7 @@
 | 构建、产物核对、打包和取日志 | [BUILD-GUIDE](BUILD-GUIDE.md) |
 | 当前驱动职责与依赖 | [驱动架构](CURRENT-DRIVER-ARCHITECTURE.md) |
 | 四大目标和执行顺序 | [IRQ／显示／日志／电源路线](IRQ-FRAMEBUFFER-PLAN.md) |
+| GPIO 中断当前批次 | [分批计划](GPIO-IRQ-IMPLEMENTATION-PLAN.md) → [第6批 stray 合同与验证](GPIO-IRQ-STAGE6-STRAY-CONTRACT.md) |
 | 显示F0–F7阶段 | [显示重构计划](FRAMEBUFFER-PANEL-PLAN.md) |
 | 完整面板驱动PD0–PD5 | [独立初始化计划](PANEL-FULL-DRIVER-PLAN.md) |
 | C08六项状态、DSI／MDP引用 | [外层引用与范围](PANEL-LINEAGE-DISPLAY-CLIENT-CLOCKS.md) |

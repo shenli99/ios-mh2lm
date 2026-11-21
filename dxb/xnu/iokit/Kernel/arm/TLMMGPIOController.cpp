@@ -651,6 +651,7 @@ TLMMGPIOController::start(IOService *provider)
 	fIrqStopping = false;
 	fIrqMasked = false;
 	fSummaryReadbackWarned = false;
+	fIrqStrayHeld = false;
 	fSummaryArmed = false;
 	fSummaryDispatchDepth = 0;
 	fIrqSummaryHolds = 0;
@@ -1366,7 +1367,8 @@ TLMMGPIOController::setSummaryMaskedLocked(bool masked)
 		return true;
 	}
 	if (!masked && fIrqMasked && fSummaryArmed &&
-	    fSummaryDispatchDepth == 0 && fIrqSummaryHolds == 0 && !fIrqStopping) {
+	    fSummaryDispatchDepth == 0 && fIrqSummaryHolds == 0 &&
+	    !fIrqStrayHeld && !fIrqStopping) {
 		/* A last-client unregister must not reopen the line between its
 		 * dispatch drain and provider teardown. Masked clients still count;
 		 * retiring clients do not. This bounded slot check performs no MMIO. */
@@ -1491,6 +1493,9 @@ TLMMGPIOController::dispatchSummary(void)
 	void *refcons[TLMM_IRQ_MAX];
 	unsigned int count;
 	unsigned int served = 0;
+	bool strayWarn = false;
+	unsigned long dispatches = 0, strays = 0;
+	unsigned int registeredPads = 0;
 	unsigned int i;
 	IOInterruptState saved;
 
@@ -1499,8 +1504,11 @@ TLMMGPIOController::dispatchSummary(void)
 	}
 	/* Reserve each snapshot before touching the line. Unregister either
 	 * closes this admission first, or waits through our complete tail. */
-	bool admitted = false;
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	if (!fIrqClaimed || fIrqStopping || fIrqStrayHeld) {
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+		return; // dispatch cannot clear the hold, scan pads or retrigger itself
+	}
 	count = fIrqCount > TLMM_IRQ_MAX ? TLMM_IRQ_MAX : fIrqCount;
 	for (i = 0; i < count; i++) {
 		pins[i] = fIrqPins[i];
@@ -1508,17 +1516,31 @@ TLMMGPIOController::dispatchSummary(void)
 		refcons[i] = fIrqRefcons[i];
 		if (handlers[i]) {
 			++fIrqInFlight[i];
-			admitted = true;
+			++registeredPads;
 		}
 	}
-	if (admitted) {
-		++fSummaryDispatchDepth;
-		/* Retain the short top-half gate for this stage. Client workers no
-		 * longer hold it after dispatch: their own pad ENABLE is the mask. */
-		(void)setSummaryMaskedLocked(true);
+	if (!registeredPads) {
+		/* An already-masked teardown callback has no live target. During
+		 * the provider-enable window, quarantine even without any pad. */
+		if (!fIrqMasked) {
+			dispatches = ++fIrqDispatches;
+			strays = ++fIrqStrays;
+			fIrqStrayHeld = true;
+			(void)setSummaryMaskedLocked(true);
+		}
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+		if (strays && (strays & (strays - 1)) == 0) {
+			SWEET_LOG_WARN("SWEET TLMM: summary line asserted with no serviced pad; "
+			    "dispatches=%lu strays=%lu pads=0; line held masked for thread "
+			    "resolution\n", dispatches, strays);
+		}
+		return;
 	}
+	++fSummaryDispatchDepth;
+	/* Retain the short top-half gate. Even a claim-window callback with no
+	 * slots must leave a persistent hold rather than repeatedly EOI a level. */
+	(void)setSummaryMaskedLocked(true);
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
-	if (!admitted) return;
 
 	for (i = 0; i < count; i++) {
 		uint32_t status;
@@ -1566,19 +1588,27 @@ TLMMGPIOController::dispatchSummary(void)
 		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
 	}
 
-	fIrqDispatches++;
-	if (!served) {
-		fIrqStrays++;
-		if ((fIrqStrays & (fIrqStrays - 1)) == 0) {
-			SWEET_LOG_DEBUG("SWEET TLMM: summary without pad status; "
-			    "strays=%lu\n", fIrqStrays);
-		}
-	}
-
 	/* A snapshot holds the callback/refcon until ALL per-dispatch work is
 	 * finished, including the tail. Unregister cannot reuse the slot or
 	 * release the last summary registration before these references drain. */
 	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	fIrqDispatches++;
+	if (!served) {
+		fIrqStrays++;
+		fIrqStrayHeld = true;
+		(void)setSummaryMaskedLocked(true);
+		strayWarn = (fIrqStrays & (fIrqStrays - 1)) == 0;
+	}
+	dispatches = fIrqDispatches;
+	strays = fIrqStrays;
+	if (strayWarn) {
+		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+		SWEET_LOG_WARN("SWEET TLMM: summary line asserted with no serviced pad; "
+		    "dispatches=%lu strays=%lu pads=%u; line held masked for thread "
+		    "resolution\n", dispatches, strays, registeredPads);
+		/* Keep the snapshot and dispatch depth through the diagnostic. */
+		saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	}
 	--fSummaryDispatchDepth;
 	(void)setSummaryMaskedLocked(false);
 	for (i = 0; i < count; ++i) {
@@ -1587,6 +1617,61 @@ TLMMGPIOController::dispatchSummary(void)
 		}
 	}
 	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+}
+
+unsigned long
+TLMMGPIOController::summaryStrays(void)
+{
+	if (!fIrqLock) return 0;
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	unsigned long sequence = fIrqStrays;
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	return sequence;
+}
+
+IOReturn
+TLMMGPIOController::resolveSummaryStray(bool externalCleared,
+    unsigned long straySequence, unsigned int confirmationSource)
+{
+	if (getPlatform()->atInterruptLevel() || !externalCleared)
+		return kIOReturnNotPermitted;
+	if (!straySequence || !confirmationSource) return kIOReturnBadArgument;
+	if (!fIrqRegistrationLock || !fIrqLock) return kIOReturnNotOpen;
+	/* Serialize with claim/release/stop before inspecting registered slots.
+	 * IRQ paths never take this sleeping lock. Object lifetime is caller-held. */
+	IOLockLock(fIrqRegistrationLock);
+	IOInterruptState saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	IOReturn rc = kIOReturnBusy;
+	bool any = false;
+	if (fIrqStopping || !fIrqProvider || !fGicd || !fIrqClaimed ||
+	    !fIrqStrayHeld || !fIrqMasked || !fSummaryArmed ||
+	    straySequence != fIrqStrays || fSummaryDispatchDepth != 0 ||
+	    fIrqClientMask != 0 || fIrqSummaryHolds != 0 || fProbeSlot >= 0)
+		goto out;
+	for (unsigned int i = 0; i < TLMM_IRQ_MAX; ++i) {
+		if (fIrqRetiring[i]) goto out;
+		if (!fIrqHandlers[i]) continue;
+		any = true;
+		if (irqPinReadOnly(fIrqPins[i])) {
+			rc = kIOReturnUnsupported;
+			goto out;
+		}
+		if (readIntrStatus(fIrqPins[i]) & TLMM_INTR_STATUS_RAW) goto out;
+	}
+	if (!any) goto out;
+	fIrqStrayHeld = false;
+	if (setSummaryMaskedLocked(false)) rc = kIOReturnSuccess;
+	else fIrqStrayHeld = true;
+out:
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	if (rc == kIOReturnSuccess) {
+		SWEET_LOG_WARN("SWEET TLMM: stray hold resolved; confirmation=%u "
+		    "sequence=%lu; external clear asserted by caller, owned pads quiet\n",
+		    confirmationSource, straySequence);
+		reportSummaryReadback();
+	}
+	IOLockUnlock(fIrqRegistrationLock);
+	return rc;
 }
 
 IOReturn
@@ -1803,7 +1888,7 @@ TLMMGPIOController::setProbePending(AGPIO *owner, bool pending)
 	if (slot < 0 || !fIrqClaimed) rc = kIOReturnNotFound;
 	else if (!fGicd) rc = kIOReturnUnsupported;
 	else if (!pending && fProbeSlot != slot) rc = kIOReturnNotPermitted;
-	else if (fIrqSummaryHolds) rc = kIOReturnBusy;
+	else if (fIrqSummaryHolds || (pending && fIrqStrayHeld)) rc = kIOReturnBusy;
 	else if (clients != 1 || (pending && fProbeSlot >= 0)) rc = kIOReturnBusy;
 	if (rc == kIOReturnSuccess) {
 		/* Keep reservation checks and the single write together. No RWP
@@ -1890,23 +1975,18 @@ TLMMGPIOController::freePinIRQLocked(unsigned int pin)
 	SWEET_LOG_INFO("SWEET TLMM: gpio%u pad interrupt freed slot=%d\n", pin,
 	    slot);
 
-	/* Last registered pad: hand the line back so a boot that no longer uses
-	 * a pad interrupt leaves the GIC as it found it. */
-	{
-		bool any = false;
-		unsigned int i;
-
-		saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
-		for (i = 0; i < TLMM_IRQ_MAX; i++) {
-			if (fIrqHandlers[i]) {
-				any = true;
-			}
-		}
-		IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
-		if (!any) {
-			releaseSummary();
-		}
+	/* Retain the masked provider claim through an unresolved incident.
+	 * Releasing it would let a replacement client take the legacy source
+	 * and re-enable the same SPI without a clear confirmation. */
+	saved = IOSimpleLockLockDisableInterrupt(fIrqLock);
+	bool any = false;
+	for (unsigned int i = 0; i < TLMM_IRQ_MAX; ++i) {
+		if (fIrqHandlers[i]) any = true;
 	}
+	bool release = !any && !fIrqStrayHeld;
+	if (release) (void)setSummaryMaskedLocked(true);
+	IOSimpleLockUnlockEnableInterrupt(fIrqLock, saved);
+	if (release) releaseSummary();
 	return kIOReturnSuccess;
 }
 

@@ -1,4 +1,10 @@
-# 当前交接（2026-11-21，第5批 b30 实机通过，进入第6批异常路径）
+# 当前交接（2026-11-21，第6批 b31 本地验证通过）
+
+GPIO summary stray 隔离与显式线程恢复已在本地完成。b30 上的确定性负对照在 stray 后 summary 保持屏蔽的断言失败。b31 通过 TLMM、触摸 worker/service、面板生命周期、显示服务和日志等级回归，ARM64 TLMM 单文件编译通过，现有 CI 源码 marker 154/154。详见[第6批合同与验证](docs/GPIO-IRQ-STAGE6-STRAY-CONTRACT.md)和工作区 `scratch/gpio-irq-stage6/`。生产改动仅在 TLMM。显式恢复入口目前没有生产调用者，设备发生 hold 后可重启恢复。
+
+下一步由用户 push 并下载 CircleCI full-source 的 `logs/xnu-kernel-0121b31.gz` 和 `logs/xnu-buildtree-0121b31.gz`。到件后核对构建树和 SHA，沿 `out-bs/mk16k-0121b31.sh` 打包、回读，随后验证 mode 3 桌面、触摸与两轮 OFF/ON。脚本已拒绝真实 b30 内核。b31 待 CI 和实机，b30 仍是已验回退。
+
+## 第5批 b30 实机验收（2026-11-21）
 
 b30/b76005f 的单GPIO122叶子mask实机验收通过：用户反馈桌面正常、无异常；`sweetlog-0121b30.bin` header version1/ring4194304/total1549334/flush12，正确解码19527行，SHA256 `48668be19ae0230e61c84bc93a0a372f82adfb760494b263256ec8253350f6bd`。机器可读报告见 `scratch/artifact-0121b30/device-log-review.json`。
 

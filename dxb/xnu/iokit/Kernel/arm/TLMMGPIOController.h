@@ -241,6 +241,12 @@ public:
 	IOReturn ackPinIRQ(unsigned int pin);
 	bool pinIRQEnabled(unsigned int pin) const;
 	bool summaryClaimed(void) const { return fIrqClaimed; }
+	/* Diagnostic-only, thread-context recovery. The caller holds this object
+	 * alive and supplies an external-clear confirmation for this incident.
+	 * No worker/resume path supplies that confirmation automatically. */
+	IOReturn resolveSummaryStray(bool externalCleared,
+	    unsigned long straySequence, unsigned int confirmationSource);
+	unsigned long summaryStrays(void);
 	/* Interrupt action: dispatched by the GIC for the summary line. Public
 	 * because the action thunk has no friendship with this class. */
 	void dispatchSummary(void);
@@ -291,6 +297,7 @@ private:
 	bool fIrqStopping;
 	bool fIrqMasked;
 	bool fSummaryReadbackWarned;
+	bool fIrqStrayHeld;
 	bool fSummaryArmed; /* first real pad resume, not claim */
 	unsigned int fSummaryDispatchDepth;
 	uint32_t fIrqSummaryHolds; /* unmaskable/island pad safety holds */

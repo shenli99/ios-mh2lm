@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the actual TLMM GPIO controller against a stubbed IOKit and fake MMIO.
 
-usage: test-mh2lm-tlmm-gpio.py EXTRACTED_XNU
+usage: test-mh2lm-tlmm-gpio.py EXTRACTED_XNU [--stray-isolation-only]
 
 The real IOKit headers cannot be linked on the host, so the two driver files
 are compiled with a small stand-in for OSObject/IOService/IOMemoryMap/IOLock
@@ -16,7 +16,10 @@ import subprocess
 import sys
 import tempfile
 
-if len(sys.argv) != 2:
+if len(sys.argv) not in (2, 3):
+    sys.exit(__doc__)
+isolation_only = len(sys.argv) == 3 and sys.argv[2] == '--stray-isolation-only'
+if len(sys.argv) == 3 and not isolation_only:
     sys.exit(__doc__)
 root = Path(sys.argv[1]).resolve()
 arm = root / 'iokit/Kernel/arm'
@@ -26,7 +29,7 @@ HEADER_C = (pex / 'tlmm_gpio.h').read_text()
 HEADER_CPP = (arm / 'TLMMGPIOController.h').read_text()
 # Fixture-only access to the bookkeeping whose hardware consistency we check.
 HEADER_CPP = HEADER_CPP.replace('class TLMMGPIOController : public IOService {',
-    'class TLMMGPIOController : public IOService {\n friend void orderingCases();')
+    'class TLMMGPIOController : public IOService {\n friend void orderingCases(); friend void strayCases();')
 
 SOURCE = (arm / 'TLMMGPIOController.cpp').read_text()
 # Model write-one GIC aliases at the MMIO boundary, never by changing the
@@ -35,6 +38,10 @@ store = '*(volatile uint32_t *)((vm_offset_t)fGicd + offset) = value;'
 assert SOURCE.count(store) == 1
 SOURCE = SOURCE.replace(store, 'fixtureGicdWrite((vm_offset_t)fGicd, offset, value);')
 
+for signature, hook in [('tlmmRead32(vm_offset_t address)\n{', 'fixturePadRead(address);'),
+                        ('tlmmWrite32(vm_offset_t address, uint32_t value)\n{', 'fixturePadWrite(address);')]:
+    assert SOURCE.count(signature) == 1
+    SOURCE = SOURCE.replace(signature, signature + '\n' + hook)
 
 
 def strip_includes(text):
@@ -76,6 +83,8 @@ static FixturePlatform *getPlatform() { return &fixturePlatform; }
 using vm_offset_t = uintptr_t;
 using vm_size_t = size_t;
 static void fixtureGicdWrite(vm_offset_t, uint32_t, uint32_t);
+static void fixturePadRead(vm_offset_t);
+static void fixturePadWrite(vm_offset_t);
 #define VM_WIMG_IO 7u
 using IOPhysicalAddress = uintptr_t;
 using IOReturn = int;
@@ -200,6 +209,7 @@ struct IOService : OSObject {
     bool hasSpecifier = false;
     bool registered = false;
     bool lineEnabled = false;
+    bool dispatchOnEnable = false;
     bool enabled = true;      /* GICD_CTLR.EnableGrp1 stand-in */
     int registeredSource = -1;
     void *interruptAction = nullptr;
@@ -261,6 +271,11 @@ struct IOService : OSObject {
         (void)source;
         assert(simpleLockDepth==0);
         ++enableCount;
+        if (dispatchOnEnable) {
+            fixtureAtInterrupt = true;
+            ((IOInterruptAction)interruptAction)(interruptTarget, nullptr, this, source);
+            fixtureAtInterrupt = false;
+        }
         return kIOReturnSuccess;
     }
 };
@@ -279,7 +294,14 @@ static void IOLog(const char *fmt, ...) {
 // bsd/dev/sweet_log_level.h, whose include the fixture strips.
 extern "C" int sweet_log_level_enabled(unsigned level);
 #define SWEET_LOG_ERROR(...) do { assert(simpleLockDepth==0); printf("[ERROR] " __VA_ARGS__); } while (0)
-#define SWEET_LOG_WARN(...) do { if (sweet_log_level_enabled(1u)) { assert(simpleLockDepth==0); printf("[WARN] " __VA_ARGS__); } } while (0)
+static std::mutex warnLogLock;
+static std::vector<std::string> warnLog;
+static void fixtureWarn(const char *fmt, ...) {
+    assert(simpleLockDepth==0);
+    char message[1024];va_list ap;va_start(ap,fmt);vsnprintf(message,sizeof(message),fmt,ap);va_end(ap);
+    std::lock_guard<std::mutex> guard(warnLogLock);warnLog.emplace_back(message);printf("[WARN] %s",message);
+}
+#define SWEET_LOG_WARN(...) do { if (sweet_log_level_enabled(1u)) fixtureWarn(__VA_ARGS__); } while (0)
 #define SWEET_LOG_INFO(...) do { if (sweet_log_level_enabled(2u)) { assert(simpleLockDepth==0); printf("[INFO] " __VA_ARGS__); } } while (0)
 #define SWEET_LOG_DEBUG(...) do { if (sweet_log_level_enabled(3u)) { assert(simpleLockDepth==0); printf("[DEBUG] " __VA_ARGS__); } } while (0)
 '''
@@ -290,6 +312,18 @@ FIXTURE = r'''
 static constexpr uint32_t kTileSize = 0x100000;
 static std::vector<uint8_t> gTiles[4];
 static IOMemoryMap *gMaps[4];
+static bool tracePads=false;
+static unsigned padReads=0,padWrites=0,summaryEnables=0;
+static void fixturePadRead(vm_offset_t address) {
+    if(!tracePads)return;
+    ++padReads;
+    // During stray/resolve only the two registered south-tile slots are legal.
+    uintptr_t base=(uintptr_t)gTiles[3].data();
+    assert(address>=base && address<base+kTileSize);
+    unsigned pin=(address-base)/0x1000;
+    assert(pin==122 || pin==100);
+}
+static void fixturePadWrite(vm_offset_t) { if(tracePads)++padWrites; }
 static IOService gProvider;
 
 static const uintptr_t kTilePhys[4] = {
@@ -317,7 +351,7 @@ static void fixtureGicdWrite(vm_offset_t base,uint32_t off,uint32_t value) {
     auto word=[&](uint32_t offset)->volatile uint32_t& {
         return *(volatile uint32_t *)(base+offset);
     };
-    if(off==0x11c){word(0x11c)=word(0x11c)|value;word(0x19c)=word(0x19c)&~value;}
+    if(off==0x11c){++summaryEnables;word(0x11c)=word(0x11c)|value;word(0x19c)=word(0x19c)&~value;}
     else if(off==0x19c){word(0x11c)=word(0x11c)&~value;word(0x19c)=word(0x19c)|value;}
     else if(off==0x21c){word(0x21c)=word(0x21c)|value;}
     else if(off==0x29c){word(0x21c)=word(0x21c)&~value;word(0x29c)=value;}
@@ -411,6 +445,7 @@ static void resetProvider(void) {
     gProvider.props.clear();
     gProvider.registered = false;
     gProvider.lineEnabled = false;
+    gProvider.dispatchOnEnable = false;
     gProvider.enabled = true;
     gProvider.registeredSource = -1;
     gProvider.interruptAction = nullptr;
@@ -561,6 +596,11 @@ static void interruptCases(void) {
     /* (4) A pad with no status must not call its handler. */
     runSummaryAction();
     assert(gIrqHits == 1);
+    #ifndef FIXTURE_STRAY_BASELINE
+    assert(!gicdLineEnabled()&&on.summaryStrays()==1); // stray leaves a persistent hold
+    assert(on.resolveSummaryStray(false,on.summaryStrays(),1)==kIOReturnNotPermitted);
+    assert(on.resolveSummaryStray(true,on.summaryStrays(),1)==kIOReturnSuccess);
+    #endif
     assert(gicdLineEnabled());
 
     /* (5) Deferred bottom half: the handler masks through its own handle and
@@ -588,24 +628,31 @@ static void interruptCases(void) {
     assert(pin100->setInterrupt(TLMM_IRQ_EDGE_RISING, irqHandler, nullptr) ==
         kIOReturnSuccess);
     gIrqDefer = true;
-    setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
-    runSummaryAction();
-    assert(gIrqHits == 2);              /* the never-armed pad stays quiet */
-    assert(tileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS) ==
-        TLMM_INTR_STATUS_RAW);
-    assert(pin100->resumeInterrupt() == kIOReturnSuccess);
-    assert(pin->setProbePending(true) == kIOReturnBusy); // shared line, no injection
-    assert(pin100->setProbePending(true) == kIOReturnBusy);
-    assert(gicdLineEnabled());
+    assert(gicdLineEnabled()); // newly published, unarmed leaf stays quiet
+    assert(!pin100->interruptEnabled());
     setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     runSummaryAction();
-    assert(gIrqHits == 4);              /* both pads ran */
-    assert(gicdLineEnabled());          /* both pad-masked, no contribution */
-    assert(pin->resumeInterrupt() == kIOReturnSuccess);
-    assert(gicdLineEnabled());          /* pad 100 cannot hold a peer */
-    assert(pin100->resumeInterrupt() == kIOReturnSuccess);
+    assert(gIrqHits == 3); // only armed gpio122 contributes
+    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) == 1);
+    assert(tileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS) == 1);
     assert(gicdLineEnabled());
+    assert(pin100->resumeInterrupt() == kIOReturnSuccess); // owns/clears its latch
+    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) == 1);
+    setTileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
+    runSummaryAction();
+    assert(gIrqHits == 4); // gpio100 runs while gpio122 is deferred
+    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) == 1);
+    assert(tileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS) == 1);
+    assert(pin->resumeInterrupt() == kIOReturnSuccess); // A's own latch is cleared
+    assert(tileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS) == 1);
+    setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
+    runSummaryAction();
+    assert(gIrqHits == 5);
+    assert(tileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS) == 1);
+    assert(tileReg(TLMM_TILE_SOUTH, 100, TLMM_GPIO_INTR_STATUS) == 1);
+    assert(pin->resumeInterrupt() == kIOReturnSuccess);
+    assert(pin100->resumeInterrupt() == kIOReturnSuccess);
     gIrqDefer = false;
 
     /* (7) Ownership rules: a held pad and a second request on the same pad are
@@ -629,8 +676,10 @@ static void interruptCases(void) {
     assert((tileReg(TLMM_TILE_NORTH, 96, TLMM_GPIO_INTR_CFG) & TLMM_INTR_ENABLE) == 0);
     assert(tileReg(TLMM_TILE_NORTH, 96, TLMM_GPIO_INTR_STATUS) == TLMM_INTR_STATUS_RAW);
     unsigned beforeFreeDispatch = gIrqHits;
+    setTileReg(TLMM_TILE_SOUTH, 122, TLMM_GPIO_INTR_STATUS, TLMM_INTR_STATUS_RAW);
     runSummaryAction();
-    assert(gIrqHits == beforeFreeDispatch); /* removed handler cannot run */
+    assert(gIrqHits == beforeFreeDispatch + 1 && gIrqLastPin == 122);
+    assert(tileReg(TLMM_TILE_NORTH, 96, TLMM_GPIO_INTR_STATUS) == TLMM_INTR_STATUS_RAW);
     pin96->put();
     AGPIO *new96 = on.acquirePin(96, "new-owner");
     assert(new96 && new96->isValid());
@@ -981,6 +1030,110 @@ static void leafCases() {
     sc->put();sb->put();assert(!gicdLineEnabled());safety.stop(&gProvider);
 }
 
+void strayCases() {
+    resetProvider();bringUp();addSpecifier();
+    TLMMGPIOController on;assert(on.init()&&on.start(&gProvider));
+    AGPIO *pin=on.acquirePin(122,"stray-owner");assert(pin);
+    gIrqPins[122]=pin;gIrqHits=0;gIrqDefer=false;
+    assert(pin->setInterrupt(TLMM_IRQ_LEVEL_LOW,irqHandler,nullptr)==0);
+    assert(pin->prepareInterrupt()==0&&pin->resumeInterrupt()==0);
+    // An independent external contributor stays asserted. Never acknowledge it.
+    setTileReg(TLMM_TILE_NORTH,96,TLMM_GPIO_CFG,TLMM_GPIO_EGPIO_ENABLE);
+    setTileReg(TLMM_TILE_NORTH,96,TLMM_GPIO_INTR_CFG,TLMM_INTR_ENABLE);
+    setTileReg(TLMM_TILE_NORTH,96,TLMM_GPIO_INTR_STATUS,1);
+    std::vector<uint8_t> before[4]={gTiles[0],gTiles[1],gTiles[2],gTiles[3]};
+    tracePads=true;padReads=padWrites=0;
+    unsigned enables=summaryEnables;size_t warns=warnLog.size();
+    fixtureAtInterrupt=true;runSummaryAction();fixtureAtInterrupt=false;
+    assert(gIrqHits==0&&!gicdLineEnabled()); // b30 must fail here
+    assert(padWrites==0&&padReads==1&&summaryEnables==enables);
+    #ifndef FIXTURE_STRAY_BASELINE
+    assert(on.summaryStrays()==1&&warnLog.size()==warns+1);
+    assert(warnLog.back().find("line held masked")!=std::string::npos);
+    assert(warnLog.back().back()=='\n'); // real newline, not literal backslash-n
+    // Persistent external level can deliver only while the summary is enabled.
+    unsigned delivered=1;
+    for(unsigned n=0;n<64;++n)if(gicdLineEnabled()){++delivered;runSummaryAction();}
+    assert(delivered==1);
+    unsigned reads=padReads;
+    fixtureAtInterrupt=true;
+    for(unsigned n=0;n<8;++n)runSummaryAction(); // queued/spurious callback
+    assert(on.resolveSummaryStray(true,1,1)==kIOReturnNotPermitted);
+    fixtureAtInterrupt=false;
+    assert(padReads==reads&&padWrites==0&&gIrqHits==0);
+    assert(on.summaryStrays()==1&&summaryEnables==enables&&warnLog.size()==warns+1);
+    for(unsigned i=0;i<4;i++)assert(gTiles[i]==before[i]);
+    assert(on.resolveSummaryStray(false,1,1)==kIOReturnNotPermitted);
+    assert(on.resolveSummaryStray(true,1,0)==kIOReturnBadArgument);
+    assert(on.resolveSummaryStray(true,2,1)==kIOReturnBusy); // stale confirmation
+    assert(pin->setProbePending(true)==kIOReturnBusy);
+    assert(pin->maskInterrupt()==0);
+    assert(on.resolveSummaryStray(true,1,1)==kIOReturnBusy); // client mask
+    assert(pin->resumeInterrupt()==0&&!gicdLineEnabled()); // cannot bypass hold
+    setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS,1);
+    padWrites=0;
+    assert(on.resolveSummaryStray(true,1,1)==kIOReturnBusy); // owned latch
+    assert(padWrites==0&&!gicdLineEnabled());
+    setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS,0);
+    setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_CFG,TLMM_GPIO_EGPIO_ENABLE);
+    assert(on.resolveSummaryStray(true,1,1)==kIOReturnUnsupported);
+    setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_CFG,0);
+    // A late client, ordinary resume, and an active dispatch cannot release hold.
+    tracePads=false;
+    AGPIO *peer=on.acquirePin(100,"stray-peer");assert(peer);
+    assert(peer->setInterrupt(TLMM_IRQ_EDGE_RISING,irqHandler,nullptr)==0);
+    assert(peer->prepareInterrupt()==0&&peer->resumeInterrupt()==0);
+    assert(!gicdLineEnabled());
+    tracePads=true;
+    on.fSummaryDispatchDepth=1;
+    assert(on.resolveSummaryStray(true,1,1)==kIOReturnBusy);
+    on.fSummaryDispatchDepth=0;on.fIrqRetiring[1]=true;
+    assert(on.resolveSummaryStray(true,1,1)==kIOReturnBusy);
+    on.fIrqRetiring[1]=false;on.fIrqStopping=true;
+    assert(on.resolveSummaryStray(true,1,1)==kIOReturnBusy);
+    on.fIrqStopping=false;auto map=on.fGicd;on.fGicd=nullptr;
+    assert(on.resolveSummaryStray(true,1,1)==kIOReturnBusy);on.fGicd=map;
+    assert(!gicdLineEnabled()&&padWrites==0);
+    // The fixture is the external diagnostic authority. Only it clears gpio96.
+    tracePads=false;setTileReg(TLMM_TILE_NORTH,96,TLMM_GPIO_INTR_STATUS,0);tracePads=true;
+    padWrites=0;
+    assert(on.resolveSummaryStray(true,1,7)==0);
+    assert(gicdLineEnabled()&&padWrites==0);
+    assert(warnLog.back().find("confirmation=7 sequence=1")!=std::string::npos);
+    assert(on.resolveSummaryStray(true,1,7)==kIOReturnBusy); // no second release
+    setTileReg(TLMM_TILE_SOUTH,122,TLMM_GPIO_INTR_STATUS,1);
+    fixtureAtInterrupt=true;runSummaryAction();fixtureAtInterrupt=false;
+    assert(gIrqHits==1&&gicdLineEnabled()); // normal owned delivery resumes
+    tracePads=false;
+    peer->put();
+    // A new stray is a different incident; an old confirmation cannot release it.
+    runSummaryAction();assert(!gicdLineEnabled()&&on.summaryStrays()==2);
+    assert(on.resolveSummaryStray(true,1,7)==kIOReturnBusy);
+    pin->put();gIrqPins[122]=nullptr;
+    assert(!gicdLineEnabled());
+    // Last-client unregister/re-register must not bypass persistent hold.
+    pin=on.acquirePin(122,"stray-replacement");assert(pin);
+    unsigned claims=gProvider.registerCount;
+    assert(gProvider.registered && gProvider.unregisterCount==0);
+    assert(pin->setInterrupt(TLMM_IRQ_LEVEL_LOW,irqHandler,nullptr)==0);
+    assert(pin->prepareInterrupt()==0&&pin->resumeInterrupt()==0);
+    assert(gProvider.registerCount==claims&&!gicdLineEnabled());pin->put();
+    #endif
+    tracePads=false;on.stop(&gProvider);
+    #ifndef FIXTURE_STRAY_BASELINE
+    assert(gProvider.unregisterCount==1 && !gProvider.registered);
+    // A callback in the provider-enable window predates the first slot.
+    resetProvider();bringUp();addSpecifier();gProvider.dispatchOnEnable=true;
+    TLMMGPIOController early;assert(early.init()&&early.start(&gProvider));
+    pin=early.acquirePin(122,"claim-window");assert(pin);
+    assert(pin->setInterrupt(TLMM_IRQ_LEVEL_LOW,irqHandler,nullptr)==0);
+    assert(early.summaryStrays()==1&&gicdLineMasked());
+    assert(pin->prepareInterrupt()==0&&pin->resumeInterrupt()==0&&!gicdLineEnabled());
+    pin->put();early.stop(&gProvider);
+    #endif
+    printf("PASS: stray isolation, external-level hold and explicit recovery\n");
+}
+
 static void islandCases(void) {
     const uint32_t declared[] = {96, 100};
 
@@ -1248,6 +1401,7 @@ int main(void) {
     teardownCases();
     orderingCases();
     leafCases();
+    strayCases();
 
     printf("PASS: TLMM GPIO controller (tile map, exclusive AGPIO, plain mode, "
         "write-exclusive/read-shared, island read-only, pad interrupts, C API)\n");
@@ -1267,10 +1421,10 @@ def main():
     # machine/machine_routines.h does not export this KPI, so the source has
     # to declare it itself -- exactly what the SPMI mux does.
     assert 'extern "C" vm_offset_t ml_io_map_unmappable' in shipped
-    source = (PRELUDE +
+    source = (('#define FIXTURE_STRAY_BASELINE 1\n' if isolation_only else '') + PRELUDE +
               'extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned);\n' +
               strip_includes(HEADER_C) + strip_includes(HEADER_CPP) +
-              strip_barriers(strip_includes(SOURCE)) + FIXTURE)
+              strip_barriers(strip_includes(SOURCE)) + (FIXTURE.replace('int main(void) {', 'int main(void) { strayCases(); return 0;') if isolation_only else FIXTURE))
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / 'test.cpp'
         binary = Path(tmp) / 'test'
@@ -1285,7 +1439,7 @@ def main():
         run = subprocess.run([str(binary)], text=True,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         print(run.stdout, end='')
-        if run.returncode == 0:
+        if run.returncode == 0 and not isolation_only:
             assert run.stdout.count('diagnostic only, not delivery proof') == 1
         return run.returncode
 
