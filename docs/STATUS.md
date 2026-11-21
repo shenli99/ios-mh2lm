@@ -6,7 +6,7 @@
 
 **最新触摸 IRQ 实机基线为 0121b30 / `b76005f`**，GPIO122 叶子掩码通过桌面、触摸和两轮普通 OFF/ON。[第5批实机证据](GPIO-IRQ-STAGE5-LEAF-MASK.md)
 
-**GPIO 第6批 0121b31 本地验证通过**，包括 stray 的持久隔离、显式线程恢复、b30 负对照和 ARM64 单文件编译。b31 实机遇到关中断写 console panic；b31r1 将 WARN 延迟到线程，实机未记录原 panic，但在软件探针附近触发 hold，触摸武装失败，显示接管冻结。b31r2 的单次探针排空已本地通过，待新 CI 产物与实机。下文 a39 为显示专项基线。[第6批合同与验证](GPIO-IRQ-STAGE6-STRAY-CONTRACT.md)
+**GPIO 第6批 0121b31 本地验证通过**，包括 stray 的持久隔离、显式线程恢复、b30 负对照和 ARM64 单文件编译。b31 实机遇到关中断写 console panic；b31r1 将 WARN 延迟到线程，实机未记录原 panic，但在软件探针附近触发 hold，触摸武装失败，显示接管冻结。b31r2 的单次探针排空已通过本地验证、产物核对和两档镜像回读，待 mode 3 实机。下文 a39 为显示专项基线。[第6批合同与验证](GPIO-IRQ-STAGE6-STRAY-CONTRACT.md)
 
 ## 当前结论
 
@@ -45,7 +45,7 @@ LG G8X（mh2lm，SM8150）已经运行 iPhone X／D22AP 的 iOS 16.7.16 用户�
 
 内核由CircleCI构建，配置位于 `.github/workflows/circleci.yml`；用户push并下载kernel／buildtree，agent核对源码、标记和SHA后沿ABI608固件打包，再回读镜像。GitHub Actions、旧sweet／guacamole shim及FV内512KiB载荷均非当前MH2LM操作路线。
 
-显示专项 a39 验收已完成。当前待下载并验证 GPIO 第6批修复版 b31r2。所有 sudo、push 和 fastboot 操作按[构建指南](BUILD-GUIDE.md)分工执行。
+显示专项 a39 验收已完成。当前待实机验证 GPIO 第6批修复版 b31r2。所有 sudo、push 和 fastboot 操作按[构建指南](BUILD-GUIDE.md)分工执行。
 
 ## 文档使用规则
 

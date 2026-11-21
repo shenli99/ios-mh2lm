@@ -1,8 +1,8 @@
-# 当前交接（2026-11-21，b31r1 实机未通过，b31r2 本地通过）
+# 当前交接（2026-11-21，b31r2 镜像已交付，待实机）
 
 用户报告 b31r1 停在日志画面超过两分钟，USB 成功启动。持久日志 version1/ring4194304/total459371/flush15，标准解码5825行。SpringBoard 已 exec，USB ACM 已配置。TouchComm ready 后，dispatches=2/strays=1/pads=1 的延迟 WARN 表明 INTID240 已 hold；软件探针 hits=1、clear=1，正式武装却因 GIC enable readback 停止。显示已有一帧硬件传输，但 touch resume admission 拒绝，FB handoff 明确冻结；之后仍有用户态活动。日志没有记录 console panic，不能由 WARN 排序确认第2次投递来源。详见[实机审计](docs/GPIO-IRQ-STAGE6-STRAY-CONTRACT.md#b31r1-实机失败与-b31r2-候选)。
 
-b31r2 仅 TLMM：当前 sole-client 软件探针在已屏蔽 leaf 的情况下最多排空一次未服务投递，不伪造回调，不清 pad 锁存，无通用 unmask。真实 stray 仍 hold，WARN 仍在线程输出。最终 fixture 对 b31r1 在预期断言失败；五组 host 回归、ARM64 TLMM TU、154/154 marker 通过。下一步由用户推送 full-source，下载 b31r2 kernel/buildtree，再核对、打包和实机；未改 C worker、显示降级或总线。b30 仍是已验回退。工作区打包门禁 `out-bs/mk16k-0121b31r2.sh` 已拒绝旧 b31r1。
+b31r2 仅 TLMM：当前 sole-client 软件探针在已屏蔽 leaf 的情况下最多排空一次未服务投递，不伪造回调，不清 pad 锁存，无通用 unmask。真实 stray 仍 hold，WARN 仍在线程输出。最终 fixture 对 b31r1 在预期断言失败；五组 host 回归、ARM64 TLMM TU、154/154 marker 通过。b31r2 的 CircleCI kernel/buildtree 已核对，5300 个 XNU 文件与 `5e1680b` 一致，两档 ABI608 最终镜像回读通过，固件、ADT、启动参数与对应 b30/b31r1 一致。下一步临时启动 mode 3，确认探针、正式武装、桌面及触摸，再做两轮 OFF/ON；请导出 `logs/sweetlog-0121b31r2.bin`。未改 C worker、显示降级或总线。详见[修复版交付记录](docs/GPIO-IRQ-STAGE6-STRAY-CONTRACT.md#b31r2-镜像交付)。b30 仍是已验回退。工作区打包门禁 `out-bs/mk16k-0121b31r2.sh` 已拒绝旧 b31r1。
 
 ## 第6批 b31r1 交付（2026-11-21）
 

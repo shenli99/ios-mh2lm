@@ -63,4 +63,17 @@ host fixture 在日志 sink 前断言中断已开启。b31 原始源码在 summa
 - 行3930 TLMM deferred WARN：dispatches=2 / strays=1 / pads=1，INTID240 隔离；3931 软件探针 hits=1、clear=1、pending/active 均为零；3932–3933 正式武装读回失败，触摸停止。WARN 在诊断线程输出，不能据其文本次序确定第2次投递是否就是软件 pending 或陈旧电平。
 - 行4470 显示已观察到硬件传输；4475 touch resume admission 失败，4480 FB HANDOFF 明确冻结画面；其后仍有 SpringBoard 与其他用户态事件。未捕获 panic；末行不代表卡死 PC。
 
-b31r2 的确定性夹具模拟先命中后屏蔽 leaf、再注入软件 pending。真实 b31r1 代码错误地 hold；b31r2 允许在当前预留内对已屏蔽 sole client 排空一次未服务投递。该机会绑定到投递入口所见的预留序号；不调用第二次 handler、不写 pad、不清既有 stray hold，不扩大到未屏蔽、过期、晚注入或额外投递。清除软件 pending 时在正常线程输出 `one masked-client software probe delivery drained`，证明消费了软件预留，不证明硬件贡献者身份。五组回归、ARM64 单文件和 154 个源码标记通过；负对照和打包旧版拒绝证据见工作区 `scratch/gpio-irq-b31r2/`。未改显示降级或 C worker，总线不在本批。下一步验证 b31r2 的真实探针/武装、桌面、触摸和两轮普通 OFF/ON；如仍有 hold，先采集实证，不放宽隔离或去扫 pad。当前无 b31r2 CI 产物或镜像。
+b31r2 的确定性夹具模拟先命中后屏蔽 leaf、再注入软件 pending。真实 b31r1 代码错误地 hold；b31r2 允许在当前预留内对已屏蔽 sole client 排空一次未服务投递。该机会绑定到投递入口所见的预留序号；不调用第二次 handler、不写 pad、不清既有 stray hold，不扩大到未屏蔽、过期、晚注入或额外投递。清除软件 pending 时在正常线程输出 `one masked-client software probe delivery drained`，证明消费了软件预留，不证明硬件贡献者身份。五组回归、ARM64 单文件和 154 个源码标记通过；负对照和打包旧版拒绝证据见工作区 `scratch/gpio-irq-b31r2/`。未改显示降级或 C worker，总线不在本批。下一步验证 b31r2 的真实探针/武装、桌面、触摸和两轮普通 OFF/ON；如仍有 hold，先采集实证，不放宽隔离或去扫 pad。b31r2 到件及镜像回读见下。
+
+### b31r2 镜像交付
+
+2026-11-21 核对两份 CircleCI 下载归档：gzip 完整，5300 个 XNU 文件匹配修复提交 `5e1680b`，154 个源码标记命中。内核 17863640 字节，SHA256 `aab2d08b1b8b7f99fcee5216ecb7ee0c9bf1e0855874295fdc5cd6978021bb2d`，与包内清单一致；确认含 `one masked-client software probe delivery drained` 和延迟诊断标记。未取得 CI run ID 或完整构建日志。
+
+两档最终镜像各 35545088 字节，回读 Android header v1、32 MiB FAT16 和其中的内核、ADT、TOML。固件、ADT 与启动参数均和对应 b30/b31r1 一致，命令行各 605 字节。证据在工作区 `scratch/artifact-0121b31r2/packaging-verification.json`。
+
+| 镜像 | SHA256 |
+|---|---|
+| `out-bs/boot-16k-0121b31r2-gpioirq-panel-pipeline.img`（mode 3） | `5c016c23c0a2ce2f7df0aac2b2d6948547222b0aeeedccb50229db92af16e0a1` |
+| `out-bs/boot-16k-0121b31r2-baseline-panel-pipeline.img`（mode 2） | `00ed9d326fd2056092bd7c802a7f01568bde6f7883f97f724c0c745b44245baf` |
+
+先用 `fastboot boot` 临时启动 mode 3。核对软件探针后能否正式武装、显示接管是否完成；若进桌面且触摸正常，再测连续滑动、多指全部抬起、两轮普通 OFF/ON 及醒后触摸。请导出 `logs/sweetlog-0121b31r2.bin`；若再次停在日志画面也应保留原始日志。观察单次软件探针排空的 INFO 是否命中，以及是否还有 stray hold 或 arm/readback 失败；不因未观察到该 INFO 就认定设备已覆盖该交错。b30 是已验回退，b31r2 仍待实机。
