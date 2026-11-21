@@ -1,4 +1,12 @@
-# 当前交接（2026-11-21，b32两档镜像已交付，待实机）
+# 当前交接（2026-11-21，b32普通实机验收通过）
+
+用户反馈“没察觉异常”。b32 / `b3f735b` mode3持久日志标准解码version1/ring4194304/total2917072/flush26，37755行、未绕环、NUL0。3877探针排空、3878 probe hits1/clear1、3879正式armed；4507首次complete、4512 FB active。两轮OFF/ON完整且均恢复GPIO122/app-format；全程76 down/76 up、峰值五指、无残留。第一轮醒后无HID接触，第二轮醒后1对；最后hits1347/empty0/late0快照在首次OFF前，不当成醒后统计。ERROR/panic/stray hold均0，五条WARN全是既有启动诊断。详见[实机记录](docs/DISPLAY-TOUCH-FAILURE-FALLBACK.md#b32-普通实机验收2026-11-21)。
+
+b32成为最新普通运行基线，保留b31r2/b30回退。没有命中无触摸降级分支，真正终态故障显示降级仍仅host覆盖；第6批持续异常电平/显式恢复等边界不变。本轮只日志/文档，无需重编、重打包或重测同版，源日志SHA `7a365e0ea3844b541ed9c6e3dfc95721536cdf4ff36218d96bc866bac1deceea`；证据 `scratch/artifact-0121b32/device-log-review.json`。
+
+NEXT：独立显示降级批次普通回归收口；下一批先审查SweetI2CController / SweetI2CDevice / SweetTouchComm职责与接口，再按小批次推进总线层和触摸C++迁移，不把未覆盖的故障实机写成已验。本轮尚无总线/C++生产变更，无待下载的新内核。
+
+## b32两档镜像交付（2026-11-21，以下待实机步骤已完成）
 
 0121b32两份CircleCI归档完整，5300份XNU源码与 `b3f735b` 逐一一致，现有154/154源码marker及b32新内核标记命中。内核17863608字节，SHA256 `cc50524ad13a191f354b4927627a1e618e56fd46325f370235a944dc38b29856`，匹配包内清单。未提供CI run ID/完整构建日志。详见[交付、摘要与验收](docs/DISPLAY-TOUCH-FAILURE-FALLBACK.md#b32-镜像交付2026-11-21)。
 

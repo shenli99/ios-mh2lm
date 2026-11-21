@@ -1,6 +1,6 @@
 # 独立显示降级：触摸终止后完成首次接管（0121b32）
 
-更新：2026-11-21。实现 `b3f735b`，基于 `9fb04a3`（b31r2 普通实机验收记录；驱动基线 `5e1680b`）。本地实现、CI归档核对与两档镜像回读完成，待实机结果。b31r2 仍是最新普通实机基线，b30 保留回退。
+更新：2026-11-21。实现 `b3f735b`，基于 `9fb04a3`（b31r2 普通实机验收记录；驱动基线 `5e1680b`）。本地实现、CI归档与镜像回读完成，mode3普通实机路径已验；触摸终态故障降级仍仅有host证据。b32成为最新普通实机基线，保留b31r2与b30回退。
 
 ## 问题与范围
 
@@ -81,10 +81,26 @@ git -C /home/shenli/work1/ref/ios-mh2lm push origin full-source
 
 证据在工作区 `scratch/artifact-0121b32/`：`verify-artifacts.py`、`artifact-verification.json`、`packaging.log`、`verify-images.py` 和 `packaging-verification.json`。两份b31r2镜像SHA保持交付值。此次没有生产/CI/固件修改，没有重跑同版驱动回归，也未push或操作设备。
 
-**下一步由用户临时启动触摸mode3：**
+**交付时的临时启动命令（普通实机已完成，结果见下）：**
 
 ```powershell
 fastboot boot "\\wsl.localhost\Debian\home\shenli\work1\out-bs\boot-16k-0121b32-gpioirq-panel-pipeline.img"
 ```
 
 先验桌面、连续触摸/多指全部抬起，再两轮普通OFF/ON与醒后触摸；留存 `logs/sweetlog-0121b32.bin`，可用既有USB采集补充。核对探针、正式armed、首次接管complete与FB handoff active、两轮完整生命周期。正常触摸时不应出现无触摸降级WARN；若worker实际终止，保留原始日志，核对终态→显示真实传输→降级完成→FB active，而不期待故障触摸恢复。故障降级实机与受控故障注入仍未覆盖；无新强制失败开关，不以`sweettouch=0`替代终态。暂不进入总线/C++迁移。
+
+
+## b32 普通实机验收（2026-11-21）
+
+用户反馈“没察觉异常”。实现 `b3f735b`，交付记录 `9a98cfc`；测试档为触摸mode3、显示lifecycle mode7。原始 `logs/sweetlog-0121b32.bin` 为4198400字节，SHA256 `7a365e0ea3844b541ed9c6e3dfc95721536cdf4ff36218d96bc866bac1deceea`。使用标准 `tools/sweet-log.py`（4096字节头块、64位total/seq）解码：version1/ring4194304/total2917072/flush26，未绕环、37755行、NUL0及UTF-8替换字符0。逐行审计见工作区 `scratch/artifact-0121b32/audit-device-log.py` 与 `device-log-review.json`。
+
+- 行3877实录一次软件探针排空，3878 probe hits1/clear1/pending0/active0/pending-after0；3879正式armed。4506真实touch token2 app/format与IRQ恢复，4507首次takeover token1/operation1 complete，4512公开FB handoff active。
+- 第一轮OFF token2于33615行complete；ON token3于34436行complete。ON过程34352色彩完成、34363新帧后进入亮度、34382亮度完成、34434 GPIO122重新armed、34435 touch token4 app/format恢复。pipeline generation2已记录。
+- 第二轮OFF token4于34852行complete；ON token5于35353行complete。ON过程35280色彩完成、35293新帧、35312亮度完成、35351重新armed、35352 touch token6恢复；pipeline generation3已记录。
+- 全日志76 down/76 up，同指顺序合法、无遗留触点，峰值同时五指。75对在首次OFF前；第一轮ON后至第二次OFF前没有HID接触记录，不能声称该段已验醒后输入；第二轮ON后实录1对（35968/35993行）。
+- 最后一条IRQ统计在33189行，hits1347/empty0/late0，处于首次OFF之前；后续触摸成功来自armed/app-format与HID证据，不把该计数快照说成醒后统计。所有计数快照empty/late均0。
+- ERROR0、panic0、TLMM stray hold0；五条WARN全部在首次OFF前，三条启动scanout review、两条USB ep0，与既有启动诊断一致。无新的无触摸降级准入/完成WARN，证明本轮走正常touch fence，而非实际故障降级。
+
+结论：b32普通首次接管、触摸及两轮OFF/ON门槛通过，成为最新普通运行基线；b31r2、b30镜像保留。真实触摸终态故障降级仍未在设备上触发；受控持续异常电平/显式恢复、多GPIO硬件并行、物理rail-off和长期稳定性均未由本日志证明。日志无SYSTEM_OFF收尾，持久尾部只代表刷盘边界，不作故障或关机位置推断。
+
+本轮仅原始日志解码、证据审计和文档提交，不重编、重打包或要求重测同版。下一批按固定计划先审查SweetI2CController / SweetI2CDevice / SweetTouchComm的职责、接口与迁移边界，再分批实现总线层和触摸C++迁移；本轮没有开始该生产改动，故障专项实机边界继续保留。

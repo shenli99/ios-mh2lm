@@ -4,9 +4,9 @@
 
 ## 当前交付
 
-**独立显示降级 0121b32 / `b3f735b` 两档镜像已交付，待实机。** 5300源码、内核SHA与154/154标记已核对；最终ABI608镜像的固件/ADT/605字节参数与b31r2一致。首次降级到complete、查询同步和硬启动截止的9组本地回归及两份ARM64 TU已通过；旧fixture同位失败单列。b32未实机验收。[实现、证据与下一步](DISPLAY-TOUCH-FAILURE-FALLBACK.md#b32-镜像交付2026-11-21)
+**独立显示降级 0121b32 / `b3f735b` 普通实机回归通过。** 首次接管、76对触点、峰值五指与两轮OFF/ON已验，第二轮醒后有触点、第一轮醒后无HID记录；ERROR/panic/stray hold均0。实际终态故障降级未触发，仍为host证据；9组相关回归与两份ARM64 TU的边界保持。[实机记录](DISPLAY-TOUCH-FAILURE-FALLBACK.md#b32-普通实机验收2026-11-21)
 
-**最新触摸 IRQ 普通实机基线为 0121b31r2 / `5e1680b`**，命中单次探针排空，桌面、触摸和两轮普通 OFF/ON 通过；b30 保留为回退。[第6批实机证据](GPIO-IRQ-STAGE6-STRAY-CONTRACT.md#b31r2-实机验收)
+**最新触摸 IRQ 普通实机基线为 0121b32 / `b3f735b`**，保留b31r2及b30镜像回退。第6批持续异常电平与显式恢复仍未实机覆盖。[b32证据](DISPLAY-TOUCH-FAILURE-FALLBACK.md#b32-普通实机验收2026-11-21) · [第6批边界](GPIO-IRQ-STAGE6-STRAY-CONTRACT.md#b31r2-实机验收)
 
 **GPIO 第6批 0121b31 本地验证通过**，包括 stray 的持久隔离、显式线程恢复、b30 负对照和 ARM64 单文件编译。b31 实机遇到关中断写 console panic；b31r1 将 WARN 延迟到线程，实机未记录原 panic，但在软件探针附近触发 hold，触摸武装失败，显示接管冻结。b31r2 的 mode 3 普通路径已实机通过；持续异常电平与显式恢复为 host 证据，未完成实机故障注入。下文 a39 为显示专项基线。[第6批合同与验证](GPIO-IRQ-STAGE6-STRAY-CONTRACT.md)
 
@@ -47,7 +47,7 @@ LG G8X（mh2lm，SM8150）已经运行 iPhone X／D22AP 的 iOS 16.7.16 用户�
 
 内核由CircleCI构建，配置位于 `.github/workflows/circleci.yml`；用户push并下载kernel／buildtree，agent核对源码、标记和SHA后沿ABI608固件打包，再回读镜像。GitHub Actions、旧sweet／guacamole shim及FV内512KiB载荷均非当前MH2LM操作路线。
 
-显示专项 a39 验收已完成，GPIO 第6批 b31r2 普通验收通过，无需重测同版。b32归档和两档镜像核对已完成，无需新CI；下一步用户临时启动gpioirq档，验桌面/触摸及两轮OFF/ON并导出日志。b32未实机验收前不推进总线或触摸C++迁移。所有 sudo、push 和 fastboot 操作按[构建指南](BUILD-GUIDE.md)分工执行。
+显示专项 a39 验收已完成，GPIO 第6批 b31r2 普通验收通过，无需重测同版。b32普通实机验收已完成，无需新CI或重测同版。下一批先审查总线层职责/接口与分批迁移边界，再推进实现；真正故障降级的实机未覆盖状态保持。所有 sudo、push 和 fastboot 操作按[构建指南](BUILD-GUIDE.md)分工执行。
 
 ## 文档使用规则
 
