@@ -4,6 +4,8 @@
 
 ## 当前交付
 
+**SM8150 时钟系统计划已制定，尚未实施。** [总计划](CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)及十个阶段覆盖统一入口、GCC、apps RSC、RPMh 客户端、频率／电源域、显示迁移、其他 CC、PM／恢复和覆盖扩展。具体小计划默认单目标，分别注明需求、本地／实机检验、预期结果和失败归属；下一实施点是 C0-01 基线锁定。本轮纯文档，无新驱动、CI、固件、ADT、镜像或实机结果，不要求重测 b32。
+
 **独立显示降级 0121b32 / `b3f735b` 普通实机回归通过。** 首次接管、76对触点、峰值五指与两轮OFF/ON已验，第二轮醒后有触点、第一轮醒后无HID记录；ERROR/panic/stray hold均0。实际终态故障降级未触发，仍为host证据；9组相关回归与两份ARM64 TU的边界保持。[实机记录](DISPLAY-TOUCH-FAILURE-FALLBACK.md#b32-普通实机验收2026-11-21)
 
 **最新触摸 IRQ 普通实机基线为 0121b32 / `b3f735b`**，保留b31r2及b30镜像回退。第6批持续异常电平与显式恢复仍未实机覆盖。[b32证据](DISPLAY-TOUCH-FAILURE-FALLBACK.md#b32-普通实机验收2026-11-21) · [第6批边界](GPIO-IRQ-STAGE6-STRAY-CONTRACT.md#b31r2-实机验收)

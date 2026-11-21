@@ -1,4 +1,12 @@
-# 当前交接（2026-11-21，b32普通实机验收通过）
+# 当前交接（2026-11-21，时钟系统分阶段计划已制定）
+
+用户要求先把时钟系统拆成阶段和小计划，明确目标、需求、检验、预期结果与实机失败归属。本轮交付[时钟总计划](docs/CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)和[阶段0–9入口](docs/CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#4-阶段入口与依赖)。具体小计划默认一个目标；后续同类资源扩展最多三个目标且必须可独立选择、实机隔离和分别判定，否则拆卡。初始化、门控、共享引用、reset、RSC 所有权、队列／缓存、divider／RCG／PLL、GDSC、升降频及恢复分开实施。
+
+架构沿用统一 IOQcomClockProvider＋独立 CC 后端，apps／display RSC 分实例，资源语义客户端共用传输；初期保留现有 IRQ 完成，先 ACTIVE-only。无安全样本或电源／系统 PM 前置时明确受阻，不以空实现、mock 或普通 OFF/ON 伪称完成。显示 C08／PD4 原有剩余项与 TLMM 独立后续保持各自范围。
+
+NEXT：所有时钟实施卡仍未开始，后续实施从 C0-01 基线锁定，再做 C0-02 writer／依赖表和 C0-03 安全样本调查。本轮只编制和审查计划、同步文档入口并本地提交，没有修改生产代码、CI、固件、ADT 或启动参数，没有新内核／镜像／实机结果，不需重编或重测 b32。最新普通实机基线仍为 b32／`b3f735b`，保留 b31r2／b30 回退。
+
+## b32 普通实机验收（前次交接，基线保持）
 
 用户反馈“没察觉异常”。b32 / `b3f735b` mode3持久日志标准解码version1/ring4194304/total2917072/flush26，37755行、未绕环、NUL0。3877探针排空、3878 probe hits1/clear1、3879正式armed；4507首次complete、4512 FB active。两轮OFF/ON完整且均恢复GPIO122/app-format；全程76 down/76 up、峰值五指、无残留。第一轮醒后无HID接触，第二轮醒后1对；最后hits1347/empty0/late0快照在首次OFF前，不当成醒后统计。ERROR/panic/stray hold均0，五条WARN全是既有启动诊断。详见[实机记录](docs/DISPLAY-TOUCH-FAILURE-FALLBACK.md#b32-普通实机验收2026-11-21)。
 

@@ -1,0 +1,103 @@
+# SM8150 时钟系统分阶段实施计划
+
+更新：2026-11-21。状态：**计划已制定，所有实施小计划均未开始**。目标设备为 LG G8X（mh2lm／SM8150）。本轮只编制计划，不修改驱动、CI、固件、设备树或启动参数，不生成测试镜像。
+
+## 1. 最终目标与范围
+
+由 `IOQcomClockProvider : IOService` 为外设提供统一时钟入口，GCC、RPMhCC、DISPCC、VIDEOCC、CAMCC、GPUCC 分别提供后端。外设按资源名取得句柄，通过有完成结果的请求使用时钟；reset、电源域、regulator、带宽保留各自的资源语义。
+
+公共 RPMh 事务模块和 `IOQcomRSCChannel` 供 RPMhCC、RPMhPD、regulator、BCM voter 共用。apps RSC 与 display RSC 分实例；同一寄存器资源／DRV 的 TCS 集合只有一个写入者。SM8150 首版不增加没有实际职责的 MMCC wrapper。
+
+交付按“具体资源及已验证能力”登记，不能因为一个控制器能初始化就称其功能齐全。芯片中尚无消费者、无安全样本或无完整资料的资源保留为未支持；后续按第9阶段逐组扩展。整个计划不承诺同步完成 GPU、相机、视频编解码器或整机 CPU suspend 驱动。
+
+## 2. 分层与不可混淆的关系
+
+| 层 | 所有权及职责 |
+|---|---|
+| 统一时钟入口 | 注册／查询后端，绑定设备资源名与 `(controller, local ID)`，管理句柄及跨 CC 依赖协调；不直接映射所有控制器 |
+| 本地 CC 后端 | 自己的 MMIO、branch、RCG、PLL、reset；本地 GDSC 操作通过同一寄存器所有者提供 |
+| RPMh 资源客户端 | 按资源类型聚合并编码；同一通道／资源／状态集不能建立互相覆盖的聚合账本 |
+| RPMh 事务模块 | 状态集、事务、confirmed 缓存、批次和完成语义；初期可与 RSC 共处一个服务的不同模块 |
+| RSC channel | 所属 DRV 的 TCS 调度、寄存器、trigger、IRQ、期限和回收；不猜测 corner／带宽含义 |
+| 电源资源层 | 电源域、供电票、频率到 corner 的约束和 PM 连接；缺能力时明确拒绝 |
+
+- Service Plane 挂载、clock parent、电源依赖分别保存。一个 CC 可以覆盖多个域；clock 节点不必各建 IOService。
+- GCC 的本地 vote 位仍走 GCC MMIO；普通 GCC 操作不因“投票”一词转走 TCS。
+- register-access clock／domain 与输出时钟的依赖分别描述，避免域关闭后无法访问其上电控制寄存器。
+- 供电／corner 提高完成后才提高频率；降频完成后才降低所需 corner。具体 GDSC／reset 顺序按已核实硬件流程执行。
+- 新的 IRQ／TCS 内存、队列容量等资源在实际需要它们的小计划建立；不提前增加 DMA 或通用大缓冲区。
+
+## 3. 小计划执行规则
+
+### 3.1 粒度
+
+1. **本文所有已列明的具体小计划只有一个目标**，低于用户允许的最多三个目标。一个目标可以包含不可分割的步骤，例如一次事务的写入、触发、完成、回收。C9-R 是尚未实例化的扩展模板；未来只有可完全隔离、独立选择并分别验收的同类资源，才允许在其一张实例卡中设置两到三个子目标。
+2. 初始化、只读查询、一次门控、引用共享、分频、RCG、PLL、reset、GDSC、IRQ 迁移、缓存、睡眠恢复分别立项。
+3. 每个功能样本固定到一个资源、一个算法类型或一个所有权切换。出现第二种 PLL／RCG／GDSC 变体，复制新小计划并赋独立编号，不能偷偷扩展原任务。
+4. 提取现有代码和接管硬件分开；接管硬件和改变其算法分开。既有路径缺陷另建修复小计划，不能夹进迁移候选。
+5. 小计划必须有可复查的行为或调查交付；不得只写“完善某控制器”“适配电源”“继续调试”。
+
+### 3.2 验收等级与未知目标
+
+- **调查任务**：交付完整表格、证据和逐项结论，可为“可实施／缺少依赖／本设备不适用”。这只完成调查，不代表相应硬件功能通过。
+- **本地通过**：相关编译、fixture／故障／边界检查通过；只证明对应软件合同。
+- **实机通过**：实际执行本卡指定路径，保存事件和结果。只有普通启动／没有异常，不能代替新功能触发证据。
+- **受阻**：缺少安全资源、供电、消费者、独立完成证据或系统低功耗入口；记录具体缺项和解除检验。不得以 mock、跳过或 `return success` 改写为实机通过。
+- **不适用**：必须有本设备资源表及来源证明，经记录从支持范围排除；不能只因难做而标不适用。
+
+每卡的“实机检验”是未来实施时的验收要求；现在不要求重测 b32。纯描述／调查任务不为凑实机次数新增镜像。若尚不能确定能安全操作的资源，先完成 C0-03，不猜一个空闲 clock。
+
+### 3.3 一次候选与失败归属
+
+- 一个候选内核只改变一个正在验收的小计划的生产行为；基础已验提交可以作为前置。通常一个小计划一个实现提交；必要时允许准备提交，但不把未验行为叠加进下一卡。
+- 首次硬件写入、硬件所有权转交及新状态转换，完成本地检查后分别交付实机。文档、只读审查和后续测试设计可以提前。
+- 设备自检通过实际公开接口或明确的诊断入口发请求，记录 `planID / resource / consumer / token / generation / phase / result`。诊断开关必须显式选择，不能自动改动正常启动的资源。
+- 至少记录请求已接受、实际执行、所需完成、最后结果。门控 OFF、RPMh ACK、GDSC 状态各按自己的语义判断，不互相替代。
+- 前置探测未通过记 `blockedBy=<前置卡>`；本卡执行已开始后失败记本卡与具体 phase。日志中途丢失、镜像不匹配或路径未执行记“证据不足”，不猜故障阶段。
+- 通用回归只判断是否退化。新目标能否通过，要看本卡的专属事件链；不能用“能进桌面”归因门控、PLL 或 IRQ 成功。
+
+### 3.4 证据、回退与现有工作
+
+每卡记录：基线提交、候选提交、模式／样本／依赖、源码与构建树匹配、kernel／镜像 SHA、原始日志路径及新鲜度、检验结果、未覆盖项、下一步。设备日志沿用 [sweet-log 工具](../tools/sweet-log.py) 和 [构建指南](BUILD-GUIDE.md)。原始产物留工作区，不入 git。
+
+公共回归选择已验基线中的启动／根卷、USB 日志、触摸、显示和普通 OFF/ON；只对可能受本卡影响的路径执行必要检查。用户负责 push、下载、sudo 和设备操作，agent 负责实现、本地验证、归档核对、打包及记录；每卡的 fastboot 操作依现有分工执行，不因写入本计划扩大设备操作权限。
+
+继承中的 UFS、USB、显示资源不得因新框架注册、初始引用为零或退出而被关闭；不运行通用 disable-unused。未知执行结果时保留资源并报告 uncertain，不能用自动重试／回滚／旧路径回退掩盖失败。
+
+当前普通实机基线为 b32；C08／PD4 等显示计划未完成的物理转换与状态重建不会因接口迁移自动完成。每项迁移必须保留原有边界，见 [状态](STATUS.md)、[显示完整驱动计划](PANEL-FULL-DRIVER-PLAN.md)及 [C08 范围](PANEL-LINEAGE-DISPLAY-CLIENT-CLOCKS.md)。
+
+## 4. 阶段入口与依赖
+
+阶段是能力分组，不是必须等待全阶段所有可选资源才能继续。**具体依赖以小计划卡为准**：例如无安全 reset 样本不阻塞已具备依赖的 RSC 只读初始化。阶段仍有未验卡时，不能笼统标成整个阶段通过。
+
+| 阶段 | 结束时增加的能力 | 小计划入口 |
+|---|---|---|
+| C0 基线与试验资源 | 明确基线、现有 writer、可安全验证的具体样本 | [阶段0](clock-plan/00-baseline.md) |
+| C1 统一入口 | 服务能初始化，后端能注册，外设能绑定只读句柄和依赖描述，公共需求账本可本地验证 | [阶段1](clock-plan/01-provider.md) |
+| C2 最小 GCC | 从初始化、只读查询到一个本地门控／共享引用／voted／reset 样本 | [阶段2](clock-plan/02-gcc.md) |
+| C3 apps RSC 公共通道 | 保留现有 IRQ 完成，分步转交执行器，形成有界事务接口 | [阶段3](clock-plan/03-rsc.md) |
+| C4 RPMh 资源客户端 | RPMhCC 单资源投票、别名聚合、受约束缓存，逐种迁移 VRM／ARC／BCM | [阶段4](clock-plan/04-rpmh-clients.md) |
+| C5 频率与本地电源域 | 分步实现 GDSC、divider、RCG、PLL 和 corner／频率协调 | [阶段5](clock-plan/05-rate-and-power.md) |
+| C6 显示资源迁移 | 按一个资源／使用组迁入 DISPCC；单独迁移 display RSC | [阶段6](clock-plan/06-display.md) |
+| C7 其他多媒体 CC | VIDEOCC、CAMCC、GPUCC 各自分步取得最小可验证能力 | [阶段7](clock-plan/07-multimedia.md) |
+| C8 状态集、PM 与恢复 | 分别验证 sleep／wake 缓存、flush、PM 连接及局部状态丢失重建 | [阶段8](clock-plan/08-pm-and-restore.md) |
+| C9 覆盖扩展与收口 | 按资源组扩展清单，验证跨 CC 使用及交付边界 | [阶段9](clock-plan/09-coverage.md) |
+
+可并行的准备工作：C1／C2 本地框架与 C3 的只读／提取工作；C7 各 CC 的资料审查。首次实现不同时开启两条新的实机写路径。C6 的 display RSC 迁移不作为 apps RSC 基础供电投票的前置，避免电源／显示时钟依赖环。
+
+## 5. 当前已有代码与参考
+
+| 入口 | 当前可复用部分／不能提前推导的结论 |
+|---|---|
+| [SweetRPMh 接口](../dxb/xnu/iokit/Kernel/arm/SweetRPMh.h)及[实现](../dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp) | apps RSC、现有 IRQ 完成及 VRM／ARC／CN0；当前未等于通用 RPMhCC 或完整低功耗实现 |
+| [显示 clock](../dxb/xnu/iokit/Kernel/arm/SweetMDSSClock.inc)及[core](../dxb/xnu/iokit/Kernel/arm/SweetMDSSCore.inc) | 本地租约、voted 分支和部分 GDSC／PLL／RCG 规则；迁移时不扩大冷初始化或最后释放权限 |
+| [显示 NoC](../dxb/xnu/iokit/Kernel/arm/SweetMDSSNoC.inc) | display RSC／数据带宽已有独立 owner；不能全部改发 apps RSC |
+| [LG GCC 参考](../../android_kernel_lge_sm8150/drivers/clk/qcom/gcc-sm8150.c)及[branch](../../android_kernel_lge_sm8150/drivers/clk/qcom/clk-branch.c) | 本地寄存器、voted 等语义；Linux 已列出的资源不等于 XNU 已接管或可随意关闭 |
+| [LG TCS 驱动](../../android_kernel_lge_sm8150/drivers/mailbox/qcom-rpmh-mailbox.c)及[RPMh 事务](../../android_kernel_lge_sm8150/drivers/soc/qcom/rpmh.c) | 本树传输层位于 mailbox，不能套上游文件名和行号；只按已验证版本移植寄存器事实 |
+| [SM8150 DTS](../../android_kernel_lge_sm8150/arch/arm64/boot/dts/qcom/sm8150.dtsi)及[GDSC](../../android_kernel_lge_sm8150/arch/arm64/boot/dts/qcom/sm8150-gdsc.dtsi) | apps／display 通道与分散在各 CC 的本地域；最终输入仍要与实际 ADT／硬件核对 |
+
+## 6. 实施状态与下一步
+
+当前所有卡状态均为“未开始”，本文不把上一轮架构讨论当成 C0 验收。第一个实施点是 **C0-01 基线锁定**，之后 C0-02 资源所有权表、C0-03 安全样本调查。完成调查前不开始新硬件写入。
+
+后续每次更新在相应卡下追加该卡的结果链接和证据等级，并同步本节；不要把全体卡预填为完成。若依赖或样本变化，先修订卡片，再实现，保持编号稳定。

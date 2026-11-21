@@ -8,6 +8,7 @@
 | a39镜像、日志和实机结论 | [0121a39验收记录](PANEL-D1-0121A39.md) |
 | 构建、产物核对、打包和取日志 | [BUILD-GUIDE](BUILD-GUIDE.md) |
 | 当前驱动职责与依赖 | [驱动架构](CURRENT-DRIVER-ARCHITECTURE.md) |
+| SM8150 时钟、CC、RPMh／RSC 分阶段实施 | [时钟总计划](CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md) → [阶段0：基线与安全样本](clock-plan/00-baseline.md) |
 | 四大目标和执行顺序 | [IRQ／显示／日志／电源路线](IRQ-FRAMEBUFFER-PLAN.md) |
 | TLMM 已实现能力、常用缺口与源码待修项 | [TLMM能力清单](TLMM-CAPABILITIES-AND-GAPS.md) |
 | GPIO 中断当前批次 | [分批计划](GPIO-IRQ-IMPLEMENTATION-PLAN.md) → [第6批 stray 合同与验证](GPIO-IRQ-STAGE6-STRAY-CONTRACT.md) |
