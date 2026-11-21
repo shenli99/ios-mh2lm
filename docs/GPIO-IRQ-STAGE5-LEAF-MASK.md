@@ -45,3 +45,18 @@ stray仍是既有计数/DEBUG，持续未知贡献者可能在EOI后重复投递
 | 2 | `7fa42e74709880e6c3db00ab5f1d3b577c761e61a5a0aca2a4e7d7807726a819` |
 
 现已交付，尚无实机结果；先以 mode 3 验证桌面、连续触摸、两轮普通 OFF/ON 和醒后触摸。保留 b29 回退，不推进第 6 批。完整核验在工作区 `scratch/artifact-0121b30/packaging-verification.json`。
+
+
+## b30 两轮 OFF/ON 实机验收（2026-11-21）
+
+用户反馈桌面运行正常、未发现异常，提供logs/sweetlog-0121b30.bin。header version1/ring4194304/total1549334/flush12，正确解码19527行，SHA256 48668be19ae0230e61c84bc93a0a372f82adfb760494b263256ec8253350f6bd。工作区机器报告scratch/artifact-0121b30/device-log-review.json。
+
+- 初次接管token1/operation1 complete行4481。
+- OFF token2/operation2行15712完成；ON token3/operation3行16518完成，触摸重新armed/app-format恢复。
+- 第二轮OFF token4/operation2行16938完成；ON token5/operation3行17443完成。
+- 全日志35 down/35 up，配对次序合法、无残留；同时触点峰值5。最后触摸统计hits459/empty0/late0。
+- ERROR=0；probe/arm/setup/resume/HANDOFF/deadline/panic失败全为0；snapshot WARN=0，旧每次unmask ERROR=0。5条WARN均为启动期scanout review/USB ep0，生命周期活动期间没有WARN。
+
+该实机只存在GPIO122一个TLMM客户端，因此直接证明单pad触摸在leaf mask改动后的真实整机启动/两轮普通唤醒通过；不能证明第二个GPIO在硬件上与触摸并行。双客户端独立派发/锁存/快worker测试仍是host aggregate模型证据，不将两者混写。
+
+结论：b30/b76005f第5批单触摸实机通过，b29仍保留回退。第6批尚未实施；下一阶段是单独设计stray隔离/恢复，不能因本日志strays未出现而跳过异常持续电平验证，也不允许擅自写未持有/island pad。本轮未验长期耐久或物理rail-off。
