@@ -9963,3 +9963,17 @@ keeps the line masked until the client resumes. Route bits (target KPSS, raw
 status) are the controller's; polarity/detect/enable stay with the client until
 the touch path is proven end to end. `sweettouchpanel=3` opts the touch facade
 into the pad path without spending a boot-arg byte (the line is 605/607).
+
+## 0123 内核归档、补丁 0231 与三档镜像（2026-11-22，实机结果待回）
+
+用户提供 `logs/xnu-kernel-0123.gz`（60335575 字节，SHA256 `417527d237444873c27b80bfab31d289bc0698054259f98d86d2ac8b47cac1ce`）与 `logs/xnu-buildtree-0123.gz`（23443182 字节，`d25a0ef0f71eb7687c58297fbad25eb174a7b25c62f3522dd155eb698a246566`）。构建树 5302 份源码与 HEAD `4190f83` 逐字节一致、154/154 marker 命中（`0231` 已含其中），所以云端构建内容＝本地严格重放结果。内核 `kernel.development.mh2lm` 17911048 字节，SHA256 `4a054ef0efc9a5bd8d3380a53848961fddbf6cc682c8c9b5cffbff714a25bace`（较 0122 多 120 字节，即 0231 的计数与属性分支），匹配包内 `SHA256SUMS`；`bindings=%u`、`detail=bad-diag-property`、`sweet,clock-diag` 文案均在位。证据 `scratch/artifact-0123/artifact-verification.json`。
+
+`bash out-bs/mk16k-0123.sh <kernel> 0123 4a054ef0…` 出三档（各 35545088 字节，参数**全部 605 字节**，六标志树 `6a50db55…`／七标志诊断树 `c93d9b83…`）：
+
+- `boot-16k-0123-baseline-panel-pipeline.img` `59108a8762db4ef35d3161e9f0e03e4d328b64ace50970b69f26265e1aff44f0`（touch 2，未刷）
+- `boot-16k-0123-gpioirq-panel-pipeline.img` `ce0101d0ede54d637d36622cbf716bd377ea814acc187f4ed6116efa5e37122d`（默认档）
+- `boot-16k-0123-gpioirq-panel-pipeline-clockdiag.img` `54771c2e83afa3df1898f815fb1b29565a995851f3893c2dc793c89ae0874c38`（与默认档只差 ADT 一个属性，参数逐字节相同）
+
+`scratch/artifact-0123/verify-images.py` 逐份解头／解 FAT／回读：kernel 槽同一 ABI608 固件、FAT 内 `kernel.macho` 等于构建产物、ADT sha 与模式对应、TOML `entry.path=Payloads/kernel.macho`、每份参数 ≤607、诊断档与默认档参数完全相同。证据 `packaging-verification.json`。
+
+NEXT：用户刷默认档→导出日志（期望 `bindings=0`、无 diag 行），再刷 clockdiag 档→导出日志（期望 `resource=cc7 … detail=backend-registered`、4 条 `phase=diag` 且 `enable` 全为 Unsupported、`phase=diag-done … detail=zero-writes` 收尾、零 WARN／ERROR）；agent 用 `audit-clock-log.py --strict <default>` 与 `--diag <clockdiag>` 核对后补实机结论、提交并收口 C1。
