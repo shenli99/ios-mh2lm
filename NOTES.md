@@ -8,9 +8,30 @@
 
 NEXT：所有时钟实施卡仍未开始，后续实施从 C0-01 基线锁定，再做 C0-02 writer／依赖表、C0-04 需求清单、C0-05 控制器范围和 C0-03 安全样本调查。本轮只编制和审查计划、同步文档入口并本地提交，没有修改生产代码、CI、固件、ADT 或启动参数，没有新内核／镜像／实机结果，不需重编或重测 b32。最新普通实机基线仍为 b32／`b3f735b`，保留 b31r2／b30 回退。
 
+## 0126 默认档实机进入桌面，C2-01／C2-02 收口（2026-11-22）
+
+补丁 `0234` 修正窗口地址后，`boot-16k-0126-gpioirq-panel-pipeline.img`（`fae0eed6fd2c5d1b7a046e0c3193e2707b0579b51c1482254081ec76bdc11b6e`，0126 内核 `75c6b0322b8417a65e1b4e01a9fc5b6d4a781616996f346b29635d149f2a19cd`＋修正后的 `gcc` 节点）实机 `fastboot boot` 进入桌面。`logs/sweetlog-0126-0.bin`（`3d1cd662b6749ac037190c2c7ee30c0c82c277d8866ce4b1806dd2b0087193bc`，`total=1366678`，`flush_sequence=12`，未回绕）默认档审计通过：
+
+- 四条 `phase=map result=0 length=0x1000`，`resource-offset=0x100000` 自洽：`gcc:0x10b000 offset=0xb000`／`gcc:0x133000 offset=0x33000`／`gcc:0x143000 offset=0x43000`／`gcc:0x162000 offset=0x62000`。裸偏移模型在真机上的危害由此彻底关闭。
+- 11 条 `phase=snapshot result=0 value=…`：`0x80000003`／`0x4221`／`0x1`／`0x80000000`／`0x80000000`／`0x80000000`／`0x100000`／`0x80000000`／`0x14b`／`0`／`0x80000000`。CBCR 里 `CLK_OFF`（bit31）在 `gcc_disp_ahb_clk`、`gcc_pdm2_clk` 上均置位，说明“enable 置位但输出关闭”是这台机器的正常状态，不是本卡的判断错误。
+- `planID=C2 resource=cc1 phase=start result=0 windows=4 snapshot=11 reads=18 writes=0 variant=0x8150`：读预算 11＋7 用满，写计数零。
+- 六条 `phase=decode` 用**设备资源名** `resource=cc1:0x1`…`cc1:0x6`（不是物理地址），顺序即描述表顺序；`cc1:0x5`＝`gcc_pdm2_clk_src` 解出 `detail=configured sel=0 div=0 div2=0 hz=19200000 known=1`，`decode-sample` 同行 `hz=19200000 known=1`。CFG `0x100000` ⇒ `SRC_SEL=0`（XO）、`hid_div=0`（未编码分频）、`mode=0`。
+- 零 MMIO 写入、零时钟 `[WARN]`／`[ERROR]`，非时钟 WARN／ERROR 清单与面板标记不超 b32。
+- 已知限制：`cc1:0x6`（`gcc_pdm2_clk`，父是本 CC 的 `cc1:0x5`）单遍解码只认 `gccFixedRate()` 固定源，如实 `parent-rate-unknown known=0`；要闭合需二遍解析，留待后续卡。
+
+工具侧本轮修了两处“期望写错”的审计缺陷，值得记住：
+
+1. `check_gcc()` 原先把 `phase=snapshot` 当成“只应出现在读失败时”。后端在成功时也逐行打印（`result=0 value=%#x`），失败才是 `[ERROR] … detail=read-failed`。现在审计要求恰好 11 条、标签按表顺序、每条 `result=0` 且带 `value=`。
+2. `phase=decode` 的 `resource` 是设备资源名（`cc1:localID`），只有 `map`／`snapshot` 用物理地址。现在期望表按 `cc1:0x1..0x6` 排序，并把每条 decode 的 `raw` 与对应快照寄存器值**逐字节比对**（`cc1:0x5` 比 `0x133010,0x133014` 这对 CMD/CFG），读错寄存器会立刻暴露。
+3. `synthetic-*.bin` 自测模板必须与真环同形：加了快照行之后，`good`／`rcg-known-rate`／`default-mode` 三个正例才重新通过（`SELF-TEST OK []`）；模板缺行会让审计“通病”检验失真。
+
+NEXT：按总计划 §3.4 进入首个硬件写候选 **C2-08（debugcc 测频）**——它在 C2-03 之前，使后续门控／频率卡先取得实测证据；C1-05 并入第一个写候选。C2-08 需要 debug mux（窗口 `0x162000`，实测当前选中 `0x14b`）的选择／计数／还原序列，先补样本卡再实现，首次写必须落在本卡声明的样本上并有还原路径。
+
 ## C2-01／C2-02 只读 GCC 后端完成（2026-11-22，待 CI／实机）
 
 时钟计划第二个实施候选，仍然**写计数为零**：`IOQcomGCC : IOQcomClockController` 匹配 `sweet,gcc`（`IOPlatformDevice`），`files.arm64` 加 `IOQcomGCC.cpp optional iokitcpp`，`KernelConfigTables.cpp` 的 MH2LM 段加 personality，ADT 由 `tools/mk-mh2lm-mdss-adt.py --gcc` 追加独立 `gcc` 节点（`sweet,gcc-abi=<u32 1>`、`sweet,gcc-variant=<u32 0x8150>`、`reg` 四窗口；`--gcc` 隐含 `--clock-provider`，去掉节点即回到 C1 字节）。实现见[阶段2](docs/clock-plan/02-gcc.md)。
+
+> 本节写于 `0234` 之前：下面第一条的窗口 `0x00033000`／`0x00043000`／`0x00062000` 是当时的裸偏移缺陷，已被 `0234` 改为 `0x00133000`／`0x00143000`／`0x00162000`（见上节与[阶段2](docs/clock-plan/02-gcc.md)）。
 
 - C2-01：按 ADT `reg` 顺序映射 `0x0010b000`／`0x00033000`／`0x00043000`／`0x00062000` 四页，每页核对解析地址与长度后使用；`sweet,gcc-abi`／`sweet,gcc-variant` 只认数值（缺失 BadArgument、非 `0x8150` Unsupported）；寄存器访问是 4 字节对齐、`offset+4<=length` 的窄只读助手，`dmb oshld` 后返回，全程一把 `IOLock`；文件内无写路径，`registerWrites()` 是常量 0；`start` 先冻结 11 个已知寄存器快照，再以 200×5 ms 有界等待 provider 发布后注册；失败路径卸载映射与锁，`stop` 撤注册并释放映射／锁（重启可再来一次）。
 - C2-02：只解码 `gcc_pdm2_clk_src`（`0x33010`、`hid_width=5`、`gcc_parent_map_0`、`mnd_width=0`）一种固定父源／分频配置；选择子 0→XO（19.2 MHz 可信）、1→GPLL0、6→GPLL0 even（后两者无非可信父频→`parent-rate-unknown`），7 与 2..5→`src-invalid`；`mode!=0`→`mode-unsupported`；`CMD_UPDATE`→`update-pending known=0`；`div=0` 按 `clk_rcg2_calc_rate` 的语义表示“未编码分频”，不按除数 1 处理（内部 `divX2=div?div+1:0`）。保留 `raw[2]` 原值与推导依据，只报“配置解码”，不宣称实测频率。显示三条 branch 声明 pinned（含 `CLK_IS_CRITICAL`），永不关闭。

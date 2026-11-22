@@ -1,6 +1,6 @@
 # C2：GCC 的最小本地时钟与 reset 能力
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C2-01／C2-02 已实现（补丁 `0233`，零写入），待 0125 实机；C2-08 起未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C2-01／C2-02 已在 0126 默认档实机验收通过（补丁 `0233`／`0234`，零写入）；C2-08 起未开始。
 
 ## 阶段目标与退出条件
 
@@ -88,7 +88,7 @@
 - **预期结果**：一个 reset 类型可用；无消费者功能观察时，明确只验 reset 控制状态。
 - **失败归属**：C2-07 ownership／assert／timing／deassert；外设功能恢复若超出样本合同另立计划。
 
-## 本候选实现（C2-01／C2-02，补丁 0233，零写入）
+## 本候选实现（C2-01／C2-02，补丁 0233＋0234，零写入）
 
 实现文件：[IOQcomGCC.h](../../dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h)、[IOQcomGCC.cpp](../../dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp)；接入 [files.arm64](../../dxb/xnu/iokit/conf/files.arm64)（`optional iokitcpp`）与 [KernelConfigTables.cpp](../../dxb/xnu/iokit/KernelConfigTables.cpp)（MH2LM 段，`IONameMatch='sweet,gcc'`，provider 为 `IOPlatformDevice`，与 C1 节点并列，不匹配 `sweet,clock-provider`）。ADT 侧由 [mk-mh2lm-mdss-adt.py](../../tools/mk-mh2lm-mdss-adt.py) 的 `--gcc` 追加独立节点 `gcc`（`name='gcc'`、`compatible='sweet,gcc'`、`sweet,gcc-abi=<u32 1>`、`sweet,gcc-variant=<u32 0x8150>`、`reg` 四个窗口），`--gcc` 隐含 `--clock-provider`，只去掉 `gcc` 节点即逐字节回到 C1 字节、两个都去掉回到原始树；`gcc` 节点恒排在 `clock` 之后。
 
@@ -108,17 +108,41 @@
 
 **证据**：`tools/tests/test-mh2lm-gcc-backend.py` 通过（身份与四类窗口拒绝、映射与 11 项快照、对齐／越界只读访问、`clk_rcg2` 解码向量含 `div=0` 哨兵与 `src-invalid`／`mode-unsupported`／`update-pending`、halt 类别、provider 绑定与 domain admission、诊断段列出真实后端且收尾 `writes=0`、零写入）；`tools/tests/test-mh2lm-clock-provider.py` 通过（含新的 16／17 表上限边界）；`tools/tests/test-mh2lm-mdss-adt.py` 通过（`gcc` 节点可选、`reg` 走 `LOW_ALIAS` 编码、`--gcc` 隐含 `--clock-provider`、可逐字节还原、CLI 与默认字节不变）；ARM64 单 TU 编译两份均 rc=0、零 `error:`（`scratch/clock-c2/logs/compile-IOQcomClock.txt`、`compile-IOQcomGCC.txt`）；补丁 `0233`（SHA256 `b92d455222eb80bbe12f67b1940a7565f41123815b1cada8f8a1f77acb487649`）在基线 `4148ed3` 上按 `0230`→`0231`→`0232`→`0233` 以 `patch -p1 --fuzz=0` 应用，六份文件与工作区 `cmp` 逐字节一致、无 `.rej`。
 
-## 待实机验收（0125 内核）
+## 实机验收（0126 默认档，通过）
+
+`logs/sweetlog-0126-0.bin`（sha256 `3d1cd662b6749ac037190c2c7ee30c0c82c277d8866ce4b1806dd2b0087193bc`，`total=1366678` 字节，`flush_sequence=12`，无回绕）来自 `boot-16k-0126-gpioirq-panel-pipeline.img`：设备进入桌面，`planID=C1 phase=start` 起 C1／C2 全链完整。审计脚本 `scratch/artifact-0126/audit-clock-log.py` 以默认档通过（零时钟 `[WARN]`／`[ERROR]`，非时钟 WARN／ERROR 清单与 b32 基线一致，面板标记不超基线）。
+
+- **窗口**：四条 `phase=map result=0 length=0x1000`，`resource=offset=kIOQcomGccBase` 自洽：`gcc:0x10b000 offset=0xb000`、`gcc:0x133000 offset=0x33000`、`gcc:0x143000 offset=0x43000`、`gcc:0x162000 offset=0x62000`。0234 的地址模型在真机上成立。
+- **快照实测值**（C2-01，11 个寄存器，`phase=snapshot result=0 value=…`）：
+
+| 寄存器 | 实测值 | 读法 |
+|---|---|---|
+| `0x10b00c`（`gcc_disp_ahb_clk` CBCR） | `0x80000003` | enable=1，`CLK_OFF`=1（bit31）→ 门控开着但输出关 |
+| `0x10b038`（`gcc_disp_hf_axi_clk` CBCR） | `0x4221` | enable=1，off=0 |
+| `0x10b048`（`gcc_disp_xo_clk` CBCR） | `0x1` | enable=1，off=0 |
+| `0x133008`／`0x13300c`／`0x133010` | `0x80000000` | 三处 `CLK_OFF`／`ROOT_OFF` 都置位 |
+| `0x133014`（RCG CFG） | `0x100000` | `SRC_SEL=0`、`hid_div=0`、`mode=0` |
+| `0x143008`（`gcc_pdm_xo4_clk` CBCR） | `0x80000000` | off=1，enable=0 |
+| `0x162000`／`0x162004`／`0x162008`（debug mux） | `0x14b`／`0`／`0x80000000` | 测频 mux 当前选中 `0x14b` |
+
+- **`start` 收尾行**：`planID=C2 resource=cc1 phase=start result=0 windows=4 snapshot=11 reads=18 writes=0 variant=0x8150`——读预算 11＋7 恰好用满，写计数为零。
+- **C2-02 实测**：`cc1:0x5`＝`gcc_pdm2_clk_src` 解出 `detail=configured sel=0 div=0 div2=0 hz=19200000 known=1`，`decode-sample` 同一行给出 `hz=19200000 known=1`：CMD `0x80000000` 的 `ROOT_OFF` 置位但配置合法，CFG `0x100000` 选中 XO（19.2 MHz）且未编码分频，故不走分频公式。这是配置解码，**不是**物理频率实测。
+- **已知限制**：`cc1:0x6`（`gcc_pdm2_clk`，父是本 CC 的 `cc1:0x5`）如实报 `parent-rate-unknown known=0`——本卡的 branch 解码只认 `gccFixedRate()` 的固定源，不做跨行速率解析。同一轮里 `cc1:0x5` 已经解出 19.2 MHz，所以后续卡若要闭合这条链，需要一次二遍解析（父频已解出后再补子行），本卡不做。
+- **工具教训**：审计脚本曾把 `phase=snapshot` 当作“只应出现在失败时”，把 `phase=decode` 的 `resource` 当作物理地址；两者都与后端实际不符（快照成功也逐行打印、解码行用设备资源名 `cc1:0xN`）。修正后审计同时把每条 decode 的 `raw` 与对应快照值逐字节比对，读错寄存器会立刻暴露。
+
+### 待实机验收（历史，0125 内核，已被 0126 取代）
+
+以下为 0125 候选期的验收清单，保留作回归对照；其中“命名约定”与“五条 branch 期望”两条与后端实际不符，已在 0126 实测后改正（见上节）。
 
 实机只验“后端建起来、只读样本有效、写计数为零、原有路径仍工作”，**不宣称任何频率实测**（测频是 C2-08）。
 
 `gcc` 节点在每个 0125 镜像里都有，所以**默认档也会跑 C2 链**；`--clock-diag`（`sweet,clock-diag=<u32 1>`）只追加 C1 诊断段，把收尾行的控制器数从 1 变 2。
 
 - 期望顺序（默认档）：`planID=C1 … phase=start … bindings=0` → 四条 `planID=C2 resource=gcc:0x10b000|0x133000|0x143000|0x162000 phase=map result=0 length=0x1000 offset=0xb000|0x33000|0x43000|0x62000`（顺序按 ADT `reg`，`offset` 必须满足 `resource-0x100000`）→ `planID=C1 resource=cc1:0x0 consumer=provider phase=register result=0 generation=…`（这条属于 provider，由后端注册触发）→ `planID=C2 resource=cc1 phase=start result=0 windows=4 snapshot=11 reads=18 writes=0 variant=0x8150` → 六条 `phase=decode` → 一条 `phase=decode-sample`。
-- 命名约定：`map`／`snapshot`／`decode` 行用**寄存器绝对地址** `resource=gcc:0x<PA>`；`start`／`stop`／`decode-sample` 行用**控制器与描述** `resource=cc1[:0x5]`。六条 `phase=decode` 按描述表顺序为 `gcc:0x10b00c`、`gcc:0x10b038`、`gcc:0x10b048`、`gcc:0x133008`、`gcc:0x133010`、`gcc:0x13300c`。
-- 五条 branch 的声明固定，解码结果与硬件状态无关，必须是：`gcc:0x10b00c detail=configured known=1`（XO）、`gcc:0x10b038 detail=parent-rate-unknown known=0`（GPLL0 无可信频率）、`gcc:0x10b048 detail=configured known=1`（XO）、`gcc:0x133008 detail=configured known=1`（XO/4＝4.8 MHz）、`gcc:0x13300c detail=parent-rate-unknown known=0`（父是本 CC 的 RCG）。
-- `gcc:0x133010`（`gcc_pdm2_clk_src`）有四种可接受结果，取决于硬件当时的选择子与分频：`detail=configured sel=0 div=… div2=… hz=… known=1`（XO 直通；`div=0` 时 `div2=0`、`hz=19200000`，否则 `hz=19200000*2/(div+1)`）、`detail=parent-rate-unknown sel=1|6 known=0`（GPLL0）、`detail=update-pending … known=0`（`CMD_UPDATE` 置位，配置未生效）、`detail=src-invalid sel=2|3|4|5|7` 或 `detail=mode-unsupported mode=…`（`[WARN]`＋`BadArgument`＝-536870206，如实拒绝而非缺陷）。
-- `decode-sample` 只在 `gcc:0x133010` 查询成功时出现一条：`planID=C2 resource=cc1:0x5 name=gcc_pdm2_clk_src phase=decode-sample result=0 hz=… known=…`；`known=0` 时 `hz=0`，不得出现任何替代值。被 `src-invalid`／`mode-unsupported` 拒绝时**没有**这一条。
+- 命名约定（0126 实测校正）：`map`／`snapshot` 行用**寄存器绝对地址** `resource=gcc:0x<PA>`；`start`／`stop` 用**控制器** `resource=cc1`；六条 `phase=decode` 与 `decode-sample` 用**设备资源名** `resource=cc1:0x<localID>`，`decode-sample` 另带 `name=<时钟名>`。`phase=decode` 按描述表顺序为 `cc1:0x1`…`cc1:0x6`，依次解码 `0x10b00c`、`0x10b038`、`0x10b048`、`0x143008`、`0x133010`＋`0x133014`、`0x13300c`。
+- 五条 branch 的声明固定，解码结果与硬件状态无关，必须是：`cc1:0x1 detail=parent-rate-unknown known=0`（描述表未声明父源）、`cc1:0x2 detail=parent-rate-unknown known=0`（GPLL0 无可信频率）、`cc1:0x3 detail=configured known=1`（XO）、`cc1:0x4 detail=configured known=1`（XO/4＝4.8 MHz）、`cc1:0x6 detail=parent-rate-unknown known=0`（父是本 CC 的 RCG，单遍解析不闭合）。
+- `cc1:0x5`（`gcc_pdm2_clk_src`，寄存器 `0x133010`／`0x133014`）有四种可接受结果，取决于硬件当时的选择子与分频：`detail=configured sel=0 div=… div2=… hz=… known=1`（XO 直通；`div=0` 时 `div2=0`、`hz=19200000`，否则 `hz=19200000*2/(div+1)`）、`detail=parent-rate-unknown sel=1|6 known=0`（GPLL0）、`detail=update-pending … known=0`（`CMD_UPDATE` 置位，配置未生效）、`detail=src-invalid sel=2|3|4|5|7` 或 `detail=mode-unsupported mode=…`（`[WARN]`＋`BadArgument`＝-536870206，如实拒绝而非缺陷）。
+- `decode-sample` 只在 `cc1:0x5` 查询成功时出现一条：`planID=C2 resource=cc1:0x5 name=gcc_pdm2_clk_src phase=decode-sample result=0 hz=… known=…`；`known=0` 时 `hz=0`，不得出现任何替代值。被 `src-invalid`／`mode-unsupported` 拒绝时**没有**这一条。
 - 零写入证据：`planID=C2` 不出现任何写相位或 `writes=1`；`phase=start` 与（重启时的）`phase=stop` 都印 `writes=0`；诊断档收尾 `phase=diag-done result=0 detail=zero-writes writes=0 controllers=2 probes=10`；`[ERROR]` 计数保持基线零。
 - 诊断档的 C1 段必须遍历两个控制器、共 10 个句柄：4 条合成（`resource=cc7:0x1..0x4`，`consumer=diag-core|diag-child|diag-orphan|diag-domain`，`token=1..4`）加 6 条 GCC 描述（`resource=cc1:0x1..0x6`，`consumer` 是时钟名，`token=5..10`）；每条 bind 行印 `bindings=10`，收尾行印 `probes=10`。GCC 六条的 `caps` 都是 `0x3`（只有 QueryConfig／QueryRate），`parents` 依次 `0/0/1/1/3/1`，`domain` 只有 `cc1:0x5` 是 `0x1`：`cc1:0x1..0x4` 与 `cc1:0x6` 为 `deps=0 depReason=ready enable=-536870201`（`capability-absent`，INFO），`cc1:0x5` 为 `deps=-536870184 depReason=domain-absent enable=-536870184`（全档唯一的时钟 `[WARN]`）。任何一条 `enable=0` 都说明只读契约被破坏（该卡没有写路径）。
 - 失败归属：`C2-01 map`（`window-absent`／`address-mismatch observed=%#llx`／`length-short observed=%#llx required=%#llx`／`no-virtual-base`）、`variant`（`missing-gcc-abi`／`missing-variant`／`variant-mismatch observed=%#x required=%#x`）、`access`（`phase=snapshot detail=read-failed`、`phase=query detail=register-read-failed`）、`register`（`provider-absent`／`registration-refused`）；`C2-02 decode`（`src-invalid`／`mode-unsupported`）与 `parent-rate`（`parent-rate-unknown`）。若默认档完全没有 `planID=C2 … phase=map` 行，先查 ADT 是否带 `gcc` 节点（`--gcc`）与 `IONameMatch='sweet,gcc'` 是否命中，再查窗口地址与 `sweet,gcc-variant`。
