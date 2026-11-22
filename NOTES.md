@@ -9992,3 +9992,15 @@ NEXT：用户刷默认档→导出日志（期望 `bindings=0`、无 diag 行）
 C1 至此收口：C1-01～C1-04 只读候选在真机默认档与诊断档均通过，写计数为零、基线零退化；C1-05（公共需求账本）仍未开始。
 
 NEXT：等 0124 构建（含 0232）出核后重新打包 clockdiag 档并刷一次，确认同一失败只剩**一条** `phase=enable ... detail=...`（不再有 `phase=admit` 行），随后即可转入 C2-01／C2-02 只读后端候选。默认档无需复验（该路径不可能产生拒绝行）。
+
+## 0124 内核与 0232 实机复验（2026-11-22，C1 收口）
+
+用户提供 `logs/xnu-kernel-0124.gz`（60335917 字节）与 `logs/xnu-buildtree-0124.gz`（23444481 字节）；构建树 5302 份源码与 HEAD `d4c5710` 逐字节一致、154/154 marker 命中。内核 `kernel.development.mh2lm` 17911248 字节（较 0123 多 200 字节），SHA256 `4dd10add94b2cf1e861c23b41d4e79f74ee31f7f581c842897d66cd05016aad8`，包内 `SHA256SUMS` 匹配，`phase=enable result=%d detail=%s`、`phase=admit result=%d detail=%s` 文案在位。证据 `scratch/artifact-0124/artifact-verification.json`。
+
+`bash out-bs/mk16k-0124.sh <kernel> 0124 4dd10add…` 出三档（各 35545088 字节，参数 605 字节）：baseline `761ace1c…`（touch 2，未刷）、gpioirq `b31e9fa3…`（未刷）、clockdiag `24ab375d6132d11569e079028ba9cd3982e5226eb7ee03bcee311e3b61b43fe6`（刷入）。注意 0232 给 `admitWalk` 加了 `bool` 参数，符号名由 `…PKcPj` 变成 `…PKcPjb`，0123 的 nm 门禁会误报，`mk16k-0124.sh` 已改。`scratch/artifact-0124/verify-images.py` 逐份解头／解 FAT／回读通过。
+
+实机只刷诊断档（`fastboot boot` OKAY）：日志 `logs/sweetlog-0124-0.bin`（4198400 字节，`total=999833`，flush 8，未绕环，SHA256 `981e29ef35bf1ebb2fb16bc5f75a63470776cc0f0464ffcb8cdc16cea6971eee`）。时钟行 **16 条**（0123 为 18）：`phase=start bindings=0`、`phase=register generation=1`、`phase=diag backend-registered`、4×`phase=bind bindings=4`、4×`phase=enable`、4×`phase=diag` 账本、`phase=diag-done detail=zero-writes`；`phase=admit` 为 0。两个被拒句柄各只剩一条 WARN，phase=`enable`、`detail` 分别为 `parent-controller-absent`／`domain-absent`、`result=-536870184`；四行账本与 0123 逐字段一致（`info=0 state=0`、`enable` 全 Unsupported 或等于 `deps`）。零 ERROR；非时钟基线与 b32 一致。审计 `scratch/artifact-0124/device-log-review-diag.json`（`audit-clock-log.py --diag`，rc=0，`duplicated=false`）。
+
+**C1-01～C1-04 收口**：本地测试、ARM64 单 TU 编译、`0230`→`0231`→`0232` 严格重放、默认＋诊断两档实机（0122／0123／0124）四层证据齐备，写计数为零、基线零退化。
+
+NEXT：下一个候选为 C2-01／C2-02 只读后端（GCC／RPMh 控制器身份与只读状态快照），与 C1-05 需求账本同属只读、不新开实机写路径；首个硬件写仍是 C2-08 debugcc 测频。

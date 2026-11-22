@@ -80,3 +80,14 @@
 - **本轮唯一缺陷**：两个被拒句柄的 `phase=admit` WARN 各出现两条逐字节相同的副本（遍历被 `checkDependencies` 与 `enable` 各走一遍），已由补丁 0232 收敛为“每个失败句柄一条、归 enable 所有”；该缺陷只影响日志行数，不影响判定内容。
 - 审计脚本 `scratch/artifact-0123/audit-clock-log.py` 两种形态都接受（重复行只被记录为 `duplicate_refusal_lines`，不被当成通过条件），输出 `scratch/artifact-0123/device-log-review.json` 与 `device-log-review-diag.json`。
 - 0123 之前的两次短日志（`sweetlog-0123-0.bin`／`-1.bin`，`total` 分别 10745838／7825416）因绕环丢掉了引导段时钟行，不作为证据；此后每次取证都在开机后不久落盘。
+
+### 0232 复验（0124 内核，仅诊断档）
+
+0124 内核（`kernel.development.mh2lm` SHA256 `4dd10add94b2cf1e861c23b41d4e79f74ee31f7f581c842897d66cd05016aad8`，17911248 字节，构建树 5302 文件与提交 `d4c5710` 一致、154 marker 命中）的诊断镜像 `boot-16k-0124-gpioirq-panel-pipeline-clockdiag.img`（SHA256 `24ab375d6132d11569e079028ba9cd3982e5226eb7ee03bcee311e3b61b43fe6`，参数 605 字节）实机启动一次，日志 `logs/sweetlog-0124-0.bin`（4198400 字节，`total=999833`，flush 8，未绕环，SHA256 `981e29ef35bf1ebb2fb16bc5f75a63470776cc0f0464ffcb8cdc16cea6971eee`）：
+
+- 时钟行 18→**16** 条，正是少了那两条重复的 `phase=admit`：`phase=start`／`register`／`diag`（backend-registered 1 条＋四句柄 4 条）／`bind` 4／`enable` 4／`diag-done` 1，`admit` 计数为 0。
+- 两个被拒句柄各只剩**一条** WARN，phase 都是 `enable`：`resource=cc7:0x3 … result=-536870184 detail=parent-controller-absent`、`resource=cc7:0x4 … result=-536870184 detail=domain-absent`；审计脚本记为 `owner_phases=["enable"] lines_per_owner={"enable":1} duplicated=false`。
+- 四行账本与 0123 逐字段相同（`info=0 state=0`、`deps`／`depReason` 一致、`caps` 0x3／0x103／0x101／0x303、`enable` 全为 Unsupported 或等于 `deps`），收尾仍是 `phase=diag-done result=0 detail=zero-writes`，零 `[ERROR]`。
+- 非时钟基线与 b32 一致（同五条 WARN、零 ERROR、`handoff`／`scanout` 各 1；短会话一轮触摸 token=2）。审计 `scratch/artifact-0124/device-log-review-diag.json`，rc=0。
+
+据此 0232 的“谁报告谁记账”在真机兑现，C1 日志形态与卡片一致；默认档不含任何拒绝路径，无需再测。
