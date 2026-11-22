@@ -1,0 +1,55 @@
+# C0-03 结果：首批安全试验样本
+
+[返回 C0](00-baseline.md)。日期：2026-11-22。等级：**调查完成（资料）**；样本的上电原状态尚无实机读数，由 C2-01 的只读快照补齐后才允许进入写卡。
+
+来源：LG `drivers/clk/qcom/gcc-sm8150.c`、`debugcc-sm8150.c`、`clk-debug.c`；b32 附带 LG DTB（[C0-05](C0-05-SCOPE.md)）；所有权表 [C0-02](C0-02-OWNERSHIP.md)。
+
+## S1：debugcc 测量链（C2-08）
+
+| 项 | 内容 |
+|---|---|
+| 资源 | GCC debug mux：`DEBUG_CTL`(sel) 0x62000 [9:0]、post-div 0x62004 [3:0]、`GCC_DEBUG_CBCR` 0x62008 bit0；计数 ctl 0x62038／status 0x6203c；XO/4 CBCR 0x43008 bit0 |
+| 当前 owner | 无（C0-02：全树未引用）；DTB 中 `qcom,cc-debug` 只供 Linux debugfs |
+| 父源／电源 | CXO（RPMh CXO 由 ABL／固件长期持有）；GCC 本身常供电 |
+| 允许动作 | 保存原值 → 写 sel/post-div → 开 DEBUG_CBCR 与 XO/4 → 短测(0x1000 tick)＋长测(0x10000 tick) → 恢复全部原值 |
+| 完成观测 | status bit25 DONE，计数 [24:0]；短测＝长测 ⇒ NotRunning；频率 = (cnt·10+15)·4.8 MHz ／ (0x10000·10+35) |
+| 停止／撤回 | DONE 等待有界（参考约 15 ms，给 50 ms 上限），超时则停止计数、恢复原值并报告 Uncertain |
+| 结论 | **可实施**，前提：GCC 窗口需扩展到覆盖 0x33000、0x43000、0x62000 三页（现 ADT 只映射 0x10b000 页） |
+
+测量参考样本（只测量，不控制）：
+
+- **运行样本**：`gcc_disp_xo_clk`（CBCR 0xb048，mux sel 0x53）。LG 标 `CLK_IS_CRITICAL`，显示正在使用，应为 19.2 MHz。
+- **关闭样本**：S2 的 `gcc_pdm_xo4_clk`（mux sel 0x99），前提是 C2-01 读到其原状态为 OFF。
+
+## S2：普通 branch gate（C2-03／04／05）
+
+| 项 | 内容 |
+|---|---|
+| 资源 | `gcc_pdm_xo4_clk`，CBCR 0x33008，enable bit0，`BRANCH_HALT`（CLK_OFF bit31），无 RCG 父源（XO/4 固定 4.8 MHz） |
+| 当前 owner／使用者 | XNU 无；b32 DTB 中无任何节点引用 GCC_PDM_*（id 68–71 引用数 0）。PDM 是 PWM 外设，本机无已知使用者 |
+| 排除理由 | 不选 UFS／USB／QUP／DISP 等任何有 DTB 消费者或 C0-02 中有继承依赖的 branch |
+| 父源／电源凭据 | CXO 同 S1；GCC 常供电；不需要 GDSC |
+| 原状态 | **未知**，待 C2-01 只读快照。若原为 ON 则说明有未知使用者，S2 作废，改选下一候选 `gcc_pdm2_clk`（0x3300c，但它有 RCG 父源，需额外确认 0x33xxx RCG 已配置） |
+| 允许动作 | 原为 OFF 时：enable → 等 CLK_OFF 清零 → debugcc 测得 ≈4.8 MHz → disable → 等 CLK_OFF 置位 → debugcc 得 NotRunning |
+| 停止条件 | CLK_OFF 等待有界；超时保留所有权并报告 Uncertain |
+| 结论 | **缺原状态观测**；C2-01 读到 OFF 后转为可实施 |
+
+“DTB 无引用”只能排除 Linux 消费者，不能排除固件／TZ 使用。保护措施：只在原状态 OFF 时动作，且只操作 bit0。
+
+## S3：apps RSC 既有合法请求（C3-01／03／04）
+
+| 项 | 内容 |
+|---|---|
+| 资源 | ARC `mmcx.lvl` 显示 Turbo 票（SweetRPMh `beginDisplayPower`，调用方 Resources.inc:113），备选 BCM CN0 300 MB/s（Core.inc:126） |
+| 当前 owner | SweetRPMh（apps DRV2 slot 0..1） |
+| 理由 | 每次 managed 显示启动都会自然发出，已有 fresh IRQ 完成路径及回归（rpmh-resources、rpmh-completion-irq） |
+| 允许动作 | 只观察自然请求；不新增资源或票值 |
+| 结论 | **可实施** |
+
+## 后续 voted／reset／PLL／GDSC 样本
+
+C0-04 已将 C2-06 voted、C2-07 reset 暂缓；PLL／GDSC 只在 C6 迁移已有显示操作时使用显示自身资源，进入对应卡前补样本卡。
+
+## 第一个候选镜像需要的只读快照
+
+合并 C1-01～04、C2-01／02（全部写计数为零）时，C2-01 启动快照应记录：0x33008、0x3300c、0x43008、0x62000、0x62004、0x62008、0x10b00c、0x10b038、0x10b048。

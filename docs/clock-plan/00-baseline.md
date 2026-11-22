@@ -1,6 +1,6 @@
 # C0：基线、所有权与安全试验样本
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：未开始。本阶段交付调查和基线，不新增硬件写入。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：**调查完成（2026-11-22）**。结果：[C0-01 基线](C0-01-BASELINE.md)、[C0-02 所有权](C0-02-OWNERSHIP.md)、[C0-03 样本](C0-03-SAMPLES.md)、[C0-04 需求](C0-04-DEMAND.md)、[C0-05 范围](C0-05-SCOPE.md)。C0-03 的 S2 原状态待 C2-01 只读快照。本阶段交付调查和基线，不新增硬件写入。
 
 ## 阶段目标与退出条件
 
