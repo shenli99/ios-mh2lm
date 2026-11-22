@@ -21,7 +21,7 @@ NEXT：所有时钟实施卡仍未开始，后续实施从 C0-01 基线锁定，
 
 边界：C1-05 公共账本按总计划 §3.4 并入下一个写候选（与 C2-03 的事件链共用记账点），本候选不实现；没有任何寄存器写、没有 setRate／父源切换／PLL／reset／GDSC 操作，未启用 `sweet,clock-diag` 时诊断段不运行。
 
-NEXT：用户 push `full-source` 触发 CI 内核构建，下载后 agent 核对源码 marker／补丁重放，再用带 `--clock-provider --gcc --clock-diag` 新 ADT SHA 校验的 0125 打包脚本出两份镜像（默认档＋诊断档），由 WSL 直接 `fastboot boot` 并取回日志，审计 `planID=C2` 行（8 条 map／start／decode／decode-sample 与零写入），首个硬件写仍是 C2-08 debugcc。
+NEXT：用户 push `full-source` 触发 CI 内核构建，下载后 agent 核对源码 marker／补丁重放，再用带 `--clock-provider --gcc --clock-diag` 新 ADT SHA 校验的 0125 打包脚本出两份镜像（默认档＋诊断档），由 WSL 直接 `fastboot boot` 并取回日志，审计 `planID=C2` 行（4 条 map、1 条 provider 注册、1 条 start、6 条 decode、1 条 decode-sample，`writes=0` 贯穿）与诊断档的 10 个句柄（4 条合成＋6 条后端，`bindings=10`／`probes=10`，唯一 WARN 是 `cc1:0x5 domain-absent`），首个硬件写仍是 C2-08 debugcc。
 
 ## C1-01～C1-04 只读候选完成（2026-11-22，待 CI／实机）
 
