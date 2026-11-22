@@ -1,6 +1,6 @@
 # C5：频率控制、本地电源域与 corner 协调
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。状态：未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：未开始。
 
 ## 阶段目标与退出条件
 

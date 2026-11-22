@@ -1,10 +1,12 @@
 # C7：VIDEOCC、CAMCC、GPUCC 的最小接入
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。状态：未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：未开始。
 
 ## 阶段目标与退出条件
 
 三个控制器各自从初始化、只读查询、一个 gate 开始；没有实际外设驱动时，只登记控制器局部证据，不声称视频、相机或 GPU 工作。每个控制器首次写之前补齐 C0-03 格式的安全样本卡。频率、PLL、GDSC、reset 等后续能力分别实例化 C9 扩展卡；不要求本阶段一次实现全部资源。
+
+各控制器仅在 C0-04 清单中有对应消费者时实施，否则整组标“暂缓（无需求）”。NPUCC、SCC 不在本阶段，其范围结论见 C0-05；若判定需要，按 C7 同样的 初始化→查询→gate 三卡模式另立 C7-N／C7-S 卡。
 
 ### C7-V01 初始化 VIDEOCC
 
