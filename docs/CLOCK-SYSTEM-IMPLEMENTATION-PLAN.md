@@ -1,6 +1,6 @@
 # SM8150 时钟系统分阶段实施计划
 
-更新：2026-11-22（按审查意见修订：需求清单前移、候选合并规则、debugcc 测频、控制器范围、C6 入口、apps RSC 交接拆分、通用约束集中）。状态：**计划已制定；C1-01～C1-04 已实现为只读候选（补丁 0230，写计数为零），其余小计划未开始**。目标设备为 LG G8X（mh2lm／SM8150）。本轮只编制计划，不修改驱动、CI、固件、设备树或启动参数，不生成测试镜像。
+更新：2026-11-22（按审查意见修订：需求清单前移、候选合并规则、debugcc 测频、控制器范围、C6 入口、apps RSC 交接拆分、通用约束集中）。状态：**计划已制定；C1-01～C1-04 已实现为只读候选（补丁 0230／0231），默认档实机通过（写计数为零），诊断通道待 0123 内核复验，其余小计划未开始**。目标设备为 LG G8X（mh2lm／SM8150）。本轮只编制计划，不修改驱动、CI、固件、设备树或启动参数，不生成测试镜像。
 
 ## 1. 最终目标与范围
 
@@ -129,6 +129,8 @@
 ## 6. 实施状态与下一步
 
 **2026-11-22：C1-01～C1-04 只读候选完成**（见[阶段1](clock-plan/01-provider.md)）。统一入口 `IOQcomClockProvider : IOService` 匹配 `sweet,clock-provider`，ADT 节点由 `mk-mh2lm-mdss-adt.py --clock-provider` 可选追加（无窗口、无子节点，默认派生字节不变）。本候选建立了控制器注册／撤回、generation、设备资源名到 `(controller, local ID)` 的只读绑定、父源／电源依赖描述与明确诊断入口；所有硬件操作返回 Unsupported，admission 先于能力判定。`tools/tests/test-mh2lm-clock-provider.py` 与 `test-mh2lm-mdss-adt.py` 通过，ARM64 单 TU 编译 rc=0，补丁 `0230`（SHA256 `3fc2536659099605f98366ea05e4eab092c7c5a2decf5a90eaa88a32102e428f`）在基线严格应用后逐字节一致。C1-05 需求账本与任何 MMIO 写入都不在本候选；实机只验匹配／Ready／绑定／写计数零，CI 与刷机步骤属于用户。
+
+**2026-11-22：C1 实机默认档通过，补丁 0231 收尾**（见[阶段1](clock-plan/01-provider.md)）。0122 内核（`5139febeb5cbfd4891df1ce499111a6ffe8ca4a3f56b6678dd8ebc7c8828a6ac`）的 gpioirq 镜像实机启动成功：`planID=C1 phase=start result=0 detail=entry-ready`，除该行外无任何时钟日志（无 bind／enable／disable／admit／注册／撤回），时钟 WARN／ERROR 均为 0；因未注册控制器、节点无窗口，本候选不存在 MMIO 写路径；面板侧 WARN／ERROR 清单与 b32 完全一致（五条既有 WARN、零 ERROR、handoff／scanout 各 1）。同一轮查出两处缺陷：入口行 `bindings=` 打印容量常量（实机 `bindings=8`，而节点不声明绑定，计划期望 `0`）；`sweetclock=1` 诊断镜像因参数 618 字节被固件以 `boot args rejected at 607` 拒绝、内核未进入。0231 如实统计节点 `sweet,clock-names` 条数，并把诊断开关移到 `sweet,clock-diag=<u32 1>` 设备树属性（参数保持 605 字节），`mk16k-0123.sh` 对每份镜像硬性校验参数 ≤607 字节。诊断段（`consumer=sweetclock-diag`、四条 `phase=diag`、`detail=zero-writes` 收尾）待 0123 内核实机复验。
 
 **2026-11-22：C0 五张调查卡完成**（见[阶段0](clock-plan/00-baseline.md)）。C0-04 将 C2-06／07、C4-01～06、C7、C8-01～06 标为暂缓（无需求）。下一候选为只读合并候选 C1-01～04 + C2-01／02（写计数为零，含 C0-03 所需快照），之后是首个硬件写候选 C2-08。以下为 C0 时的原始说明（C0 完成时所有卡状态均为“未开始”，本文不把上一轮架构讨论当成 C0 验收）：第一个实施点是 **C0-01 基线锁定**，之后 C0-02 资源所有权表、C0-04 消费者需求清单、C0-05 控制器范围判定，再做 C0-03 安全样本调查（样本优先从 C0-04 清单内选）。完成调查前不开始新硬件写入。建议首个硬件写候选为 C2-08 debugcc 测频，使后续门控／频率卡能取得实测证据。
 

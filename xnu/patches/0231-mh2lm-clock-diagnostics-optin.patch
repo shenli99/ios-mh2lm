@@ -1,0 +1,59 @@
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomClock.cpp b/dxb/xnu/iokit/Kernel/arm/IOQcomClock.cpp
+index ad30969..b6629fc 100644
+--- a/iokit/Kernel/arm/IOQcomClock.cpp
++++ b/iokit/Kernel/arm/IOQcomClock.cpp
+@@ -274,6 +274,40 @@ IOReturn IOQcomClockHandle::disable(void)
+ 
+ /* ---------------------------------------------------------------- provider */
+ 
++/* The entry never reads its own nub's name table: bindings are declared by
++ * consumers. Report what this node declares so a boot that pins something is
++ * not confused with one that pins nothing; the count is the only honest
++ * answer here, a capacity constant would look like a successful bind. */
++static unsigned clockDeclaredBindings(IOService *service)
++{
++	OSData *names=service?OSDynamicCast(OSData,service->getProperty("sweet,clock-names")):NULL;
++	if (!names) return 0;
++	const unsigned char *bytes=(const unsigned char *)names->getBytesNoCopy();
++	unsigned length=names->getLength(),count=0;
++	if (!bytes||!length) return 0;
++	for (unsigned i=0;i<length;i++) if (bytes[i]==0) count++;
++	return count;
++}
++
++/* sweet,clock-diag=1 on the matched node turns the diagnostic backend on. The
++ * boot argument path stays for images that have room for it, but this device's
++ * firmware rejects an argument list past 607 bytes and the shipped list
++ * already takes 605, so the device tree is the only usable request here. A
++ * property that is present but malformed is a configuration error, not a
++ * silent no. */
++static bool clockDiagRequested(IOService *service)
++{
++	int mode=0;
++	if (PE_parse_boot_argn("sweetclock",&mode,sizeof mode)&&mode) return true;
++	OSData *property=service?OSDynamicCast(OSData,service->getProperty("sweet,clock-diag")):NULL;
++	if (!property) return false;
++	const void *bytes=property->getBytesNoCopy();
++	if (property->getLength()==4&&bytes&&!memcmp(bytes,"\1\0\0\0",4)) return true;
++	SWEET_LOG_WARN("SWEET CLOCK: planID=C1 phase=start result=%d detail=bad-diag-property\n",
++	 kIOReturnBadArgument);
++	return false;
++}
++
+ bool IOQcomClockProvider::start(IOService *provider)
+ {
+ 	if (fLock||fReady) {
+@@ -313,11 +347,10 @@ bool IOQcomClockProvider::start(IOService *provider)
+ 	}
+ 	fReady=true;
+ 	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 phase=start result=0 detail=entry-ready bindings=%u\n",
+-	 (unsigned)kIOQcomBindingMax);
++	 clockDeclaredBindings(provider));
+ 	/* Diagnostics are opt-in: the default boot performs no clock request and
+ 	 * leaves every backend absent. */
+-	int mode=0;
+-	if (PE_parse_boot_argn("sweetclock",&mode,sizeof mode)&&mode) thread_call_enter(fDiagCall);
++	if (clockDiagRequested(provider)) thread_call_enter(fDiagCall);
+ 	return true;
+ }
+ 

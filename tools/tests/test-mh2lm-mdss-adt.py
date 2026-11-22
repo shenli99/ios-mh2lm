@@ -302,6 +302,7 @@ for opts in (dict(), dict(display_noc=True, panel_pins=True, panel_touch=True,
     clock = next(n for n in arm.children if n.name == 'clock')
     assert clock.prop('compatible') == b'sweet,clock-provider\0'
     assert clock.prop('sweet,clock-abi') == struct.pack('<I', 1)
+    assert clock.prop('sweet,clock-diag') is None
     assert clock.prop('reg') is None and clock.children == []
     arm.children = [n for n in arm.children if n.name != 'clock']
     assert adt.serialize(tree) == plain
@@ -312,4 +313,24 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-adt-') as temp:
                     str(source), str(output)], check=True)
     assert output.read_bytes() == m.derive(blob, clock_provider=True)
     assert source.read_bytes() == blob
-print('PASS: C1 clock entry is opt-in, windowless, byte-restorable and CLI-selectable')
+# The diagnostic opt-in lives on the node: the firmware rejects a boot-argument
+# list past 607 bytes, so the tree is the only request channel. Dropping the
+# property must reproduce the plain clock entry byte for byte.
+diagged = m.derive(blob, clock_diag=True)
+tree, end = adt.parse(diagged)
+assert end == len(diagged)
+arm = tree.children[1]
+clock = next(n for n in arm.children if n.name == 'clock')
+assert clock.prop('sweet,clock-diag') == struct.pack('<I', 1)
+assert clock.prop('reg') is None and clock.children == []
+clock.props = [(k, f, v) for k, f, v in clock.props if k != 'sweet,clock-diag']
+assert adt.serialize(tree) == m.derive(blob, clock_provider=True)
+with tempfile.TemporaryDirectory(prefix='mh2lm-clock-diag-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'diag.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--clock-diag',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == diagged
+    assert source.read_bytes() == blob
+print('PASS: C1 clock entry is opt-in, windowless, byte-restorable and CLI-selectable, '
+      'diagnostic request on the node')

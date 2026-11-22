@@ -24,6 +24,22 @@ NEXT：所有时钟实施卡仍未开始，后续实施从 C0-01 基线锁定，
 
 NEXT：用户 push `full-source` 触发 CircleCI 内核构建，agent 核对源码 marker／补丁重放后打包，再验启动匹配与零写计数；本地无 CI run ID 前不宣称云端通过。
 
+## C1 内核归档与镜像（2026-11-22，默认档实机通过／诊断档被 607 字节上限拒绝）
+
+用户提供 `logs/xnu-kernel-0122.gz`（SHA256 `71cbdd7fa9818fcc9cd70924ec9b008a117a5a47d87909a92a3061dfa5da36b9`）与 `logs/xnu-buildtree-0122.gz`（`3c4bc737ef1e72e3421948515ab6c9b3f0a8f42992e175e6e75b87100e96bcc6`）。构建树 5302 份 XNU 源码与 HEAD `cfd298e` 逐字节一致，154/154 源码 marker 命中；`0230` 在 C0 基线 `4148ed3` 上严格 `patch -p1 --fuzz=0` 重放后四份文件与 HEAD 逐字节一致、无 `.rej`／`.orig`。内核 `kernel.development.mh2lm` 17910928 字节，SHA256 `5139febeb5cbfd4891df1ce499111a6ffe8ca4a3f56b6678dd8ebc7c8828a6ac`，匹配包内 `SHA256SUMS`；`IOQcomClockProvider`／`Handle`／`DiagController` 符号与 C1 日志文案全部在位。未提供 CI run ID 和完整构建日志，故只称归档一致，不称云端构建通过。详见 `scratch/artifact-0122/artifact-verification.json`。
+
+设备树六标志派生 23292 字节 SHA256 `6a50db550d436cb9d3403a09eb27ed0253fdd57448c631efb088791927312690`；同五标志去掉 `--clock-provider` 仍逐字节等于 b32 的 `a9e4f371…`，说明新增只追加一个节点。结构解析确认该节点仅 `name`／`compatible=sweet,clock-provider`／`sweet,clock-abi=1` 三属性、无 `reg`、无子节点，因此改进程不得有窗口映射。`out-bs/mk16k-0122.sh` 把上述两项、固件 hook、C1 符号与文案、`ANDROID!` 头和 FAT 回读全部设成硬门。
+
+三档镜像各 35545088 字节：baseline `1c0bae0444f4ef85e05254fd620bb3862c7377c43752a105b4f0c35816bc8f52`，gpioirq `53bf5da145ae987002c093be168c60fb71db26eb1865ea48bca03138a80bc5f4`，gpioirq+sweetclock `8f3fab326ca774e4d724e289719c6dbcd94b2ace93e3767cf523874b124686c7`（618 字节，已确认被固件拒绝，见下）。回读确认 Android v1 头、同一 ABI608 固件、FAT 内 kernel/ADT/TOML；gpioirq 档与 b32 只差内核和 ADT，参数仍 605 字节；sweetclock 档 618 字节，唯一差异是追加 `sweetclock=1`。证据 `scratch/artifact-0122/packaging-verification.json`。
+
+设备实测（2026-11-22）：**gpioirq 档（605 字节参数、六标志 ADT）`fastboot boot` 成功进入内核**，日志 `logs/sweetlog-0122-0.bin`（4198400 字节，SHA256 `9d3c4fea3064ec870723b6842764264acafafe667de3b9b9251e7b0c3e0a00ae`，头 version1／ring 4194304／total 1791339／flush 14／未绕环，22558 行、NUL 0）。**sweetclock 档（618 字节）被固件拒绝：`boot args rejected at 607`，内核未进入**（agent 与用户各试一次，结果相同；先前把 `fastboot OKAY` 当成启动成功是误读）。据此确认本机启动参数硬上限 607 字节：现役参数 605 字节、40 个 token 的默认值均为 0，去掉任何一个都改变语义，所以 `sweetclock=` 这种诊断开关在本机不可能触发，只能改走设备树。
+
+时钟审计（`scratch/artifact-0122/audit-clock-log.py` → `device-log-review.json`）：日志里只有一条时钟行 `[INFO] SWEET CLOCK: planID=C1 phase=start result=0 detail=entry-ready bindings=8`；`clock_phase_counts={start:1}`，无 `bind／enable／disable／admit／register／withdraw／diag` 任何阶段，时钟 WARN 0／ERROR 0。发现缺陷：`bindings=8` 是 `IOQcomClock.cpp` 打印容量常量 `kIOQcomBindingMax` 的结果，该节点并未声明任何绑定，与计划期望的 `bindings=0` 不符；0231 改为统计 `sweet,clock-names` 实际条数。基线对照与 b32 完全一致：WARN 清单相同（`SWEET FB SCANOUT: live configuration needs review` ×3、`SWEET USB: epN cmd N status N` ×2）、ERROR 0，`scanout_transfer=1`、`fb_handoff=1`、`touch_mode3=1`、`probe_drained=1`，touch token `[2,4,6,8]`（b32 为 `[2,4,6]`，多一轮 OFF/ON），无 panic——默认档零回归。
+
+收尾补丁 `xnu/patches/0231-mh2lm-clock-diagnostics-optin.patch`（SHA256 `261a300173249d0642021913d3a0a9be6d769572a319c18467d6663e65a1790c`，2685 字节，已入库 `full-source`）：入口行如实计数；诊断开关改为设备树属性 `sweet,clock-diag=<u32 1>`（属性畸形记 `detail=bad-diag-property` WARN 且不开启），启动参数 `sweetclock` 通道保留给有参数余量的镜像。六标志树（23292 字节 `6a50db55…`）不变，新增七标志诊断树 23332 字节 `c93d9b83b8a099905a6a30b7e62f1e793dc3c7b52b6a2f12555fb6699f54deae`（只多一个属性，去掉后字节还原）。`out-bs/mk16k-0123.sh` 对**每份**镜像硬性校验参数 ≤607 字节（0122 的校验漏在 shipped 循环里，才让 618 字节镜像出厂），并打包三档：baseline、gpioirq、gpioirq+clockdiag（参数仍 605 字节）；脚本用 0122 内核做过干跑，三档镜像结构回读全部通过（kernel 槽＝同一 ABI608 固件，FAT 内 kernel／ADT／TOML 正确，参数 605 字节）。
+
+NEXT：用户 push `full-source` 触发 CI，提供 `logs/xnu-kernel-0123.gz` 与 `logs/xnu-buildtree-0123.gz`；agent 核对构建树与 HEAD 逐字节一致、重放 `0230`＋`0231`，再用 `bash out-bs/mk16k-0123.sh KERNEL 0123 EXPECTED_SHA256` 出三档镜像；用户刷 `boot-16k-0123-gpioirq-panel-pipeline-clockdiag.img` 后回报，agent 用 `audit-clock-log.py --diag` 核对 `bindings=0`、`consumer=sweetclock-diag`、四条 `phase=diag` 与 `detail=zero-writes` 收尾（并把 C1 无权重的 `detail=no-backend` ERROR 列入白名单）。
+
 ## b32 普通实机验收（前次交接，基线保持）
 
 用户反馈“没察觉异常”。b32 / `b3f735b` mode3持久日志标准解码version1/ring4194304/total2917072/flush26，37755行、未绕环、NUL0。3877探针排空、3878 probe hits1/clear1、3879正式armed；4507首次complete、4512 FB active。两轮OFF/ON完整且均恢复GPIO122/app-format；全程76 down/76 up、峰值五指、无残留。第一轮醒后无HID接触，第二轮醒后1对；最后hits1347/empty0/late0快照在首次OFF前，不当成醒后统计。ERROR/panic/stray hold均0，五条WARN全是既有启动诊断。详见[实机记录](docs/DISPLAY-TOUCH-FAILURE-FALLBACK.md#b32-普通实机验收2026-11-21)。

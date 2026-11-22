@@ -197,7 +197,37 @@ int main(){
   p->release();n->release();assert(!live);
   assert(!writes());
  }
- /* ---- registration identity, collision and withdrawal ---- */
+ /* ---- the entry reports what the node declares, never a capacity constant ---- */
+ {
+  auto*n=nub();auto*p=startProvider(n);
+  assert(logged("detail=entry-ready bindings=0"));
+  p->stop(n);p->release();n->release();assert(!live);
+  auto*n2=nub();setData(n2,"sweet,clock-names","a\0b\0",4);
+  auto*p2=startProvider(n2);
+  assert(logged("detail=entry-ready bindings=2"));
+  p2->stop(n2);p2->release();n2->release();assert(!live);
+  assert(!writes()&&trace.empty());
+ }
+ /* ---- the device tree opts diagnostics in: the argument list has no room ---- */
+ {
+  auto*n=nub();uint32_t one=1;setData(n,"sweet,clock-diag",&one,4);
+  auto*p=startProvider(n);
+  assert(p->fSlots[kIOQcomCCDiagnostic].active);
+  assert(logged("phase=diag-done result=0 detail=zero-writes"));
+  p->stop(n);p->release();n->release();assert(!live);
+  assert(!writes()&&trace.empty());
+ }
+ {
+  /* A property that is present but unusable is a configuration error: the
+   * entry warns and stays without a diagnostic backend. */
+  auto*n=nub();uint16_t bad=1;setData(n,"sweet,clock-diag",&bad,2);
+  auto*p=startProvider(n);
+  assert(!p->fSlots[kIOQcomCCDiagnostic].active);
+  assert(logged("detail=bad-diag-property"));
+  p->stop(n);p->release();n->release();assert(!live);
+  assert(!writes()&&trace.empty());
+ }
+/* ---- registration identity, collision and withdrawal ---- */
  {
   auto*n=nub();auto*p=startProvider(n);
   assert(p->registerController(nullptr)==kIOReturnBadArgument);
@@ -604,7 +634,8 @@ int main(){
         "(absent controller/clock, domain, access, unknown parent, cycle, self-parent, depth), "
         "admission-before-capability ordering, pinned-disable refusal, backend propagation, "
         "gate-free re-entrancy and self-withdraw, bounded token wrap, idempotent stop, "
-        "generation restart, opt-in diagnostics, zero MMIO writes\n");
+        "generation restart, opt-in diagnostics from the argument list or the device tree, "
+        "truthful declared-binding count, zero MMIO writes\n");
  return 0;
 }
 '''
