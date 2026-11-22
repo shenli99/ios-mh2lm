@@ -23,6 +23,19 @@ NEXT：所有时钟实施卡仍未开始，后续实施从 C0-01 基线锁定，
 
 NEXT：用户 push `full-source` 触发 CI 内核构建，下载后 agent 核对源码 marker／补丁重放，再用带 `--clock-provider --gcc --clock-diag` 新 ADT SHA 校验的 0125 打包脚本出两份镜像（默认档＋诊断档），由 WSL 直接 `fastboot boot` 并取回日志，审计 `planID=C2` 行（4 条 map、1 条 provider 注册、1 条 start、6 条 decode、1 条 decode-sample，`writes=0` 贯穿）与诊断档的 10 个句柄（4 条合成＋6 条后端，`bindings=10`／`probes=10`，唯一 WARN 是 `cc1:0x5 domain-absent`），首个硬件写仍是 C2-08 debugcc。
 
+刷机与取证命令（0125，内核到家后照此执行）：
+
+```
+python3 scratch/artifact-0125/verify-artifacts.py      # 构建树／marker／内核 C2 字符串
+bash out-bs/mk16k-0125.sh scratch/artifact-0125/kernel.development.mh2lm 0125 <内核 SHA256>
+python3 scratch/artifact-0125/verify-images.py         # 三档镜像头／FAT／两棵树／参数预算
+fastboot boot out-bs/boot-16k-0125-gpioirq-panel-pipeline-clockdiag.img
+tools/sweet-log-pull.sh logs/sweetlog-0125.txt         # OrangeFox recovery，用户侧
+python3 scratch/artifact-0125/audit-clock-log.py --diag logs/sweetlog-0125-0.bin
+python3 scratch/artifact-0125/audit-clock-log.py logs/sweetlog-0125-default.bin
+```
+
+
 ## C1-01～C1-04 只读候选完成（2026-11-22，待 CI／实机）
 
 时钟计划首个实施候选，仍然**写计数为零**：统一入口 `IOQcomClockProvider : IOService` 匹配 `sweet,clock-provider`，`iokit/conf/files.arm64` 加 `IOQcomClock.cpp optional iokitcpp`，`KernelConfigTables.cpp` 的 MH2LM 段加 personality，ADT 由 `tools/mk-mh2lm-mdss-adt.py --clock-provider` 可选追加（`name='clock'`＋`compatible`＋`sweet,clock-abi=<u32 1>`，无 `reg`、无子节点，默认派生字节与旧 ADT 完全相同；`mk-mh2lm-event-matrix.sh` 只在 `--panel-pipeline` 分支传该开关并断言 `SWEET CLOCK: planID=C1 phase=start result=0 detail=entry-ready`）。实现见[阶段1](docs/clock-plan/01-provider.md)。
