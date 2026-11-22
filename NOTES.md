@@ -10032,3 +10032,21 @@ NEXT：等 0124 构建（含 0232）出核后重新打包 clockdiag 档并刷一
 **C1-01～C1-04 收口**：本地测试、ARM64 单 TU 编译、`0230`→`0231`→`0232` 严格重放、默认＋诊断两档实机（0122／0123／0124）四层证据齐备，写计数为零、基线零退化。
 
 NEXT：下一个候选为 C2-01／C2-02 只读后端（GCC／RPMh 控制器身份与只读状态快照），与 C1-05 需求账本同属只读、不新开实机写路径；首个硬件写仍是 C2-08 debugcc 测频。
+
+## 0125 实机失败与 GCC 窗口地址缺陷（2026-11-22，补丁 0234）
+
+用户提供 `logs/xnu-kernel-0125.gz`（60411423 字节）与 `logs/xnu-buildtree-0125.gz`（23456859 字节），构建树与 HEAD `c80137d` 逐字节一致。`bash out-bs/mk16k-0125.sh <kernel> 0125 d4465d32…` 出两档镜像（默认 `150a0f18…`、gpioirq `f438b6d6…`），各刷一次都进 `bsp-kernel`（厂家 watchdog），屏上最后一句是 `sweet fg dma … phase=recovery before=0x2 after=0 after-ok=1 ctl=0 low-confirmed=1 error=0`——这句在 0121b32／0123 环里是正常早期启动打印（第 217-218 行，引文漏了 `ctl-ok=1`），不是故障标记。
+
+导出的 `logs/sweetlog-0125-0.bin`（4198400 字节）与 `sweetlog-0124-0.bin` **SHA256 完全相同**（`981e29ef…`，`total=999833`，flush 8），即 0125 挂在 UFS 可写之前，环里留的是上一次会话的内容：没有任何 `SWEET CLOCK`／`planID=C2` 行，不能用来判断 C2 走到哪一步（控制台回滚也只有约 40 行，C1 行在第 145 行附近，被刷掉是正常的——屏上没看到 `planID=C1` 不能作为定位依据）。
+
+**缺陷**：`sm8150.dtsi` 把 GCC 声明为 `reg = <0x100000 0x1f0000>`，LG `gcc-sm8150.c` 的寄存器号是这个块内的**偏移**，物理地址 = `0x00100000 + 偏移`。0125 的生成器把三个窗口写成裸偏移（`0x0033000`／`0x0043000`／`0x0062000`），ADT 于是要求映射 `0x0033000` 等低地址页；后端按声明核对，看到 `getPhysicalAddress()` 与自己声明的一致就放行，随后在 11 个"快照"读里读的是与时钟表无关的页——最可能的后果是 NOC／XPU 静默复位（不产生 panic，屏幕上就是直接进 `bsp-kernel`）。
+
+**修复（补丁 0234）**：`gccWindows[]` 与生成器 `GCC_WINDOWS` 改为 `0x0010b000`／`0x00133000`／`0x00143000`／`0x00162000`；每行 `phase=map` 追加 `offset=%#llx`（`PA - 0x100000`），设备日志因此可以直接与厂商表对账，不必再手算。主机测试把四个 `offset=` 钉进断言，`audit-clock-log.py` 的期望表也从偏移迁到 PA 并新增"`resource - offset == 0x100000`"这条检查。`0230`→`0234` 在基线 `4148ed3` 上严格重放逐字节一致（6/6 文件）。
+
+**对照实验**：`boot-16k-0125-kernel-c1only-adt.img`（`22999be4…`）＝ 0125 内核 + 0124 的 C1-only ADT（`6a50db55…`，无 `sweet,gcc` 节点）+ 0124 内核参数，用来把"0125 内核在 C1 路径上的回归"与"C2 的 gcc 窗口缺陷"分开：XNU 起来说明凶手只有 C2，仍进 `bsp-kernel` 说明内核侧还有独立问题。
+
+**踩到的工具坑**：在 `dxb/xnu` 子目录里对 `0230`… 补丁执行 `git apply -p1`，git 2.47.3 会对每个文件打印 `Skipped patch '…'`、什么都不改，却仍返回 0——重放必须从仓库顶层 `git apply --directory=dxb/xnu <patch>`，并把"rc=0 但出现 Skipped"当作失败。
+
+**踩到的判读坑**：0125 打包脚本里的 `baseline`／`gpioirq` 指的是 **触摸模式**（`sweettouchpanel=2|3`），不是 ADT 变体；两档都带 `gcc` 节点（`d7430139…`），所以"baseline 也挂"并不构成"无 gcc 对照"。真正的对照是上面那份 C1-only 镜像。
+
+NEXT：`out-bs/mk16k-0126.sh` 已备好（tag `0126`，ADT 门 `081f63dc…`／诊断 `8d6f2adb…`，`reg` 校验直接读生成器的 `GCC_WINDOWS`，因此自动跟随地址修正）。等 0126 内核构建产物：核对构建树 → 打包 → 实机默认档，验收仍是 `writes=0 reads=18 windows=4 snapshot=11 variant=0x8150` 加六条 `decode`／一条 `decode-sample`。

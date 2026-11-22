@@ -19,7 +19,7 @@ ADT 节点由 `tools/mk-mh2lm-mdss-adt.py` 派生，没有独立的时钟控制�
 | GCC DISP_AHB 0x10b00c、DISP_HF_AXI 0x10b038 | CBCR | **无**；只读：SweetMDSS.cpp:1317/1498，Clock.inc:67/77，Core.inc:13 | 每次访问 DISPCC 前的检查 | 只读 | 依赖 ABL 留下的 CLK_ENABLE（LG 标 CLK_IS_CRITICAL） | 0 |
 | GCC 其他（QUP、USB GDSC／CBCR） | — | B/sweet_touch.c 的写路径在 MH2LM 不编译（`SWEET_DEV_TOUCH 0`）；B/sweet_usb.c:169-177 只读 | — | — | USB 依赖 ABL 留下的 GDSC／CBCR | 0 |
 | GCC 本地 vote 寄存器（0x52xxx） | — | 无 | — | — | — | 0 |
-| GCC debug mux 0x62000／0x62004／0x62008／0x62038／0x6203c、XO/4 CBCR 0x43008 | — | **未引用**（全树 grep 为空） | — | — | — | 0 |
+| GCC debug mux 0x62000／0x62004／0x62008／0x62038／0x6203c、XO/4 CBCR 0x43008（PA `0x00162000`…／`0x00143008`，厂商偏移 + `0x00100000`） | — | **未引用**（全树 grep 为空） | — | — | — | 0 |
 | DISPCC MDSS GDSC 0x3000 | SW_COLLAPSE bit0 | Core.inc:161 | Resources.inc:125 `beginCoreResources` ← Scanout.inc:193/251 | 上电投票，从不写断电 | 先 ARC Turbo 与 CN0 完成；warm 路径要求 GDSC 已 ON（Core.inc:96） | 1 |
 | DISPCC PLL0／PLL1（Trion） | 配置／run／out | Core.inc:189-208 | 同上 CorePLL 阶段 | 配置／使能 | 已锁定判为 inherited 并跳过（:173-175） | 1 |
 | DISPCC RCG AHB 0x22bc、MDP 0x20c8 | CMD／CFG | Core.inc:222/228 | 同上 | 切源／更新 | 只选受控 PLL 源 | 1 |
