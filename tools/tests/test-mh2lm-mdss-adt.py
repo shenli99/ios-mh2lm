@@ -289,3 +289,27 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-pipeline-adt-') as temp:
     assert output.read_bytes() == m.derive(blob, display_noc=True, panel_pipeline=True)
     assert source.read_bytes() == blob
 print('PASS: mode7 LM0/PP0/CSC10 narrow maps, append-only ABI, all pins/touch/IRQ compositions, exact old ADT restoration and CLI')
+
+# C1 clock entry: one opt-in node, no window and no child, and removing it
+# reproduces every byte of the same ADT built without the option.
+for opts in (dict(), dict(display_noc=True, panel_pins=True, panel_touch=True,
+                          panel_identity=True, rpmh_irq=True, panel_pipeline=True)):
+    plain = m.derive(blob, **opts)
+    clocked = m.derive(blob, clock_provider=True, **opts)
+    tree, end = adt.parse(clocked)
+    assert end == len(clocked)
+    arm = tree.children[1]
+    clock = next(n for n in arm.children if n.name == 'clock')
+    assert clock.prop('compatible') == b'sweet,clock-provider\0'
+    assert clock.prop('sweet,clock-abi') == struct.pack('<I', 1)
+    assert clock.prop('reg') is None and clock.children == []
+    arm.children = [n for n in arm.children if n.name != 'clock']
+    assert adt.serialize(tree) == plain
+with tempfile.TemporaryDirectory(prefix='mh2lm-clock-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'clock.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--clock-provider',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == m.derive(blob, clock_provider=True)
+    assert source.read_bytes() == blob
+print('PASS: C1 clock entry is opt-in, windowless, byte-restorable and CLI-selectable')

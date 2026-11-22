@@ -449,6 +449,7 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
   if [ "$PANEL_PIPELINE" = '1' ]; then
    for marker in 'SWEET MDSS PIPELINE: normal command enable generation=' 'TE connected before flush/kickoff' \
        'command buffer ready bytes=4096' 'display command-engine reference=' 'SWEET MDSS PIPELINE: configured generation=' \
+       'SWEET CLOCK: planID=C1 phase=start result=0 detail=entry-ready' \
        'SWEET FB PANEL: mode7 requires a new pipeline generation' 'sweet,display-pipeline-abi'; do
     if ! grep -Fqa "$marker" "$TMPDIR/kernel.development.mh2lm"; then
      printf 'kernel lacks pipeline rebuild marker: %s\n' "$marker" >&2
@@ -459,9 +460,9 @@ if [ "$KEY_IRQ_PROFILE" = '--framebuffer-service' ]; then
   # NoC ABI declaration requires resource2/clock1 even before lifecycle setup.
   # Keep metadata admission independent of hardware lifecycle providers.
   python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --panel-identity "$ADT" "$TMPDIR/identity.adt"
-  python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --display-noc --panel-pins --panel-touch --panel-identity --rpmh-irq "$ADT" "$TMPDIR/mdss.adt"
+  python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --display-noc --panel-pins --panel-touch --panel-identity --rpmh-irq --clock-provider "$ADT" "$TMPDIR/mdss.adt"
   if [ "$PANEL_PIPELINE" = '1' ]; then
-   python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --display-noc --panel-pins --panel-touch --panel-identity --rpmh-irq --panel-pipeline "$ADT" "$TMPDIR/pipeline.adt"
+   python3 "$SCRIPT_DIR/mk-mh2lm-mdss-adt.py" --display-noc --panel-pins --panel-touch --panel-identity --rpmh-irq --panel-pipeline --clock-provider "$ADT" "$TMPDIR/pipeline.adt"
   fi
  elif [ "$PANEL_RESOURCES" = '1' ]; then
   for marker in 'SweetRPMhABI' 'SweetRPMhWritesAllowed' 'SweetDisplayRPMhBound' \

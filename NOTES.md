@@ -1,12 +1,28 @@
 # 当前交接（2026-11-22，时钟系统计划已按审查修订）
 
-2026-11-22 修订：新增 C0-04 消费者需求清单（决定实施顺序，无需求的卡标“暂缓”）、C0-05 控制器范围（含 NPUCC／SCC／debugcc）；新增 C2-08 debugcc 测频卡（建议首个硬件写候选）；总计划 3.4 候选合并规则（纯本地／只读卡可合并，首次写／所有权转交仍独立）、3.5 共享默认约束；C3-04 改为启动时选定 owner，在线交接移为可选 C3-04b；C6 写交接卡须 PD4 收口或 MDSS 时钟账本接口冻结。仍为纯文档，所有卡未开始。
+2026-11-22 修订（C0 时）：新增 C0-04 消费者需求清单（决定实施顺序，无需求的卡标“暂缓”）、C0-05 控制器范围（含 NPUCC／SCC／debugcc）；新增 C2-08 debugcc 测频卡（建议首个硬件写候选）；总计划 3.4 候选合并规则（纯本地／只读卡可合并，首次写／所有权转交仍独立）、3.5 共享默认约束；C3-04 改为启动时选定 owner，在线交接移为可选 C3-04b；C6 写交接卡须 PD4 收口或 MDSS 时钟账本接口冻结。C0 时仍为纯文档；其后 C1-01～C1-04 已实现为只读候选（见下节）。
 
 用户要求先把时钟系统拆成阶段和小计划，明确目标、需求、检验、预期结果与实机失败归属。本轮交付[时钟总计划](docs/CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)和[阶段0–9入口](docs/CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#4-阶段入口与依赖)。具体小计划默认一个目标；后续同类资源扩展最多三个目标且必须可独立选择、实机隔离和分别判定，否则拆卡。初始化、门控、共享引用、reset、RSC 所有权、队列／缓存、divider／RCG／PLL、GDSC、升降频及恢复分开实施。
 
 架构沿用统一 IOQcomClockProvider＋独立 CC 后端，apps／display RSC 分实例，资源语义客户端共用传输；初期保留现有 IRQ 完成，先 ACTIVE-only。无安全样本或电源／系统 PM 前置时明确受阻，不以空实现、mock 或普通 OFF/ON 伪称完成。显示 C08／PD4 原有剩余项与 TLMM 独立后续保持各自范围。
 
 NEXT：所有时钟实施卡仍未开始，后续实施从 C0-01 基线锁定，再做 C0-02 writer／依赖表、C0-04 需求清单、C0-05 控制器范围和 C0-03 安全样本调查。本轮只编制和审查计划、同步文档入口并本地提交，没有修改生产代码、CI、固件、ADT 或启动参数，没有新内核／镜像／实机结果，不需重编或重测 b32。最新普通实机基线仍为 b32／`b3f735b`，保留 b31r2／b30 回退。
+
+## C1-01～C1-04 只读候选完成（2026-11-22，待 CI／实机）
+
+时钟计划首个实施候选，仍然**写计数为零**：统一入口 `IOQcomClockProvider : IOService` 匹配 `sweet,clock-provider`，`iokit/conf/files.arm64` 加 `IOQcomClock.cpp optional iokitcpp`，`KernelConfigTables.cpp` 的 MH2LM 段加 personality，ADT 由 `tools/mk-mh2lm-mdss-adt.py --clock-provider` 可选追加（`name='clock'`＋`compatible`＋`sweet,clock-abi=<u32 1>`，无 `reg`、无子节点，默认派生字节与旧 ADT 完全相同；`mk-mh2lm-event-matrix.sh` 只在 `--panel-pipeline` 分支传该开关并断言 `SWEET CLOCK: planID=C1 phase=start result=0 detail=entry-ready`）。实现见[阶段1](docs/clock-plan/01-provider.md)。
+
+- C1-01 生命周期：先校验自身 ABI 再 `IOLockAlloc`／清槽／分配诊断 `thread_call`，重复 start 有确定结果，stop 幂等且只调用一次 `super::stop`，失败路径不调用，释放完持有控制器才交回父类。不映射控制器窗口、不等待 CC。
+- C1-02 注册合同：ID 1～7，重复返回 Busy 且不动原槽，每次注册生成 generation，撤回把 generation 归零，旧句柄查询／门控／依赖检查统一 NotReady。
+- C1-03 只读绑定：`sweet,clock-names`（NUL 名字表，单名 1～31 字节、≤8 项）＋`sweet,clocks`（8 字节 LE32 对：controller／local ID）；属性缺失 NotFound，类型／长度／尾 NUL／项数／ID 越界／重名 BadArgument；句柄按（controller、local ID、generation）固定身份，不同 CC 相同 local ID 不串线。
+- C1-04 依赖描述：possible／selected 父源、`accessDeps`、`domain`、`cornerMaxHz`、pinned／inheritedOn 分别保存；admission 区分 Ready／ControllerAbsent／ParentController／ParentClock／Domain／Access／UnknownParent／Cycle／Depth／Malformed，深度上限 8、遍历上限 16。不注册 IOPM、不自动供电。
+- 硬件操作在本候选全部 `kIOReturnUnsupported`，`disable` 另拒绝 pinned；admission 先于能力判定。诊断只在启动参数 `sweetclock` 下注册一次性 `sweetclock-diag` 只读后端，日志带 planID／resource／consumer／token／generation／phase／result，收尾 `detail=zero-writes`；默认启动无诊断注册。
+
+证据：新增 `tools/tests/test-mh2lm-clock-provider.py`（真实头／源＋内核语义 fixture：零填充分配、带 owner 断言的非递归 IOLock、真实 `setProperty`、`getName`、同步 `thread_call`）通过，覆盖重复／越界注册、generation 失效、13 类畸形绑定拒绝、九种 admission 原因、admission 先于能力、pinned 拒绝、后端传播、重入与自撤回、token 回绕、幂等 stop、诊断开关及 `writes()==0`；六条变异（删能力门／删 pinned 门／跳过 admission／删 token 回绕／接受过期 generation／接受畸形描述）全部被该测试捕获。`test-mh2lm-mdss-adt.py` 12 条通过（新增 C1 节点可选、无窗口、可字节还原、CLI 可选）。ARM64 单 TU 编译 rc=0（`scratch/clock-c1/edited-IOQcomClock.compile.txt`，无 `no newline`／error，仅既有宏与 `-Wunsafe-buffer-usage` 噪声）。补丁 `xnu/patches/0230-mh2lm-clock-provider-entry.patch`，SHA256 `3fc2536659099605f98366ea05e4eab092c7c5a2decf5a90eaa88a32102e428f`，在基线严格 `patch -p1 --fuzz=0` 应用后四份文件逐字节一致、无 `.rej`／`.orig`；反向 dry-run 也通过。
+
+边界：C1-05 公共需求账本未实现；本候选没有任何 MMIO 映射或寄存器写，不改父类源码、显示时钟账本、频率／电源／reset／GDSC 路径，也不关闭既有资源。实机只验匹配／Ready／绑定／写计数零；C2-01／02 后端与首个硬件写（C2-08 debugcc）属后续候选。C0 基线回归已在本候选后重跑（`scratch/clock-c0/regressions/summary.json`）：18 组中 17 通过，唯一失败仍是既有 `panel-profile-lifecycle`（日志同位 `ESC0 did not halt phase=27 rc=0x9`，与 C0 基线签名一致，未修）；本候选测试日志 `scratch/clock-c1/logs/clock-provider.log` SHA256 `ffe184ee0aecea443e7e874a10eb38f62e7176b0e782284b3c49b2c00edb744f`、`mdss-adt.log` SHA256 `065bb312ddea884f993c476b8fb0dd7c74e3b6e054fa484d5d98ed22dd9e8905`。
+
+NEXT：用户 push `full-source` 触发 CircleCI 内核构建，agent 核对源码 marker／补丁重放后打包，再验启动匹配与零写计数；本地无 CI run ID 前不宣称云端通过。
 
 ## b32 普通实机验收（前次交接，基线保持）
 
