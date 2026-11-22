@@ -9977,3 +9977,18 @@ into the pad path without spending a boot-arg byte (the line is 605/607).
 `scratch/artifact-0123/verify-images.py` 逐份解头／解 FAT／回读：kernel 槽同一 ABI608 固件、FAT 内 `kernel.macho` 等于构建产物、ADT sha 与模式对应、TOML `entry.path=Payloads/kernel.macho`、每份参数 ≤607、诊断档与默认档参数完全相同。证据 `packaging-verification.json`。
 
 NEXT：用户刷默认档→导出日志（期望 `bindings=0`、无 diag 行），再刷 clockdiag 档→导出日志（期望 `resource=cc7 … detail=backend-registered`、4 条 `phase=diag` 且 `enable` 全为 Unsupported、`phase=diag-done … detail=zero-writes` 收尾、零 WARN／ERROR）；agent 用 `audit-clock-log.py --strict <default>` 与 `--diag <clockdiag>` 核对后补实机结论、提交并收口 C1。
+
+## 0123 实机结果、补丁 0232 与 C1 收口（2026-11-22）
+
+实机两档各刷一次，日志由用户落盘取回（两次 4 MiB 都未绕环，才当作证据）：
+
+- 默认档 `boot-16k-0123-gpioirq-panel-pipeline.img` → `logs/sweetlog-0123-0b.bin`（4198400 字节，`total=1090524`，flush 9，SHA256 `a9ec2d73f233c61f4b09bead1e1a54c00946fa9d4abb46e16aef60e03a6d4a7c`）。时钟日志唯一一条 `[INFO] SWEET CLOCK: planID=C1 phase=start result=0 detail=entry-ready bindings=0`：0231 的如实计数在真机兑现（0122 同位置是容量常量 8），无 bind／enable／disable／admit／register／withdraw／diag，时钟 WARN／ERROR 为零；节点无 `reg`、无控制器注册，本档没有 MMIO 写路径。
+- 诊断档 `boot-16k-0123-gpioirq-panel-pipeline-clockdiag.img` → `logs/sweetlog-0123-1b.bin`（`total=1376435`，flush 12，SHA256 `b8764571aa79e9e7f7f3b0d6313c2c05ec51a1d726f6abb01e12ad562978b3b5`）。18 条时钟行完整：`phase=start bindings=0` → `consumer=provider phase=register result=0 generation=1`（`resource=cc7:0x0`）→ `phase=diag result=0 detail=backend-registered` → 四个句柄各一条 `phase=bind ... bindings=4` → 四行账本 → `phase=diag-done result=0 detail=zero-writes`。`diag-core`（`caps=0x3`）与 `diag-child`（`caps=0x103`）`deps=0 depReason=ready`、`enable=-536870201`（Unsupported，前者 `detail=capability-absent`）；`diag-orphan` `deps=-536870184 depReason=parent-controller-absent`、`diag-domain`（`domain=0x1`）`deps=-536870184 depReason=domain-absent`，两者 `enable` 等于 `deps`（依赖未满足没有被误报成后端不支持）；四句柄 `info=0 state=0`，无一次写成功。
+- 两档非时钟 WARN／ERROR 清单与 b32 一致（同五条 WARN、零 ERROR、`handoff`／`scanout` 各 1；短会话只有一轮触摸 token=2，`touch_armed` 2 条少于 b32 的 4，属会话长度差异）。
+- 审计：`scratch/artifact-0123/audit-clock-log.py`（两种拒绝形态都接受）输出 `device-log-review.json`（默认）与 `device-log-review-diag.json`（诊断），均为 rc=0。
+
+0231 遗留缺陷在 0123 日志里现形：两个被拒句柄的 `phase=admit` WARN 各出现**两条逐字节相同**的副本——`checkDependencies` 走一遍遍历打一条，`enable` 内部再走一遍又打一条。补丁 `0232-mh2lm-clock-single-owner-refusal.patch`（10623 字节，2 文件，SHA256 `0d3fdf8814312413db556e714048169842e70c1daf88f644d090ab20e20c2db9`）给 `admitWalk` 加 `log` 参数、`admitInternal`／`checkDependenciesInternal` 在 `log=false` 时不打印任何拒绝行，公共 `admit`／`checkDependencies` 与诊断探测各按自己的 phase 记账，`IOQcomClockHandle::enable` 打唯一一条 `phase=enable result=... detail=...`。主机测试新增断言：域依赖失败时 `phase=admit` 计数不动而 `phase=enable` 加一并带 `detail=domain-absent`，随后一次显式 `checkDependencies` 恰好加一条 `phase=admit`。在基线 `4148ed3` 上 `0230`→`0231`→`0232` 严格 `--fuzz=0` 应用后四份文件与工作树逐字节一致；ARM64 单 TU 编译 rc=0；两套主机测试（clock provider、mdss ADT）全通过。
+
+C1 至此收口：C1-01～C1-04 只读候选在真机默认档与诊断档均通过，写计数为零、基线零退化；C1-05（公共需求账本）仍未开始。
+
+NEXT：等 0124 构建（含 0232）出核后重新打包 clockdiag 档并刷一次，确认同一失败只剩**一条** `phase=enable ... detail=...`（不再有 `phase=admit` 行），随后即可转入 C2-01／C2-02 只读后端候选。默认档无需复验（该路径不可能产生拒绝行）。

@@ -102,7 +102,12 @@ class IOQcomClockProvider : public IOService {
  IOReturn retainController(uint32_t id,uint64_t generation,IOQcomClockController **out,
   uint64_t *generationOut);
  IOReturn admitWalk(uint32_t controller,uint32_t localID,unsigned depth,Walk *walk,
-  const char *consumer,uint32_t *reason);
+  const char *consumer,uint32_t *reason,bool log);
+ /* Same admission walk, with the refusal line suppressed when the caller will
+ * report the failure under its own phase (a handle enable, a diagnostics probe). */
+ IOReturn admitInternal(IOQcomClockController *owner,uint32_t localID,const char *consumer,
+  IOQcomClockInfo *info,uint32_t *reason,bool requirements,bool log);
+ IOReturn checkDependenciesInternal(IOQcomClockHandle *handle,uint32_t *reason,bool log);
  static void diagnose(thread_call_param_t,thread_call_param_t);
  void runDiagnostics(void);
 public:

@@ -95,6 +95,7 @@ source = re.sub(r'^#include.*\n', '', source, flags=re.M)
 tests = r'''
 static unsigned writes(){unsigned n=0;for(auto&o:trace)if(o.write)++n;return n;}
 static bool logged(const char*n){for(auto&m:messages)if(m.find(n)!=std::string::npos)return true;return false;}
+static unsigned counted(const char*n){unsigned c=0;for(auto&m:messages)if(m.find(n)!=std::string::npos)++c;return c;}
 static void setData(IOService*s,const char*k,const void*p,unsigned n){
  OSData*d=OSData::withBytes(p,n);assert(d);s->setProperty(k,d);d->release();
 }
@@ -431,7 +432,18 @@ int main(){
   bindings(c,{"c21","c22"},{{kIOQcomCCGCC,21},{kIOQcomCCGCC,22}});
   assert(acquire(p,c,"c21",&h)==kIOReturnSuccess);
   assert(p->checkDependencies(h,&reason)==kIOReturnNotReady&&reason==kIOQcomDepDomain);
+  /* the probe reads the reason silently; the enable below owns the single
+   * refusal line, so the admit count must not move across it */
+  unsigned admits=counted("phase=admit"),lines=counted("phase=enable");
   assert(h->enable()==kIOReturnNotReady);
+  assert(counted("phase=admit")==admits);
+  assert(counted("phase=enable")==lines+1);
+  std::string refusal=std::string("phase=enable result=")+std::to_string(kIOReturnNotReady)+" detail=domain-absent";
+  assert(logged(refusal.c_str()));
+  /* an explicit query is the caller that does own the admit line */
+  unsigned queried=counted("phase=admit");
+  assert(p->checkDependencies(h,&reason)==kIOReturnNotReady&&reason==kIOQcomDepDomain);
+  assert(counted("phase=admit")==queried+1);
   h->release();
   assert(acquire(p,c,"c22",&h)==kIOReturnSuccess);
   assert(p->checkDependencies(h,&reason)==kIOReturnNotReady&&reason==kIOQcomDepUnknownParent);

@@ -1,0 +1,189 @@
+diff --git a/iokit/Kernel/arm/IOQcomClock.cpp b/iokit/Kernel/arm/IOQcomClock.cpp
+index b6629fc..7918276 100644
+--- a/iokit/Kernel/arm/IOQcomClock.cpp
++++ b/iokit/Kernel/arm/IOQcomClock.cpp
+@@ -219,8 +219,14 @@ IOReturn IOQcomClockHandle::enable(void)
+ 	IOQcomClockInfo info;
+ 	char resource[kIOQcomLogBuf];
+ 	clockResource(resource,sizeof resource,fController,fLocalID);
+-	result=fProvider->admit(controller,fLocalID,clockConsumerName(fConsumer),&info,NULL,true);
+-	if (result==kIOReturnSuccess) {
++	uint32_t reason=kIOQcomDepReady;
++	result=fProvider->admitInternal(controller,fLocalID,clockConsumerName(fConsumer),&info,
++	 &reason,true,false);
++	if (result!=kIOReturnSuccess) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s token=%llu generation=%llu phase=enable result=%d detail=%s\n",
++		 resource,clockConsumerName(fConsumer),(unsigned long long)fToken,
++		 (unsigned long long)fGeneration,result,clockDepName(reason));
++	} else {
+ 		if (!(info.capabilities&kIOQcomCapEnable)) {
+ 			result=kIOReturnUnsupported;
+ 			SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=%s consumer=%s token=%llu generation=%llu phase=enable result=%d detail=capability-absent\n",
+@@ -574,20 +580,20 @@ IOReturn IOQcomClockProvider::acquireClock(IOService *consumer,const char *name,
+ }
+ 
+ IOReturn IOQcomClockProvider::admitWalk(uint32_t controller,uint32_t localID,
+- unsigned depth,Walk *walk,const char *consumer,uint32_t *reason)
++ unsigned depth,Walk *walk,const char *consumer,uint32_t *reason,bool log)
+ {
+ 	char resource[kIOQcomLogBuf];
+ 	clockResource(resource,sizeof resource,controller,localID);
+ 	if (depth>kIOQcomMaxDependencyDepth) {
+ 		if (reason) *reason=kIOQcomDepDepth;
+-		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
++		if (log) SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
+ 		 resource,consumer,kIOReturnBadArgument,clockDepName(kIOQcomDepDepth));
+ 		return kIOReturnBadArgument;
+ 	}
+ 	for (unsigned i=0;i<walk->count;i++) {
+ 		if (walk->controller[i]==controller&&walk->localID[i]==localID) {
+ 			if (reason) *reason=kIOQcomDepCycle;
+-			SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
++			if (log) SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
+ 			 resource,consumer,kIOReturnBadArgument,clockDepName(kIOQcomDepCycle));
+ 			return kIOReturnBadArgument;
+ 		}
+@@ -600,7 +606,7 @@ IOReturn IOQcomClockProvider::admitWalk(uint32_t controller,uint32_t localID,
+ 	IOReturn result=retainController(controller,0,&owner,NULL);
+ 	if (result!=kIOReturnSuccess) {
+ 		if (reason) *reason=kIOQcomDepParentController;
+-		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
++		if (log) SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
+ 		 resource,consumer,kIOReturnNotReady,clockDepName(kIOQcomDepParentController));
+ 		return kIOReturnNotReady;
+ 	}
+@@ -611,7 +617,7 @@ IOReturn IOQcomClockProvider::admitWalk(uint32_t controller,uint32_t localID,
+ 	 info.controller!=controller||info.localID!=localID) {
+ 		owner->release();
+ 		if (reason) *reason=kIOQcomDepParentClock;
+-		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
++		if (log) SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
+ 		 resource,consumer,kIOReturnNotReady,clockDepName(kIOQcomDepParentClock));
+ 		return kIOReturnNotReady;
+ 	}
+@@ -621,7 +627,7 @@ IOReturn IOQcomClockProvider::admitWalk(uint32_t controller,uint32_t localID,
+ 	for (unsigned i=0;i<info.possibleCount;i++) {
+ 		const IOQcomClockParent &parent=info.possible[i];
+ 		if (parent.source!=kIOQcomSourceLocal) continue;
+-		result=admitWalk(parent.controller,parent.localID,depth+1,walk,consumer,reason);
++		result=admitWalk(parent.controller,parent.localID,depth+1,walk,consumer,reason,log);
+ 		if (result!=kIOReturnSuccess) {
+ 			owner->release();
+ 			return result;
+@@ -632,8 +638,8 @@ IOReturn IOQcomClockProvider::admitWalk(uint32_t controller,uint32_t localID,
+ 	return kIOReturnSuccess;
+ }
+ 
+-IOReturn IOQcomClockProvider::admit(IOQcomClockController *owner,uint32_t localID,
+- const char *consumer,IOQcomClockInfo *info,uint32_t *reason,bool requirements)
++IOReturn IOQcomClockProvider::admitInternal(IOQcomClockController *owner,uint32_t localID,
++ const char *consumer,IOQcomClockInfo *info,uint32_t *reason,bool requirements,bool log)
+ {
+ 	if (reason) *reason=kIOQcomDepReady;
+ 	if (!owner||!info) return kIOReturnBadArgument;
+@@ -643,14 +649,14 @@ IOReturn IOQcomClockProvider::admit(IOQcomClockController *owner,uint32_t localI
+ 	IOReturn result=owner->copyClockInfo(localID,info);
+ 	if (result!=kIOReturnSuccess) {
+ 		if (reason) *reason=kIOQcomDepMalformed;
+-		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
++		if (log) SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
+ 		 resource,consumer,kIOReturnNotReady,clockDepName(kIOQcomDepMalformed));
+ 		return kIOReturnNotReady;
+ 	}
+ 	if (!clockDescriptorValid(info)||info->controller!=owner->clockControllerID()||
+ 	 info->localID!=localID) {
+ 		if (reason) *reason=kIOQcomDepMalformed;
+-		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
++		if (log) SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
+ 		 resource,consumer,kIOReturnBadArgument,clockDepName(kIOQcomDepMalformed));
+ 		return kIOReturnBadArgument;
+ 	}
+@@ -659,7 +665,7 @@ IOReturn IOQcomClockProvider::admit(IOQcomClockController *owner,uint32_t localI
+ 		IOQcomClockController *dependency=NULL;
+ 		if (retainController(id,0,&dependency,NULL)!=kIOReturnSuccess) {
+ 			if (reason) *reason=kIOQcomDepAccess;
+-			SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s dependency=cc%u\n",
++			if (log) SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s dependency=cc%u\n",
+ 			 resource,consumer,kIOReturnNotReady,clockDepName(kIOQcomDepAccess),id);
+ 			return kIOReturnNotReady;
+ 		}
+@@ -668,7 +674,7 @@ IOReturn IOQcomClockProvider::admit(IOQcomClockController *owner,uint32_t localI
+ 	if (!requirements) return kIOReturnSuccess;
+ 	if (info->domain!=0) {
+ 		if (reason) *reason=kIOQcomDepDomain;
+-		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s domain=%#x\n",
++		if (log) SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s domain=%#x\n",
+ 		 resource,consumer,kIOReturnNotReady,clockDepName(kIOQcomDepDomain),info->domain);
+ 		return kIOReturnNotReady;
+ 	}
+@@ -681,18 +687,30 @@ IOReturn IOQcomClockProvider::admit(IOQcomClockController *owner,uint32_t localI
+ 		const IOQcomClockParent &parent=info->possible[i];
+ 		if (parent.source==kIOQcomSourceUnknown) {
+ 			if (reason) *reason=kIOQcomDepUnknownParent;
+-			SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
++			if (log) SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=admit result=%d detail=%s\n",
+ 			 resource,consumer,kIOReturnNotReady,clockDepName(kIOQcomDepUnknownParent));
+ 			return kIOReturnNotReady;
+ 		}
+ 		if (parent.source!=kIOQcomSourceLocal) continue;
+-		result=admitWalk(parent.controller,parent.localID,1,&walk,consumer,reason);
++		result=admitWalk(parent.controller,parent.localID,1,&walk,consumer,reason,log);
+ 		if (result!=kIOReturnSuccess) return result;
+ 	}
+ 	return kIOReturnSuccess;
+ }
+ 
++IOReturn IOQcomClockProvider::admit(IOQcomClockController *owner,uint32_t localID,
++ const char *consumer,IOQcomClockInfo *info,uint32_t *reason,bool requirements)
++{
++	return admitInternal(owner,localID,consumer,info,reason,requirements,true);
++}
++
+ IOReturn IOQcomClockProvider::checkDependencies(IOQcomClockHandle *handle,uint32_t *reason)
++{
++	return checkDependenciesInternal(handle,reason,true);
++}
++
++IOReturn IOQcomClockProvider::checkDependenciesInternal(IOQcomClockHandle *handle,
++ uint32_t *reason,bool log)
+ {
+ 	if (reason) *reason=kIOQcomDepReady;
+ 	if (!handle) return kIOReturnBadArgument;
+@@ -700,8 +718,8 @@ IOReturn IOQcomClockProvider::checkDependencies(IOQcomClockHandle *handle,uint32
+ 	IOReturn result=retainController(handle->fController,handle->fGeneration,&controller,NULL);
+ 	if (result!=kIOReturnSuccess) return result;
+ 	IOQcomClockInfo info;
+-	result=admit(controller,handle->fLocalID,clockConsumerName(handle->fConsumer),
+-	 &info,reason,true);
++	result=admitInternal(controller,handle->fLocalID,clockConsumerName(handle->fConsumer),
++	 &info,reason,true,log);
+ 	controller->release();
+ 	return result;
+ }
+@@ -862,7 +880,7 @@ void IOQcomClockProvider::runDiagnostics(void)
+ 		uint32_t reason=kIOQcomDepReady;
+ 		IOReturn infoResult=handle->copyInfo(&info);
+ 		IOReturn stateResult=handle->copyState(&state);
+-		IOReturn depResult=checkDependencies(handle,&reason);
++		IOReturn depResult=checkDependenciesInternal(handle,&reason,false);
+ 		IOReturn enableResult=handle->enable();
+ 		SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=%s consumer=%s token=%llu generation=%llu phase=diag result=0 info=%d state=%d deps=%d depReason=%s enable=%d caps=%#x parents=%u domain=%#x\n",
+ 		 resource,names[i],(unsigned long long)handle->token(),
+diff --git a/iokit/Kernel/arm/IOQcomClock.h b/iokit/Kernel/arm/IOQcomClock.h
+index c0f9d09..4586774 100644
+--- a/iokit/Kernel/arm/IOQcomClock.h
++++ b/iokit/Kernel/arm/IOQcomClock.h
+@@ -102,7 +102,12 @@ class IOQcomClockProvider : public IOService {
+  IOReturn retainController(uint32_t id,uint64_t generation,IOQcomClockController **out,
+   uint64_t *generationOut);
+  IOReturn admitWalk(uint32_t controller,uint32_t localID,unsigned depth,Walk *walk,
+-  const char *consumer,uint32_t *reason);
++  const char *consumer,uint32_t *reason,bool log);
++ /* Same admission walk, with the refusal line suppressed when the caller will
++ * report the failure under its own phase (a handle enable, a diagnostics probe). */
++ IOReturn admitInternal(IOQcomClockController *owner,uint32_t localID,const char *consumer,
++  IOQcomClockInfo *info,uint32_t *reason,bool requirements,bool log);
++ IOReturn checkDependenciesInternal(IOQcomClockHandle *handle,uint32_t *reason,bool log);
+  static void diagnose(thread_call_param_t,thread_call_param_t);
+  void runDiagnostics(void);
+ public:
