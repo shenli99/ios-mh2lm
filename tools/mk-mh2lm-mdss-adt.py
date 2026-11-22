@@ -18,6 +18,12 @@ RPMH_WINDOWS = ((0x18220000, 0x100), (0x18220d00, 0x3000), (0x0c3f000c, 8))
 # The panel reset/TE pads are owned through TLMMGPIOController's AGPIO
 # handles, so this node no longer carries their tile windows: the controller
 # is the only mapper of TLMM.
+# C2: the four GCC pages this port may need. The first page is also the
+# first window of arm-io/mdss, which maps it read-only today: both nodes name
+# the same physical page on purpose, and only the clock backend may ever own
+# a write to it.
+GCC_WINDOWS = ((0x0010b000, 0x1000), (0x00033000, 0x1000),
+               (0x00043000, 0x1000), (0x00062000, 0x1000))
 NOC_WINDOWS = ((0x0af20000, 0x1c00), (0x0af21c00, 0x3000), (0x0af30000, 0x3fd4))
 # SM8150 TLMM: four 1 MiB tile windows (west, east, north, south). The pad
 # slot inside a tile is 0x1000 * global pin number, so a full 1 MiB window
@@ -26,7 +32,7 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
                 (0x03900000, 0x100000), (0x03d00000, 0x100000))
 
 
-def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False):
+def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False):
     display_noc = display_noc or panel_pipeline
     display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
     root, end = adt.parse(blob)
@@ -156,7 +162,7 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             ('interrupts', 0, struct.pack('<III', 240, 0, 4)),
         ])
         arm.children.append(touch)
-    if clock_diag:
+    if clock_diag or gcc:
         clock_provider = True
     if clock_provider:
         # C1: one clock entry personality. The node carries no reg and no
@@ -171,6 +177,17 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             # diagnostic backend has to be requested from the device tree.
             clock.props.append(('sweet,clock-diag', 0, struct.pack('<I', 1)))
         arm.children.append(clock)
+    if gcc and not any(n.name == 'gcc' for n in arm.children):
+        # C2: the read-only GCC backend windows. No window overlaps a writer:
+        # the 0x10b000 page is mapped read-only by the display backend and
+        # stays that way, the other three have no owner in this tree.
+        gcc_node = adt.Node()
+        gcc_node.props = [('name', 0, b'gcc\0'),
+                          ('compatible', 0, b'sweet,gcc\0'),
+                          ('sweet,gcc-abi', 0, struct.pack('<I', 1)),
+                          ('sweet,gcc-variant', 0, struct.pack('<I', 0x8150)),
+                          ('reg', 0, encode(GCC_WINDOWS))]
+        arm.children.append(gcc_node)
     return adt.serialize(root)
 
 
@@ -186,10 +203,11 @@ if __name__ == '__main__':
     parser.add_argument('--panel-pipeline', action='store_true', help='append LM0/PP0/CSC10 windows for mode7 pipeline rebuild; implies display NoC resources')
     parser.add_argument('--clock-provider', action='store_true', help='append the C1 clock entry; no window, no controller registration at boot')
     parser.add_argument('--clock-diag', action='store_true', help='append the C1 clock entry with the diagnostic opt-in property (implies --clock-provider)')
+    parser.add_argument('--gcc', action='store_true', help='append the read-only C2 GCC backend windows and variant ABI (implies --clock-provider)')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
     source, destination = args.source, args.destination
     if source.resolve() == destination.resolve():
         sys.exit('output must differ from the baseline ADT')
-    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag))
+    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc))

@@ -334,3 +334,61 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-diag-adt-') as temp:
     assert source.read_bytes() == blob
 print('PASS: C1 clock entry is opt-in, windowless, byte-restorable and CLI-selectable, '
       'diagnostic request on the node')
+
+# C2 asks for the four GCC windows on a dedicated node. The 0x10b000 page sits
+# below SOC_BASE, so its cell must use the low alias the display node already
+# relies on; dropping the node has to restore the C1 bytes exactly.
+for opts in (dict(), dict(display_noc=True, panel_pins=True, panel_touch=True,
+                          panel_identity=True, rpmh_irq=True, panel_pipeline=True),
+             dict(clock_diag=True)):
+    clocked = m.derive(blob, clock_provider=True, **opts)
+    gcced = m.derive(blob, gcc=True, **opts)
+    tree, end = adt.parse(gcced)
+    assert end == len(gcced)
+    arm = tree.children[1]
+    gcc = next(n for n in arm.children if n.name == 'gcc')
+    assert gcc.prop('compatible') == b'sweet,gcc\0'
+    assert gcc.prop('sweet,gcc-abi') == struct.pack('<I', 1)
+    assert gcc.prop('sweet,gcc-variant') == struct.pack('<I', 0x8150)
+    assert gcc.children == []
+    reg = struct.unpack('<%dQ' % (len(gcc.prop('reg')) // 8), gcc.prop('reg'))
+    assert len(reg) == 2 * len(m.GCC_WINDOWS)
+    windows = []
+    for i in range(0, len(reg), 2):
+        addr, size = reg[i], reg[i + 1]
+        windows.append((addr + m.SOC_BASE if addr < m.LOW_ALIAS else addr - m.LOW_ALIAS,
+                        size))
+    assert tuple(windows) == m.GCC_WINDOWS
+    assert arm.prop('ranges') == (struct.pack('<QQQ', 0, m.SOC_BASE, 0x100000000 - m.SOC_BASE) +
+                                  struct.pack('<QQQ', m.LOW_ALIAS, 0, m.SOC_BASE))
+    order = [n.name for n in arm.children]
+    assert order.index('clock') + 1 == order.index('gcc')
+    arm.children = [n for n in arm.children if n.name != 'gcc']
+    assert adt.serialize(tree) == clocked
+    if not opts.get('clock_diag'):	# the clock entry is part of the plain tree
+        arm.children = [n for n in arm.children if n.name != 'clock']
+        assert adt.serialize(tree) == m.derive(blob, **opts)
+# The window request alone is enough: asking for GCC asks for the entry too.
+assert m.derive(blob, gcc=True) == m.derive(blob, clock_provider=True, gcc=True)
+assert m.derive(blob, gcc=True) != m.derive(blob)
+assert not any(n.name == 'gcc' for n in adt.parse(m.derive(blob))[0].children[1].children)
+assert not any(n.name == 'gcc' for n in adt.parse(m.derive(blob, clock_provider=True))[0].children[1].children)
+with tempfile.TemporaryDirectory(prefix='mh2lm-gcc-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'gcc.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--gcc',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == m.derive(blob, gcc=True)
+    assert source.read_bytes() == blob
+    both, diagged = Path(temp)/'both.adt', m.derive(blob, clock_diag=True)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--gcc', '--clock-diag',
+                    str(source), str(both)], check=True)
+    assert both.read_bytes() == m.derive(blob, gcc=True, clock_diag=True)
+    tree, end = adt.parse(both.read_bytes())
+    assert end == len(both.read_bytes())
+    arm = tree.children[1]
+    clock = next(n for n in arm.children if n.name == 'clock')
+    assert clock.prop('sweet,clock-diag') == struct.pack('<I', 1)
+    assert diagged != both.read_bytes()	# the diag bit and the node are separable
+print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
+      'exactly removable to the C1 and original bytes, and selectable from the CLI')

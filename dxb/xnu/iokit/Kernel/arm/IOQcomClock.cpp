@@ -24,6 +24,7 @@
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSData.h>
 #include <pexpert/pexpert.h>
+#include <kern/clock.h>
 #include <string.h>
 #define SWEET_LOG_SINK IOLog
 #include "../../../bsd/dev/sweet_log_level.h"
@@ -37,7 +38,20 @@ OSDefineMetaClassAndStructors(IOQcomClockHandle,OSObject);
 OSDefineMetaClassAndStructors(IOQcomClockProvider,IOService);
 
 enum : unsigned { kIOQcomLogBuf=40, kIOQcomNameMax=32, kIOQcomNameBlobMax=8*(kIOQcomNameMax+1),
- kIOQcomPairBytes=8 };
+ kIOQcomPairBytes=8, kIOQcomProbeLocalMax=8 };
+
+/* The published entry. A backend that is not a child of the entry cannot rely
+ * on IOKit start order, so the entry makes itself findable and the backend
+ * waits a bounded time instead of failing or half-registering. */
+static IOQcomClockProvider *gPublishedProvider=NULL;
+
+/* Diagnostics run this long after the entry starts, in absolute nanoseconds. */
+enum : uint64_t { kIOQcomDiagDelayNs=5000000000ULL };
+
+IOQcomClockProvider *IOQcomClockProvider::publishedProvider(void)
+{
+	return __atomic_load_n(&gPublishedProvider,__ATOMIC_ACQUIRE);
+}
 
 static const char *clockDepName(uint32_t reason)
 {
@@ -161,6 +175,11 @@ IOReturn IOQcomClockController::enableClock(uint32_t,uint64_t)
 IOReturn IOQcomClockController::disableClock(uint32_t,uint64_t)
 {
 	return kIOReturnUnsupported;
+}
+
+bool IOQcomClockController::copyClockName(uint32_t,char *,unsigned)
+{
+	return false;
 }
 
 /* ------------------------------------------------------------------ handle */
@@ -352,11 +371,17 @@ bool IOQcomClockProvider::start(IOService *provider)
 		return false;
 	}
 	fReady=true;
+	__atomic_store_n(&gPublishedProvider,this,__ATOMIC_RELEASE);
 	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 phase=start result=0 detail=entry-ready bindings=%u\n",
 	 clockDeclaredBindings(provider));
 	/* Diagnostics are opt-in: the default boot performs no clock request and
 	 * leaves every backend absent. */
-	if (clockDiagRequested(provider)) thread_call_enter(fDiagCall);
+	if (clockDiagRequested(provider)) {
+		/* Delayed rather than immediate: the backend windows are separate
+		 * IOServices and start in an order IOKit does not fix, so the probe
+		 * runs once both are likely up instead of reporting an empty entry. */
+		thread_call_enter_delayed(fDiagCall,mach_absolute_time()+kIOQcomDiagDelayNs);
+	}
 	return true;
 }
 
@@ -381,6 +406,7 @@ void IOQcomClockProvider::stop(IOService *provider)
 		}
 		IOLockUnlock(fLock);
 	}
+	__atomic_store_n(&gPublishedProvider,NULL,__ATOMIC_RELEASE);
 	if (call) {
 		thread_call_cancel_wait(call);
 		thread_call_free(call);
@@ -421,6 +447,7 @@ void IOQcomClockProvider::free(void)
 	}
 	fReady=false;
 	fStopping=true;
+	__atomic_store_n(&gPublishedProvider,NULL,__ATOMIC_RELEASE);
 	super::free();
 }
 
@@ -488,6 +515,42 @@ IOReturn IOQcomClockProvider::withdrawController(IOQcomClockController *controll
 	 victim->clockControllerID());
 	victim->release();
 	return kIOReturnSuccess;
+}
+
+/* Zero-write evidence for the whole entry: ask every registered backend while
+ * holding a reference to it, so a stop racing the query cannot free the object
+ * under the call. */
+uint64_t IOQcomClockProvider::registeredWrites(void)
+{
+	IOQcomClockController *held[kIOQcomCCMax];
+	unsigned count=0;
+	uint64_t writes=0;
+	if (fLock) {
+		IOLockLock(fLock);
+		for (unsigned id=0;id<kIOQcomCCMax;id++) {
+			if (!fSlots[id].active||!fSlots[id].controller) continue;
+			fSlots[id].controller->retain();
+			held[count++]=fSlots[id].controller;
+		}
+		IOLockUnlock(fLock);
+	}
+	for (unsigned i=0;i<count;i++) {
+		writes+=held[i]->registerWrites();
+		held[i]->release();
+	}
+	return writes;
+}
+
+unsigned IOQcomClockProvider::registeredControllers(void)
+{
+	unsigned count=0;
+	if (!fLock) return 0;
+	IOLockLock(fLock);
+	for (unsigned id=0;id<kIOQcomCCMax;id++) {
+		if (fSlots[id].active&&fSlots[id].controller) count++;
+	}
+	IOLockUnlock(fLock);
+	return count;
 }
 
 IOReturn IOQcomClockProvider::retainController(uint32_t id,uint64_t generation,
@@ -803,6 +866,9 @@ IOReturn IOQcomClockDiagController::copyClockState(uint32_t localID,IOQcomClockS
 	return kIOReturnSuccess;
 }
 
+/* One probe: a resource that exists right now, on a registered controller. */
+struct IOQcomClockProbe { uint32_t controller, localID; char name[kIOQcomNameMax]; };
+
 void IOQcomClockProvider::runDiagnostics(void)
 {
 	bool live=false;
@@ -831,17 +897,57 @@ void IOQcomClockProvider::runDiagnostics(void)
 	diag->release();
 	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=cc%u consumer=sweetclock-diag phase=diag result=0 detail=backend-registered\n",
 	 (unsigned)kIOQcomCCDiagnostic);
-
-	static const char *const names[]={"diag-core","diag-child","diag-orphan","diag-domain"};
-	unsigned char nameBytes[64],pairBytes[sizeof names/sizeof names[0]*kIOQcomPairBytes];
-	unsigned nameLength=0;
-	for (unsigned i=0;i<sizeof names/sizeof names[0];i++) {
-		unsigned length=(unsigned)strlen(names[i])+1;
-		if (nameLength+length>sizeof nameBytes) return;
-		memcpy(nameBytes+nameLength,names[i],length);
+	/* The synthetic entries keep the C1 refusals observable; then every real
+	 * backend contributes its own descriptors, so a device log lists the
+	 * clocks that are actually registered instead of an assumed set. */
+	static const char *const synthetic[]={"diag-core","diag-child","diag-orphan","diag-domain"};
+	static_assert(kIOQcomBindingMax<=kIOQcomWalkMax,"probe table covers a full bind table");
+	IOQcomClockProbe probes[kIOQcomWalkMax];
+	unsigned count=0;
+	for (unsigned i=0;i<sizeof synthetic/sizeof synthetic[0];i++) {
+		probes[count].controller=kIOQcomCCDiagnostic;
+		probes[count].localID=(uint32_t)(i+1);
+		snprintf(probes[count].name,sizeof probes[count].name,"%s",synthetic[i]);
+		count++;
+	}
+	/* The table is bounded by what the provider's parser accepts, not by the
+	 * probe array: a listing it cannot parse would report every bind as
+	 * malformed and hide the backends it exists to show. */
+	for (uint32_t id=1;id<kIOQcomCCMax&&count<kIOQcomBindingMax;id++) {
+		if (id==kIOQcomCCDiagnostic) continue;
+		for (uint32_t localID=1;localID<=kIOQcomProbeLocalMax&&count<kIOQcomBindingMax;localID++) {
+			IOQcomClockController *owner=NULL;
+			if (retainController(id,0,&owner,NULL)!=kIOReturnSuccess) break;
+			IOQcomClockInfo info;
+			memset(&info,0,sizeof info);
+			bool found=owner->copyClockInfo(localID,&info)==kIOReturnSuccess;
+			bool named=false;
+			if (found) {
+				probes[count].controller=id;
+				probes[count].localID=localID;
+				named=owner->copyClockName(localID,probes[count].name,sizeof probes[count].name);
+			}
+			owner->release();
+			if (!found) continue;
+			if (!named) snprintf(probes[count].name,sizeof probes[count].name,"cc%u:0x%x",id,localID);
+			count++;
+		}
+	}
+	unsigned char nameBytes[kIOQcomNameBlobMax],pairBytes[kIOQcomWalkMax*kIOQcomPairBytes];
+	unsigned nameLength=0, pairCount=0;
+	bool truncated=false;
+	for (unsigned i=0;i<count;i++) {
+		unsigned length=(unsigned)strlen(probes[i].name)+1;
+		if (nameLength+length>sizeof nameBytes) { truncated=true; break; }
+		memcpy(nameBytes+nameLength,probes[i].name,length);
 		nameLength+=length;
-		uint32_t pair[2]={kIOQcomCCDiagnostic,(uint32_t)(i+1)};
-		memcpy(pairBytes+i*kIOQcomPairBytes,pair,kIOQcomPairBytes);
+		uint32_t pair[2]={probes[i].controller,probes[i].localID};
+		memcpy(pairBytes+pairCount*kIOQcomPairBytes,pair,kIOQcomPairBytes);
+		pairCount++;
+	}
+	if (truncated) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 consumer=sweetclock-diag phase=diag result=%d detail=name-table-full bound=%u count=%u\n",
+		 kIOReturnNoResources,(unsigned)sizeof nameBytes,count);
 	}
 	IOService *consumer=OSTypeAlloc(IOService);
 	if (!consumer||!consumer->init()) {
@@ -852,7 +958,7 @@ void IOQcomClockProvider::runDiagnostics(void)
 	}
 	consumer->setName("sweetclock-diag");
 	OSData *nameData=OSData::withBytes(nameBytes,nameLength);
-	OSData *pairData=OSData::withBytes(pairBytes,sizeof pairBytes);
+	OSData *pairData=OSData::withBytes(pairBytes,pairCount*kIOQcomPairBytes);
 	if (!nameData||!pairData) {
 		OSSafeReleaseNULL(nameData);
 		OSSafeReleaseNULL(pairData);
@@ -865,14 +971,14 @@ void IOQcomClockProvider::runDiagnostics(void)
 	consumer->setProperty("sweet,clocks",pairData);
 	nameData->release();
 	pairData->release();
-	for (unsigned i=0;i<sizeof names/sizeof names[0];i++) {
+	for (unsigned i=0;i<pairCount;i++) {
 		IOQcomClockHandle *handle=NULL;
 		char resource[kIOQcomLogBuf];
-		clockResource(resource,sizeof resource,kIOQcomCCDiagnostic,(uint32_t)(i+1));
-		result=acquireClock(consumer,names[i],&handle);
+		clockResource(resource,sizeof resource,probes[i].controller,probes[i].localID);
+		result=acquireClock(consumer,probes[i].name,&handle);
 		if (result!=kIOReturnSuccess) {
 			SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=diag-bind result=%d\n",
-			 resource,names[i],result);
+			 resource,probes[i].name,result);
 			continue;
 		}
 		IOQcomClockInfo info;
@@ -883,13 +989,14 @@ void IOQcomClockProvider::runDiagnostics(void)
 		IOReturn depResult=checkDependenciesInternal(handle,&reason,false);
 		IOReturn enableResult=handle->enable();
 		SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=%s consumer=%s token=%llu generation=%llu phase=diag result=0 info=%d state=%d deps=%d depReason=%s enable=%d caps=%#x parents=%u domain=%#x\n",
-		 resource,names[i],(unsigned long long)handle->token(),
+		 resource,probes[i].name,(unsigned long long)handle->token(),
 		 (unsigned long long)handle->generation(),infoResult,stateResult,
 		 depResult,clockDepName(reason),enableResult,info.capabilities,
 		 info.possibleCount,info.domain);
 		handle->release();
 	}
 	consumer->release();
-	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 consumer=sweetclock-diag phase=diag-done result=0 detail=zero-writes\n");
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 consumer=sweetclock-diag phase=diag-done result=0 detail=zero-writes writes=%llu controllers=%u probes=%u\n",
+	 (unsigned long long)registeredWrites(),registeredControllers(),count);
 }
 #endif /* ARM64_BOARD_CONFIG_MH2LM */

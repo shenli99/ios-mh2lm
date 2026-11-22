@@ -25,7 +25,11 @@ enum IOQcomClockDep : uint32_t { kIOQcomDepReady=0, kIOQcomDepControllerAbsent=1
  kIOQcomDepParentController=2, kIOQcomDepParentClock=3, kIOQcomDepCycle=4,
  kIOQcomDepDomain=5, kIOQcomDepAccess=6, kIOQcomDepUnknownParent=7,
  kIOQcomDepMalformed=8, kIOQcomDepDepth=9 };
-enum : unsigned { kIOQcomMaxParents=4, kIOQcomCornerCount=3, kIOQcomBindingMax=8,
+/* kIOQcomBindingMax is how many (controller, local ID) pairs one consumer may
+ * declare, and it must cover a full walk: the diagnostic listing builds one
+ * table for every registered clock and would otherwise hand the parser a
+ * table it rejects. */
+enum : unsigned { kIOQcomMaxParents=4, kIOQcomCornerCount=3, kIOQcomBindingMax=16,
  kIOQcomMaxDependencyDepth=8, kIOQcomWalkMax=16 };
 
 struct IOQcomClockParent { uint32_t source, controller, localID; };
@@ -64,6 +68,10 @@ public:
  virtual IOReturn enableClock(uint32_t,uint64_t);
  virtual IOReturn disableClock(uint32_t,uint64_t);
  virtual uint64_t registerWrites(void) const { return 0; }
+ /* Optional human-readable name for a local ID. The diagnostics use it so a
+  * device log identifies a resource without a second name table; false means
+  * the backend has no name and the caller prints the numeric identity. */
+ virtual bool copyClockName(uint32_t localID,char *buffer,unsigned size);
 };
 
 class IOQcomClockHandle : public OSObject {
@@ -108,6 +116,10 @@ class IOQcomClockProvider : public IOService {
  IOReturn admitInternal(IOQcomClockController *owner,uint32_t localID,const char *consumer,
   IOQcomClockInfo *info,uint32_t *reason,bool requirements,bool log);
  IOReturn checkDependenciesInternal(IOQcomClockHandle *handle,uint32_t *reason,bool log);
+ /* Zero-write evidence: the sum reported by every registered backend and the
+  * number of registrations that produced it. */
+ uint64_t registeredWrites(void);
+ unsigned registeredControllers(void);
  static void diagnose(thread_call_param_t,thread_call_param_t);
  void runDiagnostics(void);
 public:
@@ -116,6 +128,9 @@ public:
  void free(void) APPLE_KEXT_OVERRIDE;
  /* Registration is accepted only with a live provider and a unique, in-range
  * identity. The controller is retained until withdraw or stop. */
+ /* The entry publishes itself once it is ready so an independent backend can
+  * register without relying on IOKit start ordering. NULL until then. */
+ static IOQcomClockProvider *publishedProvider(void);
  IOReturn registerController(IOQcomClockController *controller);
  IOReturn withdrawController(IOQcomClockController *controller);
  /* Resolve a consumer resource name through its sweet,clock-names /

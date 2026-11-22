@@ -56,13 +56,15 @@
 - **预期结果**：公共账本合同本地通过，C2-05 和 C4-04 分别负责 GCC／RPMh 的真实硬件共享实例，互不作为对方前置。
 - **失败归属**：C1-05 identity／ledger／transition-intent；实际 gate 或投票执行归对应后端卡。
 
+- **本候选未实现，推迟到下一个写候选（0233 决定）**：C1-05 自身只依赖 C1-03，本可与 C2-01／C2-02 一起做；但总计划 [§3.4](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#34-候选镜像合并规则) 允许纯本地合同并入下一个**写入**候选而不必单开只读候选，而 C2-01／C2-02 仍是零写入，账本在这里只会多出一台没有执行者的状态机。因此 C1-05 并入 C2-08 之后、C2-03 之前的写候选，与 C2-03 的 `request→write-issued→running→completed` 事件链共用记账点；GCC 的真实硬件共享仍由 C2-05 单独验收，两者互不作为对方前置。推迟不改变拒绝语义：未验后端操作照旧返回 Unsupported。
+
 ## 本候选实现（C1-01～C1-04，补丁 0230）
 
 实现文件：[IOQcomClock.h](../../dxb/xnu/iokit/Kernel/arm/IOQcomClock.h)、[IOQcomClock.cpp](../../dxb/xnu/iokit/Kernel/arm/IOQcomClock.cpp)；接入 [files.arm64](../../dxb/xnu/iokit/conf/files.arm64)（`optional iokitcpp`）与 [KernelConfigTables.cpp](../../dxb/xnu/iokit/KernelConfigTables.cpp)（MH2LM 段，`compatible` 匹配 `sweet,clock-provider`）；ADT 节点由 [mk-mh2lm-mdss-adt.py](../../tools/mk-mh2lm-mdss-adt.py) 的 `--clock-provider` 追加，节点无 `reg`、无子节点，只有 `name='clock'`、`compatible` 与 `sweet,clock-abi=<u32 1>`。默认派生字节不变，只有显式开关才出现该节点。
 
 - **C1-01**：`start` 先校验自身 `sweet,clock-abi`（4 字节 `1`），再 `IOLockAlloc`、清空槽位、分配诊断 `thread_call`，最后置 `fReady`；重复 start 直接返回已启动结果，`stop` 幂等（第二次不重复 `super::stop`），失败路径不调用 `super::stop`，释放全部持有控制器后才交回父类。不映射任何控制器窗口，不等待任何 CC。
 - **C1-02**：`registerController`／`withdrawController` 只承认 ID 1～7；重复 ID 返回 Busy 并保持原槽位；每次注册生成新 generation，撤回将 generation 归零，旧句柄的查询、门控、依赖检查统一返回 NotReady。注册关系与资源来源分离保存，不建立每 clock 一个 IOService。
-- **C1-03**：设备用 `sweet,clock-names`（NUL 结尾名字表，单名 1～31 字节、最多 8 项）与 `sweet,clocks`（每项 2 个 LE32：controller／local ID，顺序与名字表一致）声明绑定；属性缺失返回 NotFound，类型错误、长度／尾 NUL／项数／ID 越界、重复名字返回 BadArgument。句柄持有 provider 与 consumer 引用，按（controller、local ID、generation）三元组固定身份，provider 撤回或停止后不再解析到新后端；相同 local ID 的不同 CC 不串线。
+- **C1-03**：设备用 `sweet,clock-names`（NUL 结尾名字表，单名 1～31 字节、最多 16 项（0233 起；上限与诊断遍历表 `kIOQcomWalkMax=16` 相等））与 `sweet,clocks`（每项 2 个 LE32：controller／local ID，顺序与名字表一致）声明绑定；属性缺失返回 NotFound，类型错误、长度／尾 NUL／项数／ID 越界、重复名字返回 BadArgument。句柄持有 provider 与 consumer 引用，按（controller、local ID、generation）三元组固定身份，provider 撤回或停止后不再解析到新后端；相同 local ID 的不同 CC 不串线。
 - **C1-04**：`IOQcomClockInfo` 分别记录 possible／selected 父源、`accessDeps`（寄存器访问依赖）、`domain`、`cornerMaxHz[3]`、pinned／inheritedOn；`checkDependencies` 与门控前置的 `admit` 区分 Ready、ControllerAbsent、ParentController、ParentClock、Domain、Access、UnknownParent、Cycle、Depth、Malformed，深度上限 8、遍历上限 16，环与自引用返回 BadArgument。不注册 IOPM 策略、不自动供电、不写任何寄存器。
 - **能力拒绝**：头文件把硬件能力建模为 `kIOQcomCapEnable/Disable/SetRate/Reset` 位；本候选全部后端的这些操作返回 `kIOReturnUnsupported`，`disable` 额外拒绝 pinned 时钟。admission 先于能力判定，因此“依赖未满足”不会被误报成“后端不支持”。
 - **入口行如实计数**：`phase=start` 行末尾的 `bindings=%u` 报本节点 `sweet,clock-names` 实际声明的条数（无该属性即 `0`），不再打印 `kIOQcomBindingMax` 容量常量。0122 实机日志出现 `bindings=8`，即该字段误用了容量常量；0231 修正后同一份 ADT 应打出 `bindings=0`。

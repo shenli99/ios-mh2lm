@@ -8,13 +8,28 @@
 
 NEXT：所有时钟实施卡仍未开始，后续实施从 C0-01 基线锁定，再做 C0-02 writer／依赖表、C0-04 需求清单、C0-05 控制器范围和 C0-03 安全样本调查。本轮只编制和审查计划、同步文档入口并本地提交，没有修改生产代码、CI、固件、ADT 或启动参数，没有新内核／镜像／实机结果，不需重编或重测 b32。最新普通实机基线仍为 b32／`b3f735b`，保留 b31r2／b30 回退。
 
+## C2-01／C2-02 只读 GCC 后端完成（2026-11-22，待 CI／实机）
+
+时钟计划第二个实施候选，仍然**写计数为零**：`IOQcomGCC : IOQcomClockController` 匹配 `sweet,gcc`（`IOPlatformDevice`），`files.arm64` 加 `IOQcomGCC.cpp optional iokitcpp`，`KernelConfigTables.cpp` 的 MH2LM 段加 personality，ADT 由 `tools/mk-mh2lm-mdss-adt.py --gcc` 追加独立 `gcc` 节点（`sweet,gcc-abi=<u32 1>`、`sweet,gcc-variant=<u32 0x8150>`、`reg` 四窗口；`--gcc` 隐含 `--clock-provider`，去掉节点即回到 C1 字节）。实现见[阶段2](docs/clock-plan/02-gcc.md)。
+
+- C2-01：按 ADT `reg` 顺序映射 `0x0010b000`／`0x00033000`／`0x00043000`／`0x00062000` 四页，每页核对解析地址与长度后使用；`sweet,gcc-abi`／`sweet,gcc-variant` 只认数值（缺失 BadArgument、非 `0x8150` Unsupported）；寄存器访问是 4 字节对齐、`offset+4<=length` 的窄只读助手，`dmb oshld` 后返回，全程一把 `IOLock`；文件内无写路径，`registerWrites()` 是常量 0；`start` 先冻结 11 个已知寄存器快照，再以 200×5 ms 有界等待 provider 发布后注册；失败路径卸载映射与锁，`stop` 撤注册并释放映射／锁（重启可再来一次）。
+- C2-02：只解码 `gcc_pdm2_clk_src`（`0x33010`、`hid_width=5`、`gcc_parent_map_0`、`mnd_width=0`）一种固定父源／分频配置；选择子 0→XO（19.2 MHz 可信）、1→GPLL0、6→GPLL0 even（后两者无非可信父频→`parent-rate-unknown`），7 与 2..5→`src-invalid`；`mode!=0`→`mode-unsupported`；`CMD_UPDATE`→`update-pending known=0`；`div=0` 按 `clk_rcg2_calc_rate` 的语义表示“未编码分频”，不按除数 1 处理（内部 `divX2=div?div+1:0`）。保留 `raw[2]` 原值与推导依据，只报“配置解码”，不宣称实测频率。显示三条 branch 声明 pinned（含 `CLK_IS_CRITICAL`），永不关闭。
+- 如实声明的保守项：`gcc_pdm_xo4_clk` 在厂商树无父源声明，按名字与 C0-03 S2 实测记为 XO/4（4.8 MHz）并注明“由观测声明”；无 `vdd_class` 的 branch `domain=0`；`gcc_pdm2_clk` 的父是本 CC RCG，取不到可信父频即 Unknown。
+- 顺带修正两处既有缺陷：C1 绑定表上限 `kIOQcomBindingMax` 8→16（诊断段原本把 10 条探测全部判成畸形，真实后端被藏起来；与 `kIOQcomWalkMax` 对齐并加 `static_assert`），C1 边界用例改为 16 通过／17 拒绝；GCC `stop` 未清 `fMapped`／`fLock` 导致重启永远 `already-started`（主机测试发现，已修）。
+
+证据：`tools/tests/test-mh2lm-gcc-backend.py` 通过（身份与四类窗口拒绝、映射与 11 项快照、对齐／越界只读访问、`clk_rcg2` 解码向量含 `div=0` 哨兵与三种拒绝、halt 类别、provider 绑定与 domain admission、诊断段列出真实后端且收尾 `writes=0`）；`test-mh2lm-clock-provider.py`、`test-mh2lm-mdss-adt.py`（含 `--gcc` 低别名编码／隐含开关／字节还原／CLI）通过；两份 ARM64 单 TU 编译 rc=0、零 error（`scratch/clock-c2/logs/compile-IOQcomClock.txt`、`compile-IOQcomGCC.txt`）；补丁 `xnu/patches/0233-mh2lm-gcc-readonly-backend.patch`，SHA256 `b92d455222eb80bbe12f67b1940a7565f41123815b1cada8f8a1f77acb487649`，在基线 `4148ed3` 上按 `0230`→`0233` 严格 `patch -p1 --fuzz=0` 应用后六份文件逐字节一致、无 `.rej`。测试日志在 `scratch/clock-c2/logs/`。
+
+边界：C1-05 公共账本按总计划 §3.4 并入下一个写候选（与 C2-03 的事件链共用记账点），本候选不实现；没有任何寄存器写、没有 setRate／父源切换／PLL／reset／GDSC 操作，未启用 `sweet,clock-diag` 时诊断段不运行。
+
+NEXT：用户 push `full-source` 触发 CI 内核构建，下载后 agent 核对源码 marker／补丁重放，再用带 `--clock-provider --gcc --clock-diag` 新 ADT SHA 校验的 0125 打包脚本出两份镜像（默认档＋诊断档），由 WSL 直接 `fastboot boot` 并取回日志，审计 `planID=C2` 行（8 条 map／start／decode／decode-sample 与零写入），首个硬件写仍是 C2-08 debugcc。
+
 ## C1-01～C1-04 只读候选完成（2026-11-22，待 CI／实机）
 
 时钟计划首个实施候选，仍然**写计数为零**：统一入口 `IOQcomClockProvider : IOService` 匹配 `sweet,clock-provider`，`iokit/conf/files.arm64` 加 `IOQcomClock.cpp optional iokitcpp`，`KernelConfigTables.cpp` 的 MH2LM 段加 personality，ADT 由 `tools/mk-mh2lm-mdss-adt.py --clock-provider` 可选追加（`name='clock'`＋`compatible`＋`sweet,clock-abi=<u32 1>`，无 `reg`、无子节点，默认派生字节与旧 ADT 完全相同；`mk-mh2lm-event-matrix.sh` 只在 `--panel-pipeline` 分支传该开关并断言 `SWEET CLOCK: planID=C1 phase=start result=0 detail=entry-ready`）。实现见[阶段1](docs/clock-plan/01-provider.md)。
 
 - C1-01 生命周期：先校验自身 ABI 再 `IOLockAlloc`／清槽／分配诊断 `thread_call`，重复 start 有确定结果，stop 幂等且只调用一次 `super::stop`，失败路径不调用，释放完持有控制器才交回父类。不映射控制器窗口、不等待 CC。
 - C1-02 注册合同：ID 1～7，重复返回 Busy 且不动原槽，每次注册生成 generation，撤回把 generation 归零，旧句柄查询／门控／依赖检查统一 NotReady。
-- C1-03 只读绑定：`sweet,clock-names`（NUL 名字表，单名 1～31 字节、≤8 项）＋`sweet,clocks`（8 字节 LE32 对：controller／local ID）；属性缺失 NotFound，类型／长度／尾 NUL／项数／ID 越界／重名 BadArgument；句柄按（controller、local ID、generation）固定身份，不同 CC 相同 local ID 不串线。
+- C1-03 只读绑定：`sweet,clock-names`（NUL 名字表，单名 1～31 字节、≤16 项（0233 起））＋`sweet,clocks`（8 字节 LE32 对：controller／local ID）；属性缺失 NotFound，类型／长度／尾 NUL／项数／ID 越界／重名 BadArgument；句柄按（controller、local ID、generation）固定身份，不同 CC 相同 local ID 不串线。
 - C1-04 依赖描述：possible／selected 父源、`accessDeps`、`domain`、`cornerMaxHz`、pinned／inheritedOn 分别保存；admission 区分 Ready／ControllerAbsent／ParentController／ParentClock／Domain／Access／UnknownParent／Cycle／Depth／Malformed，深度上限 8、遍历上限 16。不注册 IOPM、不自动供电。
 - 硬件操作在本候选全部 `kIOReturnUnsupported`，`disable` 另拒绝 pinned；admission 先于能力判定。诊断只在启动参数 `sweetclock` 下注册一次性 `sweetclock-diag` 只读后端，日志带 planID／resource／consumer／token／generation／phase／result，收尾 `detail=zero-writes`；默认启动无诊断注册。
 

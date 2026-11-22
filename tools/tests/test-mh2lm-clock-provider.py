@@ -78,6 +78,9 @@ static thread_call_t thread_call_allocate(thread_call_func_t fn,thread_call_para
 static bool thread_call_cancel_wait(thread_call_t){return true;}
 static void thread_call_free(thread_call_t c){delete c;}
 static bool thread_call_enter(thread_call_t c){c->fn(c->p,nullptr);return false;}
+/* The diagnostic entry is armed with a delay so a backend that starts later
+   can register first; this fixture runs it in place, which is enough here. */
+static bool thread_call_enter_delayed(thread_call_t c,uint64_t){c->fn(c->p,nullptr);return false;}
 '''
 
 arm = Path(sys.argv[1]).resolve()/'iokit/Kernel/arm'
@@ -290,20 +293,33 @@ int main(){
   assert(acquire(p,c,"gcc5",&h)==kIOReturnBadArgument);
   bindings(c,{"gcc5"},{{kIOQcomCCMax,5}});
   assert(acquire(p,c,"gcc5",&h)==kIOReturnBadArgument);
-  /* 31 bytes is a name, 32 is not; nine entries exceed the table bound. */
+  /* 31 bytes is a name, 32 is not; the table bound is kIOQcomBindingMax. */
   std::string a31(31,'a'),a32(32,'a');
   bindings(c,{a31.c_str()},{{kIOQcomCCGCC,5}});
   assert(acquire(p,c,a31.c_str(),&h)==kIOReturnSuccess&&h);h->release();
   bindings(c,{a32.c_str()},{{kIOQcomCCGCC,5}});
   assert(acquire(p,c,a32.c_str(),&h)==kIOReturnBadArgument&&!h);
-  {
-   std::vector<std::pair<unsigned,unsigned> > nine;
-   std::initializer_list<const char*> names9={"n1","n2","n3","n4","n5","n6","n7","n8","n9"};
-   bindings(c,{"n1","n2","n3","n4","n5","n6","n7","n8","n9"},
-    {{kIOQcomCCGCC,5},{kIOQcomCCGCC,5},{kIOQcomCCGCC,5},{kIOQcomCCGCC,5},
-     {kIOQcomCCGCC,5},{kIOQcomCCGCC,5},{kIOQcomCCGCC,5},{kIOQcomCCGCC,5},{kIOQcomCCGCC,5}});
-   (void)names9;
-   assert(acquire(p,c,"n9",&h)==kIOReturnBadArgument);
+  {	/* a full table is usable; one entry past it is refused whole */
+   std::vector<unsigned char> nb,pb;
+   for(unsigned i=1;i<=kIOQcomBindingMax;i++){
+    char s[8];snprintf(s,sizeof s,"n%u",i);
+    for(const char*q=s;*q;q++)nb.push_back((unsigned char)*q);
+    nb.push_back(0);
+    uint32_t pair[2]={kIOQcomCCGCC,5u};
+    pb.insert(pb.end(),(unsigned char *)pair,(unsigned char *)pair+sizeof pair);
+   }
+   setData(c,"sweet,clock-names",nb.data(),(unsigned)nb.size());
+   setData(c,"sweet,clocks",pb.data(),(unsigned)pb.size());
+   char top[8];snprintf(top,sizeof top,"n%u",kIOQcomBindingMax);
+   assert(acquire(p,c,top,&h)==kIOReturnSuccess&&h);h->release();
+   char over[8];snprintf(over,sizeof over,"n%u",kIOQcomBindingMax+1);
+   for(const char*q=over;*q;q++)nb.push_back((unsigned char)*q);
+   nb.push_back(0);
+   uint32_t pair[2]={kIOQcomCCGCC,5u};
+   pb.insert(pb.end(),(unsigned char *)pair,(unsigned char *)pair+sizeof pair);
+   setData(c,"sweet,clock-names",nb.data(),(unsigned)nb.size());
+   setData(c,"sweet,clocks",pb.data(),(unsigned)pb.size());
+   assert(acquire(p,c,over,&h)==kIOReturnBadArgument&&!h);
   }
   p->stop(n);
   p->release();
