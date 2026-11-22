@@ -1,10 +1,10 @@
 # MH2LM 当前状态
 
-更新：2026-11-21。具体证据见版本记录，操作见[构建指南](BUILD-GUIDE.md)，交接见[NOTES](../NOTES.md)。
+更新：2026-11-22。具体证据见版本记录，操作见[构建指南](BUILD-GUIDE.md)，交接见[NOTES](../NOTES.md)。
 
 ## 当前交付
 
-**SM8150 时钟系统计划已制定，尚未实施。** [总计划](CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)及十个阶段覆盖统一入口、GCC、apps RSC、RPMh 客户端、频率／电源域、显示迁移、其他 CC、PM／恢复和覆盖扩展。具体小计划默认单目标，分别注明需求、本地／实机检验、预期结果和失败归属；下一实施点是 C0-01 基线锁定，之后 C0-02／04／05／03 调查。2026-11-22 修订增加需求清单驱动、debugcc 测频卡、候选合并规则、apps RSC 启动时 owner 及 C6 入口条件。本轮纯文档，无新驱动、CI、固件、ADT、镜像或实机结果，不要求重测 b32。
+**SM8150 时钟系统：C0 调查完成，C1-01～C1-04 只读候选已实机收口。** [总计划](CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)及十个阶段覆盖统一入口、GCC、apps RSC、RPMh 客户端、频率／电源域、显示迁移、其他 CC、PM／恢复和覆盖扩展。补丁 `0230`／`0231`／`0232` 实现统一入口 `IOQcomClockProvider`、控制器注册／撤回与 generation、设备资源名到 `(controller, local ID)` 的只读绑定、父源与电源依赖描述，以及默认关闭的 `sweet,clock-diag` 诊断入口；所有硬件操作仍返回 Unsupported，写计数为零。0122 默认档、0123 默认档与诊断档实机通过（默认档 `phase=start … bindings=0` 且无其它时钟行，诊断档四只读句柄四行账本加 `detail=zero-writes` 收尾、依赖原因如实、两档非时钟基线与 b32 零差异）；0232 把同一失败被记两遍的问题收敛为“谁报告谁记账”一条。C1-05 需求账本与所有 MMIO 写留待后续，下一实施点是 C2-01／C2-02 只读后端。时段证据见 [阶段1](clock-plan/01-provider.md#实机证据0123-内核两档各一次) 与 [NOTES](../NOTES.md)。
 
 **独立显示降级 0121b32 / `b3f735b` 普通实机回归通过。** 首次接管、76对触点、峰值五指与两轮OFF/ON已验，第二轮醒后有触点、第一轮醒后无HID记录；ERROR/panic/stray hold均0。实际终态故障降级未触发，仍为host证据；9组相关回归与两份ARM64 TU的边界保持。[实机记录](DISPLAY-TOUCH-FAILURE-FALLBACK.md#b32-普通实机验收2026-11-21)
 
