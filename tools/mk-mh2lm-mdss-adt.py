@@ -21,9 +21,12 @@ RPMH_WINDOWS = ((0x18220000, 0x100), (0x18220d00, 0x3000), (0x0c3f000c, 8))
 # C2: the four GCC pages this port may need. The first page is also the
 # first window of arm-io/mdss, which maps it read-only today: both nodes name
 # the same physical page on purpose, and only the clock backend may ever own
-# a write to it.
-GCC_WINDOWS = ((0x0010b000, 0x1000), (0x00033000, 0x1000),
-               (0x00043000, 0x1000), (0x00062000, 0x1000))
+# a write to it. Every entry is a resolved physical address: the SM8150 GCC
+# block sits at 0x00100000 (sm8150.dtsi reg = <0x100000 0x1f0000>), so the
+# vendor driver offsets 0x33008/0x43008/0x62000 live on the pages below, and
+# the bare offsets are never ranges of their own.
+GCC_WINDOWS = ((0x0010b000, 0x1000), (0x00133000, 0x1000),
+               (0x00143000, 0x1000), (0x00162000, 0x1000))
 NOC_WINDOWS = ((0x0af20000, 0x1c00), (0x0af21c00, 0x3000), (0x0af30000, 0x3fd4))
 # SM8150 TLMM: four 1 MiB tile windows (west, east, north, south). The pad
 # slot inside a tile is 0x1000 * global pin number, so a full 1 MiB window

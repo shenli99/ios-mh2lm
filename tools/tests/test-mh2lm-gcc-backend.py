@@ -49,7 +49,7 @@ assert 'delayedCalls' in extra
 prelude = prelude.replace('static std::vector<unsigned> mapCalls;',
 '''static std::vector<unsigned> mapCalls;
 using IOPhysicalAddress=uint64_t;using IOVirtualAddress=uintptr_t;using IOByteCount=uint64_t;
-static constexpr uintptr_t gccBases[4]={0x0010b000,0x00033000,0x00043000,0x00062000};
+static constexpr uintptr_t gccBases[4]={0x0010b000,0x00133000,0x00143000,0x00162000};
 static constexpr size_t gccLengths[4]={0x1000,0x1000,0x1000,0x1000};
 static bool gccMode=true;
 static unsigned gccMemoryCount=4,gccAbsentIndex=99,gccWrongPA=99,gccShortLen=99,gccNoBase=99;''')
@@ -146,14 +146,14 @@ static void resetGccRegs(){
  setReg(0x0010b000u,0x00c,0x80000001u);	/* CLK_OFF|ENABLE, inherited on */
  setReg(0x0010b000u,0x038,0x00000001u);
  setReg(0x0010b000u,0x048,0x00000001u);
- setReg(0x00033000u,0x008,0x00000001u);
- setReg(0x00033000u,0x00c,0x00000001u);
- setReg(0x00033000u,0x010,0x00000000u);	/* CMD: nothing pending */
- setReg(0x00033000u,0x014,0x00000000u);	/* CFG: sel 0 (XO), div 0 */
- setReg(0x00043000u,0x008,0x00000001u);
- setReg(0x00062000u,0x000,0x00000000u);
- setReg(0x00062000u,0x004,0x00000000u);
- setReg(0x00062000u,0x008,0x00000001u);
+ setReg(0x00133000u,0x008,0x00000001u);
+ setReg(0x00133000u,0x00c,0x00000001u);
+ setReg(0x00133000u,0x010,0x00000000u);	/* CMD: nothing pending */
+ setReg(0x00133000u,0x014,0x00000000u);	/* CFG: sel 0 (XO), div 0 */
+ setReg(0x00143000u,0x008,0x00000001u);
+ setReg(0x00162000u,0x000,0x00000000u);
+ setReg(0x00162000u,0x004,0x00000000u);
+ setReg(0x00162000u,0x008,0x00000001u);
 }
 static void clearKnobs(){gccMemoryCount=4;gccAbsentIndex=99;gccWrongPA=99;gccShortLen=99;gccNoBase=99;}
 static IOQcomGCC*startGcc(IOService*gn){
@@ -161,7 +161,7 @@ static IOQcomGCC*startGcc(IOService*gn){
 }
 struct Decoded {IOReturn result;IOQcomClockState state;};
 static Decoded decodeSample(IOQcomGCC*g,uint32_t cmd,uint32_t cfg){
- setReg(0x00033000u,0x010,cmd);setReg(0x00033000u,0x014,cfg);
+ setReg(0x00133000u,0x010,cmd);setReg(0x00133000u,0x014,cfg);
  Decoded d;memset(&d,0,sizeof d);
  d.result=g->copyClockState(kIOQcomGccSampleLocalID,&d.state);
  return d;
@@ -262,7 +262,7 @@ int main(){
   auto*n=gccNub();auto*g=fixtureAlloc<IOQcomGCC>();
   clearKnobs();gccAbsentIndex=3;mapCalls.clear();
   assert(!g->start(n));
-  assert(logged("resource=gcc:0x62000 phase=map result=1 detail=window-absent"));
+  assert(logged("resource=gcc:0x162000 phase=map result=1 detail=window-absent"));
   assert(mapCalls.size()==4);
   assert(!g->fMapped&&!g->fLock&&!g->fRegistered);
   assert(liveMaps==0);
@@ -272,7 +272,7 @@ int main(){
   auto*n=gccNub();auto*g=fixtureAlloc<IOQcomGCC>();
   clearKnobs();gccWrongPA=1;mapCalls.clear();
   assert(!g->start(n));
-  assert(logged("resource=gcc:0x33000 phase=map result=2 detail=address-mismatch observed=0x33004"));
+  assert(logged("resource=gcc:0x133000 phase=map result=2 detail=address-mismatch observed=0x133004"));
   assert(mapCalls.size()==2&&liveMaps==0);
   assert(!g->fMapped&&!g->fLock);
   g->release();n->release();assert(!live&&!liveMaps);
@@ -281,7 +281,7 @@ int main(){
   auto*n=gccNub();auto*g=fixtureAlloc<IOQcomGCC>();
   clearKnobs();gccShortLen=2;mapCalls.clear();
   assert(!g->start(n));
-  assert(logged("resource=gcc:0x43000 phase=map result=2 detail=length-short observed=0xfff required=0x1000"));
+  assert(logged("resource=gcc:0x143000 phase=map result=2 detail=length-short observed=0xfff required=0x1000"));
   assert(mapCalls.size()==3&&liveMaps==0);
   g->release();n->release();assert(!live&&!liveMaps);
  }
@@ -317,17 +317,19 @@ int main(){
    * branch (five branches). */
   assert(g->fReads==kIOQcomGccSnapshotCount+2+5);
   assert(g->registerReads()==g->fReads);
-  assert(logged("resource=gcc:0x10b000 phase=map result=0 length=0x1000"));
-  assert(logged("resource=gcc:0x62000 phase=map result=0 length=0x1000"));
+  assert(logged("resource=gcc:0x10b000 phase=map result=0 length=0x1000 offset=0xb000"));
+  assert(logged("resource=gcc:0x133000 phase=map result=0 length=0x1000 offset=0x33000"));
+  assert(logged("resource=gcc:0x143000 phase=map result=0 length=0x1000 offset=0x43000"));
+  assert(logged("resource=gcc:0x162000 phase=map result=0 length=0x1000 offset=0x62000"));
   assert(logged("resource=gcc:0x10b00c phase=snapshot result=0 value=0x80000001"));
-  assert(logged("resource=gcc:0x33010 phase=snapshot result=0 value=0"));
+  assert(logged("resource=gcc:0x133010 phase=snapshot result=0 value=0"));
   /* the summary is emitted after the decode walk, so it counts those reads */
   assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=4 snapshot=11 "
                 "reads=18 writes=0 variant=0x8150"));
   assert(g->fSnapshot[kSnapshotDispAhb].valid&&g->fSnapshot[kSnapshotDispAhb].value==0x80000001u);
   assert(g->fSnapshot[kSnapshotDispXo].valid&&g->fSnapshot[kSnapshotDebugCbcr].value==1u);
   /* the ADT window order is the ABI: window 3 is the debug mux page */
-  assert(g->fWindow[3].physical==0x00062000u&&g->fWindow[3].map!=nullptr);
+  assert(g->fWindow[3].physical==0x00162000u&&g->fWindow[3].map!=nullptr);
   assert(p->fSlots[kIOQcomCCGCC].active);
   assert(p->registeredControllers()==1&&p->registeredWrites()==0);
   /* ---- descriptors are declared facts, not guesses ---- */
@@ -434,7 +436,7 @@ int main(){
   }
   /* ---- branches: halt trust follows the vendor halt class ---- */
   {
-   setReg(0x00033000u,0x008,0x80000001u);
+   setReg(0x00133000u,0x008,0x80000001u);
    IOQcomClockState s;assert(g->copyClockState(4,&s)==kIOReturnSuccess);
    assert(s.raw[0]==0x80000001u&&s.enableBit&&s.clockOffBit);
    assert(s.haltTrusted);	/* gcc_pdm_xo4_clk is BRANCH_HALT */

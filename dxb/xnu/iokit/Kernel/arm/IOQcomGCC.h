@@ -26,8 +26,11 @@
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
 
 /* C2-01: the ADT reg order is the window ABI. One 4 KiB page per block this
- * candidate observes: 0x10b000 (display), 0x33000 (PDM), 0x43000 (XO/4),
- * 0x62000 (debug mux). */
+ * candidate observes: 0x10b000 (display), 0x133000 (PDM), 0x143000 (XO/4),
+ * 0x162000 (debug mux). Those are resolved physical addresses, i.e. the
+ * vendor driver offset plus the GCC base 0x00100000 from sm8150.dtsi
+ * (reg = <0x100000 0x1f0000>); a vendor offset such as 0x33008 is never an
+ * address and must not be mapped as one. */
 enum : unsigned { kIOQcomGccWindowCount = 4 };
 
 /* C2-01: register evidence frozen at start, before any later card can change

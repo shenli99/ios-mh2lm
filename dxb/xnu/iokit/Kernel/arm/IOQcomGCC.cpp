@@ -33,13 +33,19 @@ OSDefineMetaClassAndStructors(IOQcomGCC,IOQcomClockController);
 
 enum : unsigned { kIOQcomLogBuf=40, kIOQcomGccProviderWaitTries=200, kIOQcomGccProviderWaitMs=5 };
 
+/* sm8150.dtsi declares the GCC block as reg = <0x100000 0x1f0000>. The vendor
+ * driver's register numbers are offsets inside that block, so a window is the
+ * base plus the offset the LG/QCOM tables quote; logging both keeps a device
+ * ring reconcilable with those tables without redoing the subtraction. */
+enum : uint64_t { kIOQcomGccBase=0x00100000ULL };
+
 /* The ADT reg order is the window ABI; these are the only windows this
  * candidate reads and the only lengths it accepts. */
 static const struct { uint64_t physical; uint64_t length; } gccWindows[kIOQcomGccWindowCount] = {
 	{ 0x0010b000ULL, 0x1000ULL },   /* display block: inherited/pinned branches */
-	{ 0x00033000ULL, 0x1000ULL },   /* PDM block: the C2-02 sample */
-	{ 0x00043000ULL, 0x1000ULL },   /* XO/4 branch: debug clock reference */
-	{ 0x00062000ULL, 0x1000ULL },   /* debug mux block: C2-08 will own it */
+	{ 0x00133000ULL, 0x1000ULL },   /* PDM block: the C2-02 sample */
+	{ 0x00143000ULL, 0x1000ULL },   /* XO/4 branch: debug clock reference */
+	{ 0x00162000ULL, 0x1000ULL },   /* debug mux block: C2-08 will own it */
 };
 
 /* C0-03 snapshot order. Evidence only: none of these is a clock this
@@ -190,8 +196,9 @@ IOQcomGCC::mapWindows(IOService *provider)
 			 resource,kIOReturnNotReady);
 			return false;
 		}
-		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s phase=map result=0 length=%#llx\n",
-		 resource,(unsigned long long)length);
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s phase=map result=0 length=%#llx offset=%#llx\n",
+		 resource,(unsigned long long)length,
+		 (unsigned long long)(gccWindows[i].physical-kIOQcomGccBase));
 	}
 	return true;
 }
