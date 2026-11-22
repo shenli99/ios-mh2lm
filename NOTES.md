@@ -10043,7 +10043,7 @@ NEXT：下一个候选为 C2-01／C2-02 只读后端（GCC／RPMh 控制器身�
 
 **修复（补丁 0234）**：`gccWindows[]` 与生成器 `GCC_WINDOWS` 改为 `0x0010b000`／`0x00133000`／`0x00143000`／`0x00162000`；每行 `phase=map` 追加 `offset=%#llx`（`PA - 0x100000`），设备日志因此可以直接与厂商表对账，不必再手算。主机测试把四个 `offset=` 钉进断言，`audit-clock-log.py` 的期望表也从偏移迁到 PA 并新增"`resource - offset == 0x100000`"这条检查。`0230`→`0234` 在基线 `4148ed3` 上严格重放逐字节一致（6/6 文件）。
 
-**对照实验**：`boot-16k-0125-kernel-c1only-adt.img`（`22999be4…`）＝ 0125 内核 + 0124 的 C1-only ADT（`6a50db55…`，无 `sweet,gcc` 节点）+ 0124 内核参数，用来把"0125 内核在 C1 路径上的回归"与"C2 的 gcc 窗口缺陷"分开：XNU 起来说明凶手只有 C2，仍进 `bsp-kernel` 说明内核侧还有独立问题。
+**对照实验（结果：进入桌面）**：`boot-16k-0125-kernel-c1only-adt.img`（`22999be4…`）＝ 0125 内核 + 0124 的 C1-only ADT（`6a50db55…`，无 `sweet,gcc` 节点）+ 0124 内核参数。实机 `fastboot boot`OKAY 后**进入 XNU 桌面**（用户目视确认）：同一颗 0125 内核、同一份 ramdisk、同一套参数、同一种触摸模式下系统正常运行，与两份失败镜像的唯一差别就是 ADT 里的 `sweet,gcc` 节点。因此 0125 的内核改动（`IOQcomGCC` 接入 `files.arm64`／`KernelConfigTables.cpp`）与 C1 路径都没有回归，失败原因落在 C2 的四个窗口地址上——与本条前面从 `sm8150.dtsi` 推出的地址模型一致。
 
 **踩到的工具坑**：在 `dxb/xnu` 子目录里对 `0230`… 补丁执行 `git apply -p1`，git 2.47.3 会对每个文件打印 `Skipped patch '…'`、什么都不改，却仍返回 0——重放必须从仓库顶层 `git apply --directory=dxb/xnu <patch>`，并把"rc=0 但出现 Skipped"当作失败。
 
