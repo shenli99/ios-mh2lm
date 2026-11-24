@@ -130,10 +130,16 @@ static const GccClock gccClocks[] = {
 	  {{kIOQcomSourceXO,0,0}},
 	  0, kSnapshotDispXo, 0x048, true },
 	/* The C2-03 sample: vendor offset 0x33008, one enable bit, halt check,
-	 * fixed XO/4 parent, no GDSC, and unused by the iOS device tree. */
+	 * XO parent, no GDSC, and unused by the iOS device tree.
+	 *
+	 * "xo4" in the name is not a divider: the vendor branch has no parent and
+	 * no divider, and 0130-1's counter read the gated branch four times faster
+	 * than the XO/4 parent this entry used to declare. The /4 belongs to the
+	 * debug counter's timebase alone (localID 7), which is what makes the
+	 * corrected comparison a real check rather than a tautology. */
 	{ "gcc_pdm_xo4_clk", kIOQcomGccGateLocalID, kIOQcomClockBranch, kIOQcomHaltCheck,
 	  kIOQcomCapQueryConfig|kIOQcomCapQueryRate, 0, 0, 1,
-	  {{kIOQcomSourceXODiv4,0,0}},
+	  {{kIOQcomSourceXO,0,0}},
 	  1, kSnapshotPdmXo4, 0x008, false },
 	/* The one C2-02 sample: mnd_width 0, hid_width 5, gcc_parent_map_0. */
 	{ "gcc_pdm2_clk_src", kIOQcomGccSampleLocalID, kIOQcomClockRCG, kIOQcomHaltDelay,
@@ -144,9 +150,10 @@ static const GccClock gccClocks[] = {
 	  kIOQcomCapQueryConfig|kIOQcomCapQueryRate, 0, 0, 1,
 	  {{kIOQcomSourceLocal,kIOQcomCCGCC,kIOQcomGccSampleLocalID}},
 	  1, kSnapshotPdm2, 0x00c, false },
-	/* The C2-08 counter reference, declared as the branch it really is. It
-	 * shares nothing with gcc_pdm_xo4_clk but the XO/4 fixed parent, so the
-	 * measurement demand and the C2-03 sample demand are two identities. */
+	/* The C2-08 counter reference, declared as the branch it really is. This
+	 * is the only XO/4 parent in the tree: gcc_pdm_xo4_clk is a plain XO gate,
+	 * so the measurement demand and the C2-03 sample demand are two identities
+	 * in both register and parent. */
 	{ "gcc_xo_div4_clk", kIOQcomGccMeasureReferenceLocalID, kIOQcomClockBranch,
 	  kIOQcomHaltCheck, kIOQcomCapQueryConfig|kIOQcomCapQueryRate, 0, 0, 1,
 	  {{kIOQcomSourceXODiv4,0,0}},
@@ -839,9 +846,11 @@ IOQcomGCC::measureClocks(void)
 			if (running!=kIOReturnSuccess&&worst==kIOReturnSuccess) worst=running;
 			if (gated!=kIOReturnSuccess&&worst==kIOReturnSuccess) worst=gated;
 			/* C2-03's branch is a third sample only when C2-03 really enabled
-			 * it: mux 0x99 is the counter's own reference, and the C2-02 decoder
-			 * states its rate independently (fixed XO/4 = 4.8 MHz), so this is
-			 * the measurement evidence the gate card asks for. */
+			 * it: mux 0x99 selects that branch, and the C2-02 decoder states
+			 * its rate independently (fixed XO = 19.2 MHz), so this is the
+			 * measurement evidence the gate card asks for. A wrong parent
+			 * shows up here as BadArgument, which is how 0130's XO/4 claim was
+			 * refuted on the device. */
 			if (fGateRunning) {
 				IOReturn gate=measureSample(regs,kIOQcomGccGateLocalID,
 				 kIOQcomGccGateMux,true);

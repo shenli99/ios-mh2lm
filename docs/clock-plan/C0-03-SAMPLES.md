@@ -19,21 +19,22 @@
 测量参考样本（只测量，不控制）：
 
 - **运行样本**：`gcc_disp_xo_clk`（CBCR 0xb048，mux sel 0x53）。LG 标 `CLK_IS_CRITICAL`，显示正在使用，应为 19.2 MHz。
-- **关闭样本**：S2 的 `gcc_pdm_xo4_clk`（CBCR 0x33008，mux sel 0x99），前提是 C2-01 读到其原状态为 OFF。
+- **关闭样本**：S2 的 `gcc_pdm_xo4_clk`（CBCR 0x33008，mux sel 0x99），前提是 C2-01 读到其原状态为 OFF。C2-03 把它打开之后，同一路 mux 在 0130-1 变成可测的第三路源（`cc1:0x4`，实测 19200036），关闭态与运行态的对照也因此留在同一条环里：`0x9a`（`gcc_pdm2_clk`，关）读到短长计数相等即 `hz=0`，`0x99`（已被门控打开）读到 16396/262157。
 - **身份修正（0237）**：`0x43008` 不是 PDM XO/4，而是 `gcc_xo_div4_clk`（localID 7）；0127／0128 的测量参考源实际就是它（写 `0x43008` 的 enable 后读回 `0x1`）。本表按寄存器地址仍然正确，只是名字换了。
+- **频率修正（0238）**：`0x33008` 的名字里带 `xo4`，但它**不是** XO/4 的子节点。厂商 `MUX_SRC_LIST` 把 debug index `0x99` 映射到 `gcc_pdm_xo4_clk`，而该 branch 在 0x33008 只有 `enable_mask=BIT(0)` 与 `clk_branch2_ops`，**没有 `.parent_names`、没有分频字段**——没有父名的 branch 无法对父源分频。0130（声明 XO/4＝4.8 MHz）被 0130-1 的计数直接反驳：门控自身测得 `19200036`，等于声明值的 ×4.0000075。全系统唯一的 /4 是计数器时基 `0x43008`。
 
 ## S2：普通 branch gate（C2-03／04／05）
 
 | 项 | 内容 |
 |---|---|
-| 资源 | `gcc_pdm_xo4_clk`，CBCR 0x33008，enable bit0，`BRANCH_HALT`（CLK_OFF bit31），无 RCG 父源（XO/4 固定 4.8 MHz） |
+| 资源 | `gcc_pdm_xo4_clk`，CBCR 0x33008，enable bit0，`BRANCH_HALT`（CLK_OFF bit31），无 RCG 父源、无分频（XO 直通，固定 19.2 MHz；名字里的 `xo4` 不是分频，见下方频率修正与 0130-1 实测） |
 | 当前 owner／使用者 | XNU 无；b32 DTB 中无任何节点引用 GCC_PDM_*（id 68–71 引用数 0）。PDM 是 PWM 外设，本机无已知使用者 |
 | 排除理由 | 不选 UFS／USB／QUP／DISP 等任何有 DTB 消费者或 C0-02 中有继承依赖的 branch |
 | 父源／电源凭据 | CXO 同 S1；GCC 常供电；不需要 GDSC |
 | 原状态 | **0126 实测 OFF**（`0x33008`＝`0x80000000`：off=1、enable=0），0130 门控档的重读必须仍是这一值（`phase=request result=0 enable=0 off=1 value=0x80000000`）。若变 ON 则说明有未知使用者，S2 作废，改选下一候选 `gcc_pdm2_clk`（0x3300c，但有 RCG 父源，需额外确认 0x33xxx RCG 已配置） |
-| 允许动作 | 原为 OFF 时：enable → 等 CLK_OFF 清零 → debugcc 测得 ≈4.8 MHz → disable → 等 CLK_OFF 置位 → debugcc 得 NotRunning。C2-03 只做前半段（enable → 等 halt 清零 → 留样本到重启），disable 归 C2-04 |
+| 允许动作 | 原为 OFF 时：enable → 等 CLK_OFF 清零 → debugcc 测得 ≈19.2 MHz → disable → 等 CLK_OFF 置位 → debugcc 得 NotRunning。C2-03 只做前半段（enable → 等 halt 清零 → 留样本到重启），disable 归 C2-04 |
 | 停止条件 | CLK_OFF 等待有界；超时保留所有权并报告 Uncertain |
-| 结论 | **可实施**（0126 已观测 OFF）；0128 已作为关闭样本测得 `hz=0 running=0`；0130 执行 C2-03 enable 与门控 |
+| 结论 | **可实施**（0126 已观测 OFF）；0128 已作为关闭样本测得 `hz=0 running=0`；0130 执行 C2-03 enable 与门控并通过；0130-1 在此基础上把该 branch 当作第三路测量源，测得 `19200036`（对照声明值 4800000 即 ×4），据此把父源改正为 XO（0238） |
 
 “DTB 无引用”只能排除 Linux 消费者，不能排除固件／TZ 使用。保护措施：只在原状态 OFF 时动作，且只操作 bit0。
 

@@ -235,8 +235,10 @@ static uint32_t gccCounter(uintptr_t pa,uint32_t v){
  if(gccCountStuck)return 0;			/* done never arrives */
  uint32_t mux=regs[0x00162000u]&0x3ffu;
  uint32_t ticks=ctl&0xffffffu&~((1u<<20));
- /* the C2-03 branch is the XO/4 reference itself: one count per loaded tick */
- if(mux==(uint32_t)kIOQcomGccGateMux)return (1u<<25)|ticks;
+ /* the C2-03 branch is a plain XO gate, so it counts like the running sample:
+  * four per loaded XO/4 tick. 0130 modelled it as the XO/4 clock itself and the
+  * device refuted that (19200036 against a declared 4800000). */
+ if(mux==(uint32_t)kIOQcomGccGateMux)return (1u<<25)|(uint32_t)((uint64_t)ticks*4u);
  if(mux!=(uint32_t)kIOQcomGccMeasureRunningMux)return (1u<<25)|0x40u;
  return (1u<<25)|(uint32_t)((uint64_t)ticks*4u);
 }
@@ -438,7 +440,8 @@ int main(){
    assert(i.possibleCount==1&&i.possible[0].source==kIOQcomSourceLocal);
    assert(i.possible[0].controller==kIOQcomCCGCC&&i.possible[0].localID==kIOQcomGccSampleLocalID);
    /* the C2-08 counter reference is its own clock identity, not the C2-03
-    * sample: same fixed XO/4 parent, a different register and a different ID */
+    * sample: it is the tree's only XO/4 parent, while the sample is a plain XO
+    * gate in a different register, so the two identities differ twice over */
    assert(g->copyClockInfo(kIOQcomGccMeasureReferenceLocalID,&i)==kIOReturnSuccess);
    assert(i.localID==7&&i.kind==kIOQcomClockBranch&&!i.pinned);
    assert(i.possibleCount==1&&i.possible[0].source==kIOQcomSourceXODiv4);
@@ -535,7 +538,9 @@ int main(){
    IOQcomClockState s;assert(g->copyClockState(4,&s)==kIOReturnSuccess);
    assert(s.raw[0]==0x80000001u&&s.enableBit&&s.clockOffBit);
    assert(s.haltTrusted);	/* gcc_pdm_xo4_clk is BRANCH_HALT */
-   assert(s.rateKnown&&s.configuredHz==4800000ull);	/* XO/4 */
+   /* a plain XO gate: the header constant and the descriptor agree, and the
+    * C2-08 counter is the only /4 in the tree (see the gate measure fixture) */
+   assert(s.rateKnown&&s.configuredHz==kIOQcomGccGateHz);
    assert(logged("detail=configured enable=1 off=1 raw=0x80000001 known=1"));
    assert(g->copyClockState(3,&s)==kIOReturnSuccess);
    assert(s.haltTrusted==false);	/* BRANCH_HALT_DELAY: CLK_OFF is not evidence */
@@ -594,7 +599,7 @@ int main(){
    assert(p->checkDependencies(h,&reason)==kIOReturnSuccess);	/* no parents */
    h->release();
    assert(acquire(p,c,"gcc_pdm_xo4_clk",&h)==kIOReturnSuccess);
-   assert(h->copyState(&s)==kIOReturnSuccess&&s.rateKnown&&s.configuredHz==4800000ull);
+   assert(h->copyState(&s)==kIOReturnSuccess&&s.rateKnown&&s.configuredHz==kIOQcomGccGateHz);
    h->release();
    assert(writes()==0);
    c->release();
@@ -869,6 +874,13 @@ int main(){
   assert(logged("phase=completed result=0 token="));
   assert(logged("detail=sample-kept-until-reboot"));
   assert(logged("phase=gate-done result=0 writes=1 neighbours=4 changed=0 polls=0 hold=1"));
+  /* the gate's read cost is counted, not estimated: the 19-read walk, one read
+   * of the register before the store, the poll that came back clean on its
+   * first read (one read for polls=0) and the four neighbours captured and
+   * re-checked (0130 printed reads=29, which is this sum) */
+  assert(g->fReads==kIOQcomGccSnapshotCount+2+6+1+1+8);
+  assert(logged("phase=start result=0 windows=4 snapshot=11 reads="+
+                std::to_string(kIOQcomGccSnapshotCount+2+6+1+1+8)));
   assert(g->fGateRunning&&g->fGateEnabled&&g->fGateNeighbourChanges==0);
   /* the sample is running and the card says so: the enable bit is kept */
   assert(regs[0x00133008u]==0x80000001u);
@@ -904,7 +916,10 @@ int main(){
   /* the C0-03 S2 branch is measured through the C2-08 machinery at its own mux */
   assert(counted("consumer=sweetclock-measure phase=measure result=0 mux=0x99")==1);
   assert(logged("name=gcc_pdm_xo4_clk consumer=sweetclock-measure phase=measure result=0 mux=0x99"));
-  assert(logged("decoded-hz=4800000"));
+  /* the counter and the descriptor now agree on the same clock: with the XO
+   * parent the comparison is a real check, not 4.8 MHz against itself */
+  assert(logged("resource=cc1:0x4 name=gcc_pdm_xo4_clk consumer=sweetclock-measure "
+                "phase=measure-compare result=0 decoded-hz=19200000 measured-hz=19199084"));
   assert(counted("consumer=sweetclock-measure phase=measure result=0 mux=")==3);	/* running, stopped, the gate */
   /* 23 measure stores + 1 gate store + 7 for the third sample */
   assert(writes()==23+1+7);
@@ -919,6 +934,10 @@ int main(){
   assert(p->ledgerInspect(kIOQcomCCGCC,kIOQcomGccMeasureReferenceLocalID,0,&ls)==kIOReturnSuccess);
   assert(ls.holders==0&&ls.desired==0&&ls.confirmed==0);
   assert(logged("detail=gate-incomplete")==false);
+  /* The ring's auditor can be pointed at this case: with the dump requested the
+   * fixture prints the gate+measure rows in the device vocabulary, so the same
+   * rows that just passed here are re-read by the offline auditor. */
+  /* DUMP_ROWS_HOOK */
   g->stop(gn);g->release();gn->release();
   p->stop(pn);p->release();pn->release();
   gccMeasureHook=nullptr;
@@ -1043,6 +1062,13 @@ int main(){
 }
 '''
 
+
+# The C2-03 row dump exists only when a caller asks for it: the shipped fixture
+# is one program, and the auditor replay must read the rows this build printed.
+if os.environ.get('MH2LM_GCC_DUMP_ROWS'):
+    assert tests.count('/* DUMP_ROWS_HOOK */') == 1
+    tests = tests.replace('/* DUMP_ROWS_HOOK */',
+                          'for(auto&m:messages)printf("%s\\n",m.c_str());')
 
 with tempfile.TemporaryDirectory(prefix='mh2lm-gcc-') as temp:
     cpp = Path(temp)/'test.cpp'

@@ -1,0 +1,234 @@
+From: mh2lm clock work <clock@mh2lm>
+Subject: [PATCH 0238] clock: the PDM gate's parent is XO, and the counter said so
+
+0130 shipped C2-03 with gcc_pdm_xo4_clk declared as a child of the fixed XO/4
+reference clock. The name reads that way, the vendor branch at 0x33008 has no
+parent to contradict it, and the C2-08 counter reference at 0x43008 really is
+an XO/4 branch, so the descriptor mirrored what the tree already described.
+
+The device disagreed. sweetlog-0130-1, the ring that ran the gate and the
+measurement together, measured the branch it had just enabled at 19200036 Hz
+while the descriptor declared 4800000: a delta of 3000007 ppm, reported as
+BadArgument instead of a pass. The same ring measured both controls as
+expected - gcc_disp_xo_clk at 19199963 (delta -1 ppm), gcc_pdm2_clk at 0 with
+equal short and full counts - so neither the counter nor its /4 timebase was
+at fault. The branch outputs the XO clock; the "xo4" in its name is not a
+divider.
+
+The vendor tree agrees once the branch is read as the clk_branch2 gate it is:
+debugcc-sm8150.c's MUX_SRC_LIST maps debug index 0x99 to gcc_pdm_xo4_clk, the
+branch at 0x33008 carries enable_mask = BIT(0) and clk_branch2_ops with no
+.parent_names and no divider field, and its sibling gcc_disp_xo_clk, which the
+device measures at 19200000, is parentless in exactly the same way. A branch
+with no parent name cannot divide its parent, and the only /4 in this system
+is the counter's own timebase at 0x43008 (localID 7).
+
+So localID 4 becomes a child of kIOQcomSourceXO and kIOQcomGccGateHz becomes
+19200000, while localID 7 stays the tree's only XO/4 identity. That is what
+makes the C2-03 sample a real cross-check rather than the tautology it was in
+0130: descriptor and counter now have to agree about two different clocks. The
+rate formula keeps 4800000, because that constant is the counter's calibration,
+not a claim about the measured branch.
+
+The host fixture follows the device: the counter model returns four counts per
+loaded XO/4 tick when 0x99 is selected, the branch state and the provider
+contract expect the XO rate, the gate+measure case asserts the comparison row
+against the C2-02 decoding, and the gate-only case pins the read cost the 0130
+ring printed - 11 snapshot + 2 + 6 walk + 1 request + 1 poll + 8 neighbours =
+29 - so the auditor's expected count stays a derived sum and not a guess.
+
+The fixture can also print those rows on request (MH2LM_GCC_DUMP_ROWS=1), so the
+offline ring auditor re-reads the rows this very build produced rather than a
+hand-written sample of the vocabulary. The shipped run is unchanged.
+
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
+index 7878750..7a87102 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
+@@ -130,10 +130,16 @@ static const GccClock gccClocks[] = {
+ 	  {{kIOQcomSourceXO,0,0}},
+ 	  0, kSnapshotDispXo, 0x048, true },
+ 	/* The C2-03 sample: vendor offset 0x33008, one enable bit, halt check,
+-	 * fixed XO/4 parent, no GDSC, and unused by the iOS device tree. */
++	 * XO parent, no GDSC, and unused by the iOS device tree.
++	 *
++	 * "xo4" in the name is not a divider: the vendor branch has no parent and
++	 * no divider, and 0130-1's counter read the gated branch four times faster
++	 * than the XO/4 parent this entry used to declare. The /4 belongs to the
++	 * debug counter's timebase alone (localID 7), which is what makes the
++	 * corrected comparison a real check rather than a tautology. */
+ 	{ "gcc_pdm_xo4_clk", kIOQcomGccGateLocalID, kIOQcomClockBranch, kIOQcomHaltCheck,
+ 	  kIOQcomCapQueryConfig|kIOQcomCapQueryRate, 0, 0, 1,
+-	  {{kIOQcomSourceXODiv4,0,0}},
++	  {{kIOQcomSourceXO,0,0}},
+ 	  1, kSnapshotPdmXo4, 0x008, false },
+ 	/* The one C2-02 sample: mnd_width 0, hid_width 5, gcc_parent_map_0. */
+ 	{ "gcc_pdm2_clk_src", kIOQcomGccSampleLocalID, kIOQcomClockRCG, kIOQcomHaltDelay,
+@@ -144,9 +150,10 @@ static const GccClock gccClocks[] = {
+ 	  kIOQcomCapQueryConfig|kIOQcomCapQueryRate, 0, 0, 1,
+ 	  {{kIOQcomSourceLocal,kIOQcomCCGCC,kIOQcomGccSampleLocalID}},
+ 	  1, kSnapshotPdm2, 0x00c, false },
+-	/* The C2-08 counter reference, declared as the branch it really is. It
+-	 * shares nothing with gcc_pdm_xo4_clk but the XO/4 fixed parent, so the
+-	 * measurement demand and the C2-03 sample demand are two identities. */
++	/* The C2-08 counter reference, declared as the branch it really is. This
++	 * is the only XO/4 parent in the tree: gcc_pdm_xo4_clk is a plain XO gate,
++	 * so the measurement demand and the C2-03 sample demand are two identities
++	 * in both register and parent. */
+ 	{ "gcc_xo_div4_clk", kIOQcomGccMeasureReferenceLocalID, kIOQcomClockBranch,
+ 	  kIOQcomHaltCheck, kIOQcomCapQueryConfig|kIOQcomCapQueryRate, 0, 0, 1,
+ 	  {{kIOQcomSourceXODiv4,0,0}},
+@@ -839,9 +846,11 @@ IOQcomGCC::measureClocks(void)
+ 			if (running!=kIOReturnSuccess&&worst==kIOReturnSuccess) worst=running;
+ 			if (gated!=kIOReturnSuccess&&worst==kIOReturnSuccess) worst=gated;
+ 			/* C2-03's branch is a third sample only when C2-03 really enabled
+-			 * it: mux 0x99 is the counter's own reference, and the C2-02 decoder
+-			 * states its rate independently (fixed XO/4 = 4.8 MHz), so this is
+-			 * the measurement evidence the gate card asks for. */
++			 * it: mux 0x99 selects that branch, and the C2-02 decoder states
++			 * its rate independently (fixed XO = 19.2 MHz), so this is the
++			 * measurement evidence the gate card asks for. A wrong parent
++			 * shows up here as BadArgument, which is how 0130's XO/4 claim was
++			 * refuted on the device. */
+ 			if (fGateRunning) {
+ 				IOReturn gate=measureSample(regs,kIOQcomGccGateLocalID,
+ 				 kIOQcomGccGateMux,true);
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
+index 2b10535..bad337d 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
+@@ -68,20 +68,30 @@ enum : uint32_t {
+ 	kIOQcomGccMeasureOffMux = 0x9A,
+ 	/* The counter reference is the vendor debugcc XO/4 gate at 0x43008, a
+ 	 * branch of its own. It is NOT gcc_pdm_xo4_clk (0x33008, localID 4): the
+-	 * two sit in different windows and the C2-03 sample owns the other one,
+-	 * so the ledger identity has to follow the register. */
++	 * two sit in different windows, they do not share a parent (0x43008 is the
++	 * only /4 in this system, 0x33008 is a plain XO gate) and the C2-03 sample
++	 * owns the other one, so the ledger identity has to follow the register. */
+ 	kIOQcomGccMeasureReferenceLocalID = 7, /* gcc_xo_div4_clk, 0x43008 */
+ };
+ 
+ /* C2-03: one normal branch gate. gcc_pdm_xo4_clk is the C0-03 S2 sample:
+- * vendor offset 0x33008, one enable bit, CLK_OFF halt class, no RCG parent to
+- * program and no GDSC, and the iOS device tree never consumes it. Its debug
++ * vendor offset 0x33008, one enable bit, CLK_OFF halt class, no parent divider
++ * to program and no GDSC, and the iOS device tree never consumes it. Its debug
+  * mux index (0x99) is also the C2-08 counter reference, so the measurement
+- * chain already on the device can see whether enabling it really clocks. */
++ * chain already on the device can see whether enabling it really clocks.
++ *
++ * The parent is XO, not XO/4, and the device said so. 0130 shipped with the
++ * XO/4 parent the name suggests; its counter then measured the gated branch at
++ * 19200036 Hz against a declared 4800000 (delta 3000007 ppm, BadArgument).
++ * The vendor tree agrees with the counter: debugcc-sm8150.c's MUX_SRC_LIST
++ * maps 0x99 to gcc_pdm_xo4_clk, gcc-sm8150.c's branch at 0x33008 carries no
++ * parent and no divider (a clk_branch2 gate cannot divide), and the only /4 in
++ * this system is the counter's own timebase at 0x43008. The 4.8 MHz figure was
++ * the calibration constant of the rate formula, not a rate of this branch. */
+ enum : uint32_t {
+ 	kIOQcomGccGateLocalID = 4,             /* gcc_pdm_xo4_clk */
+ 	kIOQcomGccGateMux = 0x99,
+-	kIOQcomGccGateHz = 4800000,
++	kIOQcomGccGateHz = 19200000,           /* XO: 0130-1 counted 4x the claim */
+ };
+ 
+ /* The halt poll is the vendor clk_branch_wait(): bounded, 2500 x 10 us = 25 ms,
+diff --git a/tools/tests/test-mh2lm-gcc-backend.py b/tools/tests/test-mh2lm-gcc-backend.py
+index e353460..affd59c 100644
+--- a/tools/tests/test-mh2lm-gcc-backend.py
++++ b/tools/tests/test-mh2lm-gcc-backend.py
+@@ -235,8 +235,10 @@ static uint32_t gccCounter(uintptr_t pa,uint32_t v){
+  if(gccCountStuck)return 0;			/* done never arrives */
+  uint32_t mux=regs[0x00162000u]&0x3ffu;
+  uint32_t ticks=ctl&0xffffffu&~((1u<<20));
+- /* the C2-03 branch is the XO/4 reference itself: one count per loaded tick */
+- if(mux==(uint32_t)kIOQcomGccGateMux)return (1u<<25)|ticks;
++ /* the C2-03 branch is a plain XO gate, so it counts like the running sample:
++  * four per loaded XO/4 tick. 0130 modelled it as the XO/4 clock itself and the
++  * device refuted that (19200036 against a declared 4800000). */
++ if(mux==(uint32_t)kIOQcomGccGateMux)return (1u<<25)|(uint32_t)((uint64_t)ticks*4u);
+  if(mux!=(uint32_t)kIOQcomGccMeasureRunningMux)return (1u<<25)|0x40u;
+  return (1u<<25)|(uint32_t)((uint64_t)ticks*4u);
+ }
+@@ -438,7 +440,8 @@ int main(){
+    assert(i.possibleCount==1&&i.possible[0].source==kIOQcomSourceLocal);
+    assert(i.possible[0].controller==kIOQcomCCGCC&&i.possible[0].localID==kIOQcomGccSampleLocalID);
+    /* the C2-08 counter reference is its own clock identity, not the C2-03
+-    * sample: same fixed XO/4 parent, a different register and a different ID */
++    * sample: it is the tree's only XO/4 parent, while the sample is a plain XO
++    * gate in a different register, so the two identities differ twice over */
+    assert(g->copyClockInfo(kIOQcomGccMeasureReferenceLocalID,&i)==kIOReturnSuccess);
+    assert(i.localID==7&&i.kind==kIOQcomClockBranch&&!i.pinned);
+    assert(i.possibleCount==1&&i.possible[0].source==kIOQcomSourceXODiv4);
+@@ -535,7 +538,9 @@ int main(){
+    IOQcomClockState s;assert(g->copyClockState(4,&s)==kIOReturnSuccess);
+    assert(s.raw[0]==0x80000001u&&s.enableBit&&s.clockOffBit);
+    assert(s.haltTrusted);	/* gcc_pdm_xo4_clk is BRANCH_HALT */
+-   assert(s.rateKnown&&s.configuredHz==4800000ull);	/* XO/4 */
++   /* a plain XO gate: the header constant and the descriptor agree, and the
++    * C2-08 counter is the only /4 in the tree (see the gate measure fixture) */
++   assert(s.rateKnown&&s.configuredHz==kIOQcomGccGateHz);
+    assert(logged("detail=configured enable=1 off=1 raw=0x80000001 known=1"));
+    assert(g->copyClockState(3,&s)==kIOReturnSuccess);
+    assert(s.haltTrusted==false);	/* BRANCH_HALT_DELAY: CLK_OFF is not evidence */
+@@ -594,7 +599,7 @@ int main(){
+    assert(p->checkDependencies(h,&reason)==kIOReturnSuccess);	/* no parents */
+    h->release();
+    assert(acquire(p,c,"gcc_pdm_xo4_clk",&h)==kIOReturnSuccess);
+-   assert(h->copyState(&s)==kIOReturnSuccess&&s.rateKnown&&s.configuredHz==4800000ull);
++   assert(h->copyState(&s)==kIOReturnSuccess&&s.rateKnown&&s.configuredHz==kIOQcomGccGateHz);
+    h->release();
+    assert(writes()==0);
+    c->release();
+@@ -869,6 +874,13 @@ int main(){
+   assert(logged("phase=completed result=0 token="));
+   assert(logged("detail=sample-kept-until-reboot"));
+   assert(logged("phase=gate-done result=0 writes=1 neighbours=4 changed=0 polls=0 hold=1"));
++  /* the gate's read cost is counted, not estimated: the 19-read walk, one read
++   * of the register before the store, the poll that came back clean on its
++   * first read (one read for polls=0) and the four neighbours captured and
++   * re-checked (0130 printed reads=29, which is this sum) */
++  assert(g->fReads==kIOQcomGccSnapshotCount+2+6+1+1+8);
++  assert(logged("phase=start result=0 windows=4 snapshot=11 reads="+
++                std::to_string(kIOQcomGccSnapshotCount+2+6+1+1+8)));
+   assert(g->fGateRunning&&g->fGateEnabled&&g->fGateNeighbourChanges==0);
+   /* the sample is running and the card says so: the enable bit is kept */
+   assert(regs[0x00133008u]==0x80000001u);
+@@ -904,7 +916,10 @@ int main(){
+   /* the C0-03 S2 branch is measured through the C2-08 machinery at its own mux */
+   assert(counted("consumer=sweetclock-measure phase=measure result=0 mux=0x99")==1);
+   assert(logged("name=gcc_pdm_xo4_clk consumer=sweetclock-measure phase=measure result=0 mux=0x99"));
+-  assert(logged("decoded-hz=4800000"));
++  /* the counter and the descriptor now agree on the same clock: with the XO
++   * parent the comparison is a real check, not 4.8 MHz against itself */
++  assert(logged("resource=cc1:0x4 name=gcc_pdm_xo4_clk consumer=sweetclock-measure "
++                "phase=measure-compare result=0 decoded-hz=19200000 measured-hz=19199084"));
+   assert(counted("consumer=sweetclock-measure phase=measure result=0 mux=")==3);	/* running, stopped, the gate */
+   /* 23 measure stores + 1 gate store + 7 for the third sample */
+   assert(writes()==23+1+7);
+@@ -919,6 +934,10 @@ int main(){
+   assert(p->ledgerInspect(kIOQcomCCGCC,kIOQcomGccMeasureReferenceLocalID,0,&ls)==kIOReturnSuccess);
+   assert(ls.holders==0&&ls.desired==0&&ls.confirmed==0);
+   assert(logged("detail=gate-incomplete")==false);
++  /* The ring's auditor can be pointed at this case: with the dump requested the
++   * fixture prints the gate+measure rows in the device vocabulary, so the same
++   * rows that just passed here are re-read by the offline auditor. */
++  /* DUMP_ROWS_HOOK */
+   g->stop(gn);g->release();gn->release();
+   p->stop(pn);p->release();pn->release();
+   gccMeasureHook=nullptr;
+@@ -1044,6 +1063,13 @@ int main(){
+ '''
+ 
+ 
++# The C2-03 row dump exists only when a caller asks for it: the shipped fixture
++# is one program, and the auditor replay must read the rows this build printed.
++if os.environ.get('MH2LM_GCC_DUMP_ROWS'):
++    assert tests.count('/* DUMP_ROWS_HOOK */') == 1
++    tests = tests.replace('/* DUMP_ROWS_HOOK */',
++                          'for(auto&m:messages)printf("%s\\n",m.c_str());')
++
+ with tempfile.TemporaryDirectory(prefix='mh2lm-gcc-') as temp:
+     cpp = Path(temp)/'test.cpp'
+     cpp.write_text(prelude+extra+header+gcc_header+provider+gcc_source+tests)

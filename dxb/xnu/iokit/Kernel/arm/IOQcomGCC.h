@@ -68,20 +68,30 @@ enum : uint32_t {
 	kIOQcomGccMeasureOffMux = 0x9A,
 	/* The counter reference is the vendor debugcc XO/4 gate at 0x43008, a
 	 * branch of its own. It is NOT gcc_pdm_xo4_clk (0x33008, localID 4): the
-	 * two sit in different windows and the C2-03 sample owns the other one,
-	 * so the ledger identity has to follow the register. */
+	 * two sit in different windows, they do not share a parent (0x43008 is the
+	 * only /4 in this system, 0x33008 is a plain XO gate) and the C2-03 sample
+	 * owns the other one, so the ledger identity has to follow the register. */
 	kIOQcomGccMeasureReferenceLocalID = 7, /* gcc_xo_div4_clk, 0x43008 */
 };
 
 /* C2-03: one normal branch gate. gcc_pdm_xo4_clk is the C0-03 S2 sample:
- * vendor offset 0x33008, one enable bit, CLK_OFF halt class, no RCG parent to
- * program and no GDSC, and the iOS device tree never consumes it. Its debug
+ * vendor offset 0x33008, one enable bit, CLK_OFF halt class, no parent divider
+ * to program and no GDSC, and the iOS device tree never consumes it. Its debug
  * mux index (0x99) is also the C2-08 counter reference, so the measurement
- * chain already on the device can see whether enabling it really clocks. */
+ * chain already on the device can see whether enabling it really clocks.
+ *
+ * The parent is XO, not XO/4, and the device said so. 0130 shipped with the
+ * XO/4 parent the name suggests; its counter then measured the gated branch at
+ * 19200036 Hz against a declared 4800000 (delta 3000007 ppm, BadArgument).
+ * The vendor tree agrees with the counter: debugcc-sm8150.c's MUX_SRC_LIST
+ * maps 0x99 to gcc_pdm_xo4_clk, gcc-sm8150.c's branch at 0x33008 carries no
+ * parent and no divider (a clk_branch2 gate cannot divide), and the only /4 in
+ * this system is the counter's own timebase at 0x43008. The 4.8 MHz figure was
+ * the calibration constant of the rate formula, not a rate of this branch. */
 enum : uint32_t {
 	kIOQcomGccGateLocalID = 4,             /* gcc_pdm_xo4_clk */
 	kIOQcomGccGateMux = 0x99,
-	kIOQcomGccGateHz = 4800000,
+	kIOQcomGccGateHz = 19200000,           /* XO: 0130-1 counted 4x the claim */
 };
 
 /* The halt poll is the vendor clk_branch_wait(): bounded, 2500 x 10 us = 25 ms,

@@ -30,6 +30,20 @@ C2-08 的 23 次写是测量期间借来的：开 mux、开 debug 分支、跑�
 - **“刷进去的是什么”可以直接从镜像里读出来。** ADT 属性按 Apple 布局（32 字节名字槽 + `u32` 长度 + 值）存放在 ramdisk 里，`scratch/artifact-0128/read-adt-claims.py` 把 FAT16 卷抠出来、`mcopy` 出 `kernel.macho.adt`、再按名字找槽位，就能在开机前回答“这次到底开了哪几个 opt-in”。顺带一个坑：`sweet,clock-provider` 是 clock provider 节点的 **compatible 字符串**，不是属性名，按属性名扫会读到垃圾长度——扫描器一开始就被它骗过。
 - 另外第 7 个描述符的期望值也在这轮被真实行纠正：它是 `detail=configured known=1`（声明一个固定父源 XO/4，能解析出 4.8 MHz），不是 `parent-rate-unknown`；`raw` 必须等于快照里的 `0x143008`。
 
+## 0130-1：门控成立，第三源把“名字父源”推翻（2026-11-24，补丁 0238）
+
+**门控档的判据一条都没松，出问题的是我自己写进描述表的那条父源。** `boot-16k-0130-…-clockgatemeasure.img`（`fce71e03…`）的环 `logs/sweetlog-0130-1.bin`（`80ebba44…`）里，门控侧与 0130-0 一字不差：一条 `stage=gate-enable`（`0x80000001`，从快照 `0x80000000` 只加 enable）、首读即 `enable=1 off=0`（`polls=0`）、四个邻位零变化、账本一个 token 无 `release`、屏幕与基线无差别。多出来的第三源 `cc1:0x4`（`mux=0x99`，被本候选打开的那一支）测得 `short=16396 full=262157 hz=19200036`，而描述表声明它是 XO/4＝4.8 MHz——`measure-compare` 于是 `result=-536870198`（`BadArgument`）、`delta-ppm=3000007`，即实测是声明的 **×4.0000075**。
+
+**这不是噪声，是两个对照把它钉在父源上。** 同一轮 `mux=0x53`（`gcc_disp_xo_clk`）`hz=19199963`，与解码值 19200000 差 −1 ppm；`mux=0x9a`（`gcc_pdm2_clk`，关闭）`short==full` 即 `hz=0 running=0`。同一条 XO/4 时基对前者准到 1 ppm、对后者差 3e6 ppm，能错的只有声明。
+
+**证据链（为什么是 XO 而不是 XO/4）**：厂商 `MUX_SRC_LIST` 把 debug index `0x99` 映射到 `gcc_pdm_xo4_clk`；该 branch 在 `0x33008` 只有 `enable_mask=BIT(0)` 与 `clk_branch2_ops`，**没有 `.parent_names`、没有 multiplier／divider 字段**——没有父名的 branch 无法对父源分频，名字里的 `xo4` 是历史命名不是电路。同族 `gcc_disp_xo_clk`（`0xb048`，`BRANCH_HALT_DELAY`＋`CLK_IS_CRITICAL`）同样 parentless，实测 19.2 MHz。全系统唯一的 /4 是计数器自己的时基 `0x43008`（localID 7）：公式里的 `4800000` 只是这个时基的**常量**，与被测时钟的频率无关。
+
+**修复（0238）**：localID 4 描述父源 `kIOQcomSourceXODiv4` → `kIOQcomSourceXO`，`kIOQcomGccGateHz=19200000`；宿主测试同步三处硬事实——门控 branch 作为计数器第三源时按“运行样本”计数（每拍 4 个），门控档 `reads = 29 + polls` 的恒等式，以及整行 `… decoded-hz=19200000 measured-hz=19199084 delta-ppm=-47` 的 compare 断言。另给 fixture 加 `MH2LM_GCC_DUMP_ROWS=1`：默认构建逐字节不变，只有被要求时才把这些行按设备词汇打印出来，于是 `scratch/artifact-0128/selftest-gate-auditor.py` 能拿**编译出来的真实行**同时验证 0131 的（`pass`）与 0130 的（`gate-parent-refuted`）两种形态，不必手写样本。
+
+**教训**：厂商表省略 `.parent_names` **不是**“有分频父源”的证据，更不能让名字替电路作证——`xo4` 这种命名必须先查 `debugcc-*.c` 的 `MUX_SRC_LIST`／`xo_div4_cbcr`，或者用一次计数器实测结账。设备计数器是最便宜的证伪工具：它在这里只花了一次 65536 拍的计数，就把一条写进三处文档的“4.8 MHz”推翻了。审计器的做法是**记录反驳**（`--gate-declared-xo4` 只允许这一段以 `gate-parent-refuted` 收尾），而不是放宽断言让它变绿。
+
+**0131 的期望**：`decoded-hz=19200000`、`measured-hz` 由设备计数决定（历史 19199963／19200036 都合法，只要 `|delta-ppm|<=10000`）、`result=0`、`measure-done result=0`、无 `detail=measure-incomplete`；门控侧的行与 0130 逐字相同。0130／0130-1 两环按各自当时的声明保留原样，不改写。
+
 ## 首个硬件写候选：C2-08 测频＋C1-05 账本（2026-11-24，补丁 0235／0236）
 
 这一轮是时钟计划第一次**允许写硬件**，所以写路径本身按[总计划 §3.5](docs/CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)做成单点、可数、可回退，测量是否发生由设备树决定，默认镜像继续停在零写入。
@@ -38,7 +52,7 @@ C2-08 的 23 次写是测量期间借来的：开 mux、开 debug 分支、跑�
 
 - **单点写路径**：`writeRegister(window,offset,value)` 先查映射／4 字节对齐／`offset+4<=length`（越界不写，记 `detail=bounds`），再 `dmb oshst` → 单次 `*(volatile uint32_t *)` → `dsb osh`。文件里仍然只有一处 store 形态、一处取值形态，主机测试按源码文本钉住这一点；`registerWrites()` 从常量 0 变成 `fWrites`，0126 以前“零写入”的断言因此改成“默认门缺失时 0 次 store”。
 - **测量的顺序照抄厂商**：`measureSave` 读存 5 个寄存器（`0x143008` XO/4 CBCR、`0x162000` mux sel、`0x162004` post-div、`0x162008` debug 分支 CBCR、`0x162038` 计数控制）→ 账本取得 `cc1:0x4`（`gcc_pdm_xo4_clk`，只有 `opened` 的持有者写 enable，共享持有者继承）→ 读回判 `enable=1 off=0` 才算参考源在跑 → 依次写 mux（运行样本 `0x53`＝`gcc_disp_xo_clk`）、post-div（`1-1`）、debug 分支 → 短测 `0x1000`／长测 `0x10000`（两次计数各三次写，等待 `bit25` 每次有界 `2500×10 µs`）→ 逆序恢复 5 个寄存器并逐条读回核对 → 读一次 XO/4 判 `ENABLE==0`，据此 `ledgerRelease(token,stopped,&lastHolder)`。
-- **数值**：`hz=((full*10+15)*4800000)/((0x10000*10)+35)`（即 `/655395`）×`multiplier=1`；短测＝长测即 NotRunning。样例 `short=16384 full=262144` → `19199084` Hz，与 C2-02 的 `19200000` 差 `-47 ppm`，容差 10000 ppm 之内。比较行用**有符号**除法（`/(int64_t)state.configuredHz`）：`configuredHz` 是 `uint64_t`，混入无符号除法会把 `-47` 变成约 `9.6e11`，曾经让主机测试报出一个假的“超容差”。
+- **数值**：`hz=((full*10+15)*4800000)/((0x10000*10)+35)`（即 `/655395`）×`multiplier=1`——`4800000` 是 XO/4 计数时基的常量，不是被测时钟的频率；短测＝长测即 NotRunning。样例 `short=16384 full=262144` → `19199084` Hz，与 C2-02 的 `19200000` 差 `-47 ppm`，容差 10000 ppm 之内。比较行用**有符号**除法（`/(int64_t)state.configuredHz`）：`configuredHz` 是 `uint64_t`，混入无符号除法会把 `-47` 变成约 `9.6e11`，曾经让主机测试报出一个假的“超容差”。
 - **门控**：`sweet,clock-measure=<u32 1>`（生成器 `--clock-measure`，隐含 `--gcc`）。缺失 → `Unsupported`＋DEBUG（设备级别 0 不落环，默认镜像行数与 0126 相同、仍 `writes=0`）；长度≠4 或值>1 → `ERROR detail=bad-clock-measure-gate`；测量失败只在 `start` 前补一条 `WARN detail=measure-incomplete measure-result=%d writes=%u`，后端照常 Ready。默认树 `081f63dc…`，加门 `0fc24851…`（`+40` 字节）。
 - **C1-05 账本**：`IOQcomClockProvider` 固定表 8 条 × 4 持有者，键 `(controller,localID)`；首个取得 `transitions++` 且 `transition=new`，第二个消费者只 `holders++`（`shared`，不转换）；`ledgerComplete(token,true)` 才是 `confirmed=1`／`confirmations++`，`false` 清 `pending` 并 `WARN detail=not-confirmed`；最后释放时 `stopped=false` 保留 `pending=1` 并 `ERROR detail=hardware-still-on`；generation 变化清 token 保计数（`WARN detail=stale-generation`）；未知 token `result=10 detail=unknown-token`；`withdrawController` 让条目失活。C2-08 是这个账本的第一台真实执行者。
 - **主机证据**：`test-mh2lm-gcc-backend.py`（默认门缺失 0 次 store；门在 23 次 store＝4 建立＋7×2 计数＋5 恢复、`hz=19199084`、`delta-ppm=-47`、5 次恢复 `mismatches=0`、账本 `transitions=2 confirmations=2`；坏门 0 次 store；`reference-not-running`；计数卡死 2×`done-timeout`）、`test-mh2lm-clock-provider.py`（多消费者／欠账／generation 失效／撤回／holder 与表上限）、`test-mh2lm-mdss-adt.py`（门可选、去掉即回到默认字节、CLI 同义）全部通过；补丁 `0235`（新增功能）与 `0236`（掩码核对）在基线 `d177551` 上按序严格重放，五个文件逐字节一致（两份补丁都含 `tools/tests/` 下的主机测试，因此路径相对仓库根，用 `git apply -p1`）。
@@ -75,7 +89,7 @@ NEXT：按总计划 §3.4 进入首个硬件写候选 **C2-08（debugcc 测频�
 
 - C2-01：按 ADT `reg` 顺序映射 `0x0010b000`／`0x00033000`／`0x00043000`／`0x00062000` 四页，每页核对解析地址与长度后使用；`sweet,gcc-abi`／`sweet,gcc-variant` 只认数值（缺失 BadArgument、非 `0x8150` Unsupported）；寄存器访问是 4 字节对齐、`offset+4<=length` 的窄只读助手，`dmb oshld` 后返回，全程一把 `IOLock`；文件内无写路径，`registerWrites()` 是常量 0；`start` 先冻结 11 个已知寄存器快照，再以 200×5 ms 有界等待 provider 发布后注册；失败路径卸载映射与锁，`stop` 撤注册并释放映射／锁（重启可再来一次）。
 - C2-02：只解码 `gcc_pdm2_clk_src`（`0x33010`、`hid_width=5`、`gcc_parent_map_0`、`mnd_width=0`）一种固定父源／分频配置；选择子 0→XO（19.2 MHz 可信）、1→GPLL0、6→GPLL0 even（后两者无非可信父频→`parent-rate-unknown`），7 与 2..5→`src-invalid`；`mode!=0`→`mode-unsupported`；`CMD_UPDATE`→`update-pending known=0`；`div=0` 按 `clk_rcg2_calc_rate` 的语义表示“未编码分频”，不按除数 1 处理（内部 `divX2=div?div+1:0`）。保留 `raw[2]` 原值与推导依据，只报“配置解码”，不宣称实测频率。显示三条 branch 声明 pinned（含 `CLK_IS_CRITICAL`），永不关闭。
-- 如实声明的保守项：`gcc_pdm_xo4_clk` 在厂商树无父源声明，按名字与 C0-03 S2 实测记为 XO/4（4.8 MHz）并注明“由观测声明”；无 `vdd_class` 的 branch `domain=0`；`gcc_pdm2_clk` 的父是本 CC RCG，取不到可信父频即 Unknown。
+- 如实声明的保守项：`gcc_pdm_xo4_clk` 在厂商树无父源声明，按名字与 C0-03 S2 实测记为 XO/4（4.8 MHz）并注明“由观测声明”（当时的推断已被 0130-1 的计数推翻，0238 改为 XO＝19.2 MHz，见文首 0130-1 一节）；无 `vdd_class` 的 branch `domain=0`；`gcc_pdm2_clk` 的父是本 CC RCG，取不到可信父频即 Unknown。
 - 顺带修正两处既有缺陷：C1 绑定表上限 `kIOQcomBindingMax` 8→16（诊断段原本把 10 条探测全部判成畸形，真实后端被藏起来；与 `kIOQcomWalkMax` 对齐并加 `static_assert`），C1 边界用例改为 16 通过／17 拒绝；GCC `stop` 未清 `fMapped`／`fLock` 导致重启永远 `already-started`（主机测试发现，已修）。
 
 证据：`tools/tests/test-mh2lm-gcc-backend.py` 通过（身份与四类窗口拒绝、映射与 11 项快照、对齐／越界只读访问、`clk_rcg2` 解码向量含 `div=0` 哨兵与三种拒绝、halt 类别、provider 绑定与 domain admission、诊断段列出真实后端且收尾 `writes=0`）；`test-mh2lm-clock-provider.py`、`test-mh2lm-mdss-adt.py`（含 `--gcc` 低别名编码／隐含开关／字节还原／CLI）通过；两份 ARM64 单 TU 编译 rc=0、零 error（`scratch/clock-c2/logs/compile-IOQcomClock.txt`、`compile-IOQcomGCC.txt`）；补丁 `xnu/patches/0233-mh2lm-gcc-readonly-backend.patch`，SHA256 `b92d455222eb80bbe12f67b1940a7565f41123815b1cada8f8a1f77acb487649`，在基线 `4148ed3` 上按 `0230`→`0233` 严格 `patch -p1 --fuzz=0` 应用后六份文件逐字节一致、无 `.rej`。测试日志在 `scratch/clock-c2/logs/`。
