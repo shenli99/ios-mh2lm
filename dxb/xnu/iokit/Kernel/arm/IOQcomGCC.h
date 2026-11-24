@@ -76,6 +76,18 @@ enum : unsigned {
 	kIOQcomGccMeasureRegCount = 5,
 };
 
+/* The branch CBCRs are read back only over their configuration bits. Bits
+ * 28..31 are the FSM's halt/NOC status: the hardware owns them and raises the
+ * halt bit asynchronously, which is exactly why the vendor polls them in
+ * clk_branch_wait() instead of storing them. The 0127 device read back 0x0
+ * from GCC_DEBUG_CBCR right after disabling it, while the saved value was
+ * 0x80000000 (halt status set at reset), so comparing that field would report
+ * a restore failure that never happened. */
+enum : uint32_t {
+	kIOQcomGccBranchConfigMask = 0x0FFFFFFFu,
+	kIOQcomGccVerifyAll = 0xFFFFFFFFu,
+};
+
 /* Variant identity from the ADT property; a mismatched SoC must refuse. */
 enum : uint32_t { kIOQcomGccVariantSm8150 = 0x8150 };
 

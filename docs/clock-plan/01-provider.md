@@ -1,6 +1,6 @@
 # C1：统一时钟入口与只读资源接口
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C1-01～C1-04 已实现为只读候选（补丁 `0230`／`0231`／`0232`，写计数为零），默认档与诊断档均已实机通过；**C1-05 已实现（补丁 `0235`，与 C2-08 合并为第一个写候选），待 0127 测量档实机**；其硬件共享实例仍待 C2-05／C4-04。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C1-01～C1-04 已实现为只读候选（补丁 `0230`／`0231`／`0232`，写计数为零），默认档与诊断档均已实机通过；**C1-05 已实现（补丁 `0235`，与 C2-08 合并为第一个写候选），并已在 0127 测量档实机走完一次真实的“取得—确认—释放”（`transitions=2 confirmations=2`，无欠账）**；其硬件共享实例仍待 C2-05／C4-04。
 
 ## 阶段目标与退出条件
 
@@ -62,6 +62,7 @@
 - **C1-05 撤回与欠账**：最后一个持有者 `ledgerRelease(token,stopped)` 在 `stopped=true` 时清 `pending／confirmed`、`transitions++`／`confirmations++`；`stopped=false` 时**保留** `pending=1` 并记 `ERROR detail=hardware-still-on`（`IOError`），把“硬件其实还开着”留下来而不是抹平。非最后持有者只减 `holders`。
 - **C1-05 过期与清理**：后端 `start` 每次生成新 `generation`；取得时发现 `entry-generation != generation` 就清 token／holders／desired／pending／confirmed（**保留** `transitions／confirmations`）并记 `WARN detail=stale-generation entry-generation=%llu generation=%llu`。未知 token（含已过期、已撤回、来自别的条目）→ `WARN phase=confirm|release result=10 detail=unknown-token`（`kIOReturnNotFound`）。`withdrawController` 调 `ledgerForget` 使条目失活，此后按 key 或旧 token 查询都是 `NotFound`。
 - **C1-05 边界**：不引入任何资源专属聚合公式（GCC 的门控聚合仍归 C2-05，RPMh 投票归 C4-04），不声称逻辑取得等于硬件开启；账本本身不写任何寄存器。C2-08 只把它当“参考源需求”的持有者与停钟判决的依据。
+- **C1-05 实机记录（0127 测量档，`sweetlog-0127-0.bin`）**：C2-08 每次测量都向账本取得 `cc1:0x4`（`gcc_pdm_xo4_clk`），因此这一份环第一次出现了完整的账本四行：`consumer=sweetclock-measure phase=acquire result=0 token=1 holders=1 desired=1 pending=1 confirmed=0 transitions=1 transition=new` → `phase=transition result=0 token=1 owner=1` → `phase=confirm result=0 token=1 holders=1 pending=0 confirmed=1 confirmations=2` → `phase=release result=0 token=1 holders=0 desired=0 pending=0 confirmed=0 transitions=2 confirmations=2`。要点有三个：`transition=new`（只有一个持有者，物理转换真的发生了一次）、`confirmations=2`（取得之后按“XO/4 的 `enable=1` 且 halt 位为 0”确认了一次，释放之后按“`ENABLE` 已回 0”又确认了一次）、释放行 `pending=0 confirmed=0` 且没有 `detail=hardware-still-on`（硬件确实停了，账本没有留欠账）。`consumer=` 只出现在 `acquire` 行，`confirm`／`release` 行不带它，审计按此区分。
 
 
 ## 本候选实现（C1-01～C1-04，补丁 0230）

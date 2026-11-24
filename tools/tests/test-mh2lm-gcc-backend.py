@@ -50,12 +50,27 @@ assert 'delayedCalls' in extra
 # as the clock's own edges would be.
 prelude = prelude.replace('static uint32_t readReg(uintptr_t b,uint32_t o){',
  'static std::function<uint32_t(uintptr_t,uint32_t)> gccMeasureHook;\n'
+ '/* Device model for the two restore subtleties: a branch CBCR reports its\n'
+ ' * halt status one read after the disable that cleared it (0127 read back\n'
+ ' * 0x0 for a stored 0x80000000), and a register can hold a wrong config bit. */\n'
+ 'static bool gccHaltLag=false;\n'
+ 'static std::map<uintptr_t,bool> gccHaltPending;\n'
+ 'static uintptr_t gccDriftPA=0;\n'
+ 'static uint32_t gccDriftBits=0;\n'
  'static uint32_t readReg(uintptr_t b,uint32_t o){')
+prelude = prelude.replace('static void writeReg(uintptr_t b,uint32_t o,uint32_t v){',
+ '''static void writeReg(uintptr_t b,uint32_t o,uint32_t v){
+  /* Disabling a branch arms one lagging halt status: the 0127 ring read back
+     0x0 from GCC_DEBUG_CBCR although 0x80000000 had been stored. */
+  {uintptr_t pa=b+o;
+   if(gccHaltLag&&(pa==0x00143008u||pa==0x00162008u)&&!(v&1u))gccHaltPending[pa]=true;}''')
 prelude = prelude.replace('''uint32_t v=regs[b+o];if(b==bases[6]&&o==0x110&&dmaFired)''',
  '''uint32_t v=regs[b+o];
+ if(gccDriftPA&&b+o==gccDriftPA)v^=gccDriftBits;	/* a configuration bit stuck */
+ if(gccHaltPending[b+o]){gccHaltPending[b+o]=false;v&=~0x80000000u;}	/* halt status still clearing */
  if(gccMeasureHook)v=gccMeasureHook(b+o,v);
  if(b==bases[6]&&o==0x110&&dmaFired)''')
-assert 'gccMeasureHook' in prelude
+assert 'gccMeasureHook' in prelude and 'gccHaltPending' in prelude
 
 # The GCC backend maps four consecutive ADT windows; the fixture provides a
 # host-backed page per window and knobs for the four start-time refusals.
@@ -189,16 +204,22 @@ static void resetGccRegs(){
  setReg(0x00162000u,0x004,0x00000000u);
  setReg(0x00162000u,0x008,0x00000001u);
 }
-static void clearKnobs(){gccMemoryCount=4;gccAbsentIndex=99;gccWrongPA=99;gccShortLen=99;gccNoBase=99;}
+/* Device model knobs for the restore check. gccHaltLag makes the halt status
+ * of a branch CBCR lag one read behind its disable (the 0127 ring read back
+ * 0x0 with 0x80000000 stored), and gccDriftPA/gccDriftBits hold one
+ * configuration bit of a register at the wrong level, which must still fail. */
+static void clearKnobs(){gccMemoryCount=4;gccAbsentIndex=99;gccWrongPA=99;gccShortLen=99;gccNoBase=99;
+ gccHaltLag=false;gccHaltPending.clear();gccDriftPA=0;gccDriftBits=0;}
 /* C2-08 device model. The debug counter sees the selected source: the running
  * clock (19.2 MHz) yields four counts per loaded tick of the XO/4 reference,
  * a stopped source yields the same count on both runs, and a stuck counter
  * never raises the done bit. */
 static bool gccRefStuckOff=false,gccCountStuck=false;
 static uint32_t gccCounter(uintptr_t pa,uint32_t v){
- if(pa==0x00143008u){
-  if(gccRefStuckOff)return v&~1u;		/* a branch that will not come up */
-  return (v&1u)?(v&~0x80000000u):v;		/* a running branch reports CLK_OFF=0 */
+ if(pa==0x00143008u||pa==0x00162008u){
+  if(pa==0x00143008u&&gccRefStuckOff)return v&~1u;	/* a branch that will not come up */
+  if(v&1u)return v&~0x80000000u;		/* a running branch reports CLK_OFF=0 */
+  return v;
  }
  if(pa!=0x0016203cu)return v;
  uint32_t ctl=regs[0x00162038u];
@@ -697,6 +718,57 @@ int main(){
    p->stop(pn);p->release();pn->release();
    assert(!live&&!liveMaps);
   }
+  /* ---- the halt status lags, the configuration does not: the 0127 ring ---- */
+  {
+   auto*pn=clockNub();auto*p=startProvider(pn);
+   auto*gn=gccNub(0x8150,true,true,4,1);	/* sweet,clock-measure = 1 */
+   clearKnobs();resetGccRegs();messages.clear();
+   /* the device read both gates as 0x80000000 (off, halt status set) */
+   setReg(0x00143000u,0x008,0x80000000u);
+   setReg(0x00162000u,0x008,0x80000000u);
+   gccHaltLag=true;			/* a disable's halt status lags one read, like 0127 */
+   gccMeasureHook=gccCounter;
+   auto*g=startGcc(gn);
+   assert(writes()==23);
+   /* the enable clears CLK_OFF and the ledger confirms from that very read */
+   assert(logged("phase=running result=0 enable=1 off=0 value=0x1"));
+   /* both branch restores read back with the halt status still clear, and the
+      configuration bits are what the check actually compares */
+   assert(counted("phase=restore result=0 expected=0x80000000 value=0 mask=0xfffffff")==2);	/* %#x of 0 is 0 */
+   /* the mux, post-divider and counter are compared whole */
+   assert(counted("mask=0xffffffff")==3);
+   assert(g->fRestoreMismatches==0);
+   assert(!logged("detail=mismatch"));
+   assert(logged("phase=measure-done result=0 writes=23 restores=5 mismatches=0"));
+   assert(regs[0x00162008u]==0x80000000u);	/* the store was right, the status lags */
+   assert(regs[0x00143008u]==0x80000000u);
+   g->stop(gn);assert(writes()==23);
+   g->release();gn->release();
+   p->stop(pn);p->release();pn->release();
+   assert(!live&&!liveMaps);
+  }
+  /* ---- a configuration bit that does not come back is still a failure ---- */
+  {
+   auto*pn=clockNub();auto*p=startProvider(pn);
+   auto*gn=gccNub(0x8150,true,true,4,1);
+   clearKnobs();resetGccRegs();messages.clear();
+   gccDriftPA=0x00162038u;		/* the counter register holds a wrong bit */
+   gccDriftBits=0x10u;
+   gccMeasureHook=gccCounter;
+   auto*g=startGcc(gn);
+   assert(writes()==23);
+   assert(counted("phase=restore result=")==5);
+   assert(g->fRestoreMismatches==1);
+   /* the failure is a WARN with the mask that was compared, not a filtered row */
+   assert(counted("expected=0x10 value=0 mask=0xffffffff detail=mismatch")==1);
+   assert(!logged("phase=measure-done result=0"));
+   assert(logged("mismatches=1"));
+   assert(logged("detail=measure-incomplete"));
+   g->stop(gn);
+   g->release();gn->release();
+   p->stop(pn);p->release();pn->release();
+   assert(!live&&!liveMaps);
+  }
   /* ---- the gate itself is validated: a value or width the ADT never writes -- */
   {
    clockMode=0;unsigned before=writes();
@@ -762,7 +834,8 @@ int main(){
         "default, and the gated C2-08 measurement candidate: 23 ordered stores behind "
         "one 607-byte-safe ADT gate, a ledger-acquired XO/4 reference, short/full counter "
         "runs with a bounded poll, NotRunning on equal counts, a C2-02 cross-check, and a "
-        "reverse-ordered read-back-verified restore of all five saved registers\n");
+        "reverse-ordered read-back-verified restore of all five saved registers "
+        "with the branch halt status masked out of the comparison\n");
  return 0;
 }
 '''

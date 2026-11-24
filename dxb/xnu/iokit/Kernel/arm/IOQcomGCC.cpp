@@ -316,12 +316,16 @@ IOQcomGCC::takeSnapshot(void)
  * table is the entire write footprint of the card and measureRestore() walks it
  * backwards. */
 enum : unsigned { kMeasureXo4=0, kMeasureDebugGate, kMeasureMux, kMeasurePost, kMeasureCtl };
-static const struct { unsigned window; uint32_t offset; } gccMeasureRegs[kIOQcomGccMeasureRegCount] = {
-	{ kGccWindowXoDiv4, kGccXoDiv4Offset },
-	{ kGccWindowDebug, kGccDebugGateOffset },
-	{ kGccWindowDebug, kGccDebugMuxOffset },
-	{ kGccWindowDebug, kGccDebugPostDivOffset },
-	{ kGccWindowDebug, kGccMeasureCtlOffset },
+static const struct {
+	unsigned window;
+	uint32_t offset;
+	uint32_t verifyMask;    /* bits measureRestore() compares after the write */
+} gccMeasureRegs[kIOQcomGccMeasureRegCount] = {
+	{ kGccWindowXoDiv4, kGccXoDiv4Offset, kIOQcomGccBranchConfigMask },
+	{ kGccWindowDebug, kGccDebugGateOffset, kIOQcomGccBranchConfigMask },
+	{ kGccWindowDebug, kGccDebugMuxOffset, kIOQcomGccVerifyAll },
+	{ kGccWindowDebug, kGccDebugPostDivOffset, kIOQcomGccVerifyAll },
+	{ kGccWindowDebug, kGccMeasureCtlOffset, kIOQcomGccVerifyAll },
 };
 
 /* The vendor rate formula, unchanged: the full count is scaled by the XO/4
@@ -436,15 +440,19 @@ IOQcomGCC::measureRestore(MeasureReg *regs,unsigned count)
 			result=kIOReturnNotReady;
 			continue;
 		}
-		if (observed!=r.saved) {
+		/* Only the bits this card may own are compared: a branch CBCR's
+		 * halt status belongs to the hardware and reappears on its own
+		 * schedule (the vendor polls it, clk_branch_wait()). */
+		uint32_t mask=gccMeasureRegs[back-1].verifyMask;
+		if ((observed&mask)!=(r.saved&mask)) {
 			fRestoreMismatches++;
-			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=restore result=%d expected=%#x value=%#x detail=mismatch\n",
-			 resource,kIOReturnIOError,r.saved,observed);
+			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=restore result=%d expected=%#x value=%#x mask=%#x detail=mismatch\n",
+			 resource,kIOReturnIOError,r.saved,observed,mask);
 			result=kIOReturnIOError;
 			continue;
 		}
-		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=restore result=0 expected=%#x value=%#x\n",
-		 resource,r.saved,observed);
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=restore result=0 expected=%#x value=%#x mask=%#x\n",
+		 resource,r.saved,observed,mask);
 	}
 	return result;
 }
