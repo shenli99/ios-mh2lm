@@ -1,6 +1,6 @@
 # C2：GCC 的最小本地时钟与 reset 能力
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C2-01／C2-02 已在 0126 默认档实机验收通过（补丁 `0233`／`0234`，零写入）；**C2-08 已在 0127 测量档实机验证测量链路（23 次写、19.2 MHz／−1 ppm、关闭样本 NotRunning、账本完整往返），唯恢复核验把分支的 halt 状态位当成了要写回的值，判据已由补丁 `0236` 收窄为“只比配置位”，待 0128 测量档复验**；C2-03 起未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C2-01／C2-02 已在 0126 默认档实机验收通过（补丁 `0233`／`0234`，零写入）；**C2-08 已实机收口：0127 测量档验证测量链路（23 次写、19.2 MHz、关闭样本 NotRunning、账本完整往返），暴露的唯一缺陷是恢复核验把分支的 halt 状态位当成要写回的值；补丁 `0236` 把判据收窄为“只比配置位”，0128 测量档复验 `mismatches=0`（同一次运行里 `0x162008` 读回 `0`、`0x143008` 读回 `0x80000000`，两条同一谓词都通过），19.2 MHz 与解码值差 +1 ppm**；C2-03 起未开始。
 
 ## 阶段目标与退出条件
 
@@ -134,15 +134,15 @@
 - **唯一缺陷：恢复核验比对了状态位**。`phase=restore result=-536870198 expected=0x80000000 value=0x0`（`gcc:0x162008`）**不是写失败**——`write=10 stage=debug-gate value=0x80000001` 已成功——而是分支 CBCR 的 bit31..28 是 FSM 的 OFF/NOC **状态**：厂商 `clk-branch.c` 把 `BRANCH_CLK_OFF=BIT(31)` 当状态**轮询**（`clk_branch_wait`），从不把它纳入“要写回的值”；门开之后硬件要几个周期才更新 halt 状态，所以写完立刻读回可以合法地读到 `0x0`，而写已经生效（`0x143008` 同时读回 `0x1` 就是反方向的例子：enable 生效、halt 未置位）。整寄存器比对把硬件拥有的状态位算进了“恢复到原值”，于是产生一条假 mismatch，并连带 `phase=measure-done result=-536870198 writes=23 restores=5 mismatches=1 hold=0` 与 `WARN phase=start … detail=measure-incomplete measure-result=-536870198 writes=23`。这两条 WARN 是**同一个原因的两个投影**，不是两次故障。
 - **写路径本身未被削弱**：`writeRegister` 一如既往不做读回，唯一核对者是恢复时的比对，所以滞后一拍的 halt 位永远不会让一次成功 store 记成失败；修正只在核对谓词上（补丁 `0236`），不动写路径、不动顺序、不动屏障。审计脚本 `scratch/artifact-0127/audit-clock-log.py` 的 `--legacy-restore` 模式专门复现这一份修复前日志：它要求那一条假 mismatch 必须存在（否则就说明镜像不是修复前版本），同时要求其余全部通过。
 
-### 0128 待验收（本次打包）
+### 0128 实机结果：掩码判据成立，C2-08 收口（2026-11-24）
 
-`out-bs/mk16k-0128.sh` 产出两档：默认档（树 `081f63dc…`，仍应 `writes=0`、与 0126 的 25 行结构一致）与测量档（`--clock-measure`，`0fc24851…`）。测量档相对 0127 只有一处判据变化，因此验收点几乎全部继承，另加：
+`boot-16k-0128-gpioirq-panel-pipeline-clockmeasure.img`（`b5cabf20…`，内核 `21f99b5e…`）实机进入桌面，`logs/sweetlog-0128-0.bin`（`00570b16…`，`total=1008528`，`flush_sequence=8`）是本次会话的环：13058 行日志里的 64 条 `SWEET CLOCK`、**0 条时钟 WARN**、0 条 ERROR（0127 的两条 WARN 全部消失）。逐条对照 0128 的验收点：
 
-- `phase=restore result=0 expected=0x80000000 value=0x0 mask=0xfffffff`（`0x162008`）与 `expected=0x80000000 value=0x1 mask=0xfffffff`（`0x143008`）都必须 **INFO／`result=0`**：前者“读回 0 但配置位全对”，后者“读回 1（halt 已清）配置位也对”，同一条谓词在两个方向都成立。
-- `phase=measure-done result=0 writes=23 restores=5 mismatches=0 hold=0`；**不得**再出现 `detail=measure-incomplete`，`start` 行回到 INFO 且 `reads` 不小于 0127 的 1515（掩码比较不增加读操作，读数只随轮询变化）。
-- 运行样本 `hz` 与解码 `19200000` 的差仍在 10000 ppm 内且符号正确（0127 是 `-1`，允许随计数抖动）；关闭样本仍 `running=0`、无 `measure-compare`；账本仍 `transitions=2 confirmations=2 holders=0`。
-- 回归：非时钟 WARN／ERROR 清单与 b32 基线一致（0127 测量档已证明只有面板 `live configuration needs review` 与 USB 的 `epN cmd N status N`，全部是既有项），面板正常进桌面。
-- 失败归属：若 0128 再现 `mask=0xffffffff` 且 `mismatches=1` → 镜像不是在 `0236` 之上构建的（先查内核里有没有 `mask=%#x` 文案）；若 `mask=0xfffffff` 仍 mismatch → 是真配置漂移，保留镜像回退；若 `detail=measure-incomplete` 但无任何 `detail=mismatch` → 失败在测量链路而不是恢复核对，按 0127 已证实的链路顺序二分（mux → 计数 → 恢复）。
+- **恢复行按掩码判据落在两个方向上**（这是本次唯一的判据变化，也是最有价值的证据）：`resource=gcc:0x162008 phase=restore result=0 expected=0x80000000 value=0 mask=0xfffffff`——读回值**仍然是 0**（halt 位滞后，与 0127 完全一致的现象），但配置位相等，`result=0`；同一份环里 `resource=gcc:0x143008 phase=restore result=0 expected=0x80000000 value=0x80000000 mask=0xfffffff`——halt 已清，值整相同。**同一个谓词在“读到 0”和“读到 1”两侧都成立**，说明放行的是状态位而不是把整条核对放宽；另三条 `0x162038`／`0x162004`／`0x162000`（`expected=0 value=0`、`expected=0 value=0`、`expected=0x14b value=0x14b`）仍是 `mask=0xffffffff` 整寄存器比对。
+- **收尾与失败消失**：`phase=measure-done result=0 writes=23 restores=5 mismatches=0 hold=0`；环里**没有** `detail=measure-incomplete`，`phase=start` 回到单条 INFO（`windows=4 snapshot=11 reads=1507 writes=23 variant=0x8150`，读数从 0127 的 1515 降到 1507，随轮询次数变化，掩码比较本身不加读）。
+- **测量链路复现**：运行样本 `mux=0x53 short=16398 full=262157 polls=35/683 hz=19200036 running=1` → `measure-compare decoded-hz=19200000 measured-hz=19200036 delta-ppm=1 tolerance-ppm=10000`（0127 是 `19199963`／`-1`，两次都落在 1 ppm 内且符号相反，正好说明本卡只承诺“同量级、容差内、符号正确”，不钉计数）；关闭样本 `mux=0x9a short=262157 full=262157 hz=0 running=0`、无 `measure-compare`；账本 `transitions=2 confirmations=2 holders=0`、`release_value=0x1`，与 0127 一字不差。
+- **回归**：无时钟 WARN／ERROR；非时钟清单仍是面板 `live configuration needs review`×3 与 USB `epN cmd N status N`×5（b32 为 2，同类同值 `ep0 cmd 0x6 status 1` 的枚举重试，随主机侧时序变化；审计以 `--allow-baseline-drift` 记录该次数漂移而不是当作新故障，`ERROR` 仍为零）。面板正常进桌面。
+- **收口判定**：C2-08 的“首次硬件写”四件事——写路径可数（23 次有序 store）、测量真的发生（19.2 MHz／1 ppm）、恢复真的完成（5 次逆序写＋读回核对，`mismatches=0`）、共享需求真的归还（账本无欠账）——全部在真机上成立。0128 默认档（`7f3a96bd…`）的零写入回归随后单独验收，因为“写路径存在但门关闭时不写”与“测量正确”是两件事。
 
 ## 实机验收（0126 默认档，通过）
 
