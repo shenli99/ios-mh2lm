@@ -8,6 +8,22 @@
 
 NEXT：所有时钟实施卡仍未开始，后续实施从 C0-01 基线锁定，再做 C0-02 writer／依赖表、C0-04 需求清单、C0-05 控制器范围和 C0-03 安全样本调查。本轮只编制和审查计划、同步文档入口并本地提交，没有修改生产代码、CI、固件、ADT 或启动参数，没有新内核／镜像／实机结果，不需重编或重测 b32。最新普通实机基线仍为 b32／`b3f735b`，保留 b31r2／b30 回退。
 
+## 首个“为了开钟而写钟”的候选：C2-03 分支门控（2026-11-24，补丁 0237，待 0130）
+
+C2-08 的 23 次写是测量期间借来的：开 mux、开 debug 分支、跑两次计数，收尾全部还原，硬件状态与测得之前一致。C2-03 不一样，它的产物就是“钟开着”，所以判据必须从“写成功”换成“硬件说它已经在跑”，而这条状态位恰好是 C2-08 记录过的那个坑：分支 CBCR 的 bit31..28 是 FSM 维护的 halt／NOC 状态，门开后要几拍才更新（0127 因此误判过一次恢复失败）。门控因此**不读回自己写的值**，只轮询 `CLK_OFF` 清 0，`2500×10 µs` 有界，把 `polls` 打进日志供对账；超时就是失败，而且**保留已写状态**再报（状态已经变了，谎称没变更糟），账本只清 `pending`、不记 confirmed。
+
+**先修身份，再写硬件。** 0126 按厂商 debug 约定把 `0x143008` 叫成 `gcc_pdm_xo4_clk`，但 0127／0128 的测量证据显示：写这一支的 enable 后读回 `0x1`，计数器靠它跑出 19.2 MHz；而 PDM 的本地 CBCR 是 `0x33008`（同一快照里 `0x80000000`，从没被 C2-08 碰过）。0237 把 `0x143008` 定为 localID 7 `gcc_xo_div4_clk`（`kIOQcomGccMeasureReferenceLocalID`），localID 4 留给真正要门控的 `gcc_pdm_xo4_clk`（`0x133008`）。副作用是描述表 6→7 条：默认档 25→26 行（多一条 `decode`），测量档的参考源从 `cc1:0x4` 变 `cc1:0x7`。**旧环不许改**——0127／0128／0129 的日志是当时真实发生过的事，审计脚本因此要能同时认两种身份（`--c2-03` 才把期望换成 `cc1:0x7`），而不是把历史记录“修正”成新样子。
+
+**邻位是四个，不是“页内全部”。** `0x13300c`／`0x133010`／`0x133014` 是 `gcc_pdm2_clk` 及其 RCG（0126 快照 `0x80000000`／`0x80000000`／`0x100000`），`0x10b048` 是显示 CC 里同样挂在 XO/4 上的 `gcc_disp_xo_clk`（`0x1`）。四个都在已映射窗口内，都是“被误伤立刻看得见”的位，共同覆盖“同页邻居”和“跨 CC 同父源邻居”两种风险。读回值不参与判决以外的用途：判决只看 `CLK_OFF`，邻位只回答“有没有连带改变”。
+
+**门控与测量共用一条写路径，但各持凭据。** gate 用 consumer `sweetclock-gate` 自己的 token 取得 `cc1:0x4`，`writeRegister` 新增 5 个参数（`stage`／`consumer`）只为日志归属，写语义不变（对齐／越界拒绝、`dmb oshst`→store→`dsb osh`）。这也带来一个打包细节：`writeRegister` 的 mangling 从 `…EjjjPKc` 变成 `…EjjjPKcS1_`，`mk16k-0130.sh` 的符号门必须同步改，否则会拿旧符号去核新内核（表现为“内核缺符号”而不是“符号改名”）。新增符号 `gateClocks`／`gateNeighbours` 一并钉进符号门；字符串门新增 `sweet,clock-gate`、`phase=gate-done`、`detail=sample-kept-until-reboot`、`detail=bad-clock-gate` 等。
+
+**两条 opt-in 属性互不蕴含。** 参数表 605／607 没有余量，所以开关只能走设备树：`sweet,clock-gate` 与 `sweet,clock-measure` 各 4 字节，都可单独出现。生成器 `--clock-gate` 隐含 `--gcc`；门控树 `e2996bda…`、门控＋测频树 `c0ba7498…`、默认／测量／诊断三棵树字节不变。测试把关系锁死到字节级：各自去掉即回到原树，合成树去掉门即逐字节等于测量树——这样“门控档”与“测量档”的差别永远只有那一条属性。
+
+**0130 怎么看结果。** 门控档：一条 `phase=gate`、恰好一条 `write-issued … stage=gate-enable`、`running … polls=`、`gate-check neighbours=4 changed=0`、`completed … sample-kept-until-reboot`、`gate-done writes=1 … hold=1`，账本一条 acquire／transition／confirm、**无 release**；`start` 收尾 `writes=1`。门控＋测频档：在门控行之后仍有完整测量，且多一条 `mux=0x99` 的第三源（`decoded-hz=4800000`），`writes=31`／`restores=5`／`mismatches=0`／`hold=0`，两个 token、两条 confirm、**只有测量参考那一条 release**。默认档：26 行、`writes=0`，多出的那一行是 `cc1:0x7` 的 `decode`。若门控档看到 `phase=gate` 却 `writes=0`，先确认 ADT 里的 `sweet,clock-gate` 真进了 ramdisk（打包脚本已 `cmp` 过，所以更可能是内核没换）；若 `gate-done … hold=0`，那是 halt 超时，去看 `running` 行的 `polls` 与 `value`：`value` 已是 `0x1` 而 `off` 仍为 1，说明写进去了但硬件没跑起来，属 running-wait 失败而不是写失败。
+
+门控分支会一直开到重启（`0x133008` 保持 `enable=1 off=0`），这是设计而非缺陷：验证过的关钟路径是 C2-04，多消费者共享是 C2-05。
+
 ## 首个硬件写候选：C2-08 测频＋C1-05 账本（2026-11-24，补丁 0235／0236）
 
 这一轮是时钟计划第一次**允许写硬件**，所以写路径本身按[总计划 §3.5](docs/CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)做成单点、可数、可回退，测量是否发生由设备树决定，默认镜像继续停在零写入。

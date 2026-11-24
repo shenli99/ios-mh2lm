@@ -35,7 +35,8 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
                 (0x03900000, 0x100000), (0x03d00000, 0x100000))
 
 
-def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False):
+def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
+            clock_gate=False):
     display_noc = display_noc or panel_pipeline
     display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
     root, end = adt.parse(blob)
@@ -165,9 +166,9 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             ('interrupts', 0, struct.pack('<III', 240, 0, 4)),
         ])
         arm.children.append(touch)
-    if clock_diag or gcc or clock_measure:
+    if clock_diag or gcc or clock_measure or clock_gate:
         clock_provider = True
-    gcc = gcc or clock_measure
+    gcc = gcc or clock_measure or clock_gate
     if clock_provider:
         # C1: one clock entry personality. The node carries no reg and no
         # window: every controller window stays with its own CC backend, so
@@ -195,6 +196,10 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             # C2-08 is the first candidate that writes hardware, so it is opt-in
             # from the device tree: the default image keeps the zero-write ring.
             gcc_node.props.append(('sweet,clock-measure', 0, struct.pack('<I', 1)))
+        if clock_gate:
+            # C2-03 gates a branch. It is a separate opt-in from the measurement:
+            # either can be requested alone, and both can ride together.
+            gcc_node.props.append(('sweet,clock-gate', 0, struct.pack('<I', 1)))
         arm.children.append(gcc_node)
     return adt.serialize(root)
 
@@ -213,10 +218,11 @@ if __name__ == '__main__':
     parser.add_argument('--clock-diag', action='store_true', help='append the C1 clock entry with the diagnostic opt-in property (implies --clock-provider)')
     parser.add_argument('--gcc', action='store_true', help='append the read-only C2 GCC backend windows and variant ABI (implies --clock-provider)')
     parser.add_argument('--clock-measure', action='store_true', help='append the C2-08 measurement opt-in gate (implies --gcc); the default image stays zero-write')
+    parser.add_argument('--clock-gate', action='store_true', help='append the C2-03 branch gate opt-in (implies --gcc); stores one enable bit and keeps it on until reboot')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
     source, destination = args.source, args.destination
     if source.resolve() == destination.resolve():
         sys.exit('output must differ from the baseline ADT')
-    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure))
+    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate))

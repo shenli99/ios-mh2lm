@@ -1,6 +1,6 @@
 # C2：GCC 的最小本地时钟与 reset 能力
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C2-01／C2-02 已在 0126 默认档实机验收通过（补丁 `0233`／`0234`，零写入）；**C2-08 已实机收口：0127 测量档验证测量链路（23 次写、19.2 MHz、关闭样本 NotRunning、账本完整往返），暴露的唯一缺陷是恢复核验把分支的 halt 状态位当成要写回的值；补丁 `0236` 把判据收窄为“只比配置位”，0128 测量档复验 `mismatches=0`（同一次运行里 `0x162008` 读回 `0`、`0x143008` 读回 `0x80000000`，两条同一谓词都通过），19.2 MHz 与解码值差 +1 ppm；0128 默认档用同一内核、只去掉门，复验零写入（25 行、`writes=0`、无 `gate`／`write-issued`／`measure`／`restore`／`acquire`／`release`）**。**C2-08 整卡收口**；C2-03 起未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C2-01／C2-02 已在 0126 默认档实机验收通过（补丁 `0233`／`0234`，零写入）；**C2-08 已实机收口：0127 测量档验证测量链路（23 次写、19.2 MHz、关闭样本 NotRunning、账本完整往返），暴露的唯一缺陷是恢复核验把分支的 halt 状态位当成要写回的值；补丁 `0236` 把判据收窄为“只比配置位”，0128 测量档复验 `mismatches=0`（同一次运行里 `0x162008` 读回 `0`、`0x143008` 读回 `0x80000000`，两条同一谓词都通过），19.2 MHz 与解码值差 +1 ppm；0128 默认档用同一内核、只去掉门，复验零写入（25 行、`writes=0`、无 `gate`／`write-issued`／`measure`／`restore`／`acquire`／`release`）**。**C2-08 整卡收口**。**C2-03 分支门控已实现、待 0130 实机**：补丁 `0237` 用一条 store 打开 `gcc_pdm_xo4_clk` 分支，判据是硬件 halt 位而不是写进去的值，邻位前后读回，需求由账本单独持有、样本留到重启（关钟是 C2-04、共享是 C2-05）；顺带把 `0x143008` 的身份更正为 `gcc_xo_div4_clk`（localID 7，C2-08 计数参考），描述表由 6 条变 7 条。
 
 ## 阶段目标与退出条件
 
@@ -150,6 +150,25 @@
 - 这条与测量档互补：同一个二进制，门开则 23 次有序写并全部恢复、门关则零写；属性是唯一的开关，代码里没有第二条旁路。
 
 
+## 本候选实现（C2-03 分支门控＋身份修正，补丁 0237）
+
+实现文件：[IOQcomGCC.h](../../dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h)、[IOQcomGCC.cpp](../../dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp)、[mk-mh2lm-mdss-adt.py](../../tools/mk-mh2lm-mdss-adt.py)。两张卡的前提是**先分清楚两个分支属于谁**：0126 按厂商 debug 约定把 `0x143008` 叫成 PDM XO/4，但真机上 C2-08 的计数器读的是这一支（`0x143008` 写 enable 后读回 `0x1`），而 PDM 的 `gcc_pdm_xo4_clk` 是本地 CBCR `0x33008`。0237 把 `0x143008` 改成 localID 7 `gcc_xo_div4_clk`（`kIOQcomGccMeasureReferenceLocalID`），localID 4 `gcc_pdm_xo4_clk` 仍是门控样本（`0x133008`）；描述表因此多一条，默认档 `decode` 行由 6 变 7，其余行不变。
+
+- **门控契约**：`gateClocks()` 在 C2-08 测量之前跑，只在 `sweet,clock-gate` 存在时进入。步骤固定为：读 CBCR（`phase=request`，打印 `enable`／`off`／`value`）→ 经账本取得 `(kIOQcomCCGCC, localID 4)` 的**独立 token**（consumer `sweetclock-gate`）→ 只在“持有者自己且未使能”时写一次 `value|ENABLE`（`stage=gate-enable`，走同一个 `writeRegister`：对齐／越界拒绝、`dmb oshst`→store→`dsb osh`）→ 以 `CLK_OFF`（bit31）清零作为判决（`2500×10 µs` 有界，`phase=running`，`polls` 可对账）→ 逐条读回四个邻位（`0x13300c`／`0x133010`／`0x133014` 与 `0x10b048`）与门开启前的捕获比较（`phase=gate-check changed=0`）→ 账本 `ledgerComplete(token,true)` → `phase=completed detail=sample-kept-until-reboot`（**不写回**，凭据保持 `hold=1`）→ `phase=gate-done writes=1 neighbours=4 changed=0 polls=%u hold=1`。
+- **拒绝语义（无写入）**：已使能（`detail=already-enabled`）、halt 未置（`detail=halt-not-set`，即未使能却已“运行”，说明状态不可信）、账本拒绝（`detail=ledger-refused`）、读回失败（`phase=request detail=read-failed`）、store 失败（`detail=store-failed writes=%u`）——都在写之前或写失败处收手，账本不确认；halt 超时（`detail=halt-timeout`）保留已写状态并 `ledgerComplete(token,false)`（`pending=0`、`confirmations` 不动），`gate-done … hold=0 detail=halt-timeout`，`start` 收尾补 `WARN detail=gate-incomplete gate-result=%d writes=%u`——失败的写不把只读后端拖下水，也不谎报成功。
+- **邻位为什么是这四个**：`0x13300c`／`0x133010`／`0x133014` 是同一页里 `gcc_pdm2_clk` 及其 RCG 的寄存器（0126 快照里 `0x80000000`／`0x80000000`／`0x100000`），`0x10b048` 是显示 CC 的 `gcc_disp_xo_clk` CBCR，它和 PDM 共用 XO/4 这一支；四者都是“被误伤就会被看见”的邻位，且全在已映射窗口内，不需要新页。
+- **opt-in 与合成树**：`--clock-gate`（隐含 `--gcc`）只追加一条 4 字节属性 `sweet,clock-gate=1`：门控树 `e2996bda…`（23608 字节，与测量树同长但内容不同）、门控＋测频树 `c0ba7498…`（23648 字节）；默认树仍 `081f63dc…`、测量树仍 `0fc24851…`、诊断树仍 `8d6f2adb…` 逐字节不变。两条属性的关系已在生成器测试里锁死：各自单独去掉即回到原树，门控＋测频树去掉 `sweet,clock-gate` 即逐字节等于测量树。两者都在 `gcc` 节点上，因此 605 字节的参数表没有多一个字节。
+- **证据（主机）**：`tools/tests/test-mh2lm-gcc-backend.py dxb/xnu` 通过——门只有 1 次 store（`0x80000001`，从快照值 `0x80000000` 只加 enable）、无 restore、`hold=1`、一个 token；`already-enabled`／`halt-not-set` 两次拒绝后 `ledgerInspect` 为 `NotFound`（条目从未建立，说明拒绝发生在账本之前）、零写入；halt 超时保留状态且 `pending=1 transitions=2 confirmations=0`；门控样本作为计数器第三源被测量（`mux=0x99`，`decoded-hz=4800000` 与实测差 30 ppm 以内，模型值 `4799853`）；门控＋测频合成档 31 次 store、5 次恢复、`mismatches=0`；默认档仍是零写入。`tools/tests/test-mh2lm-mdss-adt.py` 通过（两条属性各自可选、合成树可还原）；补丁 `0237` 在基线严格重放逐字节一致（带主机测试与生成器，按 `git apply -p1`）。
+
+### 0130 待实机验收（C2-03）
+
+镜像：`boot-16k-0130-gpioirq-panel-pipeline-clockgate.img`（门控档）、`…-clockgatemeasure.img`（门控＋测频档）、`…-clockmeasure.img`（只测频，回归用）、`…img`（默认档，回归用）。四档同一内核，唯一差别是 ADT 上那 1～2 条 4 字节属性。审计脚本 `scratch/artifact-0128/audit-clock-log.py --c2-03 [--gate]`（同一脚本兼容 0127／0128／0129 旧环）。
+
+- **门控档（C2-03 的唯一证据）**：`phase=gate result=0 clock-measure=0 clock-gate=1` → `phase=request result=0 enable=0 off=1 value=0x80000000`（原状态，与 0126 快照同值）→ 恰好一条 `phase=write-issued … stage=gate-enable value=0x80000001 consumer=sweetclock-gate` → `phase=running result=0 enable=1 off=0 value=0x1 polls=<有界>` → `phase=gate-check result=0 neighbours=4 changed=0` → `phase=completed result=0 token=%u enable=1 off=0 detail=sample-kept-until-reboot` → `phase=gate-done result=0 writes=1 neighbours=4 changed=0 polls=%u hold=1`；账本一条 `acquire`（`resource=cc1:0x4`，`transition=new`）＋一条 `transition`＋一条 `confirm`（`confirmed=1`），**没有** `release`；`start` 收尾 `writes=1`（若出现 `detail=gate-incomplete` 则门卡失败）。全档无时钟 `[WARN]`／`[ERROR]`。
+- **门控＋测频档（测量证据）**：在门控行之后仍有完整测量，且**多一个第三源**：`phase=measure mux=0x99`（`gcc_pdm_xo4_clk`，`0x133008` 已由本候选打开）在 `mux=0x53`（XO）与 `mux=0x9a`（`gcc_pdm2_clk`，关闭样本）之外；`decoded-hz=4800000`、实测差在容差内；`writes=31`、`restores=5`、`mismatches=0`、`hold=0`（测量把自己的参考源还回去），两个 token、两条 `confirm`；账本对 `cc1:0x7`（测量参考）仍走完 `acquire→confirm→release`，对 `cc1:0x4`（门控）只 `acquire→confirm` 不 `release`——这正是“C2-03 的样本留到重启”的可观测形式。
+- **默认档回归**：26 条 `SWEET CLOCK`（0129 的 25 条＋新增 `cc1:0x7` 一条 `decode`），`start … snapshot=11 reads=61 writes=0`，`gate`／`write-issued`／`measure`／`restore`／`acquire` 全零；`decode` 顺序为 `cc1:0x1…cc1:0x6`、`cc1:0x7`（`gcc_xo_div4_clk detail=configured known=1`，XO/4＝4.8 MHz），`decode-sample` 仍是 `cc1:0x5 hz=19200000`。
+- **失败归属**：`C2-03 request/enable`（`read-failed`／`already-enabled`／`halt-not-set`／`store-failed`）、`running-wait`（`halt-timeout`，此时 `hold=0` 且 `pending` 保留）、`neighbour`（`neighbour-changed` 并带 `changed before=%#x after=%#x mask=%#x`）、`ledger`（`ledger-refused`／`not-owner`）；父源失效（XO/4 若被别的路径关掉）要看 `0x133008` 是否读出 `off=0 enable=0`——那是前置失败，不是本卡的写失败。若门控档出现 `writes=0` 但 `phase=gate` 有，先查 ADT 属性是否真的落进 ramdisk（`mcopy` 后 `cmp` 已在打包脚本里）。门控开启后 `0x133008` 保持 `enable=1 off=0` 直到重启，属预期：C2-04 才有经过验证的关钟路径。
+
 ## 实机验收（0126 默认档，通过）
 
 `logs/sweetlog-0126-0.bin`（sha256 `3d1cd662b6749ac037190c2c7ee30c0c82c277d8866ce4b1806dd2b0087193bc`，`total=1366678` 字节，`flush_sequence=12`，无回绕）来自 `boot-16k-0126-gpioirq-panel-pipeline.img`：设备进入桌面，`planID=C1 phase=start` 起 C1／C2 全链完整。审计脚本 `scratch/artifact-0126/audit-clock-log.py` 以默认档通过（零时钟 `[WARN]`／`[ERROR]`，非时钟 WARN／ERROR 清单与 b32 基线一致，面板标记不超基线）。
@@ -164,7 +183,7 @@
 | `0x10b048`（`gcc_disp_xo_clk` CBCR） | `0x1` | enable=1，off=0 |
 | `0x133008`／`0x13300c`／`0x133010` | `0x80000000` | 三处 `CLK_OFF`／`ROOT_OFF` 都置位 |
 | `0x133014`（RCG CFG） | `0x100000` | `SRC_SEL=0`、`hid_div=0`、`mode=0` |
-| `0x143008`（`gcc_pdm_xo4_clk` CBCR） | `0x80000000` | off=1，enable=0 |
+| `0x143008`（`gcc_xo_div4_clk` CBCR，C2-08 计数参考） | `0x80000000` | off=1，enable=0 |
 | `0x162000`／`0x162004`／`0x162008`（debug mux） | `0x14b`／`0`／`0x80000000` | 测频 mux 当前选中 `0x14b` |
 
 - **`start` 收尾行**：`planID=C2 resource=cc1 phase=start result=0 windows=4 snapshot=11 reads=18 writes=0 variant=0x8150`——读预算 11＋7 恰好用满，写计数为零。

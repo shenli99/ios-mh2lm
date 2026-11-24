@@ -47,7 +47,7 @@ enum : uint64_t { kIOQcomGccBase=0x00100000ULL };
 static const struct { uint64_t physical; uint64_t length; } gccWindows[kIOQcomGccWindowCount] = {
 	{ 0x0010b000ULL, 0x1000ULL },   /* display block: inherited/pinned branches */
 	{ 0x00133000ULL, 0x1000ULL },   /* PDM block: the C2-02 sample */
-	{ 0x00143000ULL, 0x1000ULL },   /* XO/4 branch: debug clock reference */
+	{ 0x00143000ULL, 0x1000ULL },   /* XO/4 debug reference branch (C2-08) */
 	{ 0x00162000ULL, 0x1000ULL },   /* debug mux block: C2-08 will own it */
 };
 
@@ -77,14 +77,19 @@ enum : uint64_t { kGccXoHz=19200000ULL, kGccXoDiv4Hz=4800000ULL };
 /* C2-08 register map, transcribed from the vendor debugcc-sm8150.c
  * measurement block. Offsets are inside the mapped pages, so 0x62000 in the
  * vendor table is kGccWindowDebug + kGccDebugMuxOffset = 0x00162000. */
-enum : unsigned { kGccWindowXoDiv4=2, kGccWindowDebug=3 };
+enum : unsigned { kGccWindowDisplay=0, kGccWindowPdm=1, kGccWindowXoDiv4=2, kGccWindowDebug=3 };
 enum : uint32_t {
 	kGccDebugMuxOffset=0x000,          /* 0x62000 source select, mask 0x3ff */
 	kGccDebugPostDivOffset=0x004,      /* 0x62004 post divider, mask 0xf */
 	kGccDebugGateOffset=0x008,         /* 0x62008 GCC debug branch enable */
 	kGccMeasureCtlOffset=0x038,        /* 0x62038 counter control */
 	kGccMeasureStatusOffset=0x03c,     /* 0x6203c counter status */
-	kGccXoDiv4Offset=0x008,            /* 0x43008 gcc_pdm_xo4_clk branch */
+	kGccXoDiv4Offset=0x008,            /* 0x43008: the debug XO/4 reference
+	                                    * branch, NOT gcc_pdm_xo4_clk. The PDM
+	                                    * XO/4 branch is window 1 offset 0x008
+	                                    * (0x133008); device evidence: enabling
+	                                    * 0x43008 moved the counter, enabling
+	                                    * 0x33008 is the C2-03 gate sample. */
 	kGccDebugSrcSelMask=0x3ffu,
 	kGccDebugPostDivMask=0xfu,
 	kGccMeasureCountEnable=1u<<20,     /* CNT_EN */
@@ -124,7 +129,9 @@ static const GccClock gccClocks[] = {
 	  kIOQcomCapQueryConfig|kIOQcomCapQueryRate, 0, 0, 1,
 	  {{kIOQcomSourceXO,0,0}},
 	  0, kSnapshotDispXo, 0x048, true },
-	{ "gcc_pdm_xo4_clk", 4, kIOQcomClockBranch, kIOQcomHaltCheck,
+	/* The C2-03 sample: vendor offset 0x33008, one enable bit, halt check,
+	 * fixed XO/4 parent, no GDSC, and unused by the iOS device tree. */
+	{ "gcc_pdm_xo4_clk", kIOQcomGccGateLocalID, kIOQcomClockBranch, kIOQcomHaltCheck,
 	  kIOQcomCapQueryConfig|kIOQcomCapQueryRate, 0, 0, 1,
 	  {{kIOQcomSourceXODiv4,0,0}},
 	  1, kSnapshotPdmXo4, 0x008, false },
@@ -137,6 +144,13 @@ static const GccClock gccClocks[] = {
 	  kIOQcomCapQueryConfig|kIOQcomCapQueryRate, 0, 0, 1,
 	  {{kIOQcomSourceLocal,kIOQcomCCGCC,kIOQcomGccSampleLocalID}},
 	  1, kSnapshotPdm2, 0x00c, false },
+	/* The C2-08 counter reference, declared as the branch it really is. It
+	 * shares nothing with gcc_pdm_xo4_clk but the XO/4 fixed parent, so the
+	 * measurement demand and the C2-03 sample demand are two identities. */
+	{ "gcc_xo_div4_clk", kIOQcomGccMeasureReferenceLocalID, kIOQcomClockBranch,
+	  kIOQcomHaltCheck, kIOQcomCapQueryConfig|kIOQcomCapQueryRate, 0, 0, 1,
+	  {{kIOQcomSourceXODiv4,0,0}},
+	  kGccWindowXoDiv4, kSnapshotXoDiv4, kGccXoDiv4Offset, false },
 };
 enum : unsigned { kGccClockCount=sizeof gccClocks/sizeof gccClocks[0] };
 
@@ -191,6 +205,7 @@ IOQcomGCC::validateProperties(IOService *provider)
 	 * decoded-only image keeps its zero-store property. An unreadable or
 	 * unknown gate value refuses start instead of silently measuring. */
 	fMeasureEnabled=false;
+	bool haveGate=false;
 	OSData *measure=OSDynamicCast(OSData,provider->getProperty("sweet,clock-measure"));
 	if (measure) {
 		if (measure->getLength()!=4) {
@@ -198,16 +213,40 @@ IOQcomGCC::validateProperties(IOService *provider)
 			 kIOReturnBadArgument,(unsigned)measure->getLength());
 			return false;
 		}
-		uint32_t gate=0;
-		memcpy(&gate,measure->getBytesNoCopy(),4);
-		if (gate>1) {
+		uint32_t value=0;
+		memcpy(&value,measure->getBytesNoCopy(),4);
+		if (value>1) {
 			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-measure-gate value=%#x\n",
-			 kIOReturnBadArgument,gate);
+			 kIOReturnBadArgument,value);
 			return false;
 		}
-		fMeasureEnabled=gate==1;
-		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc phase=gate result=0 clock-measure=%u\n",
-		 fMeasureEnabled?1u:0u);
+		fMeasureEnabled=value==1;
+		haveGate=true;
+	}
+	/* C2-03 is the same kind of opt-in, with its own property so a measurement
+	 * image and an enable image stay independently selectable, and a value the
+	 * ADT never writes refuses start instead of enabling a clock. */
+	fGateEnabled=false;
+	OSData *branchGate=OSDynamicCast(OSData,provider->getProperty("sweet,clock-gate"));
+	if (branchGate) {
+		if (branchGate->getLength()!=4) {
+			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-gate length=%u\n",
+			 kIOReturnBadArgument,(unsigned)branchGate->getLength());
+			return false;
+		}
+		uint32_t value=0;
+		memcpy(&value,branchGate->getBytesNoCopy(),4);
+		if (value>1) {
+			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-gate value=%#x\n",
+			 kIOReturnBadArgument,value);
+			return false;
+		}
+		fGateEnabled=value==1;
+		haveGate=true;
+	}
+	if (haveGate) {
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc phase=gate result=0 clock-measure=%u clock-gate=%u\n",
+		 fMeasureEnabled?1u:0u,fGateEnabled?1u:0u);
 	}
 	return true;
 }
@@ -342,9 +381,11 @@ gccMeasureRate(uint32_t shortCount,uint32_t fullCount)
  * store barrier before the store and dsb after it, ordinal logged so the ring
  * and fWrites are the same set. */
 bool
-IOQcomGCC::writeRegister(unsigned window,uint32_t offset,uint32_t value,const char *stage)
+IOQcomGCC::writeRegister(unsigned window,uint32_t offset,uint32_t value,
+ const char *stage,const char *consumer)
 {
 	if (!fLock) return false;
+	if (!consumer) consumer="sweetclock-measure";
 	bool ok=false;
 	unsigned ordinal=0;
 	IOLockLock(fLock);
@@ -364,12 +405,12 @@ IOQcomGCC::writeRegister(unsigned window,uint32_t offset,uint32_t value,const ch
 	char resource[kIOQcomLogBuf];
 	gccName(window,offset,resource,sizeof resource);
 	if (!ok) {
-		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=write-issued result=%d stage=%s detail=bounds\n",
-		 resource,kIOReturnBadArgument,stage);
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=write-issued result=%d stage=%s detail=bounds\n",
+		 resource,consumer,kIOReturnBadArgument,stage);
 		return false;
 	}
-	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=write-issued result=0 stage=%s write=%u value=%#x\n",
-	 resource,stage,ordinal,value);
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=write-issued result=0 stage=%s write=%u value=%#x\n",
+	 resource,consumer,stage,ordinal,value);
 	return true;
 }
 
@@ -377,7 +418,8 @@ bool
 IOQcomGCC::storeMeasure(MeasureReg *regs,unsigned index,uint32_t value,const char *stage)
 {
 	if (!regs||index>=kIOQcomGccMeasureRegCount) return false;
-	if (!writeRegister(gccMeasureRegs[index].window,gccMeasureRegs[index].offset,value,stage)) return false;
+	if (!writeRegister(gccMeasureRegs[index].window,gccMeasureRegs[index].offset,value,stage,
+	   "sweetclock-measure")) return false;
 	regs[index].stored=true;
 	return true;
 }
@@ -427,7 +469,7 @@ IOQcomGCC::measureRestore(MeasureReg *regs,unsigned count)
 		if (!r.stored||!r.valid) continue;
 		char resource[kIOQcomLogBuf];
 		gccName(r.window,r.offset,resource,sizeof resource);
-		if (!writeRegister(r.window,r.offset,r.saved,"restore")) {
+		if (!writeRegister(r.window,r.offset,r.saved,"restore","sweetclock-measure")) {
 			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=restore result=%d detail=write-failed\n",
 			 resource,kIOReturnNotReady);
 			result=kIOReturnNotReady;
@@ -554,6 +596,178 @@ IOQcomGCC::measureSample(MeasureReg *regs,uint32_t localID,uint32_t muxIndex,boo
 	return result;
 }
 
+/* C2-03: the registers that must not move while the gate is enabled. The PDM
+ * branch shares its page with the sample and so does its source RCG; the
+ * display XO switch is the inherited branch the snapshot already read, and a
+ * change there would mean the store landed on somebody else's clock. Bits
+ * 28..31 are excluded for the same reason the restore excludes them: the
+ * hardware owns the halt status and moves it on its own schedule. */
+static const struct { unsigned window; uint32_t offset; uint32_t mask; }
+ gccGateNeighbours[kIOQcomGccGateNeighbourCount] = {
+	{ kGccWindowPdm, 0x00c, kIOQcomGccBranchConfigMask },     /* gcc_pdm2_clk */
+	{ kGccWindowPdm, 0x010, kIOQcomGccBranchConfigMask },     /* pdm2_clk_src CMD */
+	{ kGccWindowPdm, 0x014, kIOQcomGccVerifyAll },            /* pdm2_clk_src CFG */
+	{ kGccWindowDisplay, 0x048, kIOQcomGccBranchConfigMask }, /* gcc_disp_xo_clk */
+};
+
+/* Capture (capture=true) or compare (false). A failed read during the compare
+ * counts as a change: this proof exists to rule out an unexplained move, so an
+ * unreadable neighbour must not pass it. */
+unsigned
+IOQcomGCC::gateNeighbours(bool capture)
+{
+	unsigned changed=0;
+	for (unsigned i=0;i<kIOQcomGccGateNeighbourCount;i++) {
+		uint32_t value=0;
+		bool ok=readRegister(gccGateNeighbours[i].window,gccGateNeighbours[i].offset,&value);
+		if (capture) {
+			fGateNeighbour[i].window=gccGateNeighbours[i].window;
+			fGateNeighbour[i].offset=gccGateNeighbours[i].offset;
+			fGateNeighbour[i].value=value;
+			fGateNeighbour[i].valid=ok;
+			continue;
+		}
+		uint32_t mask=gccGateNeighbours[i].mask;
+		if (!ok||!fGateNeighbour[i].valid||
+		 (value&mask)!=(fGateNeighbour[i].value&mask)) {
+			changed++;
+			char resource[kIOQcomLogBuf];
+			gccName(gccGateNeighbours[i].window,gccGateNeighbours[i].offset,resource,sizeof resource);
+			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=neighbours result=%d detail=changed before=%#x after=%#x mask=%#x\n",
+			 resource,kIOReturnIOError,fGateNeighbour[i].value&mask,value&mask,mask);
+		}
+	}
+	fGateNeighbourChanges=changed;
+	return changed;
+}
+
+/* C2-03 entry: the first card in this file that enables a clock. The C0-03 S2
+ * sample is a plain branch, so the enable bit is the only field this card may
+ * write, the CLK_OFF halt status is the verifier (never a read-back of the bit
+ * the store just wrote: that path is exactly what a lagging halt status fools),
+ * and the neighbour set is the proof the store landed where it was aimed.
+ *
+ * The ledger token is kept, not released. This candidate has no verified
+ * disable yet (C2-04 owns that) and handing the demand back while the branch
+ * still runs would be a release row the hardware does not back. The cost is
+ * explicit: hold=1 and one held holder until reboot. */
+IOReturn
+IOQcomGCC::gateClocks(void)
+{
+	if (!fGateEnabled) {
+		SWEET_LOG_DEBUG("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-gate phase=gate result=%d detail=gate-absent\n",
+		 kIOQcomCCGCC,kIOQcomGccGateLocalID,kIOReturnUnsupported);
+		return kIOReturnUnsupported;
+	}
+	if (!fMapped||!fRegistered||!fLock) return kIOReturnNotReady;
+	const GccClock *entry=gccFind(kIOQcomGccGateLocalID);
+	if (!entry) return kIOReturnNotFound;
+	const unsigned window=entry->window;
+	const uint32_t offset=entry->offset;
+	char resource[kIOQcomLogBuf];
+	gccName(window,offset,resource,sizeof resource);
+	uint32_t saved=0;
+	if (!readRegister(window,offset,&saved)) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=request result=%d detail=read-failed\n",
+		 resource,kIOReturnNotReady);
+		return kIOReturnNotReady;
+	}
+	bool enabled=(saved&kGccBranchEnable)!=0;
+	bool off=(saved&kGccBranchClockOff)!=0;
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s name=%s consumer=sweetclock-gate phase=request result=0 enable=%u off=%u value=%#x\n",
+	 resource,entry->name,enabled?1u:0u,off?1u:0u,saved);
+	/* An enable bit somebody else already set is not this card's to touch: the
+	 * shared-demand case is C2-05, and a write now would hide a state this card
+	 * cannot explain. A branch that is not halted is equally unexplained. */
+	if (enabled||!off) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=request result=%d detail=%s enable=%u off=%u value=%#x\n",
+		 resource,kIOReturnNotReady,enabled?"already-enabled":"halt-not-set",
+		 enabled?1u:0u,off?1u:0u,saved);
+		return kIOReturnNotReady;
+	}
+	(void)gateNeighbours(true);
+	IOQcomClockProvider *provider=IOQcomClockProvider::publishedProvider();
+	uint32_t token=0;
+	bool opened=false;
+	IOReturn acquired=provider?provider->ledgerAcquire(kIOQcomCCGCC,kIOQcomGccGateLocalID,
+	 "sweetclock-gate",&token,&opened):kIOReturnNotReady;
+	if (acquired!=kIOReturnSuccess) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=request result=%d detail=ledger-refused writes=%u\n",
+		 resource,acquired,fWrites);
+		return acquired;
+	}
+	if (!opened) {
+		bool lastHolder=false;
+		(void)provider->ledgerRelease(token,false,&lastHolder);
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=cc%u:0x%x consumer=sweetclock-gate phase=transition result=%d token=%u owner=0 detail=not-owner\n",
+		 kIOQcomCCGCC,kIOQcomGccGateLocalID,kIOReturnNotReady,token);
+		return kIOReturnNotReady;
+	}
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=cc%u:0x%x consumer=sweetclock-gate phase=transition result=0 token=%u owner=1\n",
+	 kIOQcomCCGCC,kIOQcomGccGateLocalID,token);
+	uint32_t target=saved|kGccBranchEnable;
+	if (!writeRegister(window,offset,target,"gate-enable","sweetclock-gate")) {
+		bool lastHolder=false;
+		(void)provider->ledgerRelease(token,false,&lastHolder);
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=request result=%d stage=gate-enable detail=store-failed writes=%u\n",
+		 resource,kIOReturnNotReady,fWrites);
+		return kIOReturnNotReady;
+	}
+	unsigned polls=0;
+	uint32_t value=target;
+	bool running=false,readFailed=false;
+	for (polls=0;polls<kIOQcomGccGatePollTries;polls++) {
+		if (!readRegister(window,offset,&value)) { readFailed=true; break; }
+		if ((value&kGccBranchClockOff)==0) { running=true; break; }
+		IODelay(kIOQcomGccGatePollDelayUs);
+	}
+	IOReturn parked=running?kIOReturnSuccess:
+	 (readFailed?kIOReturnNotReady:kIOReturnTimeout);
+	if (running) {
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=running result=0 enable=%u off=0 value=%#x polls=%u\n",
+		 resource,(value&kGccBranchEnable)?1u:0u,value,polls);
+	} else {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=running result=%d enable=%u off=%u value=%#x polls=%u detail=%s\n",
+		 resource,parked,(value&kGccBranchEnable)?1u:0u,
+		 (value&kGccBranchClockOff)?1u:0u,value,polls,
+		 readFailed?"halt-read-failed":"halt-timeout");
+	}
+	fGateRunning=running;
+	if (provider) (void)provider->ledgerComplete(token,running);
+	if (running) {
+		unsigned changed=gateNeighbours(false);
+		if (changed) {
+			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=gate-check result=%d neighbours=%u changed=%u detail=neighbour-changed\n",
+			 resource,kIOReturnIOError,kIOQcomGccGateNeighbourCount,changed);
+		} else {
+			SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=gate-check result=0 neighbours=%u changed=0\n",
+			 resource,kIOQcomGccGateNeighbourCount);
+		}
+	}
+	if (!running) {
+		/* The store may have landed on a branch that will not come up. Leave the
+		 * state as it is (the card asks for that), give the demand back and
+		 * report the timeout; a disable here would be the unverified write
+		 * C2-04 exists to design. */
+		bool lastHolder=false;
+		if (provider) (void)provider->ledgerRelease(token,false,&lastHolder);
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=gate-done result=%d writes=%u neighbours=%u changed=%u polls=%u hold=0 detail=%s\n",
+		 resource,parked,fWrites,kIOQcomGccGateNeighbourCount,fGateNeighbourChanges,
+		 polls,readFailed?"halt-read-failed":"halt-timeout");
+		return parked;
+	}
+	/* A neighbour that moved means the store's effect is not the one this card
+	 * can account for. The branch is running and stays that way (there is no
+	 * verified disable in this candidate), but the card's verdict is a failure
+	 * and the caller reports it; the ring carries the before/after pair. */
+	IOReturn verdict=fGateNeighbourChanges?kIOReturnIOError:kIOReturnSuccess;
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=completed result=%d token=%u enable=1 off=0 detail=sample-kept-until-reboot\n",
+	 resource,verdict,token);
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=gate-done result=%d writes=%u neighbours=%u changed=%u polls=%u hold=1\n",
+	 resource,verdict,fWrites,kIOQcomGccGateNeighbourCount,fGateNeighbourChanges,polls);
+	return verdict;
+}
+
 /* C2-08 entry: save, acquire the XO/4 reference through the C1-05 ledger, store
  * the mux and the reference gate, measure the two declared samples, restore
  * every stored register, release the reference. Without the ADT gate nothing
@@ -624,6 +838,15 @@ IOQcomGCC::measureClocks(void)
 			 kIOQcomGccMeasureOffMux,false);
 			if (running!=kIOReturnSuccess&&worst==kIOReturnSuccess) worst=running;
 			if (gated!=kIOReturnSuccess&&worst==kIOReturnSuccess) worst=gated;
+			/* C2-03's branch is a third sample only when C2-03 really enabled
+			 * it: mux 0x99 is the counter's own reference, and the C2-02 decoder
+			 * states its rate independently (fixed XO/4 = 4.8 MHz), so this is
+			 * the measurement evidence the gate card asks for. */
+			if (fGateRunning) {
+				IOReturn gate=measureSample(regs,kIOQcomGccGateLocalID,
+				 kIOQcomGccGateMux,true);
+				if (gate!=kIOReturnSuccess&&worst==kIOReturnSuccess) worst=gate;
+			}
 		}
 	}
 	IOReturn restored=measureRestore(regs,kIOQcomGccMeasureRegCount);
@@ -666,6 +889,8 @@ IOQcomGCC::start(IOService *provider)
 	fWrites=0;
 	fWriteFailures=0;
 	fRestoreMismatches=0;
+	fGateRunning=false;
+	fGateNeighbourChanges=0;
 	if (!mapWindows(provider)) {
 		unmapWindows();
 		IOLockFree(fLock);
@@ -702,6 +927,13 @@ IOQcomGCC::start(IOService *provider)
 	}
 	fRegistered=true;
 	decodeSamples();
+	/* C2-03 before C2-08: the gate is the sample the measurement adds, and an
+	 * enable that could not be verified must not be inherited by it silently. */
+	IOReturn gated=gateClocks();
+	if (gated!=kIOReturnSuccess&&gated!=kIOReturnUnsupported) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=gate-incomplete gate-result=%d writes=%u\n",
+		 kIOQcomCCGCC,gated,fWrites);
+	}
 	/* C2-08 last, so registration and the C2-02 decode exist before the first
 	 * store and a failed measurement cannot leave a half-published backend. */
 	IOReturn measured=measureClocks();

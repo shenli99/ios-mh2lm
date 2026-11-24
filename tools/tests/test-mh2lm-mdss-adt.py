@@ -413,6 +413,40 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-measure-adt-') as temp:
                     str(source), str(output)], check=True)
     assert output.read_bytes() == measured
     assert source.read_bytes() == blob
+# C2-03 turns a branch on, so it gets its own property beside the measurement's:
+# each is removable alone, the combined tree is the measurement tree plus the
+# gate, and neither is reachable from a window request.
+gated = m.derive(blob, clock_gate=True)
+assert gated == m.derive(blob, gcc=True, clock_gate=True)
+assert gated != m.derive(blob, gcc=True)
+assert gated != measured
+tree, end = adt.parse(gated)
+assert end == len(gated)
+arm = tree.children[1]
+gcc = next(n for n in arm.children if n.name == 'gcc')
+assert gcc.prop('sweet,clock-gate') == struct.pack('<I', 1)
+assert gcc.prop('sweet,clock-measure') is None
+gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-gate']
+assert adt.serialize(tree) == m.derive(blob, gcc=True)
+assert b'sweet,clock-gate' not in m.derive(blob, gcc=True)
+assert b'sweet,clock-gate' not in m.derive(blob, clock_measure=True)
+assert b'sweet,clock-gate' not in blob
+both_gates = m.derive(blob, clock_measure=True, clock_gate=True)
+tree, end = adt.parse(both_gates)
+assert end == len(both_gates)
+gcc = next(n for n in tree.children[1].children if n.name == 'gcc')
+assert gcc.prop('sweet,clock-gate') == struct.pack('<I', 1)
+assert gcc.prop('sweet,clock-measure') == struct.pack('<I', 1)
+gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-gate']
+assert adt.serialize(tree) == measured, 'the combined tree must be the measurement tree plus the gate'
+with tempfile.TemporaryDirectory(prefix='mh2lm-clock-gate-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'gate.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--clock-gate',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == gated
+    assert source.read_bytes() == blob
 print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
-      'C2-08 measurement gate as an opt-in property that no earlier image carries')
+      'C2-08 measurement and C2-03 branch gate as independent opt-in properties that no '
+      'earlier image carries')

@@ -1,5 +1,6 @@
 /* SM8150 GCC backend: C2-01/C2-02 read-only candidate plus the C2-08
- * debugcc measurement (the first candidate in this file that stores).
+ * debugcc measurement (the first candidate in this file that stores) and the
+ * C2-03 branch gate (the first candidate that enables a clock for real).
  *
  * Contract of this candidate, in one place:
  *  - The backend maps exactly the four GCC pages it touches, in the ADT reg
@@ -25,6 +26,10 @@
  *    clock is not running", which is reported as such and never as 0 Hz.
  *  - The measurement is an ADT opt-in. Without the property the backend is
  *    byte-for-byte the read-only C2-01/C2-02 backend: no store, writes=0.
+ *  - C2-03 enables one normal branch gate (gcc_pdm_xo4_clk, C0-03 S2): save the
+ *    CBCR, store only the enable bit, poll CLK_OFF clear within a bound, prove
+ *    the neighbours did not move, and leave the branch running for the rest of
+ *    the boot because this candidate has no verified disable yet (C2-04).
  *  - Nothing reconfigures a PLL, a reset or a GDSC, and the inherited display
  *    branches stay somebody else's property: they are declared pinned. */
 #ifndef IOQCOM_GCC_H
@@ -36,11 +41,11 @@
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
 
 /* C2-01: the ADT reg order is the window ABI. One 4 KiB page per block this
- * candidate observes: 0x10b000 (display), 0x133000 (PDM), 0x143000 (XO/4),
- * 0x162000 (debug mux). Those are resolved physical addresses, i.e. the
- * vendor driver offset plus the GCC base 0x00100000 from sm8150.dtsi
- * (reg = <0x100000 0x1f0000>); a vendor offset such as 0x33008 is never an
- * address and must not be mapped as one. */
+ * candidate observes: 0x10b000 (display), 0x133000 (PDM), 0x143000 (debug
+ * XO/4 reference), 0x162000 (debug mux). Those are resolved physical
+ * addresses, i.e. the vendor driver offset plus the GCC base 0x00100000 from
+ * sm8150.dtsi (reg = <0x100000 0x1f0000>); a vendor offset such as 0x33008 is
+ * never an address and must not be mapped as one. */
 enum : unsigned { kIOQcomGccWindowCount = 4 };
 
 /* C2-01: register evidence frozen at start, before any later card can change
@@ -61,7 +66,32 @@ enum : uint32_t {
 	kIOQcomGccMeasureRunningHz = 19200000,
 	kIOQcomGccMeasureOffLocalID = 6,       /* gcc_pdm2_clk, enable=0 off=1 */
 	kIOQcomGccMeasureOffMux = 0x9A,
-	kIOQcomGccMeasureReferenceLocalID = 4, /* gcc_pdm_xo4_clk, the XO/4 branch */
+	/* The counter reference is the vendor debugcc XO/4 gate at 0x43008, a
+	 * branch of its own. It is NOT gcc_pdm_xo4_clk (0x33008, localID 4): the
+	 * two sit in different windows and the C2-03 sample owns the other one,
+	 * so the ledger identity has to follow the register. */
+	kIOQcomGccMeasureReferenceLocalID = 7, /* gcc_xo_div4_clk, 0x43008 */
+};
+
+/* C2-03: one normal branch gate. gcc_pdm_xo4_clk is the C0-03 S2 sample:
+ * vendor offset 0x33008, one enable bit, CLK_OFF halt class, no RCG parent to
+ * program and no GDSC, and the iOS device tree never consumes it. Its debug
+ * mux index (0x99) is also the C2-08 counter reference, so the measurement
+ * chain already on the device can see whether enabling it really clocks. */
+enum : uint32_t {
+	kIOQcomGccGateLocalID = 4,             /* gcc_pdm_xo4_clk */
+	kIOQcomGccGateMux = 0x99,
+	kIOQcomGccGateHz = 4800000,
+};
+
+/* The halt poll is the vendor clk_branch_wait(): bounded, 2500 x 10 us = 25 ms,
+ * which is the same budget the counter wait uses and far below a watchdog. The
+ * neighbours are the registers that share the sample's page plus the display
+ * XO switch the snapshot already read; they must not move. */
+enum : unsigned {
+	kIOQcomGccGatePollTries = 2500,
+	kIOQcomGccGatePollDelayUs = 10,
+	kIOQcomGccGateNeighbourCount = 4,
 };
 
 /* C2-08: tolerances. The vendor formula rounds to +-0.5 %; a rate outside one
@@ -114,14 +144,24 @@ class IOQcomGCC : public IOQcomClockController {
 	unsigned fWrites, fWriteFailures, fRestoreMismatches;
 	bool fMapped, fRegistered;
 	bool fMeasureEnabled;
+	bool fGateEnabled;
+	/* Set once the C2-03 sample is proven running, so the C2-08 pass can add
+	 * the one sample that needs somebody else's enable: the gate branch. */
+	bool fGateRunning;
+	unsigned fGateNeighbourChanges;
+	struct { unsigned window; uint32_t offset; uint32_t value; bool valid; }
+	 fGateNeighbour[kIOQcomGccGateNeighbourCount];
 	bool validateProperties(IOService *provider);
 	bool mapWindows(IOService *provider);
 	void unmapWindows(void);
 	bool readRegister(unsigned window, uint32_t offset, uint32_t *value);
 	/* C2-08: the only store path. It re-checks bounds and alignment exactly as
 	 * the read does, logs one row per store so the ring can be reconciled with
-	 * the counter, and never retries: a failed store is a failed store. */
-	bool writeRegister(unsigned window, uint32_t offset, uint32_t value, const char *stage);
+	 * the counter, and never retries: a failed store is a failed store. The
+	 * consumer is passed in so a C2-03 gate store is not attributed to the
+	 * measurement consumer that does not hold it. */
+	bool writeRegister(unsigned window, uint32_t offset, uint32_t value,
+	 const char *stage, const char *consumer);
 	/* Every measurement store goes through one of these two, so the stored set
 	 * is exactly the registers they mark for restore. */
 	bool storeMeasure(MeasureReg *regs, unsigned index, uint32_t value, const char *stage);
@@ -139,6 +179,14 @@ class IOQcomGCC : public IOQcomClockController {
 	 unsigned *polls);
 	IOReturn measureSample(MeasureReg *regs, uint32_t localID, uint32_t muxIndex,
 	 bool runningExpected);
+	/* C2-03: the enable. Saves the CBCR, stores only the enable bit through the
+	 * one store path, polls CLK_OFF clear within a bound, proves the neighbours
+	 * did not move, and hands the ledger a running confirmation it keeps for the
+	 * rest of the boot (there is no verified disable yet, that is C2-04). */
+	IOReturn gateClocks(void);
+	/* Reads the neighbour set into fGateNeighbour (capture=true) or compares it
+	 * with that capture (capture=false), returning how many moved. */
+	unsigned gateNeighbours(bool capture);
 public:
 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
 	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
