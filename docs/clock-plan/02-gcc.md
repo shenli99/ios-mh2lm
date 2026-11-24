@@ -1,6 +1,6 @@
 # C2：GCC 的最小本地时钟与 reset 能力
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C2-01／C2-02 已在 0126 默认档实机验收通过（补丁 `0233`／`0234`，零写入）；**C2-08 已实机收口：0127 测量档验证测量链路（23 次写、19.2 MHz、关闭样本 NotRunning、账本完整往返），暴露的唯一缺陷是恢复核验把分支的 halt 状态位当成要写回的值；补丁 `0236` 把判据收窄为“只比配置位”，0128 测量档复验 `mismatches=0`（同一次运行里 `0x162008` 读回 `0`、`0x143008` 读回 `0x80000000`，两条同一谓词都通过），19.2 MHz 与解码值差 +1 ppm**；C2-03 起未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C2-01／C2-02 已在 0126 默认档实机验收通过（补丁 `0233`／`0234`，零写入）；**C2-08 已实机收口：0127 测量档验证测量链路（23 次写、19.2 MHz、关闭样本 NotRunning、账本完整往返），暴露的唯一缺陷是恢复核验把分支的 halt 状态位当成要写回的值；补丁 `0236` 把判据收窄为“只比配置位”，0128 测量档复验 `mismatches=0`（同一次运行里 `0x162008` 读回 `0`、`0x143008` 读回 `0x80000000`，两条同一谓词都通过），19.2 MHz 与解码值差 +1 ppm；0128 默认档用同一内核、只去掉门，复验零写入（25 行、`writes=0`、无 `gate`／`write-issued`／`measure`／`restore`／`acquire`／`release`）**。**C2-08 整卡收口**；C2-03 起未开始。
 
 ## 阶段目标与退出条件
 
@@ -142,7 +142,13 @@
 - **收尾与失败消失**：`phase=measure-done result=0 writes=23 restores=5 mismatches=0 hold=0`；环里**没有** `detail=measure-incomplete`，`phase=start` 回到单条 INFO（`windows=4 snapshot=11 reads=1507 writes=23 variant=0x8150`，读数从 0127 的 1515 降到 1507，随轮询次数变化，掩码比较本身不加读）。
 - **测量链路复现**：运行样本 `mux=0x53 short=16398 full=262157 polls=35/683 hz=19200036 running=1` → `measure-compare decoded-hz=19200000 measured-hz=19200036 delta-ppm=1 tolerance-ppm=10000`（0127 是 `19199963`／`-1`，两次都落在 1 ppm 内且符号相反，正好说明本卡只承诺“同量级、容差内、符号正确”，不钉计数）；关闭样本 `mux=0x9a short=262157 full=262157 hz=0 running=0`、无 `measure-compare`；账本 `transitions=2 confirmations=2 holders=0`、`release_value=0x1`，与 0127 一字不差。
 - **回归**：无时钟 WARN／ERROR；非时钟清单仍是面板 `live configuration needs review`×3 与 USB `epN cmd N status N`×5（b32 为 2，同类同值 `ep0 cmd 0x6 status 1` 的枚举重试，随主机侧时序变化；审计以 `--allow-baseline-drift` 记录该次数漂移而不是当作新故障，`ERROR` 仍为零）。面板正常进桌面。
-- **收口判定**：C2-08 的“首次硬件写”四件事——写路径可数（23 次有序 store）、测量真的发生（19.2 MHz／1 ppm）、恢复真的完成（5 次逆序写＋读回核对，`mismatches=0`）、共享需求真的归还（账本无欠账）——全部在真机上成立。0128 默认档（`7f3a96bd…`）的零写入回归随后单独验收，因为“写路径存在但门关闭时不写”与“测量正确”是两件事。
+- **收口判定**：C2-08 的“首次硬件写”四件事——写路径可数（23 次有序 store）、测量真的发生（19.2 MHz／1 ppm）、恢复真的完成（5 次逆序写＋读回核对，`mismatches=0`）、共享需求真的归还（账本无欠账）——全部在真机上成立。
+
+### 0128 默认档：门关闭时一个字节都不写（2026-11-24）
+
+`boot-16k-0128-gpioirq-panel-pipeline.img`（`7f3a96bd…`）与测量档**共用同一内核** `21f99b5e…`，只把 ADT 换回 `081f63dc…`（23568 字节，不含 `sweet,clock-measure`）——这是该回归唯一干净的形态：写路径就在二进制里，差别只有一处设备树属性。实机进入桌面，`logs/sweetlog-0129-0.bin`（`860d1346…`，`total=1200369`，`flush_sequence=10`）：**25 条 `SWEET CLOCK`、0 条时钟 WARN、0 条 ERROR**，相位恰好是 `start 2`／`map 4`／`snapshot 11`／`register 1`／`decode 6`／`decode-sample 1`，`gate`／`write-issued`／`measure`／`measure-save`／`measure-compare`／`measure-done`／`restore`／`acquire`／`transition`／`confirm`／`release` **全部为零**；`phase=start … windows=4 snapshot=11 reads=18 writes=0 variant=0x8150`，没有任何一条 `writes=` 非零的行；`decode-sample` 仍是 `cc1:0x5 hz=19200000 known=1`（只读解码值，不是测量值）。非时钟清单与 b32 逐项相等（面板 ×3、USB ×2），无次数漂移。
+- 这条与测量档互补：同一个二进制，门开则 23 次有序写并全部恢复、门关则零写；属性是唯一的开关，代码里没有第二条旁路。
+
 
 ## 实机验收（0126 默认档，通过）
 
