@@ -8,7 +8,7 @@
 
 NEXT：所有时钟实施卡仍未开始，后续实施从 C0-01 基线锁定，再做 C0-02 writer／依赖表、C0-04 需求清单、C0-05 控制器范围和 C0-03 安全样本调查。本轮只编制和审查计划、同步文档入口并本地提交，没有修改生产代码、CI、固件、ADT 或启动参数，没有新内核／镜像／实机结果，不需重编或重测 b32。最新普通实机基线仍为 b32／`b3f735b`，保留 b31r2／b30 回退。
 
-## 首个“为了开钟而写钟”的候选：C2-03 分支门控（2026-11-24，补丁 0237，待 0130）
+## 首个“为了开钟而写钟”的候选：C2-03 分支门控（2026-11-24，补丁 0237，0130 实机通过）
 
 C2-08 的 23 次写是测量期间借来的：开 mux、开 debug 分支、跑两次计数，收尾全部还原，硬件状态与测得之前一致。C2-03 不一样，它的产物就是“钟开着”，所以判据必须从“写成功”换成“硬件说它已经在跑”，而这条状态位恰好是 C2-08 记录过的那个坑：分支 CBCR 的 bit31..28 是 FSM 维护的 halt／NOC 状态，门开后要几拍才更新（0127 因此误判过一次恢复失败）。门控因此**不读回自己写的值**，只轮询 `CLK_OFF` 清 0，`2500×10 µs` 有界，把 `polls` 打进日志供对账；超时就是失败，而且**保留已写状态**再报（状态已经变了，谎称没变更糟），账本只清 `pending`、不记 confirmed。
 
@@ -23,6 +23,12 @@ C2-08 的 23 次写是测量期间借来的：开 mux、开 debug 分支、跑�
 **0130 怎么看结果。** 门控档：一条 `phase=gate`、恰好一条 `write-issued … stage=gate-enable`、`running … polls=`、`gate-check neighbours=4 changed=0`、`completed … sample-kept-until-reboot`、`gate-done writes=1 … hold=1`，账本一条 acquire／transition／confirm、**无 release**；`start` 收尾 `writes=1`。门控＋测频档：在门控行之后仍有完整测量，且多一条 `mux=0x99` 的第三源（`decoded-hz=4800000`），`writes=31`／`restores=5`／`mismatches=0`／`hold=0`，两个 token、两条 confirm、**只有测量参考那一条 release**。默认档：26 行、`writes=0`，多出的那一行是 `cc1:0x7` 的 `decode`。若门控档看到 `phase=gate` 却 `writes=0`，先确认 ADT 里的 `sweet,clock-gate` 真进了 ramdisk（打包脚本已 `cmp` 过，所以更可能是内核没换）；若 `gate-done … hold=0`，那是 halt 超时，去看 `running` 行的 `polls` 与 `value`：`value` 已是 `0x1` 而 `off` 仍为 1，说明写进去了但硬件没跑起来，属 running-wait 失败而不是写失败。
 
 门控分支会一直开到重启（`0x133008` 保持 `enable=1 off=0`），这是设计而非缺陷：验证过的关钟路径是 C2-04，多消费者共享是 C2-05。
+
+**0130 门控档实机结果（`logs/sweetlog-0130-0.bin`，`e8f6870a…`，`total=1279649`，seq 11）。** 36 条时钟行、零 `[WARN]`／`[ERROR]`，屏幕与 0126／0129 无差别。分支从 `0x80000000` 写成 `0x80000001`，第一次读回就是 `0x1`——`polls=0`，一次 10 µs 延时都没用，`CLK_OFF` 已经清掉；四个邻位零变化，账本一个 token 走完 `acquire`（`transition=new`）→`transition owner=1`→`confirm confirmed=1` 且**没有** `release`，收尾 `reads=29 writes=1`。这条机器顺手纠正了两处我自己的错写法：
+
+- **`polls` 是循环跳出下标，不是轮询次数。** 循环体是“先读、看到 `CLK_OFF` 清 0 就 break”，所以首读成功时 `polls=0` 而读确实发生了一次。读次数恒等式因此是 `reads = 29 + polls`（19 步走查 + 1 次存前读 + `polls+1` 次轮询读 + 8 次邻居读），我原先写的 `28 + polls` 被设备这行 `reads=29 polls=0` 当场戳穿。教训：**用设备打印的计数去校准解析器，而不是用解析器的算术去解释设备**；同时宿主 fixture 要有 `polls>0` 的变体，否则 `+0` 的错写法照样通过。
+- **“刷进去的是什么”可以直接从镜像里读出来。** ADT 属性按 Apple 布局（32 字节名字槽 + `u32` 长度 + 值）存放在 ramdisk 里，`scratch/artifact-0128/read-adt-claims.py` 把 FAT16 卷抠出来、`mcopy` 出 `kernel.macho.adt`、再按名字找槽位，就能在开机前回答“这次到底开了哪几个 opt-in”。顺带一个坑：`sweet,clock-provider` 是 clock provider 节点的 **compatible 字符串**，不是属性名，按属性名扫会读到垃圾长度——扫描器一开始就被它骗过。
+- 另外第 7 个描述符的期望值也在这轮被真实行纠正：它是 `detail=configured known=1`（声明一个固定父源 XO/4，能解析出 4.8 MHz），不是 `parent-rate-unknown`；`raw` 必须等于快照里的 `0x143008`。
 
 ## 首个硬件写候选：C2-08 测频＋C1-05 账本（2026-11-24，补丁 0235／0236）
 
