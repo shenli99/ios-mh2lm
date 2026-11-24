@@ -8,6 +8,20 @@
 
 NEXT：所有时钟实施卡仍未开始，后续实施从 C0-01 基线锁定，再做 C0-02 writer／依赖表、C0-04 需求清单、C0-05 控制器范围和 C0-03 安全样本调查。本轮只编制和审查计划、同步文档入口并本地提交，没有修改生产代码、CI、固件、ADT 或启动参数，没有新内核／镜像／实机结果，不需重编或重测 b32。最新普通实机基线仍为 b32／`b3f735b`，保留 b31r2／b30 回退。
 
+## 首个硬件写候选：C2-08 测频＋C1-05 账本（2026-11-24，补丁 0235）
+
+这一轮是时钟计划第一次**允许写硬件**，所以写路径本身按[总计划 §3.5](docs/CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)做成单点、可数、可回退，测量是否发生由设备树决定，默认镜像继续停在零写入。
+
+**改动**（[IOQcomGCC.cpp](dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp)、[IOQcomGCC.h](dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h)、[IOQcomClock.cpp](dxb/xnu/iokit/Kernel/arm/IOQcomClock.cpp)、[IOQcomClock.h](dxb/xnu/iokit/Kernel/arm/IOQcomClock.h)、[mk-mh2lm-mdss-adt.py](tools/mk-mh2lm-mdss-adt.py) `--clock-measure`、两份主机测试、`out-bs/mk16k-0127.sh`）：
+
+- **单点写路径**：`writeRegister(window,offset,value)` 先查映射／4 字节对齐／`offset+4<=length`（越界不写，记 `detail=bounds`），再 `dmb oshst` → 单次 `*(volatile uint32_t *)` → `dsb osh`。文件里仍然只有一处 store 形态、一处取值形态，主机测试按源码文本钉住这一点；`registerWrites()` 从常量 0 变成 `fWrites`，0126 以前“零写入”的断言因此改成“默认门缺失时 0 次 store”。
+- **测量的顺序照抄厂商**：`measureSave` 读存 5 个寄存器（`0x143008` XO/4 CBCR、`0x162000` mux sel、`0x162004` post-div、`0x162008` debug 分支 CBCR、`0x162038` 计数控制）→ 账本取得 `cc1:0x4`（`gcc_pdm_xo4_clk`，只有 `opened` 的持有者写 enable，共享持有者继承）→ 读回判 `enable=1 off=0` 才算参考源在跑 → 依次写 mux（运行样本 `0x53`＝`gcc_disp_xo_clk`）、post-div（`1-1`）、debug 分支 → 短测 `0x1000`／长测 `0x10000`（两次计数各三次写，等待 `bit25` 每次有界 `2500×10 µs`）→ 逆序恢复 5 个寄存器并逐条读回核对 → 读一次 XO/4 判 `ENABLE==0`，据此 `ledgerRelease(token,stopped,&lastHolder)`。
+- **数值**：`hz=((full*10+15)*4800000)/((0x10000*10)+35)`（即 `/655395`）×`multiplier=1`；短测＝长测即 NotRunning。样例 `short=16384 full=262144` → `19199084` Hz，与 C2-02 的 `19200000` 差 `-47 ppm`，容差 10000 ppm 之内。比较行用**有符号**除法（`/(int64_t)state.configuredHz`）：`configuredHz` 是 `uint64_t`，混入无符号除法会把 `-47` 变成约 `9.6e11`，曾经让主机测试报出一个假的“超容差”。
+- **门控**：`sweet,clock-measure=<u32 1>`（生成器 `--clock-measure`，隐含 `--gcc`）。缺失 → `Unsupported`＋DEBUG（设备级别 0 不落环，默认镜像行数与 0126 相同、仍 `writes=0`）；长度≠4 或值>1 → `ERROR detail=bad-clock-measure-gate`；测量失败只在 `start` 前补一条 `WARN detail=measure-incomplete measure-result=%d writes=%u`，后端照常 Ready。默认树 `081f63dc…`，加门 `0fc24851…`（`+40` 字节）。
+- **C1-05 账本**：`IOQcomClockProvider` 固定表 8 条 × 4 持有者，键 `(controller,localID)`；首个取得 `transitions++` 且 `transition=new`，第二个消费者只 `holders++`（`shared`，不转换）；`ledgerComplete(token,true)` 才是 `confirmed=1`／`confirmations++`，`false` 清 `pending` 并 `WARN detail=not-confirmed`；最后释放时 `stopped=false` 保留 `pending=1` 并 `ERROR detail=hardware-still-on`；generation 变化清 token 保计数（`WARN detail=stale-generation`）；未知 token `result=10 detail=unknown-token`；`withdrawController` 让条目失活。C2-08 是这个账本的第一台真实执行者。
+- **主机证据**：`test-mh2lm-gcc-backend.py`（默认门缺失 0 次 store；门在 23 次 store＝4 建立＋7×2 计数＋5 恢复、`hz=19199084`、`delta-ppm=-47`、5 次恢复 `mismatches=0`、账本 `transitions=2 confirmations=2`；坏门 0 次 store；`reference-not-running`；计数卡死 2×`done-timeout`）、`test-mh2lm-clock-provider.py`（多消费者／欠账／generation 失效／撤回／holder 与表上限）、`test-mh2lm-mdss-adt.py`（门可选、去掉即回到默认字节、CLI 同义）全部通过；补丁 `0235` 在基线严格重放逐字节一致。
+- **待实机**：`boot-16k-0127-*.img` 两档由 `out-bs/mk16k-0127.sh` 打出。默认档必须仍是 25 行零写入（回归）；测量档期待 `transition`→`running value=0x1`→`measure mux=0x53 … hz=19199084 running=1`→`measure-compare … delta-ppm=-47`→`mux=0x9a … hz=0 running=0`→5 条 `restore`→`measure-done writes=23 restores=5 mismatches=0 hold=0`→`release value=0x80000000`。设备若停在 `bsp-kernel`，先 SHA 比对环是否仍是上次会话（挂载早于 UFS 可写就没有本次日志），再按窗口／页逐项二分。
+
 ## 0126 默认档实机进入桌面，C2-01／C2-02 收口（2026-11-22）
 
 补丁 `0234` 修正窗口地址后，`boot-16k-0126-gpioirq-panel-pipeline.img`（`fae0eed6fd2c5d1b7a046e0c3193e2707b0579b51c1482254081ec76bdc11b6e`，0126 内核 `75c6b0322b8417a65e1b4e01a9fc5b6d4a781616996f346b29635d149f2a19cd`＋修正后的 `gcc` 节点）实机 `fastboot boot` 进入桌面。`logs/sweetlog-0126-0.bin`（`3d1cd662b6749ac037190c2c7ee30c0c82c277d8866ce4b1806dd2b0087193bc`，`total=1366678`，`flush_sequence=12`，未回绕）默认档审计通过：

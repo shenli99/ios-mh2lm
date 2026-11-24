@@ -390,5 +390,29 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-gcc-adt-') as temp:
     clock = next(n for n in arm.children if n.name == 'clock')
     assert clock.prop('sweet,clock-diag') == struct.pack('<I', 1)
     assert diagged != both.read_bytes()	# the diag bit and the node are separable
+# C2-08 writes hardware for the first time, so the measurement request is a
+# property on the GCC node: absent from every earlier image, removable byte for
+# byte, and never implied by the window request alone.
+measured = m.derive(blob, clock_measure=True)
+assert measured == m.derive(blob, gcc=True, clock_measure=True)
+assert measured != m.derive(blob, gcc=True)
+tree, end = adt.parse(measured)
+assert end == len(measured)
+arm = tree.children[1]
+gcc = next(n for n in arm.children if n.name == 'gcc')
+assert gcc.prop('sweet,clock-measure') == struct.pack('<I', 1)
+gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-measure']
+assert adt.serialize(tree) == m.derive(blob, gcc=True)
+assert b'sweet,clock-measure' not in m.derive(blob, gcc=True)
+assert b'sweet,clock-measure' not in m.derive(blob, clock_provider=True)
+assert b'sweet,clock-measure' not in blob
+with tempfile.TemporaryDirectory(prefix='mh2lm-clock-measure-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'measure.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--clock-measure',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == measured
+    assert source.read_bytes() == blob
 print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
-      'exactly removable to the C1 and original bytes, and selectable from the CLI')
+      'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
+      'C2-08 measurement gate as an opt-in property that no earlier image carries')

@@ -1,6 +1,6 @@
 # C1：统一时钟入口与只读资源接口
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C1-01～C1-04 已实现为只读候选（补丁 `0230`／`0231`／`0232`，写计数为零），默认档与诊断档均已实机通过；C1-05 未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C1-01～C1-04 已实现为只读候选（补丁 `0230`／`0231`／`0232`，写计数为零），默认档与诊断档均已实机通过；**C1-05 已实现（补丁 `0235`，与 C2-08 合并为第一个写候选），待 0127 测量档实机**；其硬件共享实例仍待 C2-05／C4-04。
 
 ## 阶段目标与退出条件
 
@@ -56,7 +56,13 @@
 - **预期结果**：公共账本合同本地通过，C2-05 和 C4-04 分别负责 GCC／RPMh 的真实硬件共享实例，互不作为对方前置。
 - **失败归属**：C1-05 identity／ledger／transition-intent；实际 gate 或投票执行归对应后端卡。
 
-- **本候选未实现，推迟到下一个写候选（0233 决定）**：C1-05 自身只依赖 C1-03，本可与 C2-01／C2-02 一起做；但总计划 [§3.4](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#34-候选镜像合并规则) 允许纯本地合同并入下一个**写入**候选而不必单开只读候选，而 C2-01／C2-02 仍是零写入，账本在这里只会多出一台没有执行者的状态机。因此 C1-05 并入 C2-08 之后、C2-03 之前的写候选，与 C2-03 的 `request→write-issued→running→completed` 事件链共用记账点；GCC 的真实硬件共享仍由 C2-05 单独验收，两者互不作为对方前置。推迟不改变拒绝语义：未验后端操作照旧返回 Unsupported。
+- **本候选实施记录（补丁 0235，与 C2-08 合并）**：0233 决定按[总计划 §3.4](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#34-候选镜像合并规则)把它并入下一个**写入**候选——C2-08 是首个真实写，而它要开的 XO/4 参考源正好需要一个能“取得—确认—释放”的公共需求账本，于是账本在这个候选里有了第一台真实执行者，而不是一台没有执行者的状态机。C1-05 的合同本体与 GCC 硬件无关，GCC 的真实硬件共享仍由 C2-05 单独验收，两者互不作为对方前置。
+- **C1-05 条目与身份**：`IOQcomClockProvider` 内固定表 `fLedger[kIOQcomLedgerEntries=8]`，键 `(controller,localID)`；每条最多 `kIOQcomLedgerHolders=4` 个 token，字段为 `holders／desired／pending／confirmed` 与 `generation／transitions／confirmations`，`active` 表示条目曾建立。`token` 全局递增、从不签发 `0`（回绕时跳过在用值）。`controller` 必须落在 `1..kIOQcomCCMax`，空 consumer 与空 token 指针一律 `BadArgument`；provider 未挂载／未 Ready／正在 stop／后端未注册 → `NotReady`；表满或 token 位满 → `NoResources`。
+- **C1-05 转换边界**：只有“首个取得”推进 `transitions`——`desired=1,pending=1,transitions++`，返回 `openedTransition=true`，日志 `transition=new`；同一资源的第二个消费者只增 `holders`，日志 `transition=shared`，**物理转换不发生**。`ledgerComplete(token,true)` 才置 `pending=0,confirmed=1,confirmations++`；`ledgerComplete(token,false)` 同样清 `pending`，但记 `WARN detail=not-confirmed` 并返回 `NotReady`——确认是判决，不是猜。
+- **C1-05 撤回与欠账**：最后一个持有者 `ledgerRelease(token,stopped)` 在 `stopped=true` 时清 `pending／confirmed`、`transitions++`／`confirmations++`；`stopped=false` 时**保留** `pending=1` 并记 `ERROR detail=hardware-still-on`（`IOError`），把“硬件其实还开着”留下来而不是抹平。非最后持有者只减 `holders`。
+- **C1-05 过期与清理**：后端 `start` 每次生成新 `generation`；取得时发现 `entry-generation != generation` 就清 token／holders／desired／pending／confirmed（**保留** `transitions／confirmations`）并记 `WARN detail=stale-generation entry-generation=%llu generation=%llu`。未知 token（含已过期、已撤回、来自别的条目）→ `WARN phase=confirm|release result=10 detail=unknown-token`（`kIOReturnNotFound`）。`withdrawController` 调 `ledgerForget` 使条目失活，此后按 key 或旧 token 查询都是 `NotFound`。
+- **C1-05 边界**：不引入任何资源专属聚合公式（GCC 的门控聚合仍归 C2-05，RPMh 投票归 C4-04），不声称逻辑取得等于硬件开启；账本本身不写任何寄存器。C2-08 只把它当“参考源需求”的持有者与停钟判决的依据。
+
 
 ## 本候选实现（C1-01～C1-04，补丁 0230）
 
@@ -70,8 +76,8 @@
 - **入口行如实计数**：`phase=start` 行末尾的 `bindings=%u` 报本节点 `sweet,clock-names` 实际声明的条数（无该属性即 `0`），不再打印 `kIOQcomBindingMax` 容量常量。0122 实机日志出现 `bindings=8`，即该字段误用了容量常量；0231 修正后同一份 ADT 应打出 `bindings=0`。
 - **诊断入口（默认关闭，双通道）**：设备树属性 `sweet,clock-diag=<u32 1>` 或启动参数 `sweetclock` 任一存在即触发一次性 `sweetclock-diag` 控制器的只读查询，日志带 `planID=C1 resource=... consumer=... token=... generation=... phase=... result=...`，结束行标记 `detail=zero-writes`。属性存在但不足 4 字节或值不为 `1` 时记一条 `detail=bad-diag-property` 的 WARN 且不开启诊断，不把配置错误当成静默关闭。本机固件对启动参数是 **607 字节硬上限**（`boot args rejected at 607`，超限时内核根本没进入），现役参数已占 605 字节且每个 token 都有语义，因此实机只能走设备树通道；0122 的 `sweetclock=1` 镜像（618 字节）就是被这条上限拒绝的，不是诊断代码的问题。
 - **拒绝只报一次（补丁 0232）**：一次失败的使能曾经被报两遍——`checkDependencies` 的遍历打出 `phase=admit` 的 WARN，句柄 `enable` 内部再走同一条遍历又打一遍，0123 诊断日志里 `cc1:0x30` 与 `cc7:0x4` 各出现两条**逐字节相同**的 `phase=admit` 行。0232 给遍历加了一个“是否记账”的开关：`admitWalk`／`admitInternal`／`checkDependenciesInternal` 的 `log` 参数为假时不打印任何拒绝行，只把原因写回 `reason`；`checkDependencies` 与 `admit` 两个公共入口照旧记账，`IOQcomClockHandle::enable` 改为直接调静音遍历并在自己名下打出唯一一条 `phase=enable result=... detail=...`，诊断段每个句柄的探测同样走静音遍历（原因进 `depReason` 字段），因此一台设备上每个失败句柄只留一条拒绝行，且带的是它自己的 phase。成功路径与能力拒绝的 INFO 行不变。
-- **证据**：`tools/tests/test-mh2lm-clock-provider.py` 通过（覆盖生命周期、重复／越界注册、generation 失效、13 类畸形绑定拒绝、admission 九种原因、admission 先于能力、pinned 拒绝、后端传播、重入与自撤回、token 回绕、幂等 stop、参数与设备树两路诊断开关、畸形属性拒绝、`bindings=` 如实计数、写计数为零）；`tools/tests/test-mh2lm-mdss-adt.py` 通过（C1 节点可选、无窗口、可字节还原、CLI 可选、`--clock-diag` 只增加一个属性且去掉后字节还原）；ARM64 单 TU 编译 rc=0（工作区 `scratch/clock-c1/edited-IOQcomClock.compile.txt`，仅既有宏与 `-Wunsafe-buffer-usage` 噪声）；补丁 `0230`（SHA256 `3fc2536659099605f98366ea05e4eab092c7c5a2decf5a90eaa88a32102e428f`）与 `0231`（SHA256 `261a300173249d0642021913d3a0a9be6d769572a319c18467d6663e65a1790c`）在基线 `4148ed3` 上依次严格 `patch -p1 --fuzz=0` 应用后四份文件与工作树逐字节一致、无 `.rej`／`.orig`。C0 基线回归 18 组重跑仍为 17 通过＋同一既有 `panel-profile-lifecycle` ESC0 停钟失败（与 C0 签名一致），新测试日志见 `scratch/clock-c1/logs/`。补丁 `0232`（SHA256 `0d3fdf8814312413db556e714048169842e70c1daf88f644d090ab20e20c2db9`）在同一基线上按 `0230`→`0231`→`0232` 顺序严格应用后四份文件同样逐字节一致。主机测试新增两组断言：一次域依赖失败只让 `phase=admit` 计数不变而 `phase=enable` 加一且带 `detail=domain-absent`，随后一次显式 `checkDependencies` 恰好加一条 `phase=admit`（说明记账权在调用者手里，静音不是丢账）。
-- **边界**：C1-05 公共需求账本未实现；无 MMIO 映射、无寄存器读写、无热插拔硬件验证；实机只验证“匹配、Ready、绑定、写计数为零”，真实后端留给 C2-01／02，首个硬件写仍在 C2-08。本候选不改动显示时钟账本、父类源码、频率／电源／reset／GDSC 路径，也不关闭任何既有资源。
+- **证据**：`tools/tests/test-mh2lm-clock-provider.py` 通过（0235 起含账本用例，见 C1-05 段；覆盖生命周期、重复／越界注册、generation 失效、13 类畸形绑定拒绝、admission 九种原因、admission 先于能力、pinned 拒绝、后端传播、重入与自撤回、token 回绕、幂等 stop、参数与设备树两路诊断开关、畸形属性拒绝、`bindings=` 如实计数、写计数为零）；`tools/tests/test-mh2lm-mdss-adt.py` 通过（C1 节点可选、无窗口、可字节还原、CLI 可选、`--clock-diag` 只增加一个属性且去掉后字节还原）；ARM64 单 TU 编译 rc=0（工作区 `scratch/clock-c1/edited-IOQcomClock.compile.txt`，仅既有宏与 `-Wunsafe-buffer-usage` 噪声）；补丁 `0230`（SHA256 `3fc2536659099605f98366ea05e4eab092c7c5a2decf5a90eaa88a32102e428f`）与 `0231`（SHA256 `261a300173249d0642021913d3a0a9be6d769572a319c18467d6663e65a1790c`）在基线 `4148ed3` 上依次严格 `patch -p1 --fuzz=0` 应用后四份文件与工作树逐字节一致、无 `.rej`／`.orig`。C0 基线回归 18 组重跑仍为 17 通过＋同一既有 `panel-profile-lifecycle` ESC0 停钟失败（与 C0 签名一致），新测试日志见 `scratch/clock-c1/logs/`。补丁 `0232`（SHA256 `0d3fdf8814312413db556e714048169842e70c1daf88f644d090ab20e20c2db9`）在同一基线上按 `0230`→`0231`→`0232` 顺序严格应用后四份文件同样逐字节一致。主机测试新增两组断言：一次域依赖失败只让 `phase=admit` 计数不变而 `phase=enable` 加一且带 `detail=domain-absent`，随后一次显式 `checkDependencies` 恰好加一条 `phase=admit`（说明记账权在调用者手里，静音不是丢账）。
+- **边界**：无 MMIO 映射、无寄存器读写、无热插拔硬件验证；实机只验证“匹配、Ready、绑定、写计数为零”，真实后端留给 C2-01／02，首个硬件写仍在 C2-08（账本随 0235 一起落地，见上）。本候选不改动显示时钟账本、父类源码、频率／电源／reset／GDSC 路径，也不关闭任何既有资源。
 
 ## 实机证据（0123 内核，两档各一次）
 

@@ -361,6 +361,8 @@ bool IOQcomClockProvider::start(IOService *provider)
 	fNextGeneration=1;
 	fNextToken=0;
 	fHandles=0;
+	fNextLedgerToken=1;
+	memset(fLedger,0,sizeof fLedger);
 	fStopping=false;
 	fDiagCall=thread_call_allocate(diagnose,this);
 	if (!fDiagCall) {
@@ -404,6 +406,8 @@ void IOQcomClockProvider::stop(IOService *provider)
 			fSlots[id].generation=0;
 			fSlots[id].active=false;
 		}
+		/* Every registration is gone, so every demand entry is void. */
+		memset(fLedger,0,sizeof fLedger);
 		IOLockUnlock(fLock);
 	}
 	__atomic_store_n(&gPublishedProvider,NULL,__ATOMIC_RELEASE);
@@ -511,6 +515,9 @@ IOReturn IOQcomClockProvider::withdrawController(IOQcomClockController *controll
 		 kIOReturnNotFound);
 		return kIOReturnNotFound;
 	}
+	/* A withdrawn registration owes no demand: its ledger entries are dropped
+	 * before anyone can mistake them for the replacement's state. */
+	ledgerForget(victim->clockControllerID());
 	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=cc%u consumer=provider phase=withdraw result=0\n",
 	 victim->clockControllerID());
 	victim->release();
@@ -551,6 +558,262 @@ unsigned IOQcomClockProvider::registeredControllers(void)
 	}
 	IOLockUnlock(fLock);
 	return count;
+}
+
+/* ---- C1-05 demand ledger --------------------------------------------------
+ * The entry table is fixed size and touched only under fLock, so acquire and
+ * release never allocate on the path a controller's start() runs on. Everything
+ * that decides is done under the lock; the row is printed after it is dropped. */
+IOQcomClockProvider::LedgerEntry *
+IOQcomClockProvider::ledgerEntry(uint32_t controller,uint32_t localID,uint64_t generation,bool create)
+{
+	for (unsigned i=0;i<kIOQcomLedgerEntries;i++) {
+		if (fLedger[i].active&&fLedger[i].controller==controller&&fLedger[i].localID==localID)
+			return &fLedger[i];
+	}
+	if (!create) return NULL;
+	for (unsigned i=0;i<kIOQcomLedgerEntries;i++) {
+		if (fLedger[i].active) continue;
+		memset(&fLedger[i],0,sizeof fLedger[i]);
+		fLedger[i].controller=controller;
+		fLedger[i].localID=localID;
+		fLedger[i].generation=generation;
+		fLedger[i].active=true;
+		return &fLedger[i];
+	}
+	return NULL;
+}
+
+IOQcomClockProvider::LedgerEntry *
+IOQcomClockProvider::ledgerToken(uint32_t token,unsigned *index)
+{
+	for (unsigned i=0;i<kIOQcomLedgerEntries;i++) {
+		if (!fLedger[i].active) continue;
+		for (unsigned slot=0;slot<kIOQcomLedgerHolders;slot++) {
+			if (fLedger[i].tokens[slot]!=token) continue;
+			if (index) *index=slot;
+			return &fLedger[i];
+		}
+	}
+	if (index) *index=kIOQcomLedgerHolders;
+	return NULL;
+}
+
+void IOQcomClockProvider::ledgerForget(uint32_t controller)
+{
+	if (!fLock) return;
+	IOLockLock(fLock);
+	for (unsigned i=0;i<kIOQcomLedgerEntries;i++) {
+		if (!fLedger[i].active||fLedger[i].controller!=controller) continue;
+		memset(fLedger[i].tokens,0,sizeof fLedger[i].tokens);
+		fLedger[i].holders=0;
+		fLedger[i].desired=0;
+		fLedger[i].pending=0;
+		fLedger[i].confirmed=0;
+		fLedger[i].active=false;
+	}
+	IOLockUnlock(fLock);
+}
+
+IOReturn IOQcomClockProvider::ledgerAcquire(uint32_t controller,uint32_t localID,
+ const char *consumer,uint32_t *token,bool *openedTransition)
+{
+	if (token) *token=0;
+	if (openedTransition) *openedTransition=false;
+	if (!consumer||!token) return kIOReturnBadArgument;
+	if (controller==0||controller>=kIOQcomCCMax) return kIOReturnBadArgument;
+	if (!fLock) return kIOReturnNotReady;
+	char resource[kIOQcomLogBuf];
+	clockResource(resource,sizeof resource,controller,localID);
+	IOReturn result=kIOReturnSuccess;
+	uint64_t generation=0, stale=0, transitions=0;
+	unsigned holders=0, issued=0, pending=0, confirmed=0;
+	bool opened=false, staleReset=false;
+	IOLockLock(fLock);
+	if (!fReady||fStopping||!fSlots[controller].active||!fSlots[controller].controller) {
+		result=kIOReturnNotReady;
+	} else {
+		generation=fSlots[controller].generation;
+		LedgerEntry *entry=ledgerEntry(controller,localID,generation,true);
+		if (!entry) {
+			result=kIOReturnNoResources;
+		} else {
+			if (entry->generation!=generation) {
+				/* A different registration of the same identity: its demand is
+				 * void. The counters stay so the audit keeps the history. */
+				stale=entry->generation;
+				staleReset=true;
+				memset(entry->tokens,0,sizeof entry->tokens);
+				entry->holders=0;
+				entry->desired=0;
+				entry->pending=0;
+				entry->confirmed=0;
+				entry->generation=generation;
+			}
+			unsigned slot=0;
+			while (slot<kIOQcomLedgerHolders&&entry->tokens[slot]) slot++;
+			if (slot>=kIOQcomLedgerHolders) {
+				result=kIOReturnNoResources;
+			} else {
+				issued=fNextLedgerToken++;
+				if (fNextLedgerToken==0) fNextLedgerToken=1;
+				while (issued==0||ledgerToken(issued,NULL)) {
+					issued=fNextLedgerToken++;
+					if (fNextLedgerToken==0) fNextLedgerToken=1;
+				}
+				entry->tokens[slot]=issued;
+				entry->holders++;
+				if (entry->holders==1) {
+					entry->desired=1;
+					entry->pending=1;
+					entry->transitions++;
+					opened=true;
+				}
+				holders=entry->holders;
+				pending=entry->pending;
+				confirmed=entry->confirmed;
+				transitions=entry->transitions;
+				*token=issued;
+				if (openedTransition) *openedTransition=opened;
+			}
+		}
+	}
+	IOLockUnlock(fLock);
+	if (staleReset) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=acquire result=0 detail=stale-generation entry-generation=%llu generation=%llu\n",
+		 resource,consumer,(unsigned long long)stale,(unsigned long long)generation);
+	}
+	if (result!=kIOReturnSuccess) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=acquire result=%d\n",
+		 resource,consumer,result);
+		return result;
+	}
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=acquire result=0 token=%u holders=%u desired=1 pending=%u confirmed=%u transitions=%llu transition=%s\n",
+	 resource,consumer,issued,holders,pending,confirmed,(unsigned long long)transitions,
+	 opened?"new":"shared");
+	return kIOReturnSuccess;
+}
+
+IOReturn IOQcomClockProvider::ledgerComplete(uint32_t token,bool confirmed)
+{
+	if (!token) return kIOReturnBadArgument;
+	if (!fLock) return kIOReturnNotReady;
+	uint32_t controller=0, localID=0, holders=0, pending=0, state=0;
+	unsigned index=0;
+	bool found=false;
+	uint64_t confirmations=0;
+	IOLockLock(fLock);
+	LedgerEntry *entry=ledgerToken(token,&index);
+	if (entry) {
+		controller=entry->controller;
+		localID=entry->localID;
+		if (confirmed) entry->confirmed=1;
+		entry->pending=0;
+		if (confirmed) entry->confirmations++;
+		holders=entry->holders;
+		pending=entry->pending;
+		state=entry->confirmed;
+		confirmations=entry->confirmations;
+		found=true;
+	}
+	IOLockUnlock(fLock);
+	if (!found) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=cc phase=confirm result=%d token=%u detail=unknown-token\n",
+		 kIOReturnNotFound,token);
+		return kIOReturnNotFound;
+	}
+	char resource[kIOQcomLogBuf];
+	clockResource(resource,sizeof resource,controller,localID);
+	if (!confirmed) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s phase=confirm result=%d token=%u holders=%u pending=0 confirmed=%u detail=not-confirmed\n",
+		 resource,kIOReturnNotReady,token,holders,state);
+		return kIOReturnNotReady;
+	}
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=%s phase=confirm result=0 token=%u holders=%u pending=%u confirmed=1 confirmations=%llu\n",
+	 resource,token,holders,pending,(unsigned long long)confirmations);
+	return kIOReturnSuccess;
+}
+
+IOReturn IOQcomClockProvider::ledgerRelease(uint32_t token,bool stopped,bool *lastHolder)
+{
+	if (lastHolder) *lastHolder=false;
+	if (!token) return kIOReturnBadArgument;
+	if (!fLock) return kIOReturnNotReady;
+	uint32_t controller=0, localID=0, holders=0, desired=0, pending=0, state=0;
+	uint64_t transitions=0, confirmations=0;
+	bool found=false, last=false;
+	unsigned index=0;
+	IOLockLock(fLock);
+	LedgerEntry *entry=ledgerToken(token,&index);
+	if (entry&&index<kIOQcomLedgerHolders) {
+		entry->tokens[index]=0;
+		if (entry->holders) entry->holders--;
+		holders=entry->holders;
+		last=entry->holders==0;
+		if (last) {
+			entry->desired=0;
+			entry->transitions++;
+			if (stopped) {
+				entry->confirmed=0;
+				entry->pending=0;
+				entry->confirmations++;
+			} else {
+				/* The executor says the clock is still running: the demand is
+				 * recorded as owed, not as satisfied. */
+				entry->pending=1;
+			}
+		}
+		desired=entry->desired;
+		pending=entry->pending;
+		state=entry->confirmed;
+		transitions=entry->transitions;
+		confirmations=entry->confirmations;
+		controller=entry->controller;
+		localID=entry->localID;
+		found=true;
+	}
+	IOLockUnlock(fLock);
+	if (!found) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=cc phase=release result=%d token=%u detail=unknown-token\n",
+		 kIOReturnNotFound,token);
+		return kIOReturnNotFound;
+	}
+	if (lastHolder) *lastHolder=last;
+	char resource[kIOQcomLogBuf];
+	clockResource(resource,sizeof resource,controller,localID);
+	if (last&&!stopped) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C1 resource=%s phase=release result=%d token=%u holders=0 desired=0 pending=%u confirmed=%u detail=hardware-still-on\n",
+		 resource,kIOReturnIOError,token,pending,state);
+		return kIOReturnIOError;
+	}
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=%s phase=release result=0 token=%u holders=%u desired=%u pending=%u confirmed=%u transitions=%llu confirmations=%llu\n",
+	 resource,token,holders,desired,pending,state,(unsigned long long)transitions,
+	 (unsigned long long)confirmations);
+	return kIOReturnSuccess;
+}
+
+IOReturn IOQcomClockProvider::ledgerInspect(uint32_t controller,uint32_t localID,
+ uint32_t token,IOQcomClockLedgerState *state)
+{
+	if (!state) return kIOReturnBadArgument;
+	memset(state,0,sizeof *state);
+	if (!fLock) return kIOReturnNotReady;
+	IOLockLock(fLock);
+	LedgerEntry *entry=token?ledgerToken(token,NULL):ledgerEntry(controller,localID,0,false);
+	if (entry) {
+		state->controller=entry->controller;
+		state->localID=entry->localID;
+		state->token=token;
+		state->holders=entry->holders;
+		state->desired=entry->desired;
+		state->pending=entry->pending;
+		state->confirmed=entry->confirmed;
+		state->generation=entry->generation;
+		state->transitions=entry->transitions;
+		state->confirmations=entry->confirmations;
+	}
+	IOLockUnlock(fLock);
+	return entry?kIOReturnSuccess:kIOReturnNotFound;
 }
 
 IOReturn IOQcomClockProvider::retainController(uint32_t id,uint64_t generation,

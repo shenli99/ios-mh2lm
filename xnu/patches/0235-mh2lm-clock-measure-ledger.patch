@@ -1,0 +1,979 @@
+diff --git a/iokit/Kernel/arm/IOQcomClock.cpp b/iokit/Kernel/arm/IOQcomClock.cpp
+index fe643ff..b8deebf 100644
+--- a/iokit/Kernel/arm/IOQcomClock.cpp
++++ b/iokit/Kernel/arm/IOQcomClock.cpp
+@@ -361,6 +361,8 @@ bool IOQcomClockProvider::start(IOService *provider)
+ 	fNextGeneration=1;
+ 	fNextToken=0;
+ 	fHandles=0;
++	fNextLedgerToken=1;
++	memset(fLedger,0,sizeof fLedger);
+ 	fStopping=false;
+ 	fDiagCall=thread_call_allocate(diagnose,this);
+ 	if (!fDiagCall) {
+@@ -404,6 +406,8 @@ void IOQcomClockProvider::stop(IOService *provider)
+ 			fSlots[id].generation=0;
+ 			fSlots[id].active=false;
+ 		}
++		/* Every registration is gone, so every demand entry is void. */
++		memset(fLedger,0,sizeof fLedger);
+ 		IOLockUnlock(fLock);
+ 	}
+ 	__atomic_store_n(&gPublishedProvider,NULL,__ATOMIC_RELEASE);
+@@ -511,6 +515,9 @@ IOReturn IOQcomClockProvider::withdrawController(IOQcomClockController *controll
+ 		 kIOReturnNotFound);
+ 		return kIOReturnNotFound;
+ 	}
++	/* A withdrawn registration owes no demand: its ledger entries are dropped
++	 * before anyone can mistake them for the replacement's state. */
++	ledgerForget(victim->clockControllerID());
+ 	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=cc%u consumer=provider phase=withdraw result=0\n",
+ 	 victim->clockControllerID());
+ 	victim->release();
+@@ -553,6 +560,262 @@ unsigned IOQcomClockProvider::registeredControllers(void)
+ 	return count;
+ }
+ 
++/* ---- C1-05 demand ledger --------------------------------------------------
++ * The entry table is fixed size and touched only under fLock, so acquire and
++ * release never allocate on the path a controller's start() runs on. Everything
++ * that decides is done under the lock; the row is printed after it is dropped. */
++IOQcomClockProvider::LedgerEntry *
++IOQcomClockProvider::ledgerEntry(uint32_t controller,uint32_t localID,uint64_t generation,bool create)
++{
++	for (unsigned i=0;i<kIOQcomLedgerEntries;i++) {
++		if (fLedger[i].active&&fLedger[i].controller==controller&&fLedger[i].localID==localID)
++			return &fLedger[i];
++	}
++	if (!create) return NULL;
++	for (unsigned i=0;i<kIOQcomLedgerEntries;i++) {
++		if (fLedger[i].active) continue;
++		memset(&fLedger[i],0,sizeof fLedger[i]);
++		fLedger[i].controller=controller;
++		fLedger[i].localID=localID;
++		fLedger[i].generation=generation;
++		fLedger[i].active=true;
++		return &fLedger[i];
++	}
++	return NULL;
++}
++
++IOQcomClockProvider::LedgerEntry *
++IOQcomClockProvider::ledgerToken(uint32_t token,unsigned *index)
++{
++	for (unsigned i=0;i<kIOQcomLedgerEntries;i++) {
++		if (!fLedger[i].active) continue;
++		for (unsigned slot=0;slot<kIOQcomLedgerHolders;slot++) {
++			if (fLedger[i].tokens[slot]!=token) continue;
++			if (index) *index=slot;
++			return &fLedger[i];
++		}
++	}
++	if (index) *index=kIOQcomLedgerHolders;
++	return NULL;
++}
++
++void IOQcomClockProvider::ledgerForget(uint32_t controller)
++{
++	if (!fLock) return;
++	IOLockLock(fLock);
++	for (unsigned i=0;i<kIOQcomLedgerEntries;i++) {
++		if (!fLedger[i].active||fLedger[i].controller!=controller) continue;
++		memset(fLedger[i].tokens,0,sizeof fLedger[i].tokens);
++		fLedger[i].holders=0;
++		fLedger[i].desired=0;
++		fLedger[i].pending=0;
++		fLedger[i].confirmed=0;
++		fLedger[i].active=false;
++	}
++	IOLockUnlock(fLock);
++}
++
++IOReturn IOQcomClockProvider::ledgerAcquire(uint32_t controller,uint32_t localID,
++ const char *consumer,uint32_t *token,bool *openedTransition)
++{
++	if (token) *token=0;
++	if (openedTransition) *openedTransition=false;
++	if (!consumer||!token) return kIOReturnBadArgument;
++	if (controller==0||controller>=kIOQcomCCMax) return kIOReturnBadArgument;
++	if (!fLock) return kIOReturnNotReady;
++	char resource[kIOQcomLogBuf];
++	clockResource(resource,sizeof resource,controller,localID);
++	IOReturn result=kIOReturnSuccess;
++	uint64_t generation=0, stale=0, transitions=0;
++	unsigned holders=0, issued=0, pending=0, confirmed=0;
++	bool opened=false, staleReset=false;
++	IOLockLock(fLock);
++	if (!fReady||fStopping||!fSlots[controller].active||!fSlots[controller].controller) {
++		result=kIOReturnNotReady;
++	} else {
++		generation=fSlots[controller].generation;
++		LedgerEntry *entry=ledgerEntry(controller,localID,generation,true);
++		if (!entry) {
++			result=kIOReturnNoResources;
++		} else {
++			if (entry->generation!=generation) {
++				/* A different registration of the same identity: its demand is
++				 * void. The counters stay so the audit keeps the history. */
++				stale=entry->generation;
++				staleReset=true;
++				memset(entry->tokens,0,sizeof entry->tokens);
++				entry->holders=0;
++				entry->desired=0;
++				entry->pending=0;
++				entry->confirmed=0;
++				entry->generation=generation;
++			}
++			unsigned slot=0;
++			while (slot<kIOQcomLedgerHolders&&entry->tokens[slot]) slot++;
++			if (slot>=kIOQcomLedgerHolders) {
++				result=kIOReturnNoResources;
++			} else {
++				issued=fNextLedgerToken++;
++				if (fNextLedgerToken==0) fNextLedgerToken=1;
++				while (issued==0||ledgerToken(issued,NULL)) {
++					issued=fNextLedgerToken++;
++					if (fNextLedgerToken==0) fNextLedgerToken=1;
++				}
++				entry->tokens[slot]=issued;
++				entry->holders++;
++				if (entry->holders==1) {
++					entry->desired=1;
++					entry->pending=1;
++					entry->transitions++;
++					opened=true;
++				}
++				holders=entry->holders;
++				pending=entry->pending;
++				confirmed=entry->confirmed;
++				transitions=entry->transitions;
++				*token=issued;
++				if (openedTransition) *openedTransition=opened;
++			}
++		}
++	}
++	IOLockUnlock(fLock);
++	if (staleReset) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=acquire result=0 detail=stale-generation entry-generation=%llu generation=%llu\n",
++		 resource,consumer,(unsigned long long)stale,(unsigned long long)generation);
++	}
++	if (result!=kIOReturnSuccess) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=acquire result=%d\n",
++		 resource,consumer,result);
++		return result;
++	}
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=%s consumer=%s phase=acquire result=0 token=%u holders=%u desired=1 pending=%u confirmed=%u transitions=%llu transition=%s\n",
++	 resource,consumer,issued,holders,pending,confirmed,(unsigned long long)transitions,
++	 opened?"new":"shared");
++	return kIOReturnSuccess;
++}
++
++IOReturn IOQcomClockProvider::ledgerComplete(uint32_t token,bool confirmed)
++{
++	if (!token) return kIOReturnBadArgument;
++	if (!fLock) return kIOReturnNotReady;
++	uint32_t controller=0, localID=0, holders=0, pending=0, state=0;
++	unsigned index=0;
++	bool found=false;
++	uint64_t confirmations=0;
++	IOLockLock(fLock);
++	LedgerEntry *entry=ledgerToken(token,&index);
++	if (entry) {
++		controller=entry->controller;
++		localID=entry->localID;
++		if (confirmed) entry->confirmed=1;
++		entry->pending=0;
++		if (confirmed) entry->confirmations++;
++		holders=entry->holders;
++		pending=entry->pending;
++		state=entry->confirmed;
++		confirmations=entry->confirmations;
++		found=true;
++	}
++	IOLockUnlock(fLock);
++	if (!found) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=cc phase=confirm result=%d token=%u detail=unknown-token\n",
++		 kIOReturnNotFound,token);
++		return kIOReturnNotFound;
++	}
++	char resource[kIOQcomLogBuf];
++	clockResource(resource,sizeof resource,controller,localID);
++	if (!confirmed) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=%s phase=confirm result=%d token=%u holders=%u pending=0 confirmed=%u detail=not-confirmed\n",
++		 resource,kIOReturnNotReady,token,holders,state);
++		return kIOReturnNotReady;
++	}
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=%s phase=confirm result=0 token=%u holders=%u pending=%u confirmed=1 confirmations=%llu\n",
++	 resource,token,holders,pending,(unsigned long long)confirmations);
++	return kIOReturnSuccess;
++}
++
++IOReturn IOQcomClockProvider::ledgerRelease(uint32_t token,bool stopped,bool *lastHolder)
++{
++	if (lastHolder) *lastHolder=false;
++	if (!token) return kIOReturnBadArgument;
++	if (!fLock) return kIOReturnNotReady;
++	uint32_t controller=0, localID=0, holders=0, desired=0, pending=0, state=0;
++	uint64_t transitions=0, confirmations=0;
++	bool found=false, last=false;
++	unsigned index=0;
++	IOLockLock(fLock);
++	LedgerEntry *entry=ledgerToken(token,&index);
++	if (entry&&index<kIOQcomLedgerHolders) {
++		entry->tokens[index]=0;
++		if (entry->holders) entry->holders--;
++		holders=entry->holders;
++		last=entry->holders==0;
++		if (last) {
++			entry->desired=0;
++			entry->transitions++;
++			if (stopped) {
++				entry->confirmed=0;
++				entry->pending=0;
++				entry->confirmations++;
++			} else {
++				/* The executor says the clock is still running: the demand is
++				 * recorded as owed, not as satisfied. */
++				entry->pending=1;
++			}
++		}
++		desired=entry->desired;
++		pending=entry->pending;
++		state=entry->confirmed;
++		transitions=entry->transitions;
++		confirmations=entry->confirmations;
++		controller=entry->controller;
++		localID=entry->localID;
++		found=true;
++	}
++	IOLockUnlock(fLock);
++	if (!found) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=cc phase=release result=%d token=%u detail=unknown-token\n",
++		 kIOReturnNotFound,token);
++		return kIOReturnNotFound;
++	}
++	if (lastHolder) *lastHolder=last;
++	char resource[kIOQcomLogBuf];
++	clockResource(resource,sizeof resource,controller,localID);
++	if (last&&!stopped) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C1 resource=%s phase=release result=%d token=%u holders=0 desired=0 pending=%u confirmed=%u detail=hardware-still-on\n",
++		 resource,kIOReturnIOError,token,pending,state);
++		return kIOReturnIOError;
++	}
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=%s phase=release result=0 token=%u holders=%u desired=%u pending=%u confirmed=%u transitions=%llu confirmations=%llu\n",
++	 resource,token,holders,desired,pending,state,(unsigned long long)transitions,
++	 (unsigned long long)confirmations);
++	return kIOReturnSuccess;
++}
++
++IOReturn IOQcomClockProvider::ledgerInspect(uint32_t controller,uint32_t localID,
++ uint32_t token,IOQcomClockLedgerState *state)
++{
++	if (!state) return kIOReturnBadArgument;
++	memset(state,0,sizeof *state);
++	if (!fLock) return kIOReturnNotReady;
++	IOLockLock(fLock);
++	LedgerEntry *entry=token?ledgerToken(token,NULL):ledgerEntry(controller,localID,0,false);
++	if (entry) {
++		state->controller=entry->controller;
++		state->localID=entry->localID;
++		state->token=token;
++		state->holders=entry->holders;
++		state->desired=entry->desired;
++		state->pending=entry->pending;
++		state->confirmed=entry->confirmed;
++		state->generation=entry->generation;
++		state->transitions=entry->transitions;
++		state->confirmations=entry->confirmations;
++	}
++	IOLockUnlock(fLock);
++	return entry?kIOReturnSuccess:kIOReturnNotFound;
++}
++
+ IOReturn IOQcomClockProvider::retainController(uint32_t id,uint64_t generation,
+  IOQcomClockController **out,uint64_t *generationOut)
+ {
+diff --git a/iokit/Kernel/arm/IOQcomClock.h b/iokit/Kernel/arm/IOQcomClock.h
+index 4c26de8..c664989 100644
+--- a/iokit/Kernel/arm/IOQcomClock.h
++++ b/iokit/Kernel/arm/IOQcomClock.h
+@@ -43,6 +43,25 @@ struct IOQcomClockInfo {
+  bool pinned;                /* inherited/critical: never a disable candidate */
+  bool inheritedOn;           /* enable bit observed at controller start */
+ };
++/* C1-05 demand ledger. It records what consumers asked for, what the provider
++ * still owes them and what the hardware confirmed; it is demand accounting, not
++ * a rate formula and not a second copy of any controller's state. One hardware
++ * transition serves every holder of a resource: the second acquire only raises
++ * the holder count and never re-issues the transition. A token belongs to the
++ * registration generation it was granted under, so a token from a withdrawn
++ * controller is refused rather than applied to a replacement. */
++enum : unsigned { kIOQcomLedgerEntries=8, kIOQcomLedgerHolders=4 };
++enum : uint32_t { kIOQcomLedgerDesired=1u<<0, kIOQcomLedgerPending=1u<<1,
++ kIOQcomLedgerConfirmed=1u<<2 };
++struct IOQcomClockLedgerState {
++	uint32_t controller, localID;   /* resource identity: never a rate, never a name */
++	uint32_t token;                 /* the token this view was asked about, 0 = aggregate */
++	uint32_t holders;               /* distinct consumers currently holding it */
++	uint32_t desired, pending, confirmed; /* logical demand, in-flight work, hardware verdict */
++	uint64_t generation;            /* registration generation of the resource */
++	uint64_t transitions;           /* accepted logical transitions, not writes */
++	uint64_t confirmations;         /* transitions the hardware verdict closed */
++};
+ /* C2-02 query: configured (decoded) state, never a measured rate. */
+ struct IOQcomClockState {
+  uint32_t raw[2];            /* branch: CBCR; RCG: CMD, CFG */
+@@ -119,7 +138,22 @@ class IOQcomClockProvider : public IOService {
+  /* Zero-write evidence: the sum reported by every registered backend and the
+   * number of registrations that produced it. */
+  uint64_t registeredWrites(void);
+- unsigned registeredControllers(void);
++	unsigned registeredControllers(void);
++	/* C1-05 ledger. Fixed table, touched only under fLock; acquire is refused
++	 * when the resource's controller is not live, and a token belongs to the
++	 * registration generation it was granted under. */
++	struct LedgerEntry {
++		uint32_t controller, localID;
++		uint32_t tokens[kIOQcomLedgerHolders]; /* 0 = free slot */
++		uint32_t holders, desired, pending, confirmed;
++		uint64_t generation, transitions, confirmations;
++		bool active;
++	};
++	LedgerEntry fLedger[kIOQcomLedgerEntries];
++	uint32_t fNextLedgerToken;
++	LedgerEntry *ledgerEntry(uint32_t controller, uint32_t localID, uint64_t generation, bool create);
++	LedgerEntry *ledgerToken(uint32_t token, unsigned *index);
++	void ledgerForget(uint32_t controller);
+  static void diagnose(thread_call_param_t,thread_call_param_t);
+  void runDiagnostics(void);
+ public:
+@@ -144,6 +178,18 @@ public:
+  IOReturn checkDependencies(IOQcomClockHandle *handle,uint32_t *reason);
+  IOReturn admit(IOQcomClockController *owner,uint32_t localID,const char *consumer,
+   IOQcomClockInfo *info,uint32_t *reason,bool requirements);
++ /* C1-05 public side, for a controller that needs a clock on while it does
++  * work (the C2-08 measurement's XO/4 counter reference). The ledger tracks
++  * demand only: it issues no store, and a second holder of the same resource
++  * raises the count without opening a second transition. */
++ IOReturn ledgerAcquire(uint32_t controller,uint32_t localID,const char *consumer,
++  uint32_t *token,bool *openedTransition);
++ IOReturn ledgerComplete(uint32_t token,bool confirmed);
++ /* stopped is the executor's hardware verdict after it restored the resource;
++  * lastHolder reports whether this was the final holder. */
++ IOReturn ledgerRelease(uint32_t token,bool stopped,bool *lastHolder);
++ IOReturn ledgerInspect(uint32_t controller,uint32_t localID,uint32_t token,
++  IOQcomClockLedgerState *state);
+ };
+ 
+ #endif /* ARM64_BOARD_CONFIG_MH2LM */
+diff --git a/iokit/Kernel/arm/IOQcomGCC.cpp b/iokit/Kernel/arm/IOQcomGCC.cpp
+index 27eaae7..e6ea341 100644
+--- a/iokit/Kernel/arm/IOQcomGCC.cpp
++++ b/iokit/Kernel/arm/IOQcomGCC.cpp
+@@ -1,15 +1,15 @@
+-/* SM8150 GCC backend, read-only candidate C2-01/C2-02.
++/* SM8150 GCC backend: C2-01/C2-02 read-only candidate plus C2-08 measurement.
+  *
+  * Contract of this candidate, in one place:
+  *  - start() maps the four declared GCC pages through the provider nub and
+  *    validates the resolved physical address and the declared length of every
+  *    window before the first read. A wrong translation fails start instead of
+  *    silently reading somebody else's page.
+- *  - Register access is one helper: bounds checked against the declared length,
+- *    offset aligned, guarded by the backend lock, with the same post-read dmb
+- *    the display backend uses for this SoC. There is no write helper in this
+- *    file, so "zero writes" is structural rather than a counter that could
+- *    drift.
++ *  - Register access is one read helper and, since C2-08, one store helper:
++ *    both bounds checked against the declared length, offset aligned, guarded
++ *    by the backend lock, with the platform's barriers. Every store is logged
++ *    with its ordinal, so the ring's write rows and registerWrites() are the
++ *    same set and a store cannot be added without its row.
+  *  - Descriptors come from the vendor GCC tables; a branch without an explicit
+  *    vdd_class declares domain 0 instead of guessing CX, and the inherited
+  *    display branches are declared pinned.
+@@ -17,8 +17,11 @@
+  *    the decoded value when every rate in the path is trusted. An untrusted
+  *    parent is reported Unknown (configuredHz 0, rateKnown false); the
+  *    requested value is never substituted for what the hardware shows.
+- *
+- * Zero register writes: no device-memory store exists in this file. */
++ *  - C2-08 measures through the vendor debug mux. Every register it stores is
++ *    saved first and restored afterwards; the restore is verified by reading
++ *    the register back. Equal short and full counts mean the measured clock is
++ *    not running and are reported as such, never as 0 Hz. Without the ADT
++ *    measurement gate this file stores nothing. */
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ #include "IOQcomGCC.h"
+ #include <IOKit/IOLib.h>
+@@ -71,6 +74,32 @@ enum : uint32_t { kGccBranchEnable=1u<<0, kGccBranchClockOff=1u<<31,
+ 
+ enum : uint64_t { kGccXoHz=19200000ULL, kGccXoDiv4Hz=4800000ULL };
+ 
++/* C2-08 register map, transcribed from the vendor debugcc-sm8150.c
++ * measurement block. Offsets are inside the mapped pages, so 0x62000 in the
++ * vendor table is kGccWindowDebug + kGccDebugMuxOffset = 0x00162000. */
++enum : unsigned { kGccWindowXoDiv4=2, kGccWindowDebug=3 };
++enum : uint32_t {
++	kGccDebugMuxOffset=0x000,          /* 0x62000 source select, mask 0x3ff */
++	kGccDebugPostDivOffset=0x004,      /* 0x62004 post divider, mask 0xf */
++	kGccDebugGateOffset=0x008,         /* 0x62008 GCC debug branch enable */
++	kGccMeasureCtlOffset=0x038,        /* 0x62038 counter control */
++	kGccMeasureStatusOffset=0x03c,     /* 0x6203c counter status */
++	kGccXoDiv4Offset=0x008,            /* 0x43008 gcc_pdm_xo4_clk branch */
++	kGccDebugSrcSelMask=0x3ffu,
++	kGccDebugPostDivMask=0xfu,
++	kGccMeasureCountEnable=1u<<20,     /* CNT_EN */
++	kGccMeasureCountDone=1u<<25,       /* XO_DIV4_CNT_DONE */
++	kGccMeasureCountMask=(1u<<25)-1u,  /* MEASURE_CNT */
++	kGccMeasureTicksShort=0x1000u,     /* ~1 ms of XO/4 */
++	kGccMeasureTicksFull=0x10000u,     /* ~14 ms of XO/4 */
++	kGccMeasurePostDiv=1u,             /* prim_mux_div_val of both samples */
++	kGccMeasureMultiplier=1u,
++};
++
++/* Bounded polling (kIOQcomGccMeasurePoll*): the vendor driver spins
++ * unbounded waiting for CNT_DONE, a hang this card cannot afford. A dead
++ * reference costs at most that per wait, never the boot. */
++
+ /* A declared clock. parent[].localID carries, for fixed sources, the RCG
+  * parent-map selector the decoder matches against CFG_SRC_SEL; it is never a
+  * clock identity and the admission walk ignores it for those sources. */
+@@ -158,6 +187,28 @@ IOQcomGCC::validateProperties(IOService *provider)
+ 		 kIOReturnUnsupported,observed,kIOQcomGccVariantSm8150);
+ 		return false;
+ 	}
++	/* C2-08 is a write candidate: it runs only when the ADT says so, so the
++	 * decoded-only image keeps its zero-store property. An unreadable or
++	 * unknown gate value refuses start instead of silently measuring. */
++	fMeasureEnabled=false;
++	OSData *measure=OSDynamicCast(OSData,provider->getProperty("sweet,clock-measure"));
++	if (measure) {
++		if (measure->getLength()!=4) {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-measure-gate length=%u\n",
++			 kIOReturnBadArgument,(unsigned)measure->getLength());
++			return false;
++		}
++		uint32_t gate=0;
++		memcpy(&gate,measure->getBytesNoCopy(),4);
++		if (gate>1) {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-measure-gate value=%#x\n",
++			 kIOReturnBadArgument,gate);
++			return false;
++		}
++		fMeasureEnabled=gate==1;
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc phase=gate result=0 clock-measure=%u\n",
++		 fMeasureEnabled?1u:0u);
++	}
+ 	return true;
+ }
+ 
+@@ -261,6 +312,331 @@ IOQcomGCC::takeSnapshot(void)
+ 	}
+ }
+ 
++/* C2-08: the ordered store set. The index is also the restore order, so this
++ * table is the entire write footprint of the card and measureRestore() walks it
++ * backwards. */
++enum : unsigned { kMeasureXo4=0, kMeasureDebugGate, kMeasureMux, kMeasurePost, kMeasureCtl };
++static const struct { unsigned window; uint32_t offset; } gccMeasureRegs[kIOQcomGccMeasureRegCount] = {
++	{ kGccWindowXoDiv4, kGccXoDiv4Offset },
++	{ kGccWindowDebug, kGccDebugGateOffset },
++	{ kGccWindowDebug, kGccDebugMuxOffset },
++	{ kGccWindowDebug, kGccDebugPostDivOffset },
++	{ kGccWindowDebug, kGccMeasureCtlOffset },
++};
++
++/* The vendor rate formula, unchanged: the full count is scaled by the XO/4
++ * reference and divided by the loaded tick count with its rounding term. */
++static uint64_t
++gccMeasureRate(uint32_t shortCount,uint32_t fullCount)
++{
++	if (shortCount==fullCount) return 0;   /* counter did not advance: not running */
++	uint64_t scaled=((uint64_t)fullCount*10u+15u)*kGccXoDiv4Hz;
++	return scaled/((uint64_t)kGccMeasureTicksFull*10u+35u);
++}
++
++/* The only store in this file. Same bounds and alignment checks as the read,
++ * store barrier before the store and dsb after it, ordinal logged so the ring
++ * and fWrites are the same set. */
++bool
++IOQcomGCC::writeRegister(unsigned window,uint32_t offset,uint32_t value,const char *stage)
++{
++	if (!fLock) return false;
++	bool ok=false;
++	unsigned ordinal=0;
++	IOLockLock(fLock);
++	const Window &w=fWindow[window];
++	if (window<kIOQcomGccWindowCount&&w.base&&(offset&3u)==0&&
++	 (uint64_t)offset+sizeof(uint32_t)<=w.length) {
++		__asm__ volatile("dmb oshst" ::: "memory");
++		*(volatile uint32_t *)(w.base+offset)=value;
++		__asm__ volatile("dsb osh" ::: "memory");
++		ok=true;
++		fWrites++;
++		ordinal=fWrites;
++	} else {
++		fWriteFailures++;
++	}
++	IOLockUnlock(fLock);
++	char resource[kIOQcomLogBuf];
++	gccName(window,offset,resource,sizeof resource);
++	if (!ok) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=write-issued result=%d stage=%s detail=bounds\n",
++		 resource,kIOReturnBadArgument,stage);
++		return false;
++	}
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=write-issued result=0 stage=%s write=%u value=%#x\n",
++	 resource,stage,ordinal,value);
++	return true;
++}
++
++bool
++IOQcomGCC::storeMeasure(MeasureReg *regs,unsigned index,uint32_t value,const char *stage)
++{
++	if (!regs||index>=kIOQcomGccMeasureRegCount) return false;
++	if (!writeRegister(gccMeasureRegs[index].window,gccMeasureRegs[index].offset,value,stage)) return false;
++	regs[index].stored=true;
++	return true;
++}
++
++bool
++IOQcomGCC::updateMeasure(MeasureReg *regs,unsigned index,uint32_t clearMask,uint32_t setMask,
++ const char *stage)
++{
++	if (!regs||index>=kIOQcomGccMeasureRegCount||!regs[index].valid) return false;
++	uint32_t value=(regs[index].saved&~clearMask)|setMask;
++	return storeMeasure(regs,index,value,stage);
++}
++
++IOReturn
++IOQcomGCC::measureSave(MeasureReg *regs,unsigned count)
++{
++	if (!regs||count>kIOQcomGccMeasureRegCount) return kIOReturnBadArgument;
++	for (unsigned i=0;i<count;i++) {
++		regs[i].window=gccMeasureRegs[i].window;
++		regs[i].offset=gccMeasureRegs[i].offset;
++		regs[i].saved=0;
++		regs[i].valid=false;
++		regs[i].stored=false;
++		char resource[kIOQcomLogBuf];
++		gccName(regs[i].window,regs[i].offset,resource,sizeof resource);
++		if (!readRegister(regs[i].window,regs[i].offset,&regs[i].saved)) {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=measure-save result=%d detail=read-failed\n",
++			 resource,kIOReturnNotReady);
++			return kIOReturnNotReady;
++		}
++		regs[i].valid=true;
++		SWEET_LOG_DEBUG("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=measure-save result=0 value=%#x\n",
++		 resource,regs[i].saved);
++	}
++	return kIOReturnSuccess;
++}
++
++/* Reverse order, only the registers this card actually stored, each verified by
++ * reading it back after the dsb inside writeRegister(). */
++IOReturn
++IOQcomGCC::measureRestore(MeasureReg *regs,unsigned count)
++{
++	if (!regs||count>kIOQcomGccMeasureRegCount) return kIOReturnBadArgument;
++	IOReturn result=kIOReturnSuccess;
++	for (unsigned back=count;back>0;back--) {
++		MeasureReg &r=regs[back-1];
++		if (!r.stored||!r.valid) continue;
++		char resource[kIOQcomLogBuf];
++		gccName(r.window,r.offset,resource,sizeof resource);
++		if (!writeRegister(r.window,r.offset,r.saved,"restore")) {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=restore result=%d detail=write-failed\n",
++			 resource,kIOReturnNotReady);
++			result=kIOReturnNotReady;
++			continue;
++		}
++		uint32_t observed=0;
++		if (!readRegister(r.window,r.offset,&observed)) {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=restore result=%d detail=read-failed\n",
++			 resource,kIOReturnNotReady);
++			result=kIOReturnNotReady;
++			continue;
++		}
++		if (observed!=r.saved) {
++			fRestoreMismatches++;
++			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=restore result=%d expected=%#x value=%#x detail=mismatch\n",
++			 resource,kIOReturnIOError,r.saved,observed);
++			result=kIOReturnIOError;
++			continue;
++		}
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=restore result=0 expected=%#x value=%#x\n",
++		 resource,r.saved,observed);
++	}
++	return result;
++}
++
++/* Vendor run_measurement(): load the XO/4 start value, wait for the counter to
++ * be idle, enable it, wait for completion, take the count, stop it. Every wait
++ * is bounded; a timeout is reported, not spun on. */
++IOReturn
++IOQcomGCC::runMeasurement(MeasureReg *regs,uint32_t ticks,uint32_t *count,unsigned *polls)
++{
++	if (!regs||!count||!polls) return kIOReturnBadArgument;
++	*polls=0;
++	*count=0;
++	uint32_t status=0,observed=0;
++	char row[kIOQcomLogBuf];
++	gccName(kGccWindowDebug,kGccMeasureStatusOffset,row,sizeof row);
++	if (!storeMeasure(regs,kMeasureCtl,ticks,"count-ctl")) return kIOReturnNotReady;
++	if (!readRegister(kGccWindowDebug,kGccMeasureStatusOffset,&status)) return kIOReturnNotReady;
++	while ((status&kGccMeasureCountDone)!=0) {
++		if (++*polls>kIOQcomGccMeasurePollTries) {
++			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=count-ctl result=%d detail=idle-timeout polls=%u status=%#x\n",
++			 row,kIOReturnTimeout,*polls,status);
++			return kIOReturnTimeout;
++		}
++		IODelay(kIOQcomGccMeasurePollDelayUs);
++		if (!readRegister(kGccWindowDebug,kGccMeasureStatusOffset,&status)) return kIOReturnNotReady;
++	}
++	if (!storeMeasure(regs,kMeasureCtl,kGccMeasureCountEnable|ticks,"count-start")) return kIOReturnNotReady;
++	*polls=0;
++	if (!readRegister(kGccWindowDebug,kGccMeasureStatusOffset,&status)) return kIOReturnNotReady;
++	while ((status&kGccMeasureCountDone)==0) {
++		if (++*polls>kIOQcomGccMeasurePollTries) {
++			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-measure phase=count-start result=%d detail=done-timeout polls=%u status=%#x\n",
++			 row,kIOReturnTimeout,*polls,status);
++			return kIOReturnTimeout;
++		}
++		IODelay(kIOQcomGccMeasurePollDelayUs);
++		if (!readRegister(kGccWindowDebug,kGccMeasureStatusOffset,&status)) return kIOReturnNotReady;
++	}
++	if (!readRegister(kGccWindowDebug,kGccMeasureStatusOffset,&observed)) return kIOReturnNotReady;
++	*count=observed&kGccMeasureCountMask;
++	if (!storeMeasure(regs,kMeasureCtl,ticks,"count-stop")) return kIOReturnNotReady;
++	return kIOReturnSuccess;
++}
++
++/* C2-02 says what the registers mean; this says whether the clock is really
++ * running and how fast. A mismatch between the two is a finding, not a pass. */
++IOReturn
++IOQcomGCC::measureSample(MeasureReg *regs,uint32_t localID,uint32_t muxIndex,bool runningExpected)
++{
++	char name[kIOQcomLogBuf];
++	if (!copyClockName(localID,name,sizeof name)) snprintf(name,sizeof name,"cc%u:0x%x",kIOQcomCCGCC,localID);
++	if (!updateMeasure(regs,kMeasureMux,kGccDebugSrcSelMask,muxIndex&kGccDebugSrcSelMask,"mux-select")) return kIOReturnNotReady;
++	uint32_t shortCount=0,fullCount=0;
++	unsigned shortPolls=0,fullPolls=0;
++	IOReturn result=runMeasurement(regs,kGccMeasureTicksShort,&shortCount,&shortPolls);
++	if (result==kIOReturnSuccess) result=runMeasurement(regs,kGccMeasureTicksFull,&fullCount,&fullPolls);
++	if (result!=kIOReturnSuccess) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=cc%u:0x%x name=%s consumer=sweetclock-measure phase=measure result=%d detail=count-failed\n",
++		 kIOQcomCCGCC,localID,name,result);
++		return result;
++	}
++	uint64_t hz=gccMeasureRate(shortCount,fullCount);
++	bool running=hz!=0;
++	if (running!=runningExpected) {
++		result=kIOReturnNotReady;
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u:0x%x name=%s consumer=sweetclock-measure phase=measure result=%d mux=%#x ticks=%#x/%#x short=%u full=%u polls=%u/%u hz=%llu running=%u detail=%s\n",
++		 kIOQcomCCGCC,localID,name,result,muxIndex,kGccMeasureTicksShort,kGccMeasureTicksFull,
++		 shortCount,fullCount,shortPolls,fullPolls,(unsigned long long)hz,running?1u:0u,
++		 running?"running-unexpected":"not-running");
++	} else {
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u:0x%x name=%s consumer=sweetclock-measure phase=measure result=0 mux=%#x ticks=%#x/%#x short=%u full=%u polls=%u/%u hz=%llu running=%u post-div=%u multiplier=%u\n",
++		 kIOQcomCCGCC,localID,name,muxIndex,kGccMeasureTicksShort,kGccMeasureTicksFull,
++		 shortCount,fullCount,shortPolls,fullPolls,(unsigned long long)hz,running?1u:0u,
++		 kGccMeasurePostDiv,kGccMeasureMultiplier);
++	}
++	/* The C2-02 comparison the card asks for, on the same clock identity. */
++	IOQcomClockState state;
++	if (running&&copyClockState(localID,&state)==kIOReturnSuccess&&state.rateKnown&&state.configuredHz) {
++		int64_t delta=(int64_t)hz-(int64_t)state.configuredHz;
++		/* Both operands of the division must be signed: configuredHz is
++		 * unsigned, and a mixed division turns a small negative delta into a
++		 * huge unsigned value that would fail the tolerance check. */
++		int64_t ppm=delta*1000000/(int64_t)state.configuredHz;
++		if (ppm<0) ppm=-ppm;
++		if (ppm>kIOQcomGccMeasureTolerancePpm) {
++			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u:0x%x name=%s consumer=sweetclock-measure phase=measure-compare result=%d decoded-hz=%llu measured-hz=%llu delta-ppm=%lld tolerance-ppm=%d\n",
++			 kIOQcomCCGCC,localID,name,kIOReturnIOError,(unsigned long long)state.configuredHz,
++			 (unsigned long long)hz,(long long)((delta*1000000)/(int64_t)state.configuredHz),
++			 kIOQcomGccMeasureTolerancePpm);
++			if (result==kIOReturnSuccess) result=kIOReturnIOError;
++		} else {
++			SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u:0x%x name=%s consumer=sweetclock-measure phase=measure-compare result=0 decoded-hz=%llu measured-hz=%llu delta-ppm=%lld tolerance-ppm=%d\n",
++			 kIOQcomCCGCC,localID,name,(unsigned long long)state.configuredHz,
++			 (unsigned long long)hz,(long long)((delta*1000000)/(int64_t)state.configuredHz),
++			 kIOQcomGccMeasureTolerancePpm);
++		}
++	}
++	return result;
++}
++
++/* C2-08 entry: save, acquire the XO/4 reference through the C1-05 ledger, store
++ * the mux and the reference gate, measure the two declared samples, restore
++ * every stored register, release the reference. Without the ADT gate nothing
++ * here runs and no store exists. */
++IOReturn
++IOQcomGCC::measureClocks(void)
++{
++	if (!fMeasureEnabled) {
++		SWEET_LOG_DEBUG("SWEET CLOCK: planID=C2 resource=cc%u consumer=sweetclock-measure phase=measure result=%d detail=gate-absent\n",
++		 kIOQcomCCGCC,kIOReturnUnsupported);
++		return kIOReturnUnsupported;
++	}
++	if (!fMapped||!fRegistered||!fLock) return kIOReturnNotReady;
++	MeasureReg regs[kIOQcomGccMeasureRegCount];
++	IOReturn worst=kIOReturnSuccess;
++	IOReturn result=measureSave(regs,kIOQcomGccMeasureRegCount);
++	if (result!=kIOReturnSuccess) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=cc%u consumer=sweetclock-measure phase=measure result=%d detail=save-failed writes=%u\n",
++		 kIOQcomCCGCC,result,fWrites);
++		return result;
++	}
++	IOQcomClockProvider *entry=IOQcomClockProvider::publishedProvider();
++	uint32_t token=0;
++	bool opened=false;
++	IOReturn acquired=entry?entry->ledgerAcquire(kIOQcomCCGCC,kIOQcomGccMeasureReferenceLocalID,
++	 "sweetclock-measure",&token,&opened):kIOReturnNotReady;
++	if (acquired!=kIOReturnSuccess) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-measure phase=measure result=%d detail=ledger-refused writes=%u\n",
++		 kIOQcomCCGCC,kIOQcomGccMeasureReferenceLocalID,acquired,fWrites);
++		return acquired;
++	}
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=cc%u:0x%x consumer=sweetclock-measure phase=transition result=0 token=%u owner=%u\n",
++	 kIOQcomCCGCC,kIOQcomGccMeasureReferenceLocalID,token,opened?1u:0u);
++	uint32_t observed=0;
++	bool referenceRunning=false;
++	/* Only the holder that opened the demand stores the enable; a shared holder
++	 * inherits an already enabled branch and must not undo somebody else's. */
++	if (opened&&!updateMeasure(regs,kMeasureXo4,0u,kGccBranchEnable,"ref-gate")) {
++		worst=kIOReturnNotReady;
++	} else if (!readRegister(kGccWindowXoDiv4,kGccXoDiv4Offset,&observed)) {
++		worst=kIOReturnNotReady;
++	} else {
++		bool enabled=(observed&kGccBranchEnable)!=0;
++		bool off=(observed&kGccBranchClockOff)!=0;
++		referenceRunning=enabled&&!off;
++		if (referenceRunning) {
++			SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=cc%u:0x%x consumer=sweetclock-measure phase=running result=0 enable=1 off=0 value=%#x\n",
++			 kIOQcomCCGCC,kIOQcomGccMeasureReferenceLocalID,observed);
++		} else {
++			SWEET_LOG_WARN("SWEET CLOCK: planID=C1 resource=cc%u:0x%x consumer=sweetclock-measure phase=running result=%d enable=%u off=%u value=%#x detail=reference-not-running\n",
++			 kIOQcomCCGCC,kIOQcomGccMeasureReferenceLocalID,kIOReturnNotReady,enabled?1u:0u,off?1u:0u,observed);
++			if (worst==kIOReturnSuccess) worst=kIOReturnNotReady;
++		}
++		if (entry) entry->ledgerComplete(token,referenceRunning);
++	}
++	if (referenceRunning) {
++		/* Vendor order: mux select and post divider, then the debug branch. */
++		if (!updateMeasure(regs,kMeasureMux,kGccDebugSrcSelMask,
++		   kIOQcomGccMeasureRunningMux&kGccDebugSrcSelMask,"mux-select")
++		 || !updateMeasure(regs,kMeasurePost,kGccDebugPostDivMask,
++		   (kGccMeasurePostDiv-1u)&kGccDebugPostDivMask,"post-div")
++		 || !updateMeasure(regs,kMeasureDebugGate,0u,kGccBranchEnable,"debug-gate")) {
++			if (worst==kIOReturnSuccess) worst=kIOReturnNotReady;
++		} else {
++			IOReturn running=measureSample(regs,kIOQcomGccMeasureRunningLocalID,
++			 kIOQcomGccMeasureRunningMux,true);
++			IOReturn gated=measureSample(regs,kIOQcomGccMeasureOffLocalID,
++			 kIOQcomGccMeasureOffMux,false);
++			if (running!=kIOReturnSuccess&&worst==kIOReturnSuccess) worst=running;
++			if (gated!=kIOReturnSuccess&&worst==kIOReturnSuccess) worst=gated;
++		}
++	}
++	IOReturn restored=measureRestore(regs,kIOQcomGccMeasureRegCount);
++	uint32_t finalValue=0;
++	bool stopped=false;
++	if (readRegister(kGccWindowXoDiv4,kGccXoDiv4Offset,&finalValue)) {
++		stopped=(finalValue&kGccBranchEnable)==0;
++	}
++	bool lastHolder=false;
++	if (entry) (void)entry->ledgerRelease(token,stopped,&lastHolder);
++	if (!stopped) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C1 resource=cc%u:0x%x consumer=sweetclock-measure phase=release result=%d value=%#x detail=reference-still-enabled\n",
++		 kIOQcomCCGCC,kIOQcomGccMeasureReferenceLocalID,kIOReturnIOError,finalValue);
++		if (worst==kIOReturnSuccess) worst=kIOReturnIOError;
++	}
++	if (restored!=kIOReturnSuccess&&worst==kIOReturnSuccess) worst=restored;
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u consumer=sweetclock-measure phase=measure-done result=%d writes=%u restores=%u mismatches=%u hold=%u\n",
++	 kIOQcomCCGCC,worst,fWrites,kIOQcomGccMeasureRegCount,fRestoreMismatches,lastHolder?0u:1u);
++	return worst;
++}
++
+ bool
+ IOQcomGCC::start(IOService *provider)
+ {
+@@ -279,6 +655,9 @@ IOQcomGCC::start(IOService *provider)
+ 	}
+ 	fReads=0;
+ 	fReadFailures=0;
++	fWrites=0;
++	fWriteFailures=0;
++	fRestoreMismatches=0;
+ 	if (!mapWindows(provider)) {
+ 		unmapWindows();
+ 		IOLockFree(fLock);
+@@ -315,8 +694,16 @@ IOQcomGCC::start(IOService *provider)
+ 	}
+ 	fRegistered=true;
+ 	decodeSamples();
+-	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=0 variant=%#x\n",
+-	 kIOQcomCCGCC,kIOQcomGccWindowCount,kIOQcomGccSnapshotCount,fReads,kIOQcomGccVariantSm8150);
++	/* C2-08 last, so registration and the C2-02 decode exist before the first
++	 * store and a failed measurement cannot leave a half-published backend. */
++	IOReturn measured=measureClocks();
++	if (measured!=kIOReturnSuccess&&measured!=kIOReturnUnsupported) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=measure-incomplete measure-result=%d writes=%u\n",
++		 kIOQcomCCGCC,measured,fWrites);
++	}
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x\n",
++	 kIOQcomCCGCC,kIOQcomGccWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
++	 kIOQcomGccVariantSm8150);
+ 	return true;
+ }
+ 
+@@ -328,8 +715,8 @@ IOQcomGCC::stop(IOService *provider)
+ 		IOQcomClockProvider *entry=IOQcomClockProvider::publishedProvider();
+ 		if (entry) {
+ 			IOReturn result=entry->withdrawController(this);
+-			SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=stop result=%d reads=%u writes=0\n",
+-			 kIOQcomCCGCC,result,fReads);
++			SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=stop result=%d reads=%u writes=%u\n",
++			 kIOQcomCCGCC,result,fReads,fWrites);
+ 		}
+ 		fRegistered=false;
+ 	}
+diff --git a/iokit/Kernel/arm/IOQcomGCC.h b/iokit/Kernel/arm/IOQcomGCC.h
+index edc351b..d8ff28b 100644
+--- a/iokit/Kernel/arm/IOQcomGCC.h
++++ b/iokit/Kernel/arm/IOQcomGCC.h
+@@ -1,20 +1,30 @@
+-/* SM8150 GCC backend, read-only candidate C2-01/C2-02.
++/* SM8150 GCC backend: C2-01/C2-02 read-only candidate plus the C2-08
++ * debugcc measurement (the first candidate in this file that stores).
+  *
+  * Contract of this candidate, in one place:
+- *  - The backend maps exactly the four GCC pages this candidate reads, in the
+- *    ADT reg order, and validates every resolved physical address and length
+- *    before the first register read. A wrong window fails start; it never
+- *    degrades into a read of whatever memory happened to be mapped.
+- *  - Register access is a narrow, bounds-checked, read-only helper under one
+- *    IOLock with the platform-required read barrier. There is no write path in
+- *    this file at all, so the zero-write claim is structural.
++ *  - The backend maps exactly the four GCC pages it touches, in the ADT reg
++ *    order, and validates every resolved physical address and length before
++ *    the first register read. A wrong window fails start; it never degrades
++ *    into a read of whatever memory happened to be mapped.
++ *  - Register access is one narrow, bounds-checked, aligned helper under one
++ *    IOLock with the platform-required barriers. Reads have no store
++ *    counterpart anywhere else in the file, so the store set is exactly the
++ *    measurement sequence below and a write counter that cannot drift from it.
+  *  - Descriptors declare only what the vendor source declares: parents, halt
+  *    class and the supply domain that has an explicit vdd_class. Branches with
+  *    no declared domain report domain 0, not a guess.
+  *  - C2-02 decodes the one fixed-parent sample configuration. A decoded rate
+  *    is reported only when every parent rate in the path is trusted; anything
+  *    else is Unknown (configuredHz 0, rateKnown false), never the requested
+- *    value. No parent switching and no rate writes exist here.
++ *    value.
++ *  - C2-08 measures with the vendor debug mux (clk-debug.c run_measurement):
++ *    XO/4 branch as the counter reference, GCC debug mux select, post divider
++ *    and counter control. Every register it stores is saved first and restored
++ *    afterwards, and the restore is verified by reading the register back. A
++ *    short and a full measurement returning the same count means "the measured
++ *    clock is not running", which is reported as such and never as 0 Hz.
++ *  - The measurement is an ADT opt-in. Without the property the backend is
++ *    byte-for-byte the read-only C2-01/C2-02 backend: no store, writes=0.
+  *  - Nothing reconfigures a PLL, a reset or a GDSC, and the inherited display
+  *    branches stay somebody else's property: they are declared pinned. */
+ #ifndef IOQCOM_GCC_H
+@@ -40,6 +50,32 @@ enum : unsigned { kIOQcomGccSnapshotCount = 11 };
+ /* C2-02: only the fixed-parent sample (gcc_pdm2_clk_src) is decoded. */
+ enum : unsigned { kIOQcomGccSampleLocalID = 5, kIOQcomGccSampleHidWidth = 5 };
+ 
++/* C2-08: the two declared measurement samples. One is a running clock whose
++ * rate the C2-02 decoder already states (gcc_disp_xo_clk = XO = 19.2 MHz), the
++ * other is a clock the same snapshot shows gated (gcc_pdm2_clk), so both halves
++ * of the card's device check are one bounded sequence on one mux. The debug
++ * mux indices are the vendor debugcc-sm8150.c sel values, not device IDs. */
++enum : uint32_t {
++	kIOQcomGccMeasureRunningLocalID = 3,   /* gcc_disp_xo_clk */
++	kIOQcomGccMeasureRunningMux = 0x53,
++	kIOQcomGccMeasureRunningHz = 19200000,
++	kIOQcomGccMeasureOffLocalID = 6,       /* gcc_pdm2_clk, enable=0 off=1 */
++	kIOQcomGccMeasureOffMux = 0x9A,
++	kIOQcomGccMeasureReferenceLocalID = 4, /* gcc_pdm_xo4_clk, the XO/4 branch */
++};
++
++/* C2-08: tolerances. The vendor formula rounds to +-0.5 %; a rate outside one
++ * percent means the mux or the counter is wrong, not a rounding difference. */
++enum : int { kIOQcomGccMeasureTolerancePpm = 10000 };
++/* Bounded counter poll: 2500 x 10 us = 25 ms per run, far above the 14 ms a
++ * full measurement takes and far below a watchdog. The saved-register list is
++ * the whole debug block plus the XO/4 branch gate. */
++enum : unsigned {
++	kIOQcomGccMeasurePollTries = 2500,
++	kIOQcomGccMeasurePollDelayUs = 10,
++	kIOQcomGccMeasureRegCount = 5,
++};
++
+ /* Variant identity from the ADT property; a mismatched SoC must refuse. */
+ enum : uint32_t { kIOQcomGccVariantSm8150 = 0x8150 };
+ 
+@@ -51,17 +87,46 @@ class IOQcomGCC : public IOQcomClockController {
+ 		IOVirtualAddress base;  /* kernel virtual base, 0 when unmapped */
+ 		IOMemoryMap *map;       /* owned mapping, released on stop/free */
+ 	};
++	/* One register the measurement stores and must put back. */
++	struct MeasureReg {
++		unsigned window;
++		uint32_t offset;
++		uint32_t saved;
++		bool valid;
++		bool stored;
++	};
+ 	IOLock *fLock;
+ 	Window fWindow[kIOQcomGccWindowCount];
+ 	struct { uint64_t value; bool valid; } fSnapshot[kIOQcomGccSnapshotCount];
+ 	unsigned fReads, fReadFailures;
++	unsigned fWrites, fWriteFailures, fRestoreMismatches;
+ 	bool fMapped, fRegistered;
++	bool fMeasureEnabled;
+ 	bool validateProperties(IOService *provider);
+ 	bool mapWindows(IOService *provider);
+ 	void unmapWindows(void);
+ 	bool readRegister(unsigned window, uint32_t offset, uint32_t *value);
++	/* C2-08: the only store path. It re-checks bounds and alignment exactly as
++	 * the read does, logs one row per store so the ring can be reconciled with
++	 * the counter, and never retries: a failed store is a failed store. */
++	bool writeRegister(unsigned window, uint32_t offset, uint32_t value, const char *stage);
++	/* Every measurement store goes through one of these two, so the stored set
++	 * is exactly the registers they mark for restore. */
++	bool storeMeasure(MeasureReg *regs, unsigned index, uint32_t value, const char *stage);
++	bool updateMeasure(MeasureReg *regs, unsigned index, uint32_t clearMask,
++	 uint32_t setMask, const char *stage);
+ 	void takeSnapshot(void);
+ 	void decodeSamples(void);
++	/* C2-08 measurement. Returns kIOReturnSuccess when every sample produced a
++	 * verdict, kIOReturnUnsupported when the gate is absent (no store at all),
++	 * and the first failing reason otherwise. */
++	IOReturn measureClocks(void);
++	IOReturn measureSave(MeasureReg *regs, unsigned count);
++	IOReturn measureRestore(MeasureReg *regs, unsigned count);
++	IOReturn runMeasurement(MeasureReg *regs, uint32_t ticks, uint32_t *count,
++	 unsigned *polls);
++	IOReturn measureSample(MeasureReg *regs, uint32_t localID, uint32_t muxIndex,
++	 bool runningExpected);
+ public:
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
+@@ -70,9 +135,9 @@ public:
+ 	IOReturn copyClockInfo(uint32_t localID, IOQcomClockInfo *info) APPLE_KEXT_OVERRIDE;
+ 	IOReturn copyClockState(uint32_t localID, IOQcomClockState *state) APPLE_KEXT_OVERRIDE;
+ 	bool copyClockName(uint32_t localID, char *buffer, unsigned size) APPLE_KEXT_OVERRIDE;
+-	/* No write path exists in this candidate, so the count is a constant and
+-	 * cannot drift away from the code the way a counter would. */
+-	uint64_t registerWrites(void) const APPLE_KEXT_OVERRIDE { return 0; }
++	/* C2-08: the measured stores are counted, so the ring's write rows and this
++	 * number are the same set. Zero without the ADT gate. */
++	uint64_t registerWrites(void) const APPLE_KEXT_OVERRIDE { return fWrites; }
+ 	unsigned registerReads(void) const { return fReads; }
+ };
+ 

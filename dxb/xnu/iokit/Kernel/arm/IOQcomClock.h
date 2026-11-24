@@ -43,6 +43,25 @@ struct IOQcomClockInfo {
  bool pinned;                /* inherited/critical: never a disable candidate */
  bool inheritedOn;           /* enable bit observed at controller start */
 };
+/* C1-05 demand ledger. It records what consumers asked for, what the provider
+ * still owes them and what the hardware confirmed; it is demand accounting, not
+ * a rate formula and not a second copy of any controller's state. One hardware
+ * transition serves every holder of a resource: the second acquire only raises
+ * the holder count and never re-issues the transition. A token belongs to the
+ * registration generation it was granted under, so a token from a withdrawn
+ * controller is refused rather than applied to a replacement. */
+enum : unsigned { kIOQcomLedgerEntries=8, kIOQcomLedgerHolders=4 };
+enum : uint32_t { kIOQcomLedgerDesired=1u<<0, kIOQcomLedgerPending=1u<<1,
+ kIOQcomLedgerConfirmed=1u<<2 };
+struct IOQcomClockLedgerState {
+	uint32_t controller, localID;   /* resource identity: never a rate, never a name */
+	uint32_t token;                 /* the token this view was asked about, 0 = aggregate */
+	uint32_t holders;               /* distinct consumers currently holding it */
+	uint32_t desired, pending, confirmed; /* logical demand, in-flight work, hardware verdict */
+	uint64_t generation;            /* registration generation of the resource */
+	uint64_t transitions;           /* accepted logical transitions, not writes */
+	uint64_t confirmations;         /* transitions the hardware verdict closed */
+};
 /* C2-02 query: configured (decoded) state, never a measured rate. */
 struct IOQcomClockState {
  uint32_t raw[2];            /* branch: CBCR; RCG: CMD, CFG */
@@ -119,7 +138,22 @@ class IOQcomClockProvider : public IOService {
  /* Zero-write evidence: the sum reported by every registered backend and the
   * number of registrations that produced it. */
  uint64_t registeredWrites(void);
- unsigned registeredControllers(void);
+	unsigned registeredControllers(void);
+	/* C1-05 ledger. Fixed table, touched only under fLock; acquire is refused
+	 * when the resource's controller is not live, and a token belongs to the
+	 * registration generation it was granted under. */
+	struct LedgerEntry {
+		uint32_t controller, localID;
+		uint32_t tokens[kIOQcomLedgerHolders]; /* 0 = free slot */
+		uint32_t holders, desired, pending, confirmed;
+		uint64_t generation, transitions, confirmations;
+		bool active;
+	};
+	LedgerEntry fLedger[kIOQcomLedgerEntries];
+	uint32_t fNextLedgerToken;
+	LedgerEntry *ledgerEntry(uint32_t controller, uint32_t localID, uint64_t generation, bool create);
+	LedgerEntry *ledgerToken(uint32_t token, unsigned *index);
+	void ledgerForget(uint32_t controller);
  static void diagnose(thread_call_param_t,thread_call_param_t);
  void runDiagnostics(void);
 public:
@@ -144,6 +178,18 @@ public:
  IOReturn checkDependencies(IOQcomClockHandle *handle,uint32_t *reason);
  IOReturn admit(IOQcomClockController *owner,uint32_t localID,const char *consumer,
   IOQcomClockInfo *info,uint32_t *reason,bool requirements);
+ /* C1-05 public side, for a controller that needs a clock on while it does
+  * work (the C2-08 measurement's XO/4 counter reference). The ledger tracks
+  * demand only: it issues no store, and a second holder of the same resource
+  * raises the count without opening a second transition. */
+ IOReturn ledgerAcquire(uint32_t controller,uint32_t localID,const char *consumer,
+  uint32_t *token,bool *openedTransition);
+ IOReturn ledgerComplete(uint32_t token,bool confirmed);
+ /* stopped is the executor's hardware verdict after it restored the resource;
+  * lastHolder reports whether this was the final holder. */
+ IOReturn ledgerRelease(uint32_t token,bool stopped,bool *lastHolder);
+ IOReturn ledgerInspect(uint32_t controller,uint32_t localID,uint32_t token,
+  IOQcomClockLedgerState *state);
 };
 
 #endif /* ARM64_BOARD_CONFIG_MH2LM */

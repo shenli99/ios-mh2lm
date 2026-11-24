@@ -656,6 +656,108 @@ int main(){
   h->release();
   p->stop(n);p->release();n->release();c->release();assert(!live);
  }
+ /* ---- C1-05 demand ledger: one transition per shared demand ---- */
+ {
+  auto*n=nub();auto*p=startProvider(n);
+  auto*c=addController(p,kIOQcomCCGCC);
+  uint32_t t1=0,t2=0;bool opened=false,last=false;
+  IOQcomClockLedgerState st;
+  assert(p->ledgerAcquire(kIOQcomCCGCC,3,"ledger-a",&t1,&opened)==kIOReturnSuccess);
+  assert(opened&&t1);
+  assert(logged("consumer=ledger-a phase=acquire result=0 token="));
+  assert(logged("transition=new"));
+  assert(p->ledgerInspect(kIOQcomCCGCC,3,0,&st)==kIOReturnSuccess);
+  assert(st.controller==kIOQcomCCGCC&&st.localID==3&&st.token==0);
+  assert(st.holders==1&&st.desired==1&&st.pending==1&&st.confirmed==0);
+  assert(st.transitions==1&&st.confirmations==0);
+  /* a second consumer of the same clock shares the one transition */
+  assert(p->ledgerAcquire(kIOQcomCCGCC,3,"ledger-b",&t2,&opened)==kIOReturnSuccess);
+  assert(!opened&&t2&&t2!=t1);
+  assert(logged("consumer=ledger-b phase=acquire result=0 token="));
+  assert(logged("transition=shared"));
+  assert(p->ledgerInspect(kIOQcomCCGCC,3,t2,&st)==kIOReturnSuccess);
+  assert(st.token==t2&&st.holders==2&&st.desired==1&&st.transitions==1);
+  /* the hardware verdict is what turns a demand into a confirmation */
+  assert(p->ledgerComplete(t1,true)==kIOReturnSuccess);
+  assert(logged("phase=confirm result=0 token="));
+  assert(p->ledgerInspect(kIOQcomCCGCC,3,0,&st)==kIOReturnSuccess);
+  assert(st.pending==0&&st.confirmed==1&&st.confirmations==1&&st.desired==1);
+  assert(p->ledgerRelease(t1,true,&last)==kIOReturnSuccess&&!last);
+  assert(p->ledgerInspect(kIOQcomCCGCC,3,0,&st)==kIOReturnSuccess);
+  assert(st.holders==1&&st.desired==1&&st.confirmed==1);	/* still owed by ledger-b */
+  assert(p->ledgerRelease(t2,true,&last)==kIOReturnSuccess&&last);
+  assert(p->ledgerInspect(kIOQcomCCGCC,3,0,&st)==kIOReturnSuccess);
+  assert(st.holders==0&&st.desired==0&&st.pending==0&&st.confirmed==0);
+  assert(st.transitions==2&&st.confirmations==2);
+  assert(!writes());
+  /* a refused verdict is recorded, never promoted to a confirmation */
+  assert(p->ledgerAcquire(kIOQcomCCGCC,4,"ledger-verdict",&t1,&opened)==kIOReturnSuccess&&opened);
+  assert(p->ledgerComplete(t1,false)==kIOReturnNotReady);
+  assert(logged("phase=confirm result=1 token=")&&logged("detail=not-confirmed"));
+  assert(p->ledgerInspect(kIOQcomCCGCC,4,0,&st)==kIOReturnSuccess);
+  assert(st.pending==0&&st.confirmed==0&&st.confirmations==0);
+  /* an executor that cannot stop the clock leaves the demand owed */
+  assert(p->ledgerRelease(t1,false,&last)==kIOReturnIOError&&last);
+  assert(logged("detail=hardware-still-on"));
+  assert(p->ledgerInspect(kIOQcomCCGCC,4,0,&st)==kIOReturnSuccess);
+  assert(st.desired==0&&st.pending==1&&st.confirmed==0);
+  /* a re-registration voids the demand but keeps the audit history */
+  uint64_t stale=++p->fSlots[kIOQcomCCGCC].generation;
+  assert(p->ledgerAcquire(kIOQcomCCGCC,4,"ledger-generation",&t1,&opened)==kIOReturnSuccess&&opened);
+  assert(logged("detail=stale-generation"));
+  assert(p->ledgerInspect(kIOQcomCCGCC,4,0,&st)==kIOReturnSuccess);
+  assert(st.generation==stale&&st.holders==1&&st.pending==1&&st.confirmed==0);
+  assert(st.transitions==3&&st.confirmations==0);	/* 1 new, 1 release, 1 new again */
+  assert(p->ledgerRelease(t1,true,&last)==kIOReturnSuccess&&last);
+  /* withdrawal drops the entries of that controller */
+  assert(p->ledgerAcquire(kIOQcomCCGCC,5,"ledger-withdraw",&t1,&opened)==kIOReturnSuccess&&opened);
+  dropController(p,c);
+  assert(p->ledgerInspect(kIOQcomCCGCC,5,0,&st)==kIOReturnNotFound);
+  assert(p->ledgerInspect(kIOQcomCCGCC,5,t1,&st)==kIOReturnNotFound);
+  assert(p->ledgerAcquire(kIOQcomCCGCC,5,"ledger-after",&t1,&opened)==kIOReturnNotReady);
+  assert(!opened&&t1==0);
+  assert(!writes());
+  p->stop(n);p->release();n->release();assert(!live);
+ }
+ /* ---- C1-05 refusals and the holder cap ---- */
+ {
+  auto*n=nub();auto*p=startProvider(n);
+  auto*c=addController(p,kIOQcomCCGCC);
+  uint32_t t=0;bool opened=false,last=false;
+  IOQcomClockLedgerState st;
+  assert(p->ledgerAcquire(0,1,"cap-a",&t,&opened)==kIOReturnBadArgument);
+  assert(p->ledgerAcquire(kIOQcomCCMax,1,"cap-b",&t,&opened)==kIOReturnBadArgument);
+  assert(p->ledgerAcquire(kIOQcomCCGCC,1,NULL,&t,&opened)==kIOReturnBadArgument);
+  assert(p->ledgerAcquire(kIOQcomCCGCC,1,"cap-c",NULL,&opened)==kIOReturnBadArgument);
+  assert(p->ledgerAcquire(kIOQcomCCGCC,1,"cap-d",&t,NULL)==kIOReturnSuccess);
+  assert(p->ledgerComplete(0,true)==kIOReturnBadArgument);
+  assert(p->ledgerComplete(0xdeadbeefu,true)==kIOReturnNotFound);
+  assert(logged("phase=confirm result=10 token="));
+  assert(p->ledgerRelease(0,true,&last)==kIOReturnBadArgument);
+  assert(p->ledgerRelease(0xdeadbeefu,true,&last)==kIOReturnNotFound);
+  assert(logged("phase=release result=10 token="));
+  assert(p->ledgerInspect(kIOQcomCCGCC,1,0,NULL)==kIOReturnBadArgument);
+  assert(p->ledgerInspect(kIOQcomCCGCC,1,0xdeadbeefu,&st)==kIOReturnNotFound);
+  assert(p->ledgerRelease(t,true,&last)==kIOReturnSuccess&&last);
+  /* four holders is the whole table for one clock */
+  for(unsigned i=0;i<kIOQcomLedgerHolders;i++)
+   assert(p->ledgerAcquire(kIOQcomCCGCC,6,"cap-holder",&t,&opened)==kIOReturnSuccess);
+  assert(!opened);
+  assert(p->ledgerAcquire(kIOQcomCCGCC,6,"cap-overflow",&t,&opened)==kIOReturnNoResources);
+  assert(p->ledgerInspect(kIOQcomCCGCC,6,0,&st)==kIOReturnSuccess);
+  assert(st.holders==kIOQcomLedgerHolders);
+  /* the table is finite: fresh clocks fill it, then a new one is refused */
+  bool overflow=false;
+  for(unsigned i=0;i<kIOQcomLedgerEntries+1;i++) {
+   IOReturn r=p->ledgerAcquire(kIOQcomCCGCC,0x100+i,"cap-table",&t,&opened);
+   if(r==kIOReturnNoResources) { overflow=true; break; }
+   assert(r==kIOReturnSuccess);
+  }
+  assert(overflow);		/* holders and clocks both exhaust the fixed table */
+  assert(p->ledgerAcquire(kIOQcomCCGCC,0x200,"cap-full",&t,&opened)==kIOReturnNoResources);
+  assert(!writes());
+  p->stop(n);p->release();n->release();assert(!live);	/* addController lent c to the provider */
+ }
  assert(!live&&rawBlocks==0);
  printf("PASS: actual C1 clock entry; opt-in ADT-matched lifecycle, registration/collision/generation, "
         "read-only name-to-handle binding with 13 malformed-binding refusals, admission reasons "
@@ -663,7 +765,9 @@ int main(){
         "admission-before-capability ordering, pinned-disable refusal, backend propagation, "
         "gate-free re-entrancy and self-withdraw, bounded token wrap, idempotent stop, "
         "generation restart, opt-in diagnostics from the argument list or the device tree, "
-        "truthful declared-binding count, zero MMIO writes\n");
+        "truthful declared-binding count, the multi-consumer demand ledger (one transition per "
+        "shared demand, verdict-gated confirmation, owed demand when the clock cannot be stopped, "
+        "generation voiding, withdrawal cleanup, holder and table caps), zero MMIO writes\n");
  return 0;
 }
 '''
