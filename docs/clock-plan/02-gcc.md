@@ -57,6 +57,7 @@
 - **实机检验**：使用 C2-03 已验 enable，单独触发 disable，观察本卡 write／halt／complete；再用已验 enable 恢复并检查回归。
 - **预期结果**：普通 branch 的一次完整撤回可验；没有公共自动关钟策略。
 - **失败归属**：C2-04 permission／disable-write／halt-wait；enable 前置未成立不算本卡执行失败。
+- **状态**：实机通过（0132 门控＋关钟档，补丁 `0239`，见本文件末节）。
 
 ### C2-05 增加同一 branch 的多消费者引用
 
@@ -264,3 +265,25 @@
 - **默认档回归（同一内核，去掉两个开关）**：`boot-16k-0131-gpioirq-panel-pipeline.img`（ADT `081f63dc…`，`sweet,clock-gate`／`sweet,clock-measure` 各 0 条）实机进桌面，环 `logs/sweetlog-0131-1.bin`（`13e8c739…`，`total=1092625`，未回绕）。审计 `--c2-03`：**rc=0、`verdict=pass`**（`--strict` 亦过），26 条时钟行、`writes=0`、`reads=19`、`maps=4`、`snapshot=11`、`decode=7`、`decode-sample 19200000`，非时钟 WARN 与面板标记均等于 b32，无 `gate`／`write-issued`／`measure`／`restore`／`acquire`／`release` 行。即 `0238` 只改了声明，无开关路径一次写都没多。
 - **审计命令的一个细节**：`0237` 之后描述表是 7 条，默认档环也必须带 `--c2-03`（该旗标表示“这棵内核声明第 7 个描述符”，与是否开门控开关无关）；不带它，`artifact-0126` 的基线期望仍是 6 条，会在 `decode` 计数上直接断言失败——这不是设备问题。
 - **结论**：C2-03 的两半——门控行为与父源身份——现在都有实机证据，且第二轮证据是**在修正之后独立取得**的。0237／0238 一并收口，下一张卡是 C2-04（关闭路径）与 C2-05（共享）。
+
+## 本候选实现（C2-04 关钟＋恢复，补丁 0239）
+
+实现文件：[IOQcomGCC.h](../../dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h)、[IOQcomGCC.cpp](../../dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp)、[mk-mh2lm-mdss-adt.py](../../tools/mk-mh2lm-mdss-adt.py)。C2-03 留下的样本是一条**只进不出**的需求：门开了、token 还挂着、`0x133008` 一直 `enable=1`，要靠重启才能回到原状。C2-04 把“退回这条需求”做成一条经过校验的路径——先确认这条 branch 确实是本驱动自己打开的，再只撤掉本驱动那一位，等硬件自己报 halt，最后把已验证的开钟路径再跑一遍，使开机终态与 C2-03 基线逐值相同。
+
+- **关钟契约（`disableClocks()`，紧跟 `gateClocks()` 之后、`measureClocks()` 之前）**：守卫（有 provider、`fGateTokenHeld`、token 非零）→ 读 CBCR（`phase=disable-request`，打印 `enable`／`off`／`value`）→ 若已 halt（`detail=already-halted`）或未使能（`detail=not-enabled`）则不写、不释放 → 先抓四个邻位（`gateNeighbours(true, "sweetclock-disable")`）→ 只写 `saved & ~kGccBranchEnable`（`stage=disable`，走同一个 `writeRegister`：对齐／越界拒绝、`dmb oshst`→store→`dsb osh`）→ 以 bit31 `CLK_OFF` 置起作为 halt 判决（同一 `2500×10 µs` 上限，`phase=halt`，`polls` 可对账）→ 再读四邻位比对（`phase=disable-check changed=0`）→ 账本 `ledgerRelease(token, stopped=true)`：凭据的归还是**以 halt 为确认**的，而不是无条件的“我要还” → `phase=disable-done writes=2 … hold=0 last-holder=1 detail=sample-halted` → 随即 `gateClocks()` 恢复（新 token）并进入测量。
+- **拒绝与失败归属**：`no-token`／`provider-absent`（`NotReady`，不写）、`already-halted`／`not-enabled`（不写不释放，也不掩盖异常）、`halt-read-failed`（轮询自身读失败）、`halt-timeout`（2500 次仍未见到 `CLK_OFF`：**保留已写的撤回状态，不写回、不释放**，`phase=disable-done … hold=1`，`start()` 收尾补 `WARN detail=disable-incomplete`）、`neighbour-changed`（四邻位在 halt 期间被人动过：保留而不“帮它修回去”，`IOError`）、`ledger-release-failed`。
+- **“不撤销不记账的 store”是本卡的核心边界**：halt 超时或邻位漂移时，撤回位已经写出去了，但硬件没有按预期 halt、或周围状态已不可信；此时任何“写回去装作没发生”的动作都会把未知状态变成已知错误。本卡因此只保留、只报错，把修复留给重启，与 C2-03 超时语义同构。
+- **为什么要恢复**：开机终态必须与 C2-03 基线一致（`0x133008` 为 `enable=1 off=0`），否则下一次开机的门控样本与测量第三源都不成立。恢复走的是同一个已验 `gateClocks()`，不是另一段手写 enable，因此账本会看到第二次 acquisition（`token=2`、`transitions=3 transition=new`）与第三次 confirmation。
+- **opt-in 与合成树**：`--clock-disable` 隐含 `--clock-gate`（生成器与后端同时强制；只有 `sweet,clock-disable` 而缺 `sweet,clock-gate` 时后端打印 `WARN detail=clock-disable-needs-gate clock-gate=0 clock-disable=1` 且不进入关钟）。门控＋关钟树 `b1716968…`（23648 字节）、门控＋关钟＋测频树 `a043901b…`（23688 字节）；默认／测量／诊断／门控／门控＋测频五棵树逐字节不变，参数表仍 605 字节。
+- **证据（主机）**：`tools/tests/test-mh2lm-gcc-backend.py dxb/xnu` 通过——happy path 断言 `fReads==49`、三次 store（`0x80000001`／`0x0`／`0x80000001`）、终态寄存器回到 `0x80000001` 且 `hold=1`；halt 超时断言 `polls=2500 writes=2 hold=1` 且寄存器停在 `0x0`；邻位漂移与 release 被拒各有一条。`tools/tests/test-mh2lm-mdss-adt.py` 增 4 项（两条属性的隐含关系、可加性、可逐条去掉、CLI 与库的字节等价）。补丁 `0239` 在基线 `93878eb` 上严格重放 5/5 `SAME`。
+- **审计器**：`audit-clock-log.py --gate --c2-04 --c2-03` 新增第三人格，读账算成 `19 + (10+polls_g) + (10+polls_d) + (10+polls_r)`，即 **`49+polls`、三次 store**；`selftest-disable-auditor.py` 用 0131-1 真实环造的同形环跑 14 个变体（超时／读失败／已停／未使能／邻位漂移／release 被拒／恢复未完成，以及把故障行降成 `INFO` 的四个 `silent-*`），全部按语义拒绝。**设备纠正过一处模型**：恢复段 `acquire` 打印的 `transitions` 是 3——账本把每次 acquisition 记作一次 transition（门控、halt 那次归还、这次恢复），审计器与合成环已据此更正。
+
+## 实机验收（0132 门控＋关钟档：一次开机里开、关、再开，`pass`）
+
+- **镜像与环**：`boot-16k-0132-gpioirq-panel-pipeline-clockgatedisable.img`（`c2f4f6f4…`；载荷 `kernel.macho` `dfcf79e5…`、`kernel.macho.adt` `b1716968…`）；环 `logs/sweetlog-0132-1.bin`（`c24406ba…`，`total=1006585`，`flush_sequence=8`，未回绕）。审计 `--gate --c2-04 --c2-03 --strict`：**rc=0、`verdict=pass`**，51 条时钟行、`clock_warn=0`、`clock_error=0`。
+- **一条完整的关钟链**：`gate clock-measure=0 clock-gate=1 clock-disable=1` → 门控段与 0130／0131 逐字相同（`request value=0x80000000`、`write=1 value=0x80000001`、`running value=0x1 polls=0`、`changed=0`、`hold=1`）→ `disable-request enable=1 off=0 value=0x1`（硬件在 enable 之后已清掉 `CLK_OFF`，所以请求读到的不是快照值）→ `write-issued stage=disable write=2 value=0` → `halt result=0 enable=0 off=1 value=0x80000000 polls=0`（**首读即 halt**，与开钟首读即运行为对称）→ `disable-check neighbours=4 changed=0` → `release token=1 holders=0 desired=0 pending=0 confirmed=0 transitions=2 confirmations=2` → `disable-done writes=2 neighbours=4 changed=0 polls=0 hold=0 last-holder=1 detail=sample-halted`。
+- **同一开机内的恢复**：`request value=0x80000000`（又回到快照值）→ `acquire token=2 … transitions=3 transition=new` → `write-issued write=3 value=0x80000001` → `running value=0x1 polls=0` → `confirm confirmations=3` → `gate-check changed=0` → `completed token=2 detail=sample-kept-until-reboot` → `gate-done writes=3 hold=1`；收尾 `resource=cc1 phase=start … windows=4 snapshot=11 reads=49 writes=3 variant=0x8150`。读数正好是 C2-03 默认档的 19 加三段各 10：`19+10+10+10=49`，写入 `1+1+1=3`。
+- **账本语义（本卡真正被验证的部分）**：释放只有一次，且带 halt 作确认（`stopped=true` → `transitions=2 confirmations=2`，不是 `IOError hardware-still-on`）；随后同一资源被重新取得（新 token、`transitions=3`），全天一条 `release` 行——这就是“需求被交还、而不是被丢弃”。
+- **非时钟回归**：`SWEET FB SCANOUT`×3、`SWEET USB`×2，与 0127／0130 各环同形，无新 WARN 种类、无 ERROR；触摸标记（`touch_armed` 2 对 b32 的 4、`touch_app_format` 1 对 3）是所有设备环共有的既有差异，不是本卡引入。
+- **首次拉环作废的教训**：第一次的 `logs/sweetlog-0132-0.bin`（`04975515…`，`total=5089694`）已回绕——4 MiB 里有 **4105748 B／54023 行**是 `IOWorkLoop::threadMain()` 每次线程重入打的那条 `SWEET IOWORKLOOP: thread …`，占 98%，开机最早写入的时钟行全被挤掉（`SWEET CLOCK` 0 行）。该环仍证明设备健康（`SWEET MDSS IRQ … window-ms=60096 frames=3600 milli-hz=59903 dropped=0`、`SWEET FB PERF swaps=22`、`SWEET TOUCH IRQ reports=1`×17、`SpringBoard`／`backboardd` 均在跑）。结论：**环要在开机进桌面后几十秒内导**；那条打印应改成限频或只在首个 loop 打一次，留待下一轮镜像顺手处理，不影响本卡结论。
+- **结论**：C2-04 的写到 halt、halt 到账本确认、确认到恢复三段，都在同一台设备同一次开机里完成，且恢复后的终态与 C2-03 基线逐值相同。下一张卡是 C2-05（同一 branch 的多消费者共享）。

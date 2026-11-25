@@ -32,9 +32,9 @@
 | 排除理由 | 不选 UFS／USB／QUP／DISP 等任何有 DTB 消费者或 C0-02 中有继承依赖的 branch |
 | 父源／电源凭据 | CXO 同 S1；GCC 常供电；不需要 GDSC |
 | 原状态 | **0126 实测 OFF**（`0x33008`＝`0x80000000`：off=1、enable=0），0130 门控档的重读必须仍是这一值（`phase=request result=0 enable=0 off=1 value=0x80000000`）。若变 ON 则说明有未知使用者，S2 作废，改选下一候选 `gcc_pdm2_clk`（0x3300c，但有 RCG 父源，需额外确认 0x33xxx RCG 已配置） |
-| 允许动作 | 原为 OFF 时：enable → 等 CLK_OFF 清零 → debugcc 测得 ≈19.2 MHz → disable → 等 CLK_OFF 置位 → debugcc 得 NotRunning。C2-03 只做前半段（enable → 等 halt 清零 → 留样本到重启），disable 归 C2-04；实测 19.2 MHz 已被 0130-1／0131 两轮计数确认（19199963／19200036） |
-| 停止条件 | CLK_OFF 等待有界；超时保留所有权并报告 Uncertain |
-| 结论 | **可实施**（0126 已观测 OFF）；0128 已作为关闭样本测得 `hz=0 running=0`；0130 执行 C2-03 enable 与门控并通过；0130-1 在此基础上把该 branch 当作第三路测量源，测得 `19200036`（对照声明值 4800000 即 ×4），据此把父源改正为 XO（0238） |
+| 允许动作 | 原为 OFF 时：enable → 等 CLK_OFF 清零 → debugcc 测得 ≈19.2 MHz → disable → 等 CLK_OFF 置位 → debugcc 得 NotRunning。C2-03 只做前半段（enable → 等 halt 清零 → 留样本到重启），disable 归 C2-04（0132 已做：撤回一位 → 首读即见 `CLK_OFF` 置位 → 账本以 halt 作确认归还 → 同一开机内用已验 enable 恢复到原值）；实测 19.2 MHz 已被 0130-1／0131 两轮计数确认（19199963／19200036） |
+| 停止条件 | CLK_OFF 等待有界；超时保留所有权并报告 Uncertain。C2-04 的 halt 超时或四邻位漂移只保留已写状态并报错，绝不写回去 |
+| 结论 | **可实施**（0126 已观测 OFF）；0128 已作为关闭样本测得 `hz=0 running=0`；0130 执行 C2-03 enable 与门控并通过；0130-1 在此基础上把该 branch 当作第三路测量源，测得 `19200036`（对照声明值 4800000 即 ×4），据此把父源改正为 XO（0238）；0132 完成 C2-04，同一次开机内 enable→halt→归还→再 enable，收尾 `writes=3`、恢复到 `enable=1 off=0` |
 
 “DTB 无引用”只能排除 Linux 消费者，不能排除固件／TZ 使用。保护措施：只在原状态 OFF 时动作，且只操作 bit0。
 

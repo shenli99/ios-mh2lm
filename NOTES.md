@@ -8,6 +8,22 @@
 
 NEXT：所有时钟实施卡仍未开始，后续实施从 C0-01 基线锁定，再做 C0-02 writer／依赖表、C0-04 需求清单、C0-05 控制器范围和 C0-03 安全样本调查。本轮只编制和审查计划、同步文档入口并本地提交，没有修改生产代码、CI、固件、ADT 或启动参数，没有新内核／镜像／实机结果，不需重编或重测 b32。最新普通实机基线仍为 b32／`b3f735b`，保留 b31r2／b30 回退。
 
+## 首个“为关钟而写钟”的候选：C2-04 关钟＋恢复（2026-11-25，补丁 0239，0132 实机通过）
+
+C2-03 的样本是一条**只进不出**的需求：门开了、token 挂着、`0x133008` 一直到重启都是 `enable=1`。C2-04 要做的是“把这条需求交还”，而不是“把某个寄存器清掉”——差别在账本：归还要以 halt 为确认（`ledgerRelease(token, stopped=true)` → `transitions=2 confirmations=2`），不能像不知情那样还回去（那会得到 `IOError detail=hardware-still-on`）。
+
+**写之前先认领，写之后不掩盖。** `disableClocks()` 只在持有 token 且 branch 仍带着本驱动的 enable 时写；撤回的只是 `saved & ~kGccBranchEnable` 一位，走同一个 `writeRegister`（`stage=disable`）；halt 的判据是 bit31 `CLK_OFF` 置起，与开钟共用 `2500×10 µs` 上限。超时或四邻位在 halt 期间被改，就**只保留、只报错**，绝不把已经写出去的位再写回去——那会把未知状态变成已知错误。四个邻位在 store **之前**抓，与 C2-03 同序。
+
+**恢复不是礼貌，是前提。** 开机终态必须与 C2-03 基线逐值相同（`0x133008` 为 `enable=1 off=0`），否则下一轮的门控样本与测量第三源都不成立。恢复直接复用已验的 `gateClocks()`，所以账本里出现第二次 acquisition（`token=2`、`acquire … transitions=3 transition=new`）与第三次 confirmation，全天只有一条 `release`。
+
+**opt-in 只加一条属性。** `sweet,clock-disable`（4 字节，隐含 `sweet,clock-gate`，生成器与后端同时强制；缺 gate 时 WARN `detail=clock-disable-needs-gate` 且不进入）。门控＋关钟树 `b1716968…`（23648 字节）、门控＋关钟＋测频树 `a043901b…`（23688 字节）；其余五棵树逐字节不变，参数表仍 605 字节。
+
+**0132 怎么看结果**（环 `logs/sweetlog-0132-1.bin`，`c24406ba…`，`total=1006585`，未回绕；镜像 `boot-16k-0132-gpioirq-panel-pipeline-clockgatedisable.img`，`c2f4f6f4…`，载荷 `kernel.macho` `dfcf79e5…`／`kernel.macho.adt` `b1716968…`）：审计 `--gate --c2-04 --c2-03 --strict` **rc=0、`verdict=pass`**，51 行、零时钟 WARN／ERROR。链是 gate（与 0130／0131 逐字相同）→ `disable-request enable=1 off=0 value=0x1` → `write-issued stage=disable write=2 value=0` → `halt enable=0 off=1 value=0x80000000 polls=0`（首读即停，与开钟首读即运行对称）→ `disable-check changed=0` → `release token=1 … transitions=2 confirmations=2` → `disable-done writes=2 hold=0 last-holder=1 detail=sample-halted` → 恢复 `request value=0x80000000`／`acquire token=2 transitions=3`／`write=3 value=0x80000001`／`running polls=0`／`confirm confirmations=3`／`gate-done writes=3 hold=1` → 收尾 `reads=49 writes=3`（19＋三段各 10、写 1+1+1）。设备还纠正了审计器一处模型：恢复段 `acquire` 的 `transitions` 是 3，不是 2——账本把每次 acquisition 记作一次 transition。
+
+**拉环时间是个坑。** 第一次的 `logs/sweetlog-0132-0.bin`（`04975515…`，`total=5089694`）已回绕：4 MiB 里 98%（4105748 B／54023 行）是 `IOWorkLoop::threadMain()` 每次线程重入打的那行 `SWEET IOWORKLOOP: thread …`，开机最早写入的时钟行被整段挤掉（`SWEET CLOCK` 0 行）。该环仍证明设备健康（`MDSS IRQ … window-ms=60096 frames=3600 milli-hz=59903 dropped=0`、`FB swaps=22`、`touch reports=1`×17、`SpringBoard`／`backboardd` 在跑）。两条结论：环要在进桌面后几十秒内导；那条打印该限频或只在首个 loop 打一次，留待下轮镜像顺手处理，不影响本卡。
+
+NEXT：C2-05（同一 branch 的多消费者共享：A／B 各自取得、A 释放后仍运行，B 最后释放才触发已验关钟）。
+
 ## 首个“为了开钟而写钟”的候选：C2-03 分支门控（2026-11-24，补丁 0237，0130 实机通过）
 
 C2-08 的 23 次写是测量期间借来的：开 mux、开 debug 分支、跑两次计数，收尾全部还原，硬件状态与测得之前一致。C2-03 不一样，它的产物就是“钟开着”，所以判据必须从“写成功”换成“硬件说它已经在跑”，而这条状态位恰好是 C2-08 记录过的那个坑：分支 CBCR 的 bit31..28 是 FSM 维护的 halt／NOC 状态，门开后要几拍才更新（0127 因此误判过一次恢复失败）。门控因此**不读回自己写的值**，只轮询 `CLK_OFF` 清 0，`2500×10 µs` 有界，把 `polls` 打进日志供对账；超时就是失败，而且**保留已写状态**再报（状态已经变了，谎称没变更糟），账本只清 `pending`、不记 confirmed。
