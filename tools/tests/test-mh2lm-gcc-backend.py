@@ -53,7 +53,10 @@ prelude = prelude.replace('static uint32_t readReg(uintptr_t b,uint32_t o){',
  '/* Device model for the two restore subtleties: a branch CBCR reports its\n'
  ' * halt status one read after the disable that cleared it (0127 read back\n'
  ' * 0x0 for a stored 0x80000000), and a register can hold a wrong config bit. */\n'
- 'static bool gccHaltLag=false,gccNeighbourShift=false;\n'
+ 'static bool gccHaltLag=false,gccNeighbourShift=false,gccDisableNeighbourShift=false;\n'
+ '/* a store withdrew an enable: a never-halting branch can be modelled only\n'
+ ' * after the driver itself disabled it, never on the first read of a run */\n'
+ 'static bool gccDisableStored=false;\n'
  'static std::map<uintptr_t,bool> gccHaltPending;\n'
  'static uintptr_t gccDriftPA=0;\n'
  'static uint32_t gccDriftBits=0;\n'
@@ -65,7 +68,12 @@ prelude = prelude.replace('static void writeReg(uintptr_t b,uint32_t o,uint32_t 
   {uintptr_t pa=b+o;
    if(gccHaltLag&&(pa==0x00143008u||pa==0x00162008u)&&!(v&1u))gccHaltPending[pa]=true;
    /* A write that also moves a neighbour: the C2-03 proof must notice. */
-   if(gccNeighbourShift&&pa==0x00133008u&&(v&1u))regs[0x00133014u]^=0x10u;}''')
+   if(gccNeighbourShift&&pa==0x00133008u&&(v&1u))regs[0x00133014u]^=0x10u;
+   /* The same trick for the disable store: a way for the C2-04 neighbour proof
+      to see a change the cleared enable bit alone would not explain. */
+   if(gccDisableNeighbourShift&&pa==0x00133008u&&!(v&1u))regs[0x00133014u]^=0x10u;
+   /* remember that an enable was withdrawn, for the never-halts model */
+   if(pa==0x00133008u&&!(v&1u))gccDisableStored=true;}''')
 prelude = prelude.replace('''uint32_t v=regs[b+o];if(b==bases[6]&&o==0x110&&dmaFired)''',
  '''uint32_t v=regs[b+o];
  if(gccDriftPA&&b+o==gccDriftPA)v^=gccDriftBits;	/* a configuration bit stuck */
@@ -136,7 +144,14 @@ assert raw.count('#endif /* ARM64_BOARD_CONFIG_MH2LM */')==1
 # The measurement candidate is opt-in: the gate property is the only way in.
 assert raw.count('sweet,clock-measure')==1
 assert raw.count('sweet,clock-gate')==1
+# C2-04 adds exactly one more opt-in, and it is never read on its own.
+assert raw.count('sweet,clock-disable')==1
 assert 'fMeasureEnabled' in raw and 'fGateEnabled' in raw and 'gate-enable' in raw
+assert 'fDisableEnabled' in raw and 'disableClocks' in raw and 'stage=disable' in raw
+# The retraction withdraws the enable bit and nothing else, exactly once: the
+# recovery is the C2-03 store, not a second private writer.
+assert raw.count('saved&~kGccBranchEnable')==1
+assert raw.count('stage=disable')==1
 gcc_source = re.sub(r'^#include.*\n', '', raw, flags=re.M)
 # CPU barriers and actual MMIO are the only replaced engine statements.
 gcc_source = gcc_source.replace('observed=*(volatile uint32_t *)(w.base+offset);',
@@ -163,7 +178,7 @@ static IOService*clockNub(){
  auto*n=fixtureAlloc<IOService>();uint32_t abi=1;setData(n,"sweet,clock-abi",&abi,4);return n;
 }
 static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=true,
- unsigned abiLength=4,unsigned measure=0,unsigned gate=0){
+ unsigned abiLength=4,unsigned measure=0,unsigned gate=0,unsigned disable=0){
  auto*n=fixtureAlloc<IOService>();
  if(abi){uint32_t a=1;setData(n,"sweet,gcc-abi",&a,abiLength);}
  if(haveVariant)setData(n,"sweet,gcc-variant",&variant,4);
@@ -171,6 +186,8 @@ static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=t
  if(measure){uint32_t m=measure==2?2u:1u;setData(n,"sweet,clock-measure",&m,measure==3?3u:4);}
  /* gate: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
  if(gate){uint32_t g=gate==2?2u:1u;setData(n,"sweet,clock-gate",&g,gate==3?3u:4);}
+ /* disable: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
+ if(disable){uint32_t d=disable==2?2u:1u;setData(n,"sweet,clock-disable",&d,disable==3?3u:4);}
  return n;
 }
 static IOQcomClockProvider*startProvider(IOService*n){
@@ -211,13 +228,22 @@ static void resetGccRegs(){
 }
 /* C2-08/C2-03 device model knobs, declared before the reset that clears them. */
 static bool gccRefStuckOff=false,gccCountStuck=false,gccGateStuckOff=false;
+/* C2-04: a branch whose halt status never rises after the disable store. */
+static bool gccDisableStuckRunning=false;
+/* Off by default: the shipped fixture lets a test present any register value,
+ * so a synthetic 0x0 is a legitimate input for the preconditions. A case that
+ * wants the halt handshake the device performs (enable bit decides CLK_OFF)
+ * asks for it, and the two behaviours then cover both refusal arms. */
+static bool gccHaltFollowsEnable=false;
 /* Device model knobs for the restore check. gccHaltLag makes the halt status
  * of a branch CBCR lag one read behind its disable (the 0127 ring read back
  * 0x0 with 0x80000000 stored), and gccDriftPA/gccDriftBits hold one
  * configuration bit of a register at the wrong level, which must still fail. */
 static void clearKnobs(){gccMemoryCount=4;gccAbsentIndex=99;gccWrongPA=99;gccShortLen=99;gccNoBase=99;
  gccHaltLag=false;gccHaltPending.clear();gccDriftPA=0;gccDriftBits=0;
- gccRefStuckOff=false;gccCountStuck=false;gccGateStuckOff=false;gccNeighbourShift=false;}
+ gccRefStuckOff=false;gccCountStuck=false;gccGateStuckOff=false;gccNeighbourShift=false;
+ gccDisableNeighbourShift=false;gccDisableStuckRunning=false;gccHaltFollowsEnable=false;
+ gccDisableStored=false;}
 /* C2-08 device model. The debug counter sees the selected source: the running
  * clock (19.2 MHz) yields four counts per loaded tick of the XO/4 reference,
  * a stopped source yields the same count on both runs, and a stuck counter
@@ -226,6 +252,15 @@ static uint32_t gccCounter(uintptr_t pa,uint32_t v){
  if(pa==0x00143008u||pa==0x00162008u||pa==0x00133008u){
   if(pa==0x00143008u&&gccRefStuckOff)return v&~1u;	/* a branch that will not come up */
   if(pa==0x00133008u&&gccGateStuckOff)return v&~1u;	/* the C2-03 sample refusing to run */
+  /* A branch CBCR's halt status follows its own enable bit on the device: a
+   * running branch reports CLK_OFF=0, a disabled one reports CLK_OFF=1. The
+   * disable store writes the value it read (which never carries the bit the
+   * hardware owns), so this model is what makes the halt observable at all. */
+  if(pa==0x00133008u){
+   if(gccDisableStuckRunning&&gccDisableStored&&!(v&1u))return v&~0x80000000u;	/* never halts */
+   if(gccHaltFollowsEnable){
+    if(v&1u)return v&~0x80000000u;
+    return v|0x80000000u;}}
   if(v&1u)return v&~0x80000000u;		/* a running branch reports CLK_OFF=0 */
   return v;
  }
@@ -1042,6 +1077,171 @@ int main(){
   assert(!live&&!liveMaps);
  }
   assert(!live&&!liveMaps&&rawBlocks==0);
+ /* ---- C2-04: the disable retracts the enable, proves the halt, hands the demand back ---- */
+ {
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,1,1);
+  messages.clear();resetGccRegs();clearKnobs();
+  /* the C0-03 sample starts halted; the neighbours carry values a stray write
+   * would change, and the same set is checked around the disable store */
+  setReg(0x00133000u,0x008,0x80000000u);
+  setReg(0x00133000u,0x00c,0x00000005u);
+  setReg(0x00133000u,0x014,0x00000000u);
+  setReg(0x0010b000u,0x048,0x00000001u);
+  gccHaltFollowsEnable=true;gccMeasureHook=gccCounter;gccDelayCalls=0;
+  auto*g=startGcc(gn);
+  assert(counted("phase=gate result=0 clock-measure=0 clock-gate=1 clock-disable=1")==1);
+  /* enable, disable, enable: three stores, each announced once, and the second
+   * enable is the C2-03 path verbatim, so its rows appear twice */
+  assert(writes()==3);
+  assert(counted("phase=write-issued")==3);
+  assert(counted("consumer=sweetclock-gate phase=write-issued")==2);
+  assert(logged("consumer=sweetclock-gate phase=write-issued result=0 stage=gate-enable write=1 value=0x80000001"));
+  /* the store is a read-modify-write of what the branch reported: the halt bit
+   * is hardware-owned and was low, so only the enable bit is withdrawn */
+  assert(logged("consumer=sweetclock-disable phase=write-issued result=0 stage=disable write=2 value=0"));
+  assert(counted("consumer=sweetclock-gate phase=write-issued result=0 stage=gate-enable write=3")==1);
+  assert(logged("consumer=sweetclock-disable phase=disable-request result=0 enable=1 off=0 value=0x1"));
+  assert(logged("consumer=sweetclock-disable phase=halt result=0 enable=0 off=1 value=0x80000000 polls=0"));
+  assert(logged("consumer=sweetclock-disable phase=disable-check result=0 neighbours=4 changed=0"));
+  assert(logged("phase=disable-done result=0 writes=2 neighbours=4 changed=0 polls=0 hold=0 last-holder=1 detail=sample-halted"));
+  /* the release is the halted verdict, not a bare withdraw: stopped=true shows
+   * up as confirmed=0/pending=0 and the confirmation count moves */
+  assert(counted("phase=release result=0")==1);
+  assert(logged("resource=cc1:0x4 phase=release result=0 token=1 holders=0 desired=0 pending=0 confirmed=0 transitions=2 confirmations=2"));
+  /* and the recovery ran: a second gate pass, a new demand, the branch running */
+  assert(counted("phase=gate-done result=0")==2);
+  assert(logged("phase=gate-done result=0 writes=3 neighbours=4 changed=0 polls=0 hold=1"));
+  assert(counted("phase=confirm result=0")==2);
+  assert(logged("phase=start result=0 detail=disable-incomplete")==false);
+  assert(counted("consumer=sweetclock-disable phase=reenable")==0);
+  assert(g->fReads==29+20);	/* the gate's 29 reads plus the same pass twice more */
+  assert(regs[0x00133008u]==0x80000001u);
+  assert(regs[0x0013300cu]==0x00000005u&&regs[0x00133014u]==0x00000000u);
+  assert(g->fGateRunning&&g->fGateTokenHeld&&g->fGateToken==2);
+  IOQcomClockLedgerState ls;
+  assert(p->ledgerInspect(kIOQcomCCGCC,kIOQcomGccGateLocalID,0,&ls)==kIOReturnSuccess);
+  assert(ls.holders==1&&ls.desired==1&&ls.pending==0&&ls.confirmed==1);
+  assert(ls.transitions==3&&ls.confirmations==3);
+  g->stop(gn);g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
+ /* ---- C2-04 guards: a disable without the demand, or of a branch it did not leave running ---- */
+ {
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,1,0);	/* gate only: no disable opt-in */
+  messages.clear();resetGccRegs();clearKnobs();
+  setReg(0x00133000u,0x008,0x80000000u);
+  gccMeasureHook=gccCounter;gccDelayCalls=0;
+  auto*g=startGcc(gn);
+  assert(logged("phase=gate result=0 clock-measure=0 clock-gate=1 clock-disable=0"));
+  assert(writes()==1);
+  /* absent opt-in: the card is not armed at all, and says so without a store */
+  assert(g->disableClocks()==kIOReturnUnsupported);
+  assert(counted("consumer=sweetclock-disable")==0);
+  assert(writes()==1);
+  /* armed, but the demand is not in hand: nothing may be released that the
+   * ledger does not hold for this driver */
+  messages.clear();
+  g->fDisableEnabled=true;
+  g->fGateTokenHeld=false;g->fGateToken=0;
+  assert(g->disableClocks()==kIOReturnNotReady);
+  assert(logged("detail=no-token hold=0"));
+  assert(writes()==1);
+  /* handed a branch that never carried the enable this driver wrote: with the
+   * fixture's plain register file neither bit is set */
+  g->fGateTokenHeld=true;g->fGateToken=1;
+  setReg(0x00133000u,0x008,0x00000000u);
+  assert(g->disableClocks()==kIOReturnNotReady);
+  assert(logged("detail=not-enabled enable=0 off=0 value=0"));
+  /* and the same handover on a device whose halt status follows the enable bit:
+   * the branch was already halted by somebody else */
+  gccHaltFollowsEnable=true;
+  assert(g->disableClocks()==kIOReturnNotReady);
+  assert(logged("detail=already-halted enable=0 off=1 value=0x80000000"));
+  gccHaltFollowsEnable=false;
+  assert(writes()==1);
+  g->stop(gn);g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
+ /* ---- C2-04: a halt that never arrives keeps the demand and the branch ---- */
+ {
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,1,1);
+  messages.clear();resetGccRegs();clearKnobs();
+  setReg(0x00133000u,0x008,0x80000000u);
+  gccDisableStuckRunning=true;gccHaltFollowsEnable=true;gccMeasureHook=gccCounter;gccDelayCalls=0;
+  auto*g=startGcc(gn);
+  assert(logged("consumer=sweetclock-disable phase=halt result="+std::to_string(kIOReturnTimeout)+
+                " enable=0 off=0 value=0 polls="+std::to_string(kIOQcomGccDisablePollTries)+
+                " writes=2 hold=1 detail=halt-timeout"));
+  assert(counted("phase=disable-check")==0);
+  assert(counted("phase=release")==0);
+  assert(logged("phase=disable-done")==false);
+  assert(logged("detail=disable-incomplete disable-result="+std::to_string(kIOReturnTimeout)));
+  assert(writes()==2);		/* enable and the disable store; nothing undone */
+  assert(gccDelayCalls==kIOQcomGccDisablePollTries);
+  assert(g->fGateRunning&&g->fGateTokenHeld&&g->fGateToken==1);
+  assert(regs[0x00133008u]==0x00000000u);	/* as stored: the halt bit never rose */
+  IOQcomClockLedgerState ls;
+  assert(p->ledgerInspect(kIOQcomCCGCC,kIOQcomGccGateLocalID,0,&ls)==kIOReturnSuccess);
+  assert(ls.holders==1&&ls.desired==1&&ls.pending==0&&ls.confirmed==1&&ls.transitions==1);
+  g->stop(gn);g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
+ /* ---- C2-04: a neighbour that moved keeps the demand even though the halt happened ---- */
+ {
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,1,1);
+  messages.clear();resetGccRegs();clearKnobs();
+  setReg(0x00133000u,0x008,0x80000000u);
+  setReg(0x00133000u,0x00c,0x00000005u);
+  setReg(0x00133000u,0x014,0x00000000u);
+  gccDisableNeighbourShift=true;gccHaltFollowsEnable=true;gccMeasureHook=gccCounter;gccDelayCalls=0;
+  auto*g=startGcc(gn);
+  assert(logged("phase=neighbours result="+std::to_string(kIOReturnIOError)+" detail=changed"));
+  assert(logged("consumer=sweetclock-disable phase=disable-check result="+std::to_string(kIOReturnIOError)+
+                " neighbours=4 changed=1"));
+  assert(logged("phase=disable-done result="+std::to_string(kIOReturnIOError)+
+                " writes=2 neighbours=4 changed=1 polls=0 hold=1 detail=neighbour-changed"));
+  assert(counted("phase=release")==0);
+  assert(logged("detail=disable-incomplete disable-result="+std::to_string(kIOReturnIOError)));
+  assert(writes()==2);		/* and no re-enable: the card will not pretend */
+  assert(g->fGateTokenHeld&&g->fGateToken==1);
+  g->stop(gn);g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
+ /* ---- C2-04: the opt-in is validated before any window is touched ---- */
+ {
+  messages.clear();resetGccRegs();
+  auto*gn=gccNub(0x8150,true,true,4,0,1,2);
+  auto*g=fixtureAlloc<IOQcomGCC>();assert(!g->start(gn));
+  assert(logged("detail=bad-clock-disable value=0x2"));
+  assert(g->fReads==0&&writes()==0);
+  g->release();gn->release();assert(!live&&!liveMaps);
+  messages.clear();
+  auto*shortNub=gccNub(0x8150,true,true,4,0,1,3);
+  auto*g2=fixtureAlloc<IOQcomGCC>();assert(!g2->start(shortNub));
+  assert(logged("detail=bad-clock-disable length=3"));
+  assert(g2->fReads==0&&writes()==0);
+  g2->release();shortNub->release();assert(!live&&!liveMaps);
+  messages.clear();
+  /* a disable of a branch this driver never opened is refused at start: the
+   * retraction would be aimed at a state no card here can explain */
+  auto*loneNub=gccNub(0x8150,true,true,4,0,0,1);
+  auto*g3=fixtureAlloc<IOQcomGCC>();assert(!g3->start(loneNub));
+  assert(logged("detail=clock-disable-needs-gate clock-gate=0 clock-disable=1"));
+  assert(g3->fReads==0&&writes()==0);
+  g3->release();loneNub->release();assert(!live&&!liveMaps);
+ }
  printf("PASS: actual C2-01/C2-02/C2-08/C2-03 GCC backend; ADT-matched identity (abi/variant) and "
         "window refusals (absent/address/length/no-base) with clean unmapping, bounded "
         "provider wait, four mapped windows and eleven snapshots, narrow aligned "

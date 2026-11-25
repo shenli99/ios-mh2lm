@@ -251,9 +251,35 @@ IOQcomGCC::validateProperties(IOService *provider)
 		fGateEnabled=value==1;
 		haveGate=true;
 	}
+	/* C2-04 is the same kind of opt-in again. It is refused at start unless the
+	 * enable it retracts is also switched on: a disable of a branch this driver
+	 * never opened would be a store aimed at a state it cannot explain. */
+	fDisableEnabled=false;
+	OSData *branchDisable=OSDynamicCast(OSData,provider->getProperty("sweet,clock-disable"));
+	if (branchDisable) {
+		if (branchDisable->getLength()!=4) {
+			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-disable length=%u\n",
+			 kIOReturnBadArgument,(unsigned)branchDisable->getLength());
+			return false;
+		}
+		uint32_t value=0;
+		memcpy(&value,branchDisable->getBytesNoCopy(),4);
+		if (value>1) {
+			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-disable value=%#x\n",
+			 kIOReturnBadArgument,value);
+			return false;
+		}
+		fDisableEnabled=value==1;
+		haveGate=true;
+		if (fDisableEnabled&&!fGateEnabled) {
+			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=clock-disable-needs-gate clock-gate=%u clock-disable=%u\n",
+			 kIOReturnBadArgument,fGateEnabled?1u:0u,fDisableEnabled?1u:0u);
+			return false;
+		}
+	}
 	if (haveGate) {
-		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc phase=gate result=0 clock-measure=%u clock-gate=%u\n",
-		 fMeasureEnabled?1u:0u,fGateEnabled?1u:0u);
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc phase=gate result=0 clock-measure=%u clock-gate=%u clock-disable=%u\n",
+		 fMeasureEnabled?1u:0u,fGateEnabled?1u:0u,fDisableEnabled?1u:0u);
 	}
 	return true;
 }
@@ -621,7 +647,7 @@ static const struct { unsigned window; uint32_t offset; uint32_t mask; }
  * counts as a change: this proof exists to rule out an unexplained move, so an
  * unreadable neighbour must not pass it. */
 unsigned
-IOQcomGCC::gateNeighbours(bool capture)
+IOQcomGCC::gateNeighbours(bool capture, const char *consumer)
 {
 	unsigned changed=0;
 	for (unsigned i=0;i<kIOQcomGccGateNeighbourCount;i++) {
@@ -640,8 +666,8 @@ IOQcomGCC::gateNeighbours(bool capture)
 			changed++;
 			char resource[kIOQcomLogBuf];
 			gccName(gccGateNeighbours[i].window,gccGateNeighbours[i].offset,resource,sizeof resource);
-			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=neighbours result=%d detail=changed before=%#x after=%#x mask=%#x\n",
-			 resource,kIOReturnIOError,fGateNeighbour[i].value&mask,value&mask,mask);
+			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=neighbours result=%d detail=changed before=%#x after=%#x mask=%#x\n",
+			 resource,consumer,kIOReturnIOError,fGateNeighbour[i].value&mask,value&mask,mask);
 		}
 	}
 	fGateNeighbourChanges=changed;
@@ -692,7 +718,7 @@ IOQcomGCC::gateClocks(void)
 		 enabled?1u:0u,off?1u:0u,saved);
 		return kIOReturnNotReady;
 	}
-	(void)gateNeighbours(true);
+	(void)gateNeighbours(true,"sweetclock-gate");
 	IOQcomClockProvider *provider=IOQcomClockProvider::publishedProvider();
 	uint32_t token=0;
 	bool opened=false;
@@ -712,10 +738,16 @@ IOQcomGCC::gateClocks(void)
 	}
 	SWEET_LOG_INFO("SWEET CLOCK: planID=C1 resource=cc%u:0x%x consumer=sweetclock-gate phase=transition result=0 token=%u owner=1\n",
 	 kIOQcomCCGCC,kIOQcomGccGateLocalID,token);
+	/* The demand is this driver's from here on: C2-04 hands it back only after
+	 * the hardware reports the branch halted. */
+	fGateToken=token;
+	fGateTokenHeld=true;
 	uint32_t target=saved|kGccBranchEnable;
 	if (!writeRegister(window,offset,target,"gate-enable","sweetclock-gate")) {
 		bool lastHolder=false;
 		(void)provider->ledgerRelease(token,false,&lastHolder);
+		fGateToken=0;
+		fGateTokenHeld=false;
 		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=request result=%d stage=gate-enable detail=store-failed writes=%u\n",
 		 resource,kIOReturnNotReady,fWrites);
 		return kIOReturnNotReady;
@@ -742,7 +774,7 @@ IOQcomGCC::gateClocks(void)
 	fGateRunning=running;
 	if (provider) (void)provider->ledgerComplete(token,running);
 	if (running) {
-		unsigned changed=gateNeighbours(false);
+		unsigned changed=gateNeighbours(false,"sweetclock-gate");
 		if (changed) {
 			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=gate-check result=%d neighbours=%u changed=%u detail=neighbour-changed\n",
 			 resource,kIOReturnIOError,kIOQcomGccGateNeighbourCount,changed);
@@ -758,6 +790,8 @@ IOQcomGCC::gateClocks(void)
 		 * C2-04 exists to design. */
 		bool lastHolder=false;
 		if (provider) (void)provider->ledgerRelease(token,false,&lastHolder);
+		fGateToken=0;
+		fGateTokenHeld=false;
 		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=gate-done result=%d writes=%u neighbours=%u changed=%u polls=%u hold=0 detail=%s\n",
 		 resource,parked,fWrites,kIOQcomGccGateNeighbourCount,fGateNeighbourChanges,
 		 polls,readFailed?"halt-read-failed":"halt-timeout");
@@ -773,6 +807,130 @@ IOQcomGCC::gateClocks(void)
 	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-gate phase=gate-done result=%d writes=%u neighbours=%u changed=%u polls=%u hold=1\n",
 	 resource,verdict,fWrites,kIOQcomGccGateNeighbourCount,fGateNeighbourChanges,polls);
 	return verdict;
+}
+
+/* C2-04 entry: hand back the demand C2-03 opened. The card makes the disable a
+ * claim the hardware has to back rather than a second store with a nicer
+ * comment: the branch must be the one this driver left running, the store must
+ * clear the enable bit alone, and CLK_OFF has to rise within the same bound the
+ * enable waits for it to fall. Only then is the ledger demand handed back, and
+ * handed back with stopped=true so the ledger records "satisfied" instead of
+ * the "still running, owed" it would record for a bare release.
+ *
+ * A timeout keeps both the demand and the branch: nothing is reset to make a
+ * failing row read better, and the clock is still running under a demand the
+ * ledger still holds, which is exactly the state C2-03 leaves. A neighbour that
+ * moved is treated the same way: the halt happened, but this driver cannot
+ * account for what else the store touched, so it keeps the demand, says so, and
+ * does not re-enable.
+ *
+ * The success path ends by running the enable this candidate already verified,
+ * so one boot proves enable, disable, halt and recovery - and the branch is
+ * running again, which is the state the C2-03 baseline leaves for the rest of
+ * the boot. */
+IOReturn
+IOQcomGCC::disableClocks(void)
+{
+	if (!fDisableEnabled) {
+		SWEET_LOG_DEBUG("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-disable phase=disable result=%d detail=disable-absent\n",
+		 kIOQcomCCGCC,kIOQcomGccGateLocalID,kIOReturnUnsupported);
+		return kIOReturnUnsupported;
+	}
+	if (!fMapped||!fRegistered||!fLock) return kIOReturnNotReady;
+	IOQcomClockProvider *provider=IOQcomClockProvider::publishedProvider();
+	if (!provider||!fGateTokenHeld||!fGateToken) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-disable phase=disable result=%d detail=%s %s\n",
+		 kIOQcomCCGCC,kIOQcomGccGateLocalID,kIOReturnNotReady,
+		 provider?"no-token":"provider-absent","hold=0");
+		return kIOReturnNotReady;
+	}
+	const GccClock *entry=gccFind(kIOQcomGccGateLocalID);
+	if (!entry) return kIOReturnNotFound;
+	const unsigned window=entry->window;
+	const uint32_t offset=entry->offset;
+	char resource[kIOQcomLogBuf];
+	gccName(window,offset,resource,sizeof resource);
+	uint32_t saved=0;
+	if (!readRegister(window,offset,&saved)) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-request result=%d detail=read-failed\n",
+		 resource,kIOReturnNotReady);
+		return kIOReturnNotReady;
+	}
+	bool enabled=(saved&kGccBranchEnable)!=0;
+	bool off=(saved&kGccBranchClockOff)!=0;
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s name=%s consumer=sweetclock-disable phase=disable-request result=0 enable=%u off=%u value=%#x\n",
+	 resource,entry->name,enabled?1u:0u,off?1u:0u,saved);
+	/* A branch that is already halted, or one that is not the enable this
+	 * driver left behind, is not something this store can retract: the row
+	 * would claim a transition that never happened. */
+	if (!enabled||off) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-request result=%d detail=%s enable=%u off=%u value=%#x\n",
+		 resource,kIOReturnNotReady,off?"already-halted":"not-enabled",
+		 enabled?1u:0u,off?1u:0u,saved);
+		return kIOReturnNotReady;
+	}
+	(void)gateNeighbours(true,"sweetclock-disable");
+	/* Only the enable bit is cleared: the divider fields and the halt status
+	 * belong to the hardware, and a read-modify-write that dropped one of them
+	 * would be a write this card cannot justify. */
+	uint32_t target=saved&~kGccBranchEnable;
+	if (!writeRegister(window,offset,target,"disable","sweetclock-disable")) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-request result=%d stage=disable detail=store-failed writes=%u\n",
+		 resource,kIOReturnNotReady,fWrites);
+		return kIOReturnNotReady;
+	}
+	unsigned polls=0;
+	uint32_t value=target;
+	bool halted=false,readFailed=false;
+	for (polls=0;polls<kIOQcomGccDisablePollTries;polls++) {
+		if (!readRegister(window,offset,&value)) { readFailed=true; break; }
+		if ((value&kGccBranchClockOff)!=0) { halted=true; break; }
+		IODelay(kIOQcomGccDisablePollDelayUs);
+	}
+	if (!halted) {
+		/* The branch did not report halted. The demand stays where it is and the
+		 * branch is left alone: undoing the store here would be the unverified
+		 * write this card exists to rule out. */
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=halt result=%d enable=%u off=%u value=%#x polls=%u writes=%u hold=1 detail=%s\n",
+		 resource,readFailed?kIOReturnNotReady:kIOReturnTimeout,
+		 (value&kGccBranchEnable)?1u:0u,(value&kGccBranchClockOff)?1u:0u,value,polls,fWrites,
+		 readFailed?"halt-read-failed":"halt-timeout");
+		return readFailed?kIOReturnNotReady:kIOReturnTimeout;
+	}
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=halt result=0 enable=%u off=1 value=%#x polls=%u\n",
+	 resource,(value&kGccBranchEnable)?1u:0u,value,polls);
+	unsigned changed=gateNeighbours(false,"sweetclock-disable");
+	if (changed) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-check result=%d neighbours=%u changed=%u detail=neighbour-changed\n",
+		 resource,kIOReturnIOError,kIOQcomGccGateNeighbourCount,changed);
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-done result=%d writes=%u neighbours=%u changed=%u polls=%u hold=1 detail=neighbour-changed\n",
+		 resource,kIOReturnIOError,fWrites,kIOQcomGccGateNeighbourCount,changed,polls);
+		return kIOReturnIOError;
+	}
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-check result=0 neighbours=%u changed=0\n",
+	 resource,kIOQcomGccGateNeighbourCount);
+	/* The halt verdict is the licence for this release: stopped=true, so the
+	 * ledger clears the demand it was still owed and counts the confirmation. */
+	bool lastHolder=false;
+	IOReturn released=provider->ledgerRelease(fGateToken,true,&lastHolder);
+	if (released!=kIOReturnSuccess) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-done result=%d writes=%u neighbours=%u changed=0 polls=%u hold=1 detail=ledger-release-failed\n",
+		 resource,released,fWrites,kIOQcomGccGateNeighbourCount,polls);
+		return released;
+	}
+	fGateToken=0;
+	fGateTokenHeld=false;
+	fGateRunning=false;
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-done result=0 writes=%u neighbours=%u changed=0 polls=%u hold=0 last-holder=%u detail=sample-halted\n",
+	 resource,fWrites,kIOQcomGccGateNeighbourCount,polls,lastHolder?1u:0u);
+	/* Recovery: the verified enable again, from the halted state this card just
+	 * proved. Its rows are the second gate pass in this ring. */
+	IOReturn recovered=gateClocks();
+	if (recovered!=kIOReturnSuccess) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=reenable result=%d writes=%u detail=reenable-incomplete\n",
+		 resource,recovered,fWrites);
+	}
+	return recovered;
 }
 
 /* C2-08 entry: save, acquire the XO/4 reference through the C1-05 ledger, store
@@ -900,6 +1058,10 @@ IOQcomGCC::start(IOService *provider)
 	fRestoreMismatches=0;
 	fGateRunning=false;
 	fGateNeighbourChanges=0;
+	/* fDisableEnabled belongs to validateProperties: it is decided by the ADT,
+	 * and clearing it here would disarm the card after it was armed. */
+	fGateToken=0;
+	fGateTokenHeld=false;
 	if (!mapWindows(provider)) {
 		unmapWindows();
 		IOLockFree(fLock);
@@ -943,6 +1105,14 @@ IOQcomGCC::start(IOService *provider)
 		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=gate-incomplete gate-result=%d writes=%u\n",
 		 kIOQcomCCGCC,gated,fWrites);
 	}
+	/* C2-04 retracts the enable it was just given and then runs that same
+	 * verified enable again, so by the time anything measures, the branch is
+	 * running under a demand the ledger holds - whatever this card found. */
+	IOReturn disabled=disableClocks();
+	if (disabled!=kIOReturnSuccess&&disabled!=kIOReturnUnsupported) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=disable-incomplete disable-result=%d writes=%u\n",
+		 kIOQcomCCGCC,disabled,fWrites);
+	}
 	/* C2-08 last, so registration and the C2-02 decode exist before the first
 	 * store and a failed measurement cannot leave a half-published backend. */
 	IOReturn measured=measureClocks();
@@ -969,6 +1139,10 @@ IOQcomGCC::stop(IOService *provider)
 		}
 		fRegistered=false;
 	}
+	/* The ledger entry dies with the registration, so the token this driver held
+	 * is not a demand any more. */
+	fGateToken=0;
+	fGateTokenHeld=false;
 	/* Stopping releases everything start acquired, so a later start is a
 	 * real first start rather than a refused "already running". */
 	unmapWindows();

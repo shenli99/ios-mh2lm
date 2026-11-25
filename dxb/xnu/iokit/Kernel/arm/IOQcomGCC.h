@@ -104,6 +104,15 @@ enum : unsigned {
 	kIOQcomGccGateNeighbourCount = 4,
 };
 
+/* C2-04: the verified disable. It polls for the halt status the hardware owns
+ * with the same budget the enable polls for that status to clear: a branch
+ * that does not report halted inside 25 ms is a timeout, and a timeout keeps
+ * the demand in the ledger instead of resetting anything to look successful. */
+enum : unsigned {
+	kIOQcomGccDisablePollTries = 2500,
+	kIOQcomGccDisablePollDelayUs = 10,
+};
+
 /* C2-08: tolerances. The vendor formula rounds to +-0.5 %; a rate outside one
  * percent means the mux or the counter is wrong, not a rounding difference. */
 enum : int { kIOQcomGccMeasureTolerancePpm = 10000 };
@@ -155,6 +164,12 @@ class IOQcomGCC : public IOQcomClockController {
 	bool fMapped, fRegistered;
 	bool fMeasureEnabled;
 	bool fGateEnabled;
+	bool fDisableEnabled;
+	/* The C2-03 token while this driver still holds it. C2-04 releases that
+	 * demand and clears the flag, so a disable can never hand back a token it
+	 * does not own, and a second disable in the same boot has nothing to undo. */
+	uint32_t fGateToken;
+	bool fGateTokenHeld;
 	/* Set once the C2-03 sample is proven running, so the C2-08 pass can add
 	 * the one sample that needs somebody else's enable: the gate branch. */
 	bool fGateRunning;
@@ -191,12 +206,19 @@ class IOQcomGCC : public IOQcomClockController {
 	 bool runningExpected);
 	/* C2-03: the enable. Saves the CBCR, stores only the enable bit through the
 	 * one store path, polls CLK_OFF clear within a bound, proves the neighbours
-	 * did not move, and hands the ledger a running confirmation it keeps for the
-	 * rest of the boot (there is no verified disable yet, that is C2-04). */
+	 * did not move, and hands the ledger a running confirmation it keeps until
+	 * the C2-04 disable hands that same demand back. */
 	IOReturn gateClocks(void);
+	/* C2-04: the disable. Refuses without the C2-03 demand in hand and without a
+	 * running branch, stores the cleared enable bit alone, polls CLK_OFF set,
+	 * proves the neighbours stayed put, and releases the ledger with the halted
+	 * verdict the hardware actually reported. On success it re-runs the verified
+	 * enable, so one boot proves both directions and the recovery. */
+	IOReturn disableClocks(void);
 	/* Reads the neighbour set into fGateNeighbour (capture=true) or compares it
-	 * with that capture (capture=false), returning how many moved. */
-	unsigned gateNeighbours(bool capture);
+	 * with that capture (capture=false), returning how many moved. The consumer
+	 * is passed in so a disable row is not attributed to the gate pass. */
+	unsigned gateNeighbours(bool capture, const char *consumer);
 public:
 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
 	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;

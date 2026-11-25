@@ -36,7 +36,7 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
 
 
 def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
-            clock_gate=False):
+            clock_gate=False, clock_disable=False):
     display_noc = display_noc or panel_pipeline
     display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
     root, end = adt.parse(blob)
@@ -166,6 +166,11 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             ('interrupts', 0, struct.pack('<III', 240, 0, 4)),
         ])
         arm.children.append(touch)
+    # C2-04 retracts the enable C2-03 stores, so it cannot be requested without
+    # that gate: a tree that asks for a disable alone is a tree the backend
+    # refuses, and the generator will not emit one.
+    if clock_disable:
+        clock_gate = True
     if clock_diag or gcc or clock_measure or clock_gate:
         clock_provider = True
     gcc = gcc or clock_measure or clock_gate
@@ -200,6 +205,11 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             # C2-03 gates a branch. It is a separate opt-in from the measurement:
             # either can be requested alone, and both can ride together.
             gcc_node.props.append(('sweet,clock-gate', 0, struct.pack('<I', 1)))
+        if clock_disable:
+            # C2-04 withdraws that enable again and hands the demand back. The
+            # property therefore never travels alone: the gate stays beside it,
+            # and the backend cross-checks the pair before any window is read.
+            gcc_node.props.append(('sweet,clock-disable', 0, struct.pack('<I', 1)))
         arm.children.append(gcc_node)
     return adt.serialize(root)
 
@@ -219,10 +229,12 @@ if __name__ == '__main__':
     parser.add_argument('--gcc', action='store_true', help='append the read-only C2 GCC backend windows and variant ABI (implies --clock-provider)')
     parser.add_argument('--clock-measure', action='store_true', help='append the C2-08 measurement opt-in gate (implies --gcc); the default image stays zero-write')
     parser.add_argument('--clock-gate', action='store_true', help='append the C2-03 branch gate opt-in (implies --gcc); stores one enable bit and keeps it on until reboot')
+    parser.add_argument('--clock-disable', action='store_true', help='append the C2-04 verified disable opt-in (implies --clock-gate); withdraws that enable, proves the halt and releases the demand')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
     source, destination = args.source, args.destination
     if source.resolve() == destination.resolve():
         sys.exit('output must differ from the baseline ADT')
-    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate))
+    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
+                      args.clock_disable))

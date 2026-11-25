@@ -446,7 +446,42 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-gate-adt-') as temp:
                     str(source), str(output)], check=True)
     assert output.read_bytes() == gated
     assert source.read_bytes() == blob
+# C2-04 retracts the C2-03 enable, so its property is the gate's dependent: the
+# generator adds the gate when it is asked for a disable, and a tree with the
+# disable alone is unreachable from every entry point.
+disabled = m.derive(blob, clock_disable=True)
+assert disabled == m.derive(blob, clock_gate=True, clock_disable=True)
+assert disabled == m.derive(blob, gcc=True, clock_disable=True)
+assert disabled != gated
+tree, end = adt.parse(disabled)
+assert end == len(disabled)
+gcc = next(n for n in tree.children[1].children if n.name == 'gcc')
+assert gcc.prop('sweet,clock-disable') == struct.pack('<I', 1)
+assert gcc.prop('sweet,clock-gate') == struct.pack('<I', 1)
+withdrawn = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-disable']
+gcc.props = withdrawn
+assert adt.serialize(tree) == gated, 'the disable is the gate tree plus one property'
+assert b'sweet,clock-disable' not in m.derive(blob, clock_gate=True)
+assert b'sweet,clock-disable' not in m.derive(blob, clock_measure=True, clock_gate=True)
+assert b'sweet,clock-disable' not in blob
+assert b'sweet,clock-gate' in m.derive(blob, clock_disable=True), 'a disable alone is refused, so it implies the gate'
+all_three = m.derive(blob, clock_measure=True, clock_gate=True, clock_disable=True)
+tree, end = adt.parse(all_three)
+assert end == len(all_three)
+gcc = next(n for n in tree.children[1].children if n.name == 'gcc')
+assert gcc.prop('sweet,clock-measure') == struct.pack('<I', 1)
+assert gcc.prop('sweet,clock-gate') == struct.pack('<I', 1)
+assert gcc.prop('sweet,clock-disable') == struct.pack('<I', 1)
+gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-disable']
+assert adt.serialize(tree) == both_gates, 'the three opt-ins are additive'
+with tempfile.TemporaryDirectory(prefix='mh2lm-clock-disable-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'disable.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--clock-disable',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == disabled
+    assert source.read_bytes() == blob
 print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
-      'C2-08 measurement and C2-03 branch gate as independent opt-in properties that no '
-      'earlier image carries')
+      'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
+      'that no earlier image carries')
