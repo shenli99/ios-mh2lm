@@ -68,6 +68,7 @@
 - **实机检验**：两个诊断消费者通过真实接口保持样本，A 释放后仍运行且无 disable；B 最后释放才触发已验 disable，日志能分别关联两者。
 - **预期结果**：共享引用可独立验证；初始引用为零仍不能关闭 inherited clock。
 - **失败归属**：C2-05 ledger／transition；底层门控已验合同破坏则记录对应后端阶段。
+- **状态**：候选已实现（0133 共享档待实机，补丁 `0240`，见本文件末节）。
 
 ### C2-06 支持一个 GCC voted branch 的本方票
 
@@ -239,7 +240,7 @@
 - **读次数恒等式**：`reads = 29 + polls`（19 步走查 + 1 次存前读 + 轮询自己的 `polls+1` 次读 + 8 次邻居读）。设备实测 `reads=29 polls=0` 恰好等于 29，而审计器原先写的是 `28 + polls`——被这台机器当场抓出（`polls` 是循环跳出时的下标，首读成功时 `polls=0` 但确实读了一次）。宿主 fixture 同步为 `polls=1 → reads=30`，8 个变体矩阵重跑仍 8/8 PASS。
 - **账本**：`cc1:0x4` 一个 token（`token=1`），`acquire`（`transition=new`，`holders=1`）→ `transition`（`owner=1`）→ `confirm`（`confirmed=1`），**没有** `release`。这正是“C2-03 的需求由账本单独持有、硬件样本留到重启”的可观测形式。
 - **基线**：非时钟 `WARN` 只有两类——`SWEET FB SCANOUT` ×3（与 b32 相同，稳定基线）与 `SWEET USB` ×13（b32 是 2；本次会话充电线＋调试线同时在线，属既定会话漂移，用 `--allow-baseline-drift` 记录进 `baseline_drift`，不视为回归）。面板标记 `scanout_transfer=1`、`fb_handoff=1`、`touch_mode3=1`、`probe_drained=1` 全在，`touch_armed=2`（b32 为 4，只允许少不允许多）。环内无 `panic`／`Debugger message`。
-- **尚未做的**：门控＋测频档已由 0130-1 完成（下节）；剩默认档回归与 0131 的父源复验。关钟与共享分别是 C2-04／C2-05。每次验收只追加结果，不改上方清单。
+- **尚未做的**：门控＋测频档由 0130-1 完成（下节）；默认档回归与父源复验也已在 0131 结账。关钟（C2-04）与共享（C2-05）属新卡，见本文件末两节。每次验收只追加结果，不改上方清单。
 
 ## 实机验收（0130-1 门控＋测频档：门控成立，父源被计数器反驳）
 
@@ -288,3 +289,18 @@
 - **首次拉环作废的教训**：第一次的 `logs/sweetlog-0132-0.bin`（`04975515…`，`total=5089694`）已回绕——4 MiB 里有 **4105748 B／54023 行**是 `IOWorkLoop::threadMain()` 每次线程重入打的那条 `SWEET IOWORKLOOP: thread …`，占 98%，开机最早写入的时钟行全被挤掉（`SWEET CLOCK` 0 行）。该环仍证明设备健康（`SWEET MDSS IRQ … window-ms=60096 frames=3600 milli-hz=59903 dropped=0`、`SWEET FB PERF swaps=22`、`SWEET TOUCH IRQ reports=1`×17、`SpringBoard`／`backboardd` 均在跑）。结论：**环要在开机进桌面后几十秒内导**；那条打印应改成限频或只在首个 loop 打一次，留待下一轮镜像顺手处理，不影响本卡结论。
 - **默认档回归（同内核，三条开关全去掉）**：`boot-16k-0132-gpioirq-panel-pipeline.img`（`38aa7134…`；ADT `081f63dc…` 23568 字节——`read-adt-claims.py` 直接从 ramdisk 读出核对，`sweet,clock-gate`／`sweet,clock-disable`／`sweet,clock-measure` 三条全不在）实机进入桌面，环 `logs/sweetlog-0132-2.bin`（`32fa2a89…`，`total=994381`，`flush_sequence=8`，未回绕）。审计 `--c2-03 --strict` **rc=0**：26 条时钟行、`reads=19`、`writes=0`，相位恰好 `start 2`／`map 4`／`snapshot 11`／`register 1`／`decode 7`／`decode-sample 19200000`，`gate`／`write-issued`／`disable-request`／`halt`／`acquire`／`release`／`measure` **一条都没有**，零时钟 WARN／ERROR，非时钟清单与面板标记都和 b32 全等（`marker_drift=null`）。即：关钟代码确实在这个内核里，属性不在时它一步也不走。
 - **结论**：C2-04 的写到 halt、halt 到账本确认、确认到恢复三段，都在同一台设备同一次开机里完成，且恢复后的终态与 C2-03 基线逐值相同。下一张卡是 C2-05（同一 branch 的多消费者共享）。
+## 本候选实现（C2-05 共享，补丁 0240）
+
+实现文件：[IOQcomGCC.h](../../dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h)、[IOQcomGCC.cpp](../../dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp)、[mk-mh2lm-mdss-adt.py](../../tools/mk-mh2lm-mdss-adt.py)。C2-04 撤回的是“本驱动唯一持有的那条需求”，任何第二个持有者都会让那条撤回变成“别人还在用就把钟关掉”。C2-05 让两个 XNU 消费者共享门控已经打开的那条 branch：同一账本条目上挂三个持有者（门控自己＋两个共享消费者），谁都不是所有者，谁都不在别人还持有的时候写硬件；只有**最后一笔归还落在一个仍在运行的 branch 上**时，才走 C2-04 那条已验撤回把它关掉，然后把 branch 再开回来，使开机终态仍是 C2-03 基线。
+
+- **撤回体被参数化（`retractBranch(token, consumer, stage)`）**：0239 的关钟体从 `disableClocks()` 搬出来，判决与行文一字未改，只把 consumer／stage 变成参数；`disableClocks()` 缩成“守卫 + `retractBranch(fGateToken,"sweetclock-disable","disable")`”。因此 0132 的环在 0133 内核上仍逐字可读，0239 的宿主断言与 `--c2-04` 审计都不需要改。`fGateToken`／`fGateTokenHeld`／`fGateRunning` 只在撤回归还成功时清，任何失败路径一律保留凭据。
+- **共享段（`shareClocks()`）**：`fShareEnabled` 才有；守卫 provider／`fGateTokenHeld`／token → 读一次 CBCR 作为**共享前**的证据（`phase=share-request` 打印 `enable`／`off`／`value`；已 halt 或未使能则拒绝，`hold=1`）→ 两个消费者各 `ledgerAcquire` 一次（`sweetclock-share-a`／`-b`，行里带 `opened=%u`）→ 每次取得立刻 `ledgerInspect`：`opened=1` 意味着这条需求已不是门控留下的那一笔（`WARN detail=ledger-lost-owner hold=1`，已取得的逐个归还后放弃，不写硬件）→ 两笔都到手后打一行总账（`phase=share result=0 consumers=2 holders=3 clock-share=1 clock-gate=1 clock-disable=1`）。取得阶段的缺陷被真实编译暴露过：`taken` 原先在循环末尾自增，`opened=1` 的拒绝路径会把发出去的 token 留在账本里，改为取得后立即自增。
+- **非最后一笔归还零写入**：按**逆序**归还（先 `sweetclock-gate` 自己的 token，再 `sweetclock-share-a`），每笔之前都读 CBCR 并打印 `running=1`，然后 `ledgerRelease(token, stopped=false)`；行里带 `token`／`holders`／`last-holder` 与读到的 `value`。**这次读就是“共享释放不碰硬件”的全部证据**——三次 store 里没有一次属于这里。若某笔成了最后一笔（`last-holder=1`），说明第二个共享消费者的引用早被别人拿走过，`ERROR detail=unexpected-last-holder` 并且**不撤回**：宁可留一个开着的钟，也不在一个来路不明的归还上写硬件。
+- **最后一笔归还走已验证的撤回**：剩下的 `sweetclock-share-b` 必须在归还前看见 `holders=1`（否则 `WARN detail=holders-mismatch`，不撤回）→ 打印 `phase=share-last result=0 token=%u holders=1 action=retract` → 交给 `retractBranch(token,"sweetclock-share-b","share-disable")`，即与 C2-04 完全相同的写入／halt 轮询／邻位比对／账本确认 → 成功则 `phase=share-done result=0 writes=3 consumers=2 retracted=1 last-holder=1 holders=0 detail=last-release-retracted`，同一 `start()` 里的恢复随即把 branch 再开起来（第三次 acquisition，`transitions=3 confirmations=3`），终态与 C2-04 逐值相同。失败则 `WARN phase=reenable … detail=reenable-incomplete`，不假装恢复过。
+- **账本语义（宿主模型被真实语义纠正过一处）**：共享取得**不重开**条目——`pending`／`confirmed`／`transitions` 仍是门控那一次留下的值（`pending=0 confirmed=1 transitions=1`），只有 `holders` 走 1→2→3。原先的宿主断言写的是“共享取得会把条目重开成 `pending=1`”，已被改掉；真正有 `hardware-still-on` 风险的只有最后一笔，而本卡让它以 halt 作确认。
+- **opt-in 与合成树**：`--clock-share` 同时隐含 `--clock-gate` 与 `--clock-disable`（生成器与后端双强制；缺任一条时 `WARN detail=clock-share-needs-gate-disable clock-gate=%u clock-disable=%u clock-share=%u`，不进共享）。共享树 `264b4a5c…`（23688 字节）= 关钟树 + 一条 `sweet,clock-share`；共享＋测频树 `3201cb02…`（23728 字节）= 关钟＋测频树 + 同一条。默认／测量／诊断／门控／门控＋测频／关钟／关钟＋测频七棵树逐字节不变，参数表仍 605 字节——属性是唯一通道，`--clock-share` 单独调用也必须得到同一棵树。
+- **证据（主机）**：`tools/tests/test-mh2lm-gcc-backend.py dxb/xnu` 通过——happy path 断言 `fReads==52`、三次 store（`0x80000001`／`0x0`／`0x80000001`）、token 1..4（门控、a、b、恢复）、`phase=share*` 七行齐全且 `phase=confirm result=0` 恰好两次、终态 `fShareToken[0]==fShareToken[1]==0`、`fShareHolders==1`、账本 `transitions=3 confirmations=3`；拒绝路径（缺 gate 或缺 disable、`length=3`、`value=0x2`）零读零写；继承运行、`ledger-lost-owner`、halt 超时、`unexpected-last-holder`、`holders-mismatch` 各有断言。`tools/tests/test-mh2lm-mdss-adt.py` 增三项（三条属性的隐含关系、可加性、逐条去掉与 CLI 字节等价）。补丁 `0240` 在 `0239` 之上增量：基线 `a5b2112` + `0239` + `0240` 重放后五个文件与工作树逐字节相同。
+- **审计器**：`audit-clock-log.py --c2-05` 新增第五人格，读账是 `19 + (19+polls_g) + (…d) + (…r)` 之外的**三笔**——`share-request` 一次加两笔非最后归还各一次 CBCR 读，合计 **`52+polls`、三次 store**；行序要求 `share-done` 落在恢复段 `gate-done` 之后。`make-share-ring.py` 从 `sweetlog-0131-1.bin` 真实环裁剪合成变体（`ok`／`lostowner`／`halted`／`notenabled`／`unexpected-last`／`stall`／`neighbour`／`norecovery`／`noshare` 与七个 `silent-*`），`selftest-share-auditor.py` 18/18 PASS。默认人格仍拒绝任何时钟 `WARN`／`ERROR`，`silent-*` 用同形 `INFO` 行证明逐字段判据真的在工作。
+- **镜像（0133，尚未实机）**：`out-bs/mk16k-0133.sh` 在 0132 的八档之上加 `clockshare`（`adt-gate-share`）与 `clocksharemeasure`，其余七档照旧；脚本对 C2-05 的两个新符号（`retractBranch`／`shareClocks`）、全部 C2-05 行、两条新树的摘要逐条设卡，拿 0132 内核当 `$1` 会在第一条新符号处失败——刻意的负向验证。
+- **C2-04 环在 0133 内核上仍必须可读**：`disableClocks()` 现在只是一个参数化的 `retractBranch`，行文法未变，故 `logs/sweetlog-0132-1.bin` 用 `--c2-04` 仍 rc=0；而把它当 C2-03 门控档审会 rc=1（环里有 `disable`／`release` 行），这正是 `--c2-04` 存在的理由。
+- **尚未做的**：0133 两档实机验收（需先由 CI 产出含 C2-05 的内核）；`SWEET IOWORKLOOP` 限频**不并入**本轮——证据镜像一次只带一个变量，那条打印的限频留到 0134，单独一轮验。
