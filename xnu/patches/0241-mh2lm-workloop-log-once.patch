@@ -1,0 +1,102 @@
+From: mh2lm clock work <clock@mh2lm>
+Subject: [PATCH 0241] diag: name a work-loop thread once, not on every wakeup
+
+threadMain() is not entered once per loop. The body calls itself through its
+own continuation (thread_block_parameter()), so every wakeup - every round of
+any event source on that loop - runs the prologue again, and the
+"SWEET IOWORKLOOP: thread %p running loop %p" line printed there cost one
+console row per round. On the 0134 pull 9030 of 12863 decoded rows were that
+line, 70% of the 4 MiB ring, so a ring that should hold half an hour held
+minutes and the boot-time SWEET CLOCK rows - the oldest ones - were the first
+thing lost. It was not free even where it did not dominate: two of those rows
+were recorded spliced onto the end of unrelated messages
+("... serializeVariables failed, ret=0xe00002d8SWEET IOWORKLOOP: ..."), which
+is one console write landing inside another message.
+
+The line itself has to stay: a recursive-lock panic names a thread, and this is
+the only thing that maps that thread to a loop. What has to change is the rate.
+One row per owning thread answers the same question:
+
+  * The bit lives in the byte fFlags already occupies. loopRestart is a bool and
+    kLoopRestart/kLoopTerminate are already tested through the byte-wide
+    ISSETP/SETP/CLRP helpers, so kLoopThreadNamed = 0x4 is a third bit in that
+    byte: no new member, no layout change, no shared cache line. The cost is one
+    read-modify-write per loop entry, which is what the two state bits cost.
+
+  * It is per object, not one remembered thread. A single static
+    "last named thread" word is defeated by alternation: with two hot loops
+    alternating wakeups the word flips every time and both loops reprint on
+    every wakeup, which is exactly the 4493/4485 pair in the 0134 ring. The
+    shape is preserved in the test as a mutation that must be rejected.
+
+  * It is cleared at exitThread. A loop whose thread exits and is replaced would
+    otherwise stay silent, and the panic line would name an owner that is gone;
+    the replacement prints once and then goes quiet too.
+
+tools/tests/test-mh2lm-workloop-log.py compiles the shipped helpers, enum,
+threadMain() prologue and exitThread cleanup verbatim into a host program and
+drives them the way the device does: twelve loops round-robin for 500 wakeups
+each print exactly twelve rows with the right owners, the two hot loops
+alternating 4000 times print nothing, a handover prints once then stops, and a
+never-named loop still prints. Four mutations are rejected - unguarded (the
+0134 code), guarding the wrong bit, no cleanup, and the remembered-thread word
+(caught by the alternation case).
+
+diff --git a/dxb/xnu/iokit/Kernel/IOWorkLoop.cpp b/dxb/xnu/iokit/Kernel/IOWorkLoop.cpp
+index 614a8b4..d160498 100644
+--- a/dxb/xnu/iokit/Kernel/IOWorkLoop.cpp
++++ b/dxb/xnu/iokit/Kernel/IOWorkLoop.cpp
+@@ -57,7 +57,23 @@ OSMetaClassDefineReservedUnused(IOWorkLoop, 5);
+ OSMetaClassDefineReservedUnused(IOWorkLoop, 6);
+ OSMetaClassDefineReservedUnused(IOWorkLoop, 7);
+ 
+-enum IOWorkLoopState { kLoopRestart = 0x1, kLoopTerminate = 0x2 };
++/* kLoopThreadNamed is a diagnostic bit, not a loop state: threadMain() is not
++ * entered once per loop - it is re-entered through its own continuation (the
++ * thread_block_parameter() call in the body) on every wakeup - so the
++ * "thread %p running loop %p" line below would otherwise cost one console row
++ * per event-source round.  On the 0134 pull that line was 9042 of 12863 rows,
++ * 70% of the 4 MiB ring, which is why a ring that should hold half an hour
++ * held minutes.  The line exists so a recursive-lock panic names a loop owner,
++ * and one line per owning thread answers that: the bit lives in the same byte
++ * as the two state bits (loopRestart is a bool and ISSETP/SETP/CLRP already
++ * test it as a byte), it is set on the loop's own object so twelve loops each
++ * print once instead of sharing one remembered thread, and it is cleared when
++ * the loop thread exits so a loop that gains a new owner announces it again. */
++enum IOWorkLoopState {
++	kLoopRestart = 0x1,
++	kLoopTerminate = 0x2,
++	kLoopThreadNamed = 0x4
++};
+ static inline void
+ SETP(void *addr, unsigned int flag)
+ {
+@@ -435,9 +451,13 @@ IOWorkLoop::threadMain()
+ #ifdef SWEET
+ 	/* The recursive-lock panic names a thread; printing the loop's own
+ 	 * thread here and the touch worker's in ts_thread() lets the panic line
+-	 * be matched against a known owner instead of an anonymous pointer. */
+-	printf("SWEET IOWORKLOOP: thread %p running loop %p\n",
+-	    (void *)IOThreadSelf(), this);
++	 * be matched against a known owner instead of an anonymous pointer.
++	 * Once per owning thread, not once per wakeup - see kLoopThreadNamed. */
++	if (!ISSETP(&fFlags, kLoopThreadNamed)) {
++		SETP(&fFlags, kLoopThreadNamed);
++		printf("SWEET IOWORKLOOP: thread %p running loop %p\n",
++		    (void *)IOThreadSelf(), this);
++	}
+ #endif
+ restartThread:
+ 	do {
+@@ -466,6 +486,11 @@ restartThread:
+ 	} while (workToDo);
+ 
+ exitThread:
++#ifdef SWEET
++	/* This loop is about to lose the thread the line above named; let a
++	 * replacement thread announce itself instead of inheriting the bit. */
++	CLRP(&fFlags, kLoopThreadNamed);
++#endif
+ 	closeGate();
+ 	thread_t thread = workThread;
+ 	workThread = NULL; // Say we don't have a loop and free ourselves

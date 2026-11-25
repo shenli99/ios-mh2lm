@@ -57,7 +57,23 @@ OSMetaClassDefineReservedUnused(IOWorkLoop, 5);
 OSMetaClassDefineReservedUnused(IOWorkLoop, 6);
 OSMetaClassDefineReservedUnused(IOWorkLoop, 7);
 
-enum IOWorkLoopState { kLoopRestart = 0x1, kLoopTerminate = 0x2 };
+/* kLoopThreadNamed is a diagnostic bit, not a loop state: threadMain() is not
+ * entered once per loop - it is re-entered through its own continuation (the
+ * thread_block_parameter() call in the body) on every wakeup - so the
+ * "thread %p running loop %p" line below would otherwise cost one console row
+ * per event-source round.  On the 0134 pull that line was 9042 of 12863 rows,
+ * 70% of the 4 MiB ring, which is why a ring that should hold half an hour
+ * held minutes.  The line exists so a recursive-lock panic names a loop owner,
+ * and one line per owning thread answers that: the bit lives in the same byte
+ * as the two state bits (loopRestart is a bool and ISSETP/SETP/CLRP already
+ * test it as a byte), it is set on the loop's own object so twelve loops each
+ * print once instead of sharing one remembered thread, and it is cleared when
+ * the loop thread exits so a loop that gains a new owner announces it again. */
+enum IOWorkLoopState {
+	kLoopRestart = 0x1,
+	kLoopTerminate = 0x2,
+	kLoopThreadNamed = 0x4
+};
 static inline void
 SETP(void *addr, unsigned int flag)
 {
@@ -435,9 +451,13 @@ IOWorkLoop::threadMain()
 #ifdef SWEET
 	/* The recursive-lock panic names a thread; printing the loop's own
 	 * thread here and the touch worker's in ts_thread() lets the panic line
-	 * be matched against a known owner instead of an anonymous pointer. */
-	printf("SWEET IOWORKLOOP: thread %p running loop %p\n",
-	    (void *)IOThreadSelf(), this);
+	 * be matched against a known owner instead of an anonymous pointer.
+	 * Once per owning thread, not once per wakeup - see kLoopThreadNamed. */
+	if (!ISSETP(&fFlags, kLoopThreadNamed)) {
+		SETP(&fFlags, kLoopThreadNamed);
+		printf("SWEET IOWORKLOOP: thread %p running loop %p\n",
+		    (void *)IOThreadSelf(), this);
+	}
 #endif
 restartThread:
 	do {
@@ -466,6 +486,11 @@ restartThread:
 	} while (workToDo);
 
 exitThread:
+#ifdef SWEET
+	/* This loop is about to lose the thread the line above named; let a
+	 * replacement thread announce itself instead of inheriting the bit. */
+	CLRP(&fFlags, kLoopThreadNamed);
+#endif
 	closeGate();
 	thread_t thread = workThread;
 	workThread = NULL; // Say we don't have a loop and free ourselves
