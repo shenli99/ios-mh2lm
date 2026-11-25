@@ -110,9 +110,8 @@ bash /home/shenli/work1/scripts/build-mh2-uefi.sh DEBUG     # 或 RELEASE
 
 ### 5.3 打包
 
-照 `out-bs/mk-boot-persist4.sh` 复制一份改：内核文件、iOS 项的参数来源（直接取某个已实测
-profile 的 `unixnu-16k-<LABEL>-<profile>.toml` 的 `args`）、标题、UEFI 类型。用 mtools 改 FAT，不需要 sudo。
-脚本最后用 `Mu-Silicium/Resources/Scripts/mkbootimg.py --header_version 1` 出镜像并回读比对。
+照 `out-bs/mk-boot-persist5.sh`（当前版）或 `mk-boot-persist4.sh`（历史版）复制一份改：内核文件、iOS 项的参数来源（直接取某个已实测 profile 的 `unixnu-16k-<LABEL>-<profile>.toml` 的 `args`，逐字复制不要重打）、标题、UEFI 类型。用 mtools 改 FAT，不需要 sudo。
+脚本最后用 `Mu-Silicium/Resources/Scripts/mkbootimg.py --header_version 1` 出镜像并回读比对；persist5 起的做法是**从成品镜像里把 FAT 抽出来再回读**（`dd` 到偏移 `0x1e6000` 后 `mcopy`），这样校验的是真正会被刷进分区的那几个字节，而不是中途的临时文件。
 
 ### 5.4 刷写（用户执行，刷前确认）
 
@@ -123,7 +122,9 @@ fastboot flash boot_b /home/shenli/work1/out-bs/boot-persistN.img
 fastboot reboot
 ```
 boot 分区 96 MiB（0x6000000）。失败时 fastboot 仍可用，刷回上一版 persist 镜像。
-历史：persist2（0107，DEBUG）、persist3（0111，DEBUG）、persist4（0120a18 充电，RELEASE UEFI，2026-11-08）。
+历史：persist2（0107，DEBUG）、persist3（0111，DEBUG）、persist4（0120a18 充电，RELEASE UEFI，2026-11-08）、persist5（0133，带 MHPANEL1 的 RELEASE 固件卷＋面板参数 599 字节＋默认 Mass Storage，2026-11-25）。
+
+**`boot_a`／`boot_b` 两槽里放的就是持久镜像**——大容量取日志的唯一通道，不是可以随手占用的暂存位。测试镜像**只能** `fastboot boot`（RAM 启动，不写分区）；一旦把测试镜像 `fastboot flash` 进任一槽，这一槽的持久镜像就没了，只能从另一槽抢救日志。0133 默认档那一轮就这样丢过 `boot_a`，靠 `boot_b` 才把环取回来。
 
 ## 6. 取日志与实机验收
 
