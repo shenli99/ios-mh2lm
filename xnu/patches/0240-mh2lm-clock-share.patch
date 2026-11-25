@@ -1,0 +1,980 @@
+From: mh2lm clock work <clock@mh2lm>
+Subject: [PATCH 0240] clock: two consumers share the gate's demand, and the last one hands it back
+
+C2-04 closed the loop for exactly one holder: the gate opens XO/4, verifies it
+running, and later withdraws the enable it stored. A clock provider that owns a
+reference has to survive more than one reference to it, or the second consumer
+in a tree has to open a second demand for the same branch and the ledger stops
+describing the hardware. C2-05 is that card: the demand the gate verified is
+shared, and the release that ends it belongs to a consumer that did not open the
+clock.
+
+Three pieces:
+
+  * retractBranch(token, consumer, stage) is the C2-04 withdraw, lifted out of
+    disableClocks() because the consumer that turns the branch off is no longer
+    the consumer that turned it on. The rows are the same rows (disable-request,
+    write-issued, halt, disable-check, disable-done), the bounded 2500x10us halt
+    poll is the same poll, and the ledger verdict is the same: release with
+    stopped=true, so the demand becomes a confirmation instead of the IOError a
+    bare release reports. Only the name printed as consumer, the stage on the
+    store row and the token being released are parameters. disableClocks() is
+    now the thin wrapper that passes the gate's own token and the legacy names,
+    so the C2-04 ring grammar and every audit of it are untouched.
+
+  * shareClocks() is opt-in through sweet,clock-share, which implies both cards
+    below it. It reads the CBCR first (phase=share-request, enable/off/value
+    printed) and refuses an already halted or no-longer-enabled branch with
+    hold=1 and zero writes, then takes two references on the entry the gate
+    opened (phase=share-acquire, holders=2 then 3). opened must be 0 on both: an
+    opener would mean the demand being shared is not the verified one, and the
+    pass says ledger-lost-owner and abandons the retraction rather than closing
+    someone else's clock. The three-holder state is printed once, so the row
+    that lets the withdraw happen is visible rather than inferred.
+
+  * The release order is the card. The gate hands back its own reference first,
+    then the first consumer: both are non-last releases, so both read the CBCR,
+    print running=1 and the value they found, and release with stopped=false.
+    That read is the whole claim - "still running, nothing stored" - and a
+    release that finds the branch halted logs branch-halted and aborts, as does
+    any release the ledger calls last while one more holder is expected
+    (unexpected-last-holder). The last holder then runs retractBranch with its
+    own token and the stage share-disable, and phase=share-done prints the three
+    stores the boot made. A shared pass therefore ends in exactly the C2-04
+    final ledger state: holders=1, desired=1, pending=0, confirmed=1, with the
+    enable back on the branch.
+
+The ADT side is a deferred implication, not a parse-time one: sweet,clock-share
+requires both sweet,clock-gate and sweet,clock-disable, and a tree that asks for
+the share without them is refused by validateProperties with
+clock-share-needs-gate-disable. When several of the three are wrong the share is
+reported first, because it is the switch the operator flipped; the card below it
+is still named in the same row. The generator mirrors the relation, so an image
+cannot be built with the property the kernel would refuse.
+
+The arithmetic stays small because the sharing pass stores nothing: the C2-04
+chain costs 49+polls reads, and the share adds one read to head itself and one
+per non-last release, i.e. 52+polls reads and three writes. The backend case
+pins that number, walks the rows in order, and pins the ledger state the pass
+must leave behind, including the fault arms that keep the demand with the holder
+that failed.
+
+Nothing here is reachable from an image that does not carry sweet,clock-share in
+its device tree, so the zero-write default, the C2-03 measurement and the C2-04
+ring are unchanged: the property is additive, exactly removable, and the
+combined tree is the gate+disable tree plus one 4-byte property.
+
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
+index 01d98ee..4cbb013 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
+@@ -271,15 +271,54 @@ IOQcomGCC::validateProperties(IOService *provider)
+ 		}
+ 		fDisableEnabled=value==1;
+ 		haveGate=true;
+-		if (fDisableEnabled&&!fGateEnabled) {
+-			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=clock-disable-needs-gate clock-gate=%u clock-disable=%u\n",
+-			 kIOReturnBadArgument,fGateEnabled?1u:0u,fDisableEnabled?1u:0u);
++	}
++	/* C2-05 stands on both cards below it: it shares the enable C2-03 opens and
++	 * ends the shared demand through the disable C2-04 verified. Pulling the
++	 * switch without them would be a sharing pass with nothing to share, so it
++	 * refuses at start rather than degrading into one of them silently. */
++	fShareEnabled=false;
++	OSData *branchShare=OSDynamicCast(OSData,provider->getProperty("sweet,clock-share"));
++	if (branchShare) {
++		if (branchShare->getLength()!=4) {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-share length=%u\n",
++			 kIOReturnBadArgument,(unsigned)branchShare->getLength());
++			return false;
++		}
++		uint32_t value=0;
++		memcpy(&value,branchShare->getBytesNoCopy(),4);
++		if (value>1) {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-share value=%#x\n",
++			 kIOReturnBadArgument,value);
+ 			return false;
+ 		}
++		fShareEnabled=value==1;
++		haveGate=true;
++	}
++	/* The two implications are checked once, after every switch has been read,
++	 * so the row names the newest switch that is armed instead of an older one
++	 * that only happens to be missing its prerequisite too. */
++	if (fShareEnabled&&(!fGateEnabled||!fDisableEnabled)) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=clock-share-needs-gate-disable clock-gate=%u clock-disable=%u clock-share=%u\n",
++		 kIOReturnBadArgument,fGateEnabled?1u:0u,fDisableEnabled?1u:0u,fShareEnabled?1u:0u);
++		return false;
++	}
++	if (fDisableEnabled&&!fGateEnabled) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=clock-disable-needs-gate clock-gate=%u clock-disable=%u\n",
++		 kIOReturnBadArgument,fGateEnabled?1u:0u,fDisableEnabled?1u:0u);
++		return false;
+ 	}
+ 	if (haveGate) {
+-		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc phase=gate result=0 clock-measure=%u clock-gate=%u clock-disable=%u\n",
+-		 fMeasureEnabled?1u:0u,fGateEnabled?1u:0u,fDisableEnabled?1u:0u);
++		/* The ring written before this candidate keeps its exact row: the share
++		 * field appears only on an image that arms the sharing pass, so an
++		 * already-pulled C2-04 ring stays byte-identical to what its auditor
++		 * expects. */
++		if (fShareEnabled) {
++			SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc phase=gate result=0 clock-measure=%u clock-gate=%u clock-disable=%u clock-share=%u\n",
++			 fMeasureEnabled?1u:0u,fGateEnabled?1u:0u,fDisableEnabled?1u:0u,fShareEnabled?1u:0u);
++		} else {
++			SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc phase=gate result=0 clock-measure=%u clock-gate=%u clock-disable=%u\n",
++			 fMeasureEnabled?1u:0u,fGateEnabled?1u:0u,fDisableEnabled?1u:0u);
++		}
+ 	}
+ 	return true;
+ }
+@@ -809,13 +848,19 @@ IOQcomGCC::gateClocks(void)
+ 	return verdict;
+ }
+ 
+-/* C2-04 entry: hand back the demand C2-03 opened. The card makes the disable a
+- * claim the hardware has to back rather than a second store with a nicer
+- * comment: the branch must be the one this driver left running, the store must
+- * clear the enable bit alone, and CLK_OFF has to rise within the same bound the
+- * enable waits for it to fall. Only then is the ledger demand handed back, and
+- * handed back with stopped=true so the ledger records "satisfied" instead of
+- * the "still running, owed" it would record for a bare release.
++/* C2-04/C2-05 retraction. The card makes the disable a claim the hardware has to
++ * back rather than a second store with a nicer comment: the branch must be the
++ * one this driver left running, the store must clear the enable bit alone, and
++ * CLK_OFF has to rise within the same bound the enable waits for it to fall.
++ * Only then is the ledger demand handed back, and handed back with stopped=true
++ * so the ledger records "satisfied" instead of the "still running, owed" it
++ * would record for a bare release.
++ *
++ * The token is a parameter because C2-05 may end a demand it did not open: the
++ * last holder of a shared branch retracts the enable a different consumer
++ * stored, and the hardware contract is the same whichever release got there.
++ * The consumer and stage name the rows, so the ring can still attribute the
++ * single store to the holder that caused it.
+  *
+  * A timeout keeps both the demand and the branch: nothing is reset to make a
+  * failing row read better, and the clock is still running under a demand the
+@@ -829,19 +874,13 @@ IOQcomGCC::gateClocks(void)
+  * running again, which is the state the C2-03 baseline leaves for the rest of
+  * the boot. */
+ IOReturn
+-IOQcomGCC::disableClocks(void)
++IOQcomGCC::retractBranch(uint32_t token, const char *consumer, const char *stage)
+ {
+-	if (!fDisableEnabled) {
+-		SWEET_LOG_DEBUG("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-disable phase=disable result=%d detail=disable-absent\n",
+-		 kIOQcomCCGCC,kIOQcomGccGateLocalID,kIOReturnUnsupported);
+-		return kIOReturnUnsupported;
+-	}
+-	if (!fMapped||!fRegistered||!fLock) return kIOReturnNotReady;
++	if (!fMapped||!fRegistered||!fLock||!token||!consumer||!stage) return kIOReturnNotReady;
+ 	IOQcomClockProvider *provider=IOQcomClockProvider::publishedProvider();
+-	if (!provider||!fGateTokenHeld||!fGateToken) {
+-		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-disable phase=disable result=%d detail=%s %s\n",
+-		 kIOQcomCCGCC,kIOQcomGccGateLocalID,kIOReturnNotReady,
+-		 provider?"no-token":"provider-absent","hold=0");
++	if (!provider) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=%s phase=retract result=%d detail=provider-absent hold=0\n",
++		 kIOQcomCCGCC,kIOQcomGccGateLocalID,consumer,kIOReturnNotReady);
+ 		return kIOReturnNotReady;
+ 	}
+ 	const GccClock *entry=gccFind(kIOQcomGccGateLocalID);
+@@ -852,31 +891,31 @@ IOQcomGCC::disableClocks(void)
+ 	gccName(window,offset,resource,sizeof resource);
+ 	uint32_t saved=0;
+ 	if (!readRegister(window,offset,&saved)) {
+-		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-request result=%d detail=read-failed\n",
+-		 resource,kIOReturnNotReady);
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=disable-request result=%d detail=read-failed\n",
++		 resource,consumer,kIOReturnNotReady);
+ 		return kIOReturnNotReady;
+ 	}
+ 	bool enabled=(saved&kGccBranchEnable)!=0;
+ 	bool off=(saved&kGccBranchClockOff)!=0;
+-	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s name=%s consumer=sweetclock-disable phase=disable-request result=0 enable=%u off=%u value=%#x\n",
+-	 resource,entry->name,enabled?1u:0u,off?1u:0u,saved);
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s name=%s consumer=%s phase=disable-request result=0 enable=%u off=%u value=%#x\n",
++	 resource,entry->name,consumer,enabled?1u:0u,off?1u:0u,saved);
+ 	/* A branch that is already halted, or one that is not the enable this
+ 	 * driver left behind, is not something this store can retract: the row
+ 	 * would claim a transition that never happened. */
+ 	if (!enabled||off) {
+-		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-request result=%d detail=%s enable=%u off=%u value=%#x\n",
+-		 resource,kIOReturnNotReady,off?"already-halted":"not-enabled",
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=disable-request result=%d detail=%s enable=%u off=%u value=%#x\n",
++		 resource,consumer,kIOReturnNotReady,off?"already-halted":"not-enabled",
+ 		 enabled?1u:0u,off?1u:0u,saved);
+ 		return kIOReturnNotReady;
+ 	}
+-	(void)gateNeighbours(true,"sweetclock-disable");
++	(void)gateNeighbours(true,consumer);
+ 	/* Only the enable bit is cleared: the divider fields and the halt status
+ 	 * belong to the hardware, and a read-modify-write that dropped one of them
+ 	 * would be a write this card cannot justify. */
+ 	uint32_t target=saved&~kGccBranchEnable;
+-	if (!writeRegister(window,offset,target,"disable","sweetclock-disable")) {
+-		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-request result=%d stage=disable detail=store-failed writes=%u\n",
+-		 resource,kIOReturnNotReady,fWrites);
++	if (!writeRegister(window,offset,target,stage,consumer)) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=disable-request result=%d stage=%s detail=store-failed writes=%u\n",
++		 resource,consumer,kIOReturnNotReady,stage,fWrites);
+ 		return kIOReturnNotReady;
+ 	}
+ 	unsigned polls=0;
+@@ -891,48 +930,258 @@ IOQcomGCC::disableClocks(void)
+ 		/* The branch did not report halted. The demand stays where it is and the
+ 		 * branch is left alone: undoing the store here would be the unverified
+ 		 * write this card exists to rule out. */
+-		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=halt result=%d enable=%u off=%u value=%#x polls=%u writes=%u hold=1 detail=%s\n",
+-		 resource,readFailed?kIOReturnNotReady:kIOReturnTimeout,
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=halt result=%d enable=%u off=%u value=%#x polls=%u writes=%u hold=1 detail=%s\n",
++		 resource,consumer,readFailed?kIOReturnNotReady:kIOReturnTimeout,
+ 		 (value&kGccBranchEnable)?1u:0u,(value&kGccBranchClockOff)?1u:0u,value,polls,fWrites,
+ 		 readFailed?"halt-read-failed":"halt-timeout");
+ 		return readFailed?kIOReturnNotReady:kIOReturnTimeout;
+ 	}
+-	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=halt result=0 enable=%u off=1 value=%#x polls=%u\n",
+-	 resource,(value&kGccBranchEnable)?1u:0u,value,polls);
+-	unsigned changed=gateNeighbours(false,"sweetclock-disable");
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=halt result=0 enable=%u off=1 value=%#x polls=%u\n",
++	 resource,consumer,(value&kGccBranchEnable)?1u:0u,value,polls);
++	unsigned changed=gateNeighbours(false,consumer);
+ 	if (changed) {
+-		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-check result=%d neighbours=%u changed=%u detail=neighbour-changed\n",
+-		 resource,kIOReturnIOError,kIOQcomGccGateNeighbourCount,changed);
+-		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-done result=%d writes=%u neighbours=%u changed=%u polls=%u hold=1 detail=neighbour-changed\n",
+-		 resource,kIOReturnIOError,fWrites,kIOQcomGccGateNeighbourCount,changed,polls);
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=disable-check result=%d neighbours=%u changed=%u detail=neighbour-changed\n",
++		 resource,consumer,kIOReturnIOError,kIOQcomGccGateNeighbourCount,changed);
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=disable-done result=%d writes=%u neighbours=%u changed=%u polls=%u hold=1 detail=neighbour-changed\n",
++		 resource,consumer,kIOReturnIOError,fWrites,kIOQcomGccGateNeighbourCount,changed,polls);
+ 		return kIOReturnIOError;
+ 	}
+-	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-check result=0 neighbours=%u changed=0\n",
+-	 resource,kIOQcomGccGateNeighbourCount);
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=disable-check result=0 neighbours=%u changed=0\n",
++	 resource,consumer,kIOQcomGccGateNeighbourCount);
+ 	/* The halt verdict is the licence for this release: stopped=true, so the
+ 	 * ledger clears the demand it was still owed and counts the confirmation. */
+ 	bool lastHolder=false;
+-	IOReturn released=provider->ledgerRelease(fGateToken,true,&lastHolder);
++	IOReturn released=provider->ledgerRelease(token,true,&lastHolder);
+ 	if (released!=kIOReturnSuccess) {
+-		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-done result=%d writes=%u neighbours=%u changed=0 polls=%u hold=1 detail=ledger-release-failed\n",
+-		 resource,released,fWrites,kIOQcomGccGateNeighbourCount,polls);
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=disable-done result=%d writes=%u neighbours=%u changed=0 polls=%u hold=1 detail=ledger-release-failed\n",
++		 resource,consumer,released,fWrites,kIOQcomGccGateNeighbourCount,polls);
+ 		return released;
+ 	}
+ 	fGateToken=0;
+ 	fGateTokenHeld=false;
+ 	fGateRunning=false;
+-	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=disable-done result=0 writes=%u neighbours=%u changed=0 polls=%u hold=0 last-holder=%u detail=sample-halted\n",
+-	 resource,fWrites,kIOQcomGccGateNeighbourCount,polls,lastHolder?1u:0u);
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=disable-done result=0 writes=%u neighbours=%u changed=0 polls=%u hold=0 last-holder=%u detail=sample-halted\n",
++	 resource,consumer,fWrites,kIOQcomGccGateNeighbourCount,polls,lastHolder?1u:0u);
+ 	/* Recovery: the verified enable again, from the halted state this card just
+ 	 * proved. Its rows are the second gate pass in this ring. */
+ 	IOReturn recovered=gateClocks();
+ 	if (recovered!=kIOReturnSuccess) {
+-		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-disable phase=reenable result=%d writes=%u detail=reenable-incomplete\n",
+-		 resource,recovered,fWrites);
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=reenable result=%d writes=%u detail=reenable-incomplete\n",
++		 resource,consumer,recovered,fWrites);
+ 	}
+ 	return recovered;
+ }
+ 
++/* C2-04 entry: hand back the demand C2-03 opened. The guards live here rather
++ * than in the retraction, because a shared release (C2-05) ends the demand of a
++ * consumer that never owned the gate token, while this one must only ever undo
++ * the enable this very driver stored in this very boot. */
++IOReturn
++IOQcomGCC::disableClocks(void)
++{
++	if (!fDisableEnabled) {
++		SWEET_LOG_DEBUG("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-disable phase=disable result=%d detail=disable-absent\n",
++		 kIOQcomCCGCC,kIOQcomGccGateLocalID,kIOReturnUnsupported);
++		return kIOReturnUnsupported;
++	}
++	if (!fMapped||!fRegistered||!fLock) return kIOReturnNotReady;
++	IOQcomClockProvider *provider=IOQcomClockProvider::publishedProvider();
++	if (!provider||!fGateTokenHeld||!fGateToken) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-disable phase=disable result=%d detail=%s %s\n",
++		 kIOQcomCCGCC,kIOQcomGccGateLocalID,kIOReturnNotReady,
++		 provider?"no-token":"provider-absent","hold=0");
++		return kIOReturnNotReady;
++	}
++	return retractBranch(fGateToken,"sweetclock-disable","disable");
++}
++
++/* C2-05: the shared demand. Two consumers take the branch the gate opened, then
++ * the gate gives its own reference back. Nothing is stored while any of them
++ * still holds the clock: the row after each release reads the CBCR and shows
++ * the branch still enabled, which is the whole claim of the card - a release
++ * that is not the last one must not move the hardware.
++ *
++ * The last holder is a different consumer than the one that opened the clock,
++ * so the retraction below cannot be justified by "the driver that enabled it
++ * now disables it". It is justified by the ledger: holders==1, this is the last
++ * demand, and the hardware contract of C2-04 does the rest. That is also why the
++ * pass refuses to run at all when the ledger does not recognise the gate's
++ * demand: an inherited clock with zero references is not this driver's to turn
++ * off, and the row says which arm refused. */
++IOReturn
++IOQcomGCC::shareClocks(void)
++{
++	if (!fShareEnabled) {
++		SWEET_LOG_DEBUG("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-share phase=share result=%d detail=share-absent\n",
++		 kIOQcomCCGCC,kIOQcomGccGateLocalID,kIOReturnUnsupported);
++		return kIOReturnUnsupported;
++	}
++	if (!fMapped||!fRegistered||!fLock) return kIOReturnNotReady;
++	IOQcomClockProvider *provider=IOQcomClockProvider::publishedProvider();
++	if (!provider||!fGateTokenHeld||!fGateToken) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-share phase=share result=%d detail=%s %s\n",
++		 kIOQcomCCGCC,kIOQcomGccGateLocalID,kIOReturnNotReady,
++		 provider?"no-token":"provider-absent","hold=0");
++		return kIOReturnNotReady;
++	}
++	const GccClock *entry=gccFind(kIOQcomGccGateLocalID);
++	if (!entry) return kIOReturnNotFound;
++	const unsigned window=entry->window;
++	const uint32_t offset=entry->offset;
++	char resource[kIOQcomLogBuf];
++	gccName(window,offset,resource,sizeof resource);
++	uint32_t value=0;
++	if (!readRegister(window,offset,&value)) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-share phase=share-request result=%d detail=read-failed hold=1\n",
++		 resource,kIOReturnNotReady);
++		return kIOReturnNotReady;
++	}
++	bool enabled=(value&kGccBranchEnable)!=0;
++	bool off=(value&kGccBranchClockOff)!=0;
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s name=%s consumer=sweetclock-share phase=share-request result=0 enable=%u off=%u value=%#x\n",
++	 resource,entry->name,enabled?1u:0u,off?1u:0u,value);
++	/* Sharing a clock nobody is running would prove nothing: two holders of a
++	 * halted branch are two holders of nothing. */
++	if (!enabled||off) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-share phase=share-request result=%d detail=%s enable=%u off=%u value=%#x hold=1\n",
++		 resource,kIOReturnNotReady,off?"already-halted":"not-enabled",
++		 enabled?1u:0u,off?1u:0u,value);
++		return kIOReturnNotReady;
++	}
++	/* The public ledger is the only way this pass takes a reference: a consumer
++	 * that bypassed it could not be seen by the release that ends the demand. */
++	unsigned taken=0;
++	IOReturn acquired=kIOReturnSuccess;
++	for (;taken<kIOQcomGccShareConsumers;) {
++		uint32_t token=0;
++		bool opened=false;
++		acquired=provider->ledgerAcquire(kIOQcomCCGCC,kIOQcomGccGateLocalID,
++		 gccShareConsumers[taken],&token,&opened);
++		if (acquired!=kIOReturnSuccess) break;
++		fShareToken[taken]=token;
++		/* Counted as taken before anything can refuse it: a reference the ledger
++		 * issued must be handed back even when this pass then rejects it. */
++		taken++;
++		IOQcomClockLedgerState state;
++		unsigned holders=0;
++		if (provider->ledgerInspect(kIOQcomCCGCC,kIOQcomGccGateLocalID,0,&state)==kIOReturnSuccess) {
++			holders=state.holders;
++		}
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=share-acquire result=0 token=%u holders=%u opened=%u\n",
++		 resource,gccShareConsumers[taken-1],token,holders,opened?1u:0u);
++		/* The ledger hands out a transition flag only when it had no holder for
++		 * this clock. The gate opened this branch in this boot, so a flag here
++		 * means the demand being shared is not the verified one. */
++		if (opened) {
++			acquired=kIOReturnNotReady;
++			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=share-acquire result=%d token=%u detail=ledger-lost-owner hold=1\n",
++			 resource,gccShareConsumers[taken-1],kIOReturnNotReady,token);
++			break;
++		}
++	}
++	if (acquired!=kIOReturnSuccess) {
++		/* Hand back exactly what this pass took, with stopped=false: the branch
++		 * is still running, so the release is not a halt verdict. */
++		for (unsigned i=0;i<taken;i++) {
++			bool last=false;
++			(void)provider->ledgerRelease(fShareToken[i],false,&last);
++			fShareToken[i]=0;
++		}
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-share phase=share result=%d detail=acquire-failed released=%u hold=1\n",
++		 resource,acquired,taken);
++		return acquired;
++	}
++	IOQcomClockLedgerState state;
++	fShareHolders=0;
++	if (provider->ledgerInspect(kIOQcomCCGCC,kIOQcomGccGateLocalID,0,&state)==kIOReturnSuccess) {
++		fShareHolders=state.holders;
++	}
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-share phase=share result=0 consumers=%u holders=%u clock-share=1 clock-gate=1 clock-disable=1\n",
++	 resource,kIOQcomGccShareConsumers,fShareHolders);
++	/* The gate lets go of a clock it opened: the demand was real, but it is not
++	 * the one keeping the clock on any more. Every non-last release here reads
++	 * the CBCR first and logs what it saw, so "still running, no store" is a row
++	 * and not an assumption. The gate's token is the first one handed back; the
++	 * first shared consumer is the second. */
++	uint32_t releasedToken[kIOQcomGccShareConsumers];
++	const char *releasedConsumer[kIOQcomGccShareConsumers];
++	releasedToken[0]=fGateToken;releasedConsumer[0]="sweetclock-gate";
++	releasedToken[1]=fShareToken[0];releasedConsumer[1]=gccShareConsumers[0];
++	for (unsigned i=0;i<kIOQcomGccShareConsumers;i++) {
++		uint32_t seen=0;
++		if (!readRegister(window,offset,&seen)) {
++			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=share-release result=%d detail=read-failed token=%u hold=1\n",
++			 resource,releasedConsumer[i],kIOReturnNotReady,releasedToken[i]);
++			return kIOReturnNotReady;
++		}
++		bool stillEnabled=(seen&kGccBranchEnable)!=0;
++		bool stillOff=(seen&kGccBranchClockOff)!=0;
++		/* A release that is not the last one must leave the clock running: if it
++		 * is not, the ledger cannot be trusted about who holds what, and closing
++		 * more demand would hide that. */
++		if (!stillEnabled||stillOff) {
++			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=share-release result=%d detail=%s enable=%u off=%u value=%#x token=%u hold=1\n",
++			 resource,releasedConsumer[i],kIOReturnNotReady,
++			 stillOff?"branch-halted":"branch-not-enabled",
++			 stillEnabled?1u:0u,stillOff?1u:0u,seen,releasedToken[i]);
++			return kIOReturnNotReady;
++		}
++		bool last=false;
++		IOReturn released=provider->ledgerRelease(releasedToken[i],false,&last);
++		if (released!=kIOReturnSuccess) {
++			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=share-release result=%d token=%u detail=ledger-release-failed hold=1\n",
++			 resource,releasedConsumer[i],released,releasedToken[i]);
++			return released;
++		}
++		if (i==0) {
++			/* The gate's demand is gone; the shared consumers hold the branch. */
++			fGateToken=0;
++			fGateTokenHeld=false;
++		} else {
++			fShareToken[0]=0;
++		}
++		unsigned holders=0;
++		if (provider->ledgerInspect(kIOQcomCCGCC,kIOQcomGccGateLocalID,0,&state)==kIOReturnSuccess) {
++			holders=state.holders;
++		}
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=share-release result=0 token=%u holders=%u last-holder=%u running=1 value=%#x\n",
++		 resource,releasedConsumer[i],releasedToken[i],holders,last?1u:0u,seen);
++		if (last) {
++			/* The ledger says this release ended the demand while the branch is
++			 * still enabled: the pass expected one more holder, so it says so
++			 * instead of retracting on a count it cannot explain. */
++			SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=share result=%d detail=unexpected-last-holder token=%u holders=%u hold=1\n",
++			 resource,releasedConsumer[i],kIOReturnIOError,releasedToken[i],holders);
++			return kIOReturnIOError;
++		}
++	}
++	/* The last holder is the consumer that must not have been able to turn the
++	 * clock off by dropping its own request - only by being the last one. */
++	uint32_t lastToken=fShareToken[kIOQcomGccShareConsumers-1];
++	unsigned holders=0;
++	if (provider->ledgerInspect(kIOQcomCCGCC,kIOQcomGccGateLocalID,0,&state)==kIOReturnSuccess) {
++		holders=state.holders;
++	}
++	fShareHolders=holders;
++	if (holders!=1) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=share-last result=%d detail=holders-mismatch holders=%u token=%u hold=1\n",
++		 resource,gccShareConsumers[kIOQcomGccShareConsumers-1],kIOReturnNotReady,holders,lastToken);
++		return kIOReturnNotReady;
++	}
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=share-last result=0 token=%u holders=1 action=retract\n",
++	 resource,gccShareConsumers[kIOQcomGccShareConsumers-1],lastToken);
++	IOReturn verdict=retractBranch(lastToken,gccShareConsumers[kIOQcomGccShareConsumers-1],"share-disable");
++	if (verdict!=kIOReturnSuccess) {
++		/* The retraction kept the demand and the branch, so this holder is still
++		 * the last reference; the row above said which stage refused. */
++		return verdict;
++	}
++	fShareToken[kIOQcomGccShareConsumers-1]=0;
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-share phase=share-done result=0 writes=%u consumers=%u retracted=1 last-holder=1 holders=0 detail=last-release-retracted\n",
++	 resource,fWrites,kIOQcomGccShareConsumers);
++	return kIOReturnSuccess;
++}
++
+ /* C2-08 entry: save, acquire the XO/4 reference through the C1-05 ledger, store
+  * the mux and the reference gate, measure the two declared samples, restore
+  * every stored register, release the reference. Without the ADT gate nothing
+@@ -1107,12 +1356,20 @@ IOQcomGCC::start(IOService *provider)
+ 	}
+ 	/* C2-04 retracts the enable it was just given and then runs that same
+ 	 * verified enable again, so by the time anything measures, the branch is
+-	 * running under a demand the ledger holds - whatever this card found. */
+-	IOReturn disabled=disableClocks();
++	 * running under a demand the ledger holds - whatever this card found.
++	 * C2-05 replaces that pass when it is armed instead of following it: the
++	 * shared pass performs the same retraction from a last holder that did not
++	 * open the clock, and one boot should walk each contract once. */
++	IOReturn disabled=fShareEnabled?kIOReturnUnsupported:disableClocks();
+ 	if (disabled!=kIOReturnSuccess&&disabled!=kIOReturnUnsupported) {
+ 		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=disable-incomplete disable-result=%d writes=%u\n",
+ 		 kIOQcomCCGCC,disabled,fWrites);
+ 	}
++	IOReturn shared=shareClocks();
++	if (shared!=kIOReturnSuccess&&shared!=kIOReturnUnsupported) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=share-incomplete share-result=%d writes=%u\n",
++		 kIOQcomCCGCC,shared,fWrites);
++	}
+ 	/* C2-08 last, so registration and the C2-02 decode exist before the first
+ 	 * store and a failed measurement cannot leave a half-published backend. */
+ 	IOReturn measured=measureClocks();
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
+index 1bb448b..18e96ef 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
+@@ -30,6 +30,12 @@
+  *    CBCR, store only the enable bit, poll CLK_OFF clear within a bound, prove
+  *    the neighbours did not move, and leave the branch running for the rest of
+  *    the boot because this candidate has no verified disable yet (C2-04).
++ *  - C2-05 makes the same verified branch shared: two ledger consumers hold it
++ *    beside the gate, the gate hands its token back while they still hold the
++ *    clock, and the consumer whose release leaves the last reference runs the
++ *    C2-04 retraction. Sharing therefore changes bookkeeping, not the hardware
++ *    contract: it is still one store, one bounded halt wait, one neighbour
++ *    check, and a demand handed back with the halted verdict.
+  *  - Nothing reconfigures a PLL, a reset or a GDSC, and the inherited display
+  *    branches stay somebody else's property: they are declared pinned. */
+ #ifndef IOQCOM_GCC_H
+@@ -113,6 +119,15 @@ enum : unsigned {
+ 	kIOQcomGccDisablePollDelayUs = 10,
+ };
+ 
++/* C2-05: the two diagnostic consumers that share the verified branch with the
++ * gate. They hold the demand through the public ledger and never store: the
++ * only store in this pass is the retraction the last release runs. */
++enum : unsigned { kIOQcomGccShareConsumers = 2 };
++static const char *const gccShareConsumers[kIOQcomGccShareConsumers] = {
++	"sweetclock-share-a",	/* takes the branch after the gate opened it */
++	"sweetclock-share-b",	/* the last holder: its release retracts the enable */
++};
++
+ /* C2-08: tolerances. The vendor formula rounds to +-0.5 %; a rate outside one
+  * percent means the mux or the counter is wrong, not a rounding difference. */
+ enum : int { kIOQcomGccMeasureTolerancePpm = 10000 };
+@@ -165,6 +180,12 @@ class IOQcomGCC : public IOQcomClockController {
+ 	bool fMeasureEnabled;
+ 	bool fGateEnabled;
+ 	bool fDisableEnabled;
++	/* C2-05: the sharing pass is the same kind of ADT opt-in, and it needs both
++	 * of the cards it stands on: a gate to open the branch and a disable to
++	 * retract it once the last holder lets go. */
++	bool fShareEnabled;
++	uint32_t fShareToken[kIOQcomGccShareConsumers];
++	unsigned fShareHolders;
+ 	/* The C2-03 token while this driver still holds it. C2-04 releases that
+ 	 * demand and clears the flag, so a disable can never hand back a token it
+ 	 * does not own, and a second disable in the same boot has nothing to undo. */
+@@ -215,6 +236,18 @@ class IOQcomGCC : public IOQcomClockController {
+ 	 * verdict the hardware actually reported. On success it re-runs the verified
+ 	 * enable, so one boot proves both directions and the recovery. */
+ 	IOReturn disableClocks(void);
++	/* C2-04/C2-05: the retraction itself, parameterised by the token whose
++	 * release ends the demand and by the consumer that name the store rows. The
++	 * single-consumer disable passes the gate token and "disable"; the shared
++	 * pass passes the last holder's token and "share-disable", and the rows stay
++	 * the same hardware stages with a different owner. */
++	IOReturn retractBranch(uint32_t token, const char *consumer, const char *stage);
++	/* C2-05: the sharing pass. Two consumers take the branch beside the gate,
++	 * the gate's own demand goes back first, the first consumer lets go without
++	 * any store, and the last consumer's release runs retractBranch(). The
++	 * ledger is the only place the holder count lives, so the pass asks it
++	 * before deciding who is last. */
++	IOReturn shareClocks(void);
+ 	/* Reads the neighbour set into fGateNeighbour (capture=true) or compares it
+ 	 * with that capture (capture=false), returning how many moved. The consumer
+ 	 * is passed in so a disable row is not attributed to the gate pass. */
+diff --git a/tools/mk-mh2lm-mdss-adt.py b/tools/mk-mh2lm-mdss-adt.py
+index 61f8d4d..d607bfd 100644
+--- a/tools/mk-mh2lm-mdss-adt.py
++++ b/tools/mk-mh2lm-mdss-adt.py
+@@ -36,7 +36,12 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
+ 
+ 
+ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
+-            clock_gate=False, clock_disable=False):
++            clock_gate=False, clock_disable=False, clock_share=False):
++    # C2-05 stands on both cards below it, so the two switch it needs are implied
++    # here rather than trusted to every caller: a share node without them would be
++    # refused at start and the image would carry a property that can do nothing.
++    clock_disable = clock_disable or clock_share
++    clock_gate = clock_gate or clock_disable
+     display_noc = display_noc or panel_pipeline
+     display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
+     root, end = adt.parse(blob)
+@@ -210,6 +215,11 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+             # property therefore never travels alone: the gate stays beside it,
+             # and the backend cross-checks the pair before any window is read.
+             gcc_node.props.append(('sweet,clock-disable', 0, struct.pack('<I', 1)))
++        if clock_share:
++            # C2-05 shares the enable the gate opened between two consumers and
++            # lets the last of them do the withdraw C2-04 verified. It replaces
++            # the single-consumer pass, so one boot makes three stores either way.
++            gcc_node.props.append(('sweet,clock-share', 0, struct.pack('<I', 1)))
+         arm.children.append(gcc_node)
+     return adt.serialize(root)
+ 
+@@ -230,6 +240,7 @@ if __name__ == '__main__':
+     parser.add_argument('--clock-measure', action='store_true', help='append the C2-08 measurement opt-in gate (implies --gcc); the default image stays zero-write')
+     parser.add_argument('--clock-gate', action='store_true', help='append the C2-03 branch gate opt-in (implies --gcc); stores one enable bit and keeps it on until reboot')
+     parser.add_argument('--clock-disable', action='store_true', help='append the C2-04 verified disable opt-in (implies --clock-gate); withdraws that enable, proves the halt and releases the demand')
++    parser.add_argument('--clock-share', action='store_true', help='append the C2-05 sharing opt-in (implies --clock-gate and --clock-disable); two consumers share the gate demand and the last release retracts it')
+     parser.add_argument('source', type=Path)
+     parser.add_argument('destination', type=Path)
+     args = parser.parse_args()
+@@ -237,4 +248,4 @@ if __name__ == '__main__':
+     if source.resolve() == destination.resolve():
+         sys.exit('output must differ from the baseline ADT')
+     destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
+-                      args.clock_disable))
++                      args.clock_disable, args.clock_share))
+diff --git a/tools/tests/test-mh2lm-gcc-backend.py b/tools/tests/test-mh2lm-gcc-backend.py
+index 3f17582..0caf79f 100644
+--- a/tools/tests/test-mh2lm-gcc-backend.py
++++ b/tools/tests/test-mh2lm-gcc-backend.py
+@@ -147,11 +147,20 @@ assert raw.count('sweet,clock-gate')==1
+ # C2-04 adds exactly one more opt-in, and it is never read on its own.
+ assert raw.count('sweet,clock-disable')==1
+ assert 'fMeasureEnabled' in raw and 'fGateEnabled' in raw and 'gate-enable' in raw
+-assert 'fDisableEnabled' in raw and 'disableClocks' in raw and 'stage=disable' in raw
+-# The retraction withdraws the enable bit and nothing else, exactly once: the
+-# recovery is the C2-03 store, not a second private writer.
++assert 'fDisableEnabled' in raw and 'disableClocks' in raw
++# C2-05 adds the sharing opt-in, which is never read on its own either: it
++# refuses at start unless the enable it shares and the disable that ends the
++# shared demand are armed too.
++assert raw.count('sweet,clock-share')==1
++assert 'fShareEnabled' in raw and 'shareClocks' in raw
++# The retraction withdraws the enable bit and nothing else, and it stays the
++# only writer: the two cards enter it with their own token, consumer and stage
++# name, and no other call site exists.
+ assert raw.count('saved&~kGccBranchEnable')==1
+-assert raw.count('stage=disable')==1
++assert raw.count('IOQcomGCC::retractBranch(')==1
++assert raw.count('retractBranch(fGateToken,"sweetclock-disable","disable")')==1
++assert raw.count('retractBranch(lastToken,gccShareConsumers[kIOQcomGccShareConsumers-1],"share-disable")')==1
++assert raw.count('retractBranch(')==3
+ gcc_source = re.sub(r'^#include.*\n', '', raw, flags=re.M)
+ # CPU barriers and actual MMIO are the only replaced engine statements.
+ gcc_source = gcc_source.replace('observed=*(volatile uint32_t *)(w.base+offset);',
+@@ -171,6 +180,10 @@ tests = r'''
+ static unsigned writes(){unsigned n=0;for(auto&o:trace)if(o.write)++n;return n;}
+ static bool logged(const std::string&n){for(auto&m:messages)if(m.find(n)!=std::string::npos)return true;return false;}
+ static unsigned counted(const std::string&n){unsigned c=0;for(auto&m:messages)if(m.find(n)!=std::string::npos)++c;return c;}
++/* Row order is evidence here: the card's claim is that nothing is stored while a
++ * non-last holder lets go, so the tests compare positions, not just presence. */
++static long rowAt(const std::string&n){for(size_t i=0;i<messages.size();i++)
++ if(messages[i].find(n)!=std::string::npos)return (long)i;return -1;}
+ static void setData(IOService*s,const char*k,const void*p,unsigned n){
+  OSData*d=OSData::withBytes(p,n);assert(d);s->setProperty(k,d);d->release();
+ }
+@@ -178,7 +191,8 @@ static IOService*clockNub(){
+  auto*n=fixtureAlloc<IOService>();uint32_t abi=1;setData(n,"sweet,clock-abi",&abi,4);return n;
+ }
+ static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=true,
+- unsigned abiLength=4,unsigned measure=0,unsigned gate=0,unsigned disable=0){
++ unsigned abiLength=4,unsigned measure=0,unsigned gate=0,unsigned disable=0,
++ unsigned share=0){
+  auto*n=fixtureAlloc<IOService>();
+  if(abi){uint32_t a=1;setData(n,"sweet,gcc-abi",&a,abiLength);}
+  if(haveVariant)setData(n,"sweet,gcc-variant",&variant,4);
+@@ -188,6 +202,8 @@ static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=t
+  if(gate){uint32_t g=gate==2?2u:1u;setData(n,"sweet,clock-gate",&g,gate==3?3u:4);}
+  /* disable: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
+  if(disable){uint32_t d=disable==2?2u:1u;setData(n,"sweet,clock-disable",&d,disable==3?3u:4);}
++ /* share: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
++ if(share){uint32_t h=share==2?2u:1u;setData(n,"sweet,clock-share",&h,share==3?3u:4);}
+  return n;
+ }
+ static IOQcomClockProvider*startProvider(IOService*n){
+@@ -1242,6 +1258,225 @@ int main(){
+   assert(g3->fReads==0&&writes()==0);
+   g3->release();loneNub->release();assert(!live&&!liveMaps);
+  }
++ /* ---- C2-05: two consumers share the branch the gate opened, and only the
++  * last of them may retract it ---- */
++ {
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,1,1,1);	/* gate + disable + share */
++  messages.clear();resetGccRegs();clearKnobs();
++  setReg(0x00133000u,0x008,0x80000000u);
++  setReg(0x00133000u,0x00c,0x00000005u);
++  setReg(0x00133000u,0x014,0x00000000u);
++  gccHaltFollowsEnable=true;gccMeasureHook=gccCounter;gccDelayCalls=0;
++  auto*g=startGcc(gn);
++  /* the opt-in row names the third switch, and the disable keeps its own name
++   * even though it was the shared path that ran */
++  assert(counted("phase=gate result=0 clock-measure=0 clock-gate=1 clock-disable=1 clock-share=1")==1);
++  /* two shared acquisitions: the gate opened this clock in this boot, so neither
++   * may report a transition of its own */
++  assert(logged("consumer=sweetclock-share-a phase=share-acquire result=0 token=2 holders=2 opened=0"));
++  assert(logged("consumer=sweetclock-share-b phase=share-acquire result=0 token=3 holders=3 opened=0"));
++  assert(logged("consumer=sweetclock-share phase=share result=0 consumers=2 holders=3 clock-share=1 clock-gate=1 clock-disable=1"));
++  /* the gate and the first consumer hand their demands back while the branch is
++   * still enabled: each release reads the CBCR first, so every non-last release
++   * is a row and not an assumption */
++  assert(logged("consumer=sweetclock-gate phase=share-release result=0 token=1 holders=2 last-holder=0 running=1 value=0x1"));
++  assert(logged("consumer=sweetclock-share-a phase=share-release result=0 token=2 holders=1 last-holder=0 running=1 value=0x1"));
++  assert(logged("resource=cc1:0x4 phase=release result=0 token=1 holders=2 desired=1 pending=0 confirmed=1 transitions=1 confirmations=1"));
++  assert(logged("resource=cc1:0x4 phase=release result=0 token=2 holders=1 desired=1 pending=0 confirmed=1 transitions=1 confirmations=1"));
++  /* nothing was stored between the gate's own store and the last release */
++  long lastRow=rowAt("consumer=sweetclock-share-b phase=share-last result=0 token=3 holders=1 action=retract");
++  long firstStore=rowAt("consumer=sweetclock-share-b phase=write-issued result=0 stage=share-disable write=2 value=0");
++  long aRelease=rowAt("consumer=sweetclock-share-a phase=share-release");
++  long gateRelease=rowAt("consumer=sweetclock-gate phase=share-release");
++  assert(gateRelease>0&&aRelease>gateRelease&&lastRow>aRelease&&firstStore>lastRow);
++  assert(counted("consumer=sweetclock-share-a phase=write-issued")==0);
++  assert(counted("consumer=sweetclock-share-b phase=share-release result=0")==0);	/* B is the last: it retracts instead */
++  /* the last holder's release is the C2-04 contract verbatim, attributed to the
++   * consumer and stage that caused it */
++  assert(logged("consumer=sweetclock-share-b phase=disable-request result=0 enable=1 off=0 value=0x1"));
++  assert(logged("consumer=sweetclock-share-b phase=halt result=0 enable=0 off=1 value=0x80000000 polls=0"));
++  assert(logged("consumer=sweetclock-share-b phase=disable-check result=0 neighbours=4 changed=0"));
++  assert(logged("consumer=sweetclock-share-b phase=disable-done result=0 writes=2 neighbours=4 changed=0 polls=0 hold=0 last-holder=1 detail=sample-halted"));
++  assert(logged("resource=cc1:0x4 phase=release result=0 token=3 holders=0 desired=0 pending=0 confirmed=0 transitions=2 confirmations=2"));
++  assert(logged("consumer=sweetclock-share phase=share-done result=0 writes=3 consumers=2 retracted=1 last-holder=1 holders=0 detail=last-release-retracted"));
++  /* and the recovery is the C2-03 enable again: the branch is running under a
++   * new demand, which is the state the single-consumer card also leaves */
++  assert(counted("phase=write-issued")==3);
++  assert(logged("consumer=sweetclock-gate phase=write-issued result=0 stage=gate-enable write=3 value=0x80000001"));
++  assert(logged("phase=gate-done result=0 writes=3 neighbours=4 changed=0 polls=0 hold=1"));
++  assert(regs[0x00133008u]==0x80000001u);
++  assert(regs[0x0013300cu]==0x00000005u&&regs[0x00133014u]==0x00000000u);
++  assert(g->fGateRunning&&g->fGateTokenHeld&&g->fGateToken==4);
++  assert(g->fShareToken[0]==0&&g->fShareToken[1]==0);
++  assert(g->fShareHolders==1);
++  assert(g->fDisableEnabled&&g->fShareEnabled);
++  /* the ledger ends exactly where the C2-04 ring ends: one demand, satisfied */
++  IOQcomClockLedgerState ls;
++  assert(p->ledgerInspect(kIOQcomCCGCC,kIOQcomGccGateLocalID,0,&ls)==kIOReturnSuccess);
++  assert(ls.holders==1&&ls.desired==1&&ls.pending==0&&ls.confirmed==1);
++  assert(ls.transitions==3&&ls.confirmations==3);
++  assert(counted("phase=confirm result=0")==2);
++  assert(counted("phase=share-incomplete")==0&&counted("detail=disable-incomplete")==0);
++  /* the C2-04 chain plus three: the CBCR read that heads the shared pass and one
++   * read per non-last release, each proving the branch was still enabled when
++   * the demand came back */
++  assert(g->fReads==49+3);
++  assert(writes()==3);
++  /* a token that was already handed back is not a handle any more */
++  bool last=true;
++  assert(p->ledgerRelease(3,false,&last)==kIOReturnNotFound);
++  assert(!last);
++  assert(g->fShareToken[0]==0&&g->fShareToken[1]==0);
++  g->stop(gn);g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  gccMeasureHook=nullptr;
++  assert(!live&&!liveMaps);
++ }
++ /* ---- C2-05 guards: the opt-in stands on both cards below it ---- */
++ {
++  messages.clear();resetGccRegs();
++  auto*gn=gccNub(0x8150,true,true,4,0,0,1,1);	/* share + disable, no gate */
++  auto*g=fixtureAlloc<IOQcomGCC>();assert(!g->start(gn));
++  assert(logged("detail=clock-share-needs-gate-disable clock-gate=0 clock-disable=1 clock-share=1"));
++  assert(g->fReads==0&&writes()==0);
++  g->release();gn->release();assert(!live&&!liveMaps);
++  messages.clear();
++  auto*n2=gccNub(0x8150,true,true,4,0,1,0,1);	/* share + gate, no disable */
++  auto*g2=fixtureAlloc<IOQcomGCC>();assert(!g2->start(n2));
++  assert(logged("detail=clock-share-needs-gate-disable clock-gate=1 clock-disable=0 clock-share=1"));
++  assert(g2->fReads==0&&writes()==0);
++  g2->release();n2->release();assert(!live&&!liveMaps);
++  messages.clear();
++  auto*n3=gccNub(0x8150,true,true,4,0,1,1,2);	/* a value the ADT never writes */
++  auto*g3=fixtureAlloc<IOQcomGCC>();assert(!g3->start(n3));
++  assert(logged("detail=bad-clock-share value=0x2"));
++  assert(g3->fReads==0&&writes()==0);
++  g3->release();n3->release();assert(!live&&!liveMaps);
++  messages.clear();
++  auto*n4=gccNub(0x8150,true,true,4,0,1,1,3);	/* a short property */
++  auto*g4=fixtureAlloc<IOQcomGCC>();assert(!g4->start(n4));
++  assert(logged("detail=bad-clock-share length=3"));
++  assert(g4->fReads==0&&writes()==0);
++  g4->release();n4->release();assert(!live&&!liveMaps);
++ }
++ /* ---- C2-05: an inherited clock with no references is not this driver's to end ---- */
++ {
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,1,1,1);
++  messages.clear();resetGccRegs();clearKnobs();
++  setReg(0x00133000u,0x008,0x80000001u);	/* somebody else left it running */
++  gccHaltFollowsEnable=true;gccMeasureHook=gccCounter;gccDelayCalls=0;
++  auto*g=startGcc(gn);
++  /* the gate refuses to enable a branch it did not leave halted, so there is no
++   * demand to share - and, crucially, no store from the sharing pass either */
++  assert(logged("consumer=sweetclock-gate phase=request result="+std::to_string(kIOReturnNotReady)+" detail=already-enabled enable=1 off=0 value=0x1"));
++  assert(logged("consumer=sweetclock-share phase=share result="+std::to_string(kIOReturnNotReady)+" detail=no-token hold=0"));
++  assert(counted("stage=share-disable")==0);
++  assert(writes()==0);
++  assert(regs[0x00133008u]==0x80000001u);
++  assert(logged("phase=start result=0 detail=share-incomplete share-result="+std::to_string(kIOReturnNotReady)));
++  IOQcomClockLedgerState empty;
++  assert(p->ledgerInspect(kIOQcomCCGCC,kIOQcomGccGateLocalID,0,&empty)==kIOReturnNotFound);
++  g->stop(gn);g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  gccMeasureHook=nullptr;
++  assert(!live&&!liveMaps);
++ }
++ /* ---- C2-05: a ledger that lost the gate's demand refuses to share it ---- */
++ {
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,1,1);	/* gate + disable only */
++  messages.clear();resetGccRegs();clearKnobs();
++  setReg(0x00133000u,0x008,0x80000000u);
++  gccHaltFollowsEnable=true;gccMeasureHook=gccCounter;gccDelayCalls=0;
++  auto*g=startGcc(gn);
++  unsigned before=writes();
++  assert(g->fGateTokenHeld&&g->fGateToken==2);
++  /* somebody releases the demand behind the driver's back while the clock keeps
++   * running: the ledger now has no holder for this branch at all */
++  bool last=false;
++  assert(p->ledgerRelease(g->fGateToken,false,&last)==kIOReturnIOError);
++  assert(last);
++  assert(logged("phase=release result="+std::to_string(kIOReturnIOError)+" token=2 holders=0 desired=0 pending=1 confirmed=1 detail=hardware-still-on"));
++  messages.clear();
++  g->fShareEnabled=true;
++  assert(g->shareClocks()==kIOReturnNotReady);
++  /* the first acquisition would have claimed the transition that opened this
++   * clock, so the pass names the lost owner and hands the reference back */
++  assert(logged("consumer=sweetclock-share-a phase=share-acquire result=0 token="));
++  assert(logged("holders=1 opened=1"));
++  assert(logged("consumer=sweetclock-share-a phase=share-acquire result="+std::to_string(kIOReturnNotReady)));
++  assert(logged("detail=ledger-lost-owner hold=1"));
++  assert(logged("phase=share result="+std::to_string(kIOReturnNotReady)+" detail=acquire-failed released=1 hold=1"));
++  /* the reference this pass took is handed back with stopped=false: the branch
++   * is still running, so the ledger records the demand it cannot confirm rather
++   * than a halt this pass never made */
++  assert(counted("phase=release result="+std::to_string(kIOReturnIOError)+" token=")==1);
++  assert(logged("detail=hardware-still-on"));
++  assert(writes()==before);		/* not one store for a demand nobody held */
++  assert(regs[0x00133008u]==0x80000001u);
++  g->stop(gn);g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  gccMeasureHook=nullptr;
++  assert(!live&&!liveMaps);
++ }
++ /* ---- C2-05: the shared retraction is the C2-04 contract, faults included ---- */
++ {
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,1,0);	/* the gate alone: no disable, no share */
++  messages.clear();resetGccRegs();clearKnobs();
++  setReg(0x00133000u,0x008,0x80000000u);
++  gccHaltFollowsEnable=true;gccMeasureHook=gccCounter;gccDelayCalls=0;
++  auto*g=startGcc(gn);
++  assert(writes()==1&&g->fGateTokenHeld&&g->fGateToken==1);
++  g->fDisableEnabled=true;
++  g->fShareEnabled=true;
++  /* a neighbour that moved during the last holder's store keeps the demand */
++  messages.clear();
++  gccDisableNeighbourShift=true;
++  assert(g->shareClocks()==kIOReturnIOError);
++  assert(logged("consumer=sweetclock-share-b phase=disable-check result="+std::to_string(kIOReturnIOError)+" neighbours=4 changed=1"));
++  assert(logged("consumer=sweetclock-share-b phase=disable-done result="+std::to_string(kIOReturnIOError)+" writes=2 neighbours=4 changed=1 polls=0 hold=1 detail=neighbour-changed"));
++  assert(counted("phase=release")==2);	/* the gate and A only: B keeps its demand */
++  assert(writes()==2);
++  assert(g->fShareToken[1]!=0);
++  gccDisableNeighbourShift=false;
++  /* one controller at a time: this driver's registration is the one the second
++   * sample would collide with */
++  g->stop(gn);g->release();gn->release();
++  /* the halt never rises: the store is made, the poll is bounded, and the demand
++   * stays with the last holder */
++  auto*gn2=gccNub(0x8150,true,true,4,0,1,0);
++  messages.clear();resetGccRegs();clearKnobs();
++  setReg(0x00133000u,0x008,0x80000000u);
++  gccDisableStuckRunning=true;gccHaltFollowsEnable=true;gccMeasureHook=gccCounter;gccDelayCalls=0;
++  auto*g2=startGcc(gn2);
++  g2->fDisableEnabled=true;
++  g2->fShareEnabled=true;
++  messages.clear();
++  gccDisableStuckRunning=true;
++  assert(g2->shareClocks()==kIOReturnTimeout);
++  assert(logged("consumer=sweetclock-share-b phase=halt result="+std::to_string(kIOReturnTimeout)+
++                " enable=0 off=0 value=0 polls="+std::to_string(kIOQcomGccDisablePollTries)+
++                " writes=2 hold=1 detail=halt-timeout"));
++  assert(gccDelayCalls==kIOQcomGccDisablePollTries);
++  assert(regs[0x00133008u]==0x00000000u);
++  assert(logged("detail=halt-timeout"));
++  IOQcomClockLedgerState ls;
++  assert(p->ledgerInspect(kIOQcomCCGCC,kIOQcomGccGateLocalID,0,&ls)==kIOReturnSuccess);
++  /* the last holder keeps its reference: the confirmed demand is still there,
++   * held by the consumer that failed to end it rather than by the gate */
++  assert(ls.holders==1&&ls.desired==1&&ls.pending==0&&ls.confirmed==1);
++  assert(ls.transitions==1&&ls.confirmations==1);
++  assert(g2->fShareToken[1]!=0&&g2->fShareToken[0]==0);
++  assert(g2->fGateTokenHeld==false);	/* the gate handed its demand back */
++  gccDisableStuckRunning=false;
++  g2->stop(gn2);g2->release();gn2->release();
++  p->stop(pn);p->release();pn->release();
++  gccMeasureHook=nullptr;
++  assert(!live&&!liveMaps);
++ }
+  printf("PASS: actual C2-01/C2-02/C2-08/C2-03 GCC backend; ADT-matched identity (abi/variant) and "
+         "window refusals (absent/address/length/no-base) with clean unmapping, bounded "
+         "provider wait, four mapped windows and eleven snapshots, narrow aligned "
+@@ -1257,7 +1492,11 @@ int main(){
+         "gate: one store behind its own ADT opt-in, halt verified with a bounded poll, "
+         "neighbours proven unmoved, a halted branch that keeps its state and releases "
+         "its demand, refusals for an already-enabled or unhalted sample, and the gated "
+-        "branch reused as the counter's third source\n");
++        "branch reused as the counter's third source, and the C2-05 sharing pass: two "
++        "consumers on the gate's one demand, non-last releases that read the branch and "
++        "store nothing, the last release retracting it and the branch taken again, "
++        "opt-in refusals for a share without either card below it, and faults that keep "
++        "the demand with the holder that failed\n");
+  return 0;
+ }
+ '''
+diff --git a/tools/tests/test-mh2lm-mdss-adt.py b/tools/tests/test-mh2lm-mdss-adt.py
+index 037bf0f..11cf779 100644
+--- a/tools/tests/test-mh2lm-mdss-adt.py
++++ b/tools/tests/test-mh2lm-mdss-adt.py
+@@ -481,7 +481,43 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-disable-adt-') as temp:
+                     str(source), str(output)], check=True)
+     assert output.read_bytes() == disabled
+     assert source.read_bytes() == blob
++# C2-05 shares the demand the gate opened and ends it through the disable, so it is
++# the dependent of both: every entry point that can build a share tree also builds
++# the two cards below it, and the share is the top of this chain.
++shared = m.derive(blob, clock_share=True)
++assert shared == m.derive(blob, clock_gate=True, clock_disable=True, clock_share=True)
++assert shared == m.derive(blob, clock_disable=True, clock_share=True)
++assert shared == m.derive(blob, gcc=True, clock_share=True)
++assert shared != disabled
++nested, end = adt.parse(shared)
++assert end == len(shared)
++gcc = next(n for n in nested.children[1].children if n.name == 'gcc')
++assert gcc.prop('sweet,clock-share') == struct.pack('<I', 1)
++assert gcc.prop('sweet,clock-disable') == struct.pack('<I', 1)
++assert gcc.prop('sweet,clock-gate') == struct.pack('<I', 1)
++gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-share']
++assert adt.serialize(nested) == disabled, 'the share is the disable tree plus one property'
++assert b'sweet,clock-share' not in m.derive(blob, clock_gate=True, clock_disable=True)
++assert b'sweet,clock-share' not in m.derive(blob, clock_measure=True, clock_disable=True)
++assert b'sweet,clock-share' not in blob
++all_four = m.derive(blob, clock_measure=True, clock_share=True)
++nested, end = adt.parse(all_four)
++assert end == len(all_four)
++gcc = next(n for n in nested.children[1].children if n.name == 'gcc')
++assert gcc.prop('sweet,clock-share') == struct.pack('<I', 1)
++assert gcc.prop('sweet,clock-disable') == struct.pack('<I', 1)
++assert gcc.prop('sweet,clock-gate') == struct.pack('<I', 1)
++assert gcc.prop('sweet,clock-measure') == struct.pack('<I', 1)
++gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-share']
++assert adt.serialize(nested) == all_three, 'the share rides on top of the three opt-ins'
++with tempfile.TemporaryDirectory(prefix='mh2lm-clock-share-adt-') as temp:
++    source, output = Path(temp)/'base.adt', Path(temp)/'share.adt'
++    source.write_bytes(blob)
++    subprocess.run([sys.executable, str(Path(m.__file__)), '--clock-share',
++                    str(source), str(output)], check=True)
++    assert output.read_bytes() == shared
++    assert source.read_bytes() == blob
+ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
+       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
+       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
+-      'that no earlier image carries')
++      'that no earlier image carries, and the C2-05 share on top of all three')

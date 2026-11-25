@@ -30,6 +30,12 @@
  *    CBCR, store only the enable bit, poll CLK_OFF clear within a bound, prove
  *    the neighbours did not move, and leave the branch running for the rest of
  *    the boot because this candidate has no verified disable yet (C2-04).
+ *  - C2-05 makes the same verified branch shared: two ledger consumers hold it
+ *    beside the gate, the gate hands its token back while they still hold the
+ *    clock, and the consumer whose release leaves the last reference runs the
+ *    C2-04 retraction. Sharing therefore changes bookkeeping, not the hardware
+ *    contract: it is still one store, one bounded halt wait, one neighbour
+ *    check, and a demand handed back with the halted verdict.
  *  - Nothing reconfigures a PLL, a reset or a GDSC, and the inherited display
  *    branches stay somebody else's property: they are declared pinned. */
 #ifndef IOQCOM_GCC_H
@@ -113,6 +119,15 @@ enum : unsigned {
 	kIOQcomGccDisablePollDelayUs = 10,
 };
 
+/* C2-05: the two diagnostic consumers that share the verified branch with the
+ * gate. They hold the demand through the public ledger and never store: the
+ * only store in this pass is the retraction the last release runs. */
+enum : unsigned { kIOQcomGccShareConsumers = 2 };
+static const char *const gccShareConsumers[kIOQcomGccShareConsumers] = {
+	"sweetclock-share-a",	/* takes the branch after the gate opened it */
+	"sweetclock-share-b",	/* the last holder: its release retracts the enable */
+};
+
 /* C2-08: tolerances. The vendor formula rounds to +-0.5 %; a rate outside one
  * percent means the mux or the counter is wrong, not a rounding difference. */
 enum : int { kIOQcomGccMeasureTolerancePpm = 10000 };
@@ -165,6 +180,12 @@ class IOQcomGCC : public IOQcomClockController {
 	bool fMeasureEnabled;
 	bool fGateEnabled;
 	bool fDisableEnabled;
+	/* C2-05: the sharing pass is the same kind of ADT opt-in, and it needs both
+	 * of the cards it stands on: a gate to open the branch and a disable to
+	 * retract it once the last holder lets go. */
+	bool fShareEnabled;
+	uint32_t fShareToken[kIOQcomGccShareConsumers];
+	unsigned fShareHolders;
 	/* The C2-03 token while this driver still holds it. C2-04 releases that
 	 * demand and clears the flag, so a disable can never hand back a token it
 	 * does not own, and a second disable in the same boot has nothing to undo. */
@@ -215,6 +236,18 @@ class IOQcomGCC : public IOQcomClockController {
 	 * verdict the hardware actually reported. On success it re-runs the verified
 	 * enable, so one boot proves both directions and the recovery. */
 	IOReturn disableClocks(void);
+	/* C2-04/C2-05: the retraction itself, parameterised by the token whose
+	 * release ends the demand and by the consumer that name the store rows. The
+	 * single-consumer disable passes the gate token and "disable"; the shared
+	 * pass passes the last holder's token and "share-disable", and the rows stay
+	 * the same hardware stages with a different owner. */
+	IOReturn retractBranch(uint32_t token, const char *consumer, const char *stage);
+	/* C2-05: the sharing pass. Two consumers take the branch beside the gate,
+	 * the gate's own demand goes back first, the first consumer lets go without
+	 * any store, and the last consumer's release runs retractBranch(). The
+	 * ledger is the only place the holder count lives, so the pass asks it
+	 * before deciding who is last. */
+	IOReturn shareClocks(void);
 	/* Reads the neighbour set into fGateNeighbour (capture=true) or compares it
 	 * with that capture (capture=false), returning how many moved. The consumer
 	 * is passed in so a disable row is not attributed to the gate pass. */

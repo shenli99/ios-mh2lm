@@ -481,7 +481,43 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-disable-adt-') as temp:
                     str(source), str(output)], check=True)
     assert output.read_bytes() == disabled
     assert source.read_bytes() == blob
+# C2-05 shares the demand the gate opened and ends it through the disable, so it is
+# the dependent of both: every entry point that can build a share tree also builds
+# the two cards below it, and the share is the top of this chain.
+shared = m.derive(blob, clock_share=True)
+assert shared == m.derive(blob, clock_gate=True, clock_disable=True, clock_share=True)
+assert shared == m.derive(blob, clock_disable=True, clock_share=True)
+assert shared == m.derive(blob, gcc=True, clock_share=True)
+assert shared != disabled
+nested, end = adt.parse(shared)
+assert end == len(shared)
+gcc = next(n for n in nested.children[1].children if n.name == 'gcc')
+assert gcc.prop('sweet,clock-share') == struct.pack('<I', 1)
+assert gcc.prop('sweet,clock-disable') == struct.pack('<I', 1)
+assert gcc.prop('sweet,clock-gate') == struct.pack('<I', 1)
+gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-share']
+assert adt.serialize(nested) == disabled, 'the share is the disable tree plus one property'
+assert b'sweet,clock-share' not in m.derive(blob, clock_gate=True, clock_disable=True)
+assert b'sweet,clock-share' not in m.derive(blob, clock_measure=True, clock_disable=True)
+assert b'sweet,clock-share' not in blob
+all_four = m.derive(blob, clock_measure=True, clock_share=True)
+nested, end = adt.parse(all_four)
+assert end == len(all_four)
+gcc = next(n for n in nested.children[1].children if n.name == 'gcc')
+assert gcc.prop('sweet,clock-share') == struct.pack('<I', 1)
+assert gcc.prop('sweet,clock-disable') == struct.pack('<I', 1)
+assert gcc.prop('sweet,clock-gate') == struct.pack('<I', 1)
+assert gcc.prop('sweet,clock-measure') == struct.pack('<I', 1)
+gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-share']
+assert adt.serialize(nested) == all_three, 'the share rides on top of the three opt-ins'
+with tempfile.TemporaryDirectory(prefix='mh2lm-clock-share-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'share.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--clock-share',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == shared
+    assert source.read_bytes() == blob
 print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
-      'that no earlier image carries')
+      'that no earlier image carries, and the C2-05 share on top of all three')

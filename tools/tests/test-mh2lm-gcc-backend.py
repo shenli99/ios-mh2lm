@@ -147,11 +147,20 @@ assert raw.count('sweet,clock-gate')==1
 # C2-04 adds exactly one more opt-in, and it is never read on its own.
 assert raw.count('sweet,clock-disable')==1
 assert 'fMeasureEnabled' in raw and 'fGateEnabled' in raw and 'gate-enable' in raw
-assert 'fDisableEnabled' in raw and 'disableClocks' in raw and 'stage=disable' in raw
-# The retraction withdraws the enable bit and nothing else, exactly once: the
-# recovery is the C2-03 store, not a second private writer.
+assert 'fDisableEnabled' in raw and 'disableClocks' in raw
+# C2-05 adds the sharing opt-in, which is never read on its own either: it
+# refuses at start unless the enable it shares and the disable that ends the
+# shared demand are armed too.
+assert raw.count('sweet,clock-share')==1
+assert 'fShareEnabled' in raw and 'shareClocks' in raw
+# The retraction withdraws the enable bit and nothing else, and it stays the
+# only writer: the two cards enter it with their own token, consumer and stage
+# name, and no other call site exists.
 assert raw.count('saved&~kGccBranchEnable')==1
-assert raw.count('stage=disable')==1
+assert raw.count('IOQcomGCC::retractBranch(')==1
+assert raw.count('retractBranch(fGateToken,"sweetclock-disable","disable")')==1
+assert raw.count('retractBranch(lastToken,gccShareConsumers[kIOQcomGccShareConsumers-1],"share-disable")')==1
+assert raw.count('retractBranch(')==3
 gcc_source = re.sub(r'^#include.*\n', '', raw, flags=re.M)
 # CPU barriers and actual MMIO are the only replaced engine statements.
 gcc_source = gcc_source.replace('observed=*(volatile uint32_t *)(w.base+offset);',
@@ -171,6 +180,10 @@ tests = r'''
 static unsigned writes(){unsigned n=0;for(auto&o:trace)if(o.write)++n;return n;}
 static bool logged(const std::string&n){for(auto&m:messages)if(m.find(n)!=std::string::npos)return true;return false;}
 static unsigned counted(const std::string&n){unsigned c=0;for(auto&m:messages)if(m.find(n)!=std::string::npos)++c;return c;}
+/* Row order is evidence here: the card's claim is that nothing is stored while a
+ * non-last holder lets go, so the tests compare positions, not just presence. */
+static long rowAt(const std::string&n){for(size_t i=0;i<messages.size();i++)
+ if(messages[i].find(n)!=std::string::npos)return (long)i;return -1;}
 static void setData(IOService*s,const char*k,const void*p,unsigned n){
  OSData*d=OSData::withBytes(p,n);assert(d);s->setProperty(k,d);d->release();
 }
@@ -178,7 +191,8 @@ static IOService*clockNub(){
  auto*n=fixtureAlloc<IOService>();uint32_t abi=1;setData(n,"sweet,clock-abi",&abi,4);return n;
 }
 static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=true,
- unsigned abiLength=4,unsigned measure=0,unsigned gate=0,unsigned disable=0){
+ unsigned abiLength=4,unsigned measure=0,unsigned gate=0,unsigned disable=0,
+ unsigned share=0){
  auto*n=fixtureAlloc<IOService>();
  if(abi){uint32_t a=1;setData(n,"sweet,gcc-abi",&a,abiLength);}
  if(haveVariant)setData(n,"sweet,gcc-variant",&variant,4);
@@ -188,6 +202,8 @@ static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=t
  if(gate){uint32_t g=gate==2?2u:1u;setData(n,"sweet,clock-gate",&g,gate==3?3u:4);}
  /* disable: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
  if(disable){uint32_t d=disable==2?2u:1u;setData(n,"sweet,clock-disable",&d,disable==3?3u:4);}
+ /* share: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
+ if(share){uint32_t h=share==2?2u:1u;setData(n,"sweet,clock-share",&h,share==3?3u:4);}
  return n;
 }
 static IOQcomClockProvider*startProvider(IOService*n){
@@ -1242,6 +1258,225 @@ int main(){
   assert(g3->fReads==0&&writes()==0);
   g3->release();loneNub->release();assert(!live&&!liveMaps);
  }
+ /* ---- C2-05: two consumers share the branch the gate opened, and only the
+  * last of them may retract it ---- */
+ {
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,1,1,1);	/* gate + disable + share */
+  messages.clear();resetGccRegs();clearKnobs();
+  setReg(0x00133000u,0x008,0x80000000u);
+  setReg(0x00133000u,0x00c,0x00000005u);
+  setReg(0x00133000u,0x014,0x00000000u);
+  gccHaltFollowsEnable=true;gccMeasureHook=gccCounter;gccDelayCalls=0;
+  auto*g=startGcc(gn);
+  /* the opt-in row names the third switch, and the disable keeps its own name
+   * even though it was the shared path that ran */
+  assert(counted("phase=gate result=0 clock-measure=0 clock-gate=1 clock-disable=1 clock-share=1")==1);
+  /* two shared acquisitions: the gate opened this clock in this boot, so neither
+   * may report a transition of its own */
+  assert(logged("consumer=sweetclock-share-a phase=share-acquire result=0 token=2 holders=2 opened=0"));
+  assert(logged("consumer=sweetclock-share-b phase=share-acquire result=0 token=3 holders=3 opened=0"));
+  assert(logged("consumer=sweetclock-share phase=share result=0 consumers=2 holders=3 clock-share=1 clock-gate=1 clock-disable=1"));
+  /* the gate and the first consumer hand their demands back while the branch is
+   * still enabled: each release reads the CBCR first, so every non-last release
+   * is a row and not an assumption */
+  assert(logged("consumer=sweetclock-gate phase=share-release result=0 token=1 holders=2 last-holder=0 running=1 value=0x1"));
+  assert(logged("consumer=sweetclock-share-a phase=share-release result=0 token=2 holders=1 last-holder=0 running=1 value=0x1"));
+  assert(logged("resource=cc1:0x4 phase=release result=0 token=1 holders=2 desired=1 pending=0 confirmed=1 transitions=1 confirmations=1"));
+  assert(logged("resource=cc1:0x4 phase=release result=0 token=2 holders=1 desired=1 pending=0 confirmed=1 transitions=1 confirmations=1"));
+  /* nothing was stored between the gate's own store and the last release */
+  long lastRow=rowAt("consumer=sweetclock-share-b phase=share-last result=0 token=3 holders=1 action=retract");
+  long firstStore=rowAt("consumer=sweetclock-share-b phase=write-issued result=0 stage=share-disable write=2 value=0");
+  long aRelease=rowAt("consumer=sweetclock-share-a phase=share-release");
+  long gateRelease=rowAt("consumer=sweetclock-gate phase=share-release");
+  assert(gateRelease>0&&aRelease>gateRelease&&lastRow>aRelease&&firstStore>lastRow);
+  assert(counted("consumer=sweetclock-share-a phase=write-issued")==0);
+  assert(counted("consumer=sweetclock-share-b phase=share-release result=0")==0);	/* B is the last: it retracts instead */
+  /* the last holder's release is the C2-04 contract verbatim, attributed to the
+   * consumer and stage that caused it */
+  assert(logged("consumer=sweetclock-share-b phase=disable-request result=0 enable=1 off=0 value=0x1"));
+  assert(logged("consumer=sweetclock-share-b phase=halt result=0 enable=0 off=1 value=0x80000000 polls=0"));
+  assert(logged("consumer=sweetclock-share-b phase=disable-check result=0 neighbours=4 changed=0"));
+  assert(logged("consumer=sweetclock-share-b phase=disable-done result=0 writes=2 neighbours=4 changed=0 polls=0 hold=0 last-holder=1 detail=sample-halted"));
+  assert(logged("resource=cc1:0x4 phase=release result=0 token=3 holders=0 desired=0 pending=0 confirmed=0 transitions=2 confirmations=2"));
+  assert(logged("consumer=sweetclock-share phase=share-done result=0 writes=3 consumers=2 retracted=1 last-holder=1 holders=0 detail=last-release-retracted"));
+  /* and the recovery is the C2-03 enable again: the branch is running under a
+   * new demand, which is the state the single-consumer card also leaves */
+  assert(counted("phase=write-issued")==3);
+  assert(logged("consumer=sweetclock-gate phase=write-issued result=0 stage=gate-enable write=3 value=0x80000001"));
+  assert(logged("phase=gate-done result=0 writes=3 neighbours=4 changed=0 polls=0 hold=1"));
+  assert(regs[0x00133008u]==0x80000001u);
+  assert(regs[0x0013300cu]==0x00000005u&&regs[0x00133014u]==0x00000000u);
+  assert(g->fGateRunning&&g->fGateTokenHeld&&g->fGateToken==4);
+  assert(g->fShareToken[0]==0&&g->fShareToken[1]==0);
+  assert(g->fShareHolders==1);
+  assert(g->fDisableEnabled&&g->fShareEnabled);
+  /* the ledger ends exactly where the C2-04 ring ends: one demand, satisfied */
+  IOQcomClockLedgerState ls;
+  assert(p->ledgerInspect(kIOQcomCCGCC,kIOQcomGccGateLocalID,0,&ls)==kIOReturnSuccess);
+  assert(ls.holders==1&&ls.desired==1&&ls.pending==0&&ls.confirmed==1);
+  assert(ls.transitions==3&&ls.confirmations==3);
+  assert(counted("phase=confirm result=0")==2);
+  assert(counted("phase=share-incomplete")==0&&counted("detail=disable-incomplete")==0);
+  /* the C2-04 chain plus three: the CBCR read that heads the shared pass and one
+   * read per non-last release, each proving the branch was still enabled when
+   * the demand came back */
+  assert(g->fReads==49+3);
+  assert(writes()==3);
+  /* a token that was already handed back is not a handle any more */
+  bool last=true;
+  assert(p->ledgerRelease(3,false,&last)==kIOReturnNotFound);
+  assert(!last);
+  assert(g->fShareToken[0]==0&&g->fShareToken[1]==0);
+  g->stop(gn);g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
+ /* ---- C2-05 guards: the opt-in stands on both cards below it ---- */
+ {
+  messages.clear();resetGccRegs();
+  auto*gn=gccNub(0x8150,true,true,4,0,0,1,1);	/* share + disable, no gate */
+  auto*g=fixtureAlloc<IOQcomGCC>();assert(!g->start(gn));
+  assert(logged("detail=clock-share-needs-gate-disable clock-gate=0 clock-disable=1 clock-share=1"));
+  assert(g->fReads==0&&writes()==0);
+  g->release();gn->release();assert(!live&&!liveMaps);
+  messages.clear();
+  auto*n2=gccNub(0x8150,true,true,4,0,1,0,1);	/* share + gate, no disable */
+  auto*g2=fixtureAlloc<IOQcomGCC>();assert(!g2->start(n2));
+  assert(logged("detail=clock-share-needs-gate-disable clock-gate=1 clock-disable=0 clock-share=1"));
+  assert(g2->fReads==0&&writes()==0);
+  g2->release();n2->release();assert(!live&&!liveMaps);
+  messages.clear();
+  auto*n3=gccNub(0x8150,true,true,4,0,1,1,2);	/* a value the ADT never writes */
+  auto*g3=fixtureAlloc<IOQcomGCC>();assert(!g3->start(n3));
+  assert(logged("detail=bad-clock-share value=0x2"));
+  assert(g3->fReads==0&&writes()==0);
+  g3->release();n3->release();assert(!live&&!liveMaps);
+  messages.clear();
+  auto*n4=gccNub(0x8150,true,true,4,0,1,1,3);	/* a short property */
+  auto*g4=fixtureAlloc<IOQcomGCC>();assert(!g4->start(n4));
+  assert(logged("detail=bad-clock-share length=3"));
+  assert(g4->fReads==0&&writes()==0);
+  g4->release();n4->release();assert(!live&&!liveMaps);
+ }
+ /* ---- C2-05: an inherited clock with no references is not this driver's to end ---- */
+ {
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,1,1,1);
+  messages.clear();resetGccRegs();clearKnobs();
+  setReg(0x00133000u,0x008,0x80000001u);	/* somebody else left it running */
+  gccHaltFollowsEnable=true;gccMeasureHook=gccCounter;gccDelayCalls=0;
+  auto*g=startGcc(gn);
+  /* the gate refuses to enable a branch it did not leave halted, so there is no
+   * demand to share - and, crucially, no store from the sharing pass either */
+  assert(logged("consumer=sweetclock-gate phase=request result="+std::to_string(kIOReturnNotReady)+" detail=already-enabled enable=1 off=0 value=0x1"));
+  assert(logged("consumer=sweetclock-share phase=share result="+std::to_string(kIOReturnNotReady)+" detail=no-token hold=0"));
+  assert(counted("stage=share-disable")==0);
+  assert(writes()==0);
+  assert(regs[0x00133008u]==0x80000001u);
+  assert(logged("phase=start result=0 detail=share-incomplete share-result="+std::to_string(kIOReturnNotReady)));
+  IOQcomClockLedgerState empty;
+  assert(p->ledgerInspect(kIOQcomCCGCC,kIOQcomGccGateLocalID,0,&empty)==kIOReturnNotFound);
+  g->stop(gn);g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
+ /* ---- C2-05: a ledger that lost the gate's demand refuses to share it ---- */
+ {
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,1,1);	/* gate + disable only */
+  messages.clear();resetGccRegs();clearKnobs();
+  setReg(0x00133000u,0x008,0x80000000u);
+  gccHaltFollowsEnable=true;gccMeasureHook=gccCounter;gccDelayCalls=0;
+  auto*g=startGcc(gn);
+  unsigned before=writes();
+  assert(g->fGateTokenHeld&&g->fGateToken==2);
+  /* somebody releases the demand behind the driver's back while the clock keeps
+   * running: the ledger now has no holder for this branch at all */
+  bool last=false;
+  assert(p->ledgerRelease(g->fGateToken,false,&last)==kIOReturnIOError);
+  assert(last);
+  assert(logged("phase=release result="+std::to_string(kIOReturnIOError)+" token=2 holders=0 desired=0 pending=1 confirmed=1 detail=hardware-still-on"));
+  messages.clear();
+  g->fShareEnabled=true;
+  assert(g->shareClocks()==kIOReturnNotReady);
+  /* the first acquisition would have claimed the transition that opened this
+   * clock, so the pass names the lost owner and hands the reference back */
+  assert(logged("consumer=sweetclock-share-a phase=share-acquire result=0 token="));
+  assert(logged("holders=1 opened=1"));
+  assert(logged("consumer=sweetclock-share-a phase=share-acquire result="+std::to_string(kIOReturnNotReady)));
+  assert(logged("detail=ledger-lost-owner hold=1"));
+  assert(logged("phase=share result="+std::to_string(kIOReturnNotReady)+" detail=acquire-failed released=1 hold=1"));
+  /* the reference this pass took is handed back with stopped=false: the branch
+   * is still running, so the ledger records the demand it cannot confirm rather
+   * than a halt this pass never made */
+  assert(counted("phase=release result="+std::to_string(kIOReturnIOError)+" token=")==1);
+  assert(logged("detail=hardware-still-on"));
+  assert(writes()==before);		/* not one store for a demand nobody held */
+  assert(regs[0x00133008u]==0x80000001u);
+  g->stop(gn);g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
+ /* ---- C2-05: the shared retraction is the C2-04 contract, faults included ---- */
+ {
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,1,0);	/* the gate alone: no disable, no share */
+  messages.clear();resetGccRegs();clearKnobs();
+  setReg(0x00133000u,0x008,0x80000000u);
+  gccHaltFollowsEnable=true;gccMeasureHook=gccCounter;gccDelayCalls=0;
+  auto*g=startGcc(gn);
+  assert(writes()==1&&g->fGateTokenHeld&&g->fGateToken==1);
+  g->fDisableEnabled=true;
+  g->fShareEnabled=true;
+  /* a neighbour that moved during the last holder's store keeps the demand */
+  messages.clear();
+  gccDisableNeighbourShift=true;
+  assert(g->shareClocks()==kIOReturnIOError);
+  assert(logged("consumer=sweetclock-share-b phase=disable-check result="+std::to_string(kIOReturnIOError)+" neighbours=4 changed=1"));
+  assert(logged("consumer=sweetclock-share-b phase=disable-done result="+std::to_string(kIOReturnIOError)+" writes=2 neighbours=4 changed=1 polls=0 hold=1 detail=neighbour-changed"));
+  assert(counted("phase=release")==2);	/* the gate and A only: B keeps its demand */
+  assert(writes()==2);
+  assert(g->fShareToken[1]!=0);
+  gccDisableNeighbourShift=false;
+  /* one controller at a time: this driver's registration is the one the second
+   * sample would collide with */
+  g->stop(gn);g->release();gn->release();
+  /* the halt never rises: the store is made, the poll is bounded, and the demand
+   * stays with the last holder */
+  auto*gn2=gccNub(0x8150,true,true,4,0,1,0);
+  messages.clear();resetGccRegs();clearKnobs();
+  setReg(0x00133000u,0x008,0x80000000u);
+  gccDisableStuckRunning=true;gccHaltFollowsEnable=true;gccMeasureHook=gccCounter;gccDelayCalls=0;
+  auto*g2=startGcc(gn2);
+  g2->fDisableEnabled=true;
+  g2->fShareEnabled=true;
+  messages.clear();
+  gccDisableStuckRunning=true;
+  assert(g2->shareClocks()==kIOReturnTimeout);
+  assert(logged("consumer=sweetclock-share-b phase=halt result="+std::to_string(kIOReturnTimeout)+
+                " enable=0 off=0 value=0 polls="+std::to_string(kIOQcomGccDisablePollTries)+
+                " writes=2 hold=1 detail=halt-timeout"));
+  assert(gccDelayCalls==kIOQcomGccDisablePollTries);
+  assert(regs[0x00133008u]==0x00000000u);
+  assert(logged("detail=halt-timeout"));
+  IOQcomClockLedgerState ls;
+  assert(p->ledgerInspect(kIOQcomCCGCC,kIOQcomGccGateLocalID,0,&ls)==kIOReturnSuccess);
+  /* the last holder keeps its reference: the confirmed demand is still there,
+   * held by the consumer that failed to end it rather than by the gate */
+  assert(ls.holders==1&&ls.desired==1&&ls.pending==0&&ls.confirmed==1);
+  assert(ls.transitions==1&&ls.confirmations==1);
+  assert(g2->fShareToken[1]!=0&&g2->fShareToken[0]==0);
+  assert(g2->fGateTokenHeld==false);	/* the gate handed its demand back */
+  gccDisableStuckRunning=false;
+  g2->stop(gn2);g2->release();gn2->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
  printf("PASS: actual C2-01/C2-02/C2-08/C2-03 GCC backend; ADT-matched identity (abi/variant) and "
         "window refusals (absent/address/length/no-base) with clean unmapping, bounded "
         "provider wait, four mapped windows and eleven snapshots, narrow aligned "
@@ -1257,7 +1492,11 @@ int main(){
         "gate: one store behind its own ADT opt-in, halt verified with a bounded poll, "
         "neighbours proven unmoved, a halted branch that keeps its state and releases "
         "its demand, refusals for an already-enabled or unhalted sample, and the gated "
-        "branch reused as the counter's third source\n");
+        "branch reused as the counter's third source, and the C2-05 sharing pass: two "
+        "consumers on the gate's one demand, non-last releases that read the branch and "
+        "store nothing, the last release retracting it and the branch taken again, "
+        "opt-in refusals for a share without either card below it, and faults that keep "
+        "the demand with the holder that failed\n");
  return 0;
 }
 '''
