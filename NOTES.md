@@ -50,7 +50,27 @@ C2-04 撤的是“本驱动唯一持有的那条需求”。第二个消费者�
 
 **操作事故与持久镜像修复**：默认档那一轮我误用 `fastboot flash boot`（写 `boot_a`）而不是 `fastboot boot`，把 `boot_a` 上的持久镜像覆盖成了测试镜像；日志只能改从 `boot_b` 用 UniXNU 大容量模式取回（`boot_b` 的持久镜像还在）。修复走 `out-bs/mk-boot-persist5.sh` → `boot-persist5.img`（`5c60adc8…`、35545088 字节）：kernel 槽用本轮各环实际启动的 `27e7a1d1…`（BootShim＋带 `MHPANEL1` 的 RELEASE 卷＋两棵 DTB），默认项 `msd` → `Payloads/MassStorage.efi`（`02eca9c3…`，与同一 RELEASE 树配套），第二项 iOS 用 `ec1e884f…` ＋ 默认树 `a9e4f371…`（`strings` 里 `sweet,clock` 计数 0）＋605 字节参数；参数做了一处等价替换：`wdt_test=no_user_checkin`（`dxb/` 无消费者、本 boot 不加载 Android 内核）换成 `sweetbatttempirq=1`（依赖已有的 `sweetbattruntime=3`），把 persist4 的电池温度 IRQ 带回日常镜像，总长 599 字节，`sweetkeys` 靠默认值即可（`enabled=1`）；成品镜像回读：kernel 槽逐字节相同、FAT 从 `0x1e6000` 抽出后 toml 相同（`default = "msd"`）、ADT 摘要对上。教训写成文档约束：`boot_a`／`boot_b` **就是**持久镜像的位置（取日志的唯一通道），测试镜像一律 `fastboot boot`；BUILD-GUIDE §5.3／§5.4 已加这段和 persist5 的历史行。
 
-**待办**：只剩 `SWEET IOWORKLOOP` 那行限频——**不并入**本轮，证据镜像一次只带一个变量，它留到 0134 单独验；然后接 C2-06（voted branch 本方票，前置已满足）。0132-1 的环在新内核上仍须 `--c2-04` rc=0。
+**待办**：`SWEET IOWORKLOOP` 那行限频没有并进本轮（证据镜像一次只带一个变量），它现在独立成 0135 一轮，见下一节；之后接 C2-06（voted branch 本方票，前置已满足）。0132-1 的环在新内核上仍须 `--c2-04` rc=0。
+
+## 让环重新装得下半小时：0135 工作环打印限频（候选，主机证据齐备，待 CI 与实机）
+
+0134 的环把这条打印的账算清了：12863 行解码行里有 **9030 行**是 `SWEET IOWORKLOOP: thread … running loop …`（70%，`share_of_ring=0.702`），另有 12 行 `workToDo lock`；4 MiB 环因此只装得下几分钟，开机最早写入的时钟行最先被挤掉。代价还不止占地方：其中两行是**拼接**在别人的消息尾部被记下来的（`IONVRAMCHRPHandler.cpp:sync:894 - serializeVariables failed, ret=0xe00002d8SWEET IOWORKLOOP: …`），一次 console 写可以落在另一条消息中间。所以审计器数这行不锚定行首——锚定会把这两行藏起来，而它们正是问题的一部分。
+
+**根因不是"每个 loop 打一次"，是每次唤醒打一次。** `threadMain()` 并不按 loop 进入：它通过自己的 continuation（函数体里那句 `thread_block_parameter()`）在**每一次被唤醒**时重入，而那行 printf 是无条件的。两个热 loop 交替唤醒，所以环里是成对刷屏（4493／4485 行）。
+
+**行要留，改成每属主一次。** 递归锁 panic 报的是线程，这行是把它对到 loop 的唯一线索，删掉等于丢掉证据。位就放在 loop 自己已有的那个字节里：`loopRestart` 是 `bool`，`kLoopRestart`／`kLoopTerminate` 早就用**字节宽**的 `ISSETP`／`SETP`／`CLRP` 压在这个字节上，于是新增 `kLoopThreadNamed = 0x4`——进入前导时 `ISSETP`→`SETP`→printf，`exitThread:` 处 `CLRP`，让换来的新属主重新报一次。**不新增成员、不动布局、不引入共享 cache line**，代价是每 loop 一次的读改写。
+
+**先写错过一次，值得记下来。** 第一版用了一个静态字"记住最后一个被命名的线程"：两个热 loop 交替时这个字来回翻，两个 loop 于是每次都重打——正是 0134 环里那对刷屏。按对象存位才是对的，测试因此把"记住最后一个线程"这个形状列成**必须被拒**的变体，而不是只写一条 happy path。
+
+**主机证据**（`tools/tests/test-mh2lm-workloop-log.py`）：把交付的 `SETP`／`ISSETP`／`CLRP`、enum、`threadMain()` 前导和 `exitThread` 清理**原样**抠出来编进一个主机程序，按设备的方式驱动——12 个 loop 轮转 500 轮 → 正好 12 行且每行指对属主；两个热 loop 交替 4000 轮 → 0 行；线程交接 → 新属主再报 1 行、其后 0 行；未命名过的 loop 仍会报一次（证明位是逐对象的）。四种突变全部被拒：无守卫（按唤醒打）、守错位（守 `kLoopRestart`）、不清位（换线程后沉默）、"记住最后一个线程"。夹具第一次跑就撞上 `-DSWEET` 没定义（前导被编成空函数、12 个 loop 打 0 行），所以这个坑本身也有一条断言挡着。
+
+**审计器**新增 `workloop` 计数（`rows`／`distinct_pairs`／`allocator_rows`／`share_of_ring`）与这一轮的断言 `--workloop-once`：`rows == distinct_pairs` 且 `distinct_pairs <= allocator_rows`。对 0134-0 跑 `--workloop-once` **必须失败**（`AssertionError: (9030, 12)`），这是负向对照；`selftest-auditor.py` 因此 12→19 项，含"拼接行仍要被数到"。
+
+**打包用 `out-bs/mk16k-0135.sh`，轮次号跳过 0134。** 原因很实在：`sweetlog-0134-0.bin` 已经是 0133 默认档那一次的拉取，镜像号再叫 0134，审计时就分不清"这环是哪版内核出的"。脚本把 0133 的八棵 ADT 派生与全部摘digest 原样沿用（本轮不动任何属性），并用 0133 内核实跑一遍验证过：八张镜像与 0133 对应镜像**只差菜单标题里的轮次号和由它派生的 `id`**，没有其它漂移。
+
+**待验（0135 默认档一次启动）**：`SWEET IOWORKLOOP: thread` 行数应 ≈ loop 数（0134 是 12 对），不是数千；环不再回绕、装得下半小时以上；`--c2-03 --strict --workloop-once` rc=0，且默认档其余逐值不变（26 条时钟行、`reads=19`、`writes=0`、相位只有 `start`／`map`／`snapshot`／`register`／`decode`／`decode-sample`）；桌面照常进。取日志仍走持久镜像＋大容量模式，测试镜像一律 `fastboot boot`。
+
+NEXT：用户 push `full-source` 触发 CI → 下载内核 → `mk16k-0135.sh`（默认档）→ WSL `fastboot boot` → 拉环 → `--c2-03 --strict --workloop-once`；通过后接 C2-06。
 
 ## 首个“为了开钟而写钟”的候选：C2-03 分支门控（2026-11-24，补丁 0237，0130 实机通过）
 
