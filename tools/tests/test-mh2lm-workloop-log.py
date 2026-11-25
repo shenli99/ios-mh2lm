@@ -20,9 +20,18 @@ rejected, so a harness that silently stopped looking cannot pass.  The global
 word mutation is the first attempt at this fix: one remembered thread instead of
 one bit per loop, which reprints on every alternation between two hot loops and
 is exactly the noise this card removes.
+
+The bit shares loopRestart's byte, which the loop also tests for its own restart
+state, so three checks guard the sharing rather than one: the shipped text may
+name fFlags only through ISSETP/SETP/CLRP, and both spellings of the restart
+test are compiled for arm64 - the shipped one must branch on bit 0, while
+`fFlags &` must come out as a non-zero test, because that fold is what a third
+bit turns into an endless restart (the 0135 image hung on its first loop).
 Usage: test-mh2lm-workloop-log.py EXTRACTED_XNU
 """
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -44,6 +53,18 @@ assert 'kLoopRestart = 0x1' in shipped and 'kLoopTerminate = 0x2' in shipped, \
 assert '#define fFlags loopRestart' in shipped
 assert 'bool loopRestart;' in (tree/'iokit/IOKit/IOWorkLoop.h').read_text(), \
     'kLoopThreadNamed rides the byte that holds the two state bits'
+
+# Every read of the byte must be a byte test.  Written `fFlags & kLoopRestart`
+# the object's bool-ness lets the compiler turn `x & 1` into `x != 0`, so the
+# third bit would read as "restart requested" and the event-source scan would
+# never complete a pass - the 0135 image stopped the boot on its first loop
+# exactly that way.  Only the three helpers may name fFlags.
+for line in shipped.splitlines():
+    stripped = line.strip()
+    if 'fFlags' not in line or stripped.startswith(('*', '/*', '#define fFlags')):
+        continue
+    assert re.search(r'(ISSETP|SETP|CLRP)\(&fFlags,', line), \
+        f'fFlags is read outside the byte-wide helpers: {stripped}'
 
 print_block = """#ifdef SWEET
 	/* The recursive-lock panic names a thread; printing the loop's own
@@ -285,4 +306,84 @@ run = compile_and_run('global-word', global_source)
 assert run.returncode != 0, 'global-word: one remembered thread was not caught'
 assert 'case2' in run.stderr, f'global-word: caught for the wrong reason: {run.stderr}'
 
-print('workloop log: shipped fragment prints once per owner, 4 mutations rejected')
+# ---- the restart test has to stay a bit test ------------------------------
+# The bit rides loopRestart's byte, so runEventSources() must test its own bit
+# rather than the byte.  Both spellings are compiled for arm64 here: the shipped
+# one has to branch on bit 0, and `fFlags &` has to come out as a non-zero test
+# - which is what a third bit turns into "restart forever", the 0135 hang.
+for tool in ('clang', 'llvm-objdump'):
+    assert shutil.which(tool), f'{tool} is needed to compile the restart test both ways'
+
+scan_shape = r'''
+#include <stdbool.h>
+%(helpers)s
+#define fFlags s->loopRestart
+%(enum)s
+struct S { bool workToDo; bool loopRestart; };
+extern bool checkForWork(int i);
+int restart_scan(struct S *s, int n)
+{
+	bool more;
+	do {
+		CLRP(&fFlags, kLoopRestart);
+		more = false;
+		for (int i = 0; i < n; i++) {
+			more |= checkForWork(i);
+			if (ISSETP(&fFlags, kLoopTerminate)) {
+				return -1;
+			} else if (%(test)s) {
+				more = true;
+				break;
+			}
+		}
+	} while (more);
+	return more;
+}
+'''
+
+
+def scan_instructions(test):
+    text = scan_shape % {'helpers': helpers, 'enum': enum, 'test': test}
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp)/'scan.c'
+        obj = Path(tmp)/'scan.o'
+        src.write_text(text)
+        proc = subprocess.run(['clang', '--target=aarch64-none-elf', '-O2',
+                               '-c', str(src), '-o', str(obj)],
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, f'restart scan does not compile\n{proc.stderr}'
+        dump = subprocess.run(['llvm-objdump', '-d', '--no-show-raw-insn', str(obj)],
+                              capture_output=True, text=True)
+        assert dump.returncode == 0, 'cannot disassemble the restart scan'
+    out = []
+    for line in dump.stdout.splitlines():
+        m = re.match(r'\s*[0-9a-f]+:\s+([a-z.]+)\s*(.*)$', line)
+        if m:
+            out.append((m.group(1), m.group(2).strip()))
+    return out
+
+
+def restart_test_of(insns, test):
+    """The branch the restart test compiles to, after the terminate test."""
+    for i, (op, args) in enumerate(insns):
+        if op in ('tbnz', 'tbz') and '#0x1' in args:
+            for op2, args2 in insns[i + 1:i + 5]:
+                if op2 in ('tbnz', 'tbz', 'cbnz', 'cbz'):
+                    return op2, args2
+            break
+    raise AssertionError(
+        f'{test}: no terminate test followed by a restart branch\n'
+        + '\n'.join(f'{op} {args}' for op, args in insns))
+
+
+op, args = restart_test_of(scan_instructions('ISSETP(&fFlags, kLoopRestart)'),
+                           'shipped')
+assert op in ('tbnz', 'tbz') and '#0x0' in args, \
+    f'the shipped restart test is not a bit test: {op} {args}'
+op, args = restart_test_of(scan_instructions('fFlags & kLoopRestart'), 'folded')
+assert op == 'cbnz', \
+    f'the truthiness spelling no longer folds to a non-zero test ({op} {args}); ' \
+    're-derive why the shipped form uses ISSETP before deleting this check'
+
+print('workloop log: shipped fragment prints once per owner, 4 mutations '
+      'rejected, restart test is a bit test')

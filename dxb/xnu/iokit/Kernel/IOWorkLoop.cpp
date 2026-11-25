@@ -68,7 +68,18 @@ OSMetaClassDefineReservedUnused(IOWorkLoop, 7);
  * as the two state bits (loopRestart is a bool and ISSETP/SETP/CLRP already
  * test it as a byte), it is set on the loop's own object so twelve loops each
  * print once instead of sharing one remembered thread, and it is cleared when
- * the loop thread exits so a loop that gains a new owner announces it again. */
+ * the loop thread exits so a loop that gains a new owner announces it again.
+ *
+ * Because a third bit rides this byte, every reader must go through ISSETP.
+ * Spelled `fFlags & kLoopRestart` the compiler knows the object is a bool, so
+ * `x & 1` is `x != 0` and it emits cbnz: any other bit in the byte then reads
+ * as "restart requested", the event-source scan never completes a pass, and
+ * whichever thread waits on that loop never runs again.  The 0135 image did
+ * exactly that and stopped at its first loop with half a page of console and a
+ * ring that had not reached its first flush; runEventSources() now tests the
+ * restart bit through ISSETP like kLoopTerminate next to it (one load for
+ * both), and tools/tests/test-mh2lm-workloop-log.py compiles both spellings to
+ * keep the trap out. */
 enum IOWorkLoopState {
 	kLoopRestart = 0x1,
 	kLoopTerminate = 0x2,
@@ -427,7 +438,7 @@ IOWorkLoop::runEventSources()
 
 			if (ISSETP(&fFlags, kLoopTerminate)) {
 				goto abort;
-			} else if (fFlags & kLoopRestart) {
+			} else if (ISSETP(&fFlags, kLoopRestart)) {
 				more = true;
 				break;
 			}

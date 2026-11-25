@@ -1,0 +1,92 @@
+From: mh2lm clock work <clock@mh2lm>
+Subject: [PATCH 0242] fix(iokit): test the restart bit as a bit, not the whole bool
+
+0241 put a third bit (kLoopThreadNamed) in the byte loopRestart occupies, on
+the grounds that every access to that byte already went through the byte-wide
+ISSETP/SETP/CLRP helpers. One access did not. runEventSources() tested its own
+state as
+
+    } else if (fFlags & kLoopRestart) {
+
+and fFlags is the bool loopRestart itself, so `x & 1` is `x != 0` as far as the
+C++ type system goes and the compiler is entitled to drop the mask. It did: in
+the 0135 object the restart test, at runEventSources()+0x1a8, is
+
+    +0x1a8:  ldrb    w8, [x19, #0x39]    ; loopRestart
+    +0x1ac:  tbnz    w8, #0x1, <abort>   ; ISSETP(&fFlags, kLoopTerminate)
+    +0x1b0:  orr     w28, w28, w22       ; the source's answer joins `more`
+    +0x1b4:  cbnz    w8, <scan start>    ; fFlags & kLoopRestart, folded
+
+so the scan restarts whenever that byte is non-zero, not when bit 0 is set.
+With 0100 in it, every pass set `more = true` and broke out of the event-source
+chain, `do { ... } while (more)` ran again immediately, and the loop never
+completed a pass or went back to sleep.
+
+The fold is not new to 0135: the 0133 kernel carries the same four instructions
+at the same address, and it booted, because that byte only ever held the two
+state bits and bit 1 is tested first. The third bit is what turns an unnoticed
+fold into a hang - which is why the spelling, not the feature, is the bug.
+
+On the device that is the 0135 hang: the console stopped on
+"SWEET IOWORKLOOP: thread 0xfffffe2000fb4430 running loop 0xfffffe24cd5ec900"
+with the touch registration rows above it and nothing after, which is the line
+threadMain() prints before handing the loop to that first scan; the UFS ring was
+byte-identical to the previous boot's, so the machine had not survived the ten
+seconds to its first flush. The loop it stopped on is the one the boot thread
+was waiting for, and it was spinning instead.
+
+Bisected on the device with two binary patches of the same CI kernel, changing
+only the four instructions in front of the print: naming the thread on every
+wakeup while also setting the bit hung the boot; naming it on every wakeup and
+writing no bit at all reached the desktop. 0133 (no third bit, no such test)
+booted; 0135 hung twice. The kernel objects of the two builds differ in exactly
+two archive members, IOWorkLoop.cpo and __.SYMDEF, and the only source
+difference is this feature.
+
+The fix is the one-line spelling the two neighbours already use: ISSETP takes
+the address as unsigned char *, so the compiler cannot fold the mask away and
+emits tbnz w8, #0x0 - it also merges with the terminate test into a single
+load. The comment above the enum now carries the rule, because it is not
+obvious from `bool`: any bit beyond the two state bits makes every `fFlags &`
+in this file load-bearing, so readers must use the helpers.
+
+tools/tests/test-mh2lm-workloop-log.py grows two guards that would have caught
+this before the image was flashed: the shipped text may name fFlags only inside
+ISSETP/SETP/CLRP (the 0135 line is rejected with the offending source line),
+and both spellings of the restart test are compiled for arm64 and disassembled,
+requiring a bit-0 branch for the shipped form and a non-zero branch for the
+folded one, so the trap is documented by a failure that names it.
+
+diff --git a/dxb/xnu/iokit/Kernel/IOWorkLoop.cpp b/dxb/xnu/iokit/Kernel/IOWorkLoop.cpp
+index d160498..b351f44 100644
+--- a/dxb/xnu/iokit/Kernel/IOWorkLoop.cpp
++++ b/dxb/xnu/iokit/Kernel/IOWorkLoop.cpp
+@@ -68,7 +68,18 @@ OSMetaClassDefineReservedUnused(IOWorkLoop, 7);
+  * as the two state bits (loopRestart is a bool and ISSETP/SETP/CLRP already
+  * test it as a byte), it is set on the loop's own object so twelve loops each
+  * print once instead of sharing one remembered thread, and it is cleared when
+- * the loop thread exits so a loop that gains a new owner announces it again. */
++ * the loop thread exits so a loop that gains a new owner announces it again.
++ *
++ * Because a third bit rides this byte, every reader must go through ISSETP.
++ * Spelled `fFlags & kLoopRestart` the compiler knows the object is a bool, so
++ * `x & 1` is `x != 0` and it emits cbnz: any other bit in the byte then reads
++ * as "restart requested", the event-source scan never completes a pass, and
++ * whichever thread waits on that loop never runs again.  The 0135 image did
++ * exactly that and stopped at its first loop with half a page of console and a
++ * ring that had not reached its first flush; runEventSources() now tests the
++ * restart bit through ISSETP like kLoopTerminate next to it (one load for
++ * both), and tools/tests/test-mh2lm-workloop-log.py compiles both spellings to
++ * keep the trap out. */
+ enum IOWorkLoopState {
+ 	kLoopRestart = 0x1,
+ 	kLoopTerminate = 0x2,
+@@ -427,7 +438,7 @@ IOWorkLoop::runEventSources()
+ 
+ 			if (ISSETP(&fFlags, kLoopTerminate)) {
+ 				goto abort;
+-			} else if (fFlags & kLoopRestart) {
++			} else if (ISSETP(&fFlags, kLoopRestart)) {
+ 				more = true;
+ 				break;
+ 			}
