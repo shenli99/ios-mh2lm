@@ -26,7 +26,7 @@ C2-03 的样本是一条**只进不出**的需求：门开了、token 挂着、`
 
 NEXT（当时）：C2-05（同一 branch 的多消费者共享：A／B 各自取得、A 释放后仍运行，B 最后释放才触发已验关钟）——已实现，见下一节。
 
-## 第二个消费者：C2-05 共享引用（2026-11-25，补丁 0240，0133 两档待实机）
+## 第二个消费者：C2-05 共享引用（2026-11-25，补丁 0240，0133 共享档实机通过）
 
 C2-04 撤的是“本驱动唯一持有的那条需求”。第二个消费者一来，同一个动作就变成“别人还在用就把钟关了”。C2-05 不新增硬件原语，只把门控已经打开的那条 branch 变成三个人共享的一笔需求：门控自己、`sweetclock-share-a`、`sweetclock-share-b`，同一个账本条目，谁都不是所有者。
 
@@ -34,7 +34,7 @@ C2-04 撤的是“本驱动唯一持有的那条需求”。第二个消费者�
 
 **最后一笔必须自己确认自己是最后。** `sweetclock-share-b` 归还前先看 `holders=1`，才把 token 交给 `retractBranch(token,"sweetclock-share-b","share-disable")`——与 C2-04 完全同一条路径：只撤 `saved & ~kGccBranchEnable`、等 `CLK_OFF`、四邻位比对、`ledgerRelease(stopped=true)`、然后同一 `start()` 里的恢复把 branch 再开起来。若中途发现最后一笔另有其人（`last-holder=1`），`ERROR detail=unexpected-last-holder` 并且**不撤回**：宁可留一个开着的钟，也不在一个来路不明的归还上写硬件。
 
-**共享取得不重开条目。** `ledgerAcquire` 之后 `pending=0 confirmed=1 transitions=1` 仍是门控那次的值，只有 `holders` 走 1→2→3；宿主 fixture 原先断言“共享取得会重开成 `pending=1`”，被 `ledgerInspect` 的真实语义否掉。真正会撞上 `hardware-still-on` 的只有最后一笔，而它带着 halt 作确认。取到之后立刻 `ledgerInspect`：`opened=1` 说明这笔需求已不是门控留下的那一笔（`detail=ledger-lost-owner`），把已取得的逐个归还、不写硬件、放弃本次共享。这条拒绝路径真被编译器抓过一个缺陷——`taken` 自增在循环末尾，`opened=1` 时发出去的 token 会漏在账本里。
+**共享取得不重开条目——但账本照样记一行。** `ledgerAcquire` 之后 `pending=0 confirmed=1 transitions=1` 仍是门控那次的值，只有 `holders` 走 1→2→3；账本对**每一笔**取得都打 `phase=acquire` 行，共享的两笔带 `transition=shared`，所以一次共享开机的账本取得行是四条（门控、a、b、恢复），不是两条。合成环最初漏了这两行、审计器也只数到两条，被 0133 实机当场纠正（见下节「0133 怎么看结果」的实机结论）。宿主 fixture 原先断言“共享取得会重开成 `pending=1`”，被 `ledgerInspect` 的真实语义否掉。真正会撞上 `hardware-still-on` 的只有最后一笔，而它带着 halt 作确认。取到之后立刻 `ledgerInspect`：`opened=1` 说明这笔需求已不是门控留下的那一笔（`detail=ledger-lost-owner`），把已取得的逐个归还、不写硬件、放弃本次共享。这条拒绝路径真被编译器抓过一个缺陷——`taken` 自增在循环末尾，`opened=1` 时发出去的 token 会漏在账本里。
 
 **opt-in 与合成树。** `--clock-share`（4 字节）同时隐含 `sweet,clock-gate` 与 `sweet,clock-disable`（生成器与后端双强制；缺任一条 WARN `detail=clock-share-needs-gate-disable` 且不进共享）。共享树 `264b4a5c…`（23688 字节）＝关钟树 + 一条属性；共享＋测频树 `3201cb02…`（23728 字节）＝关钟＋测频树 + 同一条；其余七棵树逐字节不变，参数表仍 605 字节。`--clock-share` 单独调用必须得到同一棵树（脚本里有 `cmp`）。
 
@@ -42,7 +42,9 @@ C2-04 撤的是“本驱动唯一持有的那条需求”。第二个消费者�
 
 **0133 怎么看结果**（`out-bs/mk16k-0133.sh`，八档加 `clockshare`／`clocksharemeasure`）：要看的次序是 `phase=share-request enable=1 off=0 value=0x1` → `share-acquire token=2 holders=2 opened=0` → `share-acquire token=3 holders=3 opened=0` → `phase=share … consumers=2 holders=3 clock-share=1 clock-gate=1 clock-disable=1` → 两笔 `share-release … last-holder=0 running=1`（**读到的 `value` 一直有 enable，且这中间没有 `write-issued`**）→ `share-last token=3 holders=1 action=retract` → `write-issued stage=share-disable` → `halt … polls=0` → `share-done writes=3 consumers=2 retracted=1 last-holder=1 holders=0` → 恢复段与 0132 逐字相同。`clocksharemeasure` 档再要多一行 `measure` 证明两个持有者期间第三源仍在跑。脚本对两个新符号与全部 C2-05 行设卡，拿 0132 内核当输入会停在 `__ZN9IOQcomGCC13retractBranchEjPKcS1_`——刻意的负向验证。
 
-**待办**：CI 产出含 C2-05 的内核 → 刷 `clockshare` 拉环（进桌面几十秒内）→ `--c2-05` 审计 → `clocksharemeasure` 复验第三源 → 同内核默认档回归。`SWEET IOWORKLOOP` 那行限频**不并入**本轮：证据镜像一次只带一个变量，它留到 0134 单独验。0132-1 的环在新内核上仍须 `--c2-04` rc=0（`disableClocks()` 已缩成一个参数化 `retractBranch`，行文法未变）。
+**0133 实机结论（`clockshare` 档，`pass`）**：环 `logs/sweetlog-0133-0.bin`（`41bf8436…`，`total=1002521`、`flush_sequence=8`、**未回绕**、12942 行、63 条时钟行），`--c2-05 --c2-03 --gate --strict` 在既定 USB 重复漂移下 rc=0。逐行对上：`share-request value=0x1` → `share-a token=2 holders=2 opened=0` → `share-b token=3 holders=3 opened=0` → `phase=share consumers=2 holders=3` → 两笔 `share-release … last-holder=0 running=1 value=0x1`（期间**无任何** `write-issued`）→ `share-last token=3 holders=1 action=retract` → `write-issued stage=share-disable` → `halt polls=0 0x80000000` → `release token=3 holders=0 transitions=2` → `disable-done` → 恢复 `token=4 transitions=3 confirmations=3` → `share-done writes=3 detail=last-release-retracted`（落在恢复之后）→ `start … reads=52 writes=3`。**审计器被设备纠正的一处模型**：设备打了四条 `acquire` 行（两笔 `transition=shared`），合成环与 `check_share()` 原先只认两条；现已让 `make-share-ring.py` 为每笔共享取得补出 `planID=C1 … transition=shared` 行，`check_share()` 断言“四取两共享且共享行不动 `desired`／`pending`／`confirmed`／`transitions`”，自测仍 18/18。
+
+**待办**：`clocksharemeasure`（第三源）复验 → 同内核默认档回归。`SWEET IOWORKLOOP` 那行限频**不并入**本轮：证据镜像一次只带一个变量，它留到 0134 单独验。0132-1 的环在新内核上仍须 `--c2-04` rc=0（`disableClocks()` 已缩成一个参数化 `retractBranch`，行文法未变）。
 
 ## 首个“为了开钟而写钟”的候选：C2-03 分支门控（2026-11-24，补丁 0237，0130 实机通过）
 
