@@ -44,6 +44,8 @@ C2-08 的 23 次写是测量期间借来的：开 mux、开 debug 分支、跑�
 
 **0131 的期望**：`decoded-hz=19200000`、`measured-hz` 由设备计数决定（历史 19199963／19200036 都合法，只要 `|delta-ppm|<=10000`）、`result=0`、`measure-done result=0`、无 `detail=measure-incomplete`；门控侧的行与 0130 逐字相同。0130／0130-1 两环按各自当时的声明保留原样，不改写。
 
+**0131 结账（`logs/sweetlog-0131-0.bin`，`53543ac0…`，`total=1113159`，2026-11-24 23:03 抓取、11-25 复核）。** 镜像 `boot-16k-0131-gpioirq-panel-pipeline-clockgatemeasure.img` 的载荷与 0130 只差内核：`kernel.macho` `6a861360…`，`kernel.macho.adt` 仍是 `c0ba7498…`（五棵 ADT 树摘要与 0130 完全相同，设备树没动）。审计 `--measure --c2-03 --gate` **rc=0、`verdict=pass`**，而且不需要 `--allow-baseline-drift`（非时钟 WARN 恰好 `FB SCANOUT`×3＋`USB`×2）也不需要 `--gate-declared-xo4`（`gate_declaration_refutation=null`）：第三源 `cc1:0x4 mux=0x99` 读到 `short=16396 full=262156 hz=19199963`，对 `decoded-hz=19200000` 差 −1 ppm；两个对照照旧（`0x53` 19199963、`0x9a` `hz=0 running=0`）。门控九行与 0130／0130-1 逐字相同，账本 `token=2 holders=1 transitions=2 confirmations=2 release_value=0x1`，`measure-done result=0 writes=31 restores=5 mismatches=0`，`reads=2147`。**C2-03 到此全卡收口**：行为（0237）与父源身份（0238）各有一轮实机证据，第二轮是在修正之后独立取得的。下一张卡 C2-04（关钟）／C2-05（共享）。
+
 ## 首个硬件写候选：C2-08 测频＋C1-05 账本（2026-11-24，补丁 0235／0236）
 
 这一轮是时钟计划第一次**允许写硬件**，所以写路径本身按[总计划 §3.5](docs/CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)做成单点、可数、可回退，测量是否发生由设备树决定，默认镜像继续停在零写入。
