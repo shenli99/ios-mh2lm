@@ -22,6 +22,8 @@ C2-03 的样本是一条**只进不出**的需求：门开了、token 挂着、`
 
 **拉环时间是个坑。** 第一次的 `logs/sweetlog-0132-0.bin`（`04975515…`，`total=5089694`）已回绕：4 MiB 里 98%（4105748 B／54023 行）是 `IOWorkLoop::threadMain()` 每次线程重入打的那行 `SWEET IOWORKLOOP: thread …`，开机最早写入的时钟行被整段挤掉（`SWEET CLOCK` 0 行）。该环仍证明设备健康（`MDSS IRQ … window-ms=60096 frames=3600 milli-hz=59903 dropped=0`、`FB swaps=22`、`touch reports=1`×17、`SpringBoard`／`backboardd` 在跑）。两条结论：环要在进桌面后几十秒内导；那条打印该限频或只在首个 loop 打一次，留待下轮镜像顺手处理，不影响本卡。
 
+**默认档回归**（同一内核、三条开关全去掉，`boot-16k-0132-gpioirq-panel-pipeline.img` `38aa7134…`／ADT `081f63dc…`）：环 `logs/sweetlog-0132-2.bin`（`32fa2a89…`，`total=994381`，未回绕）审计 `--c2-03 --strict` rc=0——26 行、`reads=19`、`writes=0`，相位只有 `start`／`map`／`snapshot`／`register`／`decode`／`decode-sample`，`gate`／`write-issued`／`disable-request`／`halt`／`acquire`／`release` 一条都没有，非时钟清单与面板标记和 b32 全等。关钟代码在镜像里、开关不在时一步也不跑，C2-04 的公共回归成立。
+
 NEXT：C2-05（同一 branch 的多消费者共享：A／B 各自取得、A 释放后仍运行，B 最后释放才触发已验关钟）。
 
 ## 首个“为了开钟而写钟”的候选：C2-03 分支门控（2026-11-24，补丁 0237，0130 实机通过）
