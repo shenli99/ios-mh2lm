@@ -50,9 +50,30 @@ C2-04 撤的是“本驱动唯一持有的那条需求”。第二个消费者�
 
 **操作事故与持久镜像修复**：默认档那一轮我误用 `fastboot flash boot`（写 `boot_a`）而不是 `fastboot boot`，把 `boot_a` 上的持久镜像覆盖成了测试镜像；日志只能改从 `boot_b` 用 UniXNU 大容量模式取回（`boot_b` 的持久镜像还在）。修复走 `out-bs/mk-boot-persist5.sh` → `boot-persist5.img`（`5c60adc8…`、35545088 字节）：kernel 槽用本轮各环实际启动的 `27e7a1d1…`（BootShim＋带 `MHPANEL1` 的 RELEASE 卷＋两棵 DTB），默认项 `msd` → `Payloads/MassStorage.efi`（`02eca9c3…`，与同一 RELEASE 树配套），第二项 iOS 用 `ec1e884f…` ＋ 默认树 `a9e4f371…`（`strings` 里 `sweet,clock` 计数 0）＋605 字节参数；参数做了一处等价替换：`wdt_test=no_user_checkin`（`dxb/` 无消费者、本 boot 不加载 Android 内核）换成 `sweetbatttempirq=1`（依赖已有的 `sweetbattruntime=3`），把 persist4 的电池温度 IRQ 带回日常镜像，总长 599 字节，`sweetkeys` 靠默认值即可（`enabled=1`）；成品镜像回读：kernel 槽逐字节相同、FAT 从 `0x1e6000` 抽出后 toml 相同（`default = "msd"`）、ADT 摘要对上。教训写成文档约束：`boot_a`／`boot_b` **就是**持久镜像的位置（取日志的唯一通道），测试镜像一律 `fastboot boot`；BUILD-GUIDE §5.3／§5.4 已加这段和 persist5 的历史行。
 
-**待办**：`SWEET IOWORKLOOP` 那行限频没有并进本轮（证据镜像一次只带一个变量），它现在独立成 0135 一轮，见下一节；之后接 C2-06（voted branch 本方票，前置已满足）。0132-1 的环在新内核上仍须 `--c2-04` rc=0。
+**待办**：`SWEET IOWORKLOOP` 那行限频没有并进本轮（证据镜像一次只带一个变量），它独立成一轮（0135 判负、修正后重出为 0136），见下一节；之后接 C2-06（voted branch 本方票，前置已满足）。0132-1 的环在新内核上仍须 `--c2-04` rc=0。
 
-## 让环重新装得下半小时：0135 工作环打印限频（候选，主机证据齐备，待 CI 与实机）
+## 让环重新装得下半小时：0135 判负、`bool & 1` 折叠、0242 修正，下一轮 0136
+
+**0135 实机判负：卡死在第一个 loop。** 屏幕最后一行是 `SWEET IOWORKLOOP: thread 0xfffffe2000fb4430 running loop 0xfffffe24cd5ec900`，上面还有 `touch registered` 一类的注册行，之后什么都没有；从持久镜像拉回的环与 0134 **逐字节相同**（`cmp` 通过），说明这台机器连第一次约 10 秒的刷盘都没走到——环里那行之后本该紧跟 `SWEET: starting device-tree platform expert`。
+
+**用同一个 CI 内核对前导做两个二进制探针，把原因收敛到一位。** `out-bs/mkprobe-0135.sh` 只换 ramdisk 里的 `kernel.macho`，固件卷、ADT、`unixnu.toml`、605 字节参数、ramdisk 其余内容全部与已接受的 0135 逐字节相同，所以每次只动 `threadMain` 前导那四条指令（`ldrb`／`tbnz`／`orr`／`strb`，文件偏移 `0xa13760` 起）：**P1** 只把 `tbnz` 换 NOP（位照旧置、每次唤醒都打印）→ 同样卡死在那行；**P2** 再把 `orr`／`strb` 也换 NOP（完全不写位、每次唤醒都打印，等于 0133 语义却仍是同一个重建对象）→ 正常进桌面。于是"打印本身"、"目标文件重建带来的 36 字节位移／`kalloc_type_view` 重编号"全部排除，唯一变量就是**往那个字节写 0x4**。
+
+**为什么一个诊断位会锁死启动：`bool & 1` 被折叠成"非零"。** 代码里确实没有任何 C++ 读者按真值读这个字节——真正的读者不是源码，是编译器。`runEventSources()` 里那行 `} else if (fFlags & kLoopRestart) {`，`fFlags` 就是 `bool loopRestart`，`x & 1` 对它等于 `x != 0`，掩码可以合法省掉；0135 的目标文件里它正是如此：
+
+```
++0x1a8:  ldrb  w8, [x19, #0x39]    ; loopRestart
++0x1ac:  tbnz  w8, #0x1, <abort>   ; ISSETP(&fFlags, kLoopTerminate)，位测试没问题
++0x1b0:  orr   w28, w28, w22       ; 本事件源的答案并进 more
++0x1b4:  cbnz  w8, <scan start>    ; fFlags & kLoopRestart，被折叠成"字节非零"
+```
+
+（偏移相对 `runEventSources()`，符号在 `0xfffffe0007a17474`，实测 PC 为 `0xfffffe0007a1761c/620/624/628`。）
+
+字节里现在有 `0100`，于是每一趟扫描都把 `more` 置真、跳出事件源链，`do { … } while (more)` 立刻再来一遍：loop 永远跑不完一趟、永远不回去睡，等它的启动线程停在那里，console 也停在那行。同一处 `tbnz #0x1` 用的 `ISSETP` 是按 `unsigned char *` 读，掩码省不掉——这就是同一字节上两种读法的差别。**这个折叠不是 0135 才有的**：0133 内核在同一个地址（`runEventSources()+0x1a8`）是同样四条指令，它照样开机，因为那个字节当时只有两个状态位、位 1 先被判断掉。第三位才是把"没人注意的折叠"变成"开机卡死"的东西——所以病的是写法，不是功能。
+
+**修法（补丁 `0242`）**：把那一行换成邻居早就在用的写法 `} else if (ISSETP(&fFlags, kLoopRestart)) {`。差别只有一条指令，而且更好：本地 clang 19 交叉编译同一形态，交付写法编成 `tbnz w8, #0x0`，并与终止位合并成**一次** load（旧写法是 `ldrb` ＋ `tbnz` ＋ `cbnz`）。注释块里写明了规则：`bool` 不会告诉你这件事，只要这个字节里多一位，本文件里每一个 `fFlags &` 都会变成承重的。
+
+**主机测试补两道关（这两道才真能挡住它）**：① 源码文本里 `fFlags` 只允许出现在 `ISSETP`／`SETP`／`CLRP` 里，拿 0135 那行去跑会被点名拒绝（`fFlags is read outside the byte-wide helpers: } else if (fFlags & kLoopRestart) {`）；② 两种写法都编成 arm64 反汇编：交付的一支必须是对位 0 的 `tbz`／`tbnz`，被折叠的一支必须编成 `cbnz`——把这个坑用一条会失败的断言写清楚，而不是只留在注释里。原来的四个运行时突变照旧全部通过。
 
 0134 的环把这条打印的账算清了：12863 行解码行里有 **9030 行**是 `SWEET IOWORKLOOP: thread … running loop …`（70%，`share_of_ring=0.702`），另有 12 行 `workToDo lock`；4 MiB 环因此只装得下几分钟，开机最早写入的时钟行最先被挤掉。代价还不止占地方：其中两行是**拼接**在别人的消息尾部被记下来的（`IONVRAMCHRPHandler.cpp:sync:894 - serializeVariables failed, ret=0xe00002d8SWEET IOWORKLOOP: …`），一次 console 写可以落在另一条消息中间。所以审计器数这行不锚定行首——锚定会把这两行藏起来，而它们正是问题的一部分。
 
@@ -66,11 +87,13 @@ C2-04 撤的是“本驱动唯一持有的那条需求”。第二个消费者�
 
 **审计器**新增 `workloop` 计数（`rows`／`distinct_pairs`／`allocator_rows`／`share_of_ring`）与这一轮的断言 `--workloop-once`：`rows == distinct_pairs` 且 `distinct_pairs <= allocator_rows`。对 0134-0 跑 `--workloop-once` **必须失败**（`AssertionError: (9030, 12)`），这是负向对照；`selftest-auditor.py` 因此 12→19 项，含"拼接行仍要被数到"。
 
-**打包用 `out-bs/mk16k-0135.sh`，轮次号跳过 0134。** 原因很实在：`sweetlog-0134-0.bin` 已经是 0133 默认档那一次的拉取，镜像号再叫 0134，审计时就分不清"这环是哪版内核出的"。脚本把 0133 的八棵 ADT 派生与全部摘digest 原样沿用（本轮不动任何属性），并用 0133 内核实跑一遍验证过：八张镜像与 0133 对应镜像**只差菜单标题里的轮次号和由它派生的 `id`**，没有其它漂移。
+**打包：0135 已出（八张镜像），0136 用改名后的 `out-bs/mk16k-0136.sh`，轮次号跳过 0134。** 原因很实在：`sweetlog-0134-0.bin` 已经是 0133 默认档那一次的拉取，镜像号再叫 0134，审计时就分不清"这环是哪版内核出的"。脚本把 0133 的八棵 ADT 派生与全部摘digest 原样沿用（本轮不动任何属性），并用 0133 内核实跑一遍验证过：八张镜像与 0133 对应镜像**只差菜单标题里的轮次号和由它派生的 `id`**，没有其它漂移。
 
-**待验（0135 默认档一次启动）**：`SWEET IOWORKLOOP: thread` 行数应 ≈ loop 数（0134 是 12 对），不是数千；环不再回绕、装得下半小时以上；`--c2-03 --strict --workloop-once` rc=0，且默认档其余逐值不变（26 条时钟行、`reads=19`、`writes=0`、相位只有 `start`／`map`／`snapshot`／`register`／`decode`／`decode-sample`）；桌面照常进。取日志仍走持久镜像＋大容量模式，测试镜像一律 `fastboot boot`。
+**本轮回归（主机测试全跑一遍）**：`tools/tests` 71 个 test 脚本串行过一遍，61 个直接通过；剩下 10 个里 7 个只是调用方式不同（`*-reference.py` 要 `LINEAGE_ROOT`，`pipeline-lineage.py` 要 `LINEAGE_TREE`，`scanout-profiles.py` 不要参数），按各自 `Usage:` 给上真实路径后 7 个全绿。真正红的两项（`dsi-sequence.py`、`panel-profile-lifecycle.py`）在改动前的树 `e010e8d` 上**同样 SIGABRT**（`beginDSISequence(...)==0`），与本轮无关，另记待查；`boot-args.py` 要的 `DarwinBoot.c` 是另一个修订（本机的 `__ZN...CommandLine[DARWIN_BOOT_LINE_LENGTH]` 那一行形态对不上），本机跑不了。
 
-NEXT：用户 push `full-source` 触发 CI → 下载内核 → `mk16k-0135.sh`（默认档）→ WSL `fastboot boot` → 拉环 → `--c2-03 --strict --workloop-once`；通过后接 C2-06。
+**0136 待验（默认档一次启动，只换内核）**：`SWEET IOWORKLOOP: thread` 行数应 ≈ loop 数（0134 是 12 对），不是数千；环不再回绕、装得下半小时以上；`--c2-03 --strict --workloop-once` rc=0，且默认档其余逐值不变（26 条时钟行、`reads=19`、`writes=0`，相位只有 `start`／`map`／`snapshot`／`register`／`decode`／`decode-sample`）；桌面照常进。取日志仍走持久镜像＋大容量模式，测试镜像一律 `fastboot boot`。
+
+NEXT：用户 push `full-source` 触发 CI（含 `ca59d25`／补丁 `0242`）→ 下载内核并核对 `__ZN10IOWorkLoop15runEventSourcesEv` 那处已是 `tbz/tbnz #0x0` → `mk16k-0136.sh`（默认档）→ WSL `fastboot boot` → 拉环 → `--c2-03 --strict --workloop-once`；通过后接 C2-06。
 
 ## 首个“为了开钟而写钟”的候选：C2-03 分支门控（2026-11-24，补丁 0237，0130 实机通过）
 
