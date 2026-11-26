@@ -79,7 +79,7 @@
 - **实机检验**：确认写到本方 vote 寄存器及类型特定完成。能独立保持第二票时验证 aggregate 继续开；没有第二投票者时只验本方撤票，保留共享硬件场景未覆盖。
 - **预期结果**：本样本 voted 能力通过；整体 OFF 和本方票撤回分别报告。
 - **失败归属**：C2-06 vote-write／enable-completion／release-settle；缺第二票证据不冒充聚合关断故障。
-- **状态**：**只读前置已验收，待写票**（voted 样本见 [C0-03 的 S4](C0-03-SAMPLES.md)；0137 探针轮 rc=0，三支 voted 均 bit0 清零、`0x4d004` bit1 置位，见本文件末节；0138 投本方票）。
+- **状态**：**实机通过（本方票半边）**（0138 投票档 rc=0：`0x80000000` → 写 `0x1` → 首读即 `off=0` → 撤回写 `0x0` → 10 µs 后回到 `0x80000000`，`polls=0`／`writes=2`／`hold=0`；聚合关断需要第二位投票者，设备上不存在，**明确未覆盖**。voted 样本见 [C0-03 的 S4](C0-03-SAMPLES.md)；只读前置见本文件 0137 节，补丁 `0244`）。
 
 ### C2-07 提供一个已停止外设的 reset 脉冲
 
@@ -340,6 +340,17 @@
 - **兼容**：探针不设 `haveGate`，也不往 `phase=gate` 的 property 行加字段，所以 0136 及更早的环里这一类行一条都没有；`c2-03` 默认档读的是四条 `map` 行、19 次读、0 次写。
 - **证据**：`tools/tests/test-mh2lm-gcc-backend.py` 通过（五页映射、四行＋汇总、`registerWrites()==0`、六类拒绝：属性缺席／长度 3／值 2／页缺失／地址错／长度短、缺席档 `maps=4 reads=19 writes=0`）；`tools/tests/test-mh2lm-mdss-adt.py` 通过（属性与第五段可精确移除、旧树不含该属性、CLI 等价、`--clock-vote-probe` 隐含 provider）；`audit-clock-log.py --c2-06` 与 `make-probe-ring.py`／`selftest-probe-auditor.py` 12／12 PASS（`ok`／`held` 接受，`noflag`／`nopage`／`unmapped`／`short`／`failed`／`wrongvoted`／`misplaced`／`drift`／`silent-drift`／`silent-held` 拒绝）。补丁 `0243` 在 detached worktree 上重放，五份文件与工作区 `cmp` 逐字节一致。
 
+## 本候选实现（C2-06 写票，补丁 0244）
+
+- **属性与蕴涵**：`sweet,clock-vote`（4 字节）是自己的一条 opt-in，并**隐含** `sweet,clock-vote-probe`——投票先在第五页上读，属性缺席时不读也不写。生成器与后端双强制，缺前置时 `WARN detail=clock-vote-needs-probe`，不进投票。投票树 `1405ff45…`（23664 字节）＝探针树 + 恰好一条属性，其余十一棵树逐字节不变，参数表仍 605 字节。
+- **不给 `gccClocks[]` 加第八行**：多一个描述符会给**每张**镜像的清单多一行（四张根本不映射这页）。投票因此保留自己的本地 ID（`8`）、自己的名字（`gcc_npu_axi_clk`），骑在 0137 已映射的第五页上；`writeRegister()` 的守卫从“`window < 4`”改成“四页内，或 `arm 过` 且正好是本页 `offset 0x008`”，越权仍只记 `fWriteFailures` 不写；`writeVoteRegister()` 在存储现场点名偏移，不让调用点猜。
+- **先读后写，两处零写拒绝**：bit0 已置（别人投过票）→ `NotReady` + `WARN … result=… detail=vote-held-by-other enable=1 off=… writes=0`；bit31 已清（聚合已起、但没有我方票）→ `detail=halt-not-set`，同样 `writes=0`。两种情况都不动硬件，也都不算故障。
+- **七行文法，三个答案分开**：`phase=vote`（武装标记，早于任何映射，`detail=armed name=… offset=0x8 voted=1 vote-probe=1`）→ `vote-request`（存前读、两个位、判决）→ `write-issued … stage=vote-enable`（第几笔）→ `vote-write`（读回、配置掩码内只变了 enable：`mask=0xfffffff changed-only-enable=1`）→ `vote-running`（按厂商预算 `500×1 µs` 轮询 `CLK_OFF`，`polls` 是跳出下标）→ `write-issued … stage=vote-release` → `vote-release`（写回保存字、`delay-us=10`、`detail=observed-not-proof`）→ `vote-done`（`writes`／`vote-store`／`enable-done`／`settle`／`polls`／`hold`／`before`／`after` 八个量一行对账）。超时不是写失败：`polls=500` 时仍照常撤票，`vote-done … enable-done=0`，`start` 行另带 `detail=vote-incomplete`。
+- **释放写的是保存字，不是“再置一次”**：`value = before & 0x0FFFFFFF`，这样第二持有者若还在投票，聚合不会被我们顺手打下去。释放后 `CLK_OFF` 只作**观察**记下（`detail=observed-not-proof`）：NPU 掉电与 RPMh 都是这驱动看不见的投票者，所以本卡不宣称聚合 OFF。
+- **不借 C1 账本**：账本只有两个归还结果（confirmed／owed），票既不是 pending 也不是 confirmed；把票记成条目会在归还时打 ERROR `hardware-still-on`，正好把本轮唯一要产出的结果写成错误。投票自记 `fVoteLeftSet`／`hold`，不取 token。
+- **主机证据**：`tools/tests/test-mh2lm-gcc-backend.py dxb/xnu` 新增九个用例——一次投票的完整七行与 `fReads==29`（`polls=2` 的变体也在内）、两处零写拒绝、读回失败判 `Fault` 而不是超时、`polls=500` 仍撤票、释放后 `CLK_OFF` 仍清 0（`hold`，只记录）、`changed-only-enable=0` 的越权位、以及探针环**字节不变**的对照。`tools/tests/test-mh2lm-mdss-adt.py` 增三项：蕴涵关系（`--clock-vote` 必须同时得到探针属性）、可加性、CLI 往返字节等价。补丁 `0244` 在 `0243` 之上增量：基线 + `0243` + `0244` 重放后五个文件与工作树逐字节相同。
+- **审计器第七人格 `--c2-06-write`**（叠在 `--c2-03` 上，与 `--c2-04`／`--c2-05`／`--c2-06` 互斥，不接受 `--gate`）：`check_vote()` 先算读账 `19 + 4 + 1(请求) + 1(读回) + (polls+1)(轮询) + 1(settle)`，拒绝路径是 `19 + 4 + 1 = 24` 且 `writes=0`；逐行用 `value` 重算 `enable`／`off`（不信行上的字，`stuck` 变体因此被拒）、要求 `vote-done` 落在它汇总的每一行之后（`donefirst` 被拒）、要求 `vote-release` 的 `value` 等于保存字（`leak` 被拒）、要求 `start` 行的 `reads`／`writes` 与实算相等（`drift`／`writesdrift` 被拒）。`make-vote-ring.py` 从 `sweetlog-0136-0.bin` 裁剪合成 16 个变体，`selftest-vote-auditor.py` 16/16 PASS（5 接受：`ok`／`hold`／`held`／`notoff`／`timeout`；11 拒绝）。
+
 ## 实机验收（0137 只读探针）
 
 内核 `0d5e18f2…`（17 950 152 B，0136 之上只多 `0243`），探针镜像 `boot-16k-0137-gpioirq-panel-pipeline-clockvoteprobe.img`＝`1d0d94d1…`，同内核的默认档 `…-pipeline.img`＝`8f491362…`，两张都 35 545 088 B、605 字节参数、固件卷 `27e7a1d1…`。两次都是 `fastboot boot`，都进桌面。拆开 ramdisk 对照过：探针档与默认档的 toml **逐字节相同**，唯一差别是 ADT（`88d2d78f…` 对 `081f63dc…`）；与 0136 的默认档相比，ADT 同一份、ramdisk 里只有 kernel 和标题行变了——所以“只多了一条属性”不是推断，是逐字节的对照。
@@ -362,4 +373,31 @@ start resource=cc1 result=0 windows=5 snapshot=11 reads=23 writes=0 variant=0x81
 
 两环的非时钟基线都等于 b32（`FB SCANOUT`×3＋`USB`×2），标记齐全且不多于参考（`touch_armed` 2 对 4、`touch_app_format` 1 对 3——会话更短、帧更少）。0242 那条修好之后环里只剩 12 行 `SWEET IOWORKLOOP`（占环 0.003），两台机器都装得下整段启动。
 
-**结论**：C2-06 只读前置完成，四个寄存器、第五页、拒绝词、日志文法在设备上同时成立且零写；原状态已可引用，写卡（0138）现在有据可依。**C2-06 尚未收束**——票还没投过。
+**结论**：C2-06 只读前置完成，四个寄存器、第五页、拒绝词、日志文法在设备上同时成立且零写；原状态已可引用，写卡（0138）现在有据可依。**C2-06 尚未收束**——票还没投过；写卡结果见下一节。
+
+## 实机验收（0138 投票档：一张票投进再撤回，`pass`）
+
+- **镜像**：`boot-16k-0138-gpioirq-panel-pipeline-clockvote.img`＝`e0e2871c…`（35 545 088 B，与 0137 同底座 gpioirq，只多投票属性）；载荷 `kernel.macho`＝`e99f58e5…`（17 966 648 B，CI 产出的 `xnu-kernel-0138`，其 `SHA256SUMS` 与解包一致；0137 是 17 950 152 B，+16 496 B 就是投票代码与文案），`kernel.macho.adt`＝`1405ff45…`（23 664 B），kernel 槽仍是 `27e7a1d1…` 的带 MHPANEL1 固件卷，参数表 605 字节。**打包门禁先做了一次负向验证**：第一遍在 `kernel is missing __ZN9IOQcomGCC17writeVoteRegisterEjPKc` 处停住——是我在脚本里手写的 mangle 少了一个 `j`（真名 `…RegisterEjjPKc`，两参数），改成符号表里的实际名字后一次通过。门禁确实在核对内核，而不是只看文件在不在。
+- **环**：`logs/sweetlog-0138-0.bin`（`11ba0f02…`，`total=321524`、`flush_sequence=14`、未回绕、3969 行）`--c2-03 --c2-06-write` **rc=0**：`clock_warn=0`、`clock_error=0`，15 类时钟行各就各位（`start 2`／`vote 1`／`map 5`／`snapshot 11`／`probe 4`／`probe-sample 1`／`register 1`／`decode 7`／`decode-sample 1`／`vote-request 1`／`write-issued 2`／`vote-write 1`／`vote-running 1`／`vote-release 1`／`vote-done 1`）。
+- **原文（环行号）**：
+
+```
+165 resource=gcc:0x14d000 phase=vote result=0 detail=armed name=gcc_npu_axi_clk offset=0x8 voted=1 vote-probe=1
+184 resource=gcc:0x14d008 phase=probe result=0 name=gcc_npu_axi_clk voted=1 enable=0 clk-off=1 value=0x80000000
+197 resource=gcc:0x14d008 … consumer=sweetclock-vote phase=vote-request result=0 enable=0 off=1 value=0x80000000
+198 resource=gcc:0x14d008 … phase=write-issued result=0 stage=vote-enable write=1 value=0x1
+199 resource=gcc:0x14d008 … phase=vote-write result=0 enable=1 value=0x1 mask=0xfffffff changed-only-enable=1
+200 resource=gcc:0x14d008 … phase=vote-running result=0 enable=1 off=0 value=0x1 polls=0
+201 resource=gcc:0x14d008 … phase=write-issued result=0 stage=vote-release write=2 value=0
+202 resource=gcc:0x14d008 … phase=vote-release result=0 delay-us=10 enable=0 off=1 value=0x80000000 mask=0xfffffff detail=observed-not-proof
+203 resource=gcc:0x14d008 … phase=vote-done result=0 writes=2 vote-store=1 enable-done=1 settle=1 polls=0 hold=0 before=0x80000000 after=0x80000000
+204 resource=cc1 phase=start result=0 windows=5 snapshot=11 reads=27 writes=2 variant=0x8150 vote-probe=1 vote=1
+```
+
+- **读账恒等式在设备上成立**：`19`（走查）+`4`（探针）+`1`（请求读）+`1`（读回）+`1`（`polls+1`，此处 `polls=0`）+`1`（settle 后读）＝**27**，与 `start` 行的 `reads=27`、`writes=2` 逐值相等。`polls=0` 是跳出下标：`CLK_OFF` 在**第一次**轮询读时已经清掉，聚合是在“存储完成”到“首读”之间起来的，500 次的预算一次没用上。
+- **三件事分开成立**：`vote-store=1`（`0x80000000`→`0x1`，读回 `0x1`、掩码内**只**变了 enable）；`enable-done=1`（首读即 `off=0`）；`settle=1`（写回 `0x0`，10 µs 后 `0x80000000`）。`hold=0`、`before`／`after` 相等，说明这一趟没留下任何状态。
+- **本方票这一半因此是实机事实**：读前 `bit0=0 bit31=1`（停着、没人投票）→ 我方投一票 → 聚合起来 → 撤回 → 又回到“停着”。同时这组读数**再次证明聚合关断不能由单票证**：释放后 `CLK_OFF` 立刻回置，正说明设备上不存在第二位持有者，所以“第二票还在时聚合继续开”这条判据仍然**未覆盖**（与 0137 的划界一致，不冒充）。
+- **`0x4d004` 仍是 `0x80000002`**：bit1 保持置位，S4 里那条“厂商对 HWCG 模式不看 halt”的风险没有变化，本轮任何 halt 判读都不涉及这一支。
+- **非时钟基线等于 b32**，标记齐全且不多于参考（`touch_armed` 2、`touch_app_format` 1、`scanout_transfer` 1、`fb_handoff` 1、`touch_mode3` 1、`probe_drained` 1），`decode_sample_hz=19200000`、`variant=0x8150`。
+- **结论**：C2-06 收束，范围为“本方票可独立取得与撤回”这一半；整体 OFF 与共享硬件场景按计划保持未覆盖。下一张卡是 C2-07（已停止外设的 reset 脉冲），前置是 reset 样本卡。
+
