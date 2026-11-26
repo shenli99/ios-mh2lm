@@ -27,6 +27,10 @@ RPMH_WINDOWS = ((0x18220000, 0x100), (0x18220d00, 0x3000), (0x0c3f000c, 8))
 # the bare offsets are never ranges of their own.
 GCC_WINDOWS = ((0x0010b000, 0x1000), (0x00133000, 0x1000),
                (0x00143000, 0x1000), (0x00162000, 0x1000))
+# C2-06 appends one more range, the NPU block, and only when it asks for it. The
+# four above are the ABI every GCC tree carries; the fifth is the voted page the
+# probe reads, so a tree without the opt-in keeps a four-range reg list.
+GCC_PROBE_WINDOW = ((0x0014d000, 0x1000),)
 NOC_WINDOWS = ((0x0af20000, 0x1c00), (0x0af21c00, 0x3000), (0x0af30000, 0x3fd4))
 # SM8150 TLMM: four 1 MiB tile windows (west, east, north, south). The pad
 # slot inside a tile is 0x1000 * global pin number, so a full 1 MiB window
@@ -36,7 +40,8 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
 
 
 def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
-            clock_gate=False, clock_disable=False, clock_share=False):
+            clock_gate=False, clock_disable=False, clock_share=False,
+            clock_vote_probe=False):
     # C2-05 stands on both cards below it, so the two switch it needs are implied
     # here rather than trusted to every caller: a share node without them would be
     # refused at start and the image would carry a property that can do nothing.
@@ -176,9 +181,9 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
     # refuses, and the generator will not emit one.
     if clock_disable:
         clock_gate = True
-    if clock_diag or gcc or clock_measure or clock_gate:
+    if clock_diag or gcc or clock_measure or clock_gate or clock_vote_probe:
         clock_provider = True
-    gcc = gcc or clock_measure or clock_gate
+    gcc = gcc or clock_measure or clock_gate or clock_vote_probe
     if clock_provider:
         # C1: one clock entry personality. The node carries no reg and no
         # window: every controller window stays with its own CC backend, so
@@ -201,7 +206,8 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
                           ('compatible', 0, b'sweet,gcc\0'),
                           ('sweet,gcc-abi', 0, struct.pack('<I', 1)),
                           ('sweet,gcc-variant', 0, struct.pack('<I', 0x8150)),
-                          ('reg', 0, encode(GCC_WINDOWS))]
+                          ('reg', 0, encode(GCC_WINDOWS + GCC_PROBE_WINDOW
+                                            if clock_vote_probe else GCC_WINDOWS))]
         if clock_measure:
             # C2-08 is the first candidate that writes hardware, so it is opt-in
             # from the device tree: the default image keeps the zero-write ring.
@@ -220,6 +226,11 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             # lets the last of them do the withdraw C2-04 verified. It replaces
             # the single-consumer pass, so one boot makes three stores either way.
             gcc_node.props.append(('sweet,clock-share', 0, struct.pack('<I', 1)))
+        if clock_vote_probe:
+            # C2-06 maps the voted page and reads it; it stores nothing, so this
+            # opt-in can ride on any image that carries the GCC node. The window
+            # it needs is the fifth range appended above.
+            gcc_node.props.append(('sweet,clock-vote-probe', 0, struct.pack('<I', 1)))
         arm.children.append(gcc_node)
     return adt.serialize(root)
 
@@ -241,6 +252,7 @@ if __name__ == '__main__':
     parser.add_argument('--clock-gate', action='store_true', help='append the C2-03 branch gate opt-in (implies --gcc); stores one enable bit and keeps it on until reboot')
     parser.add_argument('--clock-disable', action='store_true', help='append the C2-04 verified disable opt-in (implies --clock-gate); withdraws that enable, proves the halt and releases the demand')
     parser.add_argument('--clock-share', action='store_true', help='append the C2-05 sharing opt-in (implies --clock-gate and --clock-disable); two consumers share the gate demand and the last release retracts it')
+    parser.add_argument('--clock-vote-probe', action='store_true', help='append the C2-06 read-only vote probe (implies --gcc); maps the NPU page as a fifth range and reads four CBCRs, zero stores')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
@@ -248,4 +260,4 @@ if __name__ == '__main__':
     if source.resolve() == destination.resolve():
         sys.exit('output must differ from the baseline ADT')
     destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
-                      args.clock_disable, args.clock_share))
+                      args.clock_disable, args.clock_share, args.clock_vote_probe))

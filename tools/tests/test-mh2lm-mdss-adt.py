@@ -517,7 +517,59 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-share-adt-') as temp:
                     str(source), str(output)], check=True)
     assert output.read_bytes() == shared
     assert source.read_bytes() == blob
+# C2-06 reads one more page than the ABI carries, so its opt-in owns both the
+# property and the fifth range: the generator emits them as one step, and a tree
+# with the property but the four-range reg list is unreachable.
+def encode_windows(windows):
+    # the generator's rule, restated here so the tree can be rebuilt by hand
+    return b''.join(struct.pack('<QQ', pa - m.SOC_BASE if pa >= m.SOC_BASE
+                                else m.LOW_ALIAS + pa, size) for pa, size in windows)
+
+
+probed = m.derive(blob, clock_vote_probe=True)
+assert probed == m.derive(blob, gcc=True, clock_vote_probe=True)
+assert probed != m.derive(blob, gcc=True)
+assert b'sweet,clock-vote-probe' not in m.derive(blob, gcc=True)
+assert b'sweet,clock-vote-probe' not in blob
+ptree, end = adt.parse(probed)
+assert end == len(probed)
+gcc = next(n for n in ptree.children[1].children if n.name == 'gcc')
+assert gcc.prop('sweet,clock-vote-probe') == struct.pack('<I', 1)
+assert gcc.prop('sweet,clock-gate') is None	# the probe writes nothing
+assert gcc.prop('sweet,clock-measure') is None
+assert gcc.prop('sweet,clock-disable') is None
+preg = struct.unpack('<%dQ' % (len(gcc.prop('reg')) // 8), gcc.prop('reg'))
+assert len(preg) == 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
+pwindows = []
+for i in range(0, len(preg), 2):
+    addr, size = preg[i], preg[i + 1]
+    pwindows.append((addr + m.SOC_BASE if addr < m.LOW_ALIAS else addr - m.LOW_ALIAS,
+                     size))
+assert tuple(pwindows) == m.GCC_WINDOWS + m.GCC_PROBE_WINDOW
+# dropping the page and the property together is the plain GCC tree again
+gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-vote-probe']
+gcc.props = [(k, f, encode_windows(m.GCC_WINDOWS) if k == 'reg' else v)
+             for k, f, v in gcc.props]
+assert adt.serialize(ptree) == m.derive(blob, gcc=True)
+# the probe composes with the write cards: it is one more property on top of
+# whatever the gate/share chain already emitted, and the ranges stay five.
+combo = m.derive(blob, clock_vote_probe=True, clock_share=True)
+ctree, end = adt.parse(combo)
+assert end == len(combo)
+gcc = next(n for n in ctree.children[1].children if n.name == 'gcc')
+for name in ('sweet,clock-vote-probe', 'sweet,clock-share', 'sweet,clock-disable',
+             'sweet,clock-gate'):
+    assert gcc.prop(name) == struct.pack('<I', 1), name
+assert len(gcc.prop('reg')) == 8 * 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
+with tempfile.TemporaryDirectory(prefix='mh2lm-clock-vote-probe-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'probe.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--clock-vote-probe',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == probed
+    assert source.read_bytes() == blob
 print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
-      'that no earlier image carries, and the C2-05 share on top of all three')
+      'that no earlier image carries, and the C2-05 share on top of all three, plus the '
+      'C2-06 vote probe, which owns both its property and the fifth range')

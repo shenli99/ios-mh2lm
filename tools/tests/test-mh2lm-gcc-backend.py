@@ -87,8 +87,11 @@ assert 'gccMeasureHook' in prelude and 'gccHaltPending' in prelude
 prelude = prelude.replace('static std::vector<unsigned> mapCalls;',
 '''static std::vector<unsigned> mapCalls;
 using IOPhysicalAddress=uint64_t;using IOVirtualAddress=uintptr_t;using IOByteCount=uint64_t;
-static constexpr uintptr_t gccBases[4]={0x0010b000,0x00133000,0x00143000,0x00162000};
-static constexpr size_t gccLengths[4]={0x1000,0x1000,0x1000,0x1000};
+/* C2-06: the fifth page is the NPU block the probe may map. It stays outside
+   the four the ADT always carries, so gccMemoryCount decides whether the nub
+   can satisfy it. */
+static constexpr uintptr_t gccBases[5]={0x0010b000,0x00133000,0x00143000,0x00162000,0x0014d000};
+static constexpr size_t gccLengths[5]={0x1000,0x1000,0x1000,0x1000,0x1000};
 static bool gccMode=true;
 static unsigned gccMemoryCount=4,gccAbsentIndex=99,gccWrongPA=99,gccShortLen=99,gccNoBase=99;''')
 prelude = prelude.replace('int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){',
@@ -192,7 +195,7 @@ static IOService*clockNub(){
 }
 static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=true,
  unsigned abiLength=4,unsigned measure=0,unsigned gate=0,unsigned disable=0,
- unsigned share=0){
+ unsigned share=0,unsigned probe=0){
  auto*n=fixtureAlloc<IOService>();
  if(abi){uint32_t a=1;setData(n,"sweet,gcc-abi",&a,abiLength);}
  if(haveVariant)setData(n,"sweet,gcc-variant",&variant,4);
@@ -204,6 +207,8 @@ static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=t
  if(disable){uint32_t d=disable==2?2u:1u;setData(n,"sweet,clock-disable",&d,disable==3?3u:4);}
  /* share: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
  if(share){uint32_t h=share==2?2u:1u;setData(n,"sweet,clock-share",&h,share==3?3u:4);}
+ /* probe: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
+ if(probe){uint32_t v=probe==2?2u:1u;setData(n,"sweet,clock-vote-probe",&v,probe==3?3u:4);}
  return n;
 }
 static IOQcomClockProvider*startProvider(IOService*n){
@@ -241,6 +246,12 @@ static void resetGccRegs(){
  setReg(0x00162000u,0x000,0x00000000u);
  setReg(0x00162000u,0x004,0x00000000u);
  setReg(0x00162000u,0x008,0x00000001u);
+ /* C2-06: the NPU page as a boot leaves it - every voted branch has an empty
+    vote register and the halt status says the aggregate is off. */
+ setReg(0x0014d000u,0x004,0x80000000u);
+ setReg(0x0014d000u,0x008,0x80000000u);
+ setReg(0x0014d000u,0x00c,0x80000000u);
+ setReg(0x0014d000u,0x010,0x80000000u);
 }
 /* C2-08/C2-03 device model knobs, declared before the reset that clears them. */
 static bool gccRefStuckOff=false,gccCountStuck=false,gccGateStuckOff=false;
@@ -430,6 +441,62 @@ int main(){
   assert(mapCalls.size()==1&&liveMaps==0);
   g->release();n->release();assert(!live&&!liveMaps);
  }
+ /* ---- C2-06 probe: one optional page, four refusals of its own ---- */
+ {	/* the opt-in names a page the ADT does not carry */
+  messages.clear();mapCalls.clear();
+  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,1);auto*g=fixtureAlloc<IOQcomGCC>();
+  clearKnobs();resetGccRegs();
+  assert(!g->start(n));
+  assert(logged("resource=gcc:0x14d000 phase=map result=1 detail=window-absent"));
+  assert(mapCalls.size()==5&&liveMaps==0);	/* four mapped, the fifth refused */
+  /* the map failure comes before the snapshot: nothing was read at all */
+  assert(!g->fMapped&&!g->fLock&&g->fReads==0);
+  g->release();n->release();assert(!live&&!liveMaps);
+ }
+ {	/* the fifth range resolves somewhere else */
+  messages.clear();mapCalls.clear();
+  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,1);auto*g=fixtureAlloc<IOQcomGCC>();
+  clearKnobs();gccMemoryCount=5;gccWrongPA=4;resetGccRegs();
+  assert(!g->start(n));
+  assert(logged("resource=gcc:0x14d000 phase=map result=2 detail=address-mismatch observed=0x14d004"));
+  assert(!g->fMapped&&!g->fLock&&liveMaps==0);
+  g->release();n->release();assert(!live&&!liveMaps);
+ }
+ {	/* the fifth page is too short to hold 0x4d010 */
+  messages.clear();mapCalls.clear();
+  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,1);auto*g=fixtureAlloc<IOQcomGCC>();
+  clearKnobs();gccMemoryCount=5;gccShortLen=4;resetGccRegs();
+  assert(!g->start(n));
+  assert(logged("resource=gcc:0x14d000 phase=map result=2 detail=length-short observed=0xfff required=0x1000"));
+  g->release();n->release();assert(!live&&!liveMaps);
+ }
+ {	/* a fifth page with no kernel base is not usable even if it maps */
+  messages.clear();mapCalls.clear();
+  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,1);auto*g=fixtureAlloc<IOQcomGCC>();
+  clearKnobs();gccMemoryCount=5;gccNoBase=4;resetGccRegs();
+  assert(!g->start(n));
+  assert(logged("resource=gcc:0x14d000 phase=map result=1 detail=no-virtual-base"));
+  g->release();n->release();assert(!live&&!liveMaps);
+ }
+ {	/* the property itself must be a word holding 0 or 1 */
+  messages.clear();mapCalls.clear();
+  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,3);auto*g=fixtureAlloc<IOQcomGCC>();
+  clearKnobs();resetGccRegs();
+  assert(!g->start(n));
+  assert(counted("detail=bad-clock-vote-probe")==1);
+  assert(logged("detail=bad-clock-vote-probe length=3"));
+  assert(mapCalls.empty());
+  g->release();n->release();assert(!live&&!liveMaps);
+ }
+ {	/* a value the ADT never writes is refused as well */
+  messages.clear();mapCalls.clear();
+  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,2);auto*g=fixtureAlloc<IOQcomGCC>();
+  clearKnobs();resetGccRegs();
+  assert(!g->start(n));
+  assert(logged("detail=bad-clock-vote-probe value=0x2"));
+  assert(mapCalls.empty());
+  g->release();n->release();assert(!live&&!liveMaps);
+ }
  /* ---- entry absent: bounded wait, then one refusal line, no half state ---- */
  {
   auto*n=gccNub();auto*g=fixtureAlloc<IOQcomGCC>();
@@ -612,12 +679,16 @@ int main(){
    assert(g->fReadFailures==failures+1);
    assert(!g->readRegister(0,0x102,&v));		/* unaligned offset */
    assert(g->fReadFailures==failures+2);
-   assert(!g->readRegister(kIOQcomGccWindowCount,0,&v));	/* not a window */
+   assert(!g->readRegister(kIOQcomGccMappedWindowCount,0,&v));	/* not a window */
    assert(g->fReadFailures==failures+2);
+   /* the optional C2-06 slot exists but was never mapped on this device: it is
+    * a failed read, not an out-of-range index */
+   assert(!g->readRegister(kIOQcomGccVoteWindow,0,&v));
+   assert(g->fReadFailures==failures+3);
    assert(!g->readRegister(0,0,NULL));		/* no output pointer */
    assert(g->readRegister(0,0xffc,&v));	/* last legal word is inside */
    assert(v==0);
-   assert(g->fReadFailures==failures+2);
+   assert(g->fReadFailures==failures+3);
   }
   /* ---- provider contract: binding, admission, no capability to write ---- */
   {
@@ -682,6 +753,46 @@ int main(){
    p->release();pn->release();
    assert(!live&&!liveMaps);
   }
+ }
+ /* ---- C2-06 probe: the voted page read once, zero stores ---- */
+ {
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1);clearKnobs();gccMemoryCount=5;resetGccRegs();
+  mapCalls.clear();
+  setReg(0x0014d000u,0x010,0x00000001u);	/* one branch arrives with a vote */
+  auto*g=startGcc(gn);
+  assert(mapCalls.size()==5);
+  assert(logged("resource=gcc:0x14d000 phase=map result=0 length=0x1000 offset=0x4d000 vote-probe=1"));
+  /* every row names the page, the branch, whether the vendor tree votes it and
+   * both bits of the CBCR: the vote in bit 0 and the halt status in bit 31 */
+  assert(logged("resource=gcc:0x14d004 phase=probe result=0 name=gcc_npu_cfg_ahb_clk voted=0 enable=0 clk-off=1 value=0x80000000"));
+  assert(logged("resource=gcc:0x14d008 phase=probe result=0 name=gcc_npu_axi_clk voted=1 enable=0 clk-off=1 value=0x80000000"));
+  assert(logged("resource=gcc:0x14d00c phase=probe result=0 name=gcc_npu_trig_clk voted=1 enable=0 clk-off=1 value=0x80000000"));
+  assert(logged("resource=gcc:0x14d010 phase=probe result=0 name=gcc_npu_at_clk voted=1 enable=1 clk-off=0 value=0x1"));
+  assert(logged("resource=cc1 phase=probe-sample result=0 voted=3 enable-set=1 enable-clear=2 clk-off=2 failed=0 reads=15 writes=0"));
+  /* the probe stores nothing and leaves the ledger untouched */
+  assert(g->registerWrites()==0&&writes()==0);
+  assert(g->fReads==kIOQcomGccSnapshotCount+4+2+6);
+  assert(g->fProbeEnabled&&g->fProbeValue[1]==0x80000000u&&g->fProbeValue[3]==1u);
+  assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=5 snapshot=11 "
+                "reads=23 writes=0 variant=0x8150 vote-probe=1"));
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  assert(!live&&!liveMaps);
+ }
+ {	/* the same tree without the opt-in maps four pages and says nothing new */
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub();clearKnobs();resetGccRegs();mapCalls.clear();
+  auto*g=startGcc(gn);
+  assert(mapCalls.size()==4&&!g->fProbeEnabled);
+  assert(counted("phase=probe")==0&&counted("vote-probe")==0);
+  assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=4 snapshot=11 "
+                "reads=19 writes=0 variant=0x8150"));
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  assert(!live&&!liveMaps);
  }
  /* ---- opt-in diagnostics list the real backend, names and all ---- */
  {

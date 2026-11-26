@@ -42,14 +42,20 @@ enum : unsigned { kIOQcomLogBuf=40, kIOQcomGccProviderWaitTries=200, kIOQcomGccP
  * ring reconcilable with those tables without redoing the subtraction. */
 enum : uint64_t { kIOQcomGccBase=0x00100000ULL };
 
-/* The ADT reg order is the window ABI; these are the only windows this
- * candidate reads and the only lengths it accepts. */
+/* The ADT reg order is the window ABI; these are the only mandatory windows and
+ * the only lengths the backend accepts without an opt-in. */
 static const struct { uint64_t physical; uint64_t length; } gccWindows[kIOQcomGccWindowCount] = {
 	{ 0x0010b000ULL, 0x1000ULL },   /* display block: inherited/pinned branches */
 	{ 0x00133000ULL, 0x1000ULL },   /* PDM block: the C2-02 sample */
 	{ 0x00143000ULL, 0x1000ULL },   /* XO/4 debug reference branch (C2-08) */
 	{ 0x00162000ULL, 0x1000ULL },   /* debug mux block: C2-08 will own it */
 };
+/* C2-06: the one optional page, at the end of the ADT reg list and only present
+ * when sweet,clock-vote-probe arms it. Vendor offset 0x4d000 is the NPU block:
+ * the AHB config branch at 0x4d004 and the three branches the vendor declares
+ * BRANCH_VOTED at 0x4d008, 0x4d00c and 0x4d010. It is kept apart from the table
+ * above because a tree without the property must not see a fifth window. */
+enum : uint64_t { kGccProbeWindowPhysical=0x0014d000ULL, kGccProbeWindowLength=0x1000ULL };
 
 /* C0-03 snapshot order. Evidence only: none of these is a clock this
  * candidate claims, and no owner is created by reading them. */
@@ -61,6 +67,19 @@ static const struct { unsigned window; uint32_t offset; } gccSnapshot[kIOQcomGcc
 	{ 1, 0x008 }, { 1, 0x00c }, { 1, 0x010 }, { 1, 0x014 },
 	{ 2, 0x008 },
 	{ 3, 0x000 }, { 3, 0x004 }, { 3, 0x008 },
+};
+
+/* C2-06 probe: the four CBCRs of the NPU page, in vendor offset order. Three of
+ * them are the branches gcc-sm8150.c declares BRANCH_VOTED (vote in bit 0, halt
+ * status in bit 31); the AHB config branch beside them is a plain halt branch
+ * and is read as the page's control. The probe reports what they hold before
+ * this candidate ever writes; it does not claim any of them. */
+static const struct { uint32_t offset; const char *name; bool voted; }
+ gccProbeRegs[kIOQcomGccProbeRegisterCount] = {
+	{ 0x004, "gcc_npu_cfg_ahb_clk", false },
+	{ 0x008, "gcc_npu_axi_clk", true },
+	{ 0x00c, "gcc_npu_trig_clk", true },
+	{ 0x010, "gcc_npu_at_clk", true },
 };
 
 /* Branch CBCR and RCG CMD/CFG field layout (drivers/clk/qcom/clk-rcg2.c and
@@ -181,9 +200,17 @@ static bool gccFixedRate(const IOQcomClockParent &parent,uint64_t *hz)
 	}
 }
 
+/* The physical address of a window, including the optional C2-06 page. */
+static uint64_t gccWindowPhysical(unsigned window)
+{
+	if (window<kIOQcomGccWindowCount) return gccWindows[window].physical;
+	if (window==kIOQcomGccVoteWindow) return kGccProbeWindowPhysical;
+	return 0;
+}
+
 static void gccName(unsigned window,uint32_t offset,char *out,size_t size)
 {
-	snprintf(out,size,"gcc:%#llx",(unsigned long long)(gccWindows[window].physical+offset));
+	snprintf(out,size,"gcc:%#llx",(unsigned long long)(gccWindowPhysical(window)+offset));
 }
 
 bool
@@ -307,6 +334,27 @@ IOQcomGCC::validateProperties(IOService *provider)
 		 kIOReturnBadArgument,fGateEnabled?1u:0u,fDisableEnabled?1u:0u);
 		return false;
 	}
+	/* C2-06: the probe is a read-only opt-in of its own. It does not set
+	 * haveGate, because it neither opens nor closes anything; it maps one more
+	 * page and reads it. */
+	fProbeEnabled=false;
+	for (unsigned i=0;i<kIOQcomGccProbeRegisterCount;i++) fProbeValue[i]=0;
+	OSData *voteProbe=OSDynamicCast(OSData,provider->getProperty("sweet,clock-vote-probe"));
+	if (voteProbe) {
+		if (voteProbe->getLength()!=4) {
+			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-vote-probe length=%u\n",
+			 kIOReturnBadArgument,(unsigned)voteProbe->getLength());
+			return false;
+		}
+		uint32_t value=0;
+		memcpy(&value,voteProbe->getBytesNoCopy(),4);
+		if (value>1) {
+			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-vote-probe value=%#x\n",
+			 kIOReturnBadArgument,value);
+			return false;
+		}
+		fProbeEnabled=value==1;
+	}
 	if (haveGate) {
 		/* The ring written before this candidate keeps its exact row: the share
 		 * field appears only on an image that arms the sharing pass, so an
@@ -362,13 +410,57 @@ IOQcomGCC::mapWindows(IOService *provider)
 		 resource,(unsigned long long)length,
 		 (unsigned long long)(gccWindows[i].physical-kIOQcomGccBase));
 	}
+	return mapProbeWindow(provider);
+}
+
+/* C2-06: the optional page gets the same four refusals the mandatory ones get,
+ * each with its own detail so a wrong tree names the page it got wrong. */
+bool
+IOQcomGCC::mapProbeWindow(IOService *provider)
+{
+	if (!fProbeEnabled) return true;
+	Window &w=fWindow[kIOQcomGccVoteWindow];
+	w.physical=kGccProbeWindowPhysical;
+	w.length=0;
+	w.base=0;
+	w.map=provider?provider->mapDeviceMemoryWithIndex(kIOQcomGccVoteWindow):NULL;
+	char resource[kIOQcomLogBuf];
+	gccName(kIOQcomGccVoteWindow,0,resource,sizeof resource);
+	if (!w.map) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s phase=map result=%d detail=window-absent\n",
+		 resource,kIOReturnNotReady);
+		return false;
+	}
+	uint64_t observed=w.map->getPhysicalAddress();
+	uint64_t length=w.map->getLength();
+	if (observed!=kGccProbeWindowPhysical) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s phase=map result=%d detail=address-mismatch observed=%#llx\n",
+		 resource,kIOReturnBadArgument,(unsigned long long)observed);
+		return false;
+	}
+	if (length<kGccProbeWindowLength) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s phase=map result=%d detail=length-short observed=%#llx required=%#llx\n",
+		 resource,kIOReturnBadArgument,(unsigned long long)length,
+		 (unsigned long long)kGccProbeWindowLength);
+		return false;
+	}
+	w.length=length;
+	w.base=w.map->getVirtualAddress();
+	if (!w.base) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s phase=map result=%d detail=no-virtual-base\n",
+		 resource,kIOReturnNotReady);
+		return false;
+	}
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s phase=map result=0 length=%#llx offset=%#llx vote-probe=1\n",
+	 resource,(unsigned long long)length,
+	 (unsigned long long)(kGccProbeWindowPhysical-kIOQcomGccBase));
 	return true;
 }
 
 void
 IOQcomGCC::unmapWindows(void)
 {
-	for (unsigned i=0;i<kIOQcomGccWindowCount;i++) {
+	for (unsigned i=0;i<kIOQcomGccMappedWindowCount;i++) {
 		OSSafeReleaseNULL(fWindow[i].map);
 		fWindow[i].base=0;
 		fWindow[i].length=0;
@@ -384,7 +476,7 @@ IOQcomGCC::unmapWindows(void)
 bool
 IOQcomGCC::readRegister(unsigned window,uint32_t offset,uint32_t *value)
 {
-	if (!value||window>=kIOQcomGccWindowCount||!fLock) return false;
+	if (!value||window>=kIOQcomGccMappedWindowCount||!fLock) return false;
 	bool ok=false;
 	uint32_t observed=0;
 	IOLockLock(fLock);
@@ -421,6 +513,48 @@ IOQcomGCC::takeSnapshot(void)
 		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s phase=snapshot result=0 value=%#x\n",
 		 resource,value);
 	}
+}
+
+/* C2-06 precondition. One page, four reads, no store and no ledger entry: the
+ * ring records which vote bits are already set before this candidate speaks,
+ * so the vote card is designed against the state the device really boots in
+ * rather than the state the vendor source suggests. */
+IOReturn
+IOQcomGCC::probeVoteSample(void)
+{
+	if (!fProbeEnabled) return kIOReturnUnsupported;
+	unsigned held=0, clear=0, off=0, failed=0, votedRegs=0;
+	for (unsigned i=0;i<kIOQcomGccProbeRegisterCount;i++) {
+		const uint32_t offset=gccProbeRegs[i].offset;
+		uint32_t value=0;
+		bool ok=readRegister(kIOQcomGccVoteWindow,offset,&value);
+		fProbeValue[i]=ok?value:0;
+		char resource[kIOQcomLogBuf];
+		gccName(kIOQcomGccVoteWindow,offset,resource,sizeof resource);
+		if (!ok) {
+			failed++;
+			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s phase=probe result=%d detail=read-failed\n",
+			 resource,kIOReturnNotReady);
+			continue;
+		}
+		const unsigned enable=(value&kGccBranchEnable)?1u:0u;
+		const unsigned halt=(value&kGccBranchClockOff)?1u:0u;
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s phase=probe result=0 name=%s voted=%u enable=%u clk-off=%u value=%#x\n",
+		 resource,gccProbeRegs[i].name,gccProbeRegs[i].voted?1u:0u,enable,halt,value);
+		if (gccProbeRegs[i].voted) {
+			votedRegs++;
+			if (enable) held++; else clear++;
+			if (halt) off++;
+		}
+	}
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=probe-sample result=0 voted=%u enable-set=%u enable-clear=%u clk-off=%u failed=%u reads=%u writes=%u\n",
+	 kIOQcomCCGCC,votedRegs,held,clear,off,failed,fReads,fWrites);
+	/* Observation, not a gate: either baseline is worth a round. An enable bit
+	 * already set is a vote this driver did not place, which makes the "the
+	 * aggregate stays on" half observable; a clear one is the single-voter case
+	 * the card's own release proof needs. A read that failed is the only
+	 * failure, because it means the page is not what the card assumes. */
+	return failed?kIOReturnNotReady:kIOReturnSuccess;
 }
 
 /* C2-08: the ordered store set. The index is also the restore order, so this
@@ -462,6 +596,8 @@ IOQcomGCC::writeRegister(unsigned window,uint32_t offset,uint32_t value,
 	unsigned ordinal=0;
 	IOLockLock(fLock);
 	const Window &w=fWindow[window];
+	/* C2-06 keeps the probe page read-only: the store set stays inside the four
+	 * mandatory windows until the vote card lands with its own guard. */
 	if (window<kIOQcomGccWindowCount&&w.base&&(offset&3u)==0&&
 	 (uint64_t)offset+sizeof(uint32_t)<=w.length) {
 		__asm__ volatile("dmb oshst" ::: "memory");
@@ -1319,6 +1455,14 @@ IOQcomGCC::start(IOService *provider)
 	}
 	fMapped=true;
 	takeSnapshot();
+	/* C2-06: read-only and before every write pass, so the baseline this round
+	 * reports is the state the boot arrived in. It stores nothing; on an image
+	 * without the opt-in it returns kIOReturnUnsupported and says nothing. */
+	IOReturn probed=probeVoteSample();
+	if (probed!=kIOReturnSuccess&&probed!=kIOReturnUnsupported) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=probe-incomplete probe-result=%d writes=%u\n",
+		 kIOQcomCCGCC,probed,fWrites);
+	}
 	/* The entry and this backend are independent IOServices; IOKit does not
 	 * order their start. Wait a bounded time for the entry to publish itself,
 	 * then refuse with a single line instead of half-registering. */
@@ -1377,9 +1521,15 @@ IOQcomGCC::start(IOService *provider)
 		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=measure-incomplete measure-result=%d writes=%u\n",
 		 kIOQcomCCGCC,measured,fWrites);
 	}
-	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x\n",
-	 kIOQcomCCGCC,kIOQcomGccWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
-	 kIOQcomGccVariantSm8150);
+	if (fProbeEnabled) {
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x vote-probe=1\n",
+		 kIOQcomCCGCC,kIOQcomGccMappedWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
+		 kIOQcomGccVariantSm8150);
+	} else {
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x\n",
+		 kIOQcomCCGCC,kIOQcomGccWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
+		 kIOQcomGccVariantSm8150);
+	}
 	return true;
 }
 

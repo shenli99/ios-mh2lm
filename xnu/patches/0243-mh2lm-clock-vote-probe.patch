@@ -1,0 +1,698 @@
+From: mh2lm clock work <clock@mh2lm>
+Subject: [PATCH 0243] clock: read the NPU vote bits before writing one
+
+C2-06 is the first card whose object is a vote rather than a clock. A voted
+branch in the vendor tree is not enabled by writing its enable bit; the bit is a
+ballot, and the branch only runs while at least one ballot is in the box. The
+release path is asymmetric in a way that matters later: enable polls the halt
+status for up to 500 us, disable waits 10 us, returns 0 and never concludes that
+the branch stopped, because another master may still be voting.
+
+Writing a ballot is therefore not a state change this driver can verify from its
+own write, and the card that does it has to be designed against what the device
+already holds. That is what this patch adds: the observation, not the vote.
+
+sweet,clock-vote-probe (4 bytes, its own opt-in, arms nothing else) maps one more
+page - vendor offset 0x0014d000, the NPU block; physical 0x0014d000 - and reads
+four branch control registers once:
+
+    0x004  gcc_npu_cfg_ahb_clk    plain halt branch, the page's control
+    0x008  gcc_npu_axi_clk        BRANCH_VOTED
+    0x00c  gcc_npu_trig_clk       BRANCH_VOTED
+    0x010  gcc_npu_at_clk         BRANCH_VOTED
+
+The fifth range is appended after the four mandatory ones, so the ADT reg order
+is still the window ABI and index 4 is the optional page. It is refused with the
+same four details the mandatory windows use (window-absent, address-mismatch,
+length-short, no-virtual-base) because the resource name already says which page
+is wrong. writeRegister() keeps refusing index 4: this pass is read-only, and the
+vote card will widen it with its own guard and its own precondition.
+
+Each reading is one row, and the summary row states the arithmetic rather than a
+verdict:
+
+    phase=probe ... name= voted= enable= clk-off= value=
+    phase=probe-sample voted=3 enable-set= enable-clear= clk-off= failed= reads= writes=
+
+An enable bit already set at boot is a vote this driver did not place. That is a
+result, not a failure - it is the second holder the aggregate-stays-on half of
+the next card needs, and it cannot be produced on demand - so the probe reports
+it and succeeds. Only a failed read fails the pass: then the page is not what the
+card assumes, the ERROR rows say which register, and the start summary carries
+detail=probe-incomplete. Nothing here writes, so no ring can be damaged by
+pulling the switch on the wrong tree.
+
+Backward compatibility is the same rule as C2-03/04/05: an image without the
+property maps four windows, reads nineteen registers and prints its start row
+byte-identically to 0136. The property is additive and exactly removable - the
+generator puts the range and the property behind one flag, and the ADT test
+proves that dropping both reproduces the tree without it.
+
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
+index 4cbb013..84dd232 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
+@@ -42,14 +42,20 @@ enum : unsigned { kIOQcomLogBuf=40, kIOQcomGccProviderWaitTries=200, kIOQcomGccP
+  * ring reconcilable with those tables without redoing the subtraction. */
+ enum : uint64_t { kIOQcomGccBase=0x00100000ULL };
+ 
+-/* The ADT reg order is the window ABI; these are the only windows this
+- * candidate reads and the only lengths it accepts. */
++/* The ADT reg order is the window ABI; these are the only mandatory windows and
++ * the only lengths the backend accepts without an opt-in. */
+ static const struct { uint64_t physical; uint64_t length; } gccWindows[kIOQcomGccWindowCount] = {
+ 	{ 0x0010b000ULL, 0x1000ULL },   /* display block: inherited/pinned branches */
+ 	{ 0x00133000ULL, 0x1000ULL },   /* PDM block: the C2-02 sample */
+ 	{ 0x00143000ULL, 0x1000ULL },   /* XO/4 debug reference branch (C2-08) */
+ 	{ 0x00162000ULL, 0x1000ULL },   /* debug mux block: C2-08 will own it */
+ };
++/* C2-06: the one optional page, at the end of the ADT reg list and only present
++ * when sweet,clock-vote-probe arms it. Vendor offset 0x4d000 is the NPU block:
++ * the AHB config branch at 0x4d004 and the three branches the vendor declares
++ * BRANCH_VOTED at 0x4d008, 0x4d00c and 0x4d010. It is kept apart from the table
++ * above because a tree without the property must not see a fifth window. */
++enum : uint64_t { kGccProbeWindowPhysical=0x0014d000ULL, kGccProbeWindowLength=0x1000ULL };
+ 
+ /* C0-03 snapshot order. Evidence only: none of these is a clock this
+  * candidate claims, and no owner is created by reading them. */
+@@ -63,6 +69,19 @@ static const struct { unsigned window; uint32_t offset; } gccSnapshot[kIOQcomGcc
+ 	{ 3, 0x000 }, { 3, 0x004 }, { 3, 0x008 },
+ };
+ 
++/* C2-06 probe: the four CBCRs of the NPU page, in vendor offset order. Three of
++ * them are the branches gcc-sm8150.c declares BRANCH_VOTED (vote in bit 0, halt
++ * status in bit 31); the AHB config branch beside them is a plain halt branch
++ * and is read as the page's control. The probe reports what they hold before
++ * this candidate ever writes; it does not claim any of them. */
++static const struct { uint32_t offset; const char *name; bool voted; }
++ gccProbeRegs[kIOQcomGccProbeRegisterCount] = {
++	{ 0x004, "gcc_npu_cfg_ahb_clk", false },
++	{ 0x008, "gcc_npu_axi_clk", true },
++	{ 0x00c, "gcc_npu_trig_clk", true },
++	{ 0x010, "gcc_npu_at_clk", true },
++};
++
+ /* Branch CBCR and RCG CMD/CFG field layout (drivers/clk/qcom/clk-rcg2.c and
+  * clk-branch.h of the vendor tree). */
+ enum : uint32_t { kGccBranchEnable=1u<<0, kGccBranchClockOff=1u<<31,
+@@ -181,9 +200,17 @@ static bool gccFixedRate(const IOQcomClockParent &parent,uint64_t *hz)
+ 	}
+ }
+ 
++/* The physical address of a window, including the optional C2-06 page. */
++static uint64_t gccWindowPhysical(unsigned window)
++{
++	if (window<kIOQcomGccWindowCount) return gccWindows[window].physical;
++	if (window==kIOQcomGccVoteWindow) return kGccProbeWindowPhysical;
++	return 0;
++}
++
+ static void gccName(unsigned window,uint32_t offset,char *out,size_t size)
+ {
+-	snprintf(out,size,"gcc:%#llx",(unsigned long long)(gccWindows[window].physical+offset));
++	snprintf(out,size,"gcc:%#llx",(unsigned long long)(gccWindowPhysical(window)+offset));
+ }
+ 
+ bool
+@@ -307,6 +334,27 @@ IOQcomGCC::validateProperties(IOService *provider)
+ 		 kIOReturnBadArgument,fGateEnabled?1u:0u,fDisableEnabled?1u:0u);
+ 		return false;
+ 	}
++	/* C2-06: the probe is a read-only opt-in of its own. It does not set
++	 * haveGate, because it neither opens nor closes anything; it maps one more
++	 * page and reads it. */
++	fProbeEnabled=false;
++	for (unsigned i=0;i<kIOQcomGccProbeRegisterCount;i++) fProbeValue[i]=0;
++	OSData *voteProbe=OSDynamicCast(OSData,provider->getProperty("sweet,clock-vote-probe"));
++	if (voteProbe) {
++		if (voteProbe->getLength()!=4) {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-vote-probe length=%u\n",
++			 kIOReturnBadArgument,(unsigned)voteProbe->getLength());
++			return false;
++		}
++		uint32_t value=0;
++		memcpy(&value,voteProbe->getBytesNoCopy(),4);
++		if (value>1) {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-vote-probe value=%#x\n",
++			 kIOReturnBadArgument,value);
++			return false;
++		}
++		fProbeEnabled=value==1;
++	}
+ 	if (haveGate) {
+ 		/* The ring written before this candidate keeps its exact row: the share
+ 		 * field appears only on an image that arms the sharing pass, so an
+@@ -362,13 +410,57 @@ IOQcomGCC::mapWindows(IOService *provider)
+ 		 resource,(unsigned long long)length,
+ 		 (unsigned long long)(gccWindows[i].physical-kIOQcomGccBase));
+ 	}
++	return mapProbeWindow(provider);
++}
++
++/* C2-06: the optional page gets the same four refusals the mandatory ones get,
++ * each with its own detail so a wrong tree names the page it got wrong. */
++bool
++IOQcomGCC::mapProbeWindow(IOService *provider)
++{
++	if (!fProbeEnabled) return true;
++	Window &w=fWindow[kIOQcomGccVoteWindow];
++	w.physical=kGccProbeWindowPhysical;
++	w.length=0;
++	w.base=0;
++	w.map=provider?provider->mapDeviceMemoryWithIndex(kIOQcomGccVoteWindow):NULL;
++	char resource[kIOQcomLogBuf];
++	gccName(kIOQcomGccVoteWindow,0,resource,sizeof resource);
++	if (!w.map) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s phase=map result=%d detail=window-absent\n",
++		 resource,kIOReturnNotReady);
++		return false;
++	}
++	uint64_t observed=w.map->getPhysicalAddress();
++	uint64_t length=w.map->getLength();
++	if (observed!=kGccProbeWindowPhysical) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s phase=map result=%d detail=address-mismatch observed=%#llx\n",
++		 resource,kIOReturnBadArgument,(unsigned long long)observed);
++		return false;
++	}
++	if (length<kGccProbeWindowLength) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s phase=map result=%d detail=length-short observed=%#llx required=%#llx\n",
++		 resource,kIOReturnBadArgument,(unsigned long long)length,
++		 (unsigned long long)kGccProbeWindowLength);
++		return false;
++	}
++	w.length=length;
++	w.base=w.map->getVirtualAddress();
++	if (!w.base) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s phase=map result=%d detail=no-virtual-base\n",
++		 resource,kIOReturnNotReady);
++		return false;
++	}
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s phase=map result=0 length=%#llx offset=%#llx vote-probe=1\n",
++	 resource,(unsigned long long)length,
++	 (unsigned long long)(kGccProbeWindowPhysical-kIOQcomGccBase));
+ 	return true;
+ }
+ 
+ void
+ IOQcomGCC::unmapWindows(void)
+ {
+-	for (unsigned i=0;i<kIOQcomGccWindowCount;i++) {
++	for (unsigned i=0;i<kIOQcomGccMappedWindowCount;i++) {
+ 		OSSafeReleaseNULL(fWindow[i].map);
+ 		fWindow[i].base=0;
+ 		fWindow[i].length=0;
+@@ -384,7 +476,7 @@ IOQcomGCC::unmapWindows(void)
+ bool
+ IOQcomGCC::readRegister(unsigned window,uint32_t offset,uint32_t *value)
+ {
+-	if (!value||window>=kIOQcomGccWindowCount||!fLock) return false;
++	if (!value||window>=kIOQcomGccMappedWindowCount||!fLock) return false;
+ 	bool ok=false;
+ 	uint32_t observed=0;
+ 	IOLockLock(fLock);
+@@ -423,6 +515,48 @@ IOQcomGCC::takeSnapshot(void)
+ 	}
+ }
+ 
++/* C2-06 precondition. One page, four reads, no store and no ledger entry: the
++ * ring records which vote bits are already set before this candidate speaks,
++ * so the vote card is designed against the state the device really boots in
++ * rather than the state the vendor source suggests. */
++IOReturn
++IOQcomGCC::probeVoteSample(void)
++{
++	if (!fProbeEnabled) return kIOReturnUnsupported;
++	unsigned held=0, clear=0, off=0, failed=0, votedRegs=0;
++	for (unsigned i=0;i<kIOQcomGccProbeRegisterCount;i++) {
++		const uint32_t offset=gccProbeRegs[i].offset;
++		uint32_t value=0;
++		bool ok=readRegister(kIOQcomGccVoteWindow,offset,&value);
++		fProbeValue[i]=ok?value:0;
++		char resource[kIOQcomLogBuf];
++		gccName(kIOQcomGccVoteWindow,offset,resource,sizeof resource);
++		if (!ok) {
++			failed++;
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s phase=probe result=%d detail=read-failed\n",
++			 resource,kIOReturnNotReady);
++			continue;
++		}
++		const unsigned enable=(value&kGccBranchEnable)?1u:0u;
++		const unsigned halt=(value&kGccBranchClockOff)?1u:0u;
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s phase=probe result=0 name=%s voted=%u enable=%u clk-off=%u value=%#x\n",
++		 resource,gccProbeRegs[i].name,gccProbeRegs[i].voted?1u:0u,enable,halt,value);
++		if (gccProbeRegs[i].voted) {
++			votedRegs++;
++			if (enable) held++; else clear++;
++			if (halt) off++;
++		}
++	}
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=probe-sample result=0 voted=%u enable-set=%u enable-clear=%u clk-off=%u failed=%u reads=%u writes=%u\n",
++	 kIOQcomCCGCC,votedRegs,held,clear,off,failed,fReads,fWrites);
++	/* Observation, not a gate: either baseline is worth a round. An enable bit
++	 * already set is a vote this driver did not place, which makes the "the
++	 * aggregate stays on" half observable; a clear one is the single-voter case
++	 * the card's own release proof needs. A read that failed is the only
++	 * failure, because it means the page is not what the card assumes. */
++	return failed?kIOReturnNotReady:kIOReturnSuccess;
++}
++
+ /* C2-08: the ordered store set. The index is also the restore order, so this
+  * table is the entire write footprint of the card and measureRestore() walks it
+  * backwards. */
+@@ -462,6 +596,8 @@ IOQcomGCC::writeRegister(unsigned window,uint32_t offset,uint32_t value,
+ 	unsigned ordinal=0;
+ 	IOLockLock(fLock);
+ 	const Window &w=fWindow[window];
++	/* C2-06 keeps the probe page read-only: the store set stays inside the four
++	 * mandatory windows until the vote card lands with its own guard. */
+ 	if (window<kIOQcomGccWindowCount&&w.base&&(offset&3u)==0&&
+ 	 (uint64_t)offset+sizeof(uint32_t)<=w.length) {
+ 		__asm__ volatile("dmb oshst" ::: "memory");
+@@ -1319,6 +1455,14 @@ IOQcomGCC::start(IOService *provider)
+ 	}
+ 	fMapped=true;
+ 	takeSnapshot();
++	/* C2-06: read-only and before every write pass, so the baseline this round
++	 * reports is the state the boot arrived in. It stores nothing; on an image
++	 * without the opt-in it returns kIOReturnUnsupported and says nothing. */
++	IOReturn probed=probeVoteSample();
++	if (probed!=kIOReturnSuccess&&probed!=kIOReturnUnsupported) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=probe-incomplete probe-result=%d writes=%u\n",
++		 kIOQcomCCGCC,probed,fWrites);
++	}
+ 	/* The entry and this backend are independent IOServices; IOKit does not
+ 	 * order their start. Wait a bounded time for the entry to publish itself,
+ 	 * then refuse with a single line instead of half-registering. */
+@@ -1377,9 +1521,15 @@ IOQcomGCC::start(IOService *provider)
+ 		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=measure-incomplete measure-result=%d writes=%u\n",
+ 		 kIOQcomCCGCC,measured,fWrites);
+ 	}
+-	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x\n",
+-	 kIOQcomCCGCC,kIOQcomGccWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
+-	 kIOQcomGccVariantSm8150);
++	if (fProbeEnabled) {
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x vote-probe=1\n",
++		 kIOQcomCCGCC,kIOQcomGccMappedWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
++		 kIOQcomGccVariantSm8150);
++	} else {
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x\n",
++		 kIOQcomCCGCC,kIOQcomGccWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
++		 kIOQcomGccVariantSm8150);
++	}
+ 	return true;
+ }
+ 
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
+index 18e96ef..5ed77ab 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
+@@ -37,7 +37,11 @@
+  *    contract: it is still one store, one bounded halt wait, one neighbour
+  *    check, and a demand handed back with the halted verdict.
+  *  - Nothing reconfigures a PLL, a reset or a GDSC, and the inherited display
+- *    branches stay somebody else's property: they are declared pinned. */
++ *    branches stay somebody else's property: they are declared pinned.
++ *  - C2-06's first step is a probe: one optional fifth page (the NPU block),
++ *    four reads, zero stores. It records which vote bits the boot arrived with
++ *    before any voted branch is written, and it is the only page the backend
++ *    maps without the four mandatory ones being present. */
+ #ifndef IOQCOM_GCC_H
+ #define IOQCOM_GCC_H
+ 
+@@ -54,6 +58,17 @@
+  * never an address and must not be mapped as one. */
+ enum : unsigned { kIOQcomGccWindowCount = 4 };
+ 
++/* C2-06: the voted sample lives in the NPU block (vendor offsets 0x4d004..
++ * 0x4d010), a fifth page the C2-01 ABI does not carry. A tree that arms the
++ * probe places it right after the four mandatory pages and says so with
++ * sweet,clock-vote-probe; without that property the backend maps exactly what
++ * it always mapped and the ring keeps its old rows. The probe stores nothing -
++ * it exists to record which vote bits are already set before the vote card is
++ * ever allowed to speak. */
++enum : unsigned { kIOQcomGccVoteWindow = kIOQcomGccWindowCount,
++	kIOQcomGccMappedWindowCount = kIOQcomGccWindowCount + 1,
++	kIOQcomGccProbeRegisterCount = 4 };
++
+ /* C2-01: register evidence frozen at start, before any later card can change
+  * the state. The order is the documented C0-03 snapshot, not a discovery. */
+ enum : unsigned { kIOQcomGccSnapshotCount = 11 };
+@@ -172,7 +187,7 @@ class IOQcomGCC : public IOQcomClockController {
+ 		bool stored;
+ 	};
+ 	IOLock *fLock;
+-	Window fWindow[kIOQcomGccWindowCount];
++	Window fWindow[kIOQcomGccMappedWindowCount];
+ 	struct { uint64_t value; bool valid; } fSnapshot[kIOQcomGccSnapshotCount];
+ 	unsigned fReads, fReadFailures;
+ 	unsigned fWrites, fWriteFailures, fRestoreMismatches;
+@@ -184,6 +199,11 @@ class IOQcomGCC : public IOQcomClockController {
+ 	 * of the cards it stands on: a gate to open the branch and a disable to
+ 	 * retract it once the last holder lets go. */
+ 	bool fShareEnabled;
++	/* C2-06: the read-only baseline of the voted block. This flag maps one
++	 * more page and reads four branches; it never stores, so an image that
++	 * carries it is still a zero-write image. */
++	bool fProbeEnabled;
++	uint32_t fProbeValue[kIOQcomGccProbeRegisterCount];
+ 	uint32_t fShareToken[kIOQcomGccShareConsumers];
+ 	unsigned fShareHolders;
+ 	/* The C2-03 token while this driver still holds it. C2-04 releases that
+@@ -199,6 +219,9 @@ class IOQcomGCC : public IOQcomClockController {
+ 	 fGateNeighbour[kIOQcomGccGateNeighbourCount];
+ 	bool validateProperties(IOService *provider);
+ 	bool mapWindows(IOService *provider);
++	/* C2-06: the probe page is mapped only when the ADT asks for it, and it is
++	 * validated with the same four refusals the mandatory pages get. */
++	bool mapProbeWindow(IOService *provider);
+ 	void unmapWindows(void);
+ 	bool readRegister(unsigned window, uint32_t offset, uint32_t *value);
+ 	/* C2-08: the only store path. It re-checks bounds and alignment exactly as
+@@ -248,6 +271,11 @@ class IOQcomGCC : public IOQcomClockController {
+ 	 * ledger is the only place the holder count lives, so the pass asks it
+ 	 * before deciding who is last. */
+ 	IOReturn shareClocks(void);
++	/* C2-06 precondition: one read-only look at the voted block. It maps the
++	 * fifth page, reads the four CBCRs there and reports, for each voted branch,
++	 * whether bit 0 is already someone's vote and whether the halt status says
++	 * the aggregate is off. It stores nothing and takes no ledger entry. */
++	IOReturn probeVoteSample(void);
+ 	/* Reads the neighbour set into fGateNeighbour (capture=true) or compares it
+ 	 * with that capture (capture=false), returning how many moved. The consumer
+ 	 * is passed in so a disable row is not attributed to the gate pass. */
+diff --git a/tools/mk-mh2lm-mdss-adt.py b/tools/mk-mh2lm-mdss-adt.py
+index d607bfd..855b335 100644
+--- a/tools/mk-mh2lm-mdss-adt.py
++++ b/tools/mk-mh2lm-mdss-adt.py
+@@ -27,6 +27,10 @@ RPMH_WINDOWS = ((0x18220000, 0x100), (0x18220d00, 0x3000), (0x0c3f000c, 8))
+ # the bare offsets are never ranges of their own.
+ GCC_WINDOWS = ((0x0010b000, 0x1000), (0x00133000, 0x1000),
+                (0x00143000, 0x1000), (0x00162000, 0x1000))
++# C2-06 appends one more range, the NPU block, and only when it asks for it. The
++# four above are the ABI every GCC tree carries; the fifth is the voted page the
++# probe reads, so a tree without the opt-in keeps a four-range reg list.
++GCC_PROBE_WINDOW = ((0x0014d000, 0x1000),)
+ NOC_WINDOWS = ((0x0af20000, 0x1c00), (0x0af21c00, 0x3000), (0x0af30000, 0x3fd4))
+ # SM8150 TLMM: four 1 MiB tile windows (west, east, north, south). The pad
+ # slot inside a tile is 0x1000 * global pin number, so a full 1 MiB window
+@@ -36,7 +40,8 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
+ 
+ 
+ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
+-            clock_gate=False, clock_disable=False, clock_share=False):
++            clock_gate=False, clock_disable=False, clock_share=False,
++            clock_vote_probe=False):
+     # C2-05 stands on both cards below it, so the two switch it needs are implied
+     # here rather than trusted to every caller: a share node without them would be
+     # refused at start and the image would carry a property that can do nothing.
+@@ -176,9 +181,9 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+     # refuses, and the generator will not emit one.
+     if clock_disable:
+         clock_gate = True
+-    if clock_diag or gcc or clock_measure or clock_gate:
++    if clock_diag or gcc or clock_measure or clock_gate or clock_vote_probe:
+         clock_provider = True
+-    gcc = gcc or clock_measure or clock_gate
++    gcc = gcc or clock_measure or clock_gate or clock_vote_probe
+     if clock_provider:
+         # C1: one clock entry personality. The node carries no reg and no
+         # window: every controller window stays with its own CC backend, so
+@@ -201,7 +206,8 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+                           ('compatible', 0, b'sweet,gcc\0'),
+                           ('sweet,gcc-abi', 0, struct.pack('<I', 1)),
+                           ('sweet,gcc-variant', 0, struct.pack('<I', 0x8150)),
+-                          ('reg', 0, encode(GCC_WINDOWS))]
++                          ('reg', 0, encode(GCC_WINDOWS + GCC_PROBE_WINDOW
++                                            if clock_vote_probe else GCC_WINDOWS))]
+         if clock_measure:
+             # C2-08 is the first candidate that writes hardware, so it is opt-in
+             # from the device tree: the default image keeps the zero-write ring.
+@@ -220,6 +226,11 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+             # lets the last of them do the withdraw C2-04 verified. It replaces
+             # the single-consumer pass, so one boot makes three stores either way.
+             gcc_node.props.append(('sweet,clock-share', 0, struct.pack('<I', 1)))
++        if clock_vote_probe:
++            # C2-06 maps the voted page and reads it; it stores nothing, so this
++            # opt-in can ride on any image that carries the GCC node. The window
++            # it needs is the fifth range appended above.
++            gcc_node.props.append(('sweet,clock-vote-probe', 0, struct.pack('<I', 1)))
+         arm.children.append(gcc_node)
+     return adt.serialize(root)
+ 
+@@ -241,6 +252,7 @@ if __name__ == '__main__':
+     parser.add_argument('--clock-gate', action='store_true', help='append the C2-03 branch gate opt-in (implies --gcc); stores one enable bit and keeps it on until reboot')
+     parser.add_argument('--clock-disable', action='store_true', help='append the C2-04 verified disable opt-in (implies --clock-gate); withdraws that enable, proves the halt and releases the demand')
+     parser.add_argument('--clock-share', action='store_true', help='append the C2-05 sharing opt-in (implies --clock-gate and --clock-disable); two consumers share the gate demand and the last release retracts it')
++    parser.add_argument('--clock-vote-probe', action='store_true', help='append the C2-06 read-only vote probe (implies --gcc); maps the NPU page as a fifth range and reads four CBCRs, zero stores')
+     parser.add_argument('source', type=Path)
+     parser.add_argument('destination', type=Path)
+     args = parser.parse_args()
+@@ -248,4 +260,4 @@ if __name__ == '__main__':
+     if source.resolve() == destination.resolve():
+         sys.exit('output must differ from the baseline ADT')
+     destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
+-                      args.clock_disable, args.clock_share))
++                      args.clock_disable, args.clock_share, args.clock_vote_probe))
+diff --git a/tools/tests/test-mh2lm-gcc-backend.py b/tools/tests/test-mh2lm-gcc-backend.py
+index 0caf79f..7a42797 100644
+--- a/tools/tests/test-mh2lm-gcc-backend.py
++++ b/tools/tests/test-mh2lm-gcc-backend.py
+@@ -87,8 +87,11 @@ assert 'gccMeasureHook' in prelude and 'gccHaltPending' in prelude
+ prelude = prelude.replace('static std::vector<unsigned> mapCalls;',
+ '''static std::vector<unsigned> mapCalls;
+ using IOPhysicalAddress=uint64_t;using IOVirtualAddress=uintptr_t;using IOByteCount=uint64_t;
+-static constexpr uintptr_t gccBases[4]={0x0010b000,0x00133000,0x00143000,0x00162000};
+-static constexpr size_t gccLengths[4]={0x1000,0x1000,0x1000,0x1000};
++/* C2-06: the fifth page is the NPU block the probe may map. It stays outside
++   the four the ADT always carries, so gccMemoryCount decides whether the nub
++   can satisfy it. */
++static constexpr uintptr_t gccBases[5]={0x0010b000,0x00133000,0x00143000,0x00162000,0x0014d000};
++static constexpr size_t gccLengths[5]={0x1000,0x1000,0x1000,0x1000,0x1000};
+ static bool gccMode=true;
+ static unsigned gccMemoryCount=4,gccAbsentIndex=99,gccWrongPA=99,gccShortLen=99,gccNoBase=99;''')
+ prelude = prelude.replace('int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){',
+@@ -192,7 +195,7 @@ static IOService*clockNub(){
+ }
+ static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=true,
+  unsigned abiLength=4,unsigned measure=0,unsigned gate=0,unsigned disable=0,
+- unsigned share=0){
++ unsigned share=0,unsigned probe=0){
+  auto*n=fixtureAlloc<IOService>();
+  if(abi){uint32_t a=1;setData(n,"sweet,gcc-abi",&a,abiLength);}
+  if(haveVariant)setData(n,"sweet,gcc-variant",&variant,4);
+@@ -204,6 +207,8 @@ static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=t
+  if(disable){uint32_t d=disable==2?2u:1u;setData(n,"sweet,clock-disable",&d,disable==3?3u:4);}
+  /* share: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
+  if(share){uint32_t h=share==2?2u:1u;setData(n,"sweet,clock-share",&h,share==3?3u:4);}
++ /* probe: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
++ if(probe){uint32_t v=probe==2?2u:1u;setData(n,"sweet,clock-vote-probe",&v,probe==3?3u:4);}
+  return n;
+ }
+ static IOQcomClockProvider*startProvider(IOService*n){
+@@ -241,6 +246,12 @@ static void resetGccRegs(){
+  setReg(0x00162000u,0x000,0x00000000u);
+  setReg(0x00162000u,0x004,0x00000000u);
+  setReg(0x00162000u,0x008,0x00000001u);
++ /* C2-06: the NPU page as a boot leaves it - every voted branch has an empty
++    vote register and the halt status says the aggregate is off. */
++ setReg(0x0014d000u,0x004,0x80000000u);
++ setReg(0x0014d000u,0x008,0x80000000u);
++ setReg(0x0014d000u,0x00c,0x80000000u);
++ setReg(0x0014d000u,0x010,0x80000000u);
+ }
+ /* C2-08/C2-03 device model knobs, declared before the reset that clears them. */
+ static bool gccRefStuckOff=false,gccCountStuck=false,gccGateStuckOff=false;
+@@ -430,6 +441,62 @@ int main(){
+   assert(mapCalls.size()==1&&liveMaps==0);
+   g->release();n->release();assert(!live&&!liveMaps);
+  }
++ /* ---- C2-06 probe: one optional page, four refusals of its own ---- */
++ {	/* the opt-in names a page the ADT does not carry */
++  messages.clear();mapCalls.clear();
++  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,1);auto*g=fixtureAlloc<IOQcomGCC>();
++  clearKnobs();resetGccRegs();
++  assert(!g->start(n));
++  assert(logged("resource=gcc:0x14d000 phase=map result=1 detail=window-absent"));
++  assert(mapCalls.size()==5&&liveMaps==0);	/* four mapped, the fifth refused */
++  /* the map failure comes before the snapshot: nothing was read at all */
++  assert(!g->fMapped&&!g->fLock&&g->fReads==0);
++  g->release();n->release();assert(!live&&!liveMaps);
++ }
++ {	/* the fifth range resolves somewhere else */
++  messages.clear();mapCalls.clear();
++  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,1);auto*g=fixtureAlloc<IOQcomGCC>();
++  clearKnobs();gccMemoryCount=5;gccWrongPA=4;resetGccRegs();
++  assert(!g->start(n));
++  assert(logged("resource=gcc:0x14d000 phase=map result=2 detail=address-mismatch observed=0x14d004"));
++  assert(!g->fMapped&&!g->fLock&&liveMaps==0);
++  g->release();n->release();assert(!live&&!liveMaps);
++ }
++ {	/* the fifth page is too short to hold 0x4d010 */
++  messages.clear();mapCalls.clear();
++  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,1);auto*g=fixtureAlloc<IOQcomGCC>();
++  clearKnobs();gccMemoryCount=5;gccShortLen=4;resetGccRegs();
++  assert(!g->start(n));
++  assert(logged("resource=gcc:0x14d000 phase=map result=2 detail=length-short observed=0xfff required=0x1000"));
++  g->release();n->release();assert(!live&&!liveMaps);
++ }
++ {	/* a fifth page with no kernel base is not usable even if it maps */
++  messages.clear();mapCalls.clear();
++  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,1);auto*g=fixtureAlloc<IOQcomGCC>();
++  clearKnobs();gccMemoryCount=5;gccNoBase=4;resetGccRegs();
++  assert(!g->start(n));
++  assert(logged("resource=gcc:0x14d000 phase=map result=1 detail=no-virtual-base"));
++  g->release();n->release();assert(!live&&!liveMaps);
++ }
++ {	/* the property itself must be a word holding 0 or 1 */
++  messages.clear();mapCalls.clear();
++  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,3);auto*g=fixtureAlloc<IOQcomGCC>();
++  clearKnobs();resetGccRegs();
++  assert(!g->start(n));
++  assert(counted("detail=bad-clock-vote-probe")==1);
++  assert(logged("detail=bad-clock-vote-probe length=3"));
++  assert(mapCalls.empty());
++  g->release();n->release();assert(!live&&!liveMaps);
++ }
++ {	/* a value the ADT never writes is refused as well */
++  messages.clear();mapCalls.clear();
++  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,2);auto*g=fixtureAlloc<IOQcomGCC>();
++  clearKnobs();resetGccRegs();
++  assert(!g->start(n));
++  assert(logged("detail=bad-clock-vote-probe value=0x2"));
++  assert(mapCalls.empty());
++  g->release();n->release();assert(!live&&!liveMaps);
++ }
+  /* ---- entry absent: bounded wait, then one refusal line, no half state ---- */
+  {
+   auto*n=gccNub();auto*g=fixtureAlloc<IOQcomGCC>();
+@@ -612,12 +679,16 @@ int main(){
+    assert(g->fReadFailures==failures+1);
+    assert(!g->readRegister(0,0x102,&v));		/* unaligned offset */
+    assert(g->fReadFailures==failures+2);
+-   assert(!g->readRegister(kIOQcomGccWindowCount,0,&v));	/* not a window */
++   assert(!g->readRegister(kIOQcomGccMappedWindowCount,0,&v));	/* not a window */
+    assert(g->fReadFailures==failures+2);
++   /* the optional C2-06 slot exists but was never mapped on this device: it is
++    * a failed read, not an out-of-range index */
++   assert(!g->readRegister(kIOQcomGccVoteWindow,0,&v));
++   assert(g->fReadFailures==failures+3);
+    assert(!g->readRegister(0,0,NULL));		/* no output pointer */
+    assert(g->readRegister(0,0xffc,&v));	/* last legal word is inside */
+    assert(v==0);
+-   assert(g->fReadFailures==failures+2);
++   assert(g->fReadFailures==failures+3);
+   }
+   /* ---- provider contract: binding, admission, no capability to write ---- */
+   {
+@@ -683,6 +754,46 @@ int main(){
+    assert(!live&&!liveMaps);
+   }
+  }
++ /* ---- C2-06 probe: the voted page read once, zero stores ---- */
++ {
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1);clearKnobs();gccMemoryCount=5;resetGccRegs();
++  mapCalls.clear();
++  setReg(0x0014d000u,0x010,0x00000001u);	/* one branch arrives with a vote */
++  auto*g=startGcc(gn);
++  assert(mapCalls.size()==5);
++  assert(logged("resource=gcc:0x14d000 phase=map result=0 length=0x1000 offset=0x4d000 vote-probe=1"));
++  /* every row names the page, the branch, whether the vendor tree votes it and
++   * both bits of the CBCR: the vote in bit 0 and the halt status in bit 31 */
++  assert(logged("resource=gcc:0x14d004 phase=probe result=0 name=gcc_npu_cfg_ahb_clk voted=0 enable=0 clk-off=1 value=0x80000000"));
++  assert(logged("resource=gcc:0x14d008 phase=probe result=0 name=gcc_npu_axi_clk voted=1 enable=0 clk-off=1 value=0x80000000"));
++  assert(logged("resource=gcc:0x14d00c phase=probe result=0 name=gcc_npu_trig_clk voted=1 enable=0 clk-off=1 value=0x80000000"));
++  assert(logged("resource=gcc:0x14d010 phase=probe result=0 name=gcc_npu_at_clk voted=1 enable=1 clk-off=0 value=0x1"));
++  assert(logged("resource=cc1 phase=probe-sample result=0 voted=3 enable-set=1 enable-clear=2 clk-off=2 failed=0 reads=15 writes=0"));
++  /* the probe stores nothing and leaves the ledger untouched */
++  assert(g->registerWrites()==0&&writes()==0);
++  assert(g->fReads==kIOQcomGccSnapshotCount+4+2+6);
++  assert(g->fProbeEnabled&&g->fProbeValue[1]==0x80000000u&&g->fProbeValue[3]==1u);
++  assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=5 snapshot=11 "
++                "reads=23 writes=0 variant=0x8150 vote-probe=1"));
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  assert(!live&&!liveMaps);
++ }
++ {	/* the same tree without the opt-in maps four pages and says nothing new */
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub();clearKnobs();resetGccRegs();mapCalls.clear();
++  auto*g=startGcc(gn);
++  assert(mapCalls.size()==4&&!g->fProbeEnabled);
++  assert(counted("phase=probe")==0&&counted("vote-probe")==0);
++  assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=4 snapshot=11 "
++                "reads=19 writes=0 variant=0x8150"));
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  assert(!live&&!liveMaps);
++ }
+  /* ---- opt-in diagnostics list the real backend, names and all ---- */
+  {
+   clockMode=1;
+diff --git a/tools/tests/test-mh2lm-mdss-adt.py b/tools/tests/test-mh2lm-mdss-adt.py
+index 11cf779..c9b2b77 100644
+--- a/tools/tests/test-mh2lm-mdss-adt.py
++++ b/tools/tests/test-mh2lm-mdss-adt.py
+@@ -517,7 +517,59 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-share-adt-') as temp:
+                     str(source), str(output)], check=True)
+     assert output.read_bytes() == shared
+     assert source.read_bytes() == blob
++# C2-06 reads one more page than the ABI carries, so its opt-in owns both the
++# property and the fifth range: the generator emits them as one step, and a tree
++# with the property but the four-range reg list is unreachable.
++def encode_windows(windows):
++    # the generator's rule, restated here so the tree can be rebuilt by hand
++    return b''.join(struct.pack('<QQ', pa - m.SOC_BASE if pa >= m.SOC_BASE
++                                else m.LOW_ALIAS + pa, size) for pa, size in windows)
++
++
++probed = m.derive(blob, clock_vote_probe=True)
++assert probed == m.derive(blob, gcc=True, clock_vote_probe=True)
++assert probed != m.derive(blob, gcc=True)
++assert b'sweet,clock-vote-probe' not in m.derive(blob, gcc=True)
++assert b'sweet,clock-vote-probe' not in blob
++ptree, end = adt.parse(probed)
++assert end == len(probed)
++gcc = next(n for n in ptree.children[1].children if n.name == 'gcc')
++assert gcc.prop('sweet,clock-vote-probe') == struct.pack('<I', 1)
++assert gcc.prop('sweet,clock-gate') is None	# the probe writes nothing
++assert gcc.prop('sweet,clock-measure') is None
++assert gcc.prop('sweet,clock-disable') is None
++preg = struct.unpack('<%dQ' % (len(gcc.prop('reg')) // 8), gcc.prop('reg'))
++assert len(preg) == 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
++pwindows = []
++for i in range(0, len(preg), 2):
++    addr, size = preg[i], preg[i + 1]
++    pwindows.append((addr + m.SOC_BASE if addr < m.LOW_ALIAS else addr - m.LOW_ALIAS,
++                     size))
++assert tuple(pwindows) == m.GCC_WINDOWS + m.GCC_PROBE_WINDOW
++# dropping the page and the property together is the plain GCC tree again
++gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-vote-probe']
++gcc.props = [(k, f, encode_windows(m.GCC_WINDOWS) if k == 'reg' else v)
++             for k, f, v in gcc.props]
++assert adt.serialize(ptree) == m.derive(blob, gcc=True)
++# the probe composes with the write cards: it is one more property on top of
++# whatever the gate/share chain already emitted, and the ranges stay five.
++combo = m.derive(blob, clock_vote_probe=True, clock_share=True)
++ctree, end = adt.parse(combo)
++assert end == len(combo)
++gcc = next(n for n in ctree.children[1].children if n.name == 'gcc')
++for name in ('sweet,clock-vote-probe', 'sweet,clock-share', 'sweet,clock-disable',
++             'sweet,clock-gate'):
++    assert gcc.prop(name) == struct.pack('<I', 1), name
++assert len(gcc.prop('reg')) == 8 * 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
++with tempfile.TemporaryDirectory(prefix='mh2lm-clock-vote-probe-adt-') as temp:
++    source, output = Path(temp)/'base.adt', Path(temp)/'probe.adt'
++    source.write_bytes(blob)
++    subprocess.run([sys.executable, str(Path(m.__file__)), '--clock-vote-probe',
++                    str(source), str(output)], check=True)
++    assert output.read_bytes() == probed
++    assert source.read_bytes() == blob
+ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
+       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
+       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
+-      'that no earlier image carries, and the C2-05 share on top of all three')
++      'that no earlier image carries, and the C2-05 share on top of all three, plus the '
++      'C2-06 vote probe, which owns both its property and the fifth range')

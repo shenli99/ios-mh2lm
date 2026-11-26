@@ -37,7 +37,11 @@
  *    contract: it is still one store, one bounded halt wait, one neighbour
  *    check, and a demand handed back with the halted verdict.
  *  - Nothing reconfigures a PLL, a reset or a GDSC, and the inherited display
- *    branches stay somebody else's property: they are declared pinned. */
+ *    branches stay somebody else's property: they are declared pinned.
+ *  - C2-06's first step is a probe: one optional fifth page (the NPU block),
+ *    four reads, zero stores. It records which vote bits the boot arrived with
+ *    before any voted branch is written, and it is the only page the backend
+ *    maps without the four mandatory ones being present. */
 #ifndef IOQCOM_GCC_H
 #define IOQCOM_GCC_H
 
@@ -53,6 +57,17 @@
  * sm8150.dtsi (reg = <0x100000 0x1f0000>); a vendor offset such as 0x33008 is
  * never an address and must not be mapped as one. */
 enum : unsigned { kIOQcomGccWindowCount = 4 };
+
+/* C2-06: the voted sample lives in the NPU block (vendor offsets 0x4d004..
+ * 0x4d010), a fifth page the C2-01 ABI does not carry. A tree that arms the
+ * probe places it right after the four mandatory pages and says so with
+ * sweet,clock-vote-probe; without that property the backend maps exactly what
+ * it always mapped and the ring keeps its old rows. The probe stores nothing -
+ * it exists to record which vote bits are already set before the vote card is
+ * ever allowed to speak. */
+enum : unsigned { kIOQcomGccVoteWindow = kIOQcomGccWindowCount,
+	kIOQcomGccMappedWindowCount = kIOQcomGccWindowCount + 1,
+	kIOQcomGccProbeRegisterCount = 4 };
 
 /* C2-01: register evidence frozen at start, before any later card can change
  * the state. The order is the documented C0-03 snapshot, not a discovery. */
@@ -172,7 +187,7 @@ class IOQcomGCC : public IOQcomClockController {
 		bool stored;
 	};
 	IOLock *fLock;
-	Window fWindow[kIOQcomGccWindowCount];
+	Window fWindow[kIOQcomGccMappedWindowCount];
 	struct { uint64_t value; bool valid; } fSnapshot[kIOQcomGccSnapshotCount];
 	unsigned fReads, fReadFailures;
 	unsigned fWrites, fWriteFailures, fRestoreMismatches;
@@ -184,6 +199,11 @@ class IOQcomGCC : public IOQcomClockController {
 	 * of the cards it stands on: a gate to open the branch and a disable to
 	 * retract it once the last holder lets go. */
 	bool fShareEnabled;
+	/* C2-06: the read-only baseline of the voted block. This flag maps one
+	 * more page and reads four branches; it never stores, so an image that
+	 * carries it is still a zero-write image. */
+	bool fProbeEnabled;
+	uint32_t fProbeValue[kIOQcomGccProbeRegisterCount];
 	uint32_t fShareToken[kIOQcomGccShareConsumers];
 	unsigned fShareHolders;
 	/* The C2-03 token while this driver still holds it. C2-04 releases that
@@ -199,6 +219,9 @@ class IOQcomGCC : public IOQcomClockController {
 	 fGateNeighbour[kIOQcomGccGateNeighbourCount];
 	bool validateProperties(IOService *provider);
 	bool mapWindows(IOService *provider);
+	/* C2-06: the probe page is mapped only when the ADT asks for it, and it is
+	 * validated with the same four refusals the mandatory pages get. */
+	bool mapProbeWindow(IOService *provider);
 	void unmapWindows(void);
 	bool readRegister(unsigned window, uint32_t offset, uint32_t *value);
 	/* C2-08: the only store path. It re-checks bounds and alignment exactly as
@@ -248,6 +271,11 @@ class IOQcomGCC : public IOQcomClockController {
 	 * ledger is the only place the holder count lives, so the pass asks it
 	 * before deciding who is last. */
 	IOReturn shareClocks(void);
+	/* C2-06 precondition: one read-only look at the voted block. It maps the
+	 * fifth page, reads the four CBCRs there and reports, for each voted branch,
+	 * whether bit 0 is already someone's vote and whether the halt status says
+	 * the aggregate is off. It stores nothing and takes no ledger entry. */
+	IOReturn probeVoteSample(void);
 	/* Reads the neighbour set into fGateNeighbour (capture=true) or compares it
 	 * with that capture (capture=false), returning how many moved. The consumer
 	 * is passed in so a disable row is not attributed to the gate pass. */
