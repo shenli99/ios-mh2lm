@@ -561,6 +561,34 @@ for name in ('sweet,clock-vote-probe', 'sweet,clock-share', 'sweet,clock-disable
              'sweet,clock-gate'):
     assert gcc.prop(name) == struct.pack('<I', 1), name
 assert len(gcc.prop('reg')) == 8 * 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
+# the write half is its own property and implies the probe: a vote alone would be
+# a tree the backend refuses, so the generator will not emit one.
+voted = m.derive(blob, clock_vote=True)
+assert voted == m.derive(blob, clock_vote_probe=True, clock_vote=True)
+assert voted != probed
+assert b'sweet,clock-vote\0' not in m.derive(blob, clock_vote_probe=True)
+assert b'sweet,clock-vote\0' not in blob
+vtree, end = adt.parse(voted)
+assert end == len(voted)
+gcc = next(n for n in vtree.children[1].children if n.name == 'gcc')
+assert gcc.prop('sweet,clock-vote') == struct.pack('<I', 1)
+assert gcc.prop('sweet,clock-vote-probe') == struct.pack('<I', 1), 'the vote implies the probe'
+# the vote buys no write authorisation of its own: the gate card stays absent, so
+# the page is reachable only by the vote register the driver checks by offset.
+assert gcc.prop('sweet,clock-gate') is None
+vreg = struct.unpack('<%dQ' % (len(gcc.prop('reg')) // 8), gcc.prop('reg'))
+assert len(vreg) == 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
+# dropping the vote property alone leaves the read-only probe tree
+gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-vote']
+assert adt.serialize(vtree) == probed
+combo = m.derive(blob, clock_vote=True, clock_share=True)
+ctree, end = adt.parse(combo)
+assert end == len(combo)
+gcc = next(n for n in ctree.children[1].children if n.name == 'gcc')
+for name in ('sweet,clock-vote', 'sweet,clock-vote-probe', 'sweet,clock-share',
+             'sweet,clock-disable', 'sweet,clock-gate'):
+    assert gcc.prop(name) == struct.pack('<I', 1), name
+assert len(gcc.prop('reg')) == 8 * 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
 with tempfile.TemporaryDirectory(prefix='mh2lm-clock-vote-probe-adt-') as temp:
     source, output = Path(temp)/'base.adt', Path(temp)/'probe.adt'
     source.write_bytes(blob)
@@ -568,8 +596,16 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-vote-probe-adt-') as temp:
                     str(source), str(output)], check=True)
     assert output.read_bytes() == probed
     assert source.read_bytes() == blob
+with tempfile.TemporaryDirectory(prefix='mh2lm-clock-vote-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'vote.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--clock-vote',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == voted
+    assert source.read_bytes() == blob
 print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
       'that no earlier image carries, and the C2-05 share on top of all three, plus the '
-      'C2-06 vote probe, which owns both its property and the fifth range')
+      'C2-06 vote probe, which owns both its property and the fifth range, and the vote on '
+      'top of it as a property of its own')

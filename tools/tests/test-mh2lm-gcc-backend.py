@@ -195,7 +195,7 @@ static IOService*clockNub(){
 }
 static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=true,
  unsigned abiLength=4,unsigned measure=0,unsigned gate=0,unsigned disable=0,
- unsigned share=0,unsigned probe=0){
+ unsigned share=0,unsigned probe=0,unsigned vote=0){
  auto*n=fixtureAlloc<IOService>();
  if(abi){uint32_t a=1;setData(n,"sweet,gcc-abi",&a,abiLength);}
  if(haveVariant)setData(n,"sweet,gcc-variant",&variant,4);
@@ -209,6 +209,8 @@ static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=t
  if(share){uint32_t h=share==2?2u:1u;setData(n,"sweet,clock-share",&h,share==3?3u:4);}
  /* probe: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
  if(probe){uint32_t v=probe==2?2u:1u;setData(n,"sweet,clock-vote-probe",&v,probe==3?3u:4);}
+ /* vote: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
+ if(vote){uint32_t v=vote==2?2u:1u;setData(n,"sweet,clock-vote",&v,vote==3?3u:4);}
  return n;
 }
 static IOQcomClockProvider*startProvider(IOService*n){
@@ -257,6 +259,12 @@ static void resetGccRegs(){
 static bool gccRefStuckOff=false,gccCountStuck=false,gccGateStuckOff=false;
 /* C2-04: a branch whose halt status never rises after the disable store. */
 static bool gccDisableStuckRunning=false;
+/* C2-06 write half: a voted branch that takes the vote and never reports the
+ * aggregate up - the one failure the 500 us enable budget has to survive. */
+static bool gccVoteStuckOff=false;
+/* C2-06: an aggregate somebody else holds up while our own vote is clear - the
+ * state the pass must refuse instead of writing a vote into it. */
+static bool gccVoteHaltClear=false;
 /* Off by default: the shipped fixture lets a test present any register value,
  * so a synthetic 0x0 is a legitimate input for the preconditions. A case that
  * wants the halt handshake the device performs (enable bit decides CLK_OFF)
@@ -270,7 +278,7 @@ static void clearKnobs(){gccMemoryCount=4;gccAbsentIndex=99;gccWrongPA=99;gccSho
  gccHaltLag=false;gccHaltPending.clear();gccDriftPA=0;gccDriftBits=0;
  gccRefStuckOff=false;gccCountStuck=false;gccGateStuckOff=false;gccNeighbourShift=false;
  gccDisableNeighbourShift=false;gccDisableStuckRunning=false;gccHaltFollowsEnable=false;
- gccDisableStored=false;}
+ gccDisableStored=false;gccVoteStuckOff=false;gccVoteHaltClear=false;}
 /* C2-08 device model. The debug counter sees the selected source: the running
  * clock (19.2 MHz) yields four counts per loaded tick of the XO/4 reference,
  * a stopped source yields the same count on both runs, and a stuck counter
@@ -290,6 +298,16 @@ static uint32_t gccCounter(uintptr_t pa,uint32_t v){
     return v|0x80000000u;}}
   if(v&1u)return v&~0x80000000u;		/* a running branch reports CLK_OFF=0 */
   return v;
+ }
+ /* C2-06 write half: the voted NPU branch. A vote lifts the halt status and
+  * withdrawing it raises the status again - that pair is the whole observable
+  * this card has. gccVoteStuckOff is a vote that landed while the aggregate
+  * stayed down. */
+ if(pa==0x0014d008u){
+  if(gccVoteHaltClear)return v&~0x80000000u;
+  if(!(v&1u))return v|0x80000000u;
+  if(gccVoteStuckOff)return v|0x80000000u;
+  return v&~0x80000000u;
  }
  if(pa!=0x0016203cu)return v;
  uint32_t ctl=regs[0x00162038u];
@@ -790,6 +808,174 @@ int main(){
   assert(counted("phase=probe")==0&&counted("vote-probe")==0);
   assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=4 snapshot=11 "
                 "reads=19 writes=0 variant=0x8150"));
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  assert(!live&&!liveMaps);
+ }
+ /* ---- C2-06 write half: the vote, placed and withdrawn in one pass ---- */
+ {
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,1);clearKnobs();
+  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
+  gccMeasureHook=gccCounter;gccDelayCalls=0;
+  auto*g=startGcc(gn);
+  /* the arm row comes before any store, so a pass that dies early still shows
+   * that this image asked for a vote */
+  assert(logged("resource=gcc:0x14d000 phase=vote result=0 detail=armed "
+                "name=gcc_npu_axi_clk offset=0x8 voted=1 vote-probe=1"));
+  /* what the branch held: nobody's vote, the aggregate off */
+  assert(logged("resource=gcc:0x14d008 name=gcc_npu_axi_clk consumer=sweetclock-vote "
+                "phase=vote-request result=0 enable=0 off=1 value=0x80000000"));
+  /* two stores, in order, and neither of them writes the halt status */
+  assert(logged("consumer=sweetclock-vote phase=write-issued result=0 stage=vote-enable write=1 value=0x1"));
+  assert(logged("consumer=sweetclock-vote phase=write-issued result=0 stage=vote-release write=2 value=0"));
+  /* fact one: the store landed and only bit 0 moved (config bits compared under
+   * the mask, so the FSM's own halt status is not counted as our change) */
+  assert(logged("phase=vote-write result=0 enable=1 value=0x1 mask=0xfffffff changed-only-enable=1"));
+  /* fact two: the aggregate came up on the first read, no sleep spent */
+  assert(logged("phase=vote-running result=0 enable=1 off=0 value=0x1 polls=0"));
+  /* fact three: bit 0 gone, one settle, and the read-after is an observation */
+  assert(logged("phase=vote-release result=0 delay-us=10 enable=0 off=1 value=0x80000000 "
+                "mask=0xfffffff detail=observed-not-proof"));
+  assert(logged("phase=vote-done result=0 writes=2 vote-store=1 enable-done=1 settle=1 "
+                "polls=0 hold=0 before=0x80000000 after=0x80000000"));
+  /* exactly one 10 us settle and no poll sleep: the pass spent the vendor's
+   * enable budget in one read, so the delay count proves the budget was not
+   * padded */
+  assert(gccDelayCalls==1);
+  assert(g->registerWrites()==2&&writes()==2);
+  assert(!g->fVoteLeftSet&&g->fVoteRunning);
+  /* the branch is back at its boot value and the pass claimed no aggregate
+   * verdict: bit 0 clear, halt status set, both stores accounted for */
+  assert(regs[0x0014d008u]==0x0u);
+  assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=5 snapshot=11 "
+                "reads="+std::to_string(g->fReads)+" writes=2 variant=0x8150 vote-probe=1 vote=1"));
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  assert(!live&&!liveMaps);
+ }
+ {
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,1);clearKnobs();
+  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
+  gccMeasureHook=gccCounter;gccDelayCalls=0;
+  /* somebody else already voted: the read-only baseline said 0x80000000 at
+   * boot, so this is the second-holder case the probe cannot rule out later */
+  setReg(0x0014d000u,0x008,0x00000001u);
+  auto*g=startGcc(gn);
+  assert(logged("phase=vote-request result=0 enable=1 off=0 value=0x1"));
+  assert(logged("phase=vote-request result="+std::to_string(kIOReturnNotReady)+
+                " detail=vote-held-by-other enable=1 off=0 value=0x1 writes=0"));
+  /* nothing was stored and the other holder's bit is untouched */
+  assert(g->registerWrites()==0&&writes()==0);
+  assert(regs[0x0014d008u]==0x00000001u);
+  assert(counted("stage=vote-enable")==0&&counted("phase=vote-done")==0);
+  assert(logged("detail=vote-incomplete vote-result="+std::to_string(kIOReturnNotReady)));
+  assert(!g->fVoteRunning&&!g->fVoteLeftSet);
+  /* the probe rows still report the state that caused the refusal */
+  assert(logged("resource=gcc:0x14d008 phase=probe result=0 name=gcc_npu_axi_clk "
+                "voted=1 enable=1 clk-off=0 value=0x1"));
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  assert(!live&&!liveMaps);
+ }
+ {
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,1);clearKnobs();
+  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
+  gccMeasureHook=gccCounter;gccDelayCalls=0;
+  /* no vote of ours, yet the aggregate is already up: a state this card cannot
+   * explain, and one a store would hide */
+  gccVoteHaltClear=true;
+  auto*g=startGcc(gn);
+  assert(logged("phase=vote-request result="+std::to_string(kIOReturnNotReady)+
+                " detail=halt-not-set enable=0 off=0 value=0 writes=0"));
+  assert(g->registerWrites()==0&&writes()==0);
+  assert(regs[0x0014d008u]==0x80000000u&&counted("phase=vote-done")==0);
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  assert(!live&&!liveMaps);
+ }
+ {
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,1);clearKnobs();
+  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
+  gccMeasureHook=gccCounter;gccDelayCalls=0;
+  /* the vote lands and the clock never comes up: the 500 us budget expires, the
+   * vote is still withdrawn, and the pass says so instead of claiming a run */
+  gccVoteStuckOff=true;
+  auto*g=startGcc(gn);
+  assert(logged("phase=vote-running result="+std::to_string(kIOReturnTimeout)+
+                " enable=1 off=1 value=0x80000001 polls=500 detail=vote-halt-timeout"));
+  assert(logged("phase=vote-done result="+std::to_string(kIOReturnTimeout)+
+                " writes=2 vote-store=1 enable-done=0 settle=1 polls=500 hold=0 "
+                "before=0x80000000 after=0x80000000"));
+  /* the vote came back out anyway: a demand this driver does not hold is not
+   * left standing because the enable failed */
+  assert(g->registerWrites()==2&&writes()==2&&regs[0x0014d008u]==0x0u);
+  assert(!g->fVoteRunning&&!g->fVoteLeftSet);
+  /* 500 poll sleeps plus the one settle: the budget is the vendor's own */
+  assert(gccDelayCalls==501);
+  assert(logged("detail=vote-incomplete vote-result="+std::to_string(kIOReturnTimeout)));
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  assert(!live&&!liveMaps);
+ }
+ /* ---- the vote is an opt-in of its own: refusals and the probe-only ring ---- */
+ {
+  messages.clear();mapCalls.clear();
+  auto*n=clockNub();auto*g=fixtureAlloc<IOQcomGCC>();
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,1);clearKnobs();resetGccRegs();
+  assert(!g->start(gn));
+  assert(logged("resource=gcc phase=start result="+std::to_string(kIOReturnBadArgument)+
+                " detail=clock-vote-needs-probe clock-vote=1 clock-vote-probe=0"));
+  /* the refusal comes before the first map, so nothing was touched */
+  assert(mapCalls.empty()&&!g->fMapped&&!g->fLock);
+  g->release();gn->release();
+  n->release();assert(!live&&!liveMaps);
+ }
+ {
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,2);clearKnobs();
+  gccMemoryCount=5;resetGccRegs();
+  auto*g=fixtureAlloc<IOQcomGCC>();
+  assert(!g->start(gn));
+  assert(logged("detail=bad-clock-vote value=0x2"));
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  assert(!live&&!liveMaps);
+ }
+ {
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,3);clearKnobs();
+  gccMemoryCount=5;resetGccRegs();
+  auto*g=fixtureAlloc<IOQcomGCC>();
+  assert(!g->start(gn));
+  assert(logged("detail=bad-clock-vote length=3"));
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  assert(!live&&!liveMaps);
+ }
+ {
+  /* probe without vote: the same ring 0137 shipped - five windows, zero stores,
+   * not one vote row. This is the backward-compatibility proof at ring level. */
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,0);clearKnobs();
+  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
+  gccMeasureHook=gccCounter;gccDelayCalls=0;
+  auto*g=startGcc(gn);
+  assert(!g->fVoteEnabled&&g->fProbeEnabled);
+  assert(counted("phase=vote")==0&&counted("phase=vote-request")==0&&counted("vote=")==0);
+  assert(g->registerWrites()==0&&writes()==0&&gccDelayCalls==0);
+  assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=5 snapshot=11 "
+                "reads="+std::to_string(g->fReads)+" writes=0 variant=0x8150 vote-probe=1"));
   g->release();gn->release();
   p->stop(pn);p->release();pn->release();
   assert(!live&&!liveMaps);

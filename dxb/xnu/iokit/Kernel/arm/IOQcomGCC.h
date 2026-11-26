@@ -143,6 +143,25 @@ static const char *const gccShareConsumers[kIOQcomGccShareConsumers] = {
 	"sweetclock-share-b",	/* the last holder: its release retracts the enable */
 };
 
+/* C2-06 write half: the branch this card may vote. gcc_npu_axi_clk is the
+ * sample the probe already read (vendor 0x4d008): bit 0 is its vote, bit 31 the
+ * halt status the NOC FSM owns. The identity is deliberately outside
+ * gccClocks[]: a vote announces no rate and exposes no queryable clock state, so
+ * it must not add a row to the read-only listings of an image that arms nothing.
+ * The poll budget is the vendor clk_branch_wait() itself, 500 x 1 us, because a
+ * BRANCH_VOTED branch is not the 25 ms halt class the plain gates use; the
+ * release settle is the single udelay(10) the same function does on the disable
+ * side of a voted branch. */
+enum : uint32_t {
+	kIOQcomGccVoteLocalID = 8,
+	kIOQcomGccVoteOffset = 0x008,
+};
+enum : unsigned {
+	kIOQcomGccVotePollTries = 500,
+	kIOQcomGccVotePollDelayUs = 1,
+	kIOQcomGccVoteSettleUs = 10,
+};
+
 /* C2-08: tolerances. The vendor formula rounds to +-0.5 %; a rate outside one
  * percent means the mux or the counter is wrong, not a rounding difference. */
 enum : int { kIOQcomGccMeasureTolerancePpm = 10000 };
@@ -204,6 +223,14 @@ class IOQcomGCC : public IOQcomClockController {
 	 * carries it is still a zero-write image. */
 	bool fProbeEnabled;
 	uint32_t fProbeValue[kIOQcomGccProbeRegisterCount];
+	/* C2-06 write half: the vote. The flag alone decides whether the pass runs,
+	 * and fVoteLeftSet records the one state the ledger cannot express - a store
+	 * that landed whose release did not, which leaves this driver's vote on the
+	 * branch with nobody owing a retraction for it. */
+	bool fVoteEnabled;
+	bool fVoteRunning;
+	bool fVoteLeftSet;
+	uint32_t fVoteBefore, fVoteAfterRelease;
 	uint32_t fShareToken[kIOQcomGccShareConsumers];
 	unsigned fShareHolders;
 	/* The C2-03 token while this driver still holds it. C2-04 releases that
@@ -276,6 +303,17 @@ class IOQcomGCC : public IOQcomClockController {
 	 * whether bit 0 is already someone's vote and whether the halt status says
 	 * the aggregate is off. It stores nothing and takes no ledger entry. */
 	IOReturn probeVoteSample(void);
+	/* C2-06 write half: the vote. Refuses a branch whose bit 0 is already set or
+	 * whose halt status already says "running", stores bit 0 alone, polls the
+	 * halt status clear inside the vendor's own 500 us budget, then clears bit 0
+	 * and settles for the vendor's single 10 us. The three facts are reported as
+	 * three rows because they are three different claims, and the last of them
+	 * is an observation, never an aggregate-off verdict. */
+	IOReturn voteClocks(void);
+	/* The vote's only store path: the fifth page has exactly one write site, so
+	 * the generic path keeps its four-window bound and a reader can count the
+	 * vote stores without re-reading that guard. */
+	bool writeVoteRegister(uint32_t offset, uint32_t value, const char *stage);
 	/* Reads the neighbour set into fGateNeighbour (capture=true) or compares it
 	 * with that capture (capture=false), returning how many moved. The consumer
 	 * is passed in so a disable row is not attributed to the gate pass. */

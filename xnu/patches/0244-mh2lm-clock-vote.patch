@@ -1,0 +1,776 @@
+From: mh2lm clock work <clock@mh2lm>
+Subject: [PATCH 0244] clock: place the NPU vote, then take it back
+
+A voted branch is not enabled by its enable bit: the bit is a ballot, and the
+branch runs only while at least one ballot is in the box. 0137 read the three
+NPU branches the vendor declares BRANCH_VOTED and found all three holding
+0x80000000 - vote clear, halt status set. Nothing else was voting, so this card
+can produce one of the two things the aggregate half needs and not the other:
+
+    our vote     -> the aggregate comes up          (this image can show it)
+    our withdrawal -> the aggregate goes away        (only a second voter can
+                                                      keep it up, and there is
+                                                      none to observe)
+
+The release row is therefore named detail=observed-not-proof, and the card claims
+the vote and its own withdrawal. It does not claim CLK_OFF means the aggregate is
+off: the NPU power collapse and RPMh are voters this driver cannot see. The
+second-holder half stays open, and the probe is what will catch it if a later
+boot ever reports bit 0 set at start.
+
+Identity. The voted branch stays outside gccClocks[]: an eighth descriptor would
+add a row to every image's decode listing, including the four images that never
+map this page. The vote carries its own local ID and its own node name instead,
+and the page is the fifth window 0137 already maps. localID 8 and vendor offset
+0x008 are the whole identity.
+
+Two stores, one guard. writeRegister() accepts the fifth window for one offset
+only, and only when sweet,clock-vote armed it; writeVoteRegister() adds the
+second check so the offset is named at the point of the store, not far from it.
+The pass then follows the vendor tree's own budget: store, read back under the
+configuration mask, poll CLK_OFF for 500 x 1 us, and on release wait the 10 us
+the vendor's vote-disable delay asks for before reading the status again. A poll
+that succeeds on its first read reports polls=0 - the field counts sleeps the
+hardware needed, not reads the driver made.
+
+Preconditions, because a vote is worth more than its own store. The register is
+read before it is written, and two states are refused with zero stores:
+
+    bit 0 already set          detail=vote-held-by-other
+    halt status already clear  detail=halt-not-set
+
+The first is somebody else's ballot: writing a 1 there erases nothing today but
+the release would take back a bit this driver never placed. The second is an
+aggregate that is up with no vote of ours in it - a state this card cannot
+account for, and one a store would hide behind a successful-looking vote. Both
+are refusals from the read, and both keep the value in the row as the evidence.
+
+The release happens on every path after a successful store, including a poll that
+ran out: a vote this pass no longer needs is a vote that keeps another master's
+aggregate alive, and leaving it standing to make a timeout row look cleaner is
+the one thing the card forbids. The verdict is kept as three answers instead of
+one - vote-store= (the read-back showed only bit 0 moved), enable-done= (the
+aggregate came up inside the budget) and settle= (the bit came back out and the
+status read after it) - so a pass that voted and then saw the clock stall still
+proves the store. A timeout returns kIOReturnTimeout, a failed read or a failed
+release kIOReturnNotReady, and the start summary carries detail=vote-incomplete
+with the result.
+
+No ledger. The voted branch has no entry in gccClocks[], so it has no token to
+acquire, and inventing one only to release it immediately would book the vote as
+a demand this backend holds: ledgerRelease(token,false) on a last holder is the
+"hardware-still-on" fault path, and a vote's normal outcome would read as that
+fault. The vote keeps its own books - fVoteLeftSet and hold= on the done row -
+and leaves the ledger describing the clocks this backend actually owns.
+
+The generator puts the vote behind --clock-vote, which implies --clock-vote-probe
+(a vote alone is a tree the backend refuses before the first map), and the ADT
+test proves the tree is the probe tree plus exactly one property, removable back
+to the probe bytes. Backward compatibility is the same rule as C2-03/04/05: an
+image without sweet,clock-vote maps five windows, performs zero stores and
+prints the 0137 start row unchanged - no vote row, no vote= field.
+
+Host tests cover the happy path (two ordered stores, polls=0, one 10 us settle),
+the two refusals, a vote whose aggregate never comes up (500 polls, the vote
+still withdrawn, timings intact), the vote-without-probe and bad-value refusals,
+and the probe-only ring staying at zero writes with no vote row at all.
+
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
+index 84dd232..910245c 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
+@@ -355,6 +355,44 @@ IOQcomGCC::validateProperties(IOService *provider)
+ 		}
+ 		fProbeEnabled=value==1;
+ 	}
++	/* C2-06 write half: the vote needs the read-only page the probe maps, so the
++	 * tree has to arm both and a vote without its probe is refused here rather
++	 * than discovered as a missing window after the boot is half done. The
++	 * fields are cleared first so an instance that was started, stopped and
++	 * started again cannot inherit a vote it never placed. */
++	fVoteEnabled=false;
++	fVoteRunning=false;
++	fVoteLeftSet=false;
++	fVoteBefore=0;
++	fVoteAfterRelease=0;
++	OSData *vote=OSDynamicCast(OSData,provider->getProperty("sweet,clock-vote"));
++	if (vote) {
++		if (vote->getLength()!=4) {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-vote length=%u\n",
++			 kIOReturnBadArgument,(unsigned)vote->getLength());
++			return false;
++		}
++		uint32_t value=0;
++		memcpy(&value,vote->getBytesNoCopy(),4);
++		if (value>1) {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-vote value=%#x\n",
++			 kIOReturnBadArgument,value);
++			return false;
++		}
++		fVoteEnabled=value==1;
++	}
++	if (fVoteEnabled&&!fProbeEnabled) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=clock-vote-needs-probe clock-vote=%u clock-vote-probe=%u\n",
++		 kIOReturnBadArgument,fVoteEnabled?1u:0u,fProbeEnabled?1u:0u);
++		return false;
++	}
++	if (fVoteEnabled) {
++		/* The arm marker is its own row and not a field on the start row: a boot
++		 * whose vote pass dies before its first store still shows that the image
++		 * was armed, and an image that arms nothing keeps every row it had. */
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc:%#llx phase=vote result=0 detail=armed name=gcc_npu_axi_clk offset=%#x voted=1 vote-probe=1\n",
++		 (unsigned long long)kGccProbeWindowPhysical,kIOQcomGccVoteOffset);
++	}
+ 	if (haveGate) {
+ 		/* The ring written before this candidate keeps its exact row: the share
+ 		 * field appears only on an image that arms the sharing pass, so an
+@@ -596,9 +634,13 @@ IOQcomGCC::writeRegister(unsigned window,uint32_t offset,uint32_t value,
+ 	unsigned ordinal=0;
+ 	IOLockLock(fLock);
+ 	const Window &w=fWindow[window];
+-	/* C2-06 keeps the probe page read-only: the store set stays inside the four
+-	 * mandatory windows until the vote card lands with its own guard. */
+-	if (window<kIOQcomGccWindowCount&&w.base&&(offset&3u)==0&&
++	/* C2-06 write half: the fifth page is writable only while the vote is armed,
++	 * and only its one vote register reaches this path at all. An image that
++	 * carries the probe but not the vote keeps a store set inside the four
++	 * mandatory windows, which is what makes the probe ring a zero-write ring. */
++	const bool inWindow=window<kIOQcomGccWindowCount||
++	 (fVoteEnabled&&window==kIOQcomGccVoteWindow&&offset==kIOQcomGccVoteOffset);
++	if (inWindow&&w.base&&(offset&3u)==0&&
+ 	 (uint64_t)offset+sizeof(uint32_t)<=w.length) {
+ 		__asm__ volatile("dmb oshst" ::: "memory");
+ 		*(volatile uint32_t *)(w.base+offset)=value;
+@@ -622,6 +664,23 @@ IOQcomGCC::writeRegister(unsigned window,uint32_t offset,uint32_t value,
+ 	return true;
+ }
+ 
++bool
++IOQcomGCC::writeVoteRegister(uint32_t offset,uint32_t value,const char *stage)
++{
++	/* The refusal is a row and not a silent false: a vote store attempted on an
++	 * image that did not arm it is a driver bug, and the ring should name it
++	 * instead of leaving a write ordinal that has no owner. */
++	if (!fVoteEnabled||offset!=kIOQcomGccVoteOffset) {
++		if (fLock) { IOLockLock(fLock); fWriteFailures++; IOLockUnlock(fLock); }
++		char resource[kIOQcomLogBuf];
++		gccName(kIOQcomGccVoteWindow,offset,resource,sizeof resource);
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=write-issued result=%d stage=%s detail=vote-unarmed\n",
++		 resource,kIOReturnBadArgument,stage);
++		return false;
++	}
++	return writeRegister(kIOQcomGccVoteWindow,offset,value,stage,"sweetclock-vote");
++}
++
+ bool
+ IOQcomGCC::storeMeasure(MeasureReg *regs,unsigned index,uint32_t value,const char *stage)
+ {
+@@ -1318,10 +1377,170 @@ IOQcomGCC::shareClocks(void)
+ 	return kIOReturnSuccess;
+ }
+ 
+-/* C2-08 entry: save, acquire the XO/4 reference through the C1-05 ledger, store
+- * the mux and the reference gate, measure the two declared samples, restore
+- * every stored register, release the reference. Without the ADT gate nothing
+- * here runs and no store exists. */
++/* C2-06 write half: the vote.
++ *
++ * gcc_npu_axi_clk is a BRANCH_VOTED branch, and "voted" is the whole reason this
++ * card reports three facts instead of one verdict. In the vendor tree
++ * (clk-branch.h:60-140) BRANCH_VOTED turns clk_branch_wait() into: on enable,
++ * poll CLK_OFF clear for at most 500 x 1 us and warn if it does not clear; on
++ * *disable*, do one udelay(10) and return success without looking at CLK_OFF at
++ * all. The hardware says nothing when a vote is withdrawn, because the vote is a
++ * statement about one consumer's need and not about the aggregate.
++ *
++ * So this pass claims exactly three things:
++ *
++ *  1. vote-write      the store landed, and the CBCR read back differs from the
++ *                     saved value in bit 0 only (config bits compared under
++ *                     kIOQcomGccBranchConfigMask, so the FSM-owned halt status
++ *                     moving is not counted as a change this driver made);
++ *  2. enable-done     CLK_OFF cleared inside the vendor's own 500 us. The 0137
++ *                     probe read 0x80000000 on all three voted branches, so the
++ *                     aggregate really was off and this is the first observation
++ *                     of it coming up;
++ *  3. release-settle  bit 0 went back to 0, one 10 us delay, one read. Whatever
++ *                     CLK_OFF says afterwards is printed as an observation and
++ *                     never as proof: with a single voter it should be 1, but a
++ *                     second voter (NPU power collapse, RPMh) would hold the
++ *                     aggregate up and this driver cannot see that vote. The
++ *                     card does not claim the aggregate is off.
++ *
++ * Two states refuse before the first store, both of them real: bit 0 already set
++ * is a vote this driver did not place (a second holder, and the case the 0137
++ * baseline rules out but a later boot may not), and bit 31 already clear while
++ * our own vote is clear is an aggregate somebody else is holding up.
++ *
++ * No ledger entry. A C1 token models "a consumer needs this clock" with exactly
++ * two release outcomes - the clock stopped (satisfied) and it did not (owed) -
++ * and a vote is neither: the bit is gone while the aggregate belongs to whoever
++ * else votes. Booking it would make the last-holder release log
++ * detail=hardware-still-on at ERROR for the one outcome this card is designed to
++ * produce. The pass therefore keeps its own books (fVoteLeftSet, hold=0/1 on the
++ * done row) and leaves the ledger to the demands whose release it can judge. */
++IOReturn
++IOQcomGCC::voteClocks(void)
++{
++	if (!fVoteEnabled) {
++		SWEET_LOG_DEBUG("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-vote phase=vote result=%d detail=vote-absent\n",
++		 kIOQcomCCGCC,kIOQcomGccVoteLocalID,kIOReturnUnsupported);
++		return kIOReturnUnsupported;
++	}
++	if (!fMapped||!fRegistered||!fLock) return kIOReturnNotReady;
++	char resource[kIOQcomLogBuf];
++	gccName(kIOQcomGccVoteWindow,kIOQcomGccVoteOffset,resource,sizeof resource);
++	if (!fWindow[kIOQcomGccVoteWindow].base) {
++		/* validateProperties makes the vote imply its probe page, so a missing
++		 * mapping here is a driver bug and never a tree mistake. */
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote result=%d detail=vote-window-absent\n",
++		 resource,kIOReturnNotReady);
++		return kIOReturnNotReady;
++	}
++	uint32_t saved=0;
++	if (!readRegister(kIOQcomGccVoteWindow,kIOQcomGccVoteOffset,&saved)) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-request result=%d detail=vote-read-failed writes=%u\n",
++		 resource,kIOReturnNotReady,fWrites);
++		return kIOReturnNotReady;
++	}
++	fVoteBefore=saved;
++	const bool held=(saved&kGccBranchEnable)!=0;
++	const bool off=(saved&kGccBranchClockOff)!=0;
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s name=gcc_npu_axi_clk consumer=sweetclock-vote phase=vote-request result=0 enable=%u off=%u value=%#x\n",
++	 resource,held?1u:0u,off?1u:0u,saved);
++	if (held||!off) {
++		/* The value is the evidence; a store here would erase a state this card
++		 * cannot account for, and it would be a vote on top of somebody's vote. */
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-request result=%d detail=%s enable=%u off=%u value=%#x writes=0\n",
++		 resource,kIOReturnNotReady,held?"vote-held-by-other":"halt-not-set",
++		 held?1u:0u,off?1u:0u,saved);
++		return kIOReturnNotReady;
++	}
++	/* Bit 0 only. The saved config bits come back on release, and the halt
++	 * status is never written on either store: the FSM owns it, which is why the
++	 * vendor's set/clear helpers are field updates and not writes of a readback. */
++	uint32_t target=(saved&kIOQcomGccBranchConfigMask)|kGccBranchEnable;
++	if (!writeVoteRegister(kIOQcomGccVoteOffset,target,"vote-enable")) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-done result=%d writes=%u vote-store=0 enable-done=0 settle=0 hold=0 detail=store-failed\n",
++		 resource,kIOReturnNotReady,fWrites);
++		return kIOReturnNotReady;
++	}
++	uint32_t written=0;
++	bool writeRead=readRegister(kIOQcomGccVoteWindow,kIOQcomGccVoteOffset,&written);
++	const bool bitOnly=writeRead&&
++	 (written&kIOQcomGccBranchConfigMask)==target;
++	if (writeRead) {
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-write result=0 enable=%u value=%#x mask=%#x changed-only-enable=%u\n",
++		 resource,(written&kGccBranchEnable)?1u:0u,written,kIOQcomGccBranchConfigMask,
++		 bitOnly?1u:0u);
++	} else {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-write result=%d detail=readback-failed\n",
++		 resource,kIOReturnNotReady);
++	}
++	/* The vendor's own enable budget: 500 x 1 us, then warn. Nothing longer,
++	 * because a voted branch that has not come up in 500 us is the NPU power
++	 * collapse's problem and not a wait this pass should extend. */
++	unsigned polls=0;
++	uint32_t value=target;
++	bool running=false,readFailed=false;
++	for (polls=0;polls<kIOQcomGccVotePollTries;polls++) {
++		if (!readRegister(kIOQcomGccVoteWindow,kIOQcomGccVoteOffset,&value)) {
++			readFailed=true;
++			break;
++		}
++		if ((value&kGccBranchClockOff)==0) { running=true; break; }
++		IODelay(kIOQcomGccVotePollDelayUs);
++	}
++	/* The loop reads before it sleeps, so a first-poll success is polls==0: the
++	 * number is the count of sleeps the hardware needed, not the count of reads. */
++	if (running) {
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-running result=0 enable=%u off=0 value=%#x polls=%u\n",
++		 resource,(value&kGccBranchEnable)?1u:0u,value,polls);
++	} else {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-running result=%d enable=%u off=%u value=%#x polls=%u detail=%s\n",
++		 resource,readFailed?kIOReturnNotReady:kIOReturnTimeout,
++		 (value&kGccBranchEnable)?1u:0u,(value&kGccBranchClockOff)?1u:0u,value,polls,
++		 readFailed?"vote-read-failed":"vote-halt-timeout");
++	}
++	fVoteRunning=running;
++	/* The vote comes back out whatever happened above: a vote this driver no
++	 * longer needs is a vote that keeps somebody's aggregate alive, and leaving
++	 * it behind to make a timeout row read better is the one thing the card
++	 * forbids. On a timeout the release is also the safest state to leave. */
++	uint32_t release=saved&kIOQcomGccBranchConfigMask;
++	bool released=writeVoteRegister(kIOQcomGccVoteOffset,release,"vote-release");
++	uint32_t settled=0;
++	bool settleRead=false;
++	if (released) {
++		IODelay(kIOQcomGccVoteSettleUs);
++		settleRead=readRegister(kIOQcomGccVoteWindow,kIOQcomGccVoteOffset,&settled);
++	}
++	fVoteLeftSet=!released||(settleRead&&(settled&kGccBranchEnable)!=0);
++	fVoteAfterRelease=settleRead?settled:0;
++	if (!released) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-release result=%d detail=vote-release-failed\n",
++		 resource,kIOReturnNotReady);
++	} else if (!settleRead) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-release result=%d delay-us=%u detail=settle-read-failed\n",
++		 resource,kIOReturnNotReady,kIOQcomGccVoteSettleUs);
++	} else {
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-release result=0 delay-us=%u enable=%u off=%u value=%#x mask=%#x detail=observed-not-proof\n",
++		 resource,kIOQcomGccVoteSettleUs,(settled&kGccBranchEnable)?1u:0u,
++		 (settled&kGccBranchClockOff)?1u:0u,settled,kIOQcomGccBranchConfigMask);
++	}
++	/* Three separate answers, never folded into one: a pass that wrote a vote and
++	 * failed to see the aggregate come up still proves the store, and a pass whose
++	 * release did not read back still proves the vote. */
++	unsigned storeOk=bitOnly?1u:0u, enableDone=running?1u:0u, settleOk=(released&&settleRead&&!fVoteLeftSet)?1u:0u;
++	IOReturn verdict=(writeRead&&bitOnly&&running&&settleOk)?kIOReturnSuccess:
++	 (readFailed||!released||!writeRead)?kIOReturnNotReady:
++	 (running?kIOReturnIOError:kIOReturnTimeout);
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-done result=%d writes=%u vote-store=%u enable-done=%u settle=%u polls=%u hold=%u before=%#x after=%#x\n",
++	 resource,verdict,fWrites,storeOk,enableDone,settleOk,polls,fVoteLeftSet?1u:0u,
++	 saved,fVoteAfterRelease);
++	if (fVoteLeftSet) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-done result=%d detail=vote-left-set value=%#x\n",
++		 resource,kIOReturnNotReady,fVoteAfterRelease);
++	}
++	return verdict;
++}
+ IOReturn
+ IOQcomGCC::measureClocks(void)
+ {
+@@ -1514,6 +1733,15 @@ IOQcomGCC::start(IOService *provider)
+ 		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=share-incomplete share-result=%d writes=%u\n",
+ 		 kIOQcomCCGCC,shared,fWrites);
+ 	}
++	/* C2-06 write half runs after the C2-04/C2-05 passes and before the C2-08
++	 * measurement: the vote is placed and withdrawn inside this pass, so the
++	 * branch is back at its boot state before anything measures, and a vote that
++	 * will not release does not sit in the way of a measurement store. */
++	IOReturn voted=voteClocks();
++	if (voted!=kIOReturnSuccess&&voted!=kIOReturnUnsupported) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=vote-incomplete vote-result=%d writes=%u\n",
++		 kIOQcomCCGCC,voted,fWrites);
++	}
+ 	/* C2-08 last, so registration and the C2-02 decode exist before the first
+ 	 * store and a failed measurement cannot leave a half-published backend. */
+ 	IOReturn measured=measureClocks();
+@@ -1521,7 +1749,11 @@ IOQcomGCC::start(IOService *provider)
+ 		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=measure-incomplete measure-result=%d writes=%u\n",
+ 		 kIOQcomCCGCC,measured,fWrites);
+ 	}
+-	if (fProbeEnabled) {
++	if (fVoteEnabled) {
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x vote-probe=1 vote=1\n",
++		 kIOQcomCCGCC,kIOQcomGccMappedWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
++		 kIOQcomGccVariantSm8150);
++	} else if (fProbeEnabled) {
+ 		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x vote-probe=1\n",
+ 		 kIOQcomCCGCC,kIOQcomGccMappedWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
+ 		 kIOQcomGccVariantSm8150);
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
+index 5ed77ab..39a1fe4 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
+@@ -143,6 +143,25 @@ static const char *const gccShareConsumers[kIOQcomGccShareConsumers] = {
+ 	"sweetclock-share-b",	/* the last holder: its release retracts the enable */
+ };
+ 
++/* C2-06 write half: the branch this card may vote. gcc_npu_axi_clk is the
++ * sample the probe already read (vendor 0x4d008): bit 0 is its vote, bit 31 the
++ * halt status the NOC FSM owns. The identity is deliberately outside
++ * gccClocks[]: a vote announces no rate and exposes no queryable clock state, so
++ * it must not add a row to the read-only listings of an image that arms nothing.
++ * The poll budget is the vendor clk_branch_wait() itself, 500 x 1 us, because a
++ * BRANCH_VOTED branch is not the 25 ms halt class the plain gates use; the
++ * release settle is the single udelay(10) the same function does on the disable
++ * side of a voted branch. */
++enum : uint32_t {
++	kIOQcomGccVoteLocalID = 8,
++	kIOQcomGccVoteOffset = 0x008,
++};
++enum : unsigned {
++	kIOQcomGccVotePollTries = 500,
++	kIOQcomGccVotePollDelayUs = 1,
++	kIOQcomGccVoteSettleUs = 10,
++};
++
+ /* C2-08: tolerances. The vendor formula rounds to +-0.5 %; a rate outside one
+  * percent means the mux or the counter is wrong, not a rounding difference. */
+ enum : int { kIOQcomGccMeasureTolerancePpm = 10000 };
+@@ -204,6 +223,14 @@ class IOQcomGCC : public IOQcomClockController {
+ 	 * carries it is still a zero-write image. */
+ 	bool fProbeEnabled;
+ 	uint32_t fProbeValue[kIOQcomGccProbeRegisterCount];
++	/* C2-06 write half: the vote. The flag alone decides whether the pass runs,
++	 * and fVoteLeftSet records the one state the ledger cannot express - a store
++	 * that landed whose release did not, which leaves this driver's vote on the
++	 * branch with nobody owing a retraction for it. */
++	bool fVoteEnabled;
++	bool fVoteRunning;
++	bool fVoteLeftSet;
++	uint32_t fVoteBefore, fVoteAfterRelease;
+ 	uint32_t fShareToken[kIOQcomGccShareConsumers];
+ 	unsigned fShareHolders;
+ 	/* The C2-03 token while this driver still holds it. C2-04 releases that
+@@ -276,6 +303,17 @@ class IOQcomGCC : public IOQcomClockController {
+ 	 * whether bit 0 is already someone's vote and whether the halt status says
+ 	 * the aggregate is off. It stores nothing and takes no ledger entry. */
+ 	IOReturn probeVoteSample(void);
++	/* C2-06 write half: the vote. Refuses a branch whose bit 0 is already set or
++	 * whose halt status already says "running", stores bit 0 alone, polls the
++	 * halt status clear inside the vendor's own 500 us budget, then clears bit 0
++	 * and settles for the vendor's single 10 us. The three facts are reported as
++	 * three rows because they are three different claims, and the last of them
++	 * is an observation, never an aggregate-off verdict. */
++	IOReturn voteClocks(void);
++	/* The vote's only store path: the fifth page has exactly one write site, so
++	 * the generic path keeps its four-window bound and a reader can count the
++	 * vote stores without re-reading that guard. */
++	bool writeVoteRegister(uint32_t offset, uint32_t value, const char *stage);
+ 	/* Reads the neighbour set into fGateNeighbour (capture=true) or compares it
+ 	 * with that capture (capture=false), returning how many moved. The consumer
+ 	 * is passed in so a disable row is not attributed to the gate pass. */
+diff --git a/tools/mk-mh2lm-mdss-adt.py b/tools/mk-mh2lm-mdss-adt.py
+index 855b335..a2d23a3 100644
+--- a/tools/mk-mh2lm-mdss-adt.py
++++ b/tools/mk-mh2lm-mdss-adt.py
+@@ -41,12 +41,16 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
+ 
+ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
+             clock_gate=False, clock_disable=False, clock_share=False,
+-            clock_vote_probe=False):
++            clock_vote_probe=False, clock_vote=False):
+     # C2-05 stands on both cards below it, so the two switch it needs are implied
+     # here rather than trusted to every caller: a share node without them would be
+     # refused at start and the image would carry a property that can do nothing.
+     clock_disable = clock_disable or clock_share
+     clock_gate = clock_gate or clock_disable
++    # C2-06's write half votes in the page its read-only half maps, so the vote
++    # implies the probe: a node that asked for the vote alone would be refused at
++    # start, and the generator will not emit one.
++    clock_vote_probe = clock_vote_probe or clock_vote
+     display_noc = display_noc or panel_pipeline
+     display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
+     root, end = adt.parse(blob)
+@@ -231,6 +235,11 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+             # opt-in can ride on any image that carries the GCC node. The window
+             # it needs is the fifth range appended above.
+             gcc_node.props.append(('sweet,clock-vote-probe', 0, struct.pack('<I', 1)))
++        if clock_vote:
++            # C2-06's write half is a separate opt-in so the read-only probe image
++            # keeps its zero-write ring: this property is the only thing that
++            # makes the fifth page reachable by the store path.
++            gcc_node.props.append(('sweet,clock-vote', 0, struct.pack('<I', 1)))
+         arm.children.append(gcc_node)
+     return adt.serialize(root)
+ 
+@@ -253,6 +262,7 @@ if __name__ == '__main__':
+     parser.add_argument('--clock-disable', action='store_true', help='append the C2-04 verified disable opt-in (implies --clock-gate); withdraws that enable, proves the halt and releases the demand')
+     parser.add_argument('--clock-share', action='store_true', help='append the C2-05 sharing opt-in (implies --clock-gate and --clock-disable); two consumers share the gate demand and the last release retracts it')
+     parser.add_argument('--clock-vote-probe', action='store_true', help='append the C2-06 read-only vote probe (implies --gcc); maps the NPU page as a fifth range and reads four CBCRs, zero stores')
++    parser.add_argument('--clock-vote', action='store_true', help='append the C2-06 vote opt-in (implies --clock-vote-probe); stores one vote bit, waits for the aggregate, and withdraws it again')
+     parser.add_argument('source', type=Path)
+     parser.add_argument('destination', type=Path)
+     args = parser.parse_args()
+@@ -260,4 +270,5 @@ if __name__ == '__main__':
+     if source.resolve() == destination.resolve():
+         sys.exit('output must differ from the baseline ADT')
+     destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
+-                      args.clock_disable, args.clock_share, args.clock_vote_probe))
++                      args.clock_disable, args.clock_share, args.clock_vote_probe,
++                      args.clock_vote))
+diff --git a/tools/tests/test-mh2lm-gcc-backend.py b/tools/tests/test-mh2lm-gcc-backend.py
+index 7a42797..2ee71d5 100644
+--- a/tools/tests/test-mh2lm-gcc-backend.py
++++ b/tools/tests/test-mh2lm-gcc-backend.py
+@@ -195,7 +195,7 @@ static IOService*clockNub(){
+ }
+ static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=true,
+  unsigned abiLength=4,unsigned measure=0,unsigned gate=0,unsigned disable=0,
+- unsigned share=0,unsigned probe=0){
++ unsigned share=0,unsigned probe=0,unsigned vote=0){
+  auto*n=fixtureAlloc<IOService>();
+  if(abi){uint32_t a=1;setData(n,"sweet,gcc-abi",&a,abiLength);}
+  if(haveVariant)setData(n,"sweet,gcc-variant",&variant,4);
+@@ -209,6 +209,8 @@ static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=t
+  if(share){uint32_t h=share==2?2u:1u;setData(n,"sweet,clock-share",&h,share==3?3u:4);}
+  /* probe: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
+  if(probe){uint32_t v=probe==2?2u:1u;setData(n,"sweet,clock-vote-probe",&v,probe==3?3u:4);}
++ /* vote: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
++ if(vote){uint32_t v=vote==2?2u:1u;setData(n,"sweet,clock-vote",&v,vote==3?3u:4);}
+  return n;
+ }
+ static IOQcomClockProvider*startProvider(IOService*n){
+@@ -257,6 +259,12 @@ static void resetGccRegs(){
+ static bool gccRefStuckOff=false,gccCountStuck=false,gccGateStuckOff=false;
+ /* C2-04: a branch whose halt status never rises after the disable store. */
+ static bool gccDisableStuckRunning=false;
++/* C2-06 write half: a voted branch that takes the vote and never reports the
++ * aggregate up - the one failure the 500 us enable budget has to survive. */
++static bool gccVoteStuckOff=false;
++/* C2-06: an aggregate somebody else holds up while our own vote is clear - the
++ * state the pass must refuse instead of writing a vote into it. */
++static bool gccVoteHaltClear=false;
+ /* Off by default: the shipped fixture lets a test present any register value,
+  * so a synthetic 0x0 is a legitimate input for the preconditions. A case that
+  * wants the halt handshake the device performs (enable bit decides CLK_OFF)
+@@ -270,7 +278,7 @@ static void clearKnobs(){gccMemoryCount=4;gccAbsentIndex=99;gccWrongPA=99;gccSho
+  gccHaltLag=false;gccHaltPending.clear();gccDriftPA=0;gccDriftBits=0;
+  gccRefStuckOff=false;gccCountStuck=false;gccGateStuckOff=false;gccNeighbourShift=false;
+  gccDisableNeighbourShift=false;gccDisableStuckRunning=false;gccHaltFollowsEnable=false;
+- gccDisableStored=false;}
++ gccDisableStored=false;gccVoteStuckOff=false;gccVoteHaltClear=false;}
+ /* C2-08 device model. The debug counter sees the selected source: the running
+  * clock (19.2 MHz) yields four counts per loaded tick of the XO/4 reference,
+  * a stopped source yields the same count on both runs, and a stuck counter
+@@ -291,6 +299,16 @@ static uint32_t gccCounter(uintptr_t pa,uint32_t v){
+   if(v&1u)return v&~0x80000000u;		/* a running branch reports CLK_OFF=0 */
+   return v;
+  }
++ /* C2-06 write half: the voted NPU branch. A vote lifts the halt status and
++  * withdrawing it raises the status again - that pair is the whole observable
++  * this card has. gccVoteStuckOff is a vote that landed while the aggregate
++  * stayed down. */
++ if(pa==0x0014d008u){
++  if(gccVoteHaltClear)return v&~0x80000000u;
++  if(!(v&1u))return v|0x80000000u;
++  if(gccVoteStuckOff)return v|0x80000000u;
++  return v&~0x80000000u;
++ }
+  if(pa!=0x0016203cu)return v;
+  uint32_t ctl=regs[0x00162038u];
+  if(!(ctl&(1u<<20)))return 0;			/* idle until the counter is enabled */
+@@ -794,6 +812,174 @@ int main(){
+   p->stop(pn);p->release();pn->release();
+   assert(!live&&!liveMaps);
+  }
++ /* ---- C2-06 write half: the vote, placed and withdrawn in one pass ---- */
++ {
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,1);clearKnobs();
++  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
++  gccMeasureHook=gccCounter;gccDelayCalls=0;
++  auto*g=startGcc(gn);
++  /* the arm row comes before any store, so a pass that dies early still shows
++   * that this image asked for a vote */
++  assert(logged("resource=gcc:0x14d000 phase=vote result=0 detail=armed "
++                "name=gcc_npu_axi_clk offset=0x8 voted=1 vote-probe=1"));
++  /* what the branch held: nobody's vote, the aggregate off */
++  assert(logged("resource=gcc:0x14d008 name=gcc_npu_axi_clk consumer=sweetclock-vote "
++                "phase=vote-request result=0 enable=0 off=1 value=0x80000000"));
++  /* two stores, in order, and neither of them writes the halt status */
++  assert(logged("consumer=sweetclock-vote phase=write-issued result=0 stage=vote-enable write=1 value=0x1"));
++  assert(logged("consumer=sweetclock-vote phase=write-issued result=0 stage=vote-release write=2 value=0"));
++  /* fact one: the store landed and only bit 0 moved (config bits compared under
++   * the mask, so the FSM's own halt status is not counted as our change) */
++  assert(logged("phase=vote-write result=0 enable=1 value=0x1 mask=0xfffffff changed-only-enable=1"));
++  /* fact two: the aggregate came up on the first read, no sleep spent */
++  assert(logged("phase=vote-running result=0 enable=1 off=0 value=0x1 polls=0"));
++  /* fact three: bit 0 gone, one settle, and the read-after is an observation */
++  assert(logged("phase=vote-release result=0 delay-us=10 enable=0 off=1 value=0x80000000 "
++                "mask=0xfffffff detail=observed-not-proof"));
++  assert(logged("phase=vote-done result=0 writes=2 vote-store=1 enable-done=1 settle=1 "
++                "polls=0 hold=0 before=0x80000000 after=0x80000000"));
++  /* exactly one 10 us settle and no poll sleep: the pass spent the vendor's
++   * enable budget in one read, so the delay count proves the budget was not
++   * padded */
++  assert(gccDelayCalls==1);
++  assert(g->registerWrites()==2&&writes()==2);
++  assert(!g->fVoteLeftSet&&g->fVoteRunning);
++  /* the branch is back at its boot value and the pass claimed no aggregate
++   * verdict: bit 0 clear, halt status set, both stores accounted for */
++  assert(regs[0x0014d008u]==0x0u);
++  assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=5 snapshot=11 "
++                "reads="+std::to_string(g->fReads)+" writes=2 variant=0x8150 vote-probe=1 vote=1"));
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  assert(!live&&!liveMaps);
++ }
++ {
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,1);clearKnobs();
++  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
++  gccMeasureHook=gccCounter;gccDelayCalls=0;
++  /* somebody else already voted: the read-only baseline said 0x80000000 at
++   * boot, so this is the second-holder case the probe cannot rule out later */
++  setReg(0x0014d000u,0x008,0x00000001u);
++  auto*g=startGcc(gn);
++  assert(logged("phase=vote-request result=0 enable=1 off=0 value=0x1"));
++  assert(logged("phase=vote-request result="+std::to_string(kIOReturnNotReady)+
++                " detail=vote-held-by-other enable=1 off=0 value=0x1 writes=0"));
++  /* nothing was stored and the other holder's bit is untouched */
++  assert(g->registerWrites()==0&&writes()==0);
++  assert(regs[0x0014d008u]==0x00000001u);
++  assert(counted("stage=vote-enable")==0&&counted("phase=vote-done")==0);
++  assert(logged("detail=vote-incomplete vote-result="+std::to_string(kIOReturnNotReady)));
++  assert(!g->fVoteRunning&&!g->fVoteLeftSet);
++  /* the probe rows still report the state that caused the refusal */
++  assert(logged("resource=gcc:0x14d008 phase=probe result=0 name=gcc_npu_axi_clk "
++                "voted=1 enable=1 clk-off=0 value=0x1"));
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  assert(!live&&!liveMaps);
++ }
++ {
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,1);clearKnobs();
++  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
++  gccMeasureHook=gccCounter;gccDelayCalls=0;
++  /* no vote of ours, yet the aggregate is already up: a state this card cannot
++   * explain, and one a store would hide */
++  gccVoteHaltClear=true;
++  auto*g=startGcc(gn);
++  assert(logged("phase=vote-request result="+std::to_string(kIOReturnNotReady)+
++                " detail=halt-not-set enable=0 off=0 value=0 writes=0"));
++  assert(g->registerWrites()==0&&writes()==0);
++  assert(regs[0x0014d008u]==0x80000000u&&counted("phase=vote-done")==0);
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  assert(!live&&!liveMaps);
++ }
++ {
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,1);clearKnobs();
++  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
++  gccMeasureHook=gccCounter;gccDelayCalls=0;
++  /* the vote lands and the clock never comes up: the 500 us budget expires, the
++   * vote is still withdrawn, and the pass says so instead of claiming a run */
++  gccVoteStuckOff=true;
++  auto*g=startGcc(gn);
++  assert(logged("phase=vote-running result="+std::to_string(kIOReturnTimeout)+
++                " enable=1 off=1 value=0x80000001 polls=500 detail=vote-halt-timeout"));
++  assert(logged("phase=vote-done result="+std::to_string(kIOReturnTimeout)+
++                " writes=2 vote-store=1 enable-done=0 settle=1 polls=500 hold=0 "
++                "before=0x80000000 after=0x80000000"));
++  /* the vote came back out anyway: a demand this driver does not hold is not
++   * left standing because the enable failed */
++  assert(g->registerWrites()==2&&writes()==2&&regs[0x0014d008u]==0x0u);
++  assert(!g->fVoteRunning&&!g->fVoteLeftSet);
++  /* 500 poll sleeps plus the one settle: the budget is the vendor's own */
++  assert(gccDelayCalls==501);
++  assert(logged("detail=vote-incomplete vote-result="+std::to_string(kIOReturnTimeout)));
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  assert(!live&&!liveMaps);
++ }
++ /* ---- the vote is an opt-in of its own: refusals and the probe-only ring ---- */
++ {
++  messages.clear();mapCalls.clear();
++  auto*n=clockNub();auto*g=fixtureAlloc<IOQcomGCC>();
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,1);clearKnobs();resetGccRegs();
++  assert(!g->start(gn));
++  assert(logged("resource=gcc phase=start result="+std::to_string(kIOReturnBadArgument)+
++                " detail=clock-vote-needs-probe clock-vote=1 clock-vote-probe=0"));
++  /* the refusal comes before the first map, so nothing was touched */
++  assert(mapCalls.empty()&&!g->fMapped&&!g->fLock);
++  g->release();gn->release();
++  n->release();assert(!live&&!liveMaps);
++ }
++ {
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,2);clearKnobs();
++  gccMemoryCount=5;resetGccRegs();
++  auto*g=fixtureAlloc<IOQcomGCC>();
++  assert(!g->start(gn));
++  assert(logged("detail=bad-clock-vote value=0x2"));
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  assert(!live&&!liveMaps);
++ }
++ {
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,3);clearKnobs();
++  gccMemoryCount=5;resetGccRegs();
++  auto*g=fixtureAlloc<IOQcomGCC>();
++  assert(!g->start(gn));
++  assert(logged("detail=bad-clock-vote length=3"));
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  assert(!live&&!liveMaps);
++ }
++ {
++  /* probe without vote: the same ring 0137 shipped - five windows, zero stores,
++   * not one vote row. This is the backward-compatibility proof at ring level. */
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,1,0);clearKnobs();
++  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
++  gccMeasureHook=gccCounter;gccDelayCalls=0;
++  auto*g=startGcc(gn);
++  assert(!g->fVoteEnabled&&g->fProbeEnabled);
++  assert(counted("phase=vote")==0&&counted("phase=vote-request")==0&&counted("vote=")==0);
++  assert(g->registerWrites()==0&&writes()==0&&gccDelayCalls==0);
++  assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=5 snapshot=11 "
++                "reads="+std::to_string(g->fReads)+" writes=0 variant=0x8150 vote-probe=1"));
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  assert(!live&&!liveMaps);
++ }
+  /* ---- opt-in diagnostics list the real backend, names and all ---- */
+  {
+   clockMode=1;
+diff --git a/tools/tests/test-mh2lm-mdss-adt.py b/tools/tests/test-mh2lm-mdss-adt.py
+index c9b2b77..765c52d 100644
+--- a/tools/tests/test-mh2lm-mdss-adt.py
++++ b/tools/tests/test-mh2lm-mdss-adt.py
+@@ -561,6 +561,34 @@ for name in ('sweet,clock-vote-probe', 'sweet,clock-share', 'sweet,clock-disable
+              'sweet,clock-gate'):
+     assert gcc.prop(name) == struct.pack('<I', 1), name
+ assert len(gcc.prop('reg')) == 8 * 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
++# the write half is its own property and implies the probe: a vote alone would be
++# a tree the backend refuses, so the generator will not emit one.
++voted = m.derive(blob, clock_vote=True)
++assert voted == m.derive(blob, clock_vote_probe=True, clock_vote=True)
++assert voted != probed
++assert b'sweet,clock-vote\0' not in m.derive(blob, clock_vote_probe=True)
++assert b'sweet,clock-vote\0' not in blob
++vtree, end = adt.parse(voted)
++assert end == len(voted)
++gcc = next(n for n in vtree.children[1].children if n.name == 'gcc')
++assert gcc.prop('sweet,clock-vote') == struct.pack('<I', 1)
++assert gcc.prop('sweet,clock-vote-probe') == struct.pack('<I', 1), 'the vote implies the probe'
++# the vote buys no write authorisation of its own: the gate card stays absent, so
++# the page is reachable only by the vote register the driver checks by offset.
++assert gcc.prop('sweet,clock-gate') is None
++vreg = struct.unpack('<%dQ' % (len(gcc.prop('reg')) // 8), gcc.prop('reg'))
++assert len(vreg) == 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
++# dropping the vote property alone leaves the read-only probe tree
++gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-vote']
++assert adt.serialize(vtree) == probed
++combo = m.derive(blob, clock_vote=True, clock_share=True)
++ctree, end = adt.parse(combo)
++assert end == len(combo)
++gcc = next(n for n in ctree.children[1].children if n.name == 'gcc')
++for name in ('sweet,clock-vote', 'sweet,clock-vote-probe', 'sweet,clock-share',
++             'sweet,clock-disable', 'sweet,clock-gate'):
++    assert gcc.prop(name) == struct.pack('<I', 1), name
++assert len(gcc.prop('reg')) == 8 * 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
+ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-vote-probe-adt-') as temp:
+     source, output = Path(temp)/'base.adt', Path(temp)/'probe.adt'
+     source.write_bytes(blob)
+@@ -568,8 +596,16 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-vote-probe-adt-') as temp:
+                     str(source), str(output)], check=True)
+     assert output.read_bytes() == probed
+     assert source.read_bytes() == blob
++with tempfile.TemporaryDirectory(prefix='mh2lm-clock-vote-adt-') as temp:
++    source, output = Path(temp)/'base.adt', Path(temp)/'vote.adt'
++    source.write_bytes(blob)
++    subprocess.run([sys.executable, str(Path(m.__file__)), '--clock-vote',
++                    str(source), str(output)], check=True)
++    assert output.read_bytes() == voted
++    assert source.read_bytes() == blob
+ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
+       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
+       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
+       'that no earlier image carries, and the C2-05 share on top of all three, plus the '
+-      'C2-06 vote probe, which owns both its property and the fifth range')
++      'C2-06 vote probe, which owns both its property and the fifth range, and the vote on '
++      'top of it as a property of its own')

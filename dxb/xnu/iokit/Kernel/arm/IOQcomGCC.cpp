@@ -355,6 +355,44 @@ IOQcomGCC::validateProperties(IOService *provider)
 		}
 		fProbeEnabled=value==1;
 	}
+	/* C2-06 write half: the vote needs the read-only page the probe maps, so the
+	 * tree has to arm both and a vote without its probe is refused here rather
+	 * than discovered as a missing window after the boot is half done. The
+	 * fields are cleared first so an instance that was started, stopped and
+	 * started again cannot inherit a vote it never placed. */
+	fVoteEnabled=false;
+	fVoteRunning=false;
+	fVoteLeftSet=false;
+	fVoteBefore=0;
+	fVoteAfterRelease=0;
+	OSData *vote=OSDynamicCast(OSData,provider->getProperty("sweet,clock-vote"));
+	if (vote) {
+		if (vote->getLength()!=4) {
+			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-vote length=%u\n",
+			 kIOReturnBadArgument,(unsigned)vote->getLength());
+			return false;
+		}
+		uint32_t value=0;
+		memcpy(&value,vote->getBytesNoCopy(),4);
+		if (value>1) {
+			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-vote value=%#x\n",
+			 kIOReturnBadArgument,value);
+			return false;
+		}
+		fVoteEnabled=value==1;
+	}
+	if (fVoteEnabled&&!fProbeEnabled) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=clock-vote-needs-probe clock-vote=%u clock-vote-probe=%u\n",
+		 kIOReturnBadArgument,fVoteEnabled?1u:0u,fProbeEnabled?1u:0u);
+		return false;
+	}
+	if (fVoteEnabled) {
+		/* The arm marker is its own row and not a field on the start row: a boot
+		 * whose vote pass dies before its first store still shows that the image
+		 * was armed, and an image that arms nothing keeps every row it had. */
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc:%#llx phase=vote result=0 detail=armed name=gcc_npu_axi_clk offset=%#x voted=1 vote-probe=1\n",
+		 (unsigned long long)kGccProbeWindowPhysical,kIOQcomGccVoteOffset);
+	}
 	if (haveGate) {
 		/* The ring written before this candidate keeps its exact row: the share
 		 * field appears only on an image that arms the sharing pass, so an
@@ -596,9 +634,13 @@ IOQcomGCC::writeRegister(unsigned window,uint32_t offset,uint32_t value,
 	unsigned ordinal=0;
 	IOLockLock(fLock);
 	const Window &w=fWindow[window];
-	/* C2-06 keeps the probe page read-only: the store set stays inside the four
-	 * mandatory windows until the vote card lands with its own guard. */
-	if (window<kIOQcomGccWindowCount&&w.base&&(offset&3u)==0&&
+	/* C2-06 write half: the fifth page is writable only while the vote is armed,
+	 * and only its one vote register reaches this path at all. An image that
+	 * carries the probe but not the vote keeps a store set inside the four
+	 * mandatory windows, which is what makes the probe ring a zero-write ring. */
+	const bool inWindow=window<kIOQcomGccWindowCount||
+	 (fVoteEnabled&&window==kIOQcomGccVoteWindow&&offset==kIOQcomGccVoteOffset);
+	if (inWindow&&w.base&&(offset&3u)==0&&
 	 (uint64_t)offset+sizeof(uint32_t)<=w.length) {
 		__asm__ volatile("dmb oshst" ::: "memory");
 		*(volatile uint32_t *)(w.base+offset)=value;
@@ -620,6 +662,23 @@ IOQcomGCC::writeRegister(unsigned window,uint32_t offset,uint32_t value,
 	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=%s phase=write-issued result=0 stage=%s write=%u value=%#x\n",
 	 resource,consumer,stage,ordinal,value);
 	return true;
+}
+
+bool
+IOQcomGCC::writeVoteRegister(uint32_t offset,uint32_t value,const char *stage)
+{
+	/* The refusal is a row and not a silent false: a vote store attempted on an
+	 * image that did not arm it is a driver bug, and the ring should name it
+	 * instead of leaving a write ordinal that has no owner. */
+	if (!fVoteEnabled||offset!=kIOQcomGccVoteOffset) {
+		if (fLock) { IOLockLock(fLock); fWriteFailures++; IOLockUnlock(fLock); }
+		char resource[kIOQcomLogBuf];
+		gccName(kIOQcomGccVoteWindow,offset,resource,sizeof resource);
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=write-issued result=%d stage=%s detail=vote-unarmed\n",
+		 resource,kIOReturnBadArgument,stage);
+		return false;
+	}
+	return writeRegister(kIOQcomGccVoteWindow,offset,value,stage,"sweetclock-vote");
 }
 
 bool
@@ -1318,10 +1377,170 @@ IOQcomGCC::shareClocks(void)
 	return kIOReturnSuccess;
 }
 
-/* C2-08 entry: save, acquire the XO/4 reference through the C1-05 ledger, store
- * the mux and the reference gate, measure the two declared samples, restore
- * every stored register, release the reference. Without the ADT gate nothing
- * here runs and no store exists. */
+/* C2-06 write half: the vote.
+ *
+ * gcc_npu_axi_clk is a BRANCH_VOTED branch, and "voted" is the whole reason this
+ * card reports three facts instead of one verdict. In the vendor tree
+ * (clk-branch.h:60-140) BRANCH_VOTED turns clk_branch_wait() into: on enable,
+ * poll CLK_OFF clear for at most 500 x 1 us and warn if it does not clear; on
+ * *disable*, do one udelay(10) and return success without looking at CLK_OFF at
+ * all. The hardware says nothing when a vote is withdrawn, because the vote is a
+ * statement about one consumer's need and not about the aggregate.
+ *
+ * So this pass claims exactly three things:
+ *
+ *  1. vote-write      the store landed, and the CBCR read back differs from the
+ *                     saved value in bit 0 only (config bits compared under
+ *                     kIOQcomGccBranchConfigMask, so the FSM-owned halt status
+ *                     moving is not counted as a change this driver made);
+ *  2. enable-done     CLK_OFF cleared inside the vendor's own 500 us. The 0137
+ *                     probe read 0x80000000 on all three voted branches, so the
+ *                     aggregate really was off and this is the first observation
+ *                     of it coming up;
+ *  3. release-settle  bit 0 went back to 0, one 10 us delay, one read. Whatever
+ *                     CLK_OFF says afterwards is printed as an observation and
+ *                     never as proof: with a single voter it should be 1, but a
+ *                     second voter (NPU power collapse, RPMh) would hold the
+ *                     aggregate up and this driver cannot see that vote. The
+ *                     card does not claim the aggregate is off.
+ *
+ * Two states refuse before the first store, both of them real: bit 0 already set
+ * is a vote this driver did not place (a second holder, and the case the 0137
+ * baseline rules out but a later boot may not), and bit 31 already clear while
+ * our own vote is clear is an aggregate somebody else is holding up.
+ *
+ * No ledger entry. A C1 token models "a consumer needs this clock" with exactly
+ * two release outcomes - the clock stopped (satisfied) and it did not (owed) -
+ * and a vote is neither: the bit is gone while the aggregate belongs to whoever
+ * else votes. Booking it would make the last-holder release log
+ * detail=hardware-still-on at ERROR for the one outcome this card is designed to
+ * produce. The pass therefore keeps its own books (fVoteLeftSet, hold=0/1 on the
+ * done row) and leaves the ledger to the demands whose release it can judge. */
+IOReturn
+IOQcomGCC::voteClocks(void)
+{
+	if (!fVoteEnabled) {
+		SWEET_LOG_DEBUG("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-vote phase=vote result=%d detail=vote-absent\n",
+		 kIOQcomCCGCC,kIOQcomGccVoteLocalID,kIOReturnUnsupported);
+		return kIOReturnUnsupported;
+	}
+	if (!fMapped||!fRegistered||!fLock) return kIOReturnNotReady;
+	char resource[kIOQcomLogBuf];
+	gccName(kIOQcomGccVoteWindow,kIOQcomGccVoteOffset,resource,sizeof resource);
+	if (!fWindow[kIOQcomGccVoteWindow].base) {
+		/* validateProperties makes the vote imply its probe page, so a missing
+		 * mapping here is a driver bug and never a tree mistake. */
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote result=%d detail=vote-window-absent\n",
+		 resource,kIOReturnNotReady);
+		return kIOReturnNotReady;
+	}
+	uint32_t saved=0;
+	if (!readRegister(kIOQcomGccVoteWindow,kIOQcomGccVoteOffset,&saved)) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-request result=%d detail=vote-read-failed writes=%u\n",
+		 resource,kIOReturnNotReady,fWrites);
+		return kIOReturnNotReady;
+	}
+	fVoteBefore=saved;
+	const bool held=(saved&kGccBranchEnable)!=0;
+	const bool off=(saved&kGccBranchClockOff)!=0;
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s name=gcc_npu_axi_clk consumer=sweetclock-vote phase=vote-request result=0 enable=%u off=%u value=%#x\n",
+	 resource,held?1u:0u,off?1u:0u,saved);
+	if (held||!off) {
+		/* The value is the evidence; a store here would erase a state this card
+		 * cannot account for, and it would be a vote on top of somebody's vote. */
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-request result=%d detail=%s enable=%u off=%u value=%#x writes=0\n",
+		 resource,kIOReturnNotReady,held?"vote-held-by-other":"halt-not-set",
+		 held?1u:0u,off?1u:0u,saved);
+		return kIOReturnNotReady;
+	}
+	/* Bit 0 only. The saved config bits come back on release, and the halt
+	 * status is never written on either store: the FSM owns it, which is why the
+	 * vendor's set/clear helpers are field updates and not writes of a readback. */
+	uint32_t target=(saved&kIOQcomGccBranchConfigMask)|kGccBranchEnable;
+	if (!writeVoteRegister(kIOQcomGccVoteOffset,target,"vote-enable")) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-done result=%d writes=%u vote-store=0 enable-done=0 settle=0 hold=0 detail=store-failed\n",
+		 resource,kIOReturnNotReady,fWrites);
+		return kIOReturnNotReady;
+	}
+	uint32_t written=0;
+	bool writeRead=readRegister(kIOQcomGccVoteWindow,kIOQcomGccVoteOffset,&written);
+	const bool bitOnly=writeRead&&
+	 (written&kIOQcomGccBranchConfigMask)==target;
+	if (writeRead) {
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-write result=0 enable=%u value=%#x mask=%#x changed-only-enable=%u\n",
+		 resource,(written&kGccBranchEnable)?1u:0u,written,kIOQcomGccBranchConfigMask,
+		 bitOnly?1u:0u);
+	} else {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-write result=%d detail=readback-failed\n",
+		 resource,kIOReturnNotReady);
+	}
+	/* The vendor's own enable budget: 500 x 1 us, then warn. Nothing longer,
+	 * because a voted branch that has not come up in 500 us is the NPU power
+	 * collapse's problem and not a wait this pass should extend. */
+	unsigned polls=0;
+	uint32_t value=target;
+	bool running=false,readFailed=false;
+	for (polls=0;polls<kIOQcomGccVotePollTries;polls++) {
+		if (!readRegister(kIOQcomGccVoteWindow,kIOQcomGccVoteOffset,&value)) {
+			readFailed=true;
+			break;
+		}
+		if ((value&kGccBranchClockOff)==0) { running=true; break; }
+		IODelay(kIOQcomGccVotePollDelayUs);
+	}
+	/* The loop reads before it sleeps, so a first-poll success is polls==0: the
+	 * number is the count of sleeps the hardware needed, not the count of reads. */
+	if (running) {
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-running result=0 enable=%u off=0 value=%#x polls=%u\n",
+		 resource,(value&kGccBranchEnable)?1u:0u,value,polls);
+	} else {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-running result=%d enable=%u off=%u value=%#x polls=%u detail=%s\n",
+		 resource,readFailed?kIOReturnNotReady:kIOReturnTimeout,
+		 (value&kGccBranchEnable)?1u:0u,(value&kGccBranchClockOff)?1u:0u,value,polls,
+		 readFailed?"vote-read-failed":"vote-halt-timeout");
+	}
+	fVoteRunning=running;
+	/* The vote comes back out whatever happened above: a vote this driver no
+	 * longer needs is a vote that keeps somebody's aggregate alive, and leaving
+	 * it behind to make a timeout row read better is the one thing the card
+	 * forbids. On a timeout the release is also the safest state to leave. */
+	uint32_t release=saved&kIOQcomGccBranchConfigMask;
+	bool released=writeVoteRegister(kIOQcomGccVoteOffset,release,"vote-release");
+	uint32_t settled=0;
+	bool settleRead=false;
+	if (released) {
+		IODelay(kIOQcomGccVoteSettleUs);
+		settleRead=readRegister(kIOQcomGccVoteWindow,kIOQcomGccVoteOffset,&settled);
+	}
+	fVoteLeftSet=!released||(settleRead&&(settled&kGccBranchEnable)!=0);
+	fVoteAfterRelease=settleRead?settled:0;
+	if (!released) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-release result=%d detail=vote-release-failed\n",
+		 resource,kIOReturnNotReady);
+	} else if (!settleRead) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-release result=%d delay-us=%u detail=settle-read-failed\n",
+		 resource,kIOReturnNotReady,kIOQcomGccVoteSettleUs);
+	} else {
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-release result=0 delay-us=%u enable=%u off=%u value=%#x mask=%#x detail=observed-not-proof\n",
+		 resource,kIOQcomGccVoteSettleUs,(settled&kGccBranchEnable)?1u:0u,
+		 (settled&kGccBranchClockOff)?1u:0u,settled,kIOQcomGccBranchConfigMask);
+	}
+	/* Three separate answers, never folded into one: a pass that wrote a vote and
+	 * failed to see the aggregate come up still proves the store, and a pass whose
+	 * release did not read back still proves the vote. */
+	unsigned storeOk=bitOnly?1u:0u, enableDone=running?1u:0u, settleOk=(released&&settleRead&&!fVoteLeftSet)?1u:0u;
+	IOReturn verdict=(writeRead&&bitOnly&&running&&settleOk)?kIOReturnSuccess:
+	 (readFailed||!released||!writeRead)?kIOReturnNotReady:
+	 (running?kIOReturnIOError:kIOReturnTimeout);
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-done result=%d writes=%u vote-store=%u enable-done=%u settle=%u polls=%u hold=%u before=%#x after=%#x\n",
+	 resource,verdict,fWrites,storeOk,enableDone,settleOk,polls,fVoteLeftSet?1u:0u,
+	 saved,fVoteAfterRelease);
+	if (fVoteLeftSet) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-vote phase=vote-done result=%d detail=vote-left-set value=%#x\n",
+		 resource,kIOReturnNotReady,fVoteAfterRelease);
+	}
+	return verdict;
+}
 IOReturn
 IOQcomGCC::measureClocks(void)
 {
@@ -1514,6 +1733,15 @@ IOQcomGCC::start(IOService *provider)
 		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=share-incomplete share-result=%d writes=%u\n",
 		 kIOQcomCCGCC,shared,fWrites);
 	}
+	/* C2-06 write half runs after the C2-04/C2-05 passes and before the C2-08
+	 * measurement: the vote is placed and withdrawn inside this pass, so the
+	 * branch is back at its boot state before anything measures, and a vote that
+	 * will not release does not sit in the way of a measurement store. */
+	IOReturn voted=voteClocks();
+	if (voted!=kIOReturnSuccess&&voted!=kIOReturnUnsupported) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=vote-incomplete vote-result=%d writes=%u\n",
+		 kIOQcomCCGCC,voted,fWrites);
+	}
 	/* C2-08 last, so registration and the C2-02 decode exist before the first
 	 * store and a failed measurement cannot leave a half-published backend. */
 	IOReturn measured=measureClocks();
@@ -1521,7 +1749,11 @@ IOQcomGCC::start(IOService *provider)
 		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=measure-incomplete measure-result=%d writes=%u\n",
 		 kIOQcomCCGCC,measured,fWrites);
 	}
-	if (fProbeEnabled) {
+	if (fVoteEnabled) {
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x vote-probe=1 vote=1\n",
+		 kIOQcomCCGCC,kIOQcomGccMappedWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
+		 kIOQcomGccVariantSm8150);
+	} else if (fProbeEnabled) {
 		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x vote-probe=1\n",
 		 kIOQcomCCGCC,kIOQcomGccMappedWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
 		 kIOQcomGccVariantSm8150);
