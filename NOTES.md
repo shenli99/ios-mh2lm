@@ -52,7 +52,7 @@ C2-04 撤的是“本驱动唯一持有的那条需求”。第二个消费者�
 
 **待办**：`SWEET IOWORKLOOP` 那行限频没有并进本轮（证据镜像一次只带一个变量），它独立成一轮（0135 判负、修正后重出为 0136），见下一节；之后接 C2-06（voted branch 本方票，前置已满足）。0132-1 的环在新内核上仍须 `--c2-04` rc=0。
 
-## 让环重新装得下半小时：0135 判负、`bool & 1` 折叠、0242 修正，下一轮 0136
+## 让环重新装得下半小时：0135 判负、`bool & 1` 折叠、0242 修正、0136 判胜
 
 **0135 实机判负：卡死在第一个 loop。** 屏幕最后一行是 `SWEET IOWORKLOOP: thread 0xfffffe2000fb4430 running loop 0xfffffe24cd5ec900`，上面还有 `touch registered` 一类的注册行，之后什么都没有；从持久镜像拉回的环与 0134 **逐字节相同**（`cmp` 通过），说明这台机器连第一次约 10 秒的刷盘都没走到——环里那行之后本该紧跟 `SWEET: starting device-tree platform expert`。
 
@@ -91,9 +91,9 @@ C2-04 撤的是“本驱动唯一持有的那条需求”。第二个消费者�
 
 **本轮回归（主机测试全跑一遍）**：`tools/tests` 71 个 test 脚本串行过一遍，61 个直接通过；剩下 10 个里 7 个只是调用方式不同（`*-reference.py` 要 `LINEAGE_ROOT`，`pipeline-lineage.py` 要 `LINEAGE_TREE`，`scanout-profiles.py` 不要参数），按各自 `Usage:` 给上真实路径后 7 个全绿。真正红的两项（`dsi-sequence.py`、`panel-profile-lifecycle.py`）在改动前的树 `e010e8d` 上**同样 SIGABRT**（`beginDSISequence(...)==0`），与本轮无关，另记待查；`boot-args.py` 要的 `DarwinBoot.c` 是另一个修订（本机的 `__ZN...CommandLine[DARWIN_BOOT_LINE_LENGTH]` 那一行形态对不上），本机跑不了。
 
-**0136 待验（默认档一次启动，只换内核）**：`SWEET IOWORKLOOP: thread` 行数应 ≈ loop 数（0134 是 12 对），不是数千；环不再回绕、装得下半小时以上；`--c2-03 --strict --workloop-once` rc=0，且默认档其余逐值不变（26 条时钟行、`reads=19`、`writes=0`，相位只有 `start`／`map`／`snapshot`／`register`／`decode`／`decode-sample`）；桌面照常进。取日志仍走持久镜像＋大容量模式，测试镜像一律 `fastboot boot`。
+**0136 判胜（默认档一次启动，只换内核，2026-11-26）**：进桌面。`logs/sweetlog-0136-0.bin`（`a707f901…`，4 194 080 B）与 0135 那张**不再逐字节相同**，说明这台机器活过了第一次约 10 秒刷盘。审计 `--c2-03 --strict --workloop-once` **rc=0**：`workloop.rows=12`、`distinct_pairs=12`、`allocator_rows=12`（一个属主一行，不多不少）、`line_count=3843`、`share_of_ring=0.003`；对 0134 的 9030 行／0.702，环占用降到千分之三，"装得下半小时"这条恢复。默认档其余逐值不变：26 条时钟行、`reads=19`／`writes=0`、`maps=4`／`snapshot=11`／`decode=7`、`variant=0x8150`、`decode_sample_hz=19200000`；WARN 清单与 b32 相等，面板 marker 全在（`touch_armed` 2 对参考 4、`touch_app_format` 1 对 3，只是这次会话更短、帧更少，没有多出来的项）。内核 `02757ac0…`（17 949 968 B），默认档镜像 `boot-16k-0136-gpioirq-panel-pipeline.img`＝`e4af103f…`（35 545 088 B），八棵 ADT 派生与 605 B 参数与 0135 相同。两条判据在刷机之前就静态验过：写侧 `orr #0x4`／`strb` 未变，读侧 `runEventSources()+0x1b4` 已是 `tbnz w8,#0x0`，`out-bs/check-0136-workloop.py` 报 PASS（同一脚本对 0133／0135 仍报 FOLDED，负向对照仍有效）。取日志仍走持久镜像＋大容量模式，测试镜像一律 `fastboot boot`。
 
-NEXT：用户 push `full-source` 触发 CI（含 `ca59d25`／补丁 `0242`）→ 下载内核并核对 `__ZN10IOWorkLoop15runEventSourcesEv` 那处已是 `tbz/tbnz #0x0` → `mk16k-0136.sh`（默认档）→ WSL `fastboot boot` → 拉环 → `--c2-03 --strict --workloop-once`；通过后接 C2-06。
+NEXT：接 C2-06（voted branch，本方票；前置已满足）。下次拉环顺带确认 0132-1 的环在新内核上 `--c2-04` 仍 rc=0。
 
 ## 首个“为了开钟而写钟”的候选：C2-03 分支门控（2026-11-24，补丁 0237，0130 实机通过）
 
