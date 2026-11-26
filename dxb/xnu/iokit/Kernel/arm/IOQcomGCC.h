@@ -162,6 +162,40 @@ enum : unsigned {
 	kIOQcomGccVoteSettleUs = 10,
 };
 
+/* C2-07: the reset sample. GCC_NPU_BCR is reset ID 3 of the vendor binding
+ * (include/dt-bindings/clock/qcom,gcc-sm8150.h) and lives at vendor offset
+ * 0x4d000 - the first word of the page the C2-06 probe already maps, so this
+ * card adds no page of its own and does not arm beside the probe. Bit 0 is the
+ * vendor's BLK_ARES field ("1 = assert, 0 = release", ipa_gcc_hwio.h:
+ * HWIO_GCC_IPA_BCR_BLK_ARES_*); drivers/clk/qcom/reset.c builds every pulse out
+ * of exactly those two field updates and a udelay(map->udelay ?: 1), which is
+ * where the 1 us comes from.
+ *
+ * Why the NPU block is the sample: it is a peripheral that is stopped and has
+ * no holder. The 0137 probe read all three of its voted branches as
+ * 0x80000000 (halt set, no vote) and the 0138 vote put its own ballot in and
+ * took it back out, so the block is idle by measurement and not by assumption;
+ * C0-02 finds no consumer for it anywhere in the tree. The precondition below
+ * re-derives that idle state from the ring instead of trusting this comment.
+ *
+ * What this card cannot buy: an observable that the block *did* something. The
+ * NPU has no driver, so the only proxy is the BCR bit itself plus the four
+ * CBCRs of the same page being unchanged - the card says exactly that and does
+ * not dress the bit readback up as a functional reset. */
+enum : uint32_t {
+	kIOQcomGccResetLocalID = 3,
+	kIOQcomGccResetOffset = 0x000,
+};
+enum : unsigned {
+	kIOQcomGccResetBit = 0,
+	/* Vendor default when the reset map entry carries no udelay: 1 us. */
+	kIOQcomGccResetPulseUs = 1,
+	/* The four CBCRs of the same page are read before and after the pulse:
+	 * three voted branches that must stay idle, one critical AHB that must not
+	 * change. A reset that moved any of them moved more than its own block. */
+	kIOQcomGccResetCollateralCount = 4,
+};
+
 /* C2-08: tolerances. The vendor formula rounds to +-0.5 %; a rate outside one
  * percent means the mux or the counter is wrong, not a rounding difference. */
 enum : int { kIOQcomGccMeasureTolerancePpm = 10000 };
@@ -231,6 +265,12 @@ class IOQcomGCC : public IOQcomClockController {
 	bool fVoteRunning;
 	bool fVoteLeftSet;
 	uint32_t fVoteBefore, fVoteAfterRelease;
+	/* C2-07: the reset pass. fResetDone records that a pulse was actually
+	 * attempted, and the two saved words are what the after-comparison needs
+	 * when the block arrived held in reset and the pulse has to put it back. */
+	bool fResetEnabled;
+	bool fResetDone;
+	uint32_t fResetBefore, fResetAfter;
 	uint32_t fShareToken[kIOQcomGccShareConsumers];
 	unsigned fShareHolders;
 	/* The C2-03 token while this driver still holds it. C2-04 releases that
@@ -314,6 +354,17 @@ class IOQcomGCC : public IOQcomClockController {
 	 * the generic path keeps its four-window bound and a reader can count the
 	 * vote stores without re-reading that guard. */
 	bool writeVoteRegister(uint32_t offset, uint32_t value, const char *stage);
+	/* C2-07: the reset pulse. Reads the block's own state first and refuses
+	 * while any of its three voted branches is claimed or running; asserts
+	 * BLK_ARES, reads the bit back, waits the vendor's 1 us, releases it, reads
+	 * the bit back again, restores the arrival state if the block arrived held,
+	 * and finally re-reads the four CBCRs to prove the pulse stayed inside its
+	 * own block. Every claim in that sentence is its own row. */
+	IOReturn resetBlock(void);
+	/* The reset's only store path, bounded to the one BCR word it owns, for the
+	 * same reason writeVoteRegister() exists: the generic bounds stay four pages
+	 * wide and the reset stores stay countable. */
+	bool writeResetRegister(uint32_t offset, uint32_t value, const char *stage);
 	/* Reads the neighbour set into fGateNeighbour (capture=true) or compares it
 	 * with that capture (capture=false), returning how many moved. The consumer
 	 * is passed in so a disable row is not attributed to the gate pass. */

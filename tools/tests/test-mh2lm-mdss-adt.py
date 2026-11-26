@@ -603,9 +603,59 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-vote-adt-') as temp:
                     str(source), str(output)], check=True)
     assert output.read_bytes() == voted
     assert source.read_bytes() == blob
+# C2-07 needs the same fifth range for a different reason: the NPU reset block
+# lives in that page, so the reset opt-in owns the range as well - but it maps the
+# page for itself, which is why it implies neither the probe nor the vote.
+reset = m.derive(blob, clock_reset=True)
+assert reset == m.derive(blob, gcc=True, clock_reset=True)
+assert reset != probed and reset != voted
+assert b'sweet,clock-reset' not in m.derive(blob, gcc=True)
+assert b'sweet,clock-reset' not in blob
+rtree, end = adt.parse(reset)
+assert end == len(reset)
+gcc = next(n for n in rtree.children[1].children if n.name == 'gcc')
+assert gcc.prop('sweet,clock-reset') == struct.pack('<I', 1)
+for absent in ('sweet,clock-vote-probe', 'sweet,clock-vote', 'sweet,clock-gate',
+               'sweet,clock-measure', 'sweet,clock-disable', 'sweet,clock-share'):
+    assert gcc.prop(absent) is None, absent
+rreg = struct.unpack('<%dQ' % (len(gcc.prop('reg')) // 8), gcc.prop('reg'))
+assert len(rreg) == 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
+rwindows = []
+for i in range(0, len(rreg), 2):
+    addr, size = rreg[i], rreg[i + 1]
+    rwindows.append((addr + m.SOC_BASE if addr < m.LOW_ALIAS else addr - m.LOW_ALIAS,
+                     size))
+assert tuple(rwindows) == m.GCC_WINDOWS + m.GCC_PROBE_WINDOW
+# same range as C2-06 and no property of C2-06's: the two cards can be read in
+# one tree only by accident, and the driver refuses that pair at start.
+assert gcc.prop('reg') == next(n for n in
+                               adt.parse(probed)[0].children[1].children
+                               if n.name == 'gcc').prop('reg')
+# dropping the reset property alone leaves the plain GCC tree: the generator
+# keeps the range and the property in one step, like the probe's.
+gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-reset']
+gcc.props = [(k, f, encode_windows(m.GCC_WINDOWS) if k == 'reg' else v)
+             for k, f, v in gcc.props]
+assert adt.serialize(rtree) == m.derive(blob, gcc=True)
+combo = m.derive(blob, clock_reset=True, clock_share=True)
+ctree, end = adt.parse(combo)
+assert end == len(combo)
+gcc = next(n for n in ctree.children[1].children if n.name == 'gcc')
+for name in ('sweet,clock-reset', 'sweet,clock-share', 'sweet,clock-disable',
+             'sweet,clock-gate'):
+    assert gcc.prop(name) == struct.pack('<I', 1), name
+assert len(gcc.prop('reg')) == 8 * 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
+with tempfile.TemporaryDirectory(prefix='mh2lm-clock-reset-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'reset.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--clock-reset',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == reset
+    assert source.read_bytes() == blob
 print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
       'that no earlier image carries, and the C2-05 share on top of all three, plus the '
       'C2-06 vote probe, which owns both its property and the fifth range, and the vote on '
-      'top of it as a property of its own')
+      'top of it as a property of its own, and the C2-07 reset, which shares the '
+      'fifth range with the probe but implies neither it nor the vote')

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Actual C2-01/C2-02/C2-08 GCC backend against contract-only MMIO fixtures.
+"""Actual C2-01/C2-02/C2-08/C2-06 GCC backend against contract-only MMIO fixtures.
 Only OS allocation/locking/thread-call primitives and the device memory backing
 store are fixtures: the shipped IOQcomGCC backend is compiled as written, with
 its two register accessors routed to the fixture register file. The structural
@@ -58,6 +58,9 @@ prelude = prelude.replace('static uint32_t readReg(uintptr_t b,uint32_t o){',
  ' * after the driver itself disabled it, never on the first read of a run */\n'
  'static bool gccDisableStored=false;\n'
  'static std::map<uintptr_t,bool> gccHaltPending;\n'
+ '/* C2-07: how many stores the NPU BCR word has taken, so a knob can make the\n'
+ ' * pulse itself - and not the baseline read - the thing that changed. */\n'
+ 'static unsigned gccResetStores;\n'
  'static uintptr_t gccDriftPA=0;\n'
  'static uint32_t gccDriftBits=0;\n'
  'static uint32_t readReg(uintptr_t b,uint32_t o){')
@@ -72,6 +75,8 @@ prelude = prelude.replace('static void writeReg(uintptr_t b,uint32_t o,uint32_t 
    /* The same trick for the disable store: a way for the C2-04 neighbour proof
       to see a change the cleared enable bit alone would not explain. */
    if(gccDisableNeighbourShift&&pa==0x00133008u&&!(v&1u))regs[0x00133014u]^=0x10u;
+   /* remember that the BCR word took a store, for the C2-07 model */
+   if(pa==0x0014d000u)++gccResetStores;
    /* remember that an enable was withdrawn, for the never-halts model */
    if(pa==0x00133008u&&!(v&1u))gccDisableStored=true;}''')
 prelude = prelude.replace('''uint32_t v=regs[b+o];if(b==bases[6]&&o==0x110&&dmaFired)''',
@@ -195,7 +200,7 @@ static IOService*clockNub(){
 }
 static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=true,
  unsigned abiLength=4,unsigned measure=0,unsigned gate=0,unsigned disable=0,
- unsigned share=0,unsigned probe=0,unsigned vote=0){
+ unsigned share=0,unsigned probe=0,unsigned vote=0,unsigned reset=0){
  auto*n=fixtureAlloc<IOService>();
  if(abi){uint32_t a=1;setData(n,"sweet,gcc-abi",&a,abiLength);}
  if(haveVariant)setData(n,"sweet,gcc-variant",&variant,4);
@@ -211,6 +216,8 @@ static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=t
  if(probe){uint32_t v=probe==2?2u:1u;setData(n,"sweet,clock-vote-probe",&v,probe==3?3u:4);}
  /* vote: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
  if(vote){uint32_t v=vote==2?2u:1u;setData(n,"sweet,clock-vote",&v,vote==3?3u:4);}
+ /* reset: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
+ if(reset){uint32_t r=reset==2?2u:1u;setData(n,"sweet,clock-reset",&r,reset==3?3u:4);}
  return n;
 }
 static IOQcomClockProvider*startProvider(IOService*n){
@@ -265,6 +272,10 @@ static bool gccVoteStuckOff=false;
 /* C2-06: an aggregate somebody else holds up while our own vote is clear - the
  * state the pass must refuse instead of writing a vote into it. */
 static bool gccVoteHaltClear=false;
+/* C2-07: the NPU BCR word. gccResetWontLatch models a block that accepts the
+ * store and never reports the bit back; gccResetMovedNeighbour models a pulse
+ * that reached past its own block, which the collateral re-read has to catch. */
+static bool gccResetWontLatch=false,gccResetMovedNeighbour=false;
 /* Off by default: the shipped fixture lets a test present any register value,
  * so a synthetic 0x0 is a legitimate input for the preconditions. A case that
  * wants the halt handshake the device performs (enable bit decides CLK_OFF)
@@ -278,12 +289,18 @@ static void clearKnobs(){gccMemoryCount=4;gccAbsentIndex=99;gccWrongPA=99;gccSho
  gccHaltLag=false;gccHaltPending.clear();gccDriftPA=0;gccDriftBits=0;
  gccRefStuckOff=false;gccCountStuck=false;gccGateStuckOff=false;gccNeighbourShift=false;
  gccDisableNeighbourShift=false;gccDisableStuckRunning=false;gccHaltFollowsEnable=false;
- gccDisableStored=false;gccVoteStuckOff=false;gccVoteHaltClear=false;}
+ gccDisableStored=false;gccVoteStuckOff=false;gccVoteHaltClear=false;
+ gccResetWontLatch=false;gccResetMovedNeighbour=false;gccResetStores=0;}
 /* C2-08 device model. The debug counter sees the selected source: the running
  * clock (19.2 MHz) yields four counts per loaded tick of the XO/4 reference,
  * a stopped source yields the same count on both runs, and a stuck counter
  * never raises the done bit. */
 static uint32_t gccCounter(uintptr_t pa,uint32_t v){
+ /* C2-07: word 0 of the NPU page is the BCR - a plain control register whose
+  * stored word is what a read sees back, except in the two cases this model
+  * exists for: a bit that never latches, and a pulse that moved a neighbour. */
+ if(pa==0x0014d000u){if(gccResetWontLatch)return v&~1u;return v;}
+ if(pa==0x0014d00cu&&gccResetMovedNeighbour&&gccResetStores)return v^0x1000u;
  if(pa==0x00143008u||pa==0x00162008u||pa==0x00133008u){
   if(pa==0x00143008u&&gccRefStuckOff)return v&~1u;	/* a branch that will not come up */
   if(pa==0x00133008u&&gccGateStuckOff)return v&~1u;	/* the C2-03 sample refusing to run */
@@ -1774,6 +1791,194 @@ int main(){
   gccMeasureHook=nullptr;
   assert(!live&&!liveMaps);
  }
+ /* ---- C2-07: the reset sample, one pulse on a stopped block ---- */
+ {
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,0,1);clearKnobs();
+  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
+  gccMeasureHook=gccCounter;gccDelayCalls=0;
+  auto*g=startGcc(gn);
+  /* the arm row names the block, the vendor reset id and the one field it owns,
+   * and it comes before any store so a pass that dies early still shows intent */
+  assert(logged("resource=gcc:0x14d000 phase=reset result=0 detail=armed "
+                "name=gcc_npu reset-id=3 offset=0 bit=0 pulse-us=1"));
+  /* the precondition is the probe's page read again: three voted branches halted
+   * and unclaimed, one critical AHB, and a BCR that arrived released */
+  assert(logged("resource=gcc:0x14d000 name=gcc_npu consumer=sweetclock-reset "
+                "phase=reset-request result=0 detail=idle held=0 value=0 "
+                "cfg=0x80000000 axi=0x80000000 trig=0x80000000 at=0x80000000"));
+  /* the pulse itself: assert then release, both stores named and ordered, and
+   * neither of them writes the status bit */
+  assert(logged("consumer=sweetclock-reset phase=write-issued result=0 stage=reset-assert write=1 value=0x1"));
+  assert(logged("phase=reset-assert result=0 asserted=1 bit=0 value=0x1 mask=0xfffffff"));
+  assert(logged("consumer=sweetclock-reset phase=write-issued result=0 stage=reset-release write=2 value=0"));
+  assert(logged("phase=reset-release result=0 released=1 bit=0 value=0 delay-us=1"));
+  /* the block is back where it arrived and its page did not move */
+  assert(logged("phase=reset-done result=0 writes=2 stores=2 pulsed=1 restored=1 "
+                "collateral=1 held-arrival=0 before=0 after=0 delay-us=1"));
+  /* exactly one vendor pulse width was spent: reset.c's udelay(map->udelay ?: 1) */
+  assert(gccDelayCalls==1);
+  assert(g->registerWrites()==2&&writes()==2);
+  assert(regs[0x0014d000u]==0x0u);
+  /* this image maps the fifth page without arming the probe: no probe rows, and
+   * the start row says reset=1 instead of vote-probe=1 */
+  assert(counted("phase=probe")==0&&counted("vote-probe")==0);
+  assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=5 snapshot=11 "
+                "reads=30 writes=2 variant=0x8150 reset=1"));
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
+ {
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,0,1);clearKnobs();
+  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
+  gccMeasureHook=gccCounter;gccDelayCalls=0;
+  /* somebody holds a vote on the branch this block would reset */
+  setReg(0x0014d000u,0x008,0x00000001u);
+  auto*g=startGcc(gn);
+  assert(logged("phase=reset-request result="+std::to_string(kIOReturnNotReady)+
+                " detail=reset-block-claimed claimed=1 running=0 held=0 value=0 writes=0"));
+  /* the refusal is zero stores: the pulse never started */
+  assert(g->registerWrites()==0&&writes()==0);
+  assert(counted("stage=reset-assert")==0&&counted("phase=reset-done")==0);
+  assert(logged("detail=reset-incomplete reset-result="+std::to_string(kIOReturnNotReady)));
+  assert(!g->fResetDone&&regs[0x0014d000u]==0x0u);
+  /* the other holder's bit is untouched */
+  assert(regs[0x0014d008u]==0x00000001u);
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
+ {
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,0,1);clearKnobs();
+  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
+  gccMeasureHook=gccCounter;gccDelayCalls=0;
+  /* no vote of ours, yet the aggregate is already up: running, not claimed */
+  gccVoteHaltClear=true;
+  auto*g=startGcc(gn);
+  assert(logged("phase=reset-request result="+std::to_string(kIOReturnNotReady)+
+                " detail=reset-block-running claimed=0 running=1 held=0 value=0 writes=0"));
+  assert(g->registerWrites()==0&&writes()==0);
+  assert(counted("stage=reset-assert")==0&&counted("phase=reset-done")==0);
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
+ {
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,0,1);clearKnobs();
+  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
+  gccMeasureHook=gccCounter;gccDelayCalls=0;
+  /* the block arrived held in reset: the pulse releases it, and the third store
+   * puts the arrival word back - the one durable side effect this card must not
+   * have */
+  setReg(0x0014d000u,0x000,0x00000001u);
+  auto*g=startGcc(gn);
+  assert(logged("phase=reset-request result=0 detail=idle held=1 value=0x1"));
+  assert(logged("phase=reset-assert result=0 asserted=1 bit=0 value=0x1 mask=0xfffffff"));
+  assert(logged("phase=reset-release result=0 released=1 bit=0 value=0 delay-us=1"));
+  assert(logged("phase=reset-restore result=0 restored=1 value=0x1 mask=0xfffffff"));
+  assert(logged("consumer=sweetclock-reset phase=write-issued result=0 stage=reset-restore write=3 value=0x1"));
+  assert(logged("phase=reset-done result=0 writes=3 stores=3 pulsed=1 restored=1 "
+                "collateral=1 held-arrival=1 before=0x1 after=0x1 delay-us=1"));
+  assert(regs[0x0014d000u]==0x1u);
+  assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=5 snapshot=11 "
+                "reads=31 writes=3 variant=0x8150 reset=1"));
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
+ {
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,0,1);clearKnobs();
+  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
+  gccMeasureHook=gccCounter;gccDelayCalls=0;
+  /* a block that accepts the store and never reports the bit back: the assert
+   * readback is the only place that can see it, and the pass has to say so
+   * rather than continue into a release of a pulse that never started */
+  gccResetWontLatch=true;
+  auto*g=startGcc(gn);
+  assert(logged("phase=reset-assert result=0 asserted=0 bit=0 value=0 mask=0xfffffff"));
+  assert(logged("phase=reset-done result="+std::to_string(kIOReturnNotReady)+
+                " writes=2 stores=2 pulsed=0 restored=0 collateral=0 before=0 observed=0 "
+                "detail=assert-not-landed"));
+  assert(counted("stage=reset-release")==0);
+  assert(regs[0x0014d000u]==0x0u);
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
+ {
+  messages.clear();
+  auto*pn=clockNub();auto*p=startProvider(pn);
+  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,0,1);clearKnobs();
+  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
+  gccMeasureHook=gccCounter;gccDelayCalls=0;
+  /* the pulse reached a neighbour in its own page: the four CBCRs read before
+   * and after are the only witness, and a pass that ignored them would call
+   * this a clean reset */
+  gccResetMovedNeighbour=true;
+  auto*g=startGcc(gn);
+  assert(logged("phase=reset-done result="+std::to_string(kIOReturnNotReady)+
+                " writes=2 stores=2 pulsed=1 restored=1 collateral=0 held-arrival=0 "
+                "before=0 after=0 delay-us=1"));
+  assert(logged("consumer=sweetclock-reset phase=reset-done result="+
+                std::to_string(kIOReturnNotReady)+" detail=collateral-moved moved=1"));
+  g->release();gn->release();
+  p->stop(pn);p->release();pn->release();
+  gccMeasureHook=nullptr;
+  assert(!live&&!liveMaps);
+ }
+ {	/* the property itself must be a word holding 0 or 1 */
+  messages.clear();mapCalls.clear();
+  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,0,0,3);auto*g=fixtureAlloc<IOQcomGCC>();
+  clearKnobs();resetGccRegs();
+  assert(!g->start(n));
+  assert(counted("detail=bad-clock-reset")==1);
+  assert(logged("detail=bad-clock-reset length=3"));
+  assert(mapCalls.empty());
+  g->release();n->release();assert(!live&&!liveMaps);
+ }
+ {	/* a value the ADT never writes is refused with its own row */
+  messages.clear();mapCalls.clear();
+  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,0,0,2);auto*g=fixtureAlloc<IOQcomGCC>();
+  clearKnobs();resetGccRegs();
+  assert(!g->start(n));
+  assert(logged("detail=bad-clock-reset value=0x2"));
+  g->release();n->release();assert(!live&&!liveMaps);
+ }
+ {	/* one boot walks one write contract: a vote and a reset cannot share it */
+  messages.clear();mapCalls.clear();
+  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,1,1,1);auto*g=fixtureAlloc<IOQcomGCC>();
+  clearKnobs();gccMemoryCount=5;resetGccRegs();
+  assert(!g->start(n));
+  assert(logged("detail=clock-reset-needs-no-vote clock-reset=1 clock-vote=1"));
+  assert(mapCalls.empty());
+  g->release();n->release();assert(!live&&!liveMaps);
+ }
+ {	/* the probe and the reset both own the fifth page, and one map row says
+	 * which card mapped it: the pair is refused before either pass runs */
+  messages.clear();mapCalls.clear();
+  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,1,0,1);auto*g=fixtureAlloc<IOQcomGCC>();
+  clearKnobs();gccMemoryCount=5;resetGccRegs();
+  assert(!g->start(n));
+  assert(logged("detail=clock-reset-needs-no-probe clock-reset=1 clock-vote-probe=1"));
+  assert(mapCalls.empty());
+  assert(counted("phase=reset ")==0);	/* the arm row is downstream of the check */
+  g->release();n->release();assert(!live&&!liveMaps);
+ }
  printf("PASS: actual C2-01/C2-02/C2-08/C2-03 GCC backend; ADT-matched identity (abi/variant) and "
         "window refusals (absent/address/length/no-base) with clean unmapping, bounded "
         "provider wait, four mapped windows and eleven snapshots, narrow aligned "
@@ -1793,7 +1998,14 @@ int main(){
         "consumers on the gate's one demand, non-last releases that read the branch and "
         "store nothing, the last release retracting it and the branch taken again, "
         "opt-in refusals for a share without either card below it, and faults that keep "
-        "the demand with the holder that failed\n");
+        "the demand with the holder that failed, and the C2-06 vote: one ballot "
+        "placed behind its own opt-in and withdrawn in the same pass, with refusals "
+        "for a vote somebody already holds and for an aggregate the card cannot "
+        "explain, and the C2-07 reset sample: one vendor-width pulse on a block "
+        "proven stopped, the arrival word put back when the block arrived held, "
+        "refusals for a claimed or running block, for a vote or a probe armed "
+        "beside it, and a pass that calls a neighbour moving inside the page a "
+        "failed reset\n");
  return 0;
 }
 '''

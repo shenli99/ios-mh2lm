@@ -1,0 +1,913 @@
+From: mh2lm clock work <clock@mh2lm>
+Subject: [PATCH 0245] clock: pulse the NPU reset, once, on a block that is stopped
+
+Every card so far read, gated, shared or voted. None of them drove a reset
+line, and a reset is the one write whose effect is invisible from here: the
+vendor's drivers/clk/qcom/reset.c does nothing but set a bit, wait, and clear
+it again - qcom_reset_set_assert() is a regmap_update_bits() with the same mask
+in both directions, and the wait is udelay(map->udelay ?: 1). A pulse on the
+wrong block is therefore indistinguishable from a pulse on the right one
+unless the ring says what the block was doing before and after.
+
+Which block. GCC_NPU_BCR is reset ID 3 of the vendor binding, at vendor offset
+0x4d000 - word 0 of the page C2-06 already maps, so no new mapping and no
+seventh window. Bit 0 is BLK_ARES with the polarity the hardware header gives
+it: 1 asserts, 0 releases. The block is the sample because it is stopped and
+has no owner: 0137 read its three voted branches as 0x80000000 and 0138 put a
+ballot in and took it back out, and C0-02 finds no consumer for the NPU
+anywhere in the tree. The other BCRs the page offers were all rejected for a
+reason worth writing down - PDM shares its page with the gcc_pdm2_clk_src RCG
+C2-02 measures, and MMSS/GPU/VIDEO would reset subsystems that are running.
+
+Six steps, one claim per row. The pass reads the four CBCRs of the page, then
+the BCR word; a block that is claimed (bit 0 already set) or running (halt
+status clear) is refused with zero stores, and the value stays in the row as
+the evidence. With the block idle it stores assert | (arrival & config mask),
+reads the word back, and waits the vendor's 1 us - the readback comes before
+the delay so a store that never landed costs no time. The release stores
+(arrival & config mask) & ~bit and reads back again; the comparison is made
+inside the config mask because a BCR may report status bits its FSM owns, and
+calling that a failed restore would be wrong in the loud direction.
+
+The arrival state wins. A block that arrives held in reset is released by the
+pulse - that is what a reset is - but leaving it released would be the one
+durable side effect this card must not have, so a third store puts the arrival
+word back and the row says restored=1. A block that fails to latch the assert
+is restored the same way, gets detail=assert-not-landed and NotReady, and
+prints no after= or delay-us=: no pulse happened, so there is nothing to
+timing-account.
+
+The verdict, and its limit. asserted= and released= are readbacks of bit 0,
+before=/after= are the whole word, delay-us= is the pulse width, and
+collateral= is whether the four CBCRs of the page were unchanged; the summary
+is in the start row as reads= and writes= like every earlier card. What it is
+not: a functional claim. The NPU has no driver and its GDSC is off, so the
+only witness that the block reacted is its own status bit, and the card says
+that instead of dressing it up.
+
+Findings are recorded, not washed. A neighbour that moved is
+detail=collateral-moved with the count and NotReady, a release that did not
+land keeps the release readback under detail=release-not-landed and NotReady,
+and a restore that mismatched is named before the word is put back. Every one
+of those paths still holds to the same internal accounting: stores= counts the
+stores the pass issued, writes= the register writes the backend logged.
+
+Identity without a descriptor. The reset has no entry in gccClocks[] - a
+descriptor would add a row to images that never map this page - so it carries
+its own local ID 3 and its own node name, and its store path is
+writeResetRegister(), bounded to the one word it owns so the generic four-window
+bound stays intact. The fifth window is mapped by either card, and the map row
+names which one: an image that arms the reset prints reset=1, not vote-probe=1.
+The probe and the reset both own that page and there is one row to explain it,
+so the two properties are refused together at start, as a vote and a reset
+already were.
+
+Backward compatibility is the rule the earlier cards set: without
+sweet,clock-reset the image maps four windows, prints the 0137 start row
+unchanged and performs zero stores. The ADT generator emits the property and
+the fifth range as one step, implies the GCC node, and the tree it writes is
+removable back to the plain GCC bytes - that is asserted, not asserted-by-eye.
+
+Host tests cover the accepted pass (two ordered stores, one 1 us delay, 30
+reads and 2 writes, the arrival word back), a block that arrived held (three
+stores, held-arrival=1, restored=1), a claimed and a running block (refused,
+zero stores), a block that never latched the assert (restored, no timing),
+a neighbour that moved inside the page, the two bad-property values, and the
+two arm-time refusals (vote beside a reset, probe beside a reset).
+
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
+index 910245c..5ff2221 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.cpp
+@@ -393,6 +393,52 @@ IOQcomGCC::validateProperties(IOService *provider)
+ 		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc:%#llx phase=vote result=0 detail=armed name=gcc_npu_axi_clk offset=%#x voted=1 vote-probe=1\n",
+ 		 (unsigned long long)kGccProbeWindowPhysical,kIOQcomGccVoteOffset);
+ 	}
++	/* C2-07: the reset arm. It borrows the probe's page but not the probe's
++	 * switch - the page is mapped by either card, the four probe rows are not -
++	 * and it is mutually exclusive with the vote, because a boot that both voted
++	 * on and reset a block would leave two cards' stores in one ring with no way
++	 * to attribute a change to either. One boot walks one write contract (plan
++	 * section: a candidate kernel changes the hardware behaviour of exactly one
++	 * card under acceptance). */
++	fResetEnabled=false;
++	fResetDone=false;
++	fResetBefore=0;
++	fResetAfter=0;
++	OSData *branchReset=OSDynamicCast(OSData,provider->getProperty("sweet,clock-reset"));
++	if (branchReset) {
++		if (branchReset->getLength()!=4) {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-reset length=%u\n",
++			 kIOReturnBadArgument,(unsigned)branchReset->getLength());
++			return false;
++		}
++		uint32_t value=0;
++		memcpy(&value,branchReset->getBytesNoCopy(),4);
++		if (value>1) {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-reset value=%#x\n",
++			 kIOReturnBadArgument,value);
++			return false;
++		}
++		fResetEnabled=value==1;
++	}
++	if (fResetEnabled&&fVoteEnabled) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=clock-reset-needs-no-vote clock-reset=%u clock-vote=%u\n",
++		 kIOReturnBadArgument,fResetEnabled?1u:0u,fVoteEnabled?1u:0u);
++		return false;
++	}
++	if (fResetEnabled&&fProbeEnabled) {
++		/* Both cards want the same page mapped, and there is one map row to say
++		 * why it is there: one boot therefore arms one of them. The pair would
++		 * also print the probe's read-only rows and the reset's stores into one
++		 * ring, which no audit profile can attribute to either card. */
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=clock-reset-needs-no-probe clock-reset=%u clock-vote-probe=%u\n",
++		 kIOReturnBadArgument,fResetEnabled?1u:0u,fProbeEnabled?1u:0u);
++		return false;
++	}
++	if (fResetEnabled) {
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc:%#llx phase=reset result=0 detail=armed name=gcc_npu reset-id=%u offset=%#x bit=%u pulse-us=%u\n",
++		 (unsigned long long)kGccProbeWindowPhysical,kIOQcomGccResetLocalID,
++		 kIOQcomGccResetOffset,kIOQcomGccResetBit,kIOQcomGccResetPulseUs);
++	}
+ 	if (haveGate) {
+ 		/* The ring written before this candidate keeps its exact row: the share
+ 		 * field appears only on an image that arms the sharing pass, so an
+@@ -456,7 +502,10 @@ IOQcomGCC::mapWindows(IOService *provider)
+ bool
+ IOQcomGCC::mapProbeWindow(IOService *provider)
+ {
+-	if (!fProbeEnabled) return true;
++	/* C2-07 borrows the same page: the reset card's BCR is word 0 of it, so an
++	 * image that arms the reset alone still maps the page - without the probe
++	 * rows, which stay the probe's own. */
++	if (!fProbeEnabled&&!fResetEnabled) return true;
+ 	Window &w=fWindow[kIOQcomGccVoteWindow];
+ 	w.physical=kGccProbeWindowPhysical;
+ 	w.length=0;
+@@ -489,9 +538,12 @@ IOQcomGCC::mapProbeWindow(IOService *provider)
+ 		 resource,kIOReturnNotReady);
+ 		return false;
+ 	}
+-	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s phase=map result=0 length=%#llx offset=%#llx vote-probe=1\n",
++	/* The row names whichever card borrowed the page: the probe's opt-in also
++	 * covers the vote (which implies it), the reset card maps it on its own. */
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s phase=map result=0 length=%#llx offset=%#llx %s\n",
+ 	 resource,(unsigned long long)length,
+-	 (unsigned long long)(kGccProbeWindowPhysical-kIOQcomGccBase));
++	 (unsigned long long)(kGccProbeWindowPhysical-kIOQcomGccBase),
++	 fProbeEnabled?"vote-probe=1":"reset=1");
+ 	return true;
+ }
+ 
+@@ -639,7 +691,8 @@ IOQcomGCC::writeRegister(unsigned window,uint32_t offset,uint32_t value,
+ 	 * carries the probe but not the vote keeps a store set inside the four
+ 	 * mandatory windows, which is what makes the probe ring a zero-write ring. */
+ 	const bool inWindow=window<kIOQcomGccWindowCount||
+-	 (fVoteEnabled&&window==kIOQcomGccVoteWindow&&offset==kIOQcomGccVoteOffset);
++	 (fVoteEnabled&&window==kIOQcomGccVoteWindow&&offset==kIOQcomGccVoteOffset)||
++	 (fResetEnabled&&window==kIOQcomGccVoteWindow&&offset==kIOQcomGccResetOffset);
+ 	if (inWindow&&w.base&&(offset&3u)==0&&
+ 	 (uint64_t)offset+sizeof(uint32_t)<=w.length) {
+ 		__asm__ volatile("dmb oshst" ::: "memory");
+@@ -681,6 +734,22 @@ IOQcomGCC::writeVoteRegister(uint32_t offset,uint32_t value,const char *stage)
+ 	return writeRegister(kIOQcomGccVoteWindow,offset,value,stage,"sweetclock-vote");
+ }
+ 
++bool
++IOQcomGCC::writeResetRegister(uint32_t offset,uint32_t value,const char *stage)
++{
++	/* Same refusal shape as the vote's store path: a reset store on an image
++	 * that did not arm it is a driver bug and gets a row, not a silent false. */
++	if (!fResetEnabled||offset!=kIOQcomGccResetOffset) {
++		if (fLock) { IOLockLock(fLock); fWriteFailures++; IOLockUnlock(fLock); }
++		char resource[kIOQcomLogBuf];
++		gccName(kIOQcomGccVoteWindow,offset,resource,sizeof resource);
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=write-issued result=%d stage=%s detail=reset-unarmed\n",
++		 resource,kIOReturnBadArgument,stage);
++		return false;
++	}
++	return writeRegister(kIOQcomGccVoteWindow,offset,value,stage,"sweetclock-reset");
++}
++
+ bool
+ IOQcomGCC::storeMeasure(MeasureReg *regs,unsigned index,uint32_t value,const char *stage)
+ {
+@@ -1541,6 +1610,194 @@ IOQcomGCC::voteClocks(void)
+ 	}
+ 	return verdict;
+ }
++/* C2-07: the reset pulse.
++ *
++ * The card asks for one reset on a peripheral that is already stopped. The
++ * sample is GCC_NPU_BCR - vendor offset 0x4d000, bit 0, the field the hardware
++ * header calls BLK_ARES (1 asserts, 0 releases) - which is word 0 of the page
++ * the C2-06 probe already maps, so this card adds no seventh mapping. The block
++ * qualifies as stopped by measurement and not by convenience: the 0137 probe
++ * read its three voted branches as 0x80000000 and the 0138 vote put a ballot in
++ * and took it back out, so nobody claims the NPU and nothing runs it. This pass
++ * re-derives that state from the ring before it writes: a claimed vote (bit 0
++ * set) or a running branch (halt status clear) both refuse the pulse.
++ *
++ * The sequence is the vendor's own drivers/clk/qcom/reset.c spelled out one
++ * claim per row:
++ *
++ *  1. request   four CBCRs of the page, then the BCR word. A refusal here is a
++ *               row and zero stores, never a silent skip.
++ *  2. assert    bit 0 set, config bits preserved, the status bit never written.
++ *  3. hold      one readback, then the vendor's udelay(map->udelay ?: 1) - the
++ *               1 us default because GCC_NPU_BCR carries no udelay in its map.
++ *  4. release   bit 0 cleared with the same config preservation.
++ *  5. settle    one readback compared with the arrival word inside the config
++ *               mask: a BCR may report status the FSM owns, and this card must
++ *               not call that a failed restore.
++ *  6. restore   only when the block *arrived* held in reset. Releasing it is
++ *               what the pulse asks for, but leaving it released would be the
++ *               one durable side effect this card must not have, so the word
++ *               goes back to the arrival value and is read back once more.
++ *
++ * The limit is in what the verdict is made of. The NPU has no driver and its
++ * GDSC is off, so "the block reset" can only mean the bit landed, stayed for
++ * the pulse and came back - plus the four CBCRs of the same page being
++ * unchanged. The done row therefore prints collateral= and not a functional
++ * claim; nothing here shows the NPU's internal FSM ran. */
++IOReturn
++IOQcomGCC::resetBlock(void)
++{
++	fResetDone=false;
++	if (!fResetEnabled) {
++		SWEET_LOG_DEBUG("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-reset phase=reset result=%d detail=reset-absent\n",
++		 kIOQcomCCGCC,kIOQcomGccResetLocalID,kIOReturnUnsupported);
++		return kIOReturnUnsupported;
++	}
++	if (!fMapped||!fRegistered||!fLock) return kIOReturnNotReady;
++	char resource[kIOQcomLogBuf];
++	gccName(kIOQcomGccVoteWindow,kIOQcomGccResetOffset,resource,sizeof resource);
++	if (!fWindow[kIOQcomGccVoteWindow].base) {
++		/* validateProperties makes the reset imply the page, so a missing mapping
++		 * here is a driver bug and never a tree mistake. */
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset result=%d detail=reset-window-absent\n",
++		 resource,kIOReturnNotReady);
++		return kIOReturnNotReady;
++	}
++	/* (1) the block has to be idle, and the page that says so is the page the
++	 * pulse touches. One pass reads the four CBCRs once and uses them twice: as
++	 * the stop precondition and as the collateral baseline. */
++	uint32_t beside[kIOQcomGccResetCollateralCount];
++	unsigned besideFailed=0;
++	for (unsigned i=0;i<kIOQcomGccResetCollateralCount;i++) {
++		beside[i]=0;
++		if (!readRegister(kIOQcomGccVoteWindow,gccProbeRegs[i].offset,&beside[i])) besideFailed++;
++	}
++	if (besideFailed) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-request result=%d detail=collateral-read-failed failed=%u writes=%u\n",
++		 resource,kIOReturnNotReady,besideFailed,fWrites);
++		return kIOReturnNotReady;
++	}
++	unsigned claimed=0, running=0;
++	for (unsigned i=0;i<kIOQcomGccResetCollateralCount;i++) {
++		if (!gccProbeRegs[i].voted) continue;
++		if (beside[i]&kGccBranchEnable) claimed++;
++		else if (!(beside[i]&kGccBranchClockOff)) running++;
++	}
++	uint32_t before=0;
++	if (!readRegister(kIOQcomGccVoteWindow,kIOQcomGccResetOffset,&before)) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-request result=%d detail=reset-read-failed writes=%u\n",
++		 resource,kIOReturnNotReady,fWrites);
++		return kIOReturnNotReady;
++	}
++	fResetBefore=before;
++	const uint32_t bit=1u<<kIOQcomGccResetBit;
++	const bool arrivedHeld=(before&bit)!=0;
++	if (claimed||running) {
++		/* The value is the evidence. Storing here would reset a block somebody is
++		 * using, and the card's whole premise is that nobody is. */
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-request result=%d detail=%s claimed=%u running=%u held=%u value=%#x writes=0\n",
++		 resource,kIOReturnNotReady,claimed?"reset-block-claimed":"reset-block-running",
++		 claimed,running,arrivedHeld?1u:0u,before);
++		return kIOReturnNotReady;
++	}
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s name=gcc_npu consumer=sweetclock-reset phase=reset-request result=0 detail=idle held=%u value=%#x cfg=%#x axi=%#x trig=%#x at=%#x\n",
++	 resource,arrivedHeld?1u:0u,before,beside[0],beside[1],beside[2],beside[3]);
++	/* (2) assert. Bit 0 only: the config bits come back on release and the status
++	 * bit is never written, exactly like the branch stores one card earlier. */
++	const uint32_t configMask=kIOQcomGccBranchConfigMask;
++	const uint32_t assertValue=(before&configMask)|bit;
++	if (!writeResetRegister(kIOQcomGccResetOffset,assertValue,"reset-assert")) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-done result=%d writes=%u stores=0 pulsed=0 restored=%u collateral=0 detail=assert-store-failed\n",
++		 resource,kIOReturnNotReady,fWrites,arrivedHeld?1u:0u);
++		return kIOReturnNotReady;
++	}
++	fResetDone=true;
++	uint32_t asserted=0;
++	const bool assertRead=readRegister(kIOQcomGccVoteWindow,kIOQcomGccResetOffset,&asserted);
++	const bool held=assertRead&&(asserted&bit)!=0;
++	if (assertRead) {
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-assert result=0 asserted=%u bit=%u value=%#x mask=%#x\n",
++		 resource,held?1u:0u,kIOQcomGccResetBit,asserted,configMask);
++	} else {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-assert result=%d detail=assert-read-failed writes=%u\n",
++		 resource,kIOReturnNotReady,fWrites);
++	}
++	if (!held) {
++		/* A store that did not land still has to leave the word where it found it:
++		 * the arrival value is written back and the pass reports the failure. */
++		unsigned restoreStores=0;
++		if (writeResetRegister(kIOQcomGccResetOffset,before&configMask,"reset-restore")) restoreStores=1;
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-done result=%d writes=%u stores=%u pulsed=0 restored=0 collateral=0 before=%#x observed=%#x detail=assert-not-landed\n",
++		 resource,kIOReturnNotReady,fWrites,1u+restoreStores,before,asserted);
++		return kIOReturnNotReady;
++	}
++	/* (3) hold and (4) release: the vendor's pulse width, then bit 0 clear. */
++	IODelay(kIOQcomGccResetPulseUs);
++	const uint32_t releaseValue=(before&configMask)&~bit;
++	if (!writeResetRegister(kIOQcomGccResetOffset,releaseValue,"reset-release")) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-done result=%d writes=%u stores=1 pulsed=0 restored=0 collateral=0 detail=release-store-failed\n",
++		 resource,kIOReturnNotReady,fWrites);
++		return kIOReturnNotReady;
++	}
++	uint32_t after=0;
++	const bool releaseRead=readRegister(kIOQcomGccVoteWindow,kIOQcomGccResetOffset,&after);
++	const bool released=releaseRead&&(after&bit)==0;
++	if (releaseRead) {
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-release result=0 released=%u bit=0 value=%#x delay-us=%u\n",
++		 resource,released?1u:0u,after,kIOQcomGccResetPulseUs);
++	} else {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-release result=%d detail=release-read-failed writes=%u\n",
++		 resource,kIOReturnNotReady,fWrites);
++	}
++	/* (5) settle, inside the config mask: a BCR is allowed to report status the
++	 * FSM owns, and a pass that called that a failed restore would be wrong. */
++	bool matched=releaseRead&&((after^before)&configMask)==0;
++	unsigned restoreStores=0;
++	if (releaseRead) fResetAfter=after;
++	if (releaseRead&&!matched) {
++		/* (6) the block arrived held in reset and the pulse released it. Put the
++		 * arrival word back, then read it once more - the pulse happened, the
++		 * state it was told to leave behind is the one it found. */
++		if (writeResetRegister(kIOQcomGccResetOffset,before&configMask,"reset-restore")) restoreStores=1;
++		uint32_t restoredValue=0;
++		if (restoreStores&&readRegister(kIOQcomGccVoteWindow,kIOQcomGccResetOffset,&restoredValue)) {
++			fResetAfter=restoredValue;
++			matched=((restoredValue^before)&configMask)==0;
++			if (matched) {
++				SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-restore result=0 restored=1 value=%#x mask=%#x\n",
++				 resource,restoredValue,configMask);
++			} else {
++				SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-restore result=%d detail=restore-mismatch before=%#x after=%#x mask=%#x\n",
++				 resource,kIOReturnNotReady,before,restoredValue,configMask);
++			}
++		} else {
++			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-restore result=%d detail=restore-%s writes=%u\n",
++			 resource,kIOReturnNotReady,restoreStores?"read-failed":"store-failed",fWrites);
++		}
++	}
++	/* The pulse is supposed to stay inside its own block. The same four CBCRs
++	 * read again is the only place this card can show that. */
++	unsigned moved=0;
++	for (unsigned i=0;i<kIOQcomGccResetCollateralCount;i++) {
++		uint32_t now=0;
++		if (!readRegister(kIOQcomGccVoteWindow,gccProbeRegs[i].offset,&now)) moved++;
++		else if (now!=beside[i]) moved++;
++	}
++	const unsigned stores=2u+restoreStores;
++	const IOReturn verdict=(held&&released&&matched&&moved==0)?kIOReturnSuccess:kIOReturnNotReady;
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-done result=%d writes=%u stores=%u pulsed=%u restored=%u collateral=%u held-arrival=%u before=%#x after=%#x delay-us=%u\n",
++	 resource,verdict,fWrites,stores,(held&&released)?1u:0u,matched?1u:0u,
++	 moved==0?1u:0u,arrivedHeld?1u:0u,before,fResetAfter,kIOQcomGccResetPulseUs);
++	if (moved) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-done result=%d detail=collateral-moved moved=%u\n",
++		 resource,kIOReturnNotReady,moved);
++	}
++	if (!released) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-done result=%d detail=release-not-landed value=%#x\n",
++		 resource,kIOReturnNotReady,after);
++	}
++	return verdict;
++}
+ IOReturn
+ IOQcomGCC::measureClocks(void)
+ {
+@@ -1742,6 +1999,16 @@ IOQcomGCC::start(IOService *provider)
+ 		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=vote-incomplete vote-result=%d writes=%u\n",
+ 		 kIOQcomCCGCC,voted,fWrites);
+ 	}
++	/* C2-07 runs where the vote ran, and for the same reason: the pulse is over
++	 * and the block is back at its arrival state before anything measures, so a
++	 * reset that will not come out does not sit in the way of a measurement
++	 * store. The two cards cannot both be armed (validateProperties refuses it),
++	 * so at most one of these two rows ever appears. */
++	IOReturn pulsed=resetBlock();
++	if (pulsed!=kIOReturnSuccess&&pulsed!=kIOReturnUnsupported) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=reset-incomplete reset-result=%d writes=%u\n",
++		 kIOQcomCCGCC,pulsed,fWrites);
++	}
+ 	/* C2-08 last, so registration and the C2-02 decode exist before the first
+ 	 * store and a failed measurement cannot leave a half-published backend. */
+ 	IOReturn measured=measureClocks();
+@@ -1753,6 +2020,12 @@ IOQcomGCC::start(IOService *provider)
+ 		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x vote-probe=1 vote=1\n",
+ 		 kIOQcomCCGCC,kIOQcomGccMappedWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
+ 		 kIOQcomGccVariantSm8150);
++	} else if (fResetEnabled) {
++		/* The reset row keeps probe= out: this image maps the fifth page without
++		 * arming the probe, and a reader of the ring must be able to see that. */
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x reset=1\n",
++		 kIOQcomCCGCC,kIOQcomGccMappedWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
++		 kIOQcomGccVariantSm8150);
+ 	} else if (fProbeEnabled) {
+ 		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x vote-probe=1\n",
+ 		 kIOQcomCCGCC,kIOQcomGccMappedWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
+index 39a1fe4..1b78426 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomGCC.h
+@@ -162,6 +162,40 @@ enum : unsigned {
+ 	kIOQcomGccVoteSettleUs = 10,
+ };
+ 
++/* C2-07: the reset sample. GCC_NPU_BCR is reset ID 3 of the vendor binding
++ * (include/dt-bindings/clock/qcom,gcc-sm8150.h) and lives at vendor offset
++ * 0x4d000 - the first word of the page the C2-06 probe already maps, so this
++ * card adds no page of its own and does not arm beside the probe. Bit 0 is the
++ * vendor's BLK_ARES field ("1 = assert, 0 = release", ipa_gcc_hwio.h:
++ * HWIO_GCC_IPA_BCR_BLK_ARES_*); drivers/clk/qcom/reset.c builds every pulse out
++ * of exactly those two field updates and a udelay(map->udelay ?: 1), which is
++ * where the 1 us comes from.
++ *
++ * Why the NPU block is the sample: it is a peripheral that is stopped and has
++ * no holder. The 0137 probe read all three of its voted branches as
++ * 0x80000000 (halt set, no vote) and the 0138 vote put its own ballot in and
++ * took it back out, so the block is idle by measurement and not by assumption;
++ * C0-02 finds no consumer for it anywhere in the tree. The precondition below
++ * re-derives that idle state from the ring instead of trusting this comment.
++ *
++ * What this card cannot buy: an observable that the block *did* something. The
++ * NPU has no driver, so the only proxy is the BCR bit itself plus the four
++ * CBCRs of the same page being unchanged - the card says exactly that and does
++ * not dress the bit readback up as a functional reset. */
++enum : uint32_t {
++	kIOQcomGccResetLocalID = 3,
++	kIOQcomGccResetOffset = 0x000,
++};
++enum : unsigned {
++	kIOQcomGccResetBit = 0,
++	/* Vendor default when the reset map entry carries no udelay: 1 us. */
++	kIOQcomGccResetPulseUs = 1,
++	/* The four CBCRs of the same page are read before and after the pulse:
++	 * three voted branches that must stay idle, one critical AHB that must not
++	 * change. A reset that moved any of them moved more than its own block. */
++	kIOQcomGccResetCollateralCount = 4,
++};
++
+ /* C2-08: tolerances. The vendor formula rounds to +-0.5 %; a rate outside one
+  * percent means the mux or the counter is wrong, not a rounding difference. */
+ enum : int { kIOQcomGccMeasureTolerancePpm = 10000 };
+@@ -231,6 +265,12 @@ class IOQcomGCC : public IOQcomClockController {
+ 	bool fVoteRunning;
+ 	bool fVoteLeftSet;
+ 	uint32_t fVoteBefore, fVoteAfterRelease;
++	/* C2-07: the reset pass. fResetDone records that a pulse was actually
++	 * attempted, and the two saved words are what the after-comparison needs
++	 * when the block arrived held in reset and the pulse has to put it back. */
++	bool fResetEnabled;
++	bool fResetDone;
++	uint32_t fResetBefore, fResetAfter;
+ 	uint32_t fShareToken[kIOQcomGccShareConsumers];
+ 	unsigned fShareHolders;
+ 	/* The C2-03 token while this driver still holds it. C2-04 releases that
+@@ -314,6 +354,17 @@ class IOQcomGCC : public IOQcomClockController {
+ 	 * the generic path keeps its four-window bound and a reader can count the
+ 	 * vote stores without re-reading that guard. */
+ 	bool writeVoteRegister(uint32_t offset, uint32_t value, const char *stage);
++	/* C2-07: the reset pulse. Reads the block's own state first and refuses
++	 * while any of its three voted branches is claimed or running; asserts
++	 * BLK_ARES, reads the bit back, waits the vendor's 1 us, releases it, reads
++	 * the bit back again, restores the arrival state if the block arrived held,
++	 * and finally re-reads the four CBCRs to prove the pulse stayed inside its
++	 * own block. Every claim in that sentence is its own row. */
++	IOReturn resetBlock(void);
++	/* The reset's only store path, bounded to the one BCR word it owns, for the
++	 * same reason writeVoteRegister() exists: the generic bounds stay four pages
++	 * wide and the reset stores stay countable. */
++	bool writeResetRegister(uint32_t offset, uint32_t value, const char *stage);
+ 	/* Reads the neighbour set into fGateNeighbour (capture=true) or compares it
+ 	 * with that capture (capture=false), returning how many moved. The consumer
+ 	 * is passed in so a disable row is not attributed to the gate pass. */
+diff --git a/tools/mk-mh2lm-mdss-adt.py b/tools/mk-mh2lm-mdss-adt.py
+index a2d23a3..fcc9e59 100644
+--- a/tools/mk-mh2lm-mdss-adt.py
++++ b/tools/mk-mh2lm-mdss-adt.py
+@@ -41,7 +41,7 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
+ 
+ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
+             clock_gate=False, clock_disable=False, clock_share=False,
+-            clock_vote_probe=False, clock_vote=False):
++            clock_vote_probe=False, clock_vote=False, clock_reset=False):
+     # C2-05 stands on both cards below it, so the two switch it needs are implied
+     # here rather than trusted to every caller: a share node without them would be
+     # refused at start and the image would carry a property that can do nothing.
+@@ -185,9 +185,10 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+     # refuses, and the generator will not emit one.
+     if clock_disable:
+         clock_gate = True
+-    if clock_diag or gcc or clock_measure or clock_gate or clock_vote_probe:
++    if (clock_diag or gcc or clock_measure or clock_gate or clock_vote_probe
++            or clock_reset):
+         clock_provider = True
+-    gcc = gcc or clock_measure or clock_gate or clock_vote_probe
++    gcc = gcc or clock_measure or clock_gate or clock_vote_probe or clock_reset
+     if clock_provider:
+         # C1: one clock entry personality. The node carries no reg and no
+         # window: every controller window stays with its own CC backend, so
+@@ -211,7 +212,8 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+                           ('sweet,gcc-abi', 0, struct.pack('<I', 1)),
+                           ('sweet,gcc-variant', 0, struct.pack('<I', 0x8150)),
+                           ('reg', 0, encode(GCC_WINDOWS + GCC_PROBE_WINDOW
+-                                            if clock_vote_probe else GCC_WINDOWS))]
++                                            if clock_vote_probe or clock_reset
++                                            else GCC_WINDOWS))]
+         if clock_measure:
+             # C2-08 is the first candidate that writes hardware, so it is opt-in
+             # from the device tree: the default image keeps the zero-write ring.
+@@ -240,6 +242,12 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+             # keeps its zero-write ring: this property is the only thing that
+             # makes the fifth page reachable by the store path.
+             gcc_node.props.append(('sweet,clock-vote', 0, struct.pack('<I', 1)))
++        if clock_reset:
++            # C2-07 pulses the NPU reset block, which lives on the same fifth
++            # range and on a word no other card touches. It maps the page for
++            # itself, so it implies neither the probe nor the vote - a node that
++            # carried both would be refused at start.
++            gcc_node.props.append(('sweet,clock-reset', 0, struct.pack('<I', 1)))
+         arm.children.append(gcc_node)
+     return adt.serialize(root)
+ 
+@@ -263,6 +271,7 @@ if __name__ == '__main__':
+     parser.add_argument('--clock-share', action='store_true', help='append the C2-05 sharing opt-in (implies --clock-gate and --clock-disable); two consumers share the gate demand and the last release retracts it')
+     parser.add_argument('--clock-vote-probe', action='store_true', help='append the C2-06 read-only vote probe (implies --gcc); maps the NPU page as a fifth range and reads four CBCRs, zero stores')
+     parser.add_argument('--clock-vote', action='store_true', help='append the C2-06 vote opt-in (implies --clock-vote-probe); stores one vote bit, waits for the aggregate, and withdraws it again')
++    parser.add_argument('--clock-reset', action='store_true', help='append the C2-07 reset opt-in (implies --gcc); maps the NPC page for itself and pulses the NPU reset bit once, 1 us wide, only after proving the block stopped')
+     parser.add_argument('source', type=Path)
+     parser.add_argument('destination', type=Path)
+     args = parser.parse_args()
+@@ -271,4 +280,4 @@ if __name__ == '__main__':
+         sys.exit('output must differ from the baseline ADT')
+     destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
+                       args.clock_disable, args.clock_share, args.clock_vote_probe,
+-                      args.clock_vote))
++                      args.clock_vote, args.clock_reset))
+diff --git a/tools/tests/test-mh2lm-gcc-backend.py b/tools/tests/test-mh2lm-gcc-backend.py
+index 2ee71d5..05c0611 100644
+--- a/tools/tests/test-mh2lm-gcc-backend.py
++++ b/tools/tests/test-mh2lm-gcc-backend.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Actual C2-01/C2-02/C2-08 GCC backend against contract-only MMIO fixtures.
++"""Actual C2-01/C2-02/C2-08/C2-06 GCC backend against contract-only MMIO fixtures.
+ Only OS allocation/locking/thread-call primitives and the device memory backing
+ store are fixtures: the shipped IOQcomGCC backend is compiled as written, with
+ its two register accessors routed to the fixture register file. The structural
+@@ -58,6 +58,9 @@ prelude = prelude.replace('static uint32_t readReg(uintptr_t b,uint32_t o){',
+  ' * after the driver itself disabled it, never on the first read of a run */\n'
+  'static bool gccDisableStored=false;\n'
+  'static std::map<uintptr_t,bool> gccHaltPending;\n'
++ '/* C2-07: how many stores the NPU BCR word has taken, so a knob can make the\n'
++ ' * pulse itself - and not the baseline read - the thing that changed. */\n'
++ 'static unsigned gccResetStores;\n'
+  'static uintptr_t gccDriftPA=0;\n'
+  'static uint32_t gccDriftBits=0;\n'
+  'static uint32_t readReg(uintptr_t b,uint32_t o){')
+@@ -72,6 +75,8 @@ prelude = prelude.replace('static void writeReg(uintptr_t b,uint32_t o,uint32_t
+    /* The same trick for the disable store: a way for the C2-04 neighbour proof
+       to see a change the cleared enable bit alone would not explain. */
+    if(gccDisableNeighbourShift&&pa==0x00133008u&&!(v&1u))regs[0x00133014u]^=0x10u;
++   /* remember that the BCR word took a store, for the C2-07 model */
++   if(pa==0x0014d000u)++gccResetStores;
+    /* remember that an enable was withdrawn, for the never-halts model */
+    if(pa==0x00133008u&&!(v&1u))gccDisableStored=true;}''')
+ prelude = prelude.replace('''uint32_t v=regs[b+o];if(b==bases[6]&&o==0x110&&dmaFired)''',
+@@ -195,7 +200,7 @@ static IOService*clockNub(){
+ }
+ static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=true,
+  unsigned abiLength=4,unsigned measure=0,unsigned gate=0,unsigned disable=0,
+- unsigned share=0,unsigned probe=0,unsigned vote=0){
++ unsigned share=0,unsigned probe=0,unsigned vote=0,unsigned reset=0){
+  auto*n=fixtureAlloc<IOService>();
+  if(abi){uint32_t a=1;setData(n,"sweet,gcc-abi",&a,abiLength);}
+  if(haveVariant)setData(n,"sweet,gcc-variant",&variant,4);
+@@ -211,6 +216,8 @@ static IOService*gccNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=t
+  if(probe){uint32_t v=probe==2?2u:1u;setData(n,"sweet,clock-vote-probe",&v,probe==3?3u:4);}
+  /* vote: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
+  if(vote){uint32_t v=vote==2?2u:1u;setData(n,"sweet,clock-vote",&v,vote==3?3u:4);}
++ /* reset: 0 absent, 1 enabled, 2 a value the ADT never writes, 3 a short property */
++ if(reset){uint32_t r=reset==2?2u:1u;setData(n,"sweet,clock-reset",&r,reset==3?3u:4);}
+  return n;
+ }
+ static IOQcomClockProvider*startProvider(IOService*n){
+@@ -265,6 +272,10 @@ static bool gccVoteStuckOff=false;
+ /* C2-06: an aggregate somebody else holds up while our own vote is clear - the
+  * state the pass must refuse instead of writing a vote into it. */
+ static bool gccVoteHaltClear=false;
++/* C2-07: the NPU BCR word. gccResetWontLatch models a block that accepts the
++ * store and never reports the bit back; gccResetMovedNeighbour models a pulse
++ * that reached past its own block, which the collateral re-read has to catch. */
++static bool gccResetWontLatch=false,gccResetMovedNeighbour=false;
+ /* Off by default: the shipped fixture lets a test present any register value,
+  * so a synthetic 0x0 is a legitimate input for the preconditions. A case that
+  * wants the halt handshake the device performs (enable bit decides CLK_OFF)
+@@ -278,12 +289,18 @@ static void clearKnobs(){gccMemoryCount=4;gccAbsentIndex=99;gccWrongPA=99;gccSho
+  gccHaltLag=false;gccHaltPending.clear();gccDriftPA=0;gccDriftBits=0;
+  gccRefStuckOff=false;gccCountStuck=false;gccGateStuckOff=false;gccNeighbourShift=false;
+  gccDisableNeighbourShift=false;gccDisableStuckRunning=false;gccHaltFollowsEnable=false;
+- gccDisableStored=false;gccVoteStuckOff=false;gccVoteHaltClear=false;}
++ gccDisableStored=false;gccVoteStuckOff=false;gccVoteHaltClear=false;
++ gccResetWontLatch=false;gccResetMovedNeighbour=false;gccResetStores=0;}
+ /* C2-08 device model. The debug counter sees the selected source: the running
+  * clock (19.2 MHz) yields four counts per loaded tick of the XO/4 reference,
+  * a stopped source yields the same count on both runs, and a stuck counter
+  * never raises the done bit. */
+ static uint32_t gccCounter(uintptr_t pa,uint32_t v){
++ /* C2-07: word 0 of the NPU page is the BCR - a plain control register whose
++  * stored word is what a read sees back, except in the two cases this model
++  * exists for: a bit that never latches, and a pulse that moved a neighbour. */
++ if(pa==0x0014d000u){if(gccResetWontLatch)return v&~1u;return v;}
++ if(pa==0x0014d00cu&&gccResetMovedNeighbour&&gccResetStores)return v^0x1000u;
+  if(pa==0x00143008u||pa==0x00162008u||pa==0x00133008u){
+   if(pa==0x00143008u&&gccRefStuckOff)return v&~1u;	/* a branch that will not come up */
+   if(pa==0x00133008u&&gccGateStuckOff)return v&~1u;	/* the C2-03 sample refusing to run */
+@@ -1774,6 +1791,194 @@ int main(){
+   gccMeasureHook=nullptr;
+   assert(!live&&!liveMaps);
+  }
++ /* ---- C2-07: the reset sample, one pulse on a stopped block ---- */
++ {
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,0,1);clearKnobs();
++  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
++  gccMeasureHook=gccCounter;gccDelayCalls=0;
++  auto*g=startGcc(gn);
++  /* the arm row names the block, the vendor reset id and the one field it owns,
++   * and it comes before any store so a pass that dies early still shows intent */
++  assert(logged("resource=gcc:0x14d000 phase=reset result=0 detail=armed "
++                "name=gcc_npu reset-id=3 offset=0 bit=0 pulse-us=1"));
++  /* the precondition is the probe's page read again: three voted branches halted
++   * and unclaimed, one critical AHB, and a BCR that arrived released */
++  assert(logged("resource=gcc:0x14d000 name=gcc_npu consumer=sweetclock-reset "
++                "phase=reset-request result=0 detail=idle held=0 value=0 "
++                "cfg=0x80000000 axi=0x80000000 trig=0x80000000 at=0x80000000"));
++  /* the pulse itself: assert then release, both stores named and ordered, and
++   * neither of them writes the status bit */
++  assert(logged("consumer=sweetclock-reset phase=write-issued result=0 stage=reset-assert write=1 value=0x1"));
++  assert(logged("phase=reset-assert result=0 asserted=1 bit=0 value=0x1 mask=0xfffffff"));
++  assert(logged("consumer=sweetclock-reset phase=write-issued result=0 stage=reset-release write=2 value=0"));
++  assert(logged("phase=reset-release result=0 released=1 bit=0 value=0 delay-us=1"));
++  /* the block is back where it arrived and its page did not move */
++  assert(logged("phase=reset-done result=0 writes=2 stores=2 pulsed=1 restored=1 "
++                "collateral=1 held-arrival=0 before=0 after=0 delay-us=1"));
++  /* exactly one vendor pulse width was spent: reset.c's udelay(map->udelay ?: 1) */
++  assert(gccDelayCalls==1);
++  assert(g->registerWrites()==2&&writes()==2);
++  assert(regs[0x0014d000u]==0x0u);
++  /* this image maps the fifth page without arming the probe: no probe rows, and
++   * the start row says reset=1 instead of vote-probe=1 */
++  assert(counted("phase=probe")==0&&counted("vote-probe")==0);
++  assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=5 snapshot=11 "
++                "reads=30 writes=2 variant=0x8150 reset=1"));
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  gccMeasureHook=nullptr;
++  assert(!live&&!liveMaps);
++ }
++ {
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,0,1);clearKnobs();
++  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
++  gccMeasureHook=gccCounter;gccDelayCalls=0;
++  /* somebody holds a vote on the branch this block would reset */
++  setReg(0x0014d000u,0x008,0x00000001u);
++  auto*g=startGcc(gn);
++  assert(logged("phase=reset-request result="+std::to_string(kIOReturnNotReady)+
++                " detail=reset-block-claimed claimed=1 running=0 held=0 value=0 writes=0"));
++  /* the refusal is zero stores: the pulse never started */
++  assert(g->registerWrites()==0&&writes()==0);
++  assert(counted("stage=reset-assert")==0&&counted("phase=reset-done")==0);
++  assert(logged("detail=reset-incomplete reset-result="+std::to_string(kIOReturnNotReady)));
++  assert(!g->fResetDone&&regs[0x0014d000u]==0x0u);
++  /* the other holder's bit is untouched */
++  assert(regs[0x0014d008u]==0x00000001u);
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  gccMeasureHook=nullptr;
++  assert(!live&&!liveMaps);
++ }
++ {
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,0,1);clearKnobs();
++  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
++  gccMeasureHook=gccCounter;gccDelayCalls=0;
++  /* no vote of ours, yet the aggregate is already up: running, not claimed */
++  gccVoteHaltClear=true;
++  auto*g=startGcc(gn);
++  assert(logged("phase=reset-request result="+std::to_string(kIOReturnNotReady)+
++                " detail=reset-block-running claimed=0 running=1 held=0 value=0 writes=0"));
++  assert(g->registerWrites()==0&&writes()==0);
++  assert(counted("stage=reset-assert")==0&&counted("phase=reset-done")==0);
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  gccMeasureHook=nullptr;
++  assert(!live&&!liveMaps);
++ }
++ {
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,0,1);clearKnobs();
++  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
++  gccMeasureHook=gccCounter;gccDelayCalls=0;
++  /* the block arrived held in reset: the pulse releases it, and the third store
++   * puts the arrival word back - the one durable side effect this card must not
++   * have */
++  setReg(0x0014d000u,0x000,0x00000001u);
++  auto*g=startGcc(gn);
++  assert(logged("phase=reset-request result=0 detail=idle held=1 value=0x1"));
++  assert(logged("phase=reset-assert result=0 asserted=1 bit=0 value=0x1 mask=0xfffffff"));
++  assert(logged("phase=reset-release result=0 released=1 bit=0 value=0 delay-us=1"));
++  assert(logged("phase=reset-restore result=0 restored=1 value=0x1 mask=0xfffffff"));
++  assert(logged("consumer=sweetclock-reset phase=write-issued result=0 stage=reset-restore write=3 value=0x1"));
++  assert(logged("phase=reset-done result=0 writes=3 stores=3 pulsed=1 restored=1 "
++                "collateral=1 held-arrival=1 before=0x1 after=0x1 delay-us=1"));
++  assert(regs[0x0014d000u]==0x1u);
++  assert(logged("planID=C2 resource=cc1 phase=start result=0 windows=5 snapshot=11 "
++                "reads=31 writes=3 variant=0x8150 reset=1"));
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  gccMeasureHook=nullptr;
++  assert(!live&&!liveMaps);
++ }
++ {
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,0,1);clearKnobs();
++  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
++  gccMeasureHook=gccCounter;gccDelayCalls=0;
++  /* a block that accepts the store and never reports the bit back: the assert
++   * readback is the only place that can see it, and the pass has to say so
++   * rather than continue into a release of a pulse that never started */
++  gccResetWontLatch=true;
++  auto*g=startGcc(gn);
++  assert(logged("phase=reset-assert result=0 asserted=0 bit=0 value=0 mask=0xfffffff"));
++  assert(logged("phase=reset-done result="+std::to_string(kIOReturnNotReady)+
++                " writes=2 stores=2 pulsed=0 restored=0 collateral=0 before=0 observed=0 "
++                "detail=assert-not-landed"));
++  assert(counted("stage=reset-release")==0);
++  assert(regs[0x0014d000u]==0x0u);
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  gccMeasureHook=nullptr;
++  assert(!live&&!liveMaps);
++ }
++ {
++  messages.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*gn=gccNub(0x8150,true,true,4,0,0,0,0,0,0,1);clearKnobs();
++  gccMemoryCount=5;resetGccRegs();mapCalls.clear();
++  gccMeasureHook=gccCounter;gccDelayCalls=0;
++  /* the pulse reached a neighbour in its own page: the four CBCRs read before
++   * and after are the only witness, and a pass that ignored them would call
++   * this a clean reset */
++  gccResetMovedNeighbour=true;
++  auto*g=startGcc(gn);
++  assert(logged("phase=reset-done result="+std::to_string(kIOReturnNotReady)+
++                " writes=2 stores=2 pulsed=1 restored=1 collateral=0 held-arrival=0 "
++                "before=0 after=0 delay-us=1"));
++  assert(logged("consumer=sweetclock-reset phase=reset-done result="+
++                std::to_string(kIOReturnNotReady)+" detail=collateral-moved moved=1"));
++  g->release();gn->release();
++  p->stop(pn);p->release();pn->release();
++  gccMeasureHook=nullptr;
++  assert(!live&&!liveMaps);
++ }
++ {	/* the property itself must be a word holding 0 or 1 */
++  messages.clear();mapCalls.clear();
++  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,0,0,3);auto*g=fixtureAlloc<IOQcomGCC>();
++  clearKnobs();resetGccRegs();
++  assert(!g->start(n));
++  assert(counted("detail=bad-clock-reset")==1);
++  assert(logged("detail=bad-clock-reset length=3"));
++  assert(mapCalls.empty());
++  g->release();n->release();assert(!live&&!liveMaps);
++ }
++ {	/* a value the ADT never writes is refused with its own row */
++  messages.clear();mapCalls.clear();
++  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,0,0,2);auto*g=fixtureAlloc<IOQcomGCC>();
++  clearKnobs();resetGccRegs();
++  assert(!g->start(n));
++  assert(logged("detail=bad-clock-reset value=0x2"));
++  g->release();n->release();assert(!live&&!liveMaps);
++ }
++ {	/* one boot walks one write contract: a vote and a reset cannot share it */
++  messages.clear();mapCalls.clear();
++  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,1,1,1);auto*g=fixtureAlloc<IOQcomGCC>();
++  clearKnobs();gccMemoryCount=5;resetGccRegs();
++  assert(!g->start(n));
++  assert(logged("detail=clock-reset-needs-no-vote clock-reset=1 clock-vote=1"));
++  assert(mapCalls.empty());
++  g->release();n->release();assert(!live&&!liveMaps);
++ }
++ {	/* the probe and the reset both own the fifth page, and one map row says
++	 * which card mapped it: the pair is refused before either pass runs */
++  messages.clear();mapCalls.clear();
++  auto*n=gccNub(0x8150,true,true,4,0,0,0,0,1,0,1);auto*g=fixtureAlloc<IOQcomGCC>();
++  clearKnobs();gccMemoryCount=5;resetGccRegs();
++  assert(!g->start(n));
++  assert(logged("detail=clock-reset-needs-no-probe clock-reset=1 clock-vote-probe=1"));
++  assert(mapCalls.empty());
++  assert(counted("phase=reset ")==0);	/* the arm row is downstream of the check */
++  g->release();n->release();assert(!live&&!liveMaps);
++ }
+  printf("PASS: actual C2-01/C2-02/C2-08/C2-03 GCC backend; ADT-matched identity (abi/variant) and "
+         "window refusals (absent/address/length/no-base) with clean unmapping, bounded "
+         "provider wait, four mapped windows and eleven snapshots, narrow aligned "
+@@ -1793,7 +1998,14 @@ int main(){
+         "consumers on the gate's one demand, non-last releases that read the branch and "
+         "store nothing, the last release retracting it and the branch taken again, "
+         "opt-in refusals for a share without either card below it, and faults that keep "
+-        "the demand with the holder that failed\n");
++        "the demand with the holder that failed, and the C2-06 vote: one ballot "
++        "placed behind its own opt-in and withdrawn in the same pass, with refusals "
++        "for a vote somebody already holds and for an aggregate the card cannot "
++        "explain, and the C2-07 reset sample: one vendor-width pulse on a block "
++        "proven stopped, the arrival word put back when the block arrived held, "
++        "refusals for a claimed or running block, for a vote or a probe armed "
++        "beside it, and a pass that calls a neighbour moving inside the page a "
++        "failed reset\n");
+  return 0;
+ }
+ '''
+diff --git a/tools/tests/test-mh2lm-mdss-adt.py b/tools/tests/test-mh2lm-mdss-adt.py
+index 765c52d..7df9b4a 100644
+--- a/tools/tests/test-mh2lm-mdss-adt.py
++++ b/tools/tests/test-mh2lm-mdss-adt.py
+@@ -603,9 +603,59 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-vote-adt-') as temp:
+                     str(source), str(output)], check=True)
+     assert output.read_bytes() == voted
+     assert source.read_bytes() == blob
++# C2-07 needs the same fifth range for a different reason: the NPU reset block
++# lives in that page, so the reset opt-in owns the range as well - but it maps the
++# page for itself, which is why it implies neither the probe nor the vote.
++reset = m.derive(blob, clock_reset=True)
++assert reset == m.derive(blob, gcc=True, clock_reset=True)
++assert reset != probed and reset != voted
++assert b'sweet,clock-reset' not in m.derive(blob, gcc=True)
++assert b'sweet,clock-reset' not in blob
++rtree, end = adt.parse(reset)
++assert end == len(reset)
++gcc = next(n for n in rtree.children[1].children if n.name == 'gcc')
++assert gcc.prop('sweet,clock-reset') == struct.pack('<I', 1)
++for absent in ('sweet,clock-vote-probe', 'sweet,clock-vote', 'sweet,clock-gate',
++               'sweet,clock-measure', 'sweet,clock-disable', 'sweet,clock-share'):
++    assert gcc.prop(absent) is None, absent
++rreg = struct.unpack('<%dQ' % (len(gcc.prop('reg')) // 8), gcc.prop('reg'))
++assert len(rreg) == 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
++rwindows = []
++for i in range(0, len(rreg), 2):
++    addr, size = rreg[i], rreg[i + 1]
++    rwindows.append((addr + m.SOC_BASE if addr < m.LOW_ALIAS else addr - m.LOW_ALIAS,
++                     size))
++assert tuple(rwindows) == m.GCC_WINDOWS + m.GCC_PROBE_WINDOW
++# same range as C2-06 and no property of C2-06's: the two cards can be read in
++# one tree only by accident, and the driver refuses that pair at start.
++assert gcc.prop('reg') == next(n for n in
++                               adt.parse(probed)[0].children[1].children
++                               if n.name == 'gcc').prop('reg')
++# dropping the reset property alone leaves the plain GCC tree: the generator
++# keeps the range and the property in one step, like the probe's.
++gcc.props = [(k, f, v) for k, f, v in gcc.props if k != 'sweet,clock-reset']
++gcc.props = [(k, f, encode_windows(m.GCC_WINDOWS) if k == 'reg' else v)
++             for k, f, v in gcc.props]
++assert adt.serialize(rtree) == m.derive(blob, gcc=True)
++combo = m.derive(blob, clock_reset=True, clock_share=True)
++ctree, end = adt.parse(combo)
++assert end == len(combo)
++gcc = next(n for n in ctree.children[1].children if n.name == 'gcc')
++for name in ('sweet,clock-reset', 'sweet,clock-share', 'sweet,clock-disable',
++             'sweet,clock-gate'):
++    assert gcc.prop(name) == struct.pack('<I', 1), name
++assert len(gcc.prop('reg')) == 8 * 2 * (len(m.GCC_WINDOWS) + len(m.GCC_PROBE_WINDOW))
++with tempfile.TemporaryDirectory(prefix='mh2lm-clock-reset-adt-') as temp:
++    source, output = Path(temp)/'base.adt', Path(temp)/'reset.adt'
++    source.write_bytes(blob)
++    subprocess.run([sys.executable, str(Path(m.__file__)), '--clock-reset',
++                    str(source), str(output)], check=True)
++    assert output.read_bytes() == reset
++    assert source.read_bytes() == blob
+ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
+       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
+       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
+       'that no earlier image carries, and the C2-05 share on top of all three, plus the '
+       'C2-06 vote probe, which owns both its property and the fifth range, and the vote on '
+-      'top of it as a property of its own')
++      'top of it as a property of its own, and the C2-07 reset, which shares the '
++      'fifth range with the probe but implies neither it nor the vote')

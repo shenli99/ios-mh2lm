@@ -41,7 +41,7 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
 
 def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
             clock_gate=False, clock_disable=False, clock_share=False,
-            clock_vote_probe=False, clock_vote=False):
+            clock_vote_probe=False, clock_vote=False, clock_reset=False):
     # C2-05 stands on both cards below it, so the two switch it needs are implied
     # here rather than trusted to every caller: a share node without them would be
     # refused at start and the image would carry a property that can do nothing.
@@ -185,9 +185,10 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
     # refuses, and the generator will not emit one.
     if clock_disable:
         clock_gate = True
-    if clock_diag or gcc or clock_measure or clock_gate or clock_vote_probe:
+    if (clock_diag or gcc or clock_measure or clock_gate or clock_vote_probe
+            or clock_reset):
         clock_provider = True
-    gcc = gcc or clock_measure or clock_gate or clock_vote_probe
+    gcc = gcc or clock_measure or clock_gate or clock_vote_probe or clock_reset
     if clock_provider:
         # C1: one clock entry personality. The node carries no reg and no
         # window: every controller window stays with its own CC backend, so
@@ -211,7 +212,8 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
                           ('sweet,gcc-abi', 0, struct.pack('<I', 1)),
                           ('sweet,gcc-variant', 0, struct.pack('<I', 0x8150)),
                           ('reg', 0, encode(GCC_WINDOWS + GCC_PROBE_WINDOW
-                                            if clock_vote_probe else GCC_WINDOWS))]
+                                            if clock_vote_probe or clock_reset
+                                            else GCC_WINDOWS))]
         if clock_measure:
             # C2-08 is the first candidate that writes hardware, so it is opt-in
             # from the device tree: the default image keeps the zero-write ring.
@@ -240,6 +242,12 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             # keeps its zero-write ring: this property is the only thing that
             # makes the fifth page reachable by the store path.
             gcc_node.props.append(('sweet,clock-vote', 0, struct.pack('<I', 1)))
+        if clock_reset:
+            # C2-07 pulses the NPU reset block, which lives on the same fifth
+            # range and on a word no other card touches. It maps the page for
+            # itself, so it implies neither the probe nor the vote - a node that
+            # carried both would be refused at start.
+            gcc_node.props.append(('sweet,clock-reset', 0, struct.pack('<I', 1)))
         arm.children.append(gcc_node)
     return adt.serialize(root)
 
@@ -263,6 +271,7 @@ if __name__ == '__main__':
     parser.add_argument('--clock-share', action='store_true', help='append the C2-05 sharing opt-in (implies --clock-gate and --clock-disable); two consumers share the gate demand and the last release retracts it')
     parser.add_argument('--clock-vote-probe', action='store_true', help='append the C2-06 read-only vote probe (implies --gcc); maps the NPU page as a fifth range and reads four CBCRs, zero stores')
     parser.add_argument('--clock-vote', action='store_true', help='append the C2-06 vote opt-in (implies --clock-vote-probe); stores one vote bit, waits for the aggregate, and withdraws it again')
+    parser.add_argument('--clock-reset', action='store_true', help='append the C2-07 reset opt-in (implies --gcc); maps the NPC page for itself and pulses the NPU reset bit once, 1 us wide, only after proving the block stopped')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
@@ -271,4 +280,4 @@ if __name__ == '__main__':
         sys.exit('output must differ from the baseline ADT')
     destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
                       args.clock_disable, args.clock_share, args.clock_vote_probe,
-                      args.clock_vote))
+                      args.clock_vote, args.clock_reset))

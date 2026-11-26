@@ -393,6 +393,52 @@ IOQcomGCC::validateProperties(IOService *provider)
 		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc:%#llx phase=vote result=0 detail=armed name=gcc_npu_axi_clk offset=%#x voted=1 vote-probe=1\n",
 		 (unsigned long long)kGccProbeWindowPhysical,kIOQcomGccVoteOffset);
 	}
+	/* C2-07: the reset arm. It borrows the probe's page but not the probe's
+	 * switch - the page is mapped by either card, the four probe rows are not -
+	 * and it is mutually exclusive with the vote, because a boot that both voted
+	 * on and reset a block would leave two cards' stores in one ring with no way
+	 * to attribute a change to either. One boot walks one write contract (plan
+	 * section: a candidate kernel changes the hardware behaviour of exactly one
+	 * card under acceptance). */
+	fResetEnabled=false;
+	fResetDone=false;
+	fResetBefore=0;
+	fResetAfter=0;
+	OSData *branchReset=OSDynamicCast(OSData,provider->getProperty("sweet,clock-reset"));
+	if (branchReset) {
+		if (branchReset->getLength()!=4) {
+			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-reset length=%u\n",
+			 kIOReturnBadArgument,(unsigned)branchReset->getLength());
+			return false;
+		}
+		uint32_t value=0;
+		memcpy(&value,branchReset->getBytesNoCopy(),4);
+		if (value>1) {
+			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=bad-clock-reset value=%#x\n",
+			 kIOReturnBadArgument,value);
+			return false;
+		}
+		fResetEnabled=value==1;
+	}
+	if (fResetEnabled&&fVoteEnabled) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=clock-reset-needs-no-vote clock-reset=%u clock-vote=%u\n",
+		 kIOReturnBadArgument,fResetEnabled?1u:0u,fVoteEnabled?1u:0u);
+		return false;
+	}
+	if (fResetEnabled&&fProbeEnabled) {
+		/* Both cards want the same page mapped, and there is one map row to say
+		 * why it is there: one boot therefore arms one of them. The pair would
+		 * also print the probe's read-only rows and the reset's stores into one
+		 * ring, which no audit profile can attribute to either card. */
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=gcc phase=start result=%d detail=clock-reset-needs-no-probe clock-reset=%u clock-vote-probe=%u\n",
+		 kIOReturnBadArgument,fResetEnabled?1u:0u,fProbeEnabled?1u:0u);
+		return false;
+	}
+	if (fResetEnabled) {
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=gcc:%#llx phase=reset result=0 detail=armed name=gcc_npu reset-id=%u offset=%#x bit=%u pulse-us=%u\n",
+		 (unsigned long long)kGccProbeWindowPhysical,kIOQcomGccResetLocalID,
+		 kIOQcomGccResetOffset,kIOQcomGccResetBit,kIOQcomGccResetPulseUs);
+	}
 	if (haveGate) {
 		/* The ring written before this candidate keeps its exact row: the share
 		 * field appears only on an image that arms the sharing pass, so an
@@ -456,7 +502,10 @@ IOQcomGCC::mapWindows(IOService *provider)
 bool
 IOQcomGCC::mapProbeWindow(IOService *provider)
 {
-	if (!fProbeEnabled) return true;
+	/* C2-07 borrows the same page: the reset card's BCR is word 0 of it, so an
+	 * image that arms the reset alone still maps the page - without the probe
+	 * rows, which stay the probe's own. */
+	if (!fProbeEnabled&&!fResetEnabled) return true;
 	Window &w=fWindow[kIOQcomGccVoteWindow];
 	w.physical=kGccProbeWindowPhysical;
 	w.length=0;
@@ -489,9 +538,12 @@ IOQcomGCC::mapProbeWindow(IOService *provider)
 		 resource,kIOReturnNotReady);
 		return false;
 	}
-	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s phase=map result=0 length=%#llx offset=%#llx vote-probe=1\n",
+	/* The row names whichever card borrowed the page: the probe's opt-in also
+	 * covers the vote (which implies it), the reset card maps it on its own. */
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s phase=map result=0 length=%#llx offset=%#llx %s\n",
 	 resource,(unsigned long long)length,
-	 (unsigned long long)(kGccProbeWindowPhysical-kIOQcomGccBase));
+	 (unsigned long long)(kGccProbeWindowPhysical-kIOQcomGccBase),
+	 fProbeEnabled?"vote-probe=1":"reset=1");
 	return true;
 }
 
@@ -639,7 +691,8 @@ IOQcomGCC::writeRegister(unsigned window,uint32_t offset,uint32_t value,
 	 * carries the probe but not the vote keeps a store set inside the four
 	 * mandatory windows, which is what makes the probe ring a zero-write ring. */
 	const bool inWindow=window<kIOQcomGccWindowCount||
-	 (fVoteEnabled&&window==kIOQcomGccVoteWindow&&offset==kIOQcomGccVoteOffset);
+	 (fVoteEnabled&&window==kIOQcomGccVoteWindow&&offset==kIOQcomGccVoteOffset)||
+	 (fResetEnabled&&window==kIOQcomGccVoteWindow&&offset==kIOQcomGccResetOffset);
 	if (inWindow&&w.base&&(offset&3u)==0&&
 	 (uint64_t)offset+sizeof(uint32_t)<=w.length) {
 		__asm__ volatile("dmb oshst" ::: "memory");
@@ -679,6 +732,22 @@ IOQcomGCC::writeVoteRegister(uint32_t offset,uint32_t value,const char *stage)
 		return false;
 	}
 	return writeRegister(kIOQcomGccVoteWindow,offset,value,stage,"sweetclock-vote");
+}
+
+bool
+IOQcomGCC::writeResetRegister(uint32_t offset,uint32_t value,const char *stage)
+{
+	/* Same refusal shape as the vote's store path: a reset store on an image
+	 * that did not arm it is a driver bug and gets a row, not a silent false. */
+	if (!fResetEnabled||offset!=kIOQcomGccResetOffset) {
+		if (fLock) { IOLockLock(fLock); fWriteFailures++; IOLockUnlock(fLock); }
+		char resource[kIOQcomLogBuf];
+		gccName(kIOQcomGccVoteWindow,offset,resource,sizeof resource);
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=write-issued result=%d stage=%s detail=reset-unarmed\n",
+		 resource,kIOReturnBadArgument,stage);
+		return false;
+	}
+	return writeRegister(kIOQcomGccVoteWindow,offset,value,stage,"sweetclock-reset");
 }
 
 bool
@@ -1541,6 +1610,194 @@ IOQcomGCC::voteClocks(void)
 	}
 	return verdict;
 }
+/* C2-07: the reset pulse.
+ *
+ * The card asks for one reset on a peripheral that is already stopped. The
+ * sample is GCC_NPU_BCR - vendor offset 0x4d000, bit 0, the field the hardware
+ * header calls BLK_ARES (1 asserts, 0 releases) - which is word 0 of the page
+ * the C2-06 probe already maps, so this card adds no seventh mapping. The block
+ * qualifies as stopped by measurement and not by convenience: the 0137 probe
+ * read its three voted branches as 0x80000000 and the 0138 vote put a ballot in
+ * and took it back out, so nobody claims the NPU and nothing runs it. This pass
+ * re-derives that state from the ring before it writes: a claimed vote (bit 0
+ * set) or a running branch (halt status clear) both refuse the pulse.
+ *
+ * The sequence is the vendor's own drivers/clk/qcom/reset.c spelled out one
+ * claim per row:
+ *
+ *  1. request   four CBCRs of the page, then the BCR word. A refusal here is a
+ *               row and zero stores, never a silent skip.
+ *  2. assert    bit 0 set, config bits preserved, the status bit never written.
+ *  3. hold      one readback, then the vendor's udelay(map->udelay ?: 1) - the
+ *               1 us default because GCC_NPU_BCR carries no udelay in its map.
+ *  4. release   bit 0 cleared with the same config preservation.
+ *  5. settle    one readback compared with the arrival word inside the config
+ *               mask: a BCR may report status the FSM owns, and this card must
+ *               not call that a failed restore.
+ *  6. restore   only when the block *arrived* held in reset. Releasing it is
+ *               what the pulse asks for, but leaving it released would be the
+ *               one durable side effect this card must not have, so the word
+ *               goes back to the arrival value and is read back once more.
+ *
+ * The limit is in what the verdict is made of. The NPU has no driver and its
+ * GDSC is off, so "the block reset" can only mean the bit landed, stayed for
+ * the pulse and came back - plus the four CBCRs of the same page being
+ * unchanged. The done row therefore prints collateral= and not a functional
+ * claim; nothing here shows the NPU's internal FSM ran. */
+IOReturn
+IOQcomGCC::resetBlock(void)
+{
+	fResetDone=false;
+	if (!fResetEnabled) {
+		SWEET_LOG_DEBUG("SWEET CLOCK: planID=C2 resource=cc%u:0x%x consumer=sweetclock-reset phase=reset result=%d detail=reset-absent\n",
+		 kIOQcomCCGCC,kIOQcomGccResetLocalID,kIOReturnUnsupported);
+		return kIOReturnUnsupported;
+	}
+	if (!fMapped||!fRegistered||!fLock) return kIOReturnNotReady;
+	char resource[kIOQcomLogBuf];
+	gccName(kIOQcomGccVoteWindow,kIOQcomGccResetOffset,resource,sizeof resource);
+	if (!fWindow[kIOQcomGccVoteWindow].base) {
+		/* validateProperties makes the reset imply the page, so a missing mapping
+		 * here is a driver bug and never a tree mistake. */
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset result=%d detail=reset-window-absent\n",
+		 resource,kIOReturnNotReady);
+		return kIOReturnNotReady;
+	}
+	/* (1) the block has to be idle, and the page that says so is the page the
+	 * pulse touches. One pass reads the four CBCRs once and uses them twice: as
+	 * the stop precondition and as the collateral baseline. */
+	uint32_t beside[kIOQcomGccResetCollateralCount];
+	unsigned besideFailed=0;
+	for (unsigned i=0;i<kIOQcomGccResetCollateralCount;i++) {
+		beside[i]=0;
+		if (!readRegister(kIOQcomGccVoteWindow,gccProbeRegs[i].offset,&beside[i])) besideFailed++;
+	}
+	if (besideFailed) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-request result=%d detail=collateral-read-failed failed=%u writes=%u\n",
+		 resource,kIOReturnNotReady,besideFailed,fWrites);
+		return kIOReturnNotReady;
+	}
+	unsigned claimed=0, running=0;
+	for (unsigned i=0;i<kIOQcomGccResetCollateralCount;i++) {
+		if (!gccProbeRegs[i].voted) continue;
+		if (beside[i]&kGccBranchEnable) claimed++;
+		else if (!(beside[i]&kGccBranchClockOff)) running++;
+	}
+	uint32_t before=0;
+	if (!readRegister(kIOQcomGccVoteWindow,kIOQcomGccResetOffset,&before)) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-request result=%d detail=reset-read-failed writes=%u\n",
+		 resource,kIOReturnNotReady,fWrites);
+		return kIOReturnNotReady;
+	}
+	fResetBefore=before;
+	const uint32_t bit=1u<<kIOQcomGccResetBit;
+	const bool arrivedHeld=(before&bit)!=0;
+	if (claimed||running) {
+		/* The value is the evidence. Storing here would reset a block somebody is
+		 * using, and the card's whole premise is that nobody is. */
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-request result=%d detail=%s claimed=%u running=%u held=%u value=%#x writes=0\n",
+		 resource,kIOReturnNotReady,claimed?"reset-block-claimed":"reset-block-running",
+		 claimed,running,arrivedHeld?1u:0u,before);
+		return kIOReturnNotReady;
+	}
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s name=gcc_npu consumer=sweetclock-reset phase=reset-request result=0 detail=idle held=%u value=%#x cfg=%#x axi=%#x trig=%#x at=%#x\n",
+	 resource,arrivedHeld?1u:0u,before,beside[0],beside[1],beside[2],beside[3]);
+	/* (2) assert. Bit 0 only: the config bits come back on release and the status
+	 * bit is never written, exactly like the branch stores one card earlier. */
+	const uint32_t configMask=kIOQcomGccBranchConfigMask;
+	const uint32_t assertValue=(before&configMask)|bit;
+	if (!writeResetRegister(kIOQcomGccResetOffset,assertValue,"reset-assert")) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-done result=%d writes=%u stores=0 pulsed=0 restored=%u collateral=0 detail=assert-store-failed\n",
+		 resource,kIOReturnNotReady,fWrites,arrivedHeld?1u:0u);
+		return kIOReturnNotReady;
+	}
+	fResetDone=true;
+	uint32_t asserted=0;
+	const bool assertRead=readRegister(kIOQcomGccVoteWindow,kIOQcomGccResetOffset,&asserted);
+	const bool held=assertRead&&(asserted&bit)!=0;
+	if (assertRead) {
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-assert result=0 asserted=%u bit=%u value=%#x mask=%#x\n",
+		 resource,held?1u:0u,kIOQcomGccResetBit,asserted,configMask);
+	} else {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-assert result=%d detail=assert-read-failed writes=%u\n",
+		 resource,kIOReturnNotReady,fWrites);
+	}
+	if (!held) {
+		/* A store that did not land still has to leave the word where it found it:
+		 * the arrival value is written back and the pass reports the failure. */
+		unsigned restoreStores=0;
+		if (writeResetRegister(kIOQcomGccResetOffset,before&configMask,"reset-restore")) restoreStores=1;
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-done result=%d writes=%u stores=%u pulsed=0 restored=0 collateral=0 before=%#x observed=%#x detail=assert-not-landed\n",
+		 resource,kIOReturnNotReady,fWrites,1u+restoreStores,before,asserted);
+		return kIOReturnNotReady;
+	}
+	/* (3) hold and (4) release: the vendor's pulse width, then bit 0 clear. */
+	IODelay(kIOQcomGccResetPulseUs);
+	const uint32_t releaseValue=(before&configMask)&~bit;
+	if (!writeResetRegister(kIOQcomGccResetOffset,releaseValue,"reset-release")) {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-done result=%d writes=%u stores=1 pulsed=0 restored=0 collateral=0 detail=release-store-failed\n",
+		 resource,kIOReturnNotReady,fWrites);
+		return kIOReturnNotReady;
+	}
+	uint32_t after=0;
+	const bool releaseRead=readRegister(kIOQcomGccVoteWindow,kIOQcomGccResetOffset,&after);
+	const bool released=releaseRead&&(after&bit)==0;
+	if (releaseRead) {
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-release result=0 released=%u bit=0 value=%#x delay-us=%u\n",
+		 resource,released?1u:0u,after,kIOQcomGccResetPulseUs);
+	} else {
+		SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-release result=%d detail=release-read-failed writes=%u\n",
+		 resource,kIOReturnNotReady,fWrites);
+	}
+	/* (5) settle, inside the config mask: a BCR is allowed to report status the
+	 * FSM owns, and a pass that called that a failed restore would be wrong. */
+	bool matched=releaseRead&&((after^before)&configMask)==0;
+	unsigned restoreStores=0;
+	if (releaseRead) fResetAfter=after;
+	if (releaseRead&&!matched) {
+		/* (6) the block arrived held in reset and the pulse released it. Put the
+		 * arrival word back, then read it once more - the pulse happened, the
+		 * state it was told to leave behind is the one it found. */
+		if (writeResetRegister(kIOQcomGccResetOffset,before&configMask,"reset-restore")) restoreStores=1;
+		uint32_t restoredValue=0;
+		if (restoreStores&&readRegister(kIOQcomGccVoteWindow,kIOQcomGccResetOffset,&restoredValue)) {
+			fResetAfter=restoredValue;
+			matched=((restoredValue^before)&configMask)==0;
+			if (matched) {
+				SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-restore result=0 restored=1 value=%#x mask=%#x\n",
+				 resource,restoredValue,configMask);
+			} else {
+				SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-restore result=%d detail=restore-mismatch before=%#x after=%#x mask=%#x\n",
+				 resource,kIOReturnNotReady,before,restoredValue,configMask);
+			}
+		} else {
+			SWEET_LOG_ERROR("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-restore result=%d detail=restore-%s writes=%u\n",
+			 resource,kIOReturnNotReady,restoreStores?"read-failed":"store-failed",fWrites);
+		}
+	}
+	/* The pulse is supposed to stay inside its own block. The same four CBCRs
+	 * read again is the only place this card can show that. */
+	unsigned moved=0;
+	for (unsigned i=0;i<kIOQcomGccResetCollateralCount;i++) {
+		uint32_t now=0;
+		if (!readRegister(kIOQcomGccVoteWindow,gccProbeRegs[i].offset,&now)) moved++;
+		else if (now!=beside[i]) moved++;
+	}
+	const unsigned stores=2u+restoreStores;
+	const IOReturn verdict=(held&&released&&matched&&moved==0)?kIOReturnSuccess:kIOReturnNotReady;
+	SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-done result=%d writes=%u stores=%u pulsed=%u restored=%u collateral=%u held-arrival=%u before=%#x after=%#x delay-us=%u\n",
+	 resource,verdict,fWrites,stores,(held&&released)?1u:0u,matched?1u:0u,
+	 moved==0?1u:0u,arrivedHeld?1u:0u,before,fResetAfter,kIOQcomGccResetPulseUs);
+	if (moved) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-done result=%d detail=collateral-moved moved=%u\n",
+		 resource,kIOReturnNotReady,moved);
+	}
+	if (!released) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=%s consumer=sweetclock-reset phase=reset-done result=%d detail=release-not-landed value=%#x\n",
+		 resource,kIOReturnNotReady,after);
+	}
+	return verdict;
+}
 IOReturn
 IOQcomGCC::measureClocks(void)
 {
@@ -1742,6 +1999,16 @@ IOQcomGCC::start(IOService *provider)
 		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=vote-incomplete vote-result=%d writes=%u\n",
 		 kIOQcomCCGCC,voted,fWrites);
 	}
+	/* C2-07 runs where the vote ran, and for the same reason: the pulse is over
+	 * and the block is back at its arrival state before anything measures, so a
+	 * reset that will not come out does not sit in the way of a measurement
+	 * store. The two cards cannot both be armed (validateProperties refuses it),
+	 * so at most one of these two rows ever appears. */
+	IOReturn pulsed=resetBlock();
+	if (pulsed!=kIOReturnSuccess&&pulsed!=kIOReturnUnsupported) {
+		SWEET_LOG_WARN("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 detail=reset-incomplete reset-result=%d writes=%u\n",
+		 kIOQcomCCGCC,pulsed,fWrites);
+	}
 	/* C2-08 last, so registration and the C2-02 decode exist before the first
 	 * store and a failed measurement cannot leave a half-published backend. */
 	IOReturn measured=measureClocks();
@@ -1751,6 +2018,12 @@ IOQcomGCC::start(IOService *provider)
 	}
 	if (fVoteEnabled) {
 		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x vote-probe=1 vote=1\n",
+		 kIOQcomCCGCC,kIOQcomGccMappedWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
+		 kIOQcomGccVariantSm8150);
+	} else if (fResetEnabled) {
+		/* The reset row keeps probe= out: this image maps the fifth page without
+		 * arming the probe, and a reader of the ring must be able to see that. */
+		SWEET_LOG_INFO("SWEET CLOCK: planID=C2 resource=cc%u phase=start result=0 windows=%u snapshot=%u reads=%u writes=%u variant=%#x reset=1\n",
 		 kIOQcomCCGCC,kIOQcomGccMappedWindowCount,kIOQcomGccSnapshotCount,fReads,fWrites,
 		 kIOQcomGccVariantSm8150);
 	} else if (fProbeEnabled) {
