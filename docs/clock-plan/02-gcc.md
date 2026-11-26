@@ -79,7 +79,7 @@
 - **实机检验**：确认写到本方 vote 寄存器及类型特定完成。能独立保持第二票时验证 aggregate 继续开；没有第二投票者时只验本方撤票，保留共享硬件场景未覆盖。
 - **预期结果**：本样本 voted 能力通过；整体 OFF 和本方票撤回分别报告。
 - **失败归属**：C2-06 vote-write／enable-completion／release-settle；缺第二票证据不冒充聚合关断故障。
-- **状态**：**前置就绪**（voted 样本见 [C0-03 的 S4](C0-03-SAMPLES.md)；0137 只读探针轮，补丁 `0243`，见本文件末节）。
+- **状态**：**只读前置已验收，待写票**（voted 样本见 [C0-03 的 S4](C0-03-SAMPLES.md)；0137 探针轮 rc=0，三支 voted 均 bit0 清零、`0x4d004` bit1 置位，见本文件末节；0138 投本方票）。
 
 ### C2-07 提供一个已停止外设的 reset 脉冲
 
@@ -339,3 +339,27 @@
 - **判据只有一条**：enable 已置位不是失败——那是本驱动没投过的票，正是下一轮撤票证明需要的第二持有者；只有读失败才 `kIOReturnNotReady`，start 随即 WARN `detail=probe-incomplete probe-result=%d writes=%u` 并照常进入门控流程（探针不改变任何既有决定）。
 - **兼容**：探针不设 `haveGate`，也不往 `phase=gate` 的 property 行加字段，所以 0136 及更早的环里这一类行一条都没有；`c2-03` 默认档读的是四条 `map` 行、19 次读、0 次写。
 - **证据**：`tools/tests/test-mh2lm-gcc-backend.py` 通过（五页映射、四行＋汇总、`registerWrites()==0`、六类拒绝：属性缺席／长度 3／值 2／页缺失／地址错／长度短、缺席档 `maps=4 reads=19 writes=0`）；`tools/tests/test-mh2lm-mdss-adt.py` 通过（属性与第五段可精确移除、旧树不含该属性、CLI 等价、`--clock-vote-probe` 隐含 provider）；`audit-clock-log.py --c2-06` 与 `make-probe-ring.py`／`selftest-probe-auditor.py` 12／12 PASS（`ok`／`held` 接受，`noflag`／`nopage`／`unmapped`／`short`／`failed`／`wrongvoted`／`misplaced`／`drift`／`silent-drift`／`silent-held` 拒绝）。补丁 `0243` 在 detached worktree 上重放，五份文件与工作区 `cmp` 逐字节一致。
+
+## 实机验收（0137 只读探针）
+
+内核 `0d5e18f2…`（17 950 152 B，0136 之上只多 `0243`），探针镜像 `boot-16k-0137-gpioirq-panel-pipeline-clockvoteprobe.img`＝`1d0d94d1…`，同内核的默认档 `…-pipeline.img`＝`8f491362…`，两张都 35 545 088 B、605 字节参数、固件卷 `27e7a1d1…`。两次都是 `fastboot boot`，都进桌面。拆开 ramdisk 对照过：探针档与默认档的 toml **逐字节相同**，唯一差别是 ADT（`88d2d78f…` 对 `081f63dc…`）；与 0136 的默认档相比，ADT 同一份、ramdisk 里只有 kernel 和标题行变了——所以“只多了一条属性”不是推断，是逐字节的对照。
+
+**探针档**（`logs/sweetlog-0137-0.bin`，`6a1cfe36…`，`total=314875`、`flush_sequence=8`、未回绕、3959 行，`--c2-03 --c2-06` **rc=0**）：32 条时钟行，分布 `start 2`／`map 5`／`snapshot 11`／`probe 4`／`probe-sample 1`／`register 1`／`decode 7`／`decode-sample 1`，`clock_warn=0`、`clock_error=0`。逐值：
+
+```
+map   resource=gcc:0x14d000 phase=map result=0 length=0x1000 offset=0x4d000 vote-probe=1
+probe gcc:0x14d004 name=gcc_npu_cfg_ahb_clk voted=0 enable=0 clk-off=1 value=0x80000002
+probe gcc:0x14d008 name=gcc_npu_axi_clk     voted=1 enable=0 clk-off=1 value=0x80000000
+probe gcc:0x14d00c name=gcc_npu_trig_clk    voted=1 enable=0 clk-off=1 value=0x80000000
+probe gcc:0x14d010 name=gcc_npu_at_clk      voted=1 enable=0 clk-off=1 value=0x80000000
+probe-sample voted=3 enable-set=0 enable-clear=3 clk-off=3 failed=0 reads=15 writes=0
+start resource=cc1 result=0 windows=5 snapshot=11 reads=23 writes=0 variant=0x8150 vote-probe=1
+```
+
+三件事因此成为实机事实，而不是资料：**第五页真在**（`offset=0x4d000`，四行都带真实 `resource=`）；**三支 voted branch 原状态全是“停着、没人投票”**（bit31 置位、bit0 清零），所以 0138 能拿到的只有本方这一侧的证词，聚合关断必须有第二位持有者才能谈，本轮造不出来；**0x4d004 的 bit1 实测为 1**，S4 里那条“厂商对 HWCG 模式根本不看 halt”的风险从注释变成了读数——以后任何“halt 没退”必须先排掉这一位。整个探针 `writes=0`，与主机对 `registerWrites()` 的断言一致。
+
+**默认档**（`logs/sweetlog-0137-1.bin`，`8b6bd558…`，`total=344792`、`flush_sequence=28`、4233 行，`--c2-03` **rc=0**）：26 条时钟行，分布 `start 2`／`map 4`／`snapshot 11`／`register 1`／`decode 7`／`decode-sample 1`，`reads=19`、`writes=0`、`variant=0x8150`、`decode_sample_hz=19200000`，**没有一条 `probe`／`probe-sample` 行**。这是 `0243` 惰性的实机对照：属性不在时，第五页不映射、四个寄存器一次不读，行文法与 0136 逐字段相同。
+
+两环的非时钟基线都等于 b32（`FB SCANOUT`×3＋`USB`×2），标记齐全且不多于参考（`touch_armed` 2 对 4、`touch_app_format` 1 对 3——会话更短、帧更少）。0242 那条修好之后环里只剩 12 行 `SWEET IOWORKLOOP`（占环 0.003），两台机器都装得下整段启动。
+
+**结论**：C2-06 只读前置完成，四个寄存器、第五页、拒绝词、日志文法在设备上同时成立且零写；原状态已可引用，写卡（0138）现在有据可依。**C2-06 尚未收束**——票还没投过。
