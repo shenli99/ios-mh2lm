@@ -116,7 +116,53 @@ C2-04 撤的是“本驱动唯一持有的那条需求”。第二个消费者�
 **0142 实机验收（C3-02 收口，2026-11-27，00ddddf4…）**：默认档一次启动。内核 17 988 008 字节（0141 是 17 987 456，+552 字节），`ci-0142-buildtree` 里的 `SweetRSCDatabase.cpp/.h`、`IOQcomRSC.cpp/.h` 与提交 `e623885` **逐字节相同**；`out-bs/mk16k-0142.sh … 0142 0ddddf4a…` 一次跑通，十三张镜像 35 545 088 字节、参数 605 字节、固件 `27e7a1d1…`、时钟树仍 `081f63dc…`、默认档树 `999e2705…`（23 924 字节）。环 `sweetlog-0142-0.bin`（4 198 400 字节，sha256 `998b0b6c…`，`total=318997`、`flush_sequence=10`、`wrapped=false`、3 958 行）里 `SWEET RSC:` **九行**，`db-query` 夹在 `command-db`（第 156 行）与 `tcs`（第 161 行）之间，总结行 `reads=10 query-reads=292 writes=0 … query=ok submit=not-ready` 与 0141 逐字相同——**十次载入那句话仍然成立，查询的代价单列而不摊进 `fReads`**。查询行 `slave=5 address=0x500a8 entry=0x818 aux=0x9b0/8 unit=20000 width=4 vcd=5 matches=1 reads=292` 与同一环第 1220 行 owner 自己的 `SWEET RPMH BCM: name=CN0 metadata ready address=0x500a8 unit=20000 width=4 vcd=5 enable-mask=0` 四个字段逐字相等（`enable-mask` 不比），`aux=0x9b0/8` 正好是 BCM 的八字节。`query-reads` 292 比夹具钉的 26 大一个量级：设备上 BCM 块有百余条目，`lookup()` 要逐条比 8 字节键——**夹具钉的是走法，不是设备的条目数**，这个数在环里只用于对账。非时钟 WARN／ERROR 清单与 b32 逐条相等（`SWEET FB SCANOUT` ×3、`SWEET USB` ×2），一条 `query-refused` 都没有，`audit-clock-log.py --c2-03 --c3-02` **严格 rc=0**（没有 `--allow-baseline-drift`）；同一份环用 `--c3-01` 判直接被拒（`the ring carries a query row: judge it with --c3-02`），旗标与环双向一致这条真的在起作用。
 **打包侧的新教训**：`IOQcomRSCChannel::queryCommandDB` 被内联进 `start()`，产物里**没有** `__ZN16IOQcomRSCChannel13queryCommandDBEv`（`strings -a` 实测 0 次，而 `SweetRSCDatabase::lookup`／`stageName` 各 1 次）。我打脚本前因为怕这个把那条成员符号门禁删掉了——门禁里留它，这一版内核会被自己的门禁拒掉。**跨翻译单元的符号才配当门禁**，成员函数要不要出符号取决于优化取舍，不是契约。
 
-NEXT：**C3-03（原样提取现有 ACTIVE 执行器）**——只搬寄存器访问、现有 IRQ/event 配合与触发／完成／清理，保留原 gate、顺序、期限、Busy 与故障保留，原 VRM／ARC／CN0 调用经内部适配层原样执行，owner 仍是唯一硬件 owner；本地检验是同一命令形状的 MMIO／结果轨迹前后一致、stale IRQ 与超时清理不弱化。**C3 至此 2/8**（C3-01、C3-02 已收口）；**C2 早已 8/8 收口**（未覆盖项逐卡标注：voted 的整体 OFF、共享硬件场景、BCR 的复位生效）。C0-04 里 NPU、音频、GPU、Wi-Fi、相机、视频保持“暂缓（无需求）”。
+## C3-03 执行器提取：机制搬走，所有权没动（2026-11-27，补丁 0249，0143 实机收口）
+
+C3-02 把"读"这件事讲完了，C3-03 要的是**搬家**：ACTIVE 路径的寄存器访问、既有 IRQ 配合、触发／完成／清理机制从 `SweetRPMh.cpp` 移进 `SweetRPMhExecutor`，
+而这一卡算不算过，取决于环能不能看出搬过。设计上先把"床"定下来：模块**零成员状态**，四个 static 函数，owner 把 TCS 基址、自己选的布局
+（`SweetRPMhLayout`，偏移只声明一次，就写在它描述的那些偏移旁边）和本来就在自己名下的有界字数组
+（`SweetRPMhWord fOperations[SweetRPMhExecutor::kCapacity]`，20 字）交进去。模块因此不可能在两次调用之间记住一笔事务。
+
+**四个入口各管一段，谁做决定写在名字上**：`arm()` 读一次源状态，说 Ready／Stale／Invalid（stale 与 invalid 的诊断仍由 owner 打，一字未改）；
+`step()` 发一个排队字并按字自己的偏移读回（w1c 字改读源状态），返回 Advanced／Blocked／Expired——它不知道期限意味着什么，Expired 是报告不是决定；
+`verify()` 先把整槽采完（源状态 → 槽 Status → 每个命令状态按 stride）再下判决，Invalid 故意放到最后，采样形状不依赖答案；
+`stageCleanup()` 往调用方数组里短排收尾：引擎模式字、引擎关、槽 enable 关、wait 关、以 w1c 形式确认源，能读回 `IRQEnable` 就追加第六字把这槽的位还原，
+五字整排或整不排，容量不够就不动。**槽算术也是契约**：ports 上下文是 TCS 数组基址，槽相对偏移由调用方加上选中槽的基址，数组全局那三字
+（源状态／源使能／确认）不加——搞反了不会报错，只会让第二个 TCS 看起来被占用，把 owner 自己的空槽检查变成 `kIOReturnBusy`，夹具第一版就是这么抓到的。
+
+**"原样"钉在测试里**：`tools/tests/test-mh2lm-rpmh-executor.py` 的 Part B 内嵌**改动之前**录下的轨迹字面量（839 条记录、六个场景：
+empty／rail-live／rail-blocked／rail-missing／rail-complete／rail-expired），逐条比对 owner 改走四个模块函数之后实际发出的读写序列与结果。
+字面量是常量，**不从模块常量重算**——否则"提取前后一致"会退化成同义反复。Part A 另钉形状：判定表逐档、`nm` 只认四个 text 符号且零 data 符号、
+模块不引 IOKit 以外的东西。两条负向对照做过并留着：对调 `verify()` 里 `IRQStatus` 与 `Status` 两次采样 → Part A 立刻失败；
+对调 owner 收尾的 `IRQEnable`／`IRQClear` 顺序 → Part B 在 `rail-complete` 上以 `assert [l for l in body if l[0]=='W'] == writes` 失败。
+15 个夹具串行 15/15 PASS（并行会撞固定 `/tmp` 目标名）。
+
+**设备端只声明一件窄事，而且办到了**：环 `logs/sweetlog-0143-0.bin`（`1be482ae…`、`total=347298`、`flush_sequence=28`、未回绕、54 619 行）里，
+`[INFO] SWEET RPMH: executor=module tcs=0 commands=3 open=0 hardware-owner=SweetRPMh` 只有一条（2111 行），
+**紧贴本次开机第一条自然完成行**（2112 行，`tcs=0 commands=3 entries=1`）——中间隔一行就成了标签，所以判据就写"紧贴"。
+`open=0` 是关键：那正是旧代码会以 `incomplete-irq` 退掉的形状（有槽没拿到完成位），零代表两个读者对同四个字没有分歧。
+之后 `tcs=0` 完成 10 条、`entries` 1→10 单调；6 条的下一行就是它那笔的 `ACTIVE ACK`（token 1–6，`ldoa14`／`ldoa17`／`ldoc3`／`ldoa5`／`display ARC`／`CN0`），中间 5 条 `commands=1` 的完成行连排、ACK 落在最后一次完成之后（完成位与命令槽不一一对应，这是旧行为），第 7 条 ACK 在又一次提交之后；另 4 条 `SWEET MDSS NOC IRQ:` 完成属显示 NoC 自己的路径，
+正则不匹配、也不该匹配（环里 grep "fresh ACTIVE completion" 会数出 14 条，那是两家的）。整环 `[ERROR] … SWEET RPMH` 零条，
+stale／posted-write／incomplete-irq／超时四条放弃路径一条都没走到。与 0142 逐字段比：`channel` 判定完全相等，
+整份 verdict 只差行号（154 对 164）与 workloop 唤醒条数（13 对 12）——抓环时刻的函数，不是契约；完成条数同理（11 对 10），
+钉住的是顺序与计数器单调，不是总数。
+
+**打包侧这次真踩到一个坑，值得写下来**：`step()` 的 mangle 里 `uint64_t` 在主机上是 `unsigned long`（`…PbmmPj`），在产品上是 `unsigned long long`（`…PbyyPj`）。
+第一版符号门禁照**本机目标文件**抄，于是打包器把**正确的内核**拒了（`kernel is missing __ZN17SweetRPMhExecutor4stepE…`）；
+换成 `llvm-nm-19 ci-0143/kernel.development.mh2lm | grep SweetRPMhExecutor` 重抄四个 mangle 后 `GATE-MATCHES-PRODUCT`，一次通过。
+旧规矩新证据：跨翻译单元的符号门禁只能从产物抄。顺带这张门禁也成了负向对照——拿 0142 的内核跑 0143 打包器，会停在同一条断言上。
+
+**旗标与环双向一致**：`--c3-03`（蕴含 `--c3-02`、`--c3-01`）判 0143 **严格 rc=0**；同一份环用 `--c3-02` 判被拒
+（`the ring carries the executor row: judge it with --c3-03`），0142 用 `--c3-03` 判也被拒（`the C3-03 ring must print the ownership row`）。
+合成自测 `selftest-channel-auditor.py` 从 37 变体扩到 **48 变体全 PASS**：接受档一条，拒绝档覆盖"有行无完成／行在完成后／TCS 或命令数不符／open≠0／
+行印两次／ACTIVE 路径错误行"，外加双向换人格。新增 `make-channel-ring.py` 的 `execfault` 变体时发现它先被**基线清单**拒掉（`SNAPSHOT: reason=incomplete-irq`
+属 ERROR 清单），这算通过，但自测的 why 行必须照实写"基线清单先拦"，否则下次会以为是执行器检查在起作用。
+
+**C3-03 由此收口，C3 3/8**：机制在模块里，所有权没动——门、顺序、期限、Busy、失败保留、日志措辞都还在 owner；
+模块拿不到 map、IRQ 源、定时器或锁，这一点先由代码形状保证，再由环里那条 `hardware-owner=SweetRPMh` 与它下面那条完成行共同作证。
+0143 的双默认树因此成为 C3-04 的起点。
+
+NEXT：**C3-04（启动时由 channel 作为 apps 执行器唯一 owner）**——owner 在 channel 首次写入前确定（编译期或显式启动参数），该模式下旧 `SweetRPMh` 执行路径不初始化写能力、不注册 IRQ handler，既有 VRM／ARC／CN0 客户端经兼容层走同一个执行器，不留两套 MMIO；不做运行中交接、不排空旧在途状态，保留单笔在途与 Busy，不改 GIC 架构、不加队列／缓存，回退方式是选旧 owner 的已验镜像或参数。本地检验：两种 owner 模式仅一方可写、IRQ 仅一方注册，新模式下旧入口的写尝试被拒绝，命令顺序与 C3-03 一致；实机检验：新 owner 模式启动并记录 owner 选择、旧写计数为零、channel 完成既有自然 VRM／ARC／CN0 请求的 IRQ 与 cleanup，USB／根卷、显示、触摸回归。**C3 至此 3/8**（C3-01、C3-02、C3-03 已收口）；**C2 早已 8/8 收口**（未覆盖项逐卡标注：voted 的整体 OFF、共享硬件场景、BCR 的复位生效）。C0-04 里 NPU、音频、GPU、Wi-Fi、相机、视频保持"暂缓（无需求）"。
 
 ## 首个“为了开钟而写钟”的候选：C2-03 分支门控（2026-11-24，补丁 0237，0130 实机通过）
 

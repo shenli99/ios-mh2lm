@@ -1,6 +1,6 @@
 # C3：apps RSC 公共事务通道
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03～C3-08 未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04～C3-08 未开始。
 
 ## 阶段目标与退出条件
 
@@ -164,6 +164,51 @@ phase=start result=0 windows=4 ranges=3 reads=10 query-reads=292 writes=0 id=0x1
 - **实机检验**：至少一个既有自然 ACTIVE 请求取得新 IRQ 完成，原消费者功能及普通路径保持；日志明确仍由旧服务持有硬件。
 - **预期结果**：公共执行器已有可复用实现，硬件所有权尚未转交。
 - **失败归属**：C3-03 extraction／sequence／completion；算法差异需撤出本卡另建修复。
+
+**0143 验收（C3-03 收口）**：环 `logs/sweetlog-0143-0.bin`（4 198 400 字节，sha256 `1be482ae…`，
+`total=347298`，`flush_sequence=28`，`wrapped=false`，54 619 行），默认档一次启动。自证句只有一条，且正好压在
+这次开机第一条自然完成行上方——中间没有任何别的行：
+
+```
+2110 [INFO] SWEET RPMH IRQ: INTID37 configured; ACTIVE completion on provider workloop, no status polling
+2111 [INFO] SWEET RPMH: executor=module tcs=0 commands=3 open=0 hardware-owner=SweetRPMh
+2112 [INFO] SWEET RPMH IRQ: fresh ACTIVE completion tcs=0 commands=3 entries=1; cleanup pending
+2113 [INFO] SWEET RPMH: token=1 ldoa14 ACTIVE ACK enable=1 mv=1800 mode=7; physical state unverified
+```
+
+两行描述同一笔事务（`tcs=0`／`commands=3`），`open=0` 表示交给模块的每个命令槽都拿到了完成位——
+这正是旧代码会以 `incomplete-irq` 退掉的形状，这里是零。**完成路径没有变**：`tcs=0` 的完成 10 条，`entries` 从 1 连到 10；前十行里 6 条的下一行就是它那笔的 `ACTIVE ACK`（token 1–6：`ldoa14`／`ldoa17`／`ldoc3`／`ldoa5`／`display ARC`／`CN0`，`enable=1`／`mv`／`mode=7` 与 0142 同形）；中间 5 条 `commands=1` 的完成行（2126–2130）连排，ACK 落在最后一次完成之后——**完成位与命令槽从来不一一对应**，这是旧行为而不是新模块的口味；第 7 条 `ACTIVE ACK` 出现在下一次提交之后。
+另有 4 条 `SWEET MDSS NOC IRQ: fresh ACTIVE completion tcs=2 …` 属显示 NoC 自己的路径，审计正则不匹配它们，
+文档里说"10 条"指的就是 RPMH 这条。整环 `[ERROR] … SWEET RPMH` **零条**，四条放弃路径
+（stale／posted-write／incomplete-irq／超时）一条都没走到，WARN 清单与 b32 逐条相等。
+
+**与 0142 的差只有开机前缀长度**：`channel` 判定的每个字段逐字相等（9 行、`reads=10`、`writes=0`、`query=ok`、
+`query_reads=292`、`query_row=CN0`、`owner_agrees=true`、4 窗口／3 区间、`id=0x10700 tcs=8 ncpt=16 irq=37`）；
+整份 verdict 里只有行号（154 对 164）与 workloop 唤醒条数（13 对 12）不同——这两项是抓环时刻的函数，不是契约。
+完成条数同理：0142 是 11 条、0143 是 10 条，差别只在于拉环前设备跑了多久，钉住的是顺序与计数器单调，不是总数。
+
+**"原样提取"钉在测试里，不在文档里**：`tools/tests/test-mh2lm-rpmh-executor.py`（478 行）Part B 内嵌
+**提取之前**录下的轨迹字面量（839 条记录、六个场景：empty、rail-live、rail-blocked、rail-missing、rail-complete、rail-expired），
+逐条比对 owner 改走 `arm/step/verify/stageCleanup` 之后实际发出的读写序列与结果；字面量是常量，不从模块常量重算，
+所以模块改了顺序而测试跟着变这件事在结构上不可能。Part A 单独钉模块形状：四个 static 的判定表、
+`nm` 只认四个 text 符号且零 data 符号（模块不记事务）、头文件不引 IOKit 以外的东西。
+两条负向对照做过并留着：把 `verify()` 里 `IRQStatus` 与 `Status` 两次采样对调，Part A 立刻失败；
+把 owner 收尾的 `IRQEnable`／`IRQClear` 顺序对调，轨迹部分在 `rail-complete` 上以
+`assert [l for l in body if l[0]=='W'] == writes` 失败。15 个夹具串行 15/15 PASS。
+
+**打包侧这次真踩到一个坑**：`step()` 的 mangle 里 `uint64_t` 在主机上是 `unsigned long`（`…PbmmPj`），
+在产品上是 `unsigned long long`（`…PbyyPj`）。第一版门禁照主机目标文件抄，于是**正确的内核被自己的门禁拒掉**；
+从 `llvm-nm-19 ci-0143/kernel.development.mh2lm` 重抄四个 mangle 后 `GATE-MATCHES-PRODUCT`，之后打包一次通过。
+规矩照旧：符号门禁一律从产物抄，不从本机目标文件抄。
+
+**旗标与环双向一致**：`--c3-03` 蕴含 `--c3-02` 与 `--c3-01`，判 0143 **严格 rc=0**（没有 `--allow-baseline-drift`）；
+同一份环用 `--c3-02` 判会被拒（`the ring carries the executor row: judge it with --c3-03`），
+0142 用 `--c3-03` 判也被拒（`the C3-03 ring must print the ownership row`）。
+
+**C3-03 由此收口**：ACTIVE 路径的寄存器访问、既有 IRQ 配合、触发／完成／清理机制已经在一个**无状态**模块里，
+owner 仍是唯一硬件所有者——TCS 选择、按类准入、面板栅栏、`IRQEnable` 值组成、GIC 布防、期限、Busy 判定、
+失败保留与全部日志措辞都还在 `SweetRPMh.cpp`；模块拿不到 map、IRQ 源、定时器或锁，这一点由代码形状保证，
+再由环里那条 `hardware-owner=SweetRPMh` 与它下面那条完成行共同作证。0143 的双默认树因此成为 C3-04 的起点。
 
 ### C3-04 启动时由 channel 作为 apps 执行器唯一 owner
 
