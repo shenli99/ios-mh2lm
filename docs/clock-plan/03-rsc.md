@@ -1,6 +1,6 @@
 # C3：apps RSC 公共事务通道
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上读到块（0140），一个字段读错、已修（补丁 `0247`），等 0141 复验；C3-02～C3-08 未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02～C3-08 未开始。
 
 ## 阶段目标与退出条件
 
@@ -35,8 +35,32 @@
   owner 的 `INTID37 configured` 在 2112 行。所以"通道必须在 owner 武装中断之后"是错的判据，"在 owner 读过块之后"才是对的，
   中断那一行只能要求出现一次。
 
-**判据（0141 复验时逐条对照）**：`--c2-03 --c3-01` 不加 `--allow-baseline-drift` 也 rc=0；通道 `reads=10`／`writes=0`；
+**0140 的判据（当时写下，0141 逐条对照）**：`--c2-03 --c3-01` 不加 `--allow-baseline-drift` 也 rc=0；通道 `reads=10`／`writes=0`；
 `id`／`major`／`tcs`／`ncpt` 与 owner 行相等；`irq-enable=0x1` 只观察；无 `version-flags-differ`；owner 的 INTID37 行出现且仅一次。
+
+#### 实机验收：0141 通道档（C3-01 收口，2026-11-27）
+
+只有 `0247` 一个补丁落地（内核 `51cbf23e…`，17 987 456 B，与 0140 同尺寸），镜像 `boot-16k-0141-gpioirq-panel-pipeline.img`
+＝`ec02cdcf…`（35 545 088 B，默认档树仍是 `bb7eb44e…`／23 884 B，十一棵门控树摘要与 605 字节参数、固件 `27e7a1d1…` 全部未变），
+一次 `fastboot boot` 进桌面。环 `logs/sweetlog-0141-0.bin`（`6a2702cc…`、4 198 400 B、`total=319335`、`flush_sequence=9`、未回绕、4019 行）。
+
+**同一块、同一个身份、同样十次载入，一条 WARN 也没多。** `SWEET RSC:` 行回到 **8 条**（`irq 1`／`map 3`／`identity 1`／
+`command-db 1`／`tcs 1`／`start 1`），`phase=command-db … version=0x1 flags=0 detail=read-only-map`——140 处的那个字确实是 0，
+`0x6c2e7863` 不再出现在任何一行；`--c2-03 --c3-01` **不加** `--allow-baseline-drift` 得 **rc=0**（第一个严格通过的通道档），
+WARN 清单只剩 `SWEET FB SCANOUT`×3 与 `SWEET USB`×2，与 b32 相等。判据逐条：`reads=10 writes=0`；
+`id=0x10700 major=1 tcs=8 ncpt=16` 与 owner 行 `pre-v3 RSC id=0x10700 config=0x800c8104 ncpt=16 ACTIVE=2` 逐字段相等；
+`irq-enable=0x1 irq-status=0 detail=observed-not-owned`、`irq=37 detail=described-not-armed`、`submit=not-ready`、`submit_attempts=0`；
+owner 的 `INTID37 configured` 出现且仅一次（2112 行，按修好的顺序判据）；时钟侧 26 行、`reads=19`／`writes=0`／`variant=0x8150`
+与 0139／0140 默认档逐值相同，面板标记齐全。DB 仍是 `0x85f20000`／4424 B，与 0140 同址同长。
+
+**内核增量这次是逐字节核对的**：0141 与 0140 同尺寸，整份差异只有四处——`LC_UUID` 16 B、加载命令区 2 B、
+`0xb023b0` 上的一条 `movz w2, #144` → `#140`（上下文与 `bl` 位移全不变），以及 `__CTF` 段整体（该段 `initprot=1` 只读不可执行，
+clang 侧每次构建都不同）。也就是说可执行代码只差这条立即数。顺带确认这套内核在字节层面不可重建（UUID 与 `__CTF` 每次都变），
+所以"同一份代码给出同一哈希"不能当判据，判据只能是代码增量 + 符号/字符串门禁 + ADT 摘要，打包脚本现在做的正是这三样。
+
+**C3-01 由此收口**：读侧成立（同一块、同一身份、十次载入）、零存储（结构上 `writeRegister()` 只回 `kIOReturnUnsupported`，
+计数 `writes=0` 不是巧合）、不注册第二个 handler（节点连 GIC 段都没有）、不碰 IRQ mask／TCS，owner 的票与完成照旧。
+未覆盖项留待后续卡：这条通道**没有任何提交能力**（`submit()` 恒 `kIOReturnNotReady`），也不与 owner 交接所有权。
 
 ### C3-02 提取只读 Command DB 查询
 
