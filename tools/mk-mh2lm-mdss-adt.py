@@ -41,7 +41,8 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
 
 def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
             clock_gate=False, clock_disable=False, clock_share=False,
-            clock_vote_probe=False, clock_vote=False, clock_reset=False):
+            clock_vote_probe=False, clock_vote=False, clock_reset=False,
+            rsc_channel=False):
     # C2-05 stands on both cards below it, so the two switch it needs are implied
     # here rather than trusted to every caller: a share node without them would be
     # refused at start and the image would carry a property that can do nothing.
@@ -159,6 +160,19 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             rpmh.props.extend([('sweet,rpmh-irq-abi', 0, struct.pack('<I', 1)),
                                ('sweet,rpmh-intid', 0, struct.pack('<I', 37))])
         arm.children.append(rpmh)
+    if rsc_channel:
+        # C3-01: a second, read-only reader of the apps RSC. It carries the same
+        # three ranges as the display owner and no GIC range at all, so this node
+        # cannot describe a second interrupt listener even by accident; the
+        # completion ABI is metadata the channel reports and never arms.
+        rsc = adt.Node()
+        rsc.props = [('name', 0, b'rsc-channel\0'),
+                     ('compatible', 0, b'sweet,rsc-channel\0'),
+                     ('reg', 0, encode(RPMH_WINDOWS)),
+                     ('sweet,rsc-abi', 0, struct.pack('<I', 1)),
+                     ('sweet,rsc-irq-abi', 0, struct.pack('<I', 1)),
+                     ('sweet,rsc-intid', 0, struct.pack('<I', 37))]
+        arm.children.append(rsc)
     if panel_pins:
         pins = adt.Node()
         pins.props = [('name', 0, b'panel-pins\0'), ('compatible', 0, b'sweet,panel-pins\0'),
@@ -272,6 +286,7 @@ if __name__ == '__main__':
     parser.add_argument('--clock-vote-probe', action='store_true', help='append the C2-06 read-only vote probe (implies --gcc); maps the NPU page as a fifth range and reads four CBCRs, zero stores')
     parser.add_argument('--clock-vote', action='store_true', help='append the C2-06 vote opt-in (implies --clock-vote-probe); stores one vote bit, waits for the aggregate, and withdraws it again')
     parser.add_argument('--clock-reset', action='store_true', help='append the C2-07 reset opt-in (implies --gcc); maps the NPC page for itself and pulses the NPU reset bit once, 1 us wide, only after proving the block stopped')
+    parser.add_argument('--rsc-channel', action='store_true', help='append the C3-01 read-only apps RSC channel; same three ranges as the display owner, no GIC range, zero stores')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
@@ -280,4 +295,4 @@ if __name__ == '__main__':
         sys.exit('output must differ from the baseline ADT')
     destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
                       args.clock_disable, args.clock_share, args.clock_vote_probe,
-                      args.clock_vote, args.clock_reset))
+                      args.clock_vote, args.clock_reset, args.rsc_channel))

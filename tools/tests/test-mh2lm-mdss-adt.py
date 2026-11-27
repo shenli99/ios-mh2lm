@@ -652,10 +652,70 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-reset-adt-') as temp:
                     str(source), str(output)], check=True)
     assert output.read_bytes() == reset
     assert source.read_bytes() == blob
+# C3-01 is a second reader, not a second owner. The node names exactly the three
+# ranges the display owner maps, so no byte of memory becomes reachable that was
+# not already described, and it carries no GIC range at all - a channel that
+# cannot map the interrupt controller cannot install a second listener. The
+# completion ABI is metadata only.
+chan = m.derive(blob, rsc_channel=True)
+assert m.derive(blob, display_resources=True, rsc_channel=True) != chan
+assert chan != blob
+assert b'sweet,rsc-channel' not in blob and b'sweet,rsc-abi' not in blob
+assert b'sweet,display-resource-abi' not in chan
+ctree, end = adt.parse(chan)
+assert end == len(chan)
+rsc = next(n for n in ctree.children[1].children if n.name == 'rsc-channel')
+assert rsc.prop('name') == b'rsc-channel\0'
+assert rsc.prop('compatible') == b'sweet,rsc-channel\0'
+creg = struct.unpack('<%dQ' % (len(rsc.prop('reg')) // 8), rsc.prop('reg'))
+cwin = []
+for i in range(0, len(creg), 2):
+    addr, size = creg[i], creg[i + 1]
+    cwin.append((addr + m.SOC_BASE if addr < m.LOW_ALIAS else addr - m.LOW_ALIAS,
+                 size))
+assert tuple(cwin) == m.RPMH_WINDOWS, cwin
+assert len(cwin) == 3, cwin
+assert rsc.prop('sweet,rsc-abi') == struct.pack('<I', 1)
+assert rsc.prop('sweet,rsc-irq-abi') == struct.pack('<I', 1)
+assert rsc.prop('sweet,rsc-intid') == struct.pack('<I', 37)
+# The same three ranges the owner maps, byte for byte: one tree cannot point the
+# reader at a different block than the writer beside it.
+owner = next(n for n in adt.parse(m.derive(blob, display_resources=True))[0]
+             .children[1].children if n.name == 'display-rpmh')
+assert rsc.prop('reg') == owner.prop('reg')
+# Removing the node alone gives the plain derivation back byte for byte: the
+# channel owns no range, no property and no other node.
+ctree.children[1].children = [n for n in ctree.children[1].children
+                              if n.name != 'rsc-channel']
+assert adt.serialize(ctree) == m.derive(blob)
+# With the owner present the reader is appended after it, and the order is fixed.
+both = m.derive(blob, display_resources=True, rsc_channel=True)
+btree, end = adt.parse(both)
+assert end == len(both)
+names = [n.name for n in btree.children[1].children]
+assert names.index('display-rpmh') + 1 == names.index('rsc-channel'), names
+# An image that asks for the display owner with the IRQ keeps the GIC range on
+# the owner only: the reader still names three.
+with_irq = m.derive(blob, rpmh_irq=True, rsc_channel=True)
+wtree, end = adt.parse(with_irq)
+assert end == len(with_irq)
+wowner = next(n for n in wtree.children[1].children if n.name == 'display-rpmh')
+wreader = next(n for n in wtree.children[1].children if n.name == 'rsc-channel')
+assert len(wowner.prop('reg')) == 8 * 2 * (len(m.RPMH_WINDOWS) + 1)
+assert wreader.prop('reg') == encode_windows(m.RPMH_WINDOWS)
+with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-channel-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'rsc.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--rsc-channel',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == chan
+    assert source.read_bytes() == blob
 print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
       'that no earlier image carries, and the C2-05 share on top of all three, plus the '
       'C2-06 vote probe, which owns both its property and the fifth range, and the vote on '
       'top of it as a property of its own, and the C2-07 reset, which shares the '
-      'fifth range with the probe but implies neither it nor the vote')
+      'fifth range with the probe but implies neither it nor the vote, and the '
+      'C3-01 read-only apps RSC channel, which names the owner\'s three ranges and '
+      'no GIC range at all')

@@ -1,0 +1,1301 @@
+From: mh2lm clock work <clock@mh2lm>
+Subject: [PATCH 0246] clock: read the apps RSC a second time, from a channel that cannot write
+
+Nine clock cards read and wrote the GCC block through a provider that owns it.
+The RSC is the other half of the same staging plan and has stayed untouched:
+SweetRPMh maps the apps RSC's DRV window, its command DB and one TCS page,
+installs the INTID37 handler, and drives four rails and the display ARC chain
+through it. Every row of C3 so far would be built on top of that owner, so the
+first step is not to change what the owner does but to show that a second
+service can reach the same block, decode it from the tree rather than from the
+owner's private state, and be structurally unable to disturb it.
+
+What C3-01 is. A second IOService - IOQcomRSCChannel - matched by the ADT node
+the generator writes, mapping the same three windows the owner maps, reading the
+block's identity, the command DB header and the two TCS words of page 0, and
+returning NotReady from submit() without touching memory. It is not a vote, not
+a handoff and not a second writer. The card exists so that the numbering, the
+window ABI and the refusal vocabulary are in place before C3 asks for anything
+that writes.
+
+Where the numbers come from. The three windows are RPMH_WINDOWS of the owner
+node - apps DRV at 0x18220000 (0x100), apps TCS at 0x18220d00 (0x3000), and the
+command DB locator at 0x0c3f000c (8 bytes) - and the command DB itself is not in
+the tree at all: word 0 of the locator is its physical address and word 1 its
+size, which is why the card can only be audited by reading the locator first.
+The identity is three words of the DRV window: id, then the solver word, then
+config, from which major, the TCS count and NCPT decode exactly as the owner
+decodes them. The TCS enable and status words are at 0 and 4 of page 0.
+
+Ten loads, enumerated. Three DRV words, two locator words, three command DB
+header words (version, magic, flags) and the two TCS words. readRegister() is
+the only place a load happens and it is bounded by the mapped window, so the
+budget is checkable by eye: the ring prints reads=10 and the host test asserts
+that every other accessor in the translation unit is a refusal. There is no
+store helper here at all - the only function that looks like one answers
+Unsupported without touching its arguments - which is what makes writes=0 a
+structural claim rather than a promise.
+
+Refusals before the second read. A window the node does not describe, a physical
+address that is not the one this firmware ships, a length shorter than the
+window, an identity whose major is outside 1..2, the all-ones solver word, a TCS
+count outside [8,18] from the 0x3000 window and the 0x2a0 stride, an NCPT
+outside 3..16, a locator that does not resolve, a command DB below 0x80000000 or
+misaligned or above 1 MiB or shorter than its own 144-byte header, a descriptor
+that will not map, and a magic that is not 0x0c0330db: each stops start() with a
+row that names the reason and says how many loads it had spent. A version or
+flags word that is not the vendor's is not a refusal - it is the WARN the owner
+already prints for the same page, because the layout is bounded by the header,
+not by the version.
+
+The interrupt is described, never armed. The node carries sweet,rsc-irq-abi
+and sweet,rsc-intid and no GIC range at all - the owner keeps the only handler,
+the only mask write and the only TCS enable word. The channel's row therefore
+says detail=described-not-armed and its TCS row detail=observed-not-owned, and
+the audit checks the ordering: the owner's INTID37 line comes first, the
+channel's description after it. Two readers of one block are a cross-check, not
+a race, because the channel never enables anything.
+
+Matching had to be added in two places. A new IOService subclass does not
+instantiate by being listed in files.arm64: it also needs a personality in
+gIOKernelConfigTables, and the personality names the node the generator writes
+(sweet,rsc-channel) rather than a class list, so an image without the node
+instantiates nothing and maps nothing.
+
+The tree. The generator gains --rsc-channel, which appends one node after
+display-rpmh: the same three ranges, abi 1, irq-abi 1, intid 37, no children and
+no display-resource dependency. Appending it after the owner is deliberate - the
+owner starts first and the channel reads a block that is already owned, which is
+the whole point - and removing the node restores the previous bytes exactly,
+which the host test asserts rather than asserts-by-eye. The twelve audited ADT
+derivations are unchanged; the channel tree is a thirteenth pinned digest, and
+the clock-only images of the previous round keep their digests and carry no
+channel node.
+
+Host tests. test-mh2lm-rsc-channel compiles the shipped translation unit against
+the fake IOKit prelude and drives ten rows: the accepted read, the identity
+refusals, the geometry refusals, the magic refusal, the version WARN, a submit
+that answers NotReady with no store, and a stop that recounts. Because the
+prelude satisfies includes the real kernel provides, the test asserts the source
+text for the things only the kernel can supply - the read-only map, the absence
+of a GIC mapping, the absence of a second handler registration.
+
+Compatibility. Without the node nothing changes: the previous round's trees,
+digests and images are untouched, and an image that carries the node differs
+from them only by that node. submit() clears the caller's token, counts the
+attempt and returns NotReady, so C3-02 and later can be judged against a client
+that was always refused.
+
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp
+new file mode 100644
+index 0000000..74d756a
+--- /dev/null
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp
+@@ -0,0 +1,445 @@
++/* SM8150 apps RSC channel: C3-01, one read-only instance.
++ *
++ * Contract of this candidate, in one place:
++ *  - start() maps the three ADT ranges (apps DRV, TCS array, command DB
++ *    locator) through the provider nub and validates every resolved physical
++ *    address and declared length before the first register read. The command
++ *    DB is a fourth window, resolved from the locator and mapped read-only; it
++ *    is not part of the reg ABI and cannot be pointed anywhere the locator does
++ *    not name.
++ *  - Register access is one load helper: bounds checked against the window,
++ *    offset aligned, guarded by the channel lock, with the read barrier this
++ *    SoC requires. This object has no store helper at all, so "writes=0" is a
++ *    property of the file and not of a code path.
++ *  - Nothing here claims the completion line. The GIC is not mapped, no
++ *    interrupt source is registered, no workloop is created and no TCS or
++ *    IRQ-enable word is written: the display owner keeps both the writes and
++ *    the line, and this card only records what it saw.
++ *  - Refusals are specific: ABI property, range count, address, length, DRV
++ *    major/decoder, TCS count, NCPT, command DB address/size/magic, and the
++ *    IRQ description each fail start with their own row. A tree that half
++ *    matches is never read "as far as it goes".
++ *  - The read budget is fixed and small: three DRV words, two locator words,
++ *    three command DB words and the TCS enable/status pair - ten loads. The
++ *    start row states the count, so a ring and this source can be reconciled
++ *    without guessing.
++ */
++#include "IOQcomRSC.h"
++#include <IOKit/IOLib.h>
++#include <libkern/c++/OSData.h>
++#include <string.h>
++#define SWEET_LOG_SINK IOLog
++#include "../../../bsd/dev/sweet_log_level.h"
++
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++
++#define super IOService
++
++OSDefineMetaClassAndStructors(IOQcomRSCChannel,IOService);
++
++/* The ADT reg order is the window ABI, exactly as the display owner declares
++ * it. These are resolved physical addresses (vendor offsets plus the SM8150
++ * RSC base are already applied in the LG DTS) and they are the only addresses
++ * this channel accepts: a node pointing at another RSC is somebody else's
++ * description and must not be read as this one. */
++static const struct { const char *name; uint64_t physical; uint64_t length; }
++rscRanges[kIOQcomRscRangeCount] = {
++	{ "apps-drv",         0x18220000ULL, 0x100ULL  },
++	{ "apps-tcs",         0x18220d00ULL, 0x3000ULL },
++	{ "apps-db-locator",  0x0c3f000cULL, 8ULL      },
++};
++
++/* The two TCS words this card looks at: word 0 is the interrupt-enable mask the
++ * owner writes, word 4 is the status the RSC raises. Both are loads. */
++enum : uint32_t { kIOQcomRscTcsEnable = 0x000, kIOQcomRscTcsStatus = 0x004 };
++
++static const char *
++rscWindowName(unsigned window)
++{
++	switch (window) {
++	case kIOQcomRscWindowDrv: return rscRanges[0].name;
++	case kIOQcomRscWindowTCS: return rscRanges[1].name;
++	case kIOQcomRscWindowLocator: return rscRanges[2].name;
++	case kIOQcomRscWindowDB: return "apps-command-db";
++	default: return "unknown";
++	}
++}
++
++bool
++IOQcomRSCChannel::validateProperties(IOService *provider)
++{
++	/* One opt-in property, versioned. An absent property means the tree did not
++	 * ask for this channel and start is not even reached; a present but wrong
++	 * one is a refusal, never a default. */
++	OSData *abi=OSDynamicCast(OSData,provider?provider->getProperty("sweet,rsc-abi"):NULL);
++	if (!abi||abi->getLength()!=4) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=start result=%d detail=bad-rsc-abi length=%u\n",
++		 kIOReturnBadArgument,abi?(unsigned)abi->getLength():0u);
++		return false;
++	}
++	uint32_t value=0;
++	memcpy(&value,abi->getBytesNoCopy(),4);
++	if (value!=kIOQcomRscAbi) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=start result=%d detail=bad-rsc-abi value=%#x expected=%#x\n",
++		 kIOReturnBadArgument,value,kIOQcomRscAbi);
++		return false;
++	}
++	/* No other property arms anything here. The irq description is mandatory
++	 * for the same reason the ranges are: a channel that cannot say which line
++	 * completes it is not the apps RSC, and saying it is how the next card
++	 * avoids inventing a second owner. */
++	return describeIRQ(provider);
++}
++
++bool
++IOQcomRSCChannel::describeIRQ(IOService *provider)
++{
++	OSData *abi=OSDynamicCast(OSData,provider?provider->getProperty("sweet,rsc-irq-abi"):NULL);
++	if (!abi||abi->getLength()!=4) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=irq result=%d detail=bad-rsc-irq-abi length=%u\n",
++		 kIOReturnBadArgument,abi?(unsigned)abi->getLength():0u);
++		return false;
++	}
++	uint32_t version=0;
++	memcpy(&version,abi->getBytesNoCopy(),4);
++	if (version!=kIOQcomRscIrqAbi) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=irq result=%d detail=bad-rsc-irq-abi value=%#x\n",
++		 kIOReturnBadArgument,version);
++		return false;
++	}
++	OSData *intid=OSDynamicCast(OSData,provider?provider->getProperty("sweet,rsc-intid"):NULL);
++	if (!intid||intid->getLength()!=4) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=irq result=%d detail=bad-rsc-intid length=%u\n",
++		 kIOReturnBadArgument,intid?(unsigned)intid->getLength():0u);
++		return false;
++	}
++	uint32_t line=0;
++	memcpy(&line,intid->getBytesNoCopy(),4);
++	if (line!=kIOQcomRscIntid) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=irq result=%d detail=bad-rsc-intid value=%u expected=%u\n",
++		 kIOReturnBadArgument,line,kIOQcomRscIntid);
++		return false;
++	}
++	fIntid=line;
++	/* Description only. No GIC map, no enable, no route, no handler - the row
++	 * says so in the field a reader would otherwise have to assume. */
++	SWEET_LOG_INFO("SWEET RSC: phase=irq intid=%u detail=described-not-armed\n",fIntid);
++	return true;
++}
++
++bool
++IOQcomRSCChannel::mapWindows(IOService *provider)
++{
++	if (!provider||provider->getResources()!=kIOReturnSuccess) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=map result=%d detail=resources-absent\n",kIOReturnNotReady);
++		return false;
++	}
++	for (unsigned i=0;i<kIOQcomRscRangeCount;i++) {
++		Window &w=fWindow[i];
++		w.physical=rscRanges[i].physical;
++		w.length=0;
++		w.base=0;
++		w.map=provider->mapDeviceMemoryWithIndex(i);
++		if (!w.map) {
++			SWEET_LOG_ERROR("SWEET RSC: phase=map resource=%s result=%d detail=window-absent\n",
++			 rscRanges[i].name,kIOReturnNotReady);
++			return false;
++		}
++		uint64_t observed=w.map->getPhysicalAddress();
++		uint64_t length=w.map->getLength();
++		if (observed!=rscRanges[i].physical) {
++			SWEET_LOG_ERROR("SWEET RSC: phase=map resource=%s result=%d detail=address-mismatch observed=%#llx expected=%#llx\n",
++			 rscRanges[i].name,kIOReturnBadArgument,(unsigned long long)observed,
++			 (unsigned long long)rscRanges[i].physical);
++			return false;
++		}
++		if (length<rscRanges[i].length) {
++			SWEET_LOG_ERROR("SWEET RSC: phase=map resource=%s result=%d detail=length-short observed=%#llx required=%#llx\n",
++			 rscRanges[i].name,kIOReturnBadArgument,(unsigned long long)length,
++			 (unsigned long long)rscRanges[i].length);
++			return false;
++		}
++		w.length=length;
++		w.base=w.map->getVirtualAddress();
++		if (!w.base) {
++			SWEET_LOG_ERROR("SWEET RSC: phase=map resource=%s result=%d detail=no-virtual-base\n",
++			 rscRanges[i].name,kIOReturnNotReady);
++			return false;
++		}
++		SWEET_LOG_INFO("SWEET RSC: phase=map resource=%s result=0 length=%#llx\n",
++		 rscRanges[i].name,(unsigned long long)length);
++	}
++	return true;
++}
++
++bool
++IOQcomRSCChannel::readIdentity(void)
++{
++	uint32_t id=0, solver=0, config=0;
++	if (!readRegister(kIOQcomRscWindowDrv,0,&id)||
++	    !readRegister(kIOQcomRscWindowDrv,4,&solver)||
++	    !readRegister(kIOQcomRscWindowDrv,12,&config)) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=identity result=%d detail=read-failed\n",kIOReturnNotReady);
++		return false;
++	}
++	fIdentity.id=id;
++	fIdentity.solver=solver;
++	fIdentity.config=config;
++	fIdentity.major=(id>>16)&255u;
++	fIdentity.tcsCount=(config>>12)&63u;
++	fIdentity.ncpt=(config>>27)&31u;
++	SWEET_LOG_INFO("SWEET RSC: phase=identity id=%#x major=%u solver=%#x tcs=%u ncpt=%u\n",
++	 id,fIdentity.major,solver,fIdentity.tcsCount,fIdentity.ncpt);
++	/* A decoder word of all ones means the window answered nothing at all (the
++	 * same refusal the display owner uses); a major other than 1/2 is a layout
++	 * this firmware cannot parse. Both are refusals before any second read. */
++	if (fIdentity.major<1||fIdentity.major>kIOQcomRscMaxMajor) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=identity result=%d detail=identity-version id=%#x major=%u\n",
++		 kIOReturnBadArgument,id,fIdentity.major);
++		return false;
++	}
++	if (solver==~0u) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=identity result=%d detail=identity-solver solver=%#x\n",
++		 kIOReturnNotReady,solver);
++		return false;
++	}
++	if (config==~0u) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=identity result=%d detail=identity-config config=%#x\n",
++		 kIOReturnNotReady,config);
++		return false;
++	}
++	if (fIdentity.tcsCount<kIOQcomRscTcsMinCount||fIdentity.tcsCount>kIOQcomRscTcsMaxCount) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=identity result=%d detail=tcs-count tcs=%u min=%u max=%u\n",
++		 kIOReturnBadArgument,fIdentity.tcsCount,kIOQcomRscTcsMinCount,kIOQcomRscTcsMaxCount);
++		return false;
++	}
++	if (fIdentity.ncpt<kIOQcomRscMinNcpt||fIdentity.ncpt>kIOQcomRscMaxNcpt) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=identity result=%d detail=ncpt ncpt=%u min=%u max=%u\n",
++		 kIOReturnBadArgument,fIdentity.ncpt,kIOQcomRscMinNcpt,kIOQcomRscMaxNcpt);
++		return false;
++	}
++	return true;
++}
++
++bool
++IOQcomRSCChannel::mapCommandDB(void)
++{
++	uint32_t address=0, bytes=0;
++	if (!readRegister(kIOQcomRscWindowLocator,0,&address)||
++	    !readRegister(kIOQcomRscWindowLocator,4,&bytes)) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=command-db result=%d detail=locator-read-failed\n",
++		 kIOReturnNotReady);
++		return false;
++	}
++	fIdentity.dbAddress=address;
++	fIdentity.dbBytes=bytes;
++	/* The locator is firmware data, not a mapping hint: every field is checked
++	 * before a descriptor is built from it. The physical range is the DRAM band
++	 * the display owner already accepts, and the length is bounded by the same
++	 * 1 MiB the owner refuses beyond. */
++	if (address<kIOQcomRscDbMinPhysical||(address&3u)||(bytes&3u)||
++	    bytes<kIOQcomRscDbHeaderBytes||bytes>kIOQcomRscDbMaxBytes||
++	    (uint64_t)address+bytes>0x100000000ULL) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=command-db result=%d detail=command-db-geometry address=%#x bytes=%u\n",
++		 kIOReturnBadArgument,address,bytes);
++		return false;
++	}
++	/* Read-only descriptor: this mapping is a witness, and a direction is part
++	 * of that promise - it is not "read-only for now". */
++	IOMemoryDescriptor *descriptor=
++	 IOMemoryDescriptor::withPhysicalAddress(address,bytes,kIODirectionIn);
++	if (!descriptor) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=command-db result=%d detail=descriptor-absent\n",
++		 kIOReturnNoMemory);
++		return false;
++	}
++	Window &w=fWindow[kIOQcomRscWindowDB];
++	w.map=descriptor->map();
++	descriptor->release();
++	if (!w.map||w.map->getPhysicalAddress()!=address||w.map->getLength()!=bytes) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=command-db result=%d detail=command-db-map-mismatch address=%#x bytes=%u\n",
++		 kIOReturnNotReady,address,bytes);
++		return false;
++	}
++	w.physical=address;
++	w.length=bytes;
++	w.base=w.map->getVirtualAddress();
++	if (!w.base) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=command-db result=%d detail=no-virtual-base\n",
++		 kIOReturnNotReady);
++		return false;
++	}
++	uint32_t version=0, magic=0, flags=0;
++	if (!readRegister(kIOQcomRscWindowDB,0,&version)||
++	    !readRegister(kIOQcomRscWindowDB,4,&magic)||
++	    !readRegister(kIOQcomRscWindowDB,kIOQcomRscDbHeaderBytes,&flags)) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=command-db result=%d detail=header-read-failed\n",
++		 kIOReturnNotReady);
++		return false;
++	}
++	fIdentity.dbVersion=version;
++	fIdentity.dbFlags=flags;
++	if (magic!=kIOQcomRscDbMagic) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=command-db result=%d detail=command-db-magic magic=%#x expected=%#x\n",
++		 kIOReturnBadArgument,magic,kIOQcomRscDbMagic);
++		return false;
++	}
++	SWEET_LOG_INFO("SWEET RSC: phase=command-db address=%#x bytes=%u version=%#x flags=%#x detail=read-only-map\n",
++	 address,bytes,version,flags);
++	if (version!=1||(flags&1u)) {
++		/* Same two fields the display owner only warns about: this channel is a
++		 * second reader of one firmware block and it must not be stricter than
++		 * the voter that already accepts the boot. The layout it validated is
++		 * still the compatible one, and the row says which. */
++		SWEET_LOG_WARN("SWEET RSC: phase=command-db detail=version-flags-differ version=%#x flags=%#x; validated compatible layout only\n",
++		 version,flags);
++	}
++	return true;
++}
++
++bool
++IOQcomRSCChannel::observeTCS(void)
++{
++	uint32_t enable=0, status=0;
++	if (!readRegister(kIOQcomRscWindowTCS,kIOQcomRscTcsEnable,&enable)||
++	    !readRegister(kIOQcomRscWindowTCS,kIOQcomRscTcsStatus,&status)) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=tcs result=%d detail=read-failed\n",kIOReturnNotReady);
++		return false;
++	}
++	fIdentity.irqEnable=enable;
++	fIdentity.irqStatus=status;
++	/* Observed, not owned: the display owner owns both of these words for this
++	 * boot, and this card must not mask, clear or acknowledge anything. The row
++	 * exists so a ring shows the channel looked at a live owner rather than a
++	 * quiet block. */
++	SWEET_LOG_INFO("SWEET RSC: phase=tcs irq-enable=%#x irq-status=%#x detail=observed-not-owned\n",
++	 enable,status);
++	return true;
++}
++
++bool
++IOQcomRSCChannel::readRegister(unsigned window,uint32_t offset,uint32_t *value)
++{
++	if (!value||window>=kIOQcomRscWindowCount||!fLock) return false;
++	bool ok=false;
++	uint32_t observed=0;
++	IOLockLock(fLock);
++	const Window &w=fWindow[window];
++	if (w.base&&(offset&3u)==0&&(uint64_t)offset+sizeof(uint32_t)<=w.length) {
++		observed=*(volatile uint32_t *)(w.base+offset);
++		__asm__ volatile("dmb oshld" ::: "memory");
++		ok=true;
++		fReads++;
++	} else {
++		fReadFailures++;
++	}
++	IOLockUnlock(fLock);
++	if (!ok) return false;
++	*value=observed;
++	return true;
++}
++
++void
++IOQcomRSCChannel::unmapWindows(void)
++{
++	for (unsigned i=0;i<kIOQcomRscWindowCount;i++) {
++		OSSafeReleaseNULL(fWindow[i].map);
++		fWindow[i].base=0;
++		fWindow[i].length=0;
++	}
++	fMapped=false;
++	fIdentity.valid=false;
++}
++
++bool
++IOQcomRSCChannel::start(IOService *provider)
++{
++	if (!IOService::start(provider)) return false;
++	fIdentity.valid=false;
++	fIntid=0;
++	fReads=0;
++	fReadFailures=0;
++	fSubmitAttempts=0;
++	fLock=IOLockAlloc();
++	if (!fLock) {
++		SWEET_LOG_ERROR("SWEET RSC: phase=start result=%d detail=lock-absent\n",kIOReturnNoMemory);
++		return false;
++	}
++	if (!validateProperties(provider)) goto fail;
++	if (!mapWindows(provider)) goto fail;
++	fMapped=true;
++	if (!readIdentity()) goto fail;
++	if (!mapCommandDB()) goto fail;
++	if (!observeTCS()) goto fail;
++	/* Nothing below can write, so this is the whole published surface: an
++	 * identity, a read count, and a channel that refuses to submit. */
++	fIdentity.valid=true;
++	fAccepting=true;
++	setProperty("SweetRSCChannelABI",(unsigned long long)kIOQcomRscAbi,32);
++	setProperty("SweetRSCChannelWrites",0ULL,32);
++	setProperty("SweetRSCChannelSubmitAllowed",false);
++	setProperty("SweetRSCChannelIRQ",(unsigned long long)fIntid,32);
++	registerService();
++	fRegistered=true;
++	SWEET_LOG_INFO("SWEET RSC: phase=start result=0 windows=%u ranges=%u reads=%u writes=0 id=%#x tcs=%u ncpt=%u db=%#x db-size=%u irq=%u submit=not-ready\n",
++	 kIOQcomRscWindowCount,kIOQcomRscRangeCount,fReads,fIdentity.id,
++	 fIdentity.tcsCount,fIdentity.ncpt,fIdentity.dbAddress,fIdentity.dbBytes,fIntid);
++	return true;
++fail:
++	fAccepting=false;
++	unmapWindows();
++	if (fLock) {
++		IOLockFree(fLock);
++		fLock=NULL;
++	}
++	SWEET_LOG_ERROR("SWEET RSC: phase=start result=%d detail=refused reads=%u writes=0\n",
++	 kIOReturnBadArgument,fReads);
++	return false;
++}
++
++IOReturn
++IOQcomRSCChannel::submit(uint64_t client,uint32_t address,uint32_t value,uint64_t *token)
++{
++	/* The token is cleared before anything can fail, so a caller that ignores
++	 * the return value still cannot mistake "no transaction" for "accepted". */
++	if (token) *token=0;
++	__atomic_add_fetch(&fSubmitAttempts,1u,__ATOMIC_RELAXED);
++	if (!fAccepting) {
++		SWEET_LOG_WARN("SWEET RSC: phase=submit result=%d detail=channel-not-accepting client=%#llx\n",
++		 kIOReturnNotReady,(unsigned long long)client);
++		return kIOReturnNotReady;
++	}
++	/* NotReady is the answer this card ships. The address and value are logged
++	 * so a consumer that ignores the refusal is visible in the ring, and the
++	 * writes field restates that nothing followed. */
++	SWEET_LOG_INFO("SWEET RSC: phase=submit result=%d detail=read-only-channel client=%#llx address=%#x value=%#x writes=0\n",
++	 kIOReturnNotReady,(unsigned long long)client,address,value);
++	return kIOReturnNotReady;
++}
++
++void
++IOQcomRSCChannel::stop(IOService *provider)
++{
++	fAccepting=false;
++	SWEET_LOG_INFO("SWEET RSC: phase=stop result=0 reads=%u writes=0 submit-attempts=%u\n",
++	 fReads,(unsigned)__atomic_load_n(&fSubmitAttempts,__ATOMIC_RELAXED));
++	unmapWindows();
++	if (fLock) {
++		IOLockFree(fLock);
++		fLock=NULL;
++	}
++	fRegistered=false;
++	super::stop(provider);
++}
++
++void
++IOQcomRSCChannel::free(void)
++{
++	unmapWindows();
++	if (fLock) {
++		IOLockFree(fLock);
++		fLock=NULL;
++	}
++	super::free();
++}
++#endif /* ARM64_BOARD_CONFIG_MH2LM */
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
+new file mode 100644
+index 0000000..e712c65
+--- /dev/null
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
+@@ -0,0 +1,142 @@
++/* SM8150 apps RSC channel: C3-01, one read-only instance.
++ *
++ * Contract of this candidate, in one place:
++ *  - The channel maps the apps RSC the existing display owner already maps:
++ *    DRV 0x18220000 (0x100), the TCS array 0x18220d00 (0x3000) and the command
++ *    DB locator 0x0c3f000c (8), in that ADT reg order. A fourth window is the
++ *    command DB itself, resolved from the locator exactly as the owner does,
++ *    and mapped read-only. Every resolved physical address and length is
++ *    validated before the first register read, so a tree that describes a
++ *    different RSC, a short window or a missing range fails start instead of
++ *    reading whatever memory happened to be mapped.
++ *  - Read-only by construction. This file has no register store, no GIC
++ *    mapping, no interrupt registration, no workloop and no TCS or IRQ-mask
++ *    write. The completion IRQ is carried as a described resource only:
++ *    the ADT says which line the apps RSC owns, and this card records it
++ *    without claiming it, because a second physical handler would be a second
++ *    owner of the same line in the same boot.
++ *  - Identity is read, not assumed: RSC id/major, solver, TCS count and NCPT
++ *    out of the config word, and the command DB version/flags/magic from the
++ *    locator. A major outside the vendor range, a decoder word of all ones, a
++ *    TCS count outside what a 0x3000 array can hold, NCPT outside 3..16 or a
++ *    command DB magic this platform does not use are refusals with their own
++ *    rows, not degraded reads.
++ *  - submit() is the published entry and this card's answer is NotReady. It
++ *    never queues, never stores and never retries; the count of attempts is
++ *    reported so a ring shows the caller was told no.
++ *  - The display owner keeps writing while this channel observes, so the TCS
++ *    interrupt-enable/status words are read once and reported as
++ *    observed-not-owned. That is the whole read budget: ten loads, zero
++ *    stores, and the ring states both.
++ */
++#ifndef IOQCOM_RSC_H
++#define IOQCOM_RSC_H
++
++#include <IOKit/IOService.h>
++#include <IOKit/IOMemoryDescriptor.h>
++
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++
++/* The three ADT reg ranges are the window ABI; the command DB is the fourth
++ * window and it is resolved, never declared. Keeping the two counts apart is
++ * what lets the map rows and the range check disagree loudly. */
++enum : unsigned { kIOQcomRscRangeCount = 3, kIOQcomRscWindowCount = 4 };
++enum : unsigned {
++	kIOQcomRscWindowDrv = 0,
++	kIOQcomRscWindowTCS = 1,
++	kIOQcomRscWindowLocator = 2,
++	kIOQcomRscWindowDB = 3,
++};
++
++/* Vendor geometry, taken from the apps RSC node the display owner already
++ * validates (drivers/soc/qcom/rpmh-rsc.c + sm8150.dtsi): DRV is one 0x100
++ * page, the TCS array is 0x3000 long with a 0x2a0 stride, and the locator is
++ * two words. An array of 0x3000 bytes holds at most 18 TCS; the vendor's own
++ * trees declare 8..18, so anything outside that is somebody else's node. */
++enum : uint32_t {
++	kIOQcomRscAbi = 1,
++	kIOQcomRscTcsStride = 0x2a0,
++	kIOQcomRscTcsMinCount = 8,
++	kIOQcomRscTcsMaxCount = 0x3000 / kIOQcomRscTcsStride,
++};
++
++/* DRV identity words. The config register packs the TCS count in bits 12..17
++ * and NCPT in bits 27..31; the major version lives in bits 16..23 of the id
++ * word. Pre-v3 RSC (major 1) and v3 (major 2) are the only layouts the vendor
++ * driver accepts, and the vendor declares 3..16 channels per TCS. */
++enum : uint32_t {
++	kIOQcomRscMaxMajor = 2,
++	kIOQcomRscMinNcpt = 3,
++	kIOQcomRscMaxNcpt = 16,
++};
++
++/* Command DB: the locator returns the physical address and byte length; the
++ * block starts with a version word, the platform magic and the flag word whose
++ * bit 0 means "not compatible". The magic is the only field that can be a hard
++ * refusal here - the display owner reads the same three words and merely warns
++ * about version/flags, so a second reader that refused them would reject trees
++ * the boot's own voter accepts. */
++enum : uint32_t {
++	kIOQcomRscDbMagic = 0x0c0330dbu,
++	kIOQcomRscDbHeaderBytes = 144,
++	kIOQcomRscDbMinPhysical = 0x80000000u,
++	kIOQcomRscDbMaxBytes = 0x100000,
++};
++
++/* Completion line: LG's SM8150 DTS gives the apps RSC SPI5, i.e. INTID37,
++ * level high. Nothing here touches the GIC; the number is the description this
++ * card hands to the next one. */
++enum : uint32_t { kIOQcomRscIntid = 37, kIOQcomRscIrqAbi = 1 };
++
++class IOQcomRSCChannel : public IOService {
++	OSDeclareDefaultStructors(IOQcomRSCChannel);
++	struct Window {
++		uint64_t physical;      /* expected resolved PA (ADT range, or locator) */
++		IOByteCount length;     /* declared length, also the bounds limit */
++		IOVirtualAddress base;  /* kernel virtual base, 0 when unmapped */
++		IOMemoryMap *map;       /* owned mapping, released on stop/free */
++	};
++	IOLock *fLock;
++	Window fWindow[kIOQcomRscWindowCount];
++	/* What the channel read, kept as evidence for the ring and for the next
++	 * card. fValid means every refusal below passed; nothing else in this
++	 * object is allowed to imply a writable channel. */
++	struct Identity {
++		uint32_t id, solver, config;
++		uint32_t major, tcsCount, ncpt;
++		uint32_t dbAddress, dbBytes, dbVersion, dbFlags;
++		uint32_t irqEnable, irqStatus;
++		bool valid;
++	} fIdentity;
++	uint32_t fIntid;
++	unsigned fReads, fReadFailures, fSubmitAttempts;
++	bool fMapped, fRegistered, fAccepting;
++	bool validateProperties(IOService *provider);
++	bool mapWindows(IOService *provider);
++	bool readIdentity(void);
++	bool mapCommandDB(void);
++	bool observeTCS(void);
++	bool describeIRQ(IOService *provider);
++	void unmapWindows(void);
++	/* The only register accessor in this file. Bounds and alignment are checked
++	 * against the declared window before the load, the load carries the read
++	 * barrier this SoC needs, and the access runs under the channel lock so a
++	 * late caller cannot observe a half-released mapping. Loads only: there is
++	 * no store counterpart to audit, which is the card's whole point. */
++	bool readRegister(unsigned window, uint32_t offset, uint32_t *value);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
++	/* Published entry. This card answers NotReady with a row that says so; it
++	 * has no queue, no deferred write and no retry to hide the refusal behind.
++	 * The token is cleared on every call so a caller cannot mistake "no
++	 * answer" for "accepted". */
++	IOReturn submit(uint64_t client, uint32_t address, uint32_t value,
++	 uint64_t *token);
++	unsigned channelReads(void) const { return fReads; }
++	bool channelSubmitAllowed(void) const { return false; }
++};
++
++#endif /* ARM64_BOARD_CONFIG_MH2LM */
++#endif /* IOQCOM_RSC_H */
+\ No newline at end of file
+diff --git a/dxb/xnu/iokit/KernelConfigTables.cpp b/dxb/xnu/iokit/KernelConfigTables.cpp
+index 9aa6166..676908f 100644
+--- a/dxb/xnu/iokit/KernelConfigTables.cpp
++++ b/dxb/xnu/iokit/KernelConfigTables.cpp
+@@ -77,6 +77,11 @@ const char * gIOKernelConfigTables =
+     "     'IONameMatch'     = 'sweet,gcc';"
+     "   },"
+     "   {"
++    "     'IOClass'         = IOQcomRSCChannel;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'sweet,rsc-channel';"
++    "   },"
++    "   {"
+     "     'IOClass'         = SweetSpmiInterruptMux;"
+     "     'IOProviderClass' = SweetSpmiMuxDevice;"
+     "     'IOMatchCategory' = SweetSpmiInterruptMux;"
+diff --git a/dxb/xnu/iokit/conf/files.arm64 b/dxb/xnu/iokit/conf/files.arm64
+index 60fb02b..bacf919 100644
+--- a/dxb/xnu/iokit/conf/files.arm64
++++ b/dxb/xnu/iokit/conf/files.arm64
+@@ -36,6 +36,7 @@ iokit/Kernel/arm/SweetRPMh.cpp                                    optional iokit
+ 
+ iokit/Kernel/arm/IOQcomClock.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/IOQcomGCC.cpp                                     optional iokitcpp
++iokit/Kernel/arm/IOQcomRSC.cpp                                     optional iokitcpp
+ 
+ iokit/Kernel/arm/SweetPanelPins.cpp                               optional iokitcpp
+ 
+diff --git a/tools/mk-mh2lm-mdss-adt.py b/tools/mk-mh2lm-mdss-adt.py
+index fcc9e59..bd0bc19 100644
+--- a/tools/mk-mh2lm-mdss-adt.py
++++ b/tools/mk-mh2lm-mdss-adt.py
+@@ -41,7 +41,8 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
+ 
+ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
+             clock_gate=False, clock_disable=False, clock_share=False,
+-            clock_vote_probe=False, clock_vote=False, clock_reset=False):
++            clock_vote_probe=False, clock_vote=False, clock_reset=False,
++            rsc_channel=False):
+     # C2-05 stands on both cards below it, so the two switch it needs are implied
+     # here rather than trusted to every caller: a share node without them would be
+     # refused at start and the image would carry a property that can do nothing.
+@@ -159,6 +160,19 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+             rpmh.props.extend([('sweet,rpmh-irq-abi', 0, struct.pack('<I', 1)),
+                                ('sweet,rpmh-intid', 0, struct.pack('<I', 37))])
+         arm.children.append(rpmh)
++    if rsc_channel:
++        # C3-01: a second, read-only reader of the apps RSC. It carries the same
++        # three ranges as the display owner and no GIC range at all, so this node
++        # cannot describe a second interrupt listener even by accident; the
++        # completion ABI is metadata the channel reports and never arms.
++        rsc = adt.Node()
++        rsc.props = [('name', 0, b'rsc-channel\0'),
++                     ('compatible', 0, b'sweet,rsc-channel\0'),
++                     ('reg', 0, encode(RPMH_WINDOWS)),
++                     ('sweet,rsc-abi', 0, struct.pack('<I', 1)),
++                     ('sweet,rsc-irq-abi', 0, struct.pack('<I', 1)),
++                     ('sweet,rsc-intid', 0, struct.pack('<I', 37))]
++        arm.children.append(rsc)
+     if panel_pins:
+         pins = adt.Node()
+         pins.props = [('name', 0, b'panel-pins\0'), ('compatible', 0, b'sweet,panel-pins\0'),
+@@ -272,6 +286,7 @@ if __name__ == '__main__':
+     parser.add_argument('--clock-vote-probe', action='store_true', help='append the C2-06 read-only vote probe (implies --gcc); maps the NPU page as a fifth range and reads four CBCRs, zero stores')
+     parser.add_argument('--clock-vote', action='store_true', help='append the C2-06 vote opt-in (implies --clock-vote-probe); stores one vote bit, waits for the aggregate, and withdraws it again')
+     parser.add_argument('--clock-reset', action='store_true', help='append the C2-07 reset opt-in (implies --gcc); maps the NPC page for itself and pulses the NPU reset bit once, 1 us wide, only after proving the block stopped')
++    parser.add_argument('--rsc-channel', action='store_true', help='append the C3-01 read-only apps RSC channel; same three ranges as the display owner, no GIC range, zero stores')
+     parser.add_argument('source', type=Path)
+     parser.add_argument('destination', type=Path)
+     args = parser.parse_args()
+@@ -280,4 +295,4 @@ if __name__ == '__main__':
+         sys.exit('output must differ from the baseline ADT')
+     destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
+                       args.clock_disable, args.clock_share, args.clock_vote_probe,
+-                      args.clock_vote, args.clock_reset))
++                      args.clock_vote, args.clock_reset, args.rsc_channel))
+diff --git a/tools/tests/test-mh2lm-mdss-adt.py b/tools/tests/test-mh2lm-mdss-adt.py
+index 7df9b4a..1f0f470 100644
+--- a/tools/tests/test-mh2lm-mdss-adt.py
++++ b/tools/tests/test-mh2lm-mdss-adt.py
+@@ -652,10 +652,70 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-clock-reset-adt-') as temp:
+                     str(source), str(output)], check=True)
+     assert output.read_bytes() == reset
+     assert source.read_bytes() == blob
++# C3-01 is a second reader, not a second owner. The node names exactly the three
++# ranges the display owner maps, so no byte of memory becomes reachable that was
++# not already described, and it carries no GIC range at all - a channel that
++# cannot map the interrupt controller cannot install a second listener. The
++# completion ABI is metadata only.
++chan = m.derive(blob, rsc_channel=True)
++assert m.derive(blob, display_resources=True, rsc_channel=True) != chan
++assert chan != blob
++assert b'sweet,rsc-channel' not in blob and b'sweet,rsc-abi' not in blob
++assert b'sweet,display-resource-abi' not in chan
++ctree, end = adt.parse(chan)
++assert end == len(chan)
++rsc = next(n for n in ctree.children[1].children if n.name == 'rsc-channel')
++assert rsc.prop('name') == b'rsc-channel\0'
++assert rsc.prop('compatible') == b'sweet,rsc-channel\0'
++creg = struct.unpack('<%dQ' % (len(rsc.prop('reg')) // 8), rsc.prop('reg'))
++cwin = []
++for i in range(0, len(creg), 2):
++    addr, size = creg[i], creg[i + 1]
++    cwin.append((addr + m.SOC_BASE if addr < m.LOW_ALIAS else addr - m.LOW_ALIAS,
++                 size))
++assert tuple(cwin) == m.RPMH_WINDOWS, cwin
++assert len(cwin) == 3, cwin
++assert rsc.prop('sweet,rsc-abi') == struct.pack('<I', 1)
++assert rsc.prop('sweet,rsc-irq-abi') == struct.pack('<I', 1)
++assert rsc.prop('sweet,rsc-intid') == struct.pack('<I', 37)
++# The same three ranges the owner maps, byte for byte: one tree cannot point the
++# reader at a different block than the writer beside it.
++owner = next(n for n in adt.parse(m.derive(blob, display_resources=True))[0]
++             .children[1].children if n.name == 'display-rpmh')
++assert rsc.prop('reg') == owner.prop('reg')
++# Removing the node alone gives the plain derivation back byte for byte: the
++# channel owns no range, no property and no other node.
++ctree.children[1].children = [n for n in ctree.children[1].children
++                              if n.name != 'rsc-channel']
++assert adt.serialize(ctree) == m.derive(blob)
++# With the owner present the reader is appended after it, and the order is fixed.
++both = m.derive(blob, display_resources=True, rsc_channel=True)
++btree, end = adt.parse(both)
++assert end == len(both)
++names = [n.name for n in btree.children[1].children]
++assert names.index('display-rpmh') + 1 == names.index('rsc-channel'), names
++# An image that asks for the display owner with the IRQ keeps the GIC range on
++# the owner only: the reader still names three.
++with_irq = m.derive(blob, rpmh_irq=True, rsc_channel=True)
++wtree, end = adt.parse(with_irq)
++assert end == len(with_irq)
++wowner = next(n for n in wtree.children[1].children if n.name == 'display-rpmh')
++wreader = next(n for n in wtree.children[1].children if n.name == 'rsc-channel')
++assert len(wowner.prop('reg')) == 8 * 2 * (len(m.RPMH_WINDOWS) + 1)
++assert wreader.prop('reg') == encode_windows(m.RPMH_WINDOWS)
++with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-channel-adt-') as temp:
++    source, output = Path(temp)/'base.adt', Path(temp)/'rsc.adt'
++    source.write_bytes(blob)
++    subprocess.run([sys.executable, str(Path(m.__file__)), '--rsc-channel',
++                    str(source), str(output)], check=True)
++    assert output.read_bytes() == chan
++    assert source.read_bytes() == blob
+ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
+       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
+       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
+       'that no earlier image carries, and the C2-05 share on top of all three, plus the '
+       'C2-06 vote probe, which owns both its property and the fifth range, and the vote on '
+       'top of it as a property of its own, and the C2-07 reset, which shares the '
+-      'fifth range with the probe but implies neither it nor the vote')
++      'fifth range with the probe but implies neither it nor the vote, and the '
++      'C3-01 read-only apps RSC channel, which names the owner\'s three ranges and '
++      'no GIC range at all')
+diff --git a/tools/tests/test-mh2lm-rsc-channel.py b/tools/tests/test-mh2lm-rsc-channel.py
+new file mode 100755
+index 0000000..97e0927
+--- /dev/null
++++ b/tools/tests/test-mh2lm-rsc-channel.py
+@@ -0,0 +1,454 @@
++#!/usr/bin/env python3
++"""Actual C3-01 apps RSC channel against contract-only MMIO fixtures.
++Only OS allocation/locking primitives, the device memory backing store and the
++command DB descriptor are fixtures: the shipped IOQcomRSCChannel is compiled as
++written, with its single register accessor routed to the fixture register file.
++The structural checks pin the source to one load and no store at all - the
++channel's whole claim is that it cannot write - and the functional cases prove
++the ten-load read budget, every start refusal, the observation of the owner's
++TCS words without touching them, and a submit that answers NotReady.
++Usage: test-mh2lm-rsc-channel.py EXTRACTED_XNU
++"""
++from pathlib import Path
++import os
++import re
++import subprocess
++import sys
++import tempfile
++
++if len(sys.argv) != 2:
++    sys.exit(__doc__)
++# Reuse the display-service primitives and every C1 provider fixture patch by
++# executing the clock provider test up to the point where it reads the tree.
++existing = Path(__file__).with_name('test-mh2lm-clock-provider.py')
++ns = {'__file__': str(existing), '__name__': 'rsc_fixture', '__doc__': ''}
++exec(compile(existing.read_text().split('arm = Path(sys.argv[1])')[0], str(existing), 'exec'), ns)
++
++prelude = ns['prelude']
++extra = ns['extra']
++
++# The channel maps four windows: the three ADT ranges through the provider nub
++# and the command DB through a descriptor built from the locator. Both paths
++# need host backing, and both need a knob per refusal the card declares.
++prelude = prelude.replace('static std::vector<unsigned> mapCalls;',
++'''static std::vector<unsigned> mapCalls;
++using IOPhysicalAddress=uint64_t;using IOVirtualAddress=uintptr_t;using IOByteCount=uint64_t;
++/* Apps RSC geometry exactly as the LG node declares it. rscMode keeps the nub
++   from answering with the display tree's own bases, so a host case cannot pass
++   by accident on the wrong window. */
++static constexpr uintptr_t rscPAs[3]={0x18220000,0x18220d00,0x0c3f000c};
++static constexpr size_t rscLens[3]={0x100,0x3000,8};
++static bool rscMode=true;
++static unsigned rscAbsentIndex=99,rscWrongPA=99,rscShortLen=99,rscNoBase=99;''')
++prelude = prelude.replace('int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){',
++'''int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){
++ if(rscMode){mapCalls.push_back(i);
++  /* the channel may only ever ask for the three ADT ranges: index 3 is the GIC
++     window of the display tree and a request for it would be a second listener */
++  if(i>=3)return nullptr;
++  if(i==rscAbsentIndex)return nullptr;
++  auto*m=new IOMemoryMap(i);
++  m->customPA=rscPAs[i]+(i==rscWrongPA?4:0);
++  m->customSize=rscLens[i]-(i==rscShortLen?1:0);
++  return m;}''')
++prelude = prelude.replace('uintptr_t getVirtualAddress(){return customPA?customPA:bases[index];}',
++'uintptr_t getVirtualAddress(){if(rscMode&&index==rscNoBase)return 0;return customPA?customPA:bases[index];}')
++assert 'rscAbsentIndex' in prelude
++
++prelude += '''
++/* The command DB is reached through a descriptor, never through the ADT reg
++   list. The direction is captured so a case can prove the mapping asked for
++   read-only and not for the owner's read-write descriptor. */
++constexpr unsigned kIODirectionIn=1;
++static bool rejectDescriptor=false;
++static unsigned descriptorDirection=0;
++static std::vector<std::pair<uintptr_t,size_t> > descriptorRequests;
++struct IOMemoryDescriptor : OSObject {
++ uintptr_t pa;size_t length;
++ static IOMemoryDescriptor*withPhysicalAddress(uintptr_t p,size_t n,unsigned d){
++  descriptorDirection=d;descriptorRequests.push_back(std::make_pair(p,n));
++  if(rejectDescriptor)return nullptr;
++  auto*x=new IOMemoryDescriptor;x->pa=p;x->length=n;return x;}
++ IOMemoryMap*map(){auto*m=new IOMemoryMap(3);m->customPA=pa;m->customSize=length;return m;}
++};
++/* The device boots at log level 0, so DEBUG rows never reach the ring: model that. */
++#define SWEET_LOG_DEBUG(...) ((void)0)
++'''
++
++arm = Path(sys.argv[1]).resolve()/'iokit/Kernel/arm'
++header_raw = (arm/'IOQcomRSC.h').read_text()
++raw = (arm/'IOQcomRSC.cpp').read_text()
++
++# ---- structural evidence, before anything is rewritten for the harness ----
++# One device memory load and no store anywhere: "writes=0" is a property of the
++# file, not of a code path, so the absence has to be checkable in the text.
++assert raw.count('*(volatile uint32_t *)')==1, raw.count('*(volatile uint32_t *)')
++assert raw.count('observed=*(volatile uint32_t *)(w.base+offset);')==1
++assert '*(w.base+offset)=' not in raw
++assert raw.count('__asm__ volatile("dmb oshld" ::: "memory");')==1
++assert 'dmb oshst' not in raw and 'dsb osh' not in raw
++assert raw.count('#if defined(ARM64_BOARD_CONFIG_MH2LM)')==1
++assert raw.count('#endif /* ARM64_BOARD_CONFIG_MH2LM */')==1
++assert header_raw.count('#if defined(ARM64_BOARD_CONFIG_MH2LM)')==1
++# The three opt-ins are the whole ADT surface, each read once.
++assert raw.count('sweet,rsc-abi')==1
++assert raw.count('sweet,rsc-irq-abi')==1
++assert raw.count('sweet,rsc-intid')==1
++# No second owner of the line: no interrupt source, no registration, no GIC
++# access, no lock that a handler could contend on.
++for banned in ('registerInterrupt','IOInterruptEventSource','IOSimpleLock',
++               'GICEnable','mapDeviceMemoryWithIndex(3','0x17a00000','0x17a0000',
++               'writeRegister','kIODirectionInOut'):
++    assert banned not in raw, banned
++    assert banned not in header_raw, banned
++# The DB is mapped with the read-only direction, and only once.
++assert raw.count('kIODirectionIn')==1
++# One published entry, one definition, and it refuses.
++assert raw.count('IOQcomRSCChannel::submit(')==1
++assert 'return kIOReturnNotReady;' in raw
++assert 'class IOQcomRSCChannel : public IOService' in header_raw
++assert 'channelSubmitAllowed(void) const { return false; }' in header_raw
++
++rsc_header = re.sub(r'^#include.*\n', '', header_raw, flags=re.M)
++rsc_header = rsc_header.replace('class IOQcomRSCChannel : public IOService {',
++                                'struct IOQcomRSCChannel : public IOService {')
++assert 'struct IOQcomRSCChannel' in rsc_header
++rsc_source = re.sub(r'^#include.*\n', '', raw, flags=re.M)
++# Actual MMIO and the barrier are the only replaced engine statements.
++rsc_source = rsc_source.replace('observed=*(volatile uint32_t *)(w.base+offset);',
++                                'observed=readReg(w.base,offset);')
++rsc_source = rsc_source.replace('__asm__ volatile("dmb oshld" ::: "memory");', '(void)0;')
++assert 'readReg(w.base,offset)' in rsc_source and 'volatile uint32_t *)' not in rsc_source
++rsc_source = '\n#undef super\n' + rsc_source
++
++tests = r'''
++static unsigned writes(){unsigned n=0;for(auto&o:trace)if(o.write)++n;return n;}
++static bool logged(const std::string&n){for(auto&m:messages)if(m.find(n)!=std::string::npos)return true;return false;}
++static unsigned counted(const std::string&n){unsigned c=0;for(auto&m:messages)if(m.find(n)!=std::string::npos)++c;return c;}
++static long rowAt(const std::string&n){for(size_t i=0;i<messages.size();i++)
++ if(messages[i].find(n)!=std::string::npos)return (long)i;return -1;}
++static void setData(IOService*s,const char*k,const void*p,unsigned n){
++ OSData*d=OSData::withBytes(p,n);assert(d);s->setProperty(k,d);d->release();
++}
++/* The command DB locator answers with a DRAM address and a byte length; the
++   block itself starts with version, magic and the flag word at offset 144. */
++static uintptr_t dbPA=0xb0000100u;
++static uint32_t dbBytes=0x400u,dbMagic=0x0c0330dbu,dbVersion=1,dbFlags=0;
++static void seedRSC(){
++ resetRegs();
++ regs[0x18220000]=(2u<<16)|0x1000u;          /* id: major 2, part 0x1000 */
++ regs[0x18220004]=0x00000001u;                /* solver present */
++ regs[0x1822000cu]=(4u<<27)|(8u<<12)|0x400u;  /* ncpt 4, eight TCS */
++ regs[0x18220d00]=0x0000001fu;                /* owner's TCS0 enable mask */
++ regs[0x18220d04]=0x00000040u;                /* a completion already pending */
++ regs[0x0c3f000c]=dbPA;regs[0x0c3f0010]=dbBytes;
++ regs[dbPA]=dbVersion;regs[dbPA+4]=dbMagic;regs[dbPA+144]=dbFlags;
++}
++/* abi/irqAbi/intid: 0 absent, otherwise (length,value) as given. */
++static IOService*rscNub(unsigned abiLen=4,uint32_t abiValue=1,
++ unsigned irqAbiLen=4,uint32_t irqAbiValue=1,
++ unsigned intidLen=4,uint32_t intidValue=37){
++ auto*n=fixtureAlloc<IOService>();
++ if(abiLen){uint32_t v=abiValue;setData(n,"sweet,rsc-abi",&v,abiLen);}
++ if(irqAbiLen){uint32_t v=irqAbiValue;setData(n,"sweet,rsc-irq-abi",&v,irqAbiLen);}
++ if(intidLen){uint32_t v=intidValue;setData(n,"sweet,rsc-intid",&v,intidLen);}
++ return n;
++}
++/* One refusal: no writes, no successful start row, every map released. */
++static void refusal(IOService*n,bool seed,const char*detail){
++ messages.clear();mapCalls.clear();descriptorRequests.clear();
++ if(seed)seedRSC();
++ unsigned maps=liveMaps;
++ auto*p=fixtureAlloc<IOQcomRSCChannel>();
++ assert(!p->start(n));
++ assert(logged(detail));
++ assert(!logged("phase=start result=0"));
++ assert(!p->fRegistered&&!p->fMapped&&!p->fLock);
++ assert(writes()==0);
++ p->release();
++ assert(liveMaps==maps);
++}
++int main(){
++ assert(!live&&!liveMaps);
++ /* ---- start refusals: the ABI, then the line, then the windows ---- */
++ {	/* no provider object at all: nothing to match, nothing to map */
++  messages.clear();mapCalls.clear();descriptorRequests.clear();
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(!p->start(nullptr));
++  assert(!p->fMapped&&!p->fLock&&!p->fRegistered&&p->fReads==0);
++  p->release();assert(!live&&!liveMaps&&mapCalls.empty());
++ }
++ {	/* absent opt-in is the ADT default, not a silent read-only mode */
++  auto*n=rscNub(0);
++  refusal(n,true,"detail=bad-rsc-abi length=0");
++  n->release();
++ }
++ {	/* a short property is a wrong tree, not a version we can guess */
++  auto*n=rscNub(3);
++  refusal(n,true,"detail=bad-rsc-abi length=3");
++  n->release();
++ }
++ {	/* the ABI is versioned: 2 is not this card */
++  auto*n=rscNub(4,2);
++  refusal(n,true,"detail=bad-rsc-abi value=0x2 expected=0x1");
++  n->release();
++ }
++ {	/* the line has its own ABI, and it is mandatory: a channel that cannot
++      say which line completes it is not the apps RSC */
++  auto*n=rscNub(4,1,0);
++  refusal(n,true,"detail=bad-rsc-irq-abi length=0");
++  n->release();
++ }
++ {	/* an irq ABI this firmware does not speak */
++  auto*n=rscNub(4,1,4,2);
++  refusal(n,true,"detail=bad-rsc-irq-abi value=0x2");
++  n->release();
++ }
++ {	/* absent INTID */
++  auto*n=rscNub(4,1,4,1,0);
++  refusal(n,true,"detail=bad-rsc-intid length=0");
++  n->release();
++ }
++ {	/* another RSC's completion line must not be adopted as this one's */
++  auto*n=rscNub(4,1,4,1,4,38);
++  refusal(n,true,"detail=bad-rsc-intid value=38 expected=37");
++  n->release();
++ }
++ {	/* a display RSC description pointed at this class: the DRV base differs */
++  rscWrongPA=0;
++  auto*n=rscNub();
++  refusal(n,true,"detail=address-mismatch");
++  rscWrongPA=99;
++  n->release();
++ }
++ {	/* the TCS array is 0x3000 long; a shorter one cannot hold 18 TCS */
++  rscShortLen=1;
++  auto*n=rscNub();
++  refusal(n,true,"detail=length-short");
++  rscShortLen=99;
++  n->release();
++ }
++ {	/* a missing range is refused by index, not read as far as it goes */
++  rscAbsentIndex=2;
++  auto*n=rscNub();
++  refusal(n,true,"detail=window-absent");
++  rscAbsentIndex=99;
++  n->release();
++ }
++ {	/* a window with no kernel virtual base cannot be read at all */
++  rscNoBase=1;
++  auto*n=rscNub();
++  refusal(n,true,"detail=no-virtual-base");
++  rscNoBase=99;
++  n->release();
++ }
++ /* ---- identity refusals, each after the DRV words were read ---- */
++ {	/* a layout this firmware cannot parse */
++  auto*n=rscNub();seedRSC();messages.clear();mapCalls.clear();
++  regs[0x18220000]=(3u<<16)|0x1000u;
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(!p->start(n));
++  assert(logged("detail=identity-version")&&logged("major=3"));
++  assert(writes()==0);p->release();
++  n->release();
++ }
++ {	/* a decoder word of all ones answered nothing */
++  auto*n=rscNub();seedRSC();messages.clear();mapCalls.clear();
++  regs[0x18220004]=0xffffffffu;
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(!p->start(n));
++  assert(logged("detail=identity-solver"));
++  assert(writes()==0);p->release();
++  n->release();
++ }
++ {	/* and the same for the config word */
++  auto*n=rscNub();seedRSC();messages.clear();mapCalls.clear();
++  regs[0x1822000cu]=0xffffffffu;
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(!p->start(n));
++  assert(logged("detail=identity-config"));
++  assert(writes()==0);p->release();
++  n->release();
++ }
++ {	/* one TCS too few for the vendor range */
++  auto*n=rscNub();seedRSC();messages.clear();mapCalls.clear();
++  regs[0x1822000cu]=(4u<<27)|(7u<<12);
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(!p->start(n));
++  assert(logged("detail=tcs-count tcs=7 min=8 max=18"));
++  assert(writes()==0);p->release();
++  n->release();
++ }
++ {	/* and one more than a 0x3000 array can hold */
++  auto*n=rscNub();seedRSC();messages.clear();mapCalls.clear();
++  regs[0x1822000cu]=(4u<<27)|(19u<<12);
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(!p->start(n));
++  assert(logged("detail=tcs-count tcs=19"));
++  assert(writes()==0);p->release();
++  n->release();
++ }
++ {	/* NCPT below the vendor floor */
++  auto*n=rscNub();seedRSC();messages.clear();mapCalls.clear();
++  regs[0x1822000cu]=(2u<<27)|(8u<<12);
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(!p->start(n));
++  assert(logged("detail=ncpt ncpt=2 min=3 max=16"));
++  assert(writes()==0);p->release();
++  n->release();
++ }
++ {	/* and above its ceiling */
++  auto*n=rscNub();seedRSC();messages.clear();mapCalls.clear();
++  regs[0x1822000cu]=(17u<<27)|(8u<<12);
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(!p->start(n));
++  assert(logged("detail=ncpt ncpt=17"));
++  assert(writes()==0);p->release();
++  n->release();
++ }
++ /* ---- command DB refusals: the locator is firmware data, not a hint ---- */
++ {	/* an address outside the band the owner accepts */
++  auto*n=rscNub();seedRSC();messages.clear();mapCalls.clear();
++  regs[0x0c3f000c]=0x1000u;
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(!p->start(n));
++  assert(logged("detail=command-db-geometry address=0x1000"));
++  assert(descriptorRequests.empty());
++  assert(writes()==0);p->release();
++  n->release();
++ }
++ {	/* a length too short to hold the header */
++  auto*n=rscNub();seedRSC();messages.clear();mapCalls.clear();
++  regs[0x0c3f0010]=140u;
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(!p->start(n));
++  assert(logged("detail=command-db-geometry address=0xb0000100 bytes=140"));
++  assert(descriptorRequests.empty());
++  assert(writes()==0);p->release();
++  n->release();
++ }
++ {	/* the descriptor itself cannot be built */
++  auto*n=rscNub();seedRSC();messages.clear();mapCalls.clear();
++  rejectDescriptor=true;
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(!p->start(n));
++  assert(logged("detail=descriptor-absent"));
++  assert(writes()==0);p->release();
++  rejectDescriptor=false;
++  n->release();
++ }
++ {	/* the block is not this platform's command DB */
++  auto*n=rscNub();seedRSC();messages.clear();mapCalls.clear();
++  regs[dbPA+4]=0xdeadbeefu;
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(!p->start(n));
++  assert(logged("detail=command-db-magic magic=0xdeadbeef"));
++  assert(writes()==0);p->release();
++  n->release();
++ }
++ /* ---- the channel itself ---- */
++ {	/* the read budget, the rows, and the absence of any store */
++  auto*n=rscNub();seedRSC();messages.clear();mapCalls.clear();descriptorRequests.clear();
++  unsigned maps=liveMaps;
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(p->start(n));
++  /* three ADT ranges, in order, and never the GIC window */
++  assert(mapCalls.size()==3);
++  assert(mapCalls[0]==0&&mapCalls[1]==1&&mapCalls[2]==2);
++  /* the DB came from the locator, read-only */
++  assert(descriptorRequests.size()==1);
++  assert(descriptorRequests[0].first==dbPA&&descriptorRequests[0].second==dbBytes);
++  assert(descriptorDirection==kIODirectionIn);
++  /* ten loads: three DRV words, two locator words, three DB words, TCS pair */
++  assert(p->channelReads()==10);
++  assert(writes()==0);
++  assert(p->fIdentity.major==2u&&p->fIdentity.tcsCount==8u&&p->fIdentity.ncpt==4u);
++  assert(p->fIdentity.dbVersion==1u&&p->fIdentity.dbFlags==0u);
++  assert(p->fIntid==37u);
++  assert(logged("phase=identity id=0x21000 major=2 solver=0x1 tcs=8 ncpt=4"));
++  assert(logged("phase=map resource=apps-drv result=0"));
++  assert(logged("phase=map resource=apps-tcs result=0"));
++  assert(logged("phase=map resource=apps-db-locator result=0"));
++  assert(logged("phase=command-db address=0xb0000100 bytes=1024 version=0x1 flags=0 detail=read-only-map"));
++  assert(logged("phase=irq intid=37 detail=described-not-armed"));
++  assert(logged("phase=start result=0 windows=4 ranges=3 reads=10 writes=0 id=0x21000 tcs=8 ncpt=4 db=0xb0000100 db-size=1024 irq=37 submit=not-ready"));
++  /* the owner's TCS words were read and left exactly as they were */
++  assert(logged("phase=tcs irq-enable=0x1f irq-status=0x40 detail=observed-not-owned"));
++  assert(regs[0x18220d00]==0x1fu&&regs[0x18220d04]==0x40u);
++  /* order: identity before the DB, the DB before the TCS observation */
++  assert(rowAt("phase=identity")<rowAt("phase=command-db"));
++  assert(rowAt("phase=command-db")<rowAt("phase=tcs"));
++  assert(rowAt("phase=tcs")<rowAt("phase=start result=0"));
++  /* the published surface says the same thing the rows do */
++  assert(!p->channelSubmitAllowed());
++
++  /* ---- submit: NotReady with a row, and still not a single store ---- */
++  messages.clear();
++  uint64_t token=0xffffffffffffffffULL;
++  assert(p->submit(7u,0x1000u,0x2u,&token)==kIOReturnNotReady);
++  assert(token==0);
++  assert(logged("phase=submit result=1 detail=read-only-channel client=0x7 address=0x1000 value=0x2 writes=0"));
++  assert(writes()==0);
++  /* a caller that passes no token is still refused, not accepted */
++  assert(p->submit(7u,0x1000u,0x2u,nullptr)==kIOReturnNotReady);
++  assert(writes()==0);
++
++  /* ---- stop releases everything the start acquired ---- */
++  messages.clear();
++  p->stop(n);
++  assert(logged("phase=stop result=0 reads=10 writes=0 submit-attempts=2"));
++  assert(liveMaps==maps);
++  assert(!p->fMapped&&!p->fLock&&!p->fRegistered);
++  /* after stop the channel is not accepting: the refusal names that reason */
++  messages.clear();
++  assert(p->submit(7u,0x1000u,0x2u,nullptr)==kIOReturnNotReady);
++  assert(logged("detail=channel-not-accepting"));
++  assert(writes()==0);
++  p->release();
++  n->release();
++ }
++ {	/* a second start after stop is a real first start, not a refused one */
++  auto*n=rscNub();seedRSC();messages.clear();
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(p->start(n));
++  assert(p->channelReads()==10);
++  p->stop(n);
++  assert(p->start(n));
++  assert(p->channelReads()==10);
++  assert(writes()==0);
++  p->stop(n);
++  p->release();
++  n->release();
++ }
++ {	/* a command DB whose version/flags differ from the compatible pair is a
++      warning, not a refusal: the display owner reads the same words and only
++      warns, so a second reader must not reject a boot its own voter accepts */
++  auto*n=rscNub();seedRSC();messages.clear();
++  regs[dbPA]=2u;regs[dbPA+144]=1u;
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(p->start(n));
++  assert(logged("detail=version-flags-differ"));
++  assert(p->fIdentity.dbVersion==2u&&p->fIdentity.dbFlags==1u);
++  assert(writes()==0);
++  p->stop(n);p->release();
++  n->release();
++ }
++ assert(!live&&!liveMaps);
++ printf("test-mh2lm-rsc-channel: PASS (%u rows inspected)\n",(unsigned)messages.size());
++ return 0;
++}
++'''
++
++
++with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-') as temp:
++    cpp = Path(temp)/'test.cpp'
++    cpp.write_text(prelude+extra+rsc_header+rsc_source+tests)
++    if os.environ.get('MH2LM_KEEP_CPP'):
++        Path('/tmp/mh2lm-rsc-kept.cpp').write_text(cpp.read_text())
++    binary = Path(temp)/'test'
++    subprocess.run([os.environ.get('CXX', 'clang++-19'), '-std=c++17', '-g', '-pthread',
++                    '-fsanitize=address,undefined', '-fno-omit-frame-pointer', str(cpp), '-o', str(binary)], check=True)
++    env = dict(os.environ)
++    env['ASAN_OPTIONS'] = env.get('ASAN_OPTIONS', '')+':detect_leaks=0'
++    env['UBSAN_OPTIONS'] = env.get('UBSAN_OPTIONS', '')+':halt_on_error=1:print_stacktrace=1'
++    subprocess.run([str(binary)], check=True, env=env, timeout=60)
+\ No newline at end of file
