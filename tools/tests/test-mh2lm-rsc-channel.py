@@ -131,7 +131,8 @@ static void setData(IOService*s,const char*k,const void*p,unsigned n){
  OSData*d=OSData::withBytes(p,n);assert(d);s->setProperty(k,d);d->release();
 }
 /* The command DB locator answers with a DRAM address and a byte length; the
-   block itself starts with version, magic and the flag word at offset 144. */
+   block itself starts with version, magic and - at offset 140, the header's last
+   word - the flag word whose bit 0 means "not compatible". */
 static uintptr_t dbPA=0xb0000100u;
 static uint32_t dbBytes=0x400u,dbMagic=0x0c0330dbu,dbVersion=1,dbFlags=0;
 static void seedRSC(){
@@ -142,7 +143,7 @@ static void seedRSC(){
  regs[0x18220d00]=0x0000001fu;                /* owner's TCS0 enable mask */
  regs[0x18220d04]=0x00000040u;                /* a completion already pending */
  regs[0x0c3f000c]=dbPA;regs[0x0c3f0010]=dbBytes;
- regs[dbPA]=dbVersion;regs[dbPA+4]=dbMagic;regs[dbPA+144]=dbFlags;
+ regs[dbPA]=dbVersion;regs[dbPA+4]=dbMagic;regs[dbPA+140]=dbFlags;
 }
 /* abi/irqAbi/intid: 0 absent, otherwise (length,value) as given. */
 static IOService*rscNub(unsigned abiLen=4,uint32_t abiValue=1,
@@ -169,6 +170,7 @@ static void refusal(IOService*n,bool seed,const char*detail){
  assert(liveMaps==maps);
 }
 int main(){
+ unsigned acceptedRows=0;
  assert(!live&&!liveMaps);
  /* ---- start refusals: the ABI, then the line, then the windows ---- */
  {	/* no provider object at all: nothing to match, nothing to map */
@@ -381,6 +383,9 @@ int main(){
   assert(rowAt("phase=tcs")<rowAt("phase=start result=0"));
   /* the published surface says the same thing the rows do */
   assert(!p->channelSubmitAllowed());
+  /* what the ring from this pass has to explain: one row per phase, and the
+     command DB's two when its version/flags are not the compatible pair */
+  acceptedRows=messages.size();
 
   /* ---- submit: NotReady with a row, and still not a single store ---- */
   messages.clear();
@@ -424,7 +429,7 @@ int main(){
       warning, not a refusal: the display owner reads the same words and only
       warns, so a second reader must not reject a boot its own voter accepts */
   auto*n=rscNub();seedRSC();messages.clear();
-  regs[dbPA]=2u;regs[dbPA+144]=1u;
+  regs[dbPA]=2u;regs[dbPA+140]=1u;
   auto*p=fixtureAlloc<IOQcomRSCChannel>();
   assert(p->start(n));
   assert(logged("detail=version-flags-differ"));
@@ -433,8 +438,35 @@ int main(){
   p->stop(n);p->release();
   n->release();
  }
+ {	/* the flag word is the header's last word: a DB whose version is the
+      compatible one but whose flag bit 0 is set must still warn, and a word at
+      any other offset must not be mistaken for flags - the device boot that
+      produced the 0140 ring reported 0x6c2e7863 here because the read was one
+      header-size past the start instead of one word before its end */
+  auto*n=rscNub();seedRSC();messages.clear();
+  regs[dbPA]=1u;regs[dbPA+140]=1u;regs[dbPA+144]=0x6c2e7863u;
+  auto*p=fixtureAlloc<IOQcomRSCChannel>();
+  assert(p->start(n));
+  assert(logged("detail=version-flags-differ version=0x1 flags=0x1"));
+  assert(p->fIdentity.dbVersion==1u&&p->fIdentity.dbFlags==1u);
+  assert(writes()==0);
+  p->stop(n);p->release();
+  n->release();
+  /* and with the flag word clear the same DB is silent, even though the word
+     past the header is noise */
+  auto*n2=rscNub();seedRSC();messages.clear();
+  regs[dbPA]=1u;regs[dbPA+140]=0u;regs[dbPA+144]=0x6c2e7863u;
+  p=fixtureAlloc<IOQcomRSCChannel>();
+  assert(p->start(n2));
+  assert(!logged("version-flags-differ"));
+  assert(logged("version=0x1 flags=0 detail=read-only-map"));
+  assert(p->fIdentity.dbFlags==0u);
+  assert(writes()==0);
+  p->stop(n2);p->release();
+  n2->release();
+ }
  assert(!live&&!liveMaps);
- printf("test-mh2lm-rsc-channel: PASS (%u rows inspected)\n",(unsigned)messages.size());
+ printf("test-mh2lm-rsc-channel: PASS (%u rows from the accepted pass)\n",(unsigned)acceptedRows);
  return 0;
 }
 '''

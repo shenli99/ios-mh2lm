@@ -272,7 +272,7 @@ IOQcomRSCChannel::mapCommandDB(void)
 	uint32_t version=0, magic=0, flags=0;
 	if (!readRegister(kIOQcomRscWindowDB,0,&version)||
 	    !readRegister(kIOQcomRscWindowDB,4,&magic)||
-	    !readRegister(kIOQcomRscWindowDB,kIOQcomRscDbHeaderBytes,&flags)) {
+	    !readRegister(kIOQcomRscWindowDB,kIOQcomRscDbFlagsOffset,&flags)) {
 		SWEET_LOG_ERROR("SWEET RSC: phase=command-db result=%d detail=header-read-failed\n",
 		 kIOReturnNotReady);
 		return false;

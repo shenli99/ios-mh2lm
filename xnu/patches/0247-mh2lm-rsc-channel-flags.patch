@@ -1,0 +1,161 @@
+From: mh2lm clock work <clock@mh2lm>
+Subject: [PATCH 0247] fix(rsc): read the command DB flag word where the header keeps it
+
+The 0140 ring is the first boot with the channel in the tree.  Ten loads,
+three windows, zero stores, the owner's id, its NCPT and its TCS count all
+agreed - and one field was wrong.
+
+start() printed
+
+  SWEET RSC: phase=command-db address=0x85f20000 bytes=4424 \
+             version=0x1 flags=0x6c2e7863 detail=read-only-map
+  SWEET RSC: phase=command-db detail=version-flags-differ \
+             version=0x1 flags=0x6c2e7863; validated compatible layout only
+
+and the second row is a warning on every default boot from now on, which is
+why this is a fix and not a note.  0x6c2e7863 is not a flag word: read
+little-endian it is "cx.l", the first four bytes of a command DB entry.  The
+read went to kIOQcomRscDbHeaderBytes - the header's size, 144 - so it landed
+four bytes past the end of the header it had just measured instead of on the
+header's last word.
+
+Why 140.  The display owner reads the same bit at offset 140 and warns about
+the same two fields (SweetRPMh.cpp:578-581, `read(fDB,140)&1`).  In the 0140
+boot the owner printed its pre-v3 RSC row and no version/flags warning at all,
+so the vendor header this firmware ships carries version 1 and a clear flag
+bit, and the channel's warning was entirely its own artifact: two readers of
+one block disagreed about the block, and the newer reader was the wrong one.
+
+What changes.  A named kIOQcomRscDbFlagsOffset=140 replaces the size at the
+third read.  The host suite now pins the offset from both sides - a DB whose
+version is 1 but whose flag bit is set must warn with the values it read, and
+the same DB with that bit clear must stay silent while 0x6c2e7863 sits at
+offset 144.  Reading offset 8, the word after the version and the magic, is
+the same class of mistake and is excluded by the same pair.  The budget stays
+at ten loads: three DRV words, two locator words, three DB header words, two
+TCS words.
+
+The ordering claim is also corrected, in the auditor rather than the driver.
+The channel describes INTID37 only after the owner has mapped and read the
+block - that is what the pre-v3 RSC row above it proves - and not after the
+owner arms its line, which the display stack does hundreds of lines later
+(0140: channel rows at 146..154, owner INTID37 row at 2112).  The synthetic
+ring now reproduces that order, and a second accepted variant places the
+channel after the owner's interrupt row to show that neither order matters.
+
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp
+index 74d756a..4d4e499 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp
+@@ -272,7 +272,7 @@ IOQcomRSCChannel::mapCommandDB(void)
+ 	uint32_t version=0, magic=0, flags=0;
+ 	if (!readRegister(kIOQcomRscWindowDB,0,&version)||
+ 	    !readRegister(kIOQcomRscWindowDB,4,&magic)||
+-	    !readRegister(kIOQcomRscWindowDB,kIOQcomRscDbHeaderBytes,&flags)) {
++	    !readRegister(kIOQcomRscWindowDB,kIOQcomRscDbFlagsOffset,&flags)) {
+ 		SWEET_LOG_ERROR("SWEET RSC: phase=command-db result=%d detail=header-read-failed\n",
+ 		 kIOReturnNotReady);
+ 		return false;
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
+index e712c65..23d64db 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
+@@ -79,6 +79,11 @@ enum : uint32_t {
+ enum : uint32_t {
+ 	kIOQcomRscDbMagic = 0x0c0330dbu,
+ 	kIOQcomRscDbHeaderBytes = 144,
++	/* The flag word is the header's last word, not the word after the version
++	 * and the magic. The display owner reads offset 140 for the same bit, and a
++	 * channel that read 8 would report the first entry's bytes as flags and warn
++	 * on a boot the voter accepts. */
++	kIOQcomRscDbFlagsOffset = 140,
+ 	kIOQcomRscDbMinPhysical = 0x80000000u,
+ 	kIOQcomRscDbMaxBytes = 0x100000,
+ };
+diff --git a/tools/tests/test-mh2lm-rsc-channel.py b/tools/tests/test-mh2lm-rsc-channel.py
+index 97e0927..a8e5aa8 100755
+--- a/tools/tests/test-mh2lm-rsc-channel.py
++++ b/tools/tests/test-mh2lm-rsc-channel.py
+@@ -131,7 +131,8 @@ static void setData(IOService*s,const char*k,const void*p,unsigned n){
+  OSData*d=OSData::withBytes(p,n);assert(d);s->setProperty(k,d);d->release();
+ }
+ /* The command DB locator answers with a DRAM address and a byte length; the
+-   block itself starts with version, magic and the flag word at offset 144. */
++   block itself starts with version, magic and - at offset 140, the header's last
++   word - the flag word whose bit 0 means "not compatible". */
+ static uintptr_t dbPA=0xb0000100u;
+ static uint32_t dbBytes=0x400u,dbMagic=0x0c0330dbu,dbVersion=1,dbFlags=0;
+ static void seedRSC(){
+@@ -142,7 +143,7 @@ static void seedRSC(){
+  regs[0x18220d00]=0x0000001fu;                /* owner's TCS0 enable mask */
+  regs[0x18220d04]=0x00000040u;                /* a completion already pending */
+  regs[0x0c3f000c]=dbPA;regs[0x0c3f0010]=dbBytes;
+- regs[dbPA]=dbVersion;regs[dbPA+4]=dbMagic;regs[dbPA+144]=dbFlags;
++ regs[dbPA]=dbVersion;regs[dbPA+4]=dbMagic;regs[dbPA+140]=dbFlags;
+ }
+ /* abi/irqAbi/intid: 0 absent, otherwise (length,value) as given. */
+ static IOService*rscNub(unsigned abiLen=4,uint32_t abiValue=1,
+@@ -169,6 +170,7 @@ static void refusal(IOService*n,bool seed,const char*detail){
+  assert(liveMaps==maps);
+ }
+ int main(){
++ unsigned acceptedRows=0;
+  assert(!live&&!liveMaps);
+  /* ---- start refusals: the ABI, then the line, then the windows ---- */
+  {	/* no provider object at all: nothing to match, nothing to map */
+@@ -381,6 +383,9 @@ int main(){
+   assert(rowAt("phase=tcs")<rowAt("phase=start result=0"));
+   /* the published surface says the same thing the rows do */
+   assert(!p->channelSubmitAllowed());
++  /* what the ring from this pass has to explain: one row per phase, and the
++     command DB's two when its version/flags are not the compatible pair */
++  acceptedRows=messages.size();
+ 
+   /* ---- submit: NotReady with a row, and still not a single store ---- */
+   messages.clear();
+@@ -424,7 +429,7 @@ int main(){
+       warning, not a refusal: the display owner reads the same words and only
+       warns, so a second reader must not reject a boot its own voter accepts */
+   auto*n=rscNub();seedRSC();messages.clear();
+-  regs[dbPA]=2u;regs[dbPA+144]=1u;
++  regs[dbPA]=2u;regs[dbPA+140]=1u;
+   auto*p=fixtureAlloc<IOQcomRSCChannel>();
+   assert(p->start(n));
+   assert(logged("detail=version-flags-differ"));
+@@ -433,8 +438,35 @@ int main(){
+   p->stop(n);p->release();
+   n->release();
+  }
++ {	/* the flag word is the header's last word: a DB whose version is the
++      compatible one but whose flag bit 0 is set must still warn, and a word at
++      any other offset must not be mistaken for flags - the device boot that
++      produced the 0140 ring reported 0x6c2e7863 here because the read was one
++      header-size past the start instead of one word before its end */
++  auto*n=rscNub();seedRSC();messages.clear();
++  regs[dbPA]=1u;regs[dbPA+140]=1u;regs[dbPA+144]=0x6c2e7863u;
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(p->start(n));
++  assert(logged("detail=version-flags-differ version=0x1 flags=0x1"));
++  assert(p->fIdentity.dbVersion==1u&&p->fIdentity.dbFlags==1u);
++  assert(writes()==0);
++  p->stop(n);p->release();
++  n->release();
++  /* and with the flag word clear the same DB is silent, even though the word
++     past the header is noise */
++  auto*n2=rscNub();seedRSC();messages.clear();
++  regs[dbPA]=1u;regs[dbPA+140]=0u;regs[dbPA+144]=0x6c2e7863u;
++  p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(p->start(n2));
++  assert(!logged("version-flags-differ"));
++  assert(logged("version=0x1 flags=0 detail=read-only-map"));
++  assert(p->fIdentity.dbFlags==0u);
++  assert(writes()==0);
++  p->stop(n2);p->release();
++  n2->release();
++ }
+  assert(!live&&!liveMaps);
+- printf("test-mh2lm-rsc-channel: PASS (%u rows inspected)\n",(unsigned)messages.size());
++ printf("test-mh2lm-rsc-channel: PASS (%u rows from the accepted pass)\n",(unsigned)acceptedRows);
+  return 0;
+ }
+ '''

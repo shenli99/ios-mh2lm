@@ -79,6 +79,11 @@ enum : uint32_t {
 enum : uint32_t {
 	kIOQcomRscDbMagic = 0x0c0330dbu,
 	kIOQcomRscDbHeaderBytes = 144,
+	/* The flag word is the header's last word, not the word after the version
+	 * and the magic. The display owner reads offset 140 for the same bit, and a
+	 * channel that read 8 would report the first entry's bytes as flags and warn
+	 * on a boot the voter accepts. */
+	kIOQcomRscDbFlagsOffset = 140,
 	kIOQcomRscDbMinPhysical = 0x80000000u,
 	kIOQcomRscDbMaxBytes = 0x100000,
 };
