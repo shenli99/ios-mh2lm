@@ -116,6 +116,15 @@ C2-04 撤的是“本驱动唯一持有的那条需求”。第二个消费者�
 **0142 实机验收（C3-02 收口，2026-11-27，00ddddf4…）**：默认档一次启动。内核 17 988 008 字节（0141 是 17 987 456，+552 字节），`ci-0142-buildtree` 里的 `SweetRSCDatabase.cpp/.h`、`IOQcomRSC.cpp/.h` 与提交 `e623885` **逐字节相同**；`out-bs/mk16k-0142.sh … 0142 0ddddf4a…` 一次跑通，十三张镜像 35 545 088 字节、参数 605 字节、固件 `27e7a1d1…`、时钟树仍 `081f63dc…`、默认档树 `999e2705…`（23 924 字节）。环 `sweetlog-0142-0.bin`（4 198 400 字节，sha256 `998b0b6c…`，`total=318997`、`flush_sequence=10`、`wrapped=false`、3 958 行）里 `SWEET RSC:` **九行**，`db-query` 夹在 `command-db`（第 156 行）与 `tcs`（第 161 行）之间，总结行 `reads=10 query-reads=292 writes=0 … query=ok submit=not-ready` 与 0141 逐字相同——**十次载入那句话仍然成立，查询的代价单列而不摊进 `fReads`**。查询行 `slave=5 address=0x500a8 entry=0x818 aux=0x9b0/8 unit=20000 width=4 vcd=5 matches=1 reads=292` 与同一环第 1220 行 owner 自己的 `SWEET RPMH BCM: name=CN0 metadata ready address=0x500a8 unit=20000 width=4 vcd=5 enable-mask=0` 四个字段逐字相等（`enable-mask` 不比），`aux=0x9b0/8` 正好是 BCM 的八字节。`query-reads` 292 比夹具钉的 26 大一个量级：设备上 BCM 块有百余条目，`lookup()` 要逐条比 8 字节键——**夹具钉的是走法，不是设备的条目数**，这个数在环里只用于对账。非时钟 WARN／ERROR 清单与 b32 逐条相等（`SWEET FB SCANOUT` ×3、`SWEET USB` ×2），一条 `query-refused` 都没有，`audit-clock-log.py --c2-03 --c3-02` **严格 rc=0**（没有 `--allow-baseline-drift`）；同一份环用 `--c3-01` 判直接被拒（`the ring carries a query row: judge it with --c3-02`），旗标与环双向一致这条真的在起作用。
 **打包侧的新教训**：`IOQcomRSCChannel::queryCommandDB` 被内联进 `start()`，产物里**没有** `__ZN16IOQcomRSCChannel13queryCommandDBEv`（`strings -a` 实测 0 次，而 `SweetRSCDatabase::lookup`／`stageName` 各 1 次）。我打脚本前因为怕这个把那条成员符号门禁删掉了——门禁里留它，这一版内核会被自己的门禁拒掉。**跨翻译单元的符号才配当门禁**，成员函数要不要出符号取决于优化取舍，不是契约。
 
+**0144 是文档提交的 CI 构建，不安排上机（2026-11-27）**：推 `7dd55ed`（C3-03 收口文档）后 CI 给出 `logs/xnu-kernel-0144.gz` 与 `logs/xnu-buildtree-0144.gz`。
+`ci-0144-buildtree/xnu` 与 `ci-0143-buildtree/xnu` **逐字节相同**（`diff -rq` 干净）——docs 与 NOTES 在仓库根、不在构建树里，所以这一轮编的是同一份源码；
+`HEAD:dxb/xnu` 对 `ci-0144-buildtree/xnu` 也只剩 `libsyscall/Libsyscall.xcodeproj/project.xcworkspace` 这一处构建副产物。
+内核 17 988 504 字节（与 0143 同），**代码段逐字节相同**：按段比，`__TEXT_EXEC`／`__DATA_CONST`／`__DATA`／`__KLD`／`__KLDDATA`／`__BOOTDATA`／`__LINKINFO`／`__LINKEDIT` 全部相等；
+差异只有两处——`__CTF,__ctf` 的 section size（0143 是 614 243、0144 是 617 906 字节，段本身两边都是 0x98000 带填充）和那一段的内容。
+`__CTF` 是编译器产出的类型元数据，两次构建之间它的长度与内容都变了，而代码段一字未动；**所以 CI 的内核产物不是逐字节可复现的**，
+"逐字节相同"只能用来比构建树与代码段，不能拿来比整份内核——这条以后每次核对 CI 产物都用得上。
+因此 0144 不上机：它与已审计的 0143 内核是同一份代码，C3-03 的实机证据仍是 0143 的环，`ci-0144` 留作下一卡的基线。
+
 ## C3-03 执行器提取：机制搬走，所有权没动（2026-11-27，补丁 0249，0143 实机收口）
 
 C3-02 把"读"这件事讲完了，C3-03 要的是**搬家**：ACTIVE 路径的寄存器访问、既有 IRQ 配合、触发／完成／清理机制从 `SweetRPMh.cpp` 移进 `SweetRPMhExecutor`，
