@@ -37,24 +37,59 @@
  *    A query that fails is a WARN and never a start refusal: the channel's
  *    evidence does not depend on the DB being readable, and the display owner
  *    remains the only writer either way.
+ *  - C3-04 adds the second mode, off unless the tree asks for it. With
+ *    sweet,rsc-executor the channel is the boot's apps executor: it gains a
+ *    fourth ADT range (the GIC window the display node used to carry), takes
+ *    the TCS array writable, becomes the one path that stores an RSC word and
+ *    the one place INTID37 is enabled and dispatched, and publishes a
+ *    SweetAppsDoor table for the display service to reach it. That mode is
+ *    decided from the tree alone and never revised at run time: the same file
+ *    boots read-only (C3-01/02 evidence, writes=0 by code path) or as the
+ *    owner, and only one side can be the owner in a given boot.
  */
 #ifndef IOQCOM_RSC_H
 #define IOQCOM_RSC_H
 
 #include <IOKit/IOService.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/IOInterruptEventSource.h>
+#include <IOKit/IOWorkLoop.h>
+#include "SweetAppsDoor.h"
+#include "SweetAppsLine.h"
 
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
 
 /* The three ADT reg ranges are the window ABI; the command DB is the fourth
  * window and it is resolved, never declared. Keeping the two counts apart is
- * what lets the map rows and the range check disagree loudly. */
-enum : unsigned { kIOQcomRscRangeCount = 3, kIOQcomRscWindowCount = 4 };
+ * what lets the map rows and the range check disagree loudly. In the executor
+ * mode a fourth ADT range (the GIC distributor window) is declared after the
+ * three, so the range count and the window count both grow by one and the two
+ * modes stay distinguishable in the ring. */
+enum : unsigned {
+	kIOQcomRscRangeCount = 3,
+	kIOQcomRscExecutorRangeCount = 4,
+	kIOQcomRscWindowCount = 5,
+	/* The windows a tree that does not delegate has: the same ids minus the
+	 * GIC, and the number the C3-01..03 rings printed. Keeping it separate is
+	 * what lets the start row say how many windows this boot actually holds
+	 * instead of how many the driver could hold. */
+	kIOQcomRscMappedWindowCount = 4,
+};
 enum : unsigned {
 	kIOQcomRscWindowDrv = 0,
 	kIOQcomRscWindowTCS = 1,
 	kIOQcomRscWindowLocator = 2,
 	kIOQcomRscWindowDB = 3,
+	kIOQcomRscWindowGIC = 4,
+};
+
+/* C3-04: the executor opt-in. The property is the whole owner switch; the
+ * window, the store licence and the IRQ claim all follow from it, and a boot
+ * without it behaves exactly as C3-01/02 shipped. */
+enum : uint32_t {
+	kIOQcomRscExecutorAbi = 1,
+	kIOQcomRscExecutorGicPhysical = 0x17a00000U,
+	kIOQcomRscExecutorGicLength = 0x10000U,
 };
 
 /* Vendor geometry, taken from the apps RSC node the display owner already
@@ -140,7 +175,49 @@ class IOQcomRSCChannel : public IOService {
 	unsigned fQueryReads;
 	bool fQueryEnabled;
 	bool fMapped, fRegistered, fAccepting;
+	/* C3-04. fExecutor is decided once, from the tree, before the first
+	 * register access; everything below it exists only in that mode, so a
+	 * read-only boot carries no map, no event source and no door. */
+	bool fExecutor;
+	vm_offset_t fGIC;
+	IOWorkLoop *fLoop;
+	IOInterruptEventSource *fIRQEvent;
+	bool fIRQEventAdded, fDoorPublished;
+	unsigned fStores, fDoorReads;
+	unsigned fIRQEntries, fIRQArmed, fIRQPosted, fIRQOnline, fIRQSources;
+	bool fIRQTouched, fIRQConfigured;
+	uint64_t fIRQDeadline;
+	/* The display service's completion entry, installed once through the door.
+	 * Second installers are refused: the line has one policy client. */
+	void *fCompletionTarget;
+	bool (*fCompletion)(void *);
+	SweetAppsDoor fDoor;
 	bool validateProperties(IOService *provider);
+	bool setupExecutor(IOService *provider);
+	void buildDoor(void);
+	void stopExecutor(void);
+	/* Door-side TCS access. The store below is the only one in this file, it is
+	 * reachable only when fExecutor is set, and it carries the barriers this
+	 * SoC needs on a VM_WIMG_IO mapping. */
+	uint32_t tcsRead(uint32_t offset);
+	void tcsWrite(uint32_t offset, uint32_t value);
+	void lineQuiet(uint32_t bit);
+	IOReturn lineTriggerReady(void);
+	bool handleIRQ(void);
+	static void irqAction(OSObject *owner, IOInterruptEventSource *source, int count);
+	static uint32_t doorRead(void *context, uint32_t offset);
+	static void doorWrite(void *context, uint32_t offset, uint32_t value);
+	static bool doorIdentity(void *context, uint32_t *id, uint32_t *solver,
+	 uint32_t *config);
+	static IOReturn doorTriggerReady(void *context);
+	static void doorArm(void *context);
+	static void doorUnmask(void *context);
+	static void doorQuiet(void *context, uint32_t bit);
+	static void doorStop(void *context);
+	static bool doorIrq(void *context);
+	static bool doorInstall(void *context, void *target, bool (*callback)(void *));
+	static unsigned doorStores(void *context);
+	static unsigned doorIrqs(void *context);
 	bool mapWindows(IOService *provider);
 	bool readIdentity(void);
 	bool mapCommandDB(void);
@@ -172,6 +249,10 @@ public:
 	IOReturn submit(uint64_t client, uint32_t address, uint32_t value,
 	 uint64_t *token);
 	unsigned channelReads(void) const { return fReads; }
+	/* C3-04: the store count and the owner flag are read by the ring rows and by
+	 * the host fixture, never by a client. */
+	unsigned channelStores(void) const { return fStores; }
+	bool channelIsExecutor(void) const { return fExecutor; }
 	bool channelSubmitAllowed(void) const { return false; }
 };
 

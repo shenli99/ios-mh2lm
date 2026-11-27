@@ -42,7 +42,7 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
 def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
             clock_gate=False, clock_disable=False, clock_share=False,
             clock_vote_probe=False, clock_vote=False, clock_reset=False,
-            rsc_channel=False, rsc_query=False):
+            rsc_channel=False, rsc_query=False, rsc_executor=False):
     # C2-05 stands on both cards below it, so the two switch it needs are implied
     # here rather than trusted to every caller: a share node without them would be
     # refused at start and the image would carry a property that can do nothing.
@@ -56,6 +56,14 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
     # without the channel would carry a property nothing reads.
     if rsc_query and not rsc_channel:
         raise ValueError('--rsc-query needs --rsc-channel')
+    # C3-04 has two owners or none: the channel becomes the sole writer and the
+    # display node has to say so in the same tree. Asking for the delegating
+    # half alone, or delegating to a channel that does not exist, would produce
+    # a boot with no writer at all.
+    if rsc_executor and not rsc_channel:
+        raise ValueError('--rsc-executor needs --rsc-channel')
+    if rsc_executor and not rpmh_irq:
+        raise ValueError('--rsc-executor needs --rpmh-irq (the old owner must be told to stand down)')
     display_noc = display_noc or panel_pipeline
     display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
     root, end = adt.parse(blob)
@@ -163,6 +171,12 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             # event/workloop; metadata-only and old ABI output stay unchanged.
             rpmh.props.extend([('sweet,rpmh-irq-abi', 0, struct.pack('<I', 1)),
                                ('sweet,rpmh-intid', 0, struct.pack('<I', 37))])
+        if rsc_executor:
+            # C3-04: this node keeps its ranges and its INTID, but no longer
+            # writes through them - the channel owns the array and the
+            # completion line for this boot. The range list is left exactly as
+            # shipped so a rollback only has to drop this property.
+            rpmh.props.append(('sweet,rpmh-executor-delegated', 0, struct.pack('<I', 1)))
         arm.children.append(rpmh)
     if rsc_channel:
         # C3-01: a second, read-only reader of the apps RSC. It carries the same
@@ -170,12 +184,20 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
         # cannot describe a second interrupt listener even by accident; the
         # completion ABI is metadata the channel reports and never arms.
         rsc = adt.Node()
+        # C3-04 adds the GIC range the channel owns once it executes; every
+        # earlier mode keeps the three ranges, so nothing here can listen.
+        rsc_ranges = RPMH_WINDOWS + IRQ_WINDOWS[-1:] if rsc_executor else RPMH_WINDOWS
         rsc.props = [('name', 0, b'rsc-channel\0'),
                      ('compatible', 0, b'sweet,rsc-channel\0'),
-                     ('reg', 0, encode(RPMH_WINDOWS)),
+                     ('reg', 0, encode(rsc_ranges)),
                      ('sweet,rsc-abi', 0, struct.pack('<I', 1)),
                      ('sweet,rsc-irq-abi', 0, struct.pack('<I', 1)),
                      ('sweet,rsc-intid', 0, struct.pack('<I', 37))]
+        if rsc_executor:
+            # C3-04: the range list above now names the completion window, so the
+            # node states who it is for this boot. The property is the switch the
+            # driver reads; the ranges only say what it may map once it is on.
+            rsc.props.append(('sweet,rsc-executor', 0, struct.pack('<I', 1)))
         if rsc_query:
             # C3-02: permission to ask the command DB about one known resource.
             # Its own versioned opt-in, so a tree that keeps the C3-01 read
@@ -297,6 +319,7 @@ if __name__ == '__main__':
     parser.add_argument('--clock-reset', action='store_true', help='append the C2-07 reset opt-in (implies --gcc); maps the NPC page for itself and pulses the NPU reset bit once, 1 us wide, only after proving the block stopped')
     parser.add_argument('--rsc-channel', action='store_true', help='append the C3-01 read-only apps RSC channel; same three ranges as the display owner, no GIC range, zero stores')
     parser.add_argument('--rsc-query', action='store_true', help='C3-02: let the channel query the read-only command DB for one known resource; requires --rsc-channel')
+    parser.add_argument('--rsc-executor', action='store_true', help='C3-04: the channel becomes the sole apps executor (fourth GIC range, sweet,rsc-executor) and the display node stands down; requires --rsc-channel and --rpmh-irq')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
@@ -306,4 +329,4 @@ if __name__ == '__main__':
     destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
                       args.clock_disable, args.clock_share, args.clock_vote_probe,
                       args.clock_vote, args.clock_reset, args.rsc_channel,
-                      args.rsc_query))
+                      args.rsc_query, args.rsc_executor))

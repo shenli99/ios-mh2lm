@@ -1,6 +1,6 @@
 # C3：apps RSC 公共事务通道
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04～C3-08 未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 代码＋补丁＋门禁＋审计器完成（本地全绿），待 0145 双默认树实机；C3-04b 暂缓（无需求），C3-05～C3-08 未开始。
 
 ## 阶段目标与退出条件
 
@@ -222,6 +222,74 @@ owner 仍是唯一硬件所有者——TCS 选择、按类准入、面板栅栏�
 - **实机检验**：新 owner 模式启动，记录 owner 选择、旧写计数为零、channel 完成既有自然 VRM／ARC／CN0 请求的 IRQ／cleanup；USB／根卷、显示、触摸回归。
 - **预期结果**：唯一 writer 和 IRQ owner 已迁移，资源语义不变。后续 C3-05 起与 C4 依赖本卡，不依赖 C3-04b。
 - **失败归属**：C3-04 owner-select／IRQ-owner／dispatch；新算法问题不能靠兼容回退隐藏。
+
+#### 实现与本地证据（C3-04 代码完成，待 0145 实机）
+
+**切换点是设备树，不是启动参数**：固件对启动参数是 607 字节硬上限，现役已占 605 字节（见 C1-02），
+所以这一卡的两个开关只能是属性——`rsc-channel` 上的 `sweet,rsc-executor`（4 字节，值 1）与
+`display-rpmh` 上的 `sweet,rpmh-executor-delegated`（4 字节，值 1）。生成器 `--rsc-executor` 要求同时给出
+`--rsc-channel` 与 `--rpmh-irq`，**拒绝半边树**：只让 channel 接管而没有 owner 退位，或者 owner 退位而没有 channel，
+都会得到一次"两个都不能写"或"两个都在写"的启动，两种都不许输出。派生树与 C3-03 树只差两条属性加 channel 的第四个 range
+（GIC 窗口 `0x17a00000/0x10000`，`23924 → 24020` 字节，`999e2705… → a81e8b56…`），
+摘掉两属性并截回 range 后 `adt.serialize()` 与查询树逐字节相同——"切换只动一处"因此由产物自证。
+
+**owner 在第一次写入之前就定了**：`SweetRPMh::start()` 先读自己的属性得到 `fDelegated`，再调
+`sweet_apps_owner(delegated, haveIRQServices)` 求出唯一 owner（`Channel`／`Service`／`None`），随后所有写入口
+（`ensureExecutor()`／`execute()`／`tcsWrite()`）都先问 `executorDoor()`：门没人发布就**打一条行、返回失败、绝不自己写**。
+delegated 模式下 `SweetRPMh` 不 map TCS／DRV／GIC，只把 locator 与 command DB 以 `kIODirectionIn` 映射，
+并用 channel 已读到的身份做 `adoptDelegatedIdentity()`——兼容层拿到的是同一个执行器，不是第二套 MMIO。
+"不初始化写能力、不注册 IRQ handler"因此在代码形状上成立：`fRSC`／`fTCS` 为空、`fMode` 必须为 2 才可能走到旧路径、
+IRQ 源只在 `!fDelegated && fMode==2` 时创建，`SweetAppsDoor` 的表也只在认领线路处（`setupIRQ()`）发布，
+一个从不取线的启动不发布任何空表。
+
+**门是唯一交汇处**：`SweetAppsDoor.h/.cpp` 是一个函数表加一对 `publish`／`withdraw`。发布走一条懒分配的
+`lck_mtx` 做比较交换，**第二个发布者被拒**（`line table refused; another owner published first; no writes`），
+撤回只接受"真的还挂着"的那个指针，所以退位的旧 owner 拆不掉继任者。半边表（缺 `context`／`name`／`read`／`write`／`irq`）
+被拒并点名 `detail=incomplete-table`；锁分配失败是 `detail=lock-absent`，都不静默降级。
+
+**线路是第二份实现，旧序列冻结**：`SweetAppsLine.h/.cpp` 提供 `geometry`／`claimable`／`program`／`retired`／
+`verify`／`mask`／`unmask`／`admit` 八条静态判据，全部只读写 GIC 那一页。这里刻意**不**把 `SweetRPMh` 里那段内联序列统一进来：
+那段有五个设备环作证，统一它就等于改一条本卡不该碰的路径（结论与理由写在补丁正文里）。
+
+**channel 作为执行器**：`sweet,rsc-executor` 让节点给出第四段 range，`IOQcomRSC` 映射它、校验控制器几何
+（`ctlr=0x12 typer=0x7b041d`）、确认该线当前不是活的、自建 `IOWorkLoop` 与一个 `IOInterruptEventSource`，
+然后才发布门。上半部只做三件事——mask 线路、记一次进入、`interruptOccurred()` 叫醒线程——完成回调在
+work loop 线程上跑，且**调用前已释放 `fLock`**，所以客户端可以立刻从门里回来投下一笔。写走 `tcsWrite()`：
+窗口外拒绝、非执行器模式拒绝、记账每一次被接受的 store，顺序规则沿用通道原有那套；线路只在一次触发被准入之后才 unmask，
+停止时先 quiet 再摘 event source。启动行因此是 `windows=5 ranges=4 … executor=channel`，
+停止行是 `… executor=channel` 加一条 `phase=executor-stop … door=withdrawn`。
+
+**旧 owner 变成客户端**：`phase=delegate result=0 owner=IOQcomRSCChannel stores-here=0 irq-handlers-here=0` 是这一侧的
+唯一新句子，后面跟着原有的那笔自然完成；ownership 行改成 `executor=delegated … hardware-owner=IOQcomRSCChannel`。
+两条**描述现实**的行按模式换词：`phase=irq … detail=described-for-executor` 与
+`phase=tcs … detail=observed-before-owner`（旧树仍是 `described-not-armed`／`observed-not-owned`），
+所以单看一份环就能回答"这一轮谁持有硬件"，不需要外挂上下文。
+`SWEET APPS DOOR:` 前缀是新加的诊断面，旧路径的诊断措辞一个字节都没动。
+
+**本地检验**（全绿，串行跑）：`test-mh2lm-rsc-executor-door.py`（新，驱动两种 owner 对同一份夹具：同一票产出同一串 TCS store 轨迹，
+delegated 侧只 map locator+DB、不 map 数组、不布防、采纳 owner 身份、自写入计数为零，门被撤回后**带行、缺 token、零写**）；
+`test-mh2lm-rsc-channel.py`（执行器接受档 + 三条拒绝档 + 两条模式措辞断言）；`test-mh2lm-mdss-adt.py`（组合、两处半边拒绝、
+可字节还原、CLI 等价）；`test-mh2lm-display-service.py`／`test-mh2lm-rpmh-executor.py`／`test-mh2lm-rpmh-completion-irq.py`
+跟着改动后仍 rc=0；`scratch/c3-03/run-suite.sh` 十六夹具串行仍全 PASS。
+
+**包门禁**：`out-bs/mk16k-0145.sh` 在 0143 的全部钉子上加 13 个跨翻译单元符号（门 5 ＋ 线路 8）、23 条 C3-04 字面量，
+以及从 0143 树派生 `adt-16k-3g-clock-executor.adt` 的断言组：两节点属性集、解码后的 range 等于
+`RPMH_WINDOWS + IRQ_WINDOWS[-1:]`、arm-io 子节点顺序、摘除后逐字节还原成查询树、两条 CLI 等价 `cmp`、
+半边 `--rsc-executor` 必须拒绝且不留文件。
+
+**审计器**：`--c3-04`（蕴含 `--c3-03`）判三项——通道（该模式 `windows=5`／`ranges=4`、map 顺序以 `apps-gic length=0x10000` 结尾、
+两条模式措辞）、ownership（`executor=delegated`／`IOQcomRSCChannel`、仍是第一笔自然完成正上方）、交接（门只一条、在 start 之前、
+`stores=0 writes-at-start=0 workloop=own`、`writes=0`、旧侧无 `INTID37 configured`、无 `executor=module`、无 ERROR）。
+合成环由 `make-channel-ring.py … delegated` 从 0143 环改写而成；`selftest-channel-auditor.py`
+**PASS - 71 变体**（原 48 ＋ 1 个合格交接环 ＋ 19 个应当被拒的交接环 ＋ 3 个跨人格互拒）。跨人格互拒措辞：
+delegated 环用 `--c3-03` 判 → `the ring hands the hardware to the channel: judge it with --c3-04`；
+0143｜0142 用 `--c3-04` 判 → `the ownership row still names SweetRPMh: this tree did not delegate`／
+`the C3-04 ring must print the ownership row`。
+
+**0145 待实机**（本卡收口要一次双默认树的启动）：环里应有 `SWEET APPS DOOR: phase=publish`、
+`SWEET RSC: phase=executor … workloop=own`、`executor=delegated … hardware-owner=IOQcomRSCChannel` 与 `phase=delegate`；
+**不该**有 `SWEET RPMH IRQ: INTID37 configured`、`executor=module`、以及任何旧入口的 store 行（`stores-here=0`）；
+自然 VRM／ARC／CN0 请求的 ACTIVE 完成与 cleanup 继续到达，USB／根卷、显示、触摸回归。
 
 ### C3-04b （可选）运行中将 apps 执行器从旧服务交接给 channel
 

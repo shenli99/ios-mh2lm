@@ -4,6 +4,8 @@
  * readback, GIC drain and watchdog phases without polling completion. */
 #if defined(ARM64_BOARD_CONFIG_MH2LM)
 #include "SweetRPMh.h"
+#include "SweetAppsDoor.h"
+#include "SweetAppsLine.h"
 #include "SweetPanelPins.h"
 #include "SweetTouchPanel.h"
 #include <IOKit/IOLib.h>
@@ -86,27 +88,17 @@ void SweetRPMh::write(vm_offset_t base,uint32_t off,uint32_t value)
  __asm__ volatile("dsb osh" ::: "memory");
 }
 /* apps RSC: LG SM8150 DTS SPI5 => INTID37 (level high), GICv3.
- * Same native physical-dispatch pattern as MDSS, not a consumer singleton.
- * The permanent lock fences late callbacks before service/event/map release. */
-static IOSimpleLock *rpmhIRQDispatch;
-static SweetRPMh *rpmhIRQService;
-static IOSimpleLock *rpmh_irq_lock(void)
-{
- IOSimpleLock *lock=__atomic_load_n(&rpmhIRQDispatch,__ATOMIC_ACQUIRE);
- if (!lock) {
-  IOSimpleLock *candidate=IOSimpleLockAlloc();
-  if (!candidate) return NULL;
-  if (__atomic_compare_exchange_n(&rpmhIRQDispatch,&lock,candidate,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
-   SWEET_LOG_INFO("SWEET RPMH: irq lock %p\n",candidate);
-   lock=candidate;
-  }
-  else IOSimpleLockFree(candidate);
- }
- return lock;
-}
-enum { GICBit=1u<<5, GICEnable=0x104, GICDisable=0x184,
- GICPending=0x204, GICClearPending=0x284, GICActive=0x304,
- GICGroup=0x084, GICConfig=0xc08, GICPriority=0x424, GICRoute=0x6128 };
+ * C3-04 moved the dispatch lock and the "who owns the line" latch into
+ * SweetAppsDoor.cpp, so both possible owners share one router: the platform
+ * chain calls sweet_rpmh_irq() there and it hands INTID37 to the published
+ * table. This service keeps only its own GIC statements. */
+/* INTID37's GICD words have one definition for both possible owners
+ * (SweetAppsLine.h). The statements below keep their historical spelling. */
+enum { GICBit=kSweetAppsGICBit, GICEnable=kSweetAppsGICEnable,
+ GICDisable=kSweetAppsGICDisable, GICPending=kSweetAppsGICPending,
+ GICClearPending=kSweetAppsGICClearPending, GICActive=kSweetAppsGICActive,
+ GICGroup=kSweetAppsGICGroup, GICConfig=kSweetAppsGICConfig,
+ GICPriority=kSweetAppsGICPriority, GICRoute=kSweetAppsGICRoute };
 
 bool SweetRPMh::setupIRQ(IOService *provider)
 {
@@ -125,28 +117,34 @@ bool SweetRPMh::setupIRQ(IOService *provider)
  fIRQEvent=IOInterruptEventSource::interruptEventSource(this,irqAction);
  if (!fIRQEvent || fLoop->addEventSource(fIRQEvent)!=kIOReturnSuccess) return false;
  fIRQEventAdded=true;
- IOSimpleLock *lock=rpmh_irq_lock();
- if (!lock) return false;
- IOInterruptState saved=IOSimpleLockLockDisableInterrupt(lock);
- if (!rpmhIRQService) { rpmhIRQService=this; fIRQClaimed=true; }
- IOSimpleLockUnlockEnableInterrupt(lock,saved);
- return fIRQClaimed;
+ /* The line is claimed by publishing the table, and this is the only place it
+  * happens: one owner per boot, and a refused publish is a refused start. A
+  * boot that never takes the line (mode 1) publishes nothing, because there
+  * would be no line to name. */
+ if (!publishTable()) {
+  SWEET_LOG_ERROR("SWEET RPMH: line table refused; another owner published first; no writes\n");
+  return false;
+ }
+ fIRQClaimed=true;
+ return true;
 }
 
 IOReturn SweetRPMh::prepareIRQ(void)
 {
  const vm_offset_t gic=fIRQMap->getVirtualAddress();
  if (fIRQConfigured) {
+  /* Already ours: still re-state the invariant before every trigger, because a
+   * rewired distributor is exactly what "configured once" would hide. */
   if ((read(gic,GICConfig)&0xc00u) || (read(gic,GICPriority)&0xff00u)!=0xa000u ||
       read(gic,GICRoute) || read(gic,GICRoute+4)) return kIOReturnIOError;
-  return kIOReturnSuccess;
+  return admitIRQ(gic);
  }
  if (!fIRQTouched) {
   /* Fail read-only if another owner, pending source or unsupported geometry
    * exists. Do not acknowledge inherited peripheral/GIC pending state. */
   if ((read(gic,0xffe8)&0xf0u)!=0x30u || ((read(gic,4)&31u)+1u)*32u<=37u ||
       !(read(gic,0)&2u) || ((read(gic,GICEnable)|read(gic,GICPending)|read(gic,GICActive))&GICBit) ||
-      read(fTCS,IRQStatus)) return kIOReturnBusy;
+      tcsRead(IRQStatus)) return kIOReturnBusy;
   fIRQTouched=true; fEverWritten=true;
   write(gic,GICDisable,GICBit);
   write(gic,GICGroup,read(gic,GICGroup)|GICBit);
@@ -168,13 +166,32 @@ IOReturn SweetRPMh::prepareIRQ(void)
   setProperty("SweetRPMhCompletionIRQ",37ULL,32);
   SWEET_LOG_INFO("SWEET RPMH IRQ: INTID37 configured; ACTIVE completion on provider workloop, no status polling\n");
  }
+ return admitIRQ(gic);
+}
+
+/* An IRQ worker may beat the previous sleh EOI on another CPU. Wait via the
+ * caller's timer while the owned line drains, never overwrite an active
+ * generation. This belongs to the owner of the line, so the delegated mode
+ * gets the same steps from the channel's trigger-ready instead. */
+IOReturn SweetRPMh::admitIRQ(vm_offset_t gic)
+{
+ if (read(gic,GICActive)&GICBit) return kIOReturnNotReady;
+ if (read(gic,GICPending)&GICBit) {
+  if (tcsRead(IRQStatus)) return kIOReturnBusy;
+  write(gic,GICClearPending,GICBit);
+  if (read(gic,GICPending)&GICBit) return kIOReturnNotReady;
+ }
  return kIOReturnSuccess;
 }
 
 bool SweetRPMh::handleIRQ(void)
 {
  /* Dispatch lock held: event/map stay alive. No peripheral ACK, client gate,
-  * payload scan, allocation or wait in the top half. sleh performs GIC EOI. */
+  * payload scan, allocation or wait in the top half. sleh performs GIC EOI.
+  * A delegated boot never mapped this window and never publishes this table,
+  * so reaching here without a map would be a table/lifecycle bug: claim the
+  * line anyway rather than letting it fall into the generic dispatcher. */
+ if (!fIRQMap) return true;
  if (!__atomic_load_n(&fIRQOnline,__ATOMIC_ACQUIRE)) return true;
  write(fIRQMap->getVirtualAddress(),GICDisable,GICBit);
  __atomic_add_fetch(&fIRQEntries,1u,__ATOMIC_RELAXED);
@@ -183,23 +200,20 @@ bool SweetRPMh::handleIRQ(void)
  fIRQEvent->interruptOccurred(NULL,NULL,0);
  return true;
 }
-extern "C" bool sweet_rpmh_irq(unsigned int intid)
-{
- if (intid!=37u) return false;
- IOSimpleLock *lock=__atomic_load_n(&rpmhIRQDispatch,__ATOMIC_ACQUIRE);
- if (lock) {
-  IOInterruptState saved=IOSimpleLockLockDisableInterrupt(lock);
-  if (rpmhIRQService) (void)rpmhIRQService->handleIRQ();
-  IOSimpleLockUnlockEnableInterrupt(lock,saved);
- }
- return true; /* Reserved apps RSC SPI, including late stopped delivery. */
-}
 void SweetRPMh::irqAction(OSObject *owner,IOInterruptEventSource *,int)
 {
  SweetRPMh *self=(SweetRPMh *)owner;
  if (!__atomic_exchange_n(&self->fIRQPosted,0u,__ATOMIC_ACQ_REL) || !self->fAccepting) return;
+ self->completionArrived();
+}
+/* The delegated mode reaches this through the channel's workloop (its top half
+ * posts, this runs on a thread), so the body is shared and takes no lock of its
+ * own: the caller owns the serialisation that matters. */
+void SweetRPMh::completionArrived(void)
+{
+ SweetRPMh *self=this;
  if (!self->fBusy || !self->fExecuting || self->fOperationCount ||
-     !(read(self->fTCS,IRQStatus)&(1u<<self->fTCSIndex))) {
+     !(tcsRead(IRQStatus)&(1u<<self->fTCSIndex))) {
   SWEET_LOG_ERROR("SWEET RPMH IRQ: unexpected ACTIVE completion; source retained, no foreign ACK\n");
   self->quietIRQ(); self->fPoisoned=true;
   if (self->fBusy) self->finish(kIOReturnIOError,true);
@@ -211,22 +225,18 @@ void SweetRPMh::irqAction(OSObject *owner,IOInterruptEventSource *,int)
 void SweetRPMh::quietIRQ(void)
 {
  __atomic_store_n(&fIRQArmed,0u,__ATOMIC_RELEASE);
- if (fIRQTouched) write(fIRQMap->getVirtualAddress(),GICDisable,GICBit);
- if (fIRQSourceMask) {
-  uint32_t enabled=read(fTCS,IRQEnable);
-  if (enabled!=~0u) write(fTCS,IRQEnable,enabled&~fIRQSourceMask);
- }
+ const SweetAppsDoor *door=executorDoor();
+ if (door && door->quiet) { door->quiet(door->context,fIRQSourceMask); return; }
+ /* No table at all: this boot owns nothing, so there is nothing to quiet. */
 }
 void SweetRPMh::stopIRQ(void)
 {
  __atomic_store_n(&fIRQOnline,0u,__ATOMIC_RELEASE);
- if (fIRQClaimed) {
-  IOSimpleLock *lock=__atomic_load_n(&rpmhIRQDispatch,__ATOMIC_ACQUIRE);
-  IOInterruptState saved=IOSimpleLockLockDisableInterrupt(lock);
-  if (rpmhIRQService==this) rpmhIRQService=NULL;
-  fIRQClaimed=false;
-  IOSimpleLockUnlockEnableInterrupt(lock,saved);
- }
+ /* Withdraw first: after this no store or IRQ can reach this service, so the
+  * event source and the maps below are no longer reachable from interrupt
+  * context. In the delegated mode there is nothing of ours to withdraw. */
+ if (fTablePublished) { sweet_apps_door_withdraw(&fTable); fTablePublished=false; }
+ fIRQClaimed=false;
  if (fIRQEventAdded) { fIRQEvent->disable(); fLoop->removeEventSource(fIRQEvent); fIRQEventAdded=false; }
 }
 void SweetRPMh::waitCompletion(void)
@@ -365,11 +375,37 @@ bool SweetRPMh::lookupBCM(unsigned bcm)
  return true;
 }
 
+/* Delegated: no flight may reach the array until the owner's identity and the
+ * completion binding are both in place. One gate for all three entry points, so
+ * a rail vote cannot slip past what a register vote already checks. */
+bool SweetRPMh::ensureExecutor(void)
+{
+ if (!fDelegated) return true;
+ /* One owner per boot, and its table is the only write path. Without it there
+  * is nothing here to store through, so refuse before the flight - never fall
+  * back to a mapping this mode deliberately does not take. */
+ if (!executorDoor()) {
+  SWEET_LOG_ERROR("SWEET RPMH: no executor door; request refused, no writable path here\n");
+  return false;
+ }
+ if (!fIdentityReady && !adoptDelegatedIdentity()) {
+  SWEET_LOG_ERROR("SWEET RPMH: hardware owner published no identity; request refused, no self-mapped fallback\n");
+  return false;
+ }
+ if (!installDelegated()) {
+  SWEET_LOG_ERROR("SWEET RPMH: hardware owner accepts no completion; request refused, no polling fallback\n");
+  return false;
+ }
+ return true;
+}
+
 IOReturn SweetRPMh::beginRegisterBandwidth(unsigned client,uint64_t proposal)
 {
  if (fMode!=2) return kIOReturnNotPermitted;
  if (fPoisoned) return kIOReturnNotReady;
  if (fBusy) return kIOReturnBusy;
+ /* NotReady keeps the client's retry semantics, never polling. */
+ if (!ensureExecutor()) return kIOReturnNotReady;
  if (!lookupBCM(SweetBCMCN0)) return kIOReturnNotReady;
  uint64_t target=proposal;
  for (unsigned i=0;i<8;++i) if (i!=client && fClients[i].id && fClients[i].registerVote>target)
@@ -382,13 +418,13 @@ IOReturn SweetRPMh::beginRegisterBandwidth(unsigned client,uint64_t proposal)
  if (!noWrite) {
   int empty=-1;
   for (unsigned t=0;t<2;++t) {
-   uint32_t b=t*Stride, enabled=read(fTCS,b+Enable);
+   uint32_t b=t*Stride, enabled=tcsRead(b+Enable);
    if (enabled&~((1u<<fNCPT)-1u)) return kIOReturnIOError;
    for (unsigned c=0;c<fNCPT;++c)
-    if ((enabled&(1u<<c)) && read(fTCS,b+Address+c*CommandStride)==fBCM[SweetBCMCN0].address) return kIOReturnBusy;
+    if ((enabled&(1u<<c)) && tcsRead(b+Address+c*CommandStride)==fBCM[SweetBCMCN0].address) return kIOReturnBusy;
    if (empty<0 && emptyTCS(t)) empty=(int)t;
   }
-  if (empty<0 || (fSavedIRQ=read(fTCS,IRQEnable))==~0u) return kIOReturnBusy;
+  if (empty<0 || (fSavedIRQ=tcsRead(IRQEnable))==~0u) return kIOReturnBusy;
   chosen=(unsigned)empty;
   if (!emptyTCS(chosen)) return kIOReturnBusy;
  }
@@ -447,10 +483,10 @@ IOReturn SweetRPMh::selectArcTCS(unsigned *selected)
 {
  int chosen=-1;
  for (unsigned t=0;t<2;++t) {
-  uint32_t b=t*Stride, enabled=read(fTCS,b+Enable);
+  uint32_t b=t*Stride, enabled=tcsRead(b+Enable);
   if (enabled & ~((1u<<fNCPT)-1u)) return kIOReturnIOError;
   for (unsigned c=0;c<fNCPT;++c) if (enabled&(1u<<c)) {
-   uint32_t address=read(fTCS,b+Address+c*CommandStride);
+   uint32_t address=tcsRead(b+Address+c*CommandStride);
    /* Reserve the entire dependency chain, including a later stage's rail. */
    for (unsigned r=0;r<SweetDisplaySupplyCount;++r)
     if (address==fArc[r].address) return kIOReturnBusy;
@@ -466,7 +502,7 @@ IOReturn SweetRPMh::queueArcStage(void)
  unsigned chosen=0;
  IOReturn result=selectArcTCS(&chosen);
  if (result!=kIOReturnSuccess) return result;
- uint32_t irq=read(fTCS,IRQEnable);
+ uint32_t irq=tcsRead(IRQEnable);
  if (irq==~0u || !emptyTCS(chosen)) return kIOReturnBusy;
  fTCSIndex=chosen; fSavedIRQ=irq;
  fExecuting=false; fIRQObserved=false; fOperation=fOperationCount=0; fWriteIssued=false;
@@ -487,6 +523,7 @@ IOReturn SweetRPMh::beginDisplayPower(unsigned client,SweetDisplayCorner proposa
 {
  if (fMode!=2) return kIOReturnNotPermitted;
  if (fPoisoned) return kIOReturnNotReady;
+ if (!ensureExecutor()) return kIOReturnNotReady;
  if (fBusy) return kIOReturnBusy;
  if ((unsigned)proposal>=SweetDisplayCornerCount) return kIOReturnBadArgument;
  if (!loadDisplayPower()) return kIOReturnNotReady;
@@ -552,26 +589,44 @@ void SweetRPMh::completeTransaction(void)
  if (result!=kIOReturnSuccess) finish(result,true);
 }
 
-bool SweetRPMh::mapResources(IOService *provider)
+/* The array identity is the same in both modes; only its source differs. */
+bool SweetRPMh::adoptIdentity(uint32_t id,uint32_t solver,uint32_t config)
 {
- OSData *abi=OSDynamicCast(OSData,provider->getProperty("sweet,rpmh-abi"));
- if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),"\1\0\0\0",4)) return false;
- const uint64_t pa[]={0x18220000,0x18220d00,0x0c3f000c};
- const uint64_t length[]={0x100,0x3000,8};
- if (provider->getResources()!=kIOReturnSuccess) return false;
- for (unsigned i=0;i<3;++i) {
-  fMaps[i]=provider->mapDeviceMemoryWithIndex(i);
-  if (!fMaps[i] || fMaps[i]->getPhysicalAddress()!=pa[i] || fMaps[i]->getLength()!=length[i]) return false;
+ unsigned major=(id>>16)&255, count=(config>>12)&63, ncpt=(config>>27)&31;
+ if ((major!=1 && major!=2) || solver==~0u || config==~0u ||
+     count<8 || count>0x3000/Stride || ncpt<3 || ncpt>16) return false;
+ fIdentityId=id; fIdentitySolver=solver; fIdentityConfig=config;
+ fNCPT=ncpt; fIdentityReady=true; return true;
+}
+
+/* Delegated: the array belongs to the channel, so its identity arrives through
+ * that owner's table. Absent table means "not started yet", never a reason to
+ * map the array ourselves. */
+bool SweetRPMh::adoptDelegatedIdentity(void)
+{
+ if (fIdentityReady) return true;
+ const SweetAppsDoor *door=executorDoor();
+ if (!door || !door->identity) return false;
+ uint32_t id=0,solver=0,config=0;
+ if (!door->identity(door->context,&id,&solver,&config)) return false;
+ if (!adoptIdentity(id,solver,config)) {
+  SWEET_LOG_ERROR("SWEET RPMH: hardware owner reported unsupported array id=%#x config=%#x\n",id,config);
+  return false;
  }
- fRSC=fMaps[0]->getVirtualAddress(); fTCS=fMaps[1]->getVirtualAddress();
- uint32_t id=read(fRSC,0), solver=read(fRSC,4), config=read(fRSC,12);
- unsigned major=(id>>16)&255, count=(config>>12)&63;
- fNCPT=(config>>27)&31;
- if ((major!=1 && major!=2) || solver==~0u || config==~0u || count<8 || count>0x3000/Stride || fNCPT<3 || fNCPT>16) return false;
+ SWEET_LOG_INFO("SWEET RPMH: identity adopted from hardware owner id=%#x config=%#x ncpt=%u\n",id,config,fNCPT);
+ return true;
+}
+
+/* Locator + command DB. Read-only here in both modes: this service resolves
+ * resources from the DB and never writes it. */
+bool SweetRPMh::mapDatabase(IOService *provider)
+{
+ fMaps[2]=provider->mapDeviceMemoryWithIndex(2);
+ if (!fMaps[2] || fMaps[2]->getPhysicalAddress()!=0x0c3f000c || fMaps[2]->getLength()!=8) return false;
  vm_offset_t locator=fMaps[2]->getVirtualAddress();
  uint32_t dbPA=read(locator,0); fDBSize=read(locator,4);
  if (dbPA<0x80000000u || (dbPA&3) || (fDBSize&3) || fDBSize<DBHeader || fDBSize>0x100000 || (uint64_t)dbPA+fDBSize>0x100000000ULL) return false;
- IOMemoryDescriptor *descriptor=IOMemoryDescriptor::withPhysicalAddress(dbPA,fDBSize,kIODirectionInOut);
+ IOMemoryDescriptor *descriptor=IOMemoryDescriptor::withPhysicalAddress(dbPA,fDBSize,fDelegated?kIODirectionIn:kIODirectionInOut);
  if (!descriptor) return false;
  fMaps[3]=descriptor->map(); descriptor->release();
  if (!fMaps[3] || fMaps[3]->getPhysicalAddress()!=dbPA || fMaps[3]->getLength()!=fDBSize) return false;
@@ -583,7 +638,64 @@ bool SweetRPMh::mapResources(IOService *provider)
   if (!lookup(r)) { SWEET_LOG_ERROR("SWEET RPMH: missing/malformed display resource %s\n",railNames[r]); return false; }
   SWEET_LOG_INFO("SWEET RPMH: %s address=%#x available; inherited rail state unknown\n",railNames[r],fAddresses[r]);
  }
+ return true;
+}
+
+bool SweetRPMh::mapResources(IOService *provider)
+{
+ OSData *abi=OSDynamicCast(OSData,provider->getProperty("sweet,rpmh-abi"));
+ if (!abi || abi->getLength()!=4 || memcmp(abi->getBytesNoCopy(),"\1\0\0\0",4)) return false;
+ if (provider->getResources()!=kIOReturnSuccess) return false;
+ if (fDelegated) {
+  /* No DRV map, no TCS map, no GIC map and no handler: the channel owns all of
+   * them. This is the whole point of the card -- the old entry point cannot
+   * write because it has no writable mapping left to write through. */
+  if (!mapDatabase(provider)) return false;
+  SWEET_LOG_INFO("SWEET RPMH: executor=delegated maps=locator+db; no tcs/gic window here, no irq handler here\n");
+  return true;
+ }
+ const uint64_t pa[]={0x18220000,0x18220d00};
+ const uint64_t length[]={0x100,0x3000};
+ for (unsigned i=0;i<2;++i) {
+  fMaps[i]=provider->mapDeviceMemoryWithIndex(i);
+  if (!fMaps[i] || fMaps[i]->getPhysicalAddress()!=pa[i] || fMaps[i]->getLength()!=length[i]) return false;
+ }
+ fRSC=fMaps[0]->getVirtualAddress(); fTCS=fMaps[1]->getVirtualAddress();
+ uint32_t id=read(fRSC,0), solver=read(fRSC,4), config=read(fRSC,12);
+ if (!adoptIdentity(id,solver,config)) return false;
+ if (!mapDatabase(provider)) return false;
  SWEET_LOG_INFO("SWEET RPMH: pre-v3 RSC id=%#x config=%#x ncpt=%u ACTIVE=2\n",id,config,fNCPT);
+ return true;
+}
+
+/* The tree decides the owner, not a boot arg: the budget is spent and both
+ * sides must read the same answer. */
+bool SweetRPMh::delegatedRequested(IOService *provider)
+{
+ OSData *flag=OSDynamicCast(OSData,provider->getProperty("sweet,rpmh-executor-delegated"));
+ if (!flag || flag->getLength()!=4) return false;
+ uint32_t value=0; memcpy(&value,flag->getBytesNoCopy(),4);
+ return value==1u;
+}
+
+/* Delegated: bind this service's completion to the hardware owner's event
+ * source. Refused loudly, because a silently missing completion consumer would
+ * turn every ACTIVE ACK into a timeout. */
+bool SweetRPMh::installDelegated(void)
+{
+ if (!fDelegated || fInstalled) return true;
+ const SweetAppsDoor *door=executorDoor();
+ if (!door || !door->install) {
+  SWEET_LOG_WARN("SWEET RPMH: delegated owner has not published yet; retrying on the next request\n");
+  return false;
+ }
+ if (!door->install(door->context,this,completionThunk)) {
+  SWEET_LOG_ERROR("SWEET RPMH: hardware owner refused the completion binding; no completion path here\n");
+  return false;
+ }
+ fInstalled=true;
+ SWEET_LOG_INFO("SWEET RPMH: phase=delegate result=0 owner=%s stores-here=0 irq-handlers-here=0\n",
+  door->name ? door->name : "channel");
  return true;
 }
 
@@ -592,6 +704,20 @@ bool SweetRPMh::start(IOService *provider)
  int mode=0; (void)PE_parse_boot_argn("sweetdisplayresources",&mode,sizeof(mode));
  if (mode<1 || mode>2 || !IOService::start(provider)) return false;
  fMode=(unsigned)mode;
+ /* C3-04: the owner comes from the tree, before the first register access and
+  * without a boot arg (the boot-arg budget is spent). A tree that says both
+  * sides program the line resolves to SweetAppsOwnerNone and nothing starts. */
+ fDelegated=delegatedRequested(provider);
+ SweetAppsOwner owner=sweet_apps_owner(fDelegated,!fDelegated);
+ if (owner==SweetAppsOwnerNone) {
+  SWEET_LOG_ERROR("SWEET RPMH: owner selection contradictory; delegated=%u writes-here=%u; no maps, no writes\n",
+   fDelegated?1u:0u,fDelegated?0u:1u);
+  return false;
+ }
+ if (fDelegated && fMode!=2) {
+  SWEET_LOG_ERROR("SWEET RPMH: delegated owner needs mode 2 ACTIVE completion; mode=%d rejected\n",mode);
+  return false;
+ }
  unsigned expected=0;
  if (!__atomic_compare_exchange_n(&rpmhOwner,&expected,1,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
   SWEET_LOG_ERROR("SWEET RPMH: apps-DRV already owned/retired this boot\n"); return false;
@@ -605,10 +731,13 @@ bool SweetRPMh::start(IOService *provider)
  fGateAdded=true;
  if (fLoop->addEventSource(fTimer)!=kIOReturnSuccess) return false;
  fTimerAdded=true;
- if (fMode==2 && !setupIRQ(provider)) {
+ if (!fDelegated && fMode==2 && !setupIRQ(provider)) {
   SWEET_LOG_ERROR("SWEET RPMH IRQ: ABI/map/event/ownership rejected; mode2 disabled, no polling fallback\n"); return false;
  }
  fAccepting=true; fExecutorReported=false;
+ SWEET_LOG_INFO("SWEET RPMH: owner=%s maps=%s irq-handler=%s stores-here=%u\n",
+  fDelegated?"IOQcomRSCChannel":"SweetRPMh",fDelegated?"locator+db":"rsc+tcs+locator+db+db",
+  fDelegated?"none":"own",fDelegated?0u:__atomic_load_n(&fSelfStores,__ATOMIC_ACQUIRE));
  setProperty("SweetRPMhABI",1ULL,32); setProperty("SweetRPMhWritesAllowed",fMode==2);
  unsigned sharedMask=0;
  for (unsigned r=0;r<SweetRailCount;++r) if (railLimits[r].lastDisableRequiresHandoff) sharedMask|=1u<<r;
@@ -618,8 +747,8 @@ bool SweetRPMh::start(IOService *provider)
 
 bool SweetRPMh::emptyTCS(unsigned t)
 {
- uint32_t b=t*Stride, idle=read(fTCS,b+Status);
- return idle && idle!=~0u && read(fTCS,b+Control)==0 && read(fTCS,b+Enable)==0 && read(fTCS,b+Wait)==0 && !(read(fTCS,IRQStatus)&(1u<<t));
+ uint32_t b=t*Stride, idle=tcsRead(b+Status);
+ return idle && idle!=~0u && tcsRead(b+Control)==0 && tcsRead(b+Enable)==0 && tcsRead(b+Wait)==0 && !(tcsRead(IRQStatus)&(1u<<t));
 }
 void SweetRPMh::addOperation(uint32_t off,uint32_t value,bool w1c)
 { fOperations[fOperationCount++]={off,value,w1c}; }
@@ -630,11 +759,143 @@ static const SweetRPMhLayout tcsLayout={
  Issued|Complete
 };
 
+/* ---------------------------------------------------------------------------
+ * C3-04: one write path per boot.
+ *
+ * The TCS array is reached through exactly one of two implementations: this
+ * service's own map, or the channel's map through the published table. Both
+ * are the same function below, so no caller can produce a second store and no
+ * client has to know which side owns the hardware.
+ * ------------------------------------------------------------------------ */
+
+const SweetAppsDoor *SweetRPMh::executorDoor(void)
+{ return sweet_apps_door(); }
+
+uint32_t SweetRPMh::tcsRead(uint32_t offset)
+{
+ if (fDelegated) {
+  const SweetAppsDoor *door=executorDoor();
+  if (!door || !door->read) return ~0u;
+  return door->read(door->context,offset);
+ }
+ if (!fTCS) return ~0u;
+ return read(fTCS,offset);
+}
+
+void SweetRPMh::tcsWrite(uint32_t offset,uint32_t value)
+{
+ if (fDelegated) {
+  const SweetAppsDoor *door=executorDoor();
+  if (!door || !door->write) {
+   /* The card's refusal: in the new mode the old entry point must be unable to
+    * write, and must say so rather than silently invent a second MMIO path. */
+   SWEET_LOG_ERROR("SWEET RPMH: no executor door; store refused offset=%#x value=%#x\n",
+    offset,value);
+   fPoisoned=true; return;
+  }
+  door->write(door->context,offset,value); return;
+ }
+ if (!fTCS) {
+  SWEET_LOG_ERROR("SWEET RPMH: no TCS window; store refused offset=%#x value=%#x\n",offset,value);
+  fPoisoned=true; return;
+ }
+ write(fTCS,offset,value);
+ __atomic_add_fetch(&fSelfStores,1u,__ATOMIC_RELAXED);
+}
+
 uint32_t SweetRPMh::portRead(void *context,uint32_t offset)
-{ return read(*(const vm_offset_t *)context,offset); }
+{ return ((SweetRPMh *)context)->tcsRead(offset); }
 
 void SweetRPMh::portWrite(void *context,uint32_t offset,uint32_t value)
-{ write(*(const vm_offset_t *)context,offset,value); }
+{ ((SweetRPMh *)context)->tcsWrite(offset,value); }
+
+/* The table this service publishes when it owns the line. Every entry is the
+ * same code the direct path used, so the delegated mode and the old mode run
+ * one implementation and one order. */
+bool SweetRPMh::publishTable(void)
+{
+ if (fTablePublished) return true;
+ fTable.name="SweetRPMh"; fTable.context=this;
+ fTable.read=tableRead; fTable.write=tableWrite; fTable.identity=tableIdentity;
+ fTable.triggerReady=tableTriggerReady; fTable.arm=tableArm; fTable.unmask=tableUnmask;
+ fTable.quiet=tableQuiet; fTable.stop=tableStop; fTable.irq=tableIrq;
+ fTable.install=tableInstall; fTable.stores=tableStores; fTable.irqs=tableIrqs;
+ if (!sweet_apps_door_publish(&fTable)) return false;
+ fTablePublished=true; return true;
+}
+
+uint32_t SweetRPMh::tableRead(void *context,uint32_t offset)
+{ return ((SweetRPMh *)context)->tcsRead(offset); }
+
+void SweetRPMh::tableWrite(void *context,uint32_t offset,uint32_t value)
+{ ((SweetRPMh *)context)->tcsWrite(offset,value); }
+
+bool SweetRPMh::tableIdentity(void *context,uint32_t *id,uint32_t *solver,uint32_t *config)
+{
+ SweetRPMh *self=(SweetRPMh *)context;
+ if (!self->fIdentityReady) return false;
+ if (id) *id=self->fIdentityId;
+ if (solver) *solver=self->fIdentitySolver;
+ if (config) *config=self->fIdentityConfig;
+ return true;
+}
+
+IOReturn SweetRPMh::tableTriggerReady(void *context)
+{ return ((SweetRPMh *)context)->prepareIRQ(); }
+
+void SweetRPMh::tableArm(void *context)
+{ __atomic_store_n(&((SweetRPMh *)context)->fIRQArmed,1u,__ATOMIC_RELEASE); }
+
+void SweetRPMh::tableUnmask(void *context)
+{
+ SweetRPMh *self=(SweetRPMh *)context;
+ if (self->fIRQMap) write(self->fIRQMap->getVirtualAddress(),GICEnable,GICBit);
+}
+
+void SweetRPMh::tableQuiet(void *context,uint32_t bit)
+{
+ SweetRPMh *self=(SweetRPMh *)context;
+ if (self->fIRQTouched && self->fIRQMap) write(self->fIRQMap->getVirtualAddress(),GICDisable,GICBit);
+ if (bit) {
+  uint32_t enabled=self->tcsRead(IRQEnable);
+  if (enabled!=~0u) self->tcsWrite(IRQEnable,enabled&~bit);
+ }
+}
+
+void SweetRPMh::tableStop(void *context)
+{ ((SweetRPMh *)context)->stopIRQ(); }
+
+bool SweetRPMh::tableIrq(void *context)
+{ return ((SweetRPMh *)context)->handleIRQ(); }
+
+bool SweetRPMh::tableInstall(void *context,void *target,bool (*callback)(void *))
+{
+ /* This service is its own single client; a second installer would be a second
+  * completion path, which the card forbids. */
+ return target==(void *)context && callback!=NULL;
+}
+
+unsigned SweetRPMh::tableStores(void *context)
+{ return __atomic_load_n(&((SweetRPMh *)context)->fSelfStores,__ATOMIC_ACQUIRE); }
+
+unsigned SweetRPMh::tableIrqs(void *context)
+{ return __atomic_load_n(&((SweetRPMh *)context)->fIRQEntries,__ATOMIC_ACQUIRE); }
+
+bool SweetRPMh::completionThunk(void *target)
+{
+ SweetRPMh *self=(SweetRPMh *)target;
+ if (!self || !self->fAccepting) return false;
+ self->completionArrived();
+ return true;
+}
+
+IOReturn SweetRPMh::completionAction(OSObject *owner,void *,void *,void *,void *)
+{
+ /* Delegated mode: the channel's top half posted its event source, so the
+  * completion runs on a workloop thread and never inside the channel's lock. */
+ (void)SweetRPMh::completionThunk(owner);
+ return kIOReturnSuccess;
+}
 
 bool SweetRPMh::panelFenceValid(const SweetPanelSupplyFence &f)
 {
@@ -656,6 +917,7 @@ IOReturn SweetRPMh::begin(unsigned client,unsigned rail,const SweetRailVote &pro
 {
  if (fMode!=2) return kIOReturnNotPermitted;
  if (fPoisoned) return kIOReturnNotReady;
+ if (!ensureExecutor()) return kIOReturnNotReady;
  if (fBusy) return kIOReturnBusy;
  SweetRailVote target={false,railLimits[rail].minMV,railLimits[rail].maxMV,0};
  if (proposal.enabled && (proposal.minMV>proposal.maxMV || proposal.minMV<railLimits[rail].minMV || proposal.maxMV>railLimits[rail].maxMV)) return kIOReturnBadArgument;
@@ -692,12 +954,12 @@ IOReturn SweetRPMh::begin(unsigned client,unsigned rail,const SweetRailVote &pro
  }
  int chosen=-1;
  for (unsigned t=0;t<2;++t) {
-  uint32_t b=t*Stride, enabled=read(fTCS,b+Enable);
+  uint32_t b=t*Stride, enabled=tcsRead(b+Enable);
   if (enabled & ~((1u<<fNCPT)-1u)) return kIOReturnIOError;
-  for (unsigned c=0;c<fNCPT;++c) if ((enabled&(1u<<c)) && (read(fTCS,b+Address+c*CommandStride)&~15u)==fAddresses[rail]) return kIOReturnBusy;
+  for (unsigned c=0;c<fNCPT;++c) if ((enabled&(1u<<c)) && (tcsRead(b+Address+c*CommandStride)&~15u)==fAddresses[rail]) return kIOReturnBusy;
   if (chosen<0 && emptyTCS(t)) chosen=(int)t;
  }
- if (chosen<0 || (fSavedIRQ=read(fTCS,IRQEnable))==~0u) return kIOReturnBusy;
+ if (chosen<0 || (fSavedIRQ=tcsRead(IRQEnable))==~0u) return kIOReturnBusy;
  fTCSIndex=(unsigned)chosen;
  if (!emptyTCS(fTCSIndex)) return kIOReturnBusy;
  fClients[client].status=status; fClients[client].status.state=SweetRPMhPending;
@@ -786,36 +1048,38 @@ void SweetRPMh::advance(void)
    fArcRequest && now>fStageDeadline ? (now-fStageDeadline)/1000 : 0ULL,
    fWriteIssued && now>fWriteDeadline ? (now-fWriteDeadline)/1000 : 0ULL);
   SWEET_LOG_ERROR("SWEET RPMH SNAPSHOT: irq-enable=%#x saved-irq-enable=%#x irq-status=%#x tcs-status=%#x control=%#x enable=%#x wait=%#x\n",
-   read(fTCS,IRQEnable),fSavedIRQ,read(fTCS,IRQStatus),read(fTCS,b+Status),
-   read(fTCS,b+Control),read(fTCS,b+Enable),read(fTCS,b+Wait));
+   tcsRead(IRQEnable),fSavedIRQ,tcsRead(IRQStatus),tcsRead(b+Status),
+   tcsRead(b+Control),tcsRead(b+Enable),tcsRead(b+Wait));
   /* VRM uses three commands, ARC/CN0 one. Refuse any diagnostic expansion
    * beyond those slots even if future request shapes grow. No W1C reads. */
   for (unsigned c=0;c<fCommandCount && c<3;++c) {
    uint32_t command=b+c*CommandStride;
    SWEET_LOG_ERROR("SWEET RPMH SNAPSHOT: command=%u msgid=%#x address=%#x data=%#x status=%#x\n",
-    c,read(fTCS,command+Message),read(fTCS,command+Address),
-    read(fTCS,command+Data),read(fTCS,command+CommandStatus));
+    c,tcsRead(command+Message),tcsRead(command+Address),
+    tcsRead(command+Data),tcsRead(command+CommandStatus));
   }
  };
  if (now>=fDeadline || (fArcRequest && now>=fStageDeadline)) {
   diagnose("deadline"); finish(kIOReturnTimeout,true); return;
  }
- SweetRPMhExecutor::Ports ports={&fTCS,portRead,portWrite};
+ /* Every store and every line step of this transaction goes through the one
+  * published table, whichever side owns the hardware. A withdrawn table is a
+  * stopped boot, not a reason to reach for a second MMIO path. */
+ const SweetAppsDoor *door=executorDoor();
+ if (!door) {
+  /* The owner is gone: the flight is refused before its first byte, because the
+   * alternative - writing around the table - is exactly the second MMIO path
+   * this card removes. A store already in flight hits the refusal in tcsWrite. */
+  SWEET_LOG_ERROR("SWEET RPMH: no executor door; flight refused, no second MMIO path\n");
+  finish(kIOReturnNotReady,fEverWritten); return;
+ }
+ SweetRPMhExecutor::Ports ports={this,portRead,portWrite};
  if (!fExecuting && fOperation==0 && !fWriteIssued) {
-  IOReturn result=prepareIRQ();
+  IOReturn result=door->triggerReady(door->context);
   if (result==kIOReturnNotReady) { fTimer->setTimeoutUS(100); return; }
   if (result!=kIOReturnSuccess) {
    SWEET_LOG_ERROR("SWEET RPMH IRQ: GIC/source admission failed rc=%#x; no trigger\n",(unsigned)result);
    finish(result,fEverWritten); return;
-  }
-  const vm_offset_t gic=fIRQMap->getVirtualAddress();
-  /* An IRQ worker may beat the previous sleh EOI on another CPU. Wait via
-   * timer while the owned line drains, never overwrite an active generation. */
-  if (read(gic,GICActive)&GICBit) { fTimer->setTimeoutUS(100); return; }
-  if (read(gic,GICPending)&GICBit) {
-   if (read(fTCS,IRQStatus)) { finish(kIOReturnBusy,true); return; }
-   write(gic,GICClearPending,GICBit);
-   if (read(gic,GICPending)&GICBit) { fTimer->setTimeoutUS(100); return; }
   }
   __atomic_store_n(&fIRQPosted,0u,__ATOMIC_RELEASE);
  }
@@ -835,16 +1099,16 @@ void SweetRPMh::advance(void)
    }
    if (fOperation==1 && !fExecuting && fRegisterRequest) {
     for (unsigned t=0;t<2;++t) {
-     uint32_t enabled=read(fTCS,t*Stride+Enable);
+     uint32_t enabled=tcsRead(t*Stride+Enable);
      if (enabled&~((1u<<fNCPT)-1u)) { finish(kIOReturnIOError,true); return; }
      for (unsigned c=0;c<fNCPT;++c)
-      if ((enabled&(1u<<c)) && read(fTCS,t*Stride+Address+c*CommandStride)==fBCM[SweetBCMCN0].address) {
+      if ((enabled&(1u<<c)) && tcsRead(t*Stride+Address+c*CommandStride)==fBCM[SweetBCMCN0].address) {
        finish(kIOReturnBusy,true); return;
       }
     }
    }
    if (op.offset==IRQEnable) {
-    uint32_t current=read(fTCS,IRQEnable);
+    uint32_t current=tcsRead(IRQEnable);
     if (current==~0u) { finish(kIOReturnIOError,fEverWritten); return; }
     op.value=fExecuting ? ((current&~bit)|(fSavedIRQ&bit)) :
         (fOperation ? (current|bit) : (current&~bit));
@@ -878,11 +1142,11 @@ void SweetRPMh::advance(void)
   }
   fIRQObserved=false; fExecuting=true;
   fOperation=fOperationCount=0;
-  __atomic_store_n(&fIRQArmed,1u,__ATOMIC_RELEASE);
-  write(fTCS,b+Control,AMC|Trigger);
+  door->arm(door->context);
+  tcsWrite(b+Control,AMC|Trigger);
   /* Fast completion before enable stays pending on the level-high line. Do
    * not clear GIC/peripheral pending after trigger. Actual callback is required. */
-  write(fIRQMap->getVirtualAddress(),GICEnable,GICBit);
+  door->unmask(door->context);
   waitCompletion(); return;
  }
  if (fOperationCount) {
@@ -902,8 +1166,9 @@ void SweetRPMh::advance(void)
  /* The mechanics moved, the hardware owner did not: say so once per boot. */
  if (!fExecutorReported) {
   fExecutorReported=true;
-  SWEET_LOG_INFO("SWEET RPMH: executor=module tcs=%u commands=%u open=%u hardware-owner=SweetRPMh\n",
-   fTCSIndex,fCommandCount,unacknowledged);
+  SWEET_LOG_INFO("SWEET RPMH: executor=%s tcs=%u commands=%u open=%u hardware-owner=%s\n",
+   fDelegated?"delegated":"module",fTCSIndex,fCommandCount,unacknowledged,
+   fDelegated?"IOQcomRSCChannel":"SweetRPMh");
  }
  SWEET_LOG_INFO("SWEET RPMH IRQ: fresh ACTIVE completion tcs=%u commands=%u entries=%u; cleanup pending\n",
   fTCSIndex,fCommandCount,__atomic_load_n(&fIRQEntries,__ATOMIC_ACQUIRE));

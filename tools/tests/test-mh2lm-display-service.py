@@ -84,7 +84,16 @@ rpmh_source = rpmh_source.replace('__asm__ volatile("dmb oshst" ::: "memory");',
 # here too, declarations before the owner and definitions after it.
 rpmh_executor_header = (arm/'SweetRPMhExecutor.h').read_text() if (arm/'SweetRPMhExecutor.h').exists() else ''
 rpmh_executor_source = (arm/'SweetRPMhExecutor.cpp').read_text() if rpmh_executor_header else ''
-source = re.sub(r'^#include.*\n', '', rpmh_executor_header+rpmh_header+rpmh_source+rpmh_executor_source, flags=re.M)+source
+# C3-04: the door table and the line sequence are separate translation units the
+# service includes; the fixture has to see them in the same order a build would.
+apps_door_header = (arm/'SweetAppsDoor.h').read_text() if (arm/'SweetAppsDoor.h').exists() else ''
+apps_door_source = (arm/'SweetAppsDoor.cpp').read_text() if apps_door_header else ''
+apps_line_header = (arm/'SweetAppsLine.h').read_text() if (arm/'SweetAppsLine.h').exists() else ''
+apps_line_source = (arm/'SweetAppsLine.cpp').read_text() if apps_line_header else ''
+apps_line_source = re.sub(r'__asm__ volatile\("(dmb|dsb)[^"]*" ::: "memory"\);', '(void)0;', apps_line_source)
+source = re.sub(r'^#include.*\n', '', apps_door_header+apps_line_header+apps_line_source+
+                apps_door_source+rpmh_executor_header+rpmh_header+rpmh_source+
+                rpmh_executor_source, flags=re.M)+source
 if (arm/'SweetPanelPins.h').exists():
     pins_header = (arm/'SweetPanelPins.h').read_text().replace('class SweetPanelPins :', 'struct SweetPanelPins :').replace('class SweetPanelPinsClient :', 'struct SweetPanelPinsClient :')
     pins_source = (arm/'SweetPanelPins.cpp').read_text()
@@ -150,7 +159,7 @@ using vm_offset_t=uintptr_t;
 // The fixture uses physical addresses as synthetic virtual addresses.
 static vm_offset_t ml_vtophys(vm_offset_t address){return address;}
 using IOReturn=int;
-constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4,kIOReturnBusy=5,kIOReturnNoMemory=6,kIOReturnAborted=7,kIOReturnNoResources=8,kIOReturnTimeout=9,kIOReturnNotFound=10,kIOReturnNotPermitted=11,kIOReturnNotOpen=12;
+constexpr int kIOReturnSuccess=0,kIOReturnNotReady=1,kIOReturnBadArgument=2,kIOReturnIOError=3,kIOReturnUnsupported=4,kIOReturnBusy=5,kIOReturnNoMemory=6,kIOReturnAborted=7,kIOReturnNoResources=8,kIOReturnTimeout=9,kIOReturnNotFound=10,kIOReturnNotPermitted=11,kIOReturnNotOpen=12,kIOReturnExclusiveAccess=13;
 using IOOptionBits=unsigned;using IOInterruptState=unsigned;
 // Wait-event adapter: registration is separate from blocking, preserving a
 // wakeup that arrives after assert_wait but before thread_block.
@@ -488,6 +497,7 @@ struct IOMemoryDescriptor : OSObject {
  static IOMemoryDescriptor*withPhysicalAddress(uintptr_t p,size_t n,unsigned){auto*d=new IOMemoryDescriptor;d->pa=p;d->length=n;return d;}
  IOMemoryMap*map(){auto*m=new IOMemoryMap(3);m->customPA=pa;m->customSize=length;return m;}
 };
+constexpr unsigned kIODirectionIn=1;
 constexpr unsigned kIODirectionInOut=3;
 struct SweetScanoutPool : OSObject {
  bool pinned=false;uint64_t pa=0x10000000;

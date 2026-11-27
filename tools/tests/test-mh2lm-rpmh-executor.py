@@ -36,7 +36,7 @@ for called in ('SweetRPMhExecutor::arm(', 'SweetRPMhExecutor::step(',
                'SweetRPMhExecutor::verify(', 'SweetRPMhExecutor::stageCleanup('):
     assert called in owner, called
 # The one record that says who kept the hardware is emitted by the owner.
-assert 'executor=module tcs=%u commands=%u open=%u hardware-owner=SweetRPMh' in owner
+assert 'executor=%s tcs=%u commands=%u open=%u hardware-owner=%s' in owner
 
 UNITS = r"""
 #include <assert.h>

@@ -34,6 +34,7 @@
 #include "IOQcomRSC.h"
 #include "SweetRSCDatabase.h"
 #include <IOKit/IOLib.h>
+#include <kern/clock.h>
 #include <libkern/c++/OSData.h>
 #include <string.h>
 #define SWEET_LOG_SINK IOLog
@@ -51,10 +52,15 @@ OSDefineMetaClassAndStructors(IOQcomRSCChannel,IOService);
  * this channel accepts: a node pointing at another RSC is somebody else's
  * description and must not be read as this one. */
 static const struct { const char *name; uint64_t physical; uint64_t length; }
-rscRanges[kIOQcomRscRangeCount] = {
+rscRanges[kIOQcomRscExecutorRangeCount] = {
 	{ "apps-drv",         0x18220000ULL, 0x100ULL  },
 	{ "apps-tcs",         0x18220d00ULL, 0x3000ULL },
 	{ "apps-db-locator",  0x0c3f000cULL, 8ULL      },
+	/* C3-04 only: the distributor window the display node carried while it was
+	 * the owner. Declared after the three RSC ranges, so the same table serves
+	 * both modes and the range count alone says which one a ring booted. */
+	{ "apps-gic",         (uint64_t)kIOQcomRscExecutorGicPhysical,
+	  (uint64_t)kIOQcomRscExecutorGicLength },
 };
 
 /* The two TCS words this card looks at: word 0 is the interrupt-enable mask the
@@ -69,6 +75,7 @@ rscWindowName(unsigned window)
 	case kIOQcomRscWindowTCS: return rscRanges[1].name;
 	case kIOQcomRscWindowLocator: return rscRanges[2].name;
 	case kIOQcomRscWindowDB: return "apps-command-db";
+	case kIOQcomRscWindowGIC: return rscRanges[3].name;
 	default: return "unknown";
 	}
 }
@@ -91,6 +98,30 @@ IOQcomRSCChannel::validateProperties(IOService *provider)
 		SWEET_LOG_ERROR("SWEET RSC: phase=start result=%d detail=bad-rsc-abi value=%#x expected=%#x\n",
 		 kIOReturnBadArgument,value,kIOQcomRscAbi);
 		return false;
+	}
+	/* C3-04, the third opt-in and the only one that changes who writes. It is
+	 * validated here - before the line is described, not after - because both of
+	 * the description rows have to say which role they describe for: an
+	 * `described-not-armed` row on a boot that arms the line four steps later
+	 * would be a true sentence about the wrong boot, and a ring is read as one
+	 * sentence per row. A malformed request is still a refusal and never a
+	 * silent read-only boot: the tree asked for an owner, and "probably
+	 * read-only" is not an answer to that. */
+	OSData *executor=OSDynamicCast(OSData,provider?provider->getProperty("sweet,rsc-executor"):NULL);
+	if (executor) {
+		if (executor->getLength()!=4) {
+			SWEET_LOG_ERROR("SWEET RSC: phase=start result=%d detail=bad-rsc-executor length=%u\n",
+			 kIOReturnBadArgument,(unsigned)executor->getLength());
+			return false;
+		}
+		uint32_t wanted=0;
+		memcpy(&wanted,executor->getBytesNoCopy(),4);
+		if (wanted!=kIOQcomRscExecutorAbi) {
+			SWEET_LOG_ERROR("SWEET RSC: phase=start result=%d detail=bad-rsc-executor value=%#x expected=%#x\n",
+			 kIOReturnBadArgument,wanted,kIOQcomRscExecutorAbi);
+			return false;
+		}
+		fExecutor=true;
 	}
 	/* No other property arms anything here. The irq description is mandatory
 	 * for the same reason the ranges are: a channel that cannot say which line
@@ -150,9 +181,13 @@ IOQcomRSCChannel::describeIRQ(IOService *provider)
 		return false;
 	}
 	fIntid=line;
-	/* Description only. No GIC map, no enable, no route, no handler - the row
-	 * says so in the field a reader would otherwise have to assume. */
-	SWEET_LOG_INFO("SWEET RSC: phase=irq intid=%u detail=described-not-armed\n",fIntid);
+	/* Description only. In the read-only mode there is no GIC map, no enable, no
+	 * route and no handler, and the row says so in the field a reader would
+	 * otherwise have to assume. In the executor mode those four steps happen
+	 * later, in setupExecutor, so the row says that instead of claiming an
+	 * absence this boot does not have. */
+	SWEET_LOG_INFO("SWEET RSC: phase=irq intid=%u detail=%s\n",fIntid,
+	 fExecutor?"described-for-executor":"described-not-armed");
 	return true;
 }
 
@@ -163,8 +198,13 @@ IOQcomRSCChannel::mapWindows(IOService *provider)
 		SWEET_LOG_ERROR("SWEET RSC: phase=map result=%d detail=resources-absent\n",kIOReturnNotReady);
 		return false;
 	}
-	for (unsigned i=0;i<kIOQcomRscRangeCount;i++) {
-		Window &w=fWindow[i];
+	/* In the executor mode the tree declares one more range, the GIC window. It
+	 * lands in its own window index so the command DB keeps index 3 and the
+	 * read-only mode's window numbering is untouched. */
+	const unsigned ranges=fExecutor?kIOQcomRscExecutorRangeCount:kIOQcomRscRangeCount;
+	for (unsigned i=0;i<ranges;i++) {
+		const unsigned index=(i<kIOQcomRscRangeCount)?i:kIOQcomRscWindowGIC;
+		Window &w=fWindow[index];
 		w.physical=rscRanges[i].physical;
 		w.length=0;
 		w.base=0;
@@ -197,6 +237,7 @@ IOQcomRSCChannel::mapWindows(IOService *provider)
 		}
 		SWEET_LOG_INFO("SWEET RSC: phase=map resource=%s result=0 length=%#llx\n",
 		 rscRanges[i].name,(unsigned long long)length);
+		if (index==kIOQcomRscWindowGIC) fGIC=w.base;
 	}
 	return true;
 }
@@ -337,13 +378,370 @@ IOQcomRSCChannel::observeTCS(void)
 	}
 	fIdentity.irqEnable=enable;
 	fIdentity.irqStatus=status;
-	/* Observed, not owned: the display owner owns both of these words for this
-	 * boot, and this card must not mask, clear or acknowledge anything. The row
-	 * exists so a ring shows the channel looked at a live owner rather than a
-	 * quiet block. */
-	SWEET_LOG_INFO("SWEET RSC: phase=tcs irq-enable=%#x irq-status=%#x detail=observed-not-owned\n",
-	 enable,status);
+	/* Observed, not owned *yet*: in the read-only mode the display owner keeps
+	 * both of these words for the whole boot, and this card must not mask, clear
+	 * or acknowledge anything. In the executor mode the channel reads them
+	 * before it publishes the door and owns them from then on, so the row says
+	 * it looked at a live block without claiming the words. Either way the row
+	 * exists so a ring shows the channel read a live owner rather than a quiet
+	 * block. */
+	SWEET_LOG_INFO("SWEET RSC: phase=tcs irq-enable=%#x irq-status=%#x detail=%s\n",
+	 enable,status,fExecutor?"observed-before-owner":"observed-not-owned");
 	return true;
+}
+
+/* ---------------------------------------------------------------------------
+ * C3-04: the executor mode.
+ *
+ * Everything below runs only when the tree carried sweet,rsc-executor, and it
+ * is the whole of this boot's RSC write capability: one store helper, one GIC
+ * line, one event source, one published door. The read-only mode above never
+ * reaches any of it, so "writes=0 by code path" stays a structural fact rather
+ * than a promise.
+ * ------------------------------------------------------------------------ */
+
+static uint64_t
+rscNowNS(void)
+{
+	uint64_t now=0;
+	absolutetime_to_nanoseconds(mach_absolute_time(),&now);
+	return now;
+}
+
+/* The status word the line-admission step consults: any set bit means a
+ * previous flight is still unacknowledged, which is a refusal, not a stall. */
+static uint32_t
+rscStatusThunk(void *context)
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	return channel?channel->tcsRead(kIOQcomRscTcsStatus):0u;
+}
+
+uint32_t
+IOQcomRSCChannel::tcsRead(uint32_t offset)
+{
+	uint32_t value=~0u;
+	if (!fExecutor||!fLock||!fWindow[kIOQcomRscWindowTCS].base) return ~0u;
+	if (!readWindow(kIOQcomRscWindowTCS,offset,&value,&fDoorReads)) return ~0u;
+	return value;
+}
+
+void
+IOQcomRSCChannel::tcsWrite(uint32_t offset,uint32_t value)
+{
+	/* The only store in this file, and it exists only in the executor mode. A
+	 * store without the mode is a programming error, so it is refused loudly
+	 * rather than quietly ignored. */
+	if (!fExecutor||!fLock) {
+		SWEET_LOG_ERROR("SWEET RSC: phase=store result=%d detail=not-executor offset=%#x\n",
+		 kIOReturnNotPermitted,offset);
+		return;
+	}
+	bool ok=false;
+	IOLockLock(fLock);
+	Window &w=fWindow[kIOQcomRscWindowTCS];
+	uint64_t end=(uint64_t)offset+sizeof(uint32_t);
+	if (w.base&&(offset&3u)==0&&w.length>=sizeof(uint32_t)&&end<=w.length) {
+		/* VM_WIMG_IO is not strongly ordered: the store must be published
+		 * before the caller's read-back or the next trigger. */
+		__asm__ volatile("dmb oshst" ::: "memory");
+		*(volatile uint32_t *)(w.base+offset)=value;
+		__asm__ volatile("dsb osh" ::: "memory");
+		__atomic_add_fetch(&fStores,1u,__ATOMIC_RELAXED);
+		ok=true;
+	}
+	IOLockUnlock(fLock);
+	if (!ok) {
+		SWEET_LOG_ERROR("SWEET RSC: phase=store result=%d detail=out-of-window offset=%#x value=%#x writes=%u\n",
+		 kIOReturnBadArgument,offset,value,fStores);
+	}
+}
+
+void
+IOQcomRSCChannel::buildDoor(void)
+{
+	fDoor.name="IOQcomRSCChannel";
+	fDoor.context=this;
+	fDoor.read=doorRead;
+	fDoor.write=doorWrite;
+	fDoor.identity=doorIdentity;
+	fDoor.triggerReady=doorTriggerReady;
+	fDoor.arm=doorArm;
+	fDoor.unmask=doorUnmask;
+	fDoor.quiet=doorQuiet;
+	fDoor.stop=doorStop;
+	fDoor.irq=doorIrq;
+	fDoor.install=doorInstall;
+	fDoor.stores=doorStores;
+	fDoor.irqs=doorIrqs;
+}
+
+bool
+IOQcomRSCChannel::setupExecutor(IOService *provider)
+{
+	/* The line is taken before the door exists, and the door exists before the
+	 * first store: a client that finds the door can therefore never find a line
+	 * that is half-programmed. Geometry and claim are read-only checks, so a
+	 * tree that describes an unsupported or already-live line fails here with
+	 * no store, no event source and no door. */
+	if (!fGIC) {
+		SWEET_LOG_ERROR("SWEET RSC: phase=executor result=%d detail=gic-window-absent\n",
+		 kIOReturnNotReady);
+		return false;
+	}
+	if (!SweetAppsLine::geometry(fGIC)) {
+		SWEET_LOG_ERROR("SWEET RSC: phase=executor result=%d detail=unsupported-gic\n",
+		 kIOReturnUnsupported);
+		return false;
+	}
+	if (!SweetAppsLine::claimable(fGIC)) {
+		SWEET_LOG_ERROR("SWEET RSC: phase=executor result=%d detail=line-already-live\n",
+		 kIOReturnBusy);
+		return false;
+	}
+	fLoop=IOWorkLoop::workLoop();
+	if (!fLoop) {
+		SWEET_LOG_ERROR("SWEET RSC: phase=executor result=%d detail=no-workloop\n",
+		 kIOReturnNoResources);
+		return false;
+	}
+	fIRQEvent=IOInterruptEventSource::interruptEventSource(this,irqAction);
+	if (!fIRQEvent||fLoop->addEventSource(fIRQEvent)!=kIOReturnSuccess) {
+		SWEET_LOG_ERROR("SWEET RSC: phase=executor result=%d detail=no-event-source\n",
+		 kIOReturnNoResources);
+		OSSafeReleaseNULL(fIRQEvent);
+		return false;
+	}
+	fIRQEventAdded=true;
+	buildDoor();
+	if (!sweet_apps_door_publish(&fDoor)) {
+		SWEET_LOG_ERROR("SWEET RSC: phase=executor result=%d detail=door-refused\n",
+		 kIOReturnBusy);
+		return false;
+	}
+	fDoorPublished=true;
+	SWEET_LOG_INFO("SWEET RSC: phase=executor result=0 owner=%s intid=%u windows=%u ranges=%u stores=0 writes-at-start=0 workloop=own\n",
+	 fDoor.name,fIntid,kIOQcomRscWindowCount,kIOQcomRscExecutorRangeCount);
+	return true;
+}
+
+void
+IOQcomRSCChannel::stopExecutor(void)
+{
+	if (!fExecutor) return;
+	/* Withdraw first: after this returns no new store or IRQ can enter, and the
+	 * display service sees an absent door instead of a line being dismantled. */
+	__atomic_store_n(&fIRQOnline,0u,__ATOMIC_RELEASE);
+	if (fDoorPublished) {
+		sweet_apps_door_withdraw(&fDoor);
+		fDoorPublished=false;
+	}
+	if (fIRQTouched&&fGIC) SweetAppsLine::mask(fGIC);
+	if (fIRQEventAdded&&fLoop) {
+		fIRQEvent->disable();
+		fLoop->removeEventSource(fIRQEvent);
+		fIRQEventAdded=false;
+	}
+	OSSafeReleaseNULL(fIRQEvent);
+	/* The loop is this driver's own: it was created for the one event source
+	 * above, so it is released here and not left for the boot to reclaim. */
+	if (fLoop) {
+		fLoop->release();
+		fLoop=NULL;
+	}
+	fIRQConfigured=false;
+	fIRQTouched=false;
+	__atomic_store_n(&fCompletion,(bool (*)(void *))NULL,__ATOMIC_RELEASE);
+	fCompletionTarget=NULL;
+	SWEET_LOG_INFO("SWEET RSC: phase=executor-stop result=0 stores=%u irqs=%u door=withdrawn\n",
+	 fStores,fIRQEntries);
+}
+
+IOReturn
+IOQcomRSCChannel::lineTriggerReady(void)
+{
+	if (!fExecutor||!fGIC) return kIOReturnNotPermitted;
+	if (fIRQConfigured) {
+		if (!SweetAppsLine::verify(fGIC)) return kIOReturnIOError;
+	} else {
+		if (!fIRQTouched) {
+			SweetAppsLine::Verdict program=SweetAppsLine::program(fGIC);
+			if (program!=SweetAppsLine::LineReady) {
+				return program==SweetAppsLine::LineForeign?kIOReturnBusy:kIOReturnIOError;
+			}
+			fIRQTouched=true;
+			fIRQDeadline=rscNowNS()+1000000ULL;
+		}
+		/* RWP is an asynchronous distributor phase: the caller asks again with
+		 * its own timer, this path never spins. */
+		SweetAppsLine::Verdict retired=SweetAppsLine::retired(fGIC,rscNowNS(),fIRQDeadline);
+		if (retired!=SweetAppsLine::LineReady) {
+			return retired==SweetAppsLine::LineWait?kIOReturnNotReady:kIOReturnIOError;
+		}
+		fIRQConfigured=true;
+		__atomic_store_n(&fIRQOnline,1u,__ATOMIC_RELEASE);
+		setProperty("SweetRSCExecutorIRQ",(unsigned long long)fIntid,32);
+		SWEET_LOG_INFO("SWEET RSC: phase=line result=0 intid=%u owner=channel; ACTIVE completion on own workloop, no status polling\n",
+		 fIntid);
+	}
+	/* One trigger: no active generation of ours, and any pending bit either
+	 * acknowledges a clear source or refuses the flight. An inherited source is
+	 * never cleared on somebody else's behalf. */
+	SweetAppsLine::Verdict admit=SweetAppsLine::admit(fGIC,rscNowNS(),
+	 rscNowNS()+1000000ULL,rscStatusThunk,this,NULL);
+	if (admit==SweetAppsLine::LineWait) return kIOReturnNotReady;
+	if (admit==SweetAppsLine::LineForeign) return kIOReturnBusy;
+	if (admit!=SweetAppsLine::LineReady) return kIOReturnIOError;
+	return kIOReturnSuccess;
+}
+
+void
+IOQcomRSCChannel::lineQuiet(uint32_t bit)
+{
+	/* Stop this completion from arriving again, and drop only our own source
+	 * bit from the array mask. No peripheral ACK, no status write: the source
+	 * word belongs to the client that armed it. */
+	__atomic_store_n(&fIRQArmed,0u,__ATOMIC_RELEASE);
+	if (fIRQTouched&&fGIC) SweetAppsLine::mask(fGIC);
+	if (!bit) return;
+	uint32_t enabled=tcsRead(kIOQcomRscTcsEnable);
+	if (enabled==~0u) return;
+	if (enabled&bit) tcsWrite(kIOQcomRscTcsEnable,enabled&~bit);
+}
+
+bool
+IOQcomRSCChannel::handleIRQ(void)
+{
+	/* Top half, called from the one router with its dispatch lock held: mask,
+	 * count, post. No lock allocation, no client code, no payload scan and no
+	 * wait; the workloop thread decides what the completion means. */
+	if (!__atomic_load_n(&fIRQOnline,__ATOMIC_ACQUIRE)) return true;
+	if (fGIC) SweetAppsLine::mask(fGIC);
+	__atomic_add_fetch(&fIRQEntries,1u,__ATOMIC_RELAXED);
+	if (!__atomic_exchange_n(&fIRQArmed,0u,__ATOMIC_ACQ_REL)) return true;
+	__atomic_store_n(&fIRQPosted,1u,__ATOMIC_RELEASE);
+	if (fIRQEvent) fIRQEvent->interruptOccurred(NULL,NULL,0);
+	return true;
+}
+
+void
+IOQcomRSCChannel::irqAction(OSObject *owner,IOInterruptEventSource *,int)
+{
+	IOQcomRSCChannel *self=(IOQcomRSCChannel *)owner;
+	if (!self||!__atomic_exchange_n(&self->fIRQPosted,0u,__ATOMIC_ACQ_REL)) return;
+	/* The client's entry runs with no channel lock held: it takes its own gate,
+	 * and may come straight back through the door to program the next flight. */
+	bool (*completion)(void *)=__atomic_load_n(&self->fCompletion,__ATOMIC_ACQUIRE);
+	void *target=self->fCompletionTarget;
+	if (!completion||!target) {
+		SWEET_LOG_WARN("SWEET RSC: phase=irq result=%d detail=no-completion-client entries=%u\n",
+		 kIOReturnNotReady,self->fIRQEntries);
+		return;
+	}
+	if (!completion(target)) {
+		SWEET_LOG_WARN("SWEET RSC: phase=irq result=%d detail=client-refused entries=%u\n",
+		 kIOReturnIOError,self->fIRQEntries);
+	}
+}
+
+uint32_t
+IOQcomRSCChannel::doorRead(void *context,uint32_t offset)
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	return channel?channel->tcsRead(offset):~0u;
+}
+
+void
+IOQcomRSCChannel::doorWrite(void *context,uint32_t offset,uint32_t value)
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	if (channel) channel->tcsWrite(offset,value);
+}
+
+bool
+IOQcomRSCChannel::doorIdentity(void *context,uint32_t *id,uint32_t *solver,
+ uint32_t *config)
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	if (!channel||!channel->fIdentity.valid) return false;
+	if (id) *id=channel->fIdentity.id;
+	if (solver) *solver=channel->fIdentity.solver;
+	if (config) *config=channel->fIdentity.config;
+	return true;
+}
+
+IOReturn
+IOQcomRSCChannel::doorTriggerReady(void *context)
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	return channel?channel->lineTriggerReady():kIOReturnNotPermitted;
+}
+
+void
+IOQcomRSCChannel::doorArm(void *context)
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	if (channel) __atomic_store_n(&channel->fIRQArmed,1u,__ATOMIC_RELEASE);
+}
+
+void
+IOQcomRSCChannel::doorUnmask(void *context)
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	if (channel&&channel->fGIC) SweetAppsLine::unmask(channel->fGIC);
+}
+
+void
+IOQcomRSCChannel::doorQuiet(void *context,uint32_t bit)
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	if (channel) channel->lineQuiet(bit);
+}
+
+void
+IOQcomRSCChannel::doorStop(void *context)
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	if (channel) channel->stopExecutor();
+}
+
+bool
+IOQcomRSCChannel::doorIrq(void *context)
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	return channel?channel->handleIRQ():true;
+}
+
+bool
+IOQcomRSCChannel::doorInstall(void *context,void *target,bool (*callback)(void *))
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	if (!channel||!channel->fExecutor||!callback||!target) return false;
+	bool (*current)(void *)=__atomic_load_n(&channel->fCompletion,__ATOMIC_ACQUIRE);
+	if (current) {
+		if (current==callback&&channel->fCompletionTarget==target) return true;
+		SWEET_LOG_WARN("SWEET RSC: phase=install result=%d detail=client-already-installed\n",
+		 kIOReturnBusy);
+		return false;
+	}
+	channel->fCompletionTarget=target;
+	__atomic_store_n(&channel->fCompletion,callback,__ATOMIC_RELEASE);
+	SWEET_LOG_INFO("SWEET RSC: phase=install result=0 detail=completion-client\n");
+	return true;
+}
+
+unsigned
+IOQcomRSCChannel::doorStores(void *context)
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	return channel?channel->fStores:0u;
+}
+
+unsigned
+IOQcomRSCChannel::doorIrqs(void *context)
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	return channel?channel->fIRQEntries:0u;
 }
 
 bool
@@ -452,6 +850,27 @@ IOQcomRSCChannel::start(IOService *provider)
 	fSubmitAttempts=0;
 	fQueryReads=0;
 	fQueryEnabled=false;
+	/* C3-04 state is initialised before any property is read: an early refusal
+	 * must not leave a half-built door or event source behind for stop(). */
+	fExecutor=false;
+	fGIC=0;
+	fLoop=NULL;
+	fIRQEvent=NULL;
+	fIRQEventAdded=false;
+	fDoorPublished=false;
+	fStores=0;
+	fDoorReads=0;
+	fIRQEntries=0;
+	fIRQArmed=0;
+	fIRQPosted=0;
+	fIRQOnline=0;
+	fIRQSources=0;
+	fIRQTouched=false;
+	fIRQConfigured=false;
+	fIRQDeadline=0;
+	fCompletionTarget=NULL;
+	fCompletion=NULL;
+	memset(&fDoor,0,sizeof(fDoor));
 	fIdentity.queryDone=false;
 	fIdentity.queryAddress=0;
 	fIdentity.queryUnit=0;
@@ -471,23 +890,31 @@ IOQcomRSCChannel::start(IOService *provider)
 	if (!mapCommandDB()) goto fail;
 	queryCommandDB();
 	if (!observeTCS()) goto fail;
+	/* The owner decision is already made from the tree; this is the only place
+	 * it turns into a line, a workloop and a door. */
+	if (fExecutor&&!setupExecutor(provider)) goto fail;
 	/* Nothing below can write, so this is the whole published surface: an
 	 * identity, a read count, and a channel that refuses to submit. */
 	fIdentity.valid=true;
 	fAccepting=true;
 	setProperty("SweetRSCChannelABI",(unsigned long long)kIOQcomRscAbi,32);
-	setProperty("SweetRSCChannelWrites",0ULL,32);
+	setProperty("SweetRSCChannelWrites",(unsigned long long)fStores,32);
+	setProperty("SweetRSCChannelExecutor",fExecutor);
 	setProperty("SweetRSCChannelSubmitAllowed",false);
 	setProperty("SweetRSCChannelIRQ",(unsigned long long)fIntid,32);
 	registerService();
 	fRegistered=true;
-	SWEET_LOG_INFO("SWEET RSC: phase=start result=0 windows=%u ranges=%u reads=%u query-reads=%u writes=0 id=%#x tcs=%u ncpt=%u db=%#x db-size=%u irq=%u query=%s submit=not-ready\n",
-	 kIOQcomRscWindowCount,kIOQcomRscRangeCount,fReads,fQueryReads,fIdentity.id,
+	SWEET_LOG_INFO("SWEET RSC: phase=start result=0 windows=%u ranges=%u reads=%u query-reads=%u writes=%u id=%#x tcs=%u ncpt=%u db=%#x db-size=%u irq=%u query=%s submit=not-ready executor=%s\n",
+	 fExecutor?kIOQcomRscWindowCount:kIOQcomRscMappedWindowCount,
+	 fExecutor?kIOQcomRscExecutorRangeCount:kIOQcomRscRangeCount,
+	 fReads,fQueryReads,fStores,fIdentity.id,
 	 fIdentity.tcsCount,fIdentity.ncpt,fIdentity.dbAddress,fIdentity.dbBytes,fIntid,
-	 !fQueryEnabled?"absent":(fIdentity.queryDone?"ok":"missing"));
+	 !fQueryEnabled?"absent":(fIdentity.queryDone?"ok":"missing"),
+	 fExecutor?"channel":"absent");
 	return true;
 fail:
 	fAccepting=false;
+	stopExecutor();
 	unmapWindows();
 	if (fLock) {
 		IOLockFree(fLock);
@@ -522,8 +949,10 @@ void
 IOQcomRSCChannel::stop(IOService *provider)
 {
 	fAccepting=false;
-	SWEET_LOG_INFO("SWEET RSC: phase=stop result=0 reads=%u writes=0 submit-attempts=%u\n",
-	 fReads,(unsigned)__atomic_load_n(&fSubmitAttempts,__ATOMIC_RELAXED));
+	stopExecutor();
+	SWEET_LOG_INFO("SWEET RSC: phase=stop result=0 reads=%u writes=%u submit-attempts=%u executor=%s\n",
+	 fReads,fStores,(unsigned)__atomic_load_n(&fSubmitAttempts,__ATOMIC_RELAXED),
+	 fExecutor?"channel":"absent");
 	unmapWindows();
 	if (fLock) {
 		IOLockFree(fLock);
@@ -536,6 +965,7 @@ IOQcomRSCChannel::stop(IOService *provider)
 void
 IOQcomRSCChannel::free(void)
 {
+	stopExecutor();
 	unmapWindows();
 	if (fLock) {
 		IOLockFree(fLock);

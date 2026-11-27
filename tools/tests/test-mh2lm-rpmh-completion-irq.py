@@ -30,10 +30,10 @@ int main(){
   if(fault==0){n->properties["sweet,rpmh-irq-abi"]->release();n->properties.erase("sweet,rpmh-irq-abi");}
   if(fault==1){n->properties["sweet,rpmh-intid"]->release();uint32_t wrong=38;n->properties["sweet,rpmh-intid"]=OSData::withBytes(&wrong,4);}
   if(fault==2)missingMap=3;if(fault==3)badMap=3;if(fault==4)shortMap=3;
-  auto*s=new SweetRPMh();assert(!s->start(n)&&!writes());s->release();dropNub(n);assert(!live&&!liveMaps&&!rpmhOwner&&!rpmhIRQService);
+  auto*s=new SweetRPMh();assert(!s->start(n)&&!writes());s->release();dropNub(n);assert(!live&&!liveMaps&&!rpmhOwner&&!sweet_apps_door());
  }
  fixtures();resourceMode=1;auto*n=nub();n->properties["sweet,rpmh-irq-abi"]->release();n->properties.erase("sweet,rpmh-irq-abi");
- auto*s=make(n);assert(!s->fIRQMap&&!s->fIRQEvent&&!rpmhIRQService);dispose(s,n);
+ auto*s=make(n);assert(!s->fIRQMap&&!s->fIRQEvent&&!sweet_apps_door());dispose(s,n);
  // Refuse another GIC owner, foreign pending or unsupported layout read-only.
  for(unsigned fault=0;fault<5;++fault){fixtures();resourceMode=2;n=nub();s=make(n);
   if(fault==0)regs[G+0x104]=GB;if(fault==1)regs[G+0x204]=GB;
@@ -103,7 +103,7 @@ int main(){
  while(!stopEntered)std::this_thread::yield();assert(!stopDone);
  while(__atomic_load_n(&s->fIRQOnline,__ATOMIC_ACQUIRE))std::this_thread::yield();
  {std::lock_guard<std::mutex>l(pauseLock);releaseRead=true;pauseCV.notify_all();}
- irqThread.join();stopper.join();pauseIRQWrite=false;assert(!rpmhIRQService&&!s->fIRQEventAdded);
+ irqThread.join();stopper.join();pauseIRQWrite=false;assert(!sweet_apps_door()&&!s->fIRQEventAdded);
  auto size=trace.size();s->fIRQPosted=1;SweetRPMh::irqAction(s,s->fIRQEvent,1);s->fTimer->action(s,s->fTimer);
  assert(sweet_rpmh_irq(37)&&!sweet_rpmh_irq(38)&&trace.size()==size);
  s->release();dropNub(n);reboot();assert(!live&&!liveMaps&&queued.empty());

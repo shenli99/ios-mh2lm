@@ -748,6 +748,56 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-query-adt-') as temp:
     refused = subprocess.run([sys.executable, str(Path(m.__file__)), '--rsc-query',
                               str(source), str(output)], capture_output=True)
     assert refused.returncode != 0, refused
+# C3-04 turns the channel into the sole executor for one boot. Two things must be
+# true of the tree it derives: the channel names a fourth range and says it
+# executes, and the display node says it has stood down - while keeping its own
+# ranges and INTID so that a rollback is a property edit, not a re-derivation.
+assert b'sweet,rsc-executor' not in chan and b'sweet,rpmh-executor-delegated' not in chan
+exec_tree = m.derive(blob, rpmh_irq=True, rsc_channel=True, rsc_executor=True)
+etree, end = adt.parse(exec_tree)
+assert end == len(exec_tree)
+xowner = next(n for n in etree.children[1].children if n.name == 'display-rpmh')
+xchannel = next(n for n in etree.children[1].children if n.name == 'rsc-channel')
+assert xchannel.prop('sweet,rsc-executor') == struct.pack('<I', 1)
+assert xchannel.prop('reg') == encode_windows(m.RPMH_WINDOWS + m.IRQ_WINDOWS[-1:])
+assert len(xchannel.prop('reg')) == 8 * 2 * (len(m.RPMH_WINDOWS) + 1)
+assert xowner.prop('sweet,rpmh-executor-delegated') == struct.pack('<I', 1)
+# The old owner loses no range and no INTID: only its role changed, so the
+# hardware description of the array and the line is still one description.
+assert xowner.prop('reg') == wowner.prop('reg')
+assert xowner.prop('sweet,rpmh-intid') == wowner.prop('sweet,rpmh-intid')
+assert xowner.prop('sweet,rpmh-irq-abi') == wowner.prop('sweet,rpmh-irq-abi')
+assert [n.name for n in etree.children[1].children] == [n.name for n in wtree.children[1].children]
+# The executor is a role, not a query: it must not turn the C3-02 request on.
+assert b'sweet,rsc-query' not in exec_tree
+# Only the two properties and the fourth range differ from the C3-03 tree, so
+# dropping the role returns exactly the bytes that boot ran with.
+xchannel.props = [x for x in xchannel.props if x[0] != 'sweet,rsc-executor']
+xchannel.props = [('reg', 0, encode_windows(m.RPMH_WINDOWS)) if x[0] == 'reg' else x
+                  for x in xchannel.props]
+xowner.props = [x for x in xowner.props if x[0] != 'sweet,rpmh-executor-delegated']
+assert adt.serialize(etree) == with_irq
+# One owner or none: each half is refused without the other, because a tree that
+# delegates to a channel it does not describe, or names an executor without
+# standing the old owner down, would boot with no writer at all.
+for bad in ({'rsc_channel': True, 'rsc_executor': True},
+            {'rpmh_irq': True, 'rsc_executor': True}):
+    try:
+        m.derive(blob, **bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('a one-sided C3-04 tree must be refused: %r' % (bad,))
+with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-executor-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'exec.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--rpmh-irq', '--rsc-channel',
+                    '--rsc-executor', str(source), str(output)], check=True)
+    assert output.read_bytes() == exec_tree
+    assert source.read_bytes() == blob
+    refused = subprocess.run([sys.executable, str(Path(m.__file__)), '--rsc-channel',
+                              '--rsc-executor', str(source), str(output)], capture_output=True)
+    assert refused.returncode != 0, refused
 print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
@@ -757,4 +807,7 @@ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order
       'fifth range with the probe but implies neither it nor the vote, and the '
       'C3-01 read-only apps RSC channel, which names the owner\'s three ranges and '
       'no GIC range at all, and the C3-02 query request, which is one property on '
-      'that node and refuses to exist without it')
+      'that node and refuses to exist without it, and the C3-04 executor role, '
+      'which gives the channel the fourth range and stands the display owner '
+      'down without touching its ranges or INTID, one property per side away '
+      'from the C3-03 bytes')

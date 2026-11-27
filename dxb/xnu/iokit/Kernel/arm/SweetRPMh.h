@@ -8,6 +8,7 @@
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOLocks.h>
+#include "SweetAppsDoor.h"
 #include "SweetRPMhExecutor.h"
 
 enum SweetRail { SweetRailVDDI, SweetRailVPNL, SweetRailHost, SweetRailPHY, SweetRailCount };
@@ -128,8 +129,40 @@ class SweetRPMh : public IOService {
  bool fIRQEventAdded, fIRQClaimed, fIRQTouched, fIRQConfigured;
  uint64_t fIRQConfigureDeadline;
  unsigned fIRQOnline, fIRQArmed, fIRQPosted, fIRQEntries, fIRQSourceMask;
+ /* C3-04: the owner is decided from the ADT before the first register access.
+  * fDelegated means the channel owns the array and the line; this service then
+  * maps no TCS window, registers no handler and reaches the hardware only
+  * through the published table. fTable is this service's own table in the
+  * other mode, so both modes have exactly one write path. */
+ bool fDelegated, fTablePublished, fIdentityReady, fInstalled;
+ unsigned fSelfStores;
+ uint32_t fIdentityId, fIdentitySolver, fIdentityConfig;
+ SweetAppsDoor fTable;
+ bool delegatedRequested(IOService *);
+ bool ensureExecutor(void);
+ bool adoptDelegatedIdentity(void);
+ bool publishTable(void);
+ const SweetAppsDoor *executorDoor(void);
+ uint32_t tcsRead(uint32_t);
+ void tcsWrite(uint32_t,uint32_t);
+ static uint32_t tableRead(void *,uint32_t);
+ static void tableWrite(void *,uint32_t,uint32_t);
+ static bool tableIdentity(void *,uint32_t *,uint32_t *,uint32_t *);
+ static IOReturn tableTriggerReady(void *);
+ static void tableArm(void *);
+ static void tableUnmask(void *);
+ static void tableQuiet(void *,uint32_t);
+ static void tableStop(void *);
+ static bool tableIrq(void *);
+ static bool tableInstall(void *,void *,bool (*)(void *));
+ static unsigned tableStores(void *);
+ static unsigned tableIrqs(void *);
+ static bool completionThunk(void *);
+ static IOReturn completionAction(OSObject *,void *,void *,void *,void *);
+ void completionArrived(void);
  bool setupIRQ(IOService *);
  IOReturn prepareIRQ(void);
+ IOReturn admitIRQ(vm_offset_t);
  bool handleIRQ(void);
  void quietIRQ(void);
  void stopIRQ(void);
@@ -177,6 +210,9 @@ class SweetRPMh : public IOService {
  IOReturn queueArcStage(void);
  void completeTransaction(void);
  bool mapResources(IOService *);
+ bool mapDatabase(IOService *);
+ bool adoptIdentity(uint32_t,uint32_t,uint32_t);
+ bool installDelegated(void);
  bool emptyTCS(unsigned);
  IOReturn begin(unsigned,unsigned,const SweetRailVote &);
  void addOperation(uint32_t,uint32_t,bool = false);

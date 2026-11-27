@@ -37,17 +37,21 @@ prelude = prelude.replace('static std::vector<unsigned> mapCalls;',
 using IOPhysicalAddress=uint64_t;using IOVirtualAddress=uintptr_t;using IOByteCount=uint64_t;
 /* Apps RSC geometry exactly as the LG node declares it. rscMode keeps the nub
    from answering with the display tree's own bases, so a host case cannot pass
-   by accident on the wrong window. */
-static constexpr uintptr_t rscPAs[3]={0x18220000,0x18220d00,0x0c3f000c};
-static constexpr size_t rscLens[3]={0x100,0x3000,8};
-static bool rscMode=true;
+   by accident on the wrong window. C3-04: a delegating tree adds the apps GIC
+   window as the fourth range, so the same nub answers that one too - and only
+   when the executor opt-in was set, which is what makes "three ranges" the
+   default a case can assert. */
+static constexpr uintptr_t rscPAs[4]={0x18220000,0x18220d00,0x0c3f000c,0x17a00000};
+static constexpr size_t rscLens[4]={0x100,0x3000,8,0x10000};
+static bool rscMode=true,rscExecutor=false;
 static unsigned rscAbsentIndex=99,rscWrongPA=99,rscShortLen=99,rscNoBase=99;''')
 prelude = prelude.replace('int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){',
 '''int getResources(){return 0;}IOMemoryMap*mapDeviceMemoryWithIndex(unsigned i){
  if(rscMode){mapCalls.push_back(i);
-  /* the channel may only ever ask for the three ADT ranges: index 3 is the GIC
-     window of the display tree and a request for it would be a second listener */
-  if(i>=3)return nullptr;
+  /* Three ranges by default; the fourth is the apps GIC window and it is only
+     there when the tree opted into the executor. Asking for it either way is a
+     different tree, not a lenient one. */
+  if(i>(rscExecutor?3u:2u))return nullptr;
   if(i==rscAbsentIndex)return nullptr;
   auto*m=new IOMemoryMap(i);
   m->customPA=rscPAs[i]+(i==rscWrongPA?4:0);
@@ -82,28 +86,49 @@ header_raw = (arm/'IOQcomRSC.h').read_text()
 raw = (arm/'IOQcomRSC.cpp').read_text()
 
 # ---- structural evidence, before anything is rewritten for the harness ----
-# One device memory load and no store anywhere: "writes=0" is a property of the
-# file, not of a code path, so the absence has to be checkable in the text.
-assert raw.count('*(volatile uint32_t *)')==1, raw.count('*(volatile uint32_t *)')
+# C3-04: the channel can be the hardware owner, so it now has exactly one store.
+# It stays one statement in one helper, and the load stays one statement in
+# another, which is what keeps "a tree that did not delegate writes nothing" a
+# property a reader can check in this file instead of a promise in a comment.
+assert raw.count('*(volatile uint32_t *)')==2, raw.count('*(volatile uint32_t *)')
 assert raw.count('observed=*(volatile uint32_t *)(w.base+offset);')==1
-assert '*(w.base+offset)=' not in raw
+assert raw.count('*(volatile uint32_t *)(w.base+offset)=value;')==1
+# The store lives in tcsWrite and nowhere before it: the only way to reach a
+# store is the function the door table publishes.
+assert raw.index('*(volatile uint32_t *)(w.base+offset)=value;') > raw.index('IOQcomRSCChannel::tcsWrite')
+# One barrier pair per direction, and no raw read-modify-write of device memory.
 assert raw.count('__asm__ volatile("dmb oshld" ::: "memory");')==1
-assert 'dmb oshst' not in raw and 'dsb osh' not in raw
+assert raw.count('__asm__ volatile("dmb oshst" ::: "memory");')==1
+assert raw.count('__asm__ volatile("dsb osh" ::: "memory");')==1
 assert raw.count('#if defined(ARM64_BOARD_CONFIG_MH2LM)')==1
 assert raw.count('#endif /* ARM64_BOARD_CONFIG_MH2LM */')==1
 assert header_raw.count('#if defined(ARM64_BOARD_CONFIG_MH2LM)')==1
-# The three opt-ins are the whole ADT surface, each read once.
+# The opt-ins are the whole ADT surface, each read once.
 assert raw.count('sweet,rsc-abi')==1
 assert raw.count('sweet,rsc-irq-abi')==1
 assert raw.count('sweet,rsc-intid')==1
-# No second owner of the line: no interrupt source, no registration, no GIC
-# access, no lock that a handler could contend on.
-for banned in ('registerInterrupt','IOInterruptEventSource','IOSimpleLock',
-               'GICEnable','mapDeviceMemoryWithIndex(3','0x17a00000','0x17a0000',
+assert raw.count('sweet,rsc-query')==1
+assert raw.count('getProperty("sweet,rsc-executor")')==1
+# Still no second way to touch the line: no registration call, no scalar lock
+# in this file (the door's router lock is another translation unit), no GICD
+# word spelled here at all - masking goes through SweetAppsLine, which is.
+for banned in ('registerInterrupt','IOSimpleLock','GICEnable','GICDisable',
+               'GICPending','GICActive','GICConfig','GICPriority','GICRoute',
                'writeRegister','kIODirectionInOut'):
     assert banned not in raw, banned
     assert banned not in header_raw, banned
-# The DB is mapped with the read-only direction, and only once.
+# The only place the GIC physical address may appear is the header's expectation
+# for the fourth window: the file never spells an address it could read.
+assert raw.count('0x17a00000')==0 and raw.count('0x17a0000')==0
+assert header_raw.count('0x17a00000')==1
+assert raw.count('kIOQcomRscExecutorGicPhysical')==1
+# One interrupt source, created once, and the top half only posts to it.
+assert raw.count('IOInterruptEventSource')==2
+assert raw.count('interruptOccurred')==1
+# The owner is announced through the one door table and retired through it.
+assert raw.count('sweet_apps_door_publish')==1
+assert raw.count('sweet_apps_door_withdraw')==1
+# The DB is mapped with the read-only direction, and only once, in either mode.
 assert raw.count('kIODirectionIn')==1
 # One published entry, one definition, and it refuses.
 assert raw.count('IOQcomRSCChannel::submit(')==1
@@ -116,12 +141,48 @@ rsc_header = rsc_header.replace('class IOQcomRSCChannel : public IOService {',
                                 'struct IOQcomRSCChannel : public IOService {')
 assert 'struct IOQcomRSCChannel' in rsc_header
 rsc_source = re.sub(r'^#include.*\n', '', raw, flags=re.M)
-# Actual MMIO and the barrier are the only replaced engine statements.
+# Actual MMIO and the barriers are the only replaced engine statements. The
+# harness records both directions, so a store the channel should not have made
+# is a row in the trace rather than a memory corruption in the test process.
 rsc_source = rsc_source.replace('observed=*(volatile uint32_t *)(w.base+offset);',
                                 'observed=readReg(w.base,offset);')
-rsc_source = rsc_source.replace('__asm__ volatile("dmb oshld" ::: "memory");', '(void)0;')
+rsc_source = rsc_source.replace('*(volatile uint32_t *)(w.base+offset)=value;',
+                                'writeReg(w.base,offset,value);')
+rsc_source = re.sub(r'__asm__ volatile\("(dmb|dsb)[^"]*" ::: "memory"\);', '(void)0;', rsc_source)
 assert 'readReg(w.base,offset)' in rsc_source and 'volatile uint32_t *)' not in rsc_source
+assert 'writeReg(w.base,offset,value)' in rsc_source
 rsc_source = '\n#undef super\n' + rsc_source
+# C3-04 adds two sibling translation units to the same kext: the door router and
+# the line driver. The harness compiles both as written and routes the line's two
+# MMIO statements into the same register file the channel reads, so the GIC the
+# channel claims is a row in `trace` and a word in `regs` like every other bus
+# access in this fixture - not a host address that would have to be invented.
+def load_tu(name):
+ text = re.sub(r'^#include.*\n', '', (arm/name).read_text(), flags=re.M)
+ return text
+apps_door_header = load_tu('SweetAppsDoor.h')
+apps_line_header = load_tu('SweetAppsLine.h').replace('class SweetAppsLine {',
+                                                      'struct SweetAppsLine {')
+apps_line_source = load_tu('SweetAppsLine.cpp')
+assert 'struct SweetAppsLine' in apps_line_header
+apps_line_source = apps_line_source.replace('uint32_t value=*(volatile uint32_t *)(base+off);',
+                                            'uint32_t value=readReg(base,off);')
+apps_line_source = apps_line_source.replace('*(volatile uint32_t *)(base+off)=value;',
+                                            'writeReg(base,off,value);')
+apps_line_source = re.sub(r'__asm__ volatile\("(dmb|dsb)[^"]*" ::: "memory"\);', '(void)0;',
+                          apps_line_source)
+# The route word is the one aligned 64-bit store in the line driver; the fixture
+# register file is 32-bit, so it becomes the pair the hardware sees.
+apps_line_source = apps_line_source.replace('*(volatile uint64_t *)(gic+kSweetAppsGICRoute)=0;',
+                                            'writeReg(gic,kSweetAppsGICRoute,0);writeReg(gic,kSweetAppsGICRoute+4,0);')
+assert 'volatile uint32_t *)' not in apps_line_source
+assert 'volatile uint64_t *)' not in apps_line_source
+assert apps_line_source.count('writeReg(gic,kSweetAppsGICRoute,0)')==1
+assert apps_line_source.count('readReg(base,off)')==1 and apps_line_source.count('writeReg(base,off,value)')==1
+apps_door_source = load_tu('SweetAppsDoor.cpp')
+# The door's lock is the router's serialisation and must not be a no-op: reuse
+# the prelude's IOSimpleLock, which asserts nothing about ordering but does hold.
+assert 'IOSimpleLock' in apps_door_source
 # The query module is a second file in the same kext: it owns the command DB
 # decoding and takes nothing but a reader, so the harness links the two exactly
 # as the build does - the header before the channel that includes it, the source
@@ -179,13 +240,27 @@ static void seedDb(){
 static IOService*rscNub(unsigned abiLen=4,uint32_t abiValue=1,
  unsigned irqAbiLen=4,uint32_t irqAbiValue=1,
  unsigned intidLen=4,uint32_t intidValue=37,
- unsigned queryLen=0,uint32_t queryValue=1){
+ unsigned queryLen=0,uint32_t queryValue=1,
+ bool executor=false,unsigned executorLen=4,uint32_t executorValue=1){
  auto*n=fixtureAlloc<IOService>();
  if(abiLen){uint32_t v=abiValue;setData(n,"sweet,rsc-abi",&v,abiLen);}
  if(irqAbiLen){uint32_t v=irqAbiValue;setData(n,"sweet,rsc-irq-abi",&v,irqAbiLen);}
  if(intidLen){uint32_t v=intidValue;setData(n,"sweet,rsc-intid",&v,intidLen);}
  if(queryLen){uint32_t v=queryValue;setData(n,"sweet,rsc-query",&v,queryLen);}
+ if(executor){uint32_t v=executorValue;setData(n,"sweet,rsc-executor",&v,executorLen);}
  return n;
+}
+/* The apps GIC as the delegating tree describes it: GICv3, an implemented line
+   range that covers INTID 37, group 1 on, and the line free. `busy` and
+   `pending` are the two ways a previous owner can still be on it. */
+static constexpr uintptr_t GIC=0x17a00000;
+static void seedLine(bool busy=false,bool pending=false){
+ regs[GIC+0x000]=0x12u;
+ regs[GIC+0x004]=0x7b041du;
+ regs[GIC+0xffe8]=0x30u;
+ regs[GIC+0x084]=0;regs[GIC+0x104]=busy?1u<<5:0u;regs[GIC+0x204]=pending?1u<<5:0u;
+ regs[GIC+0x304]=0;regs[GIC+0xc08]=0;regs[GIC+0x424]=0;
+ regs[GIC+0x6128]=0;regs[GIC+0x612c]=0;
 }
 /* One refusal: no writes, no successful start row, every map released. */
 static void refusal(IOService*n,bool seed,const char*detail){
@@ -246,6 +321,18 @@ int main(){
  {	/* another RSC's completion line must not be adopted as this one's */
   auto*n=rscNub(4,1,4,1,4,38);
   refusal(n,true,"detail=bad-rsc-intid value=38 expected=37");
+  n->release();
+ }
+ {	/* the executor opt-in is versioned like the other three: a short property
+      is a wrong tree, and it is refused before any window is mapped */
+  auto*n=rscNub(4,1,4,1,4,37,0,1,true,3);
+  refusal(n,true,"detail=bad-rsc-executor length=3");
+  n->release();
+ }
+ {	/* an owner request this firmware does not speak is a refusal, not a
+      read-only boot with a note */
+  auto*n=rscNub(4,1,4,1,4,37,0,1,true,4,2);
+  refusal(n,true,"detail=bad-rsc-executor value=0x2 expected=0x1");
   n->release();
  }
  {	/* the query opt-in is versioned like the rest, and a short property is a
@@ -416,7 +503,7 @@ int main(){
   assert(logged("phase=map resource=apps-db-locator result=0"));
   assert(logged("phase=command-db address=0xb0000100 bytes=1024 version=0x1 flags=0 detail=read-only-map"));
   assert(logged("phase=irq intid=37 detail=described-not-armed"));
-  assert(logged("phase=start result=0 windows=4 ranges=3 reads=10 query-reads=0 writes=0 id=0x21000 tcs=8 ncpt=4 db=0xb0000100 db-size=1024 irq=37 query=absent submit=not-ready"));
+  assert(logged("phase=start result=0 windows=4 ranges=3 reads=10 query-reads=0 writes=0 id=0x21000 tcs=8 ncpt=4 db=0xb0000100 db-size=1024 irq=37 query=absent submit=not-ready executor=absent"));
   /* the owner's TCS words were read and left exactly as they were */
   assert(logged("phase=tcs irq-enable=0x1f irq-status=0x40 detail=observed-not-owned"));
   assert(regs[0x18220d00]==0x1fu&&regs[0x18220d04]==0x40u);
@@ -564,6 +651,170 @@ int main(){
   p->stop(n2);p->release();
   n2->release();
  }
+ /* =====================================================================
+  * C3-04: the delegating tree. The channel is this boot's apps executor, so
+  * the same object now owns the line, the store and the one door. What is
+  * proved below is the card's local criterion: one owner can write, the line
+  * is published only after it is safely programmed, the old entry point has
+  * no second write path, and a non-delegating tree still ends with zero
+  * stores.
+  * ===================================================================== */
+ {	/* start on the delegating tree: four ranges, four windows, no store yet */
+  rscExecutor=true;
+  auto*n=rscNub(4,1,4,1,4,37,0,1,true);seedRSC();seedLine();messages.clear();mapCalls.clear();
+  unsigned maps=liveMaps;
+  auto*p=fixtureAlloc<IOQcomRSCChannel>();
+  assert(p->start(n));
+  assert(p->channelIsExecutor()&&p->fExecutor&&p->fDoorPublished);
+  /* the GIC window is the fourth range and the fifth window */
+  assert(mapCalls.size()==4&&mapCalls[0]==0&&mapCalls[1]==1&&mapCalls[2]==2&&mapCalls[3]==3);
+  assert(p->fWindow[kIOQcomRscWindowGIC].base==GIC);
+  /* the executor row names the owner, and the start row says the same */
+  assert(logged("phase=executor result=0 owner=IOQcomRSCChannel intid=37 windows=5 ranges=4 stores=0 writes-at-start=0 workloop=own"));
+  assert(logged("executor=channel"));
+  assert(logged("phase=start result=0 windows=5 ranges=4 reads=10"));
+  /* the two rows that describe the line and the TCS words name the role they
+     describe for: this boot arms the line four steps later, so a row claiming
+     "not armed" would be true only of the other mode */
+  assert(logged("phase=irq intid=37 detail=described-for-executor"));
+  assert(logged("phase=tcs irq-enable=0x1f irq-status=0x40 detail=observed-before-owner"));
+  assert(!logged("detail=described-not-armed"));
+  assert(!logged("detail=observed-not-owned"));
+  /* identity is read once, here, and the identity budget is untouched */
+  assert(p->channelReads()==10);
+  /* nothing has been stored: the door exists, the line is still the tree's */
+  assert(writes()==0);
+  assert(p->channelStores()==0);
+  /* the door is published and it is the one the old entry point finds */
+  const SweetAppsDoor *d=sweet_apps_door();
+  assert(d&&d->context==(void*)p&&!strcmp(d->name,"IOQcomRSCChannel"));
+  assert(d->stores(d->context)==p->channelStores()&&d->irqs(d->context)==0);
+  /* the old entry point answers for this line and only this line */
+  assert(!sweet_rpmh_irq(38u));
+  /* ---- the identity the owner reports is the one it read ---- */
+  uint32_t id=0,solver=0,config=0;
+  assert(d->identity(d->context,&id,&solver,&config));
+  assert(id==0x21000u&&solver==1u&&config==regs[0x1822000c]);
+  assert(p->channelReads()==10);
+
+  /* ---- the door's two accesses are the channel's, not a second path ---- */
+  unsigned doorReads=p->fDoorReads;
+  assert(d->read(d->context,0)==0x1fu);
+  assert(d->read(d->context,4)==0x40u);
+  assert(p->fDoorReads==doorReads+2);
+  /* a door read is not charged to the identity budget */
+  assert(p->channelReads()==10);
+  assert(p->channelStores()==0);
+  /* an acknowledge through the door is one store, in the one place */
+  d->write(d->context,4u,0u);
+  assert(regs[0x18220d04]==0u);
+  assert(p->channelStores()==1&&d->stores(d->context)==1);
+  /* an out-of-window store is refused loudly and stores nothing */
+  messages.clear();
+  d->write(d->context,0x4000u,0u);
+  assert(logged("phase=store result=2 detail=out-of-window"));
+  assert(p->channelStores()==1);
+
+  /* ---- the line is programmed once, then admitted ---- */
+  assert(!p->fIRQConfigured&&!p->fIRQTouched);
+  assert(d->triggerReady(d->context)==kIOReturnSuccess);
+  assert(p->fIRQTouched&&p->fIRQConfigured);
+  assert(logged("phase=line result=0 intid=37 owner=channel"));
+  /* group 1, level, priority 0xa0, routed nowhere yet, and still masked */
+  assert(regs[GIC+0x084]&(1u<<5));
+  assert((regs[GIC+0xc08]&0xc00u)==0);
+  assert((regs[GIC+0x424]&0xff00u)==0xa000u);
+  assert(regs[GIC+0x6128]==0&&regs[GIC+0x612c]==0);
+  assert(!(regs[GIC+0x104]&(1u<<5)));
+  /* a second trigger only verifies; it does not re-program the line */
+  unsigned programWrites=writes();
+  assert(d->triggerReady(d->context)==kIOReturnSuccess);
+  assert(writes()==programWrites);
+  /* arm then unmask is the service's order: gate first, line second */
+  d->arm(d->context);
+  d->unmask(d->context);
+  assert(regs[GIC+0x104]&(1u<<5));
+
+  /* ---- the top half masks and posts, nothing else ---- */
+  unsigned entries=p->fIRQEntries;
+  assert(p->fIRQPosted==0);
+  assert(d->irq(d->context));                   /* armed: mask, count, post */
+  assert(p->fIRQEntries==entries+1);
+  assert(!(regs[GIC+0x104]&(1u<<5)));           /* masked before the workloop */
+  assert(p->fIRQPosted==1);
+  /* an unarmed line still masks and counts, but posts nothing */
+  assert(d->irq(d->context));
+  assert(p->fIRQEntries==entries+2);
+  assert(p->fIRQPosted==1);
+  /* the workloop thread with no client says so and clears the post */
+  messages.clear();
+  pump();
+  assert(logged("detail=no-completion-client"));
+  assert(p->fIRQPosted==0);
+  /* ---- the installed client runs on the workloop, never in the top half ---- */
+  {static unsigned calls=0;static bool accept=true;
+   static bool (*cb)(void*)=[](void*)->bool{++calls;return accept;};
+   assert(!d->install(d->context,nullptr,cb));
+   messages.clear();
+   assert(d->install(d->context,(void*)p,cb));
+   assert(logged("phase=install result=0 detail=completion-client"));
+   d->arm(d->context);
+   assert(d->irq(d->context));
+   assert(p->fIRQPosted==1&&calls==0);         /* posted, client not yet run */
+   pump();
+   assert(p->fIRQPosted==0&&calls==1);
+   /* a client that refuses is a WARN, and the post is still cleared */
+   accept=false;
+   messages.clear();
+   d->arm(d->context);
+   assert(d->irq(d->context));
+   pump();
+   assert(logged("detail=client-refused"));
+   assert(p->fIRQPosted==0&&calls==2);
+  }
+  /* ---- quiet drops our own source bit and never the owner's ---- */
+  messages.clear();
+  p->fIRQArmed=1;
+  d->quiet(d->context,0x2u);
+  assert(p->fIRQArmed==0);
+  assert(regs[0x18220d00]==0x1du);
+  assert(!(regs[GIC+0x104]&(1u<<5)));
+
+  /* ---- withdraw: the door goes before anything is dismantled ---- */
+  messages.clear();
+  p->stop(n);
+  assert(!sweet_apps_door());
+  assert(logged("phase=executor-stop result=0 stores="));
+  assert(!p->fDoorPublished&&!p->fIRQEventAdded&&!p->fCompletion);
+  p->release();
+  assert(liveMaps==maps);
+  n->release();
+ }
+ {	/* a tree that delegates to a line somebody else still drives is refused
+      before the door exists: no store, no event source, no publish */
+  rscExecutor=true;
+  auto*n=rscNub(4,1,4,1,4,37,0,1,true);seedRSC();seedLine(true);messages.clear();
+  auto*p=fixtureAlloc<IOQcomRSCChannel>();
+  assert(!p->start(n));
+  assert(logged("phase=executor result=5 detail=line-already-live"));
+  assert(writes()==0&&!sweet_apps_door()&&!p->fDoorPublished&&!p->fIRQEventAdded);
+  p->release();n->release();
+ }
+ {	/* a second executor on the same boot is refused by the door, and the
+      refusal leaves no store behind and the first owner's door standing */
+  rscExecutor=true;
+  auto*n=rscNub(4,1,4,1,4,37,0,1,true);seedRSC();seedLine();messages.clear();
+  auto*a=fixtureAlloc<IOQcomRSCChannel>();assert(a->start(n));
+  auto*n2=rscNub(4,1,4,1,4,37,0,1,true);
+  auto*b=fixtureAlloc<IOQcomRSCChannel>();
+  assert(!b->start(n2));
+  assert(logged("phase=executor result=5 detail=door-refused"));
+  assert(sweet_apps_door()&&sweet_apps_door()->context==(void*)a);
+  assert(b->channelStores()==0&&!b->fDoorPublished&&!b->fIRQEventAdded);
+  b->release();n2->release();
+  a->stop(n);a->release();n->release();
+  assert(!sweet_apps_door());
+ }
  assert(!live&&!liveMaps);
  printf("test-mh2lm-rsc-channel: PASS (%u rows from the accepted pass)\n",(unsigned)acceptedRows);
  return 0;
@@ -573,7 +824,9 @@ int main(){
 
 with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-') as temp:
     cpp = Path(temp)/'test.cpp'
-    cpp.write_text(prelude+extra+db_header+rsc_header+rsc_source+db_source+tests)
+    cpp.write_text(prelude+extra+apps_door_header+apps_line_header+db_header+
+                   rsc_header+apps_door_source+apps_line_source+rsc_source+
+                   db_source+tests)
     if os.environ.get('MH2LM_KEEP_CPP'):
         Path('/tmp/mh2lm-rsc-kept.cpp').write_text(cpp.read_text())
     binary = Path(temp)/'test'
