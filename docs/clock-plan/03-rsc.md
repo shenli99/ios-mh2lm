@@ -1,6 +1,6 @@
 # C3：apps RSC 公共事务通道
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上读到块（0140），一个字段读错、已修（补丁 `0247`），等 0141 复验；C3-02～C3-08 未开始。
 
 ## 阶段目标与退出条件
 
@@ -15,6 +15,28 @@
 - **实机检验**：新实例读到与原 owner 一致的 apps 配置，写计数零，原 owner 的自然投票及 IRQ 仍完成。
 - **预期结果**：通道可初始化但没有第二个 writer；不同 RSC 的描述不串用。
 - **失败归属**：C3-01 identity／layout／map；原票失败且缺新写证据时先查基线与访问条件。
+
+#### 实机证据：0140 通道档（C3-01 第一次上机，2026-11-27）
+
+默认档树＝0139 默认树 + 一个 `sweet,rsc-channel` 节点（六条属性，`reg` 只列 owner 的三段，窗口里没有 GIC），一次 `fastboot boot` 进桌面，
+环 `logs/sweetlog-0140-0.bin` 里有 9 条 `SWEET RSC:` 行：`phase=irq intid=37 detail=described-not-armed`、三次 `phase=map`
+（`apps-drv` `0x100`／`apps-tcs` `0x3000`／`apps-db-locator` `0x8`）、`phase=identity id=0x10700 major=1 solver=0x4010100 tcs=8 ncpt=16`、
+`phase=command-db address=0x85f20000 bytes=4424 version=0x1`、`phase=tcs irq-enable=0x1 irq-status=0 detail=observed-not-owned`、
+`phase=start … windows=4 ranges=3 reads=10 writes=0 id=0x10700 tcs=8 ncpt=16 irq=37 submit=not-ready`。
+身份五个字段与 owner 那一行（`pre-v3 RSC id=0x10700 config=0x800c8104 ncpt=16 ACTIVE=2`）逐字段相等，读账 10 次载入、零次存储，
+`submit_attempts=0`（没有调用者），`phase=stop` 不出现（驱动在本次启动里不卸载）；时钟侧 26 行、`reads=19`／`writes=0` 与 0139 默认档逐值相同。
+
+**这张环抓到 driver 一处读错，也纠正了本卡对启动顺序的假设。**
+
+- flag 字读在 `kIOQcomRscDbHeaderBytes`（144，header 的**长度**）而不是 header 的最后一个字（140），于是把命令条目首字节当 flags
+  打印成 `flags=0x6c2e7863`（小端即 `"cx.l"`），并对一次健康启动报了 `version-flags-differ` WARN。owner 在同一次启动里一条 version/flags
+  警告都没有，所以错的只能是新读者。修法是 `kIOQcomRscDbFlagsOffset=140`（补丁 `0247`），读账仍是 10 次载入；宿主测试用两侧用例钉住这个偏移。
+- 通道描述 INTID37 时，owner 只**映射并读过**这一块，还没有武装它自己的线：0140 的顺序是 owner 身份行（136）→ 通道 146..154 →
+  owner 的 `INTID37 configured` 在 2112 行。所以"通道必须在 owner 武装中断之后"是错的判据，"在 owner 读过块之后"才是对的，
+  中断那一行只能要求出现一次。
+
+**判据（0141 复验时逐条对照）**：`--c2-03 --c3-01` 不加 `--allow-baseline-drift` 也 rc=0；通道 `reads=10`／`writes=0`；
+`id`／`major`／`tcs`／`ncpt` 与 owner 行相等；`irq-enable=0x1` 只观察；无 `version-flags-differ`；owner 的 INTID37 行出现且仅一次。
 
 ### C3-02 提取只读 Command DB 查询
 
