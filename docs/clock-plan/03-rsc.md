@@ -1,6 +1,6 @@
 # C3：apps RSC 公共事务通道
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02～C3-08 未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03～C3-08 未开始。
 
 ## 阶段目标与退出条件
 
@@ -111,10 +111,49 @@ DB 内容，公共模块表达不了，原样留在 owner；② 公共 chunk 门
 `matches=1`、`aux` 以 `/8` 结尾）；`enable-mask` 不比，那是调用方策略不是 DB 内容。自测 `selftest-channel-auditor.py`
 **PASS - 37 变体**（24 个 C3-01 ＋ 2 个合格查询环 ＋ 9 个应当被拒的查询环 ＋ 两个跨人格互拒）。
 
-**待实机**：0142 档（节点加一条属性、ADT `999e2705…`／23 924 B、十三张镜像、605 字节参数与十一棵门控树摘要不变）。
-判据：`SWEET RSC:` **9 行**（`db-query` 严格夹在 `command-db` 与 `tcs` 之间）、`reads=10`／`writes=0` 不动、
-`query-reads` 等于行内 `reads`、`query=ok`、与 owner 的 CN0 行逐字段相等、**零新增 WARN**（成功是 INFO，失败才 WARN）。
 补丁 `xnu/patches/0248-mh2lm-rsc-database.patch`（1 527 行），在基线上严格重放后与工作树逐字节相同。
+
+#### 实机验收：0142 查询档（C3-02 收口，2026-11-27）
+
+默认档一次启动（`boot-16k-0142-gpioirq-panel-pipeline.img`，内核 `0ddddf4a…`，17 988 008 字节；CI 构建树里的
+`SweetRSCDatabase.cpp/.h`、`IOQcomRSC.cpp/.h` 与提交 `e623885` 逐字节相同），环 `sweetlog-0142-0.bin`
+（4 198 400 字节，sha256 `998b0b6c…`，`total=318997`，`flush_sequence=10`，`wrapped=false`，3 958 行）。
+`SWEET RSC:` **九行**，`db-query` 严格夹在 `command-db` 与 `tcs` 之间：
+
+```
+phase=irq intid=37 detail=described-not-armed
+phase=map resource=apps-drv result=0 length=0x100
+phase=map resource=apps-tcs result=0 length=0x3000
+phase=map resource=apps-db-locator result=0 length=0x8
+phase=identity id=0x10700 major=1 solver=0x4010100 tcs=8 ncpt=16
+phase=command-db address=0x85f20000 bytes=4424 version=0x1 flags=0 detail=read-only-map
+phase=db-query name=CN0 result=0 slave=5 address=0x500a8 entry=0x818 aux=0x9b0/8 unit=20000 width=4 vcd=5 matches=1 reads=292
+phase=tcs irq-enable=0x1 irq-status=0 detail=observed-not-owned
+phase=start result=0 windows=4 ranges=3 reads=10 query-reads=292 writes=0 id=0x10700 tcs=8 ncpt=16 db=0x85f20000 db-size=4424 irq=37 query=ok submit=not-ready
+```
+
+**两代读者给出同一份答案**：同一环第 1220 行是 owner 自己的
+`SWEET RPMH BCM: name=CN0 metadata ready address=0x500a8 unit=20000 width=4 vcd=5 enable-mask=0`——
+`address`／`unit`／`width`／`vcd` 四个字段逐字相等（`enable-mask` 不比，它是调用方策略），`slave=5`、`matches=1`。
+辅助区间 `aux=0x9b0/8` 落在 BCM 八字节那条上，与 owner 只按 `range(table,8)` 取用一致。
+
+**账目分开且没有漂**：`reads=10`／`writes=0` 与 0141 一模一样（C3-01 立下的那句话仍然成立），
+查询的代价单列成 `query-reads=292`，与查询行自己的 `reads=292` 相等。292 比夹具钉的 26 大一个量级，
+原因是设备上的 BCM 块有一百多个条目、`lookup()` 要逐条比 8 字节键才找到 `CN0`——**夹具钉的是走法，不是设备的条目数**，
+这一点在写夹具时就该预期到；环里这个数只用于对账，没有门限依赖它。
+
+**零新增 WARN**：非时钟 WARN／ERROR 清单与 b32 逐条相等（`SWEET FB SCANOUT` ×3、`SWEET USB` ×2），
+`query-refused` 一条也没有——成功是 INFO，只有"树里点名了块里没有的资源"才 WARN，而这一版树点名的是真实存在的 `CN0`。
+`audit-clock-log.py --c2-03 --c3-02` **严格 rc=0**（没有 `--allow-baseline-drift`）。
+
+**旗标与环双向一致**：用 `--c3-01` 判这份环直接被拒（`AssertionError: the ring carries a query row: judge it with --c3-02`）。
+**打包侧记一笔**：`IOQcomRSCChannel::queryCommandDB` 被内联进 `start()`，产物里**没有**它的符号，
+所以符号门禁只钉跨翻译单元的 `SweetRSCDatabase::lookup`／`stageName`（`strings -a` 里实测各一次）——
+手写一条 `__ZN16IOQcomRSCChannel13queryCommandDBEv` 会让这一版内核被自己的门禁拒掉。
+
+**C3-02 由此收口**：资源驱动可共享只读元数据（同一份 DB、同一个判据、同一个顺序，两个读者给出同一份答案），
+而普通外设拿到的只有 `SweetRSCResource` 这个纯结构（地址、entry、aux 区间、unit／width／vcd、电平表、匹配数与拒绝 stage），
+没有任何"把原始映射交出去"的接口；投票仍走旧查询与旧执行器，块上一次写都没有。
 
 ### C3-03 原样提取现有 ACTIVE 执行器
 
