@@ -80,7 +80,11 @@ rpmh_source = re.sub(r'uint32_t SweetRPMh::read\([^\n]*\)\n\{.*?\n\}', 'uint32_t
 rpmh_source = re.sub(r'void SweetRPMh::write\([^\n]*\)\n\{.*?\n\}', 'void SweetRPMh::write(vm_offset_t b,uint32_t o,uint32_t v) { writeReg(b,o,v); }', rpmh_source, flags=re.S)
 rpmh_source = rpmh_source.replace('*(volatile uint64_t *)(gic+GICRoute)=0;', 'writeReg(gic,GICRoute,0);writeReg(gic,GICRoute+4,0);')
 rpmh_source = rpmh_source.replace('__asm__ volatile("dmb oshst" ::: "memory");', '(void)0;').replace('__asm__ volatile("dsb osh" ::: "memory");', '(void)0;')
-source = re.sub(r'^#include.*\n', '', rpmh_header+rpmh_source, flags=re.M)+source
+# SweetRPMhExecutor is a separate translation unit in the product; keep it one
+# here too, declarations before the owner and definitions after it.
+rpmh_executor_header = (arm/'SweetRPMhExecutor.h').read_text() if (arm/'SweetRPMhExecutor.h').exists() else ''
+rpmh_executor_source = (arm/'SweetRPMhExecutor.cpp').read_text() if rpmh_executor_header else ''
+source = re.sub(r'^#include.*\n', '', rpmh_executor_header+rpmh_header+rpmh_source+rpmh_executor_source, flags=re.M)+source
 if (arm/'SweetPanelPins.h').exists():
     pins_header = (arm/'SweetPanelPins.h').read_text().replace('class SweetPanelPins :', 'struct SweetPanelPins :').replace('class SweetPanelPinsClient :', 'struct SweetPanelPinsClient :')
     pins_source = (arm/'SweetPanelPins.cpp').read_text()

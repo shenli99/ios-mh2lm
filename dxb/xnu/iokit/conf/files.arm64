@@ -33,6 +33,7 @@ iokit/Kernel/arm/SweetPmicAdc5.cpp                                optional iokit
 iokit/Kernel/arm/SweetMDSS.cpp                                    optional iokitcpp
 
 iokit/Kernel/arm/SweetRPMh.cpp                                    optional iokitcpp
+iokit/Kernel/arm/SweetRPMhExecutor.cpp                            optional iokitcpp
 
 iokit/Kernel/arm/IOQcomClock.cpp                                   optional iokitcpp
 iokit/Kernel/arm/IOQcomGCC.cpp                                     optional iokitcpp

@@ -8,6 +8,7 @@
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOLocks.h>
+#include "SweetRPMhExecutor.h"
 
 enum SweetRail { SweetRailVDDI, SweetRailVPNL, SweetRailHost, SweetRailPHY, SweetRailCount };
 struct SweetRailVote { bool enabled; unsigned minMV, maxMV, loadUA; };
@@ -138,8 +139,11 @@ class SweetRPMh : public IOService {
  SweetPanelSupplyFence fPanelFence;
  bool panelFenceValid(const SweetPanelSupplyFence &);
  void clearPanelFence(void);
- struct Operation { uint32_t offset, value; bool w1c; };
- Operation fOperations[20];
+ /* Queued TCS words stay here: this service owns the storage and every
+  * policy decision. SweetRPMhExecutor only moves the words and judges the
+  * readback/completion they produce. */
+ SweetRPMhWord fOperations[SweetRPMhExecutor::kCapacity];
+ bool fExecutorReported;
  struct ArcResource { uint32_t address; unsigned count, levels[16]; };
  ArcResource fArc[SweetDisplaySupplyCount];
  bool fArcMetadataTried, fArcAvailable, fArcRequest;
@@ -156,6 +160,9 @@ class SweetRPMh : public IOService {
  uint64_t fRegisterProposal, fRegisterTarget, fRegisterAggregate;
  static uint32_t read(vm_offset_t,uint32_t);
  static void write(vm_offset_t,uint32_t,uint32_t);
+ /* MMIO ports handed to the executor; they never outlive one call. */
+ static uint32_t portRead(void *,uint32_t);
+ static void portWrite(void *,uint32_t,uint32_t);
  static uint64_t nowNS(void);
  uint16_t db16(uint32_t);
  bool range(uint32_t,uint32_t);

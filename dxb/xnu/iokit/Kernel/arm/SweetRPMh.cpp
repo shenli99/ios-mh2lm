@@ -608,7 +608,7 @@ bool SweetRPMh::start(IOService *provider)
  if (fMode==2 && !setupIRQ(provider)) {
   SWEET_LOG_ERROR("SWEET RPMH IRQ: ABI/map/event/ownership rejected; mode2 disabled, no polling fallback\n"); return false;
  }
- fAccepting=true;
+ fAccepting=true; fExecutorReported=false;
  setProperty("SweetRPMhABI",1ULL,32); setProperty("SweetRPMhWritesAllowed",fMode==2);
  unsigned sharedMask=0;
  for (unsigned r=0;r<SweetRailCount;++r) if (railLimits[r].lastDisableRequiresHandoff) sharedMask|=1u<<r;
@@ -623,6 +623,18 @@ bool SweetRPMh::emptyTCS(unsigned t)
 }
 void SweetRPMh::addOperation(uint32_t off,uint32_t value,bool w1c)
 { fOperations[fOperationCount++]={off,value,w1c}; }
+
+/* The layout is declared once, next to the offsets it describes. */
+static const SweetRPMhLayout tcsLayout={
+ Status,IRQStatus,IRQEnable,IRQClear,Control,Wait,Enable,CommandStatus,CommandStride,
+ Issued|Complete
+};
+
+uint32_t SweetRPMh::portRead(void *context,uint32_t offset)
+{ return read(*(const vm_offset_t *)context,offset); }
+
+void SweetRPMh::portWrite(void *context,uint32_t offset,uint32_t value)
+{ write(*(const vm_offset_t *)context,offset,value); }
 
 bool SweetRPMh::panelFenceValid(const SweetPanelSupplyFence &f)
 {
@@ -788,6 +800,7 @@ void SweetRPMh::advance(void)
  if (now>=fDeadline || (fArcRequest && now>=fStageDeadline)) {
   diagnose("deadline"); finish(kIOReturnTimeout,true); return;
  }
+ SweetRPMhExecutor::Ports ports={&fTCS,portRead,portWrite};
  if (!fExecuting && fOperation==0 && !fWriteIssued) {
   IOReturn result=prepareIRQ();
   if (result==kIOReturnNotReady) { fTimer->setTimeoutUS(100); return; }
@@ -809,7 +822,7 @@ void SweetRPMh::advance(void)
  /* Bounded fixed operation count. A posted write not yet visible resumes on
   * the timer, never delay()/sleep or completion busy-wait inside the gate. */
  while (fOperation<fOperationCount) {
-  Operation &op=fOperations[fOperation];
+  SweetRPMhWord &op=fOperations[fOperation];
   if (!fWriteIssued) {
    /* Recheck ownership after masking and before first payload write. */
    if (fOperation==1 && !fExecuting && !emptyTCS(fTCSIndex)) { finish(kIOReturnBusy,true); return; }
@@ -840,27 +853,29 @@ void SweetRPMh::advance(void)
    if (fPanelFence.pins && (isInactive() || !panelFenceValid(fPanelFence))) {
     finish(kIOReturnNotReady,fExecuting || fWriteIssued || fOperation!=0); return;
    }
-   fEverWritten=true; write(fTCS,op.offset,op.value); fWriteDeadline=now+1000000; fWriteIssued=true;
+   fEverWritten=true; fWriteDeadline=now+1000000;
   }
-  uint32_t value=read(fTCS,op.w1c ? IRQStatus : op.offset);
-  if (op.w1c ? ((value&op.value)!=0) : (value!=op.value)) {
-   if (now>=fWriteDeadline) {
-    SWEET_LOG_ERROR("SWEET RPMH SNAPSHOT: posted offset=%#x want=%#x got=%#x w1c=%u\n",
-     op.offset,op.value,value,op.w1c);
-    diagnose("posted-write"); finish(kIOReturnIOError,true);
-   }
-   else fTimer->setTimeoutUS(100);
-   return;
+  /* The executor posts one word and reads it back; it never decides when to
+   * give up, so the deadline and the diagnosis stay here. */
+  uint32_t observed=0;
+  SweetRPMhExecutor::Step step=SweetRPMhExecutor::step(ports,tcsLayout,op,&fWriteIssued,
+   now,fWriteDeadline,&observed);
+  if (step==SweetRPMhExecutor::StepExpired) {
+   SWEET_LOG_ERROR("SWEET RPMH SNAPSHOT: posted offset=%#x want=%#x got=%#x w1c=%u\n",
+    op.offset,op.value,observed,op.w1c);
+   diagnose("posted-write"); finish(kIOReturnIOError,true); return;
   }
-  ++fOperation; fWriteIssued=false;
+  if (step==SweetRPMhExecutor::StepBlocked) { fTimer->setTimeoutUS(100); return; }
+  ++fOperation;
  }
  if (!fExecuting) {
   if (fPanelFence.pins && (isInactive() || !panelFenceValid(fPanelFence))) { finish(kIOReturnNotReady,true); return; }
   /* Source is enabled while GIC remains masked. The selected completion was
    * explicitly cleared while idle: require zero after unmask, BEFORE trigger.
    * This excludes masked stale status without accepting old CMD_STATUS. */
-  uint32_t irq=read(fTCS,IRQStatus);
-  if (irq==~0u || (irq&bit)) { diagnose("stale-before-trigger"); finish(kIOReturnIOError,true); return; }
+  if (SweetRPMhExecutor::arm(ports,tcsLayout,bit,NULL)!=SweetRPMhExecutor::ArmReady) {
+   diagnose("stale-before-trigger"); finish(kIOReturnIOError,true); return;
+  }
   fIRQObserved=false; fExecuting=true;
   fOperation=fOperationCount=0;
   __atomic_store_n(&fIRQArmed,1u,__ATOMIC_RELEASE);
@@ -875,23 +890,27 @@ void SweetRPMh::advance(void)
   completeTransaction(); return;
  }
  if (!fIRQObserved) { waitCompletion(); return; } /* watchdog only, no status polling */
- uint32_t irq=read(fTCS,IRQStatus), idle=read(fTCS,b+Status);
- bool complete=true;
- for (unsigned c=0;c<fCommandCount;++c) {
-  uint32_t status=read(fTCS,b+CommandStatus+c*CommandStride);
-  complete &= status!=~0u && (status&(Issued|Complete))==(Issued|Complete);
+ unsigned unacknowledged=0;
+ SweetRPMhExecutor::Verdict verdict=SweetRPMhExecutor::verify(ports,tcsLayout,b,bit,
+  fCommandCount,&unacknowledged);
+ if (verdict==SweetRPMhExecutor::VerdictInvalid) {
+  diagnose("invalid-completion"); finish(kIOReturnIOError,true); return;
  }
- if (irq==~0u || idle==~0u) { diagnose("invalid-completion"); finish(kIOReturnIOError,true); return; }
- if (!idle || !(irq&bit) || !complete) {
+ if (verdict==SweetRPMhExecutor::VerdictIncomplete) {
   diagnose("incomplete-irq"); finish(kIOReturnIOError,true); return;
+ }
+ /* The mechanics moved, the hardware owner did not: say so once per boot. */
+ if (!fExecutorReported) {
+  fExecutorReported=true;
+  SWEET_LOG_INFO("SWEET RPMH: executor=module tcs=%u commands=%u open=%u hardware-owner=SweetRPMh\n",
+   fTCSIndex,fCommandCount,unacknowledged);
  }
  SWEET_LOG_INFO("SWEET RPMH IRQ: fresh ACTIVE completion tcs=%u commands=%u entries=%u; cleanup pending\n",
   fTCSIndex,fCommandCount,__atomic_load_n(&fIRQEntries,__ATOMIC_ACQUIRE));
- addOperation(b+Control,AMC); addOperation(b+Control,0);
- addOperation(b+Enable,0); addOperation(b+Wait,0); addOperation(IRQClear,bit,true);
- uint32_t enabled=read(fTCS,IRQEnable);
- if (enabled==~0u) { finish(kIOReturnIOError,true); return; }
- addOperation(IRQEnable,(enabled&~bit)|(fSavedIRQ&bit));
+ if (!SweetRPMhExecutor::stageCleanup(ports,tcsLayout,b,fOperations,&fOperationCount,AMC,bit,
+  fSavedIRQ)) {
+  finish(kIOReturnIOError,true); return;
+ }
  fTimer->setTimeoutUS(1);
 }
 

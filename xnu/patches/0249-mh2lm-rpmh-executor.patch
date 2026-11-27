@@ -1,0 +1,949 @@
+From: mh2lm clock work <clock@mh2lm>
+Subject: [PATCH 0249] refactor(rpmh): move the ACTIVE executor mechanics into a module, keep the owner on the hardware
+
+C3-03 asks for one thing: the ACTIVE path's register access, its existing IRQ
+cooperation, and its trigger/complete/cleanup mechanics move into an internal
+module, while the service that owns the block keeps the gate, the order, the
+deadline, the Busy decision and the failure retention.  This patch does exactly
+that and nothing else.  The set of words the driver writes, the order in which
+it writes them and the words it reads back are unchanged - the point of the card
+is that the mechanics can be addressed through a module without the bus noticing,
+so anything the bus could notice is a defect.
+
+The module.  SweetRPMhExecutor.h/.cpp is a plain C++ translation unit with four
+static functions and no member state at all:
+
+  - arm() reads the source status word once and says Ready when the selected
+    completion bit is clear, Stale when it is already posted, Invalid when the
+    word answers all ones.  The owner's stale-before-trigger diagnosis hangs off
+    the Stale and Invalid answers, so a bit it cannot attribute still ends the
+    transaction where it always did.
+  - step() posts one queued word and reads it back, at the word's own offset, or
+    at the source status word for a write-one-to-clear word - the same two cases
+    the inline code had, in the same order, one write and one read per call.  It
+    returns Advanced, Blocked or Expired, and it deliberately does not know what
+    a deadline means: Expired is a report to the caller, not a decision.
+  - verify() samples the whole slot before forming any verdict: the source
+    status, the slot's Status word, then every command status at its stride.  The
+    verdict is formed after the last load, so the shape of the sample never
+    depends on the answer.  Invalid is decided last on purpose.
+  - stageCleanup() stages the tail into the caller's array: engine-mode word,
+    engine off, slot enable off, wait off, the acknowledge as a write-one-to-clear
+    word, and finally the source mask with the selected bit restored to what the
+    slot inherited.  It stages the five fixed words whole or not at all, and it
+    appends the mask word only when the caller's bounded storage can hold it, so
+    a caller never walks a half-written tail.
+
+Ports, not providers.  The module talks to the block through a two-thunk Ports
+struct and a SweetRPMhLayout of offsets.  It receives no provider, no memory map,
+no timer, no lock, no log: the storage behind the thunks belongs to the owner
+(portRead/portWrite forward to the owner's existing read()/write()), and the
+layout is declared once, next to the offsets it describes.  That is the property
+the host test gates on - the module compiles against nothing but the system
+headers, and its object file has four text symbols and no data symbols, because
+a data symbol here would be a transaction the module remembers between calls.
+
+Slot arithmetic is part of the contract.  The ports context is the TCS array
+base, so the slot-relative offsets are added to the selected slot base by the
+caller and the array-global words (source status, source enable, acknowledge) are
+not.  This is stated at the layout, because getting it wrong is silent: addressing
+a slot word from the array base makes the second TCS look occupied, which turns
+the owner's own emptiness check into a Busy refusal.  That is how the fixture
+caught the first version of this patch.
+
+What stays in the owner, and why.  TCS selection, per-class admission, the panel
+fence, the IRQEnable value composition, the GIC arming, the deadline, the Busy
+decision and every log wording are untouched and still in SweetRPMh.cpp, along
+with finish().  The write-dead handler still prints the SNAPSHOT row with the
+word and the readback step() observed, then still calls diagnose("posted-write")
+and finish(kIOReturnIOError) - the module reports, the owner retires.  Nothing
+about ownership moved: the executor keeps no map, arms no interrupt, cancels no
+timer and takes no lock, and the one new row says so once per boot:
+
+  SWEET RPMH: executor=module tcs=%u commands=%u open=%u hardware-owner=SweetRPMh
+
+The "open" count is the number of command statuses the sample found without the
+finished bits or answering all ones, so a ring can tell a clean completion from
+one that arrived with an unacknowledged command even before the following
+fresh-completion row.
+
+Parity, measured rather than argued.  Before the extraction the display fixture
+was used to dump the ACTIVE trajectory of six situations - one rail vote through
+a fresh completion, five ARC stages of one display vote, and one cleanup whose
+completion never clears - and the result was 839 records over those six
+scenarios, writes included in order.  Those records are embedded in
+tools/tests/test-mh2lm-rpmh-executor.py as literals and compared record for
+record, with a per-scenario digest.  The comparison is deliberately against
+literals captured before the change and not against anything the module computes:
+recomputing the expectation from the module's own constants would let a change in
+a constant silently redefine the trace it is supposed to protect.  Two negative
+controls were run against the shipped test: swapping the sample order inside
+verify() fails the mechanics part, and swapping the owner's stage order for the
+source mask and the acknowledge fails the trajectory part.
+
+Host evidence.  tools/tests/test-mh2lm-rpmh-executor.py compiles the shipped
+SweetRPMhExecutor.cpp alone against a stub IOTypes.h and drives it with a fake
+register file - Ready/Stale/Invalid arming, a posted write that lands and one that
+does not, a write-one-to-clear word observed at the source status rather than at
+the acknowledge register, a word that expires with its write still outstanding,
+the four-way verdict including the two invalid shapes, and the cleanup tail whole
+or not at all - then replays the six scenarios through the shipped owner and
+checks the six digests, the record and write counts, the single ownership row and
+the fact that the owner still announces its own ACTIVE acknowledgements.  The
+display fixture now stitches the executor as its own translation unit, declarations
+before the owner and definitions after it, which is how the product builds it.
+The whole rpmh/display fixture set runs 15 of 15.
+
+Device check.  One ring with at least one natural ACTIVE completion and the
+ownership row above; the auditor judges the C3-03 ring on the completion rows and
+refuses to grade a ring that carries neither.
+
+No clocks, no votes, no new writes, no change of order: C3-03 moves mechanics,
+not policy.  The display owner remains the only voter and the only writer in the
+stage, and submit() is still kIOReturnNotReady.
+
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
+index 81949dd..186ce1d 100644
+--- a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
+@@ -608,7 +608,7 @@ bool SweetRPMh::start(IOService *provider)
+  if (fMode==2 && !setupIRQ(provider)) {
+   SWEET_LOG_ERROR("SWEET RPMH IRQ: ABI/map/event/ownership rejected; mode2 disabled, no polling fallback\n"); return false;
+  }
+- fAccepting=true;
++ fAccepting=true; fExecutorReported=false;
+  setProperty("SweetRPMhABI",1ULL,32); setProperty("SweetRPMhWritesAllowed",fMode==2);
+  unsigned sharedMask=0;
+  for (unsigned r=0;r<SweetRailCount;++r) if (railLimits[r].lastDisableRequiresHandoff) sharedMask|=1u<<r;
+@@ -624,6 +624,18 @@ bool SweetRPMh::emptyTCS(unsigned t)
+ void SweetRPMh::addOperation(uint32_t off,uint32_t value,bool w1c)
+ { fOperations[fOperationCount++]={off,value,w1c}; }
+ 
++/* The layout is declared once, next to the offsets it describes. */
++static const SweetRPMhLayout tcsLayout={
++ Status,IRQStatus,IRQEnable,IRQClear,Control,Wait,Enable,CommandStatus,CommandStride,
++ Issued|Complete
++};
++
++uint32_t SweetRPMh::portRead(void *context,uint32_t offset)
++{ return read(*(const vm_offset_t *)context,offset); }
++
++void SweetRPMh::portWrite(void *context,uint32_t offset,uint32_t value)
++{ write(*(const vm_offset_t *)context,offset,value); }
++
+ bool SweetRPMh::panelFenceValid(const SweetPanelSupplyFence &f)
+ {
+  if (!f.pins || !f.touch || !f.pinsConsumer || !f.pinsToken || !f.touchConsumer || !f.touchToken ||
+@@ -788,6 +800,7 @@ void SweetRPMh::advance(void)
+  if (now>=fDeadline || (fArcRequest && now>=fStageDeadline)) {
+   diagnose("deadline"); finish(kIOReturnTimeout,true); return;
+  }
++ SweetRPMhExecutor::Ports ports={&fTCS,portRead,portWrite};
+  if (!fExecuting && fOperation==0 && !fWriteIssued) {
+   IOReturn result=prepareIRQ();
+   if (result==kIOReturnNotReady) { fTimer->setTimeoutUS(100); return; }
+@@ -809,7 +822,7 @@ void SweetRPMh::advance(void)
+  /* Bounded fixed operation count. A posted write not yet visible resumes on
+   * the timer, never delay()/sleep or completion busy-wait inside the gate. */
+  while (fOperation<fOperationCount) {
+-  Operation &op=fOperations[fOperation];
++  SweetRPMhWord &op=fOperations[fOperation];
+   if (!fWriteIssued) {
+    /* Recheck ownership after masking and before first payload write. */
+    if (fOperation==1 && !fExecuting && !emptyTCS(fTCSIndex)) { finish(kIOReturnBusy,true); return; }
+@@ -840,27 +853,29 @@ void SweetRPMh::advance(void)
+    if (fPanelFence.pins && (isInactive() || !panelFenceValid(fPanelFence))) {
+     finish(kIOReturnNotReady,fExecuting || fWriteIssued || fOperation!=0); return;
+    }
+-   fEverWritten=true; write(fTCS,op.offset,op.value); fWriteDeadline=now+1000000; fWriteIssued=true;
++   fEverWritten=true; fWriteDeadline=now+1000000;
+   }
+-  uint32_t value=read(fTCS,op.w1c ? IRQStatus : op.offset);
+-  if (op.w1c ? ((value&op.value)!=0) : (value!=op.value)) {
+-   if (now>=fWriteDeadline) {
+-    SWEET_LOG_ERROR("SWEET RPMH SNAPSHOT: posted offset=%#x want=%#x got=%#x w1c=%u\n",
+-     op.offset,op.value,value,op.w1c);
+-    diagnose("posted-write"); finish(kIOReturnIOError,true);
+-   }
+-   else fTimer->setTimeoutUS(100);
+-   return;
++  /* The executor posts one word and reads it back; it never decides when to
++   * give up, so the deadline and the diagnosis stay here. */
++  uint32_t observed=0;
++  SweetRPMhExecutor::Step step=SweetRPMhExecutor::step(ports,tcsLayout,op,&fWriteIssued,
++   now,fWriteDeadline,&observed);
++  if (step==SweetRPMhExecutor::StepExpired) {
++   SWEET_LOG_ERROR("SWEET RPMH SNAPSHOT: posted offset=%#x want=%#x got=%#x w1c=%u\n",
++    op.offset,op.value,observed,op.w1c);
++   diagnose("posted-write"); finish(kIOReturnIOError,true); return;
+   }
+-  ++fOperation; fWriteIssued=false;
++  if (step==SweetRPMhExecutor::StepBlocked) { fTimer->setTimeoutUS(100); return; }
++  ++fOperation;
+  }
+  if (!fExecuting) {
+   if (fPanelFence.pins && (isInactive() || !panelFenceValid(fPanelFence))) { finish(kIOReturnNotReady,true); return; }
+   /* Source is enabled while GIC remains masked. The selected completion was
+    * explicitly cleared while idle: require zero after unmask, BEFORE trigger.
+    * This excludes masked stale status without accepting old CMD_STATUS. */
+-  uint32_t irq=read(fTCS,IRQStatus);
+-  if (irq==~0u || (irq&bit)) { diagnose("stale-before-trigger"); finish(kIOReturnIOError,true); return; }
++  if (SweetRPMhExecutor::arm(ports,tcsLayout,bit,NULL)!=SweetRPMhExecutor::ArmReady) {
++   diagnose("stale-before-trigger"); finish(kIOReturnIOError,true); return;
++  }
+   fIRQObserved=false; fExecuting=true;
+   fOperation=fOperationCount=0;
+   __atomic_store_n(&fIRQArmed,1u,__ATOMIC_RELEASE);
+@@ -875,23 +890,27 @@ void SweetRPMh::advance(void)
+   completeTransaction(); return;
+  }
+  if (!fIRQObserved) { waitCompletion(); return; } /* watchdog only, no status polling */
+- uint32_t irq=read(fTCS,IRQStatus), idle=read(fTCS,b+Status);
+- bool complete=true;
+- for (unsigned c=0;c<fCommandCount;++c) {
+-  uint32_t status=read(fTCS,b+CommandStatus+c*CommandStride);
+-  complete &= status!=~0u && (status&(Issued|Complete))==(Issued|Complete);
++ unsigned unacknowledged=0;
++ SweetRPMhExecutor::Verdict verdict=SweetRPMhExecutor::verify(ports,tcsLayout,b,bit,
++  fCommandCount,&unacknowledged);
++ if (verdict==SweetRPMhExecutor::VerdictInvalid) {
++  diagnose("invalid-completion"); finish(kIOReturnIOError,true); return;
+  }
+- if (irq==~0u || idle==~0u) { diagnose("invalid-completion"); finish(kIOReturnIOError,true); return; }
+- if (!idle || !(irq&bit) || !complete) {
++ if (verdict==SweetRPMhExecutor::VerdictIncomplete) {
+   diagnose("incomplete-irq"); finish(kIOReturnIOError,true); return;
+  }
++ /* The mechanics moved, the hardware owner did not: say so once per boot. */
++ if (!fExecutorReported) {
++  fExecutorReported=true;
++  SWEET_LOG_INFO("SWEET RPMH: executor=module tcs=%u commands=%u open=%u hardware-owner=SweetRPMh\n",
++   fTCSIndex,fCommandCount,unacknowledged);
++ }
+  SWEET_LOG_INFO("SWEET RPMH IRQ: fresh ACTIVE completion tcs=%u commands=%u entries=%u; cleanup pending\n",
+   fTCSIndex,fCommandCount,__atomic_load_n(&fIRQEntries,__ATOMIC_ACQUIRE));
+- addOperation(b+Control,AMC); addOperation(b+Control,0);
+- addOperation(b+Enable,0); addOperation(b+Wait,0); addOperation(IRQClear,bit,true);
+- uint32_t enabled=read(fTCS,IRQEnable);
+- if (enabled==~0u) { finish(kIOReturnIOError,true); return; }
+- addOperation(IRQEnable,(enabled&~bit)|(fSavedIRQ&bit));
++ if (!SweetRPMhExecutor::stageCleanup(ports,tcsLayout,b,fOperations,&fOperationCount,AMC,bit,
++  fSavedIRQ)) {
++  finish(kIOReturnIOError,true); return;
++ }
+  fTimer->setTimeoutUS(1);
+ }
+ 
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h
+index 93a2ec4..e1ddd52 100644
+--- a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h
++++ b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h
+@@ -8,6 +8,7 @@
+ #include <IOKit/IOWorkLoop.h>
+ #include <IOKit/IOInterruptEventSource.h>
+ #include <IOKit/IOLocks.h>
++#include "SweetRPMhExecutor.h"
+ 
+ enum SweetRail { SweetRailVDDI, SweetRailVPNL, SweetRailHost, SweetRailPHY, SweetRailCount };
+ struct SweetRailVote { bool enabled; unsigned minMV, maxMV, loadUA; };
+@@ -138,8 +139,11 @@ class SweetRPMh : public IOService {
+  SweetPanelSupplyFence fPanelFence;
+  bool panelFenceValid(const SweetPanelSupplyFence &);
+  void clearPanelFence(void);
+- struct Operation { uint32_t offset, value; bool w1c; };
+- Operation fOperations[20];
++ /* Queued TCS words stay here: this service owns the storage and every
++  * policy decision. SweetRPMhExecutor only moves the words and judges the
++  * readback/completion they produce. */
++ SweetRPMhWord fOperations[SweetRPMhExecutor::kCapacity];
++ bool fExecutorReported;
+  struct ArcResource { uint32_t address; unsigned count, levels[16]; };
+  ArcResource fArc[SweetDisplaySupplyCount];
+  bool fArcMetadataTried, fArcAvailable, fArcRequest;
+@@ -156,6 +160,9 @@ class SweetRPMh : public IOService {
+  uint64_t fRegisterProposal, fRegisterTarget, fRegisterAggregate;
+  static uint32_t read(vm_offset_t,uint32_t);
+  static void write(vm_offset_t,uint32_t,uint32_t);
++ /* MMIO ports handed to the executor; they never outlive one call. */
++ static uint32_t portRead(void *,uint32_t);
++ static void portWrite(void *,uint32_t,uint32_t);
+  static uint64_t nowNS(void);
+  uint16_t db16(uint32_t);
+  bool range(uint32_t,uint32_t);
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRPMhExecutor.cpp b/dxb/xnu/iokit/Kernel/arm/SweetRPMhExecutor.cpp
+new file mode 100644
+index 0000000..1ce46a7
+--- /dev/null
++++ b/dxb/xnu/iokit/Kernel/arm/SweetRPMhExecutor.cpp
+@@ -0,0 +1,69 @@
++#include "SweetRPMhExecutor.h"
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++
++SweetRPMhExecutor::Arm SweetRPMhExecutor::arm(Ports &ports,const SweetRPMhLayout &layout,
++    uint32_t bit,uint32_t *observed)
++{
++ const uint32_t status=ports.read(ports.context,layout.irqStatus);
++ if (observed) *observed=status;
++ if (status==~0u) return ArmInvalid;
++ if (status&bit) return ArmStale;
++ return ArmReady;
++}
++
++SweetRPMhExecutor::Step SweetRPMhExecutor::step(Ports &ports,const SweetRPMhLayout &layout,
++    const SweetRPMhWord &word,bool *issued,uint64_t now,uint64_t deadline,uint32_t *observed)
++{
++ if (!*issued) {
++  ports.write(ports.context,word.offset,word.value);
++  *issued=true;
++ }
++ const uint32_t value=ports.read(ports.context,word.w1c ? layout.irqStatus : word.offset);
++ if (observed) *observed=value;
++ const bool settled=word.w1c ? ((value&word.value)==0) : (value==word.value);
++ if (!settled) return now>=deadline ? StepExpired : StepBlocked;
++ *issued=false;
++ return StepAdvanced;
++}
++
++SweetRPMhExecutor::Verdict SweetRPMhExecutor::verify(Ports &ports,const SweetRPMhLayout &layout,
++    uint32_t slot,uint32_t bit,unsigned commands,unsigned *unacknowledged)
++{
++ /* Read order matters more than it looks: the same transaction shape must
++  * produce the same bus traffic before and after the extraction, so the whole
++  * slot is sampled before any verdict is formed. */
++ const uint32_t irq=ports.read(ports.context,layout.irqStatus);
++ const uint32_t idle=ports.read(ports.context,slot+layout.status);
++ unsigned open=0;
++ for (unsigned c=0;c<commands;++c) {
++  const uint32_t status=ports.read(ports.context,slot+layout.commandStatus+c*layout.commandStride);
++  /* A command that answers ~0 has not acknowledged anything either. */
++  if (status==~0u || (status&layout.ackMask)!=layout.ackMask) ++open;
++ }
++ if (unacknowledged) *unacknowledged=open;
++ if (irq==~0u || idle==~0u) return VerdictInvalid;
++ if (!idle || !(irq&bit) || open) return VerdictIncomplete;
++ return VerdictComplete;
++}
++
++bool SweetRPMhExecutor::stageCleanup(Ports &ports,const SweetRPMhLayout &layout,
++    uint32_t slot,SweetRPMhWord *words,unsigned *count,uint32_t amc,uint32_t bit,
++    uint32_t savedEnable)
++{
++ unsigned n=*count;
++ /* Order matters: the engine stops before its per-slot words are dropped, and
++  * the acknowledge lands while the source is still masked. */
++ if (n+5>kCapacity) return false;
++ words[n++]={slot+layout.control,amc,false};
++ words[n++]={slot+layout.control,0,false};
++ words[n++]={slot+layout.enable,0,false};
++ words[n++]={slot+layout.wait,0,false};
++ words[n++]={layout.clear,bit,true};
++ const uint32_t enabled=ports.read(ports.context,layout.irqEnable);
++ if (enabled==~0u) { *count=n; return false; }
++ if (n+1>kCapacity) { *count=n; return false; }
++ words[n++]={layout.irqEnable,(enabled&~bit)|(savedEnable&bit),false};
++ *count=n;
++ return true;
++}
++#endif
+\ No newline at end of file
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRPMhExecutor.h b/dxb/xnu/iokit/Kernel/arm/SweetRPMhExecutor.h
+new file mode 100644
+index 0000000..497c59a
+--- /dev/null
++++ b/dxb/xnu/iokit/Kernel/arm/SweetRPMhExecutor.h
+@@ -0,0 +1,76 @@
++/* MH2LM ACTIVE transaction mechanics.
++ *
++ * The service stays the only hardware owner: it picks the TCS, admits the
++ * request, admits again before every queued write, keeps the GIC route, owns
++ * the deadlines and decides when to give up. What lives here is the mechanical
++ * half of one ACTIVE transaction: the posted-write readback that decides
++ * whether the next queued word may be issued, the verdict that says a
++ * completion is real, and the tail that quiesces a completed TCS. No function
++ * here chooses a resource, an address or a value, maps a base address, or
++ * remembers state between calls: the caller owns the word storage and passes
++ * its own ports, so a reviewed call site reads exactly like the register
++ * sequence it performs. */
++#ifndef SWEET_RPMH_EXECUTOR_H
++#define SWEET_RPMH_EXECUTOR_H
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include <IOKit/IOTypes.h>
++
++/* One queued TCS word. w1c words are acknowledged by writing, then observed
++ * through the source status word instead of their own address. */
++struct SweetRPMhWord { uint32_t offset, value; bool w1c; };
++
++/* TCS register geometry. Passed in rather than duplicated here, so the layout
++ * stays declared once, next to the offsets it describes. */
++struct SweetRPMhLayout {
++ uint32_t status;         /* per-TCS busy/status word */
++ uint32_t irqStatus;      /* source status, also the w1c readback */
++ uint32_t irqEnable;
++ uint32_t clear;          /* write-one-to-clear acknowledge */
++ /* Slot-relative: the caller passes the selected slot base to the calls
++  * that touch it, because one TCS block never owns another. */
++ uint32_t control, wait, enable, commandStatus, commandStride;
++ uint32_t ackMask;        /* bits a command must report when it finished */
++};
++
++class SweetRPMhExecutor {
++public:
++ /* Room for the largest staged shape: the inherited enable/clear pair, three
++  * commands with wait/enable/control, the trigger and the cleanup tail. */
++ static constexpr unsigned kCapacity = 20;
++ /* Both directions belong to the MMIO owner; a port never caches a base. */
++ struct Ports {
++  void *context;
++  uint32_t (*read)(void *, uint32_t offset);
++  void (*write)(void *, uint32_t offset, uint32_t value);
++ };
++ enum Step {
++  StepAdvanced, /* the queued word was accepted: move on to the next one */
++  StepBlocked,  /* the posted write is not visible yet: resume on the timer */
++  StepExpired   /* still not visible past the write deadline */
++ };
++ enum Arm { ArmReady, ArmStale, ArmInvalid };
++ enum Verdict {
++  VerdictComplete,   /* idle, source bit set, every command acknowledged */
++  VerdictIncomplete, /* the bus is idle-looking but a claim is missing */
++  VerdictInvalid     /* a required status word folded to ~0 */
++ };
++ /* A transaction may only trigger on a quiet source: no status, no inherited
++  * bit. A source that answers ~0 is not a quiet one. */
++ static Arm arm(Ports &, const SweetRPMhLayout &, uint32_t bit, uint32_t *observed);
++ /* Issue one queued word and read it back. The queue moves on only when the
++  * readback matches; otherwise the same word stays at the head. */
++ static Step step(Ports &, const SweetRPMhLayout &, const SweetRPMhWord &,
++     bool *issued, uint64_t now, uint64_t deadline, uint32_t *observed);
++ /* A completion claim is real only when the source bit survived, the TCS is
++  * idle and every command reported both issued and complete. */
++ static Verdict verify(Ports &, const SweetRPMhLayout &, uint32_t slot, uint32_t bit,
++     unsigned commands, unsigned *unacknowledged);
++ /* Words that quiesce a completed TCS: stop the engine, drop this slot's
++  * enable/wait words, acknowledge the source, then restore the saved enable
++  * bits for this slot only. False when the enable word cannot be read. */
++ static bool stageCleanup(Ports &, const SweetRPMhLayout &, uint32_t slot,
++     SweetRPMhWord *words,
++     unsigned *count, uint32_t amc, uint32_t bit, uint32_t savedEnable);
++};
++#endif
++#endif
+\ No newline at end of file
+diff --git a/dxb/xnu/iokit/conf/files.arm64 b/dxb/xnu/iokit/conf/files.arm64
+index 8358836..6ded5bc 100644
+--- a/dxb/xnu/iokit/conf/files.arm64
++++ b/dxb/xnu/iokit/conf/files.arm64
+@@ -33,6 +33,7 @@ iokit/Kernel/arm/SweetPmicAdc5.cpp                                optional iokit
+ iokit/Kernel/arm/SweetMDSS.cpp                                    optional iokitcpp
+ 
+ iokit/Kernel/arm/SweetRPMh.cpp                                    optional iokitcpp
++iokit/Kernel/arm/SweetRPMhExecutor.cpp                            optional iokitcpp
+ 
+ iokit/Kernel/arm/IOQcomClock.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/IOQcomGCC.cpp                                     optional iokitcpp
+diff --git a/tools/tests/test-mh2lm-display-service.py b/tools/tests/test-mh2lm-display-service.py
+index 446300f..913621f 100644
+--- a/tools/tests/test-mh2lm-display-service.py
++++ b/tools/tests/test-mh2lm-display-service.py
+@@ -80,7 +80,11 @@ rpmh_source = re.sub(r'uint32_t SweetRPMh::read\([^\n]*\)\n\{.*?\n\}', 'uint32_t
+ rpmh_source = re.sub(r'void SweetRPMh::write\([^\n]*\)\n\{.*?\n\}', 'void SweetRPMh::write(vm_offset_t b,uint32_t o,uint32_t v) { writeReg(b,o,v); }', rpmh_source, flags=re.S)
+ rpmh_source = rpmh_source.replace('*(volatile uint64_t *)(gic+GICRoute)=0;', 'writeReg(gic,GICRoute,0);writeReg(gic,GICRoute+4,0);')
+ rpmh_source = rpmh_source.replace('__asm__ volatile("dmb oshst" ::: "memory");', '(void)0;').replace('__asm__ volatile("dsb osh" ::: "memory");', '(void)0;')
+-source = re.sub(r'^#include.*\n', '', rpmh_header+rpmh_source, flags=re.M)+source
++# SweetRPMhExecutor is a separate translation unit in the product; keep it one
++# here too, declarations before the owner and definitions after it.
++rpmh_executor_header = (arm/'SweetRPMhExecutor.h').read_text() if (arm/'SweetRPMhExecutor.h').exists() else ''
++rpmh_executor_source = (arm/'SweetRPMhExecutor.cpp').read_text() if rpmh_executor_header else ''
++source = re.sub(r'^#include.*\n', '', rpmh_executor_header+rpmh_header+rpmh_source+rpmh_executor_source, flags=re.M)+source
+ if (arm/'SweetPanelPins.h').exists():
+     pins_header = (arm/'SweetPanelPins.h').read_text().replace('class SweetPanelPins :', 'struct SweetPanelPins :').replace('class SweetPanelPinsClient :', 'struct SweetPanelPinsClient :')
+     pins_source = (arm/'SweetPanelPins.cpp').read_text()
+diff --git a/tools/tests/test-mh2lm-rpmh-executor.py b/tools/tests/test-mh2lm-rpmh-executor.py
+new file mode 100644
+index 0000000..fc5b1dd
+--- /dev/null
++++ b/tools/tests/test-mh2lm-rpmh-executor.py
+@@ -0,0 +1,482 @@
++#!/usr/bin/env python3
++"""Actual RPMh ACTIVE executor: module mechanics plus its pre-extraction MMIO trace.
++
++The module is compiled on its own, so nothing it needs can be supplied by the
++owner; then the shipped owner is compiled through the display fixture and its
++ACTIVE trajectory is compared with the literals captured before the extraction.
++Usage: test-mh2lm-rpmh-executor.py EXTRACTED_XNU
++"""
++from pathlib import Path
++import hashlib
++import os
++import re
++import shutil
++import subprocess
++import sys
++import tempfile
++
++if len(sys.argv) != 2:
++    sys.exit(__doc__)
++root = Path(sys.argv[1]).resolve()
++arm = root / 'iokit/Kernel/arm'
++header = (arm / 'SweetRPMhExecutor.h').read_text()
++source = (arm / 'SweetRPMhExecutor.cpp').read_text()
++owner = (arm / 'SweetRPMh.cpp').read_text()
++
++# The mechanics are a translation unit of its own: no provider, no map, no
++# timer, no lock, no service registry. Anything of that kind would make the
++# module an owner instead of a register sequence.
++for banned in ('mapDeviceMemory', 'IOService', 'IOTimerEventSource', 'IOLock',
++               'IOSimpleLock', 'registerService', 'getProvider', 'OSData',
++               'OSArray', 'IOMemoryDescriptor', 'IOSleep', 'thread_call'):
++    assert banned not in source, banned
++    assert banned not in header, banned
++# ... and the owner still reaches every one of the four mechanics by name.
++for called in ('SweetRPMhExecutor::arm(', 'SweetRPMhExecutor::step(',
++               'SweetRPMhExecutor::verify(', 'SweetRPMhExecutor::stageCleanup('):
++    assert called in owner, called
++# The one record that says who kept the hardware is emitted by the owner.
++assert 'executor=module tcs=%u commands=%u open=%u hardware-owner=SweetRPMh' in owner
++
++UNITS = r"""
++#include <assert.h>
++#include <stdio.h>
++#include <string.h>
++#include "SweetRPMhExecutor.h"
++
++/* A TCS slot is modelled as little as possible: a word per offset, the source
++ * status word cleared only by the acknowledge write, and an access log. */
++struct Regs {
++ uint32_t v[1024];
++ unsigned reads, writes, recorded;
++ uint32_t order[32];
++ bool swallow;  /* a posted write the bus has not landed yet */
++};
++static uint32_t rdRead(void *c, uint32_t o) {
++ Regs *r = (Regs *)c;
++ r->reads++;
++ if (r->recorded < 32) r->order[r->recorded++] = o;
++ return r->v[o];
++}
++static void rdWrite(void *c, uint32_t o, uint32_t v) {
++ Regs *r = (Regs *)c;
++ r->writes++;
++ if (r->swallow) return;
++ if (o == 8) r->v[4] &= ~v; else r->v[o] = v;
++}
++static void reset(Regs *r) { memset(r, 0, sizeof(*r)); }
++static SweetRPMhExecutor::Ports ports(Regs *r) {
++ SweetRPMhExecutor::Ports p;
++ p.context = r; p.read = rdRead; p.write = rdWrite;
++ return p;
++}
++/* Same geometry the owner publishes: status, source status, enable, clear,
++ * then the slot words, then the command block. */
++static const SweetRPMhLayout L = {0x18, 0x04, 0x00, 0x08, 0x14, 0x1c, 0x10, 0x3c, 0x14, 0x3};
++static const uint32_t SLOT = 0x2a0, AMC = 0x10000;
++
++int main() {
++ Regs r; SweetRPMhExecutor::Ports p;
++ uint32_t seen = 0xdeadbeef; bool issued = false; unsigned open = 0;
++ SweetRPMhWord word; SweetRPMhWord words[SweetRPMhExecutor::kCapacity];
++
++ /* arm(): a clear source means the slot is ours; an already posted bit is a
++  * completion that cannot be attributed, and an all-ones answer is no answer. */
++ reset(&r); p = ports(&r); issued = false; r.v[4] = 0;
++ assert(SweetRPMhExecutor::arm(p, L, 1u, &seen) == SweetRPMhExecutor::ArmReady && seen == 0);
++ r.v[4] = 2;
++ assert(SweetRPMhExecutor::arm(p, L, 1u, &seen) == SweetRPMhExecutor::ArmReady && seen == 2);
++ r.v[4] = 1;
++ assert(SweetRPMhExecutor::arm(p, L, 1u, &seen) == SweetRPMhExecutor::ArmStale && seen == 1);
++ r.v[4] = ~0u;
++ assert(SweetRPMhExecutor::arm(p, L, 1u, &seen) == SweetRPMhExecutor::ArmInvalid);
++ r.v[4] = 0;
++ assert(SweetRPMhExecutor::arm(p, L, 1u, NULL) == SweetRPMhExecutor::ArmReady);
++
++ /* step(): one posted word per call. The readback decides whether the next
++  * word may go out; a word that never settles blocks without being rewritten. */
++ word.offset = 0x30; word.value = 0x10108; word.w1c = false;
++ reset(&r); p = ports(&r); issued = false; r.v[0x30] = 0x10108;
++ assert(SweetRPMhExecutor::step(p, L, word, &issued, 0, 10, 0) == SweetRPMhExecutor::StepAdvanced);
++ assert(!issued && r.writes == 1 && r.reads == 1 && r.order[0] == 0x30);
++ reset(&r); p = ports(&r); issued = false; r.swallow = true;
++ assert(SweetRPMhExecutor::step(p, L, word, &issued, 0, 10, 0) == SweetRPMhExecutor::StepBlocked);
++ assert(issued && r.writes == 1 && r.reads == 1);
++ /* A w1c word is acknowledged by the write and observed at the source status,
++  * never by reading back the acknowledge register. */
++ word.offset = 0x08; word.value = 2; word.w1c = true;
++ reset(&r); p = ports(&r); issued = false; r.v[4] = 3;
++ assert(SweetRPMhExecutor::step(p, L, word, &issued, 0, 10, &seen) == SweetRPMhExecutor::StepAdvanced);
++ assert(!issued && seen == 1 && r.order[0] == 0x04 && r.v[4] == 1 && r.writes == 1);
++ reset(&r); p = ports(&r); issued = false; r.v[4] = 6; r.swallow = true; issued = false;
++ assert(SweetRPMhExecutor::step(p, L, word, &issued, 0, 10, 0) == SweetRPMhExecutor::StepBlocked && issued);
++ /* A word that never settles past the deadline expires with the write still
++  * outstanding, so the caller cannot mistake it for a queued word. */
++ reset(&r); p = ports(&r); issued = false; r.v[4] = 6; r.swallow = true; issued = false;
++ assert(SweetRPMhExecutor::step(p, L, word, &issued, 5, 5, 0) == SweetRPMhExecutor::StepExpired);
++ assert(issued && r.writes == 1 && r.reads == 1);
++
++ /* verify(): the whole slot is sampled first, then the verdict. A command that
++  * answers all ones or misses the finished bits keeps the transaction open. */
++ reset(&r); p = ports(&r); issued = false;
++ r.v[4] = 1; r.v[SLOT + 0x18] = 1;
++ r.v[SLOT + 0x3c] = 0x10103; r.v[SLOT + 0x50] = 0x10103; r.v[SLOT + 0x64] = 0x10103;
++ assert(SweetRPMhExecutor::verify(p, L, SLOT, 1u, 3, &open) == SweetRPMhExecutor::VerdictComplete);
++ assert(open == 0 && r.recorded == 5);
++ assert(r.order[0] == 0x04 && r.order[1] == SLOT + 0x18);
++ assert(r.order[2] == SLOT + 0x3c && r.order[3] == SLOT + 0x50 && r.order[4] == SLOT + 0x64);
++ reset(&r); p = ports(&r); issued = false;
++ r.v[4] = 0; r.v[SLOT + 0x18] = 1;
++ r.v[SLOT + 0x3c] = r.v[SLOT + 0x50] = r.v[SLOT + 0x64] = 0x10103;
++ assert(SweetRPMhExecutor::verify(p, L, SLOT, 1u, 3, &open) == SweetRPMhExecutor::VerdictIncomplete && open == 0);
++ reset(&r); p = ports(&r); issued = false;
++ r.v[4] = 1; r.v[SLOT + 0x18] = 0;
++ r.v[SLOT + 0x3c] = r.v[SLOT + 0x50] = r.v[SLOT + 0x64] = 0x10103;
++ assert(SweetRPMhExecutor::verify(p, L, SLOT, 1u, 3, &open) == SweetRPMhExecutor::VerdictIncomplete && open == 0);
++ reset(&r); p = ports(&r); issued = false;
++ r.v[4] = 1; r.v[SLOT + 0x18] = 1;
++ r.v[SLOT + 0x3c] = 0x10103; r.v[SLOT + 0x50] = 0x10101; r.v[SLOT + 0x64] = 0x10103;
++ assert(SweetRPMhExecutor::verify(p, L, SLOT, 1u, 3, &open) == SweetRPMhExecutor::VerdictIncomplete && open == 1);
++ reset(&r); p = ports(&r); issued = false;
++ r.v[4] = 1; r.v[SLOT + 0x18] = 1;
++ r.v[SLOT + 0x3c] = 0x10103; r.v[SLOT + 0x50] = ~0u; r.v[SLOT + 0x64] = 0x10103;
++ assert(SweetRPMhExecutor::verify(p, L, SLOT, 1u, 3, &open) == SweetRPMhExecutor::VerdictIncomplete && open == 1);
++ /* Unreadable source or slot invalidates the verdict, but the sample is still
++  * the same five reads: the shape of the sample may not depend on the answer. */
++ reset(&r); p = ports(&r); issued = false;
++ r.v[4] = ~0u; r.v[SLOT + 0x18] = 1;
++ r.v[SLOT + 0x3c] = r.v[SLOT + 0x50] = r.v[SLOT + 0x64] = 0x10103;
++ assert(SweetRPMhExecutor::verify(p, L, SLOT, 1u, 3, 0) == SweetRPMhExecutor::VerdictInvalid && r.recorded == 5);
++ reset(&r); p = ports(&r); issued = false;
++ r.v[4] = 1; r.v[SLOT + 0x18] = ~0u;
++ r.v[SLOT + 0x3c] = r.v[SLOT + 0x50] = r.v[SLOT + 0x64] = 0x10103;
++ assert(SweetRPMhExecutor::verify(p, L, SLOT, 1u, 3, 0) == SweetRPMhExecutor::VerdictInvalid && r.recorded == 5);
++
++ /* stageCleanup(): engine first, then the slot words, the acknowledge while the
++  * source is still masked, and the mask back to inherited-for-this-slot. */
++ reset(&r); p = ports(&r); issued = false; r.v[0] = 0x45;
++ unsigned count = 0;
++ assert(SweetRPMhExecutor::stageCleanup(p, L, SLOT, words, &count, AMC, 2u, 0x42));
++ assert(count == 6);
++ assert(words[0].offset == SLOT + 0x14 && words[0].value == AMC && !words[0].w1c);
++ assert(words[1].offset == SLOT + 0x14 && words[1].value == 0 && !words[1].w1c);
++ assert(words[2].offset == SLOT + 0x10 && words[2].value == 0 && !words[2].w1c);
++ assert(words[3].offset == SLOT + 0x1c && words[3].value == 0 && !words[3].w1c);
++ assert(words[4].offset == 0x08 && words[4].value == 2u && words[4].w1c);
++ assert(words[5].offset == 0x00 && words[5].value == 0x47 && !words[5].w1c);
++ assert(r.reads == 1 && r.writes == 0 && r.order[0] == 0x00);
++ /* Bounded storage: the tail is staged whole or not at all, and a source that
++  * cannot be read back leaves the transaction for the owner to retire. */
++ reset(&r); p = ports(&r); issued = false; r.v[0] = 0x41; count = 15;
++ assert(!SweetRPMhExecutor::stageCleanup(p, L, SLOT, words, &count, AMC, 1u, 0) && count == 20);
++ reset(&r); p = ports(&r); issued = false; count = 16;
++ assert(!SweetRPMhExecutor::stageCleanup(p, L, SLOT, words, &count, AMC, 1u, 0) && count == 16);
++ assert(r.reads == 0 && r.writes == 0);
++ reset(&r); p = ports(&r); issued = false; r.v[0] = ~0u; count = 0;
++ assert(!SweetRPMhExecutor::stageCleanup(p, L, SLOT, words, &count, AMC, 1u, 0) && count == 5);
++ puts("PASS: actual ACTIVE executor mechanics; arm ready/stale/invalid, posted write advanced/blocked/expired without extra traffic, verdict after one fixed five-read sample, w1c observed at the source status, bounded cleanup tail staged whole or not at all");
++ return 0;
++}
++"""
++
++PRELUDE = """
++#pragma once
++#include <stdint.h>
++"""
++
++DUMP = r"""
++static void show(const char *label) {
++ printf("## %s\n", label);
++ for (auto &o : trace) printf("%s %#x=%#x\n", o.write ? "W" : "R", (unsigned)o.addr, o.value);
++ trace.clear();
++}
++static void flushMessages(size_t *cursor) {
++ for (; *cursor < messages.size(); ++(*cursor)) printf("#MSG %s\n", messages[*cursor].c_str());
++}
++int main() {
++ setvbuf(stdout, NULL, _IONBF, 0);
++ size_t cursor = 0;
++ IOService *n; SweetRPMh *s; uint64_t id;
++ // One rail vote through a fresh ACTIVE completion.
++ fixtures(); resourceMode = 2; n = nub(); s = make(n); id = attach(s);
++ vote(s, id, SweetRailVDDI, {true, 1800, 1880, 62000}); tick(s); ack(s);
++ show("rail-complete"); destroy(s, n); reboot();
++ // ARC: selection, first target, cleanup, then the later stages of one vote.
++ arcFixtures(); resourceMode = 2; n = nub(); s = make(n); id = attach(s);
++ displayVote(s, id, SweetDisplayLowSVS); arcStage(s, 0, 6); show("arc-stage-1");
++ arcStage(s, 1, 6); show("arc-stage-2");
++ arcStage(s, 2, 1); show("arc-stage-3");
++ arcStage(s, 1, 3); arcStage(s, 0, 2); show("arc-stage-5");
++ destroy(s, n); reboot();
++ // Cleanup staged, completion never clears: the bounded posted-write readback.
++ fixtures(); n = nub(); s = make(n); id = attach(s);
++ rpmhKeepIRQ = true; vote(s, id, SweetRailVDDI, {true, 1800, 1880, 62000});
++ regs[TCS + 4] |= 1u << s->fTCSIndex;
++ for (unsigned i = 0; i < 3; ++i) { fakeTicks += 100000; s->fTimer->action(s, s->fTimer); }
++ show("rail-kept-irq"); destroy(s, n); reboot();
++ flushMessages(&cursor);
++ puts("DUMP-OK");
++ return 0;
++}
++"""
++
++# Captured from the tree before the executor was extracted: record count, read
++# count, whole-scenario digest, and every write in order. These are literals
++# because the point of the extraction is that the trajectory did not move.
++PINNED = {
++    "rail-complete": (171, 140,
++     "ae55381360424e998f1e370d7242f11c891c5143bae83f903c4ecf014097f96c",
++     [
++      "W 0x17a00184=0x20",
++      "W 0x17a00084=0x20",
++      "W 0x17a00c08=0",
++      "W 0x17a00424=0xa000",
++      "W 0x17a06128=0",
++      "W 0x17a0612c=0",
++      "W 0x18220d00=0x40",
++      "W 0x18220d08=0x1",
++      "W 0x18220d30=0x10108",
++      "W 0x18220d34=0x40000",
++      "W 0x18220d38=0x708",
++      "W 0x18220d44=0x10108",
++      "W 0x18220d48=0x40008",
++      "W 0x18220d4c=0x7",
++      "W 0x18220d58=0x10108",
++      "W 0x18220d5c=0x40004",
++      "W 0x18220d60=0x1",
++      "W 0x18220d10=0x7",
++      "W 0x18220d1c=0x7",
++      "W 0x18220d14=0",
++      "W 0x18220d14=0x10000",
++      "W 0x18220d00=0x41",
++      "W 0x18220d14=0x1010000",
++      "W 0x17a00104=0x20",
++      "W 0x17a00184=0x20",
++      "W 0x18220d14=0x10000",
++      "W 0x18220d14=0",
++      "W 0x18220d1c=0",
++      "W 0x18220d10=0",
++      "W 0x18220d08=0x1",
++      "W 0x18220d00=0x41",
++     ]),
++    "arc-stage-1": (289, 264,
++     "6ce3527934ffe724962499b4501043ea23c49d2410225edb780cafe2ed27c004",
++     [
++      "W 0x17a00184=0x20",
++      "W 0x17a00084=0x20",
++      "W 0x17a00c08=0",
++      "W 0x17a00424=0xa000",
++      "W 0x17a06128=0",
++      "W 0x17a0612c=0",
++      "W 0x18220d00=0x40",
++      "W 0x18220d08=0x1",
++      "W 0x18220d30=0x10108",
++      "W 0x18220d34=0x30000",
++      "W 0x18220d38=0x6",
++      "W 0x18220d10=0x1",
++      "W 0x18220d1c=0x1",
++      "W 0x18220d14=0",
++      "W 0x18220d14=0x10000",
++      "W 0x18220d00=0x41",
++      "W 0x18220d14=0x1010000",
++      "W 0x17a00104=0x20",
++      "W 0x17a00184=0x20",
++      "W 0x18220d14=0x10000",
++      "W 0x18220d14=0",
++      "W 0x18220d1c=0",
++      "W 0x18220d10=0",
++      "W 0x18220d08=0x1",
++      "W 0x18220d00=0x41",
++     ]),
++    "arc-stage-2": (75, 56,
++     "2801e4e138cc09135968fdf7900fbbbf37595ba3e8ab8c795e2ccab6ae50a512",
++     [
++      "W 0x18220d00=0x40",
++      "W 0x18220d08=0x1",
++      "W 0x18220d30=0x10108",
++      "W 0x18220d34=0x30004",
++      "W 0x18220d38=0x6",
++      "W 0x18220d10=0x1",
++      "W 0x18220d1c=0x1",
++      "W 0x18220d14=0",
++      "W 0x18220d14=0x10000",
++      "W 0x18220d00=0x41",
++      "W 0x18220d14=0x1010000",
++      "W 0x17a00104=0x20",
++      "W 0x17a00184=0x20",
++      "W 0x18220d14=0x10000",
++      "W 0x18220d14=0",
++      "W 0x18220d1c=0",
++      "W 0x18220d10=0",
++      "W 0x18220d08=0x1",
++      "W 0x18220d00=0x41",
++     ]),
++    "arc-stage-3": (75, 56,
++     "1af9663039e1b019311562c217e911b92ff58a0f9e9524bb8a4011584aebaf43",
++     [
++      "W 0x18220d00=0x40",
++      "W 0x18220d08=0x1",
++      "W 0x18220d30=0x10108",
++      "W 0x18220d34=0x30008",
++      "W 0x18220d38=0x1",
++      "W 0x18220d10=0x1",
++      "W 0x18220d1c=0x1",
++      "W 0x18220d14=0",
++      "W 0x18220d14=0x10000",
++      "W 0x18220d00=0x41",
++      "W 0x18220d14=0x1010000",
++      "W 0x17a00104=0x20",
++      "W 0x17a00184=0x20",
++      "W 0x18220d14=0x10000",
++      "W 0x18220d14=0",
++      "W 0x18220d1c=0",
++      "W 0x18220d10=0",
++      "W 0x18220d08=0x1",
++      "W 0x18220d00=0x41",
++     ]),
++    "arc-stage-5": (137, 99,
++     "0c3e7378142613073b2fe110af851032650c193d67a8e4ce658c8b3844a3bb21",
++     [
++      "W 0x18220d00=0x40",
++      "W 0x18220d08=0x1",
++      "W 0x18220d30=0x10108",
++      "W 0x18220d34=0x30004",
++      "W 0x18220d38=0x3",
++      "W 0x18220d10=0x1",
++      "W 0x18220d1c=0x1",
++      "W 0x18220d14=0",
++      "W 0x18220d14=0x10000",
++      "W 0x18220d00=0x41",
++      "W 0x18220d14=0x1010000",
++      "W 0x17a00104=0x20",
++      "W 0x17a00184=0x20",
++      "W 0x18220d14=0x10000",
++      "W 0x18220d14=0",
++      "W 0x18220d1c=0",
++      "W 0x18220d10=0",
++      "W 0x18220d08=0x1",
++      "W 0x18220d00=0x41",
++      "W 0x18220d00=0x40",
++      "W 0x18220d08=0x1",
++      "W 0x18220d30=0x10108",
++      "W 0x18220d34=0x30000",
++      "W 0x18220d38=0x2",
++      "W 0x18220d10=0x1",
++      "W 0x18220d1c=0x1",
++      "W 0x18220d14=0",
++      "W 0x18220d14=0x10000",
++      "W 0x18220d00=0x41",
++      "W 0x18220d14=0x1010000",
++      "W 0x17a00104=0x20",
++      "W 0x17a00184=0x20",
++      "W 0x18220d14=0x10000",
++      "W 0x18220d14=0",
++      "W 0x18220d1c=0",
++      "W 0x18220d10=0",
++      "W 0x18220d08=0x1",
++      "W 0x18220d00=0x41",
++     ]),
++    "rail-kept-irq": (92, 92,
++     "6e34d21512192f3322bde46f6fde1c318c6ba626b638cf730bf28afff5fbeefa",
++     [
++     ]),
++}
++
++env = dict(os.environ)
++env['ASAN_OPTIONS'] = env.get('ASAN_OPTIONS', '') + ':detect_leaks=0'
++env['UBSAN_OPTIONS'] = env.get('UBSAN_OPTIONS', '') + ':halt_on_error=1:print_stacktrace=1'
++
++with tempfile.TemporaryDirectory(prefix='mh2lm-executor-') as temp:
++    temp = Path(temp)
++    include = temp / 'include' / 'IOKit'
++    include.mkdir(parents=True)
++    (include / 'IOTypes.h').write_text(PRELUDE)
++    compiler = os.environ.get('CXX', 'clang++-19')
++    flags = ['-std=c++17', '-g', '-pthread', '-fsanitize=address,undefined',
++             '-fno-omit-frame-pointer']
++
++    # The module compiles against nothing but the system headers: if it ever
++    # needs the owner, this unit stops building.
++    unit = temp / 'units.cpp'
++    unit.write_text('#define ARM64_BOARD_CONFIG_MH2LM 1\n' + UNITS)
++    binary = temp / 'units'
++    subprocess.run([compiler] + flags + ['-DARM64_BOARD_CONFIG_MH2LM=1',
++                    '-I', str(temp / 'include'), '-I', str(arm), str(unit),
++                    str(arm / 'SweetRPMhExecutor.cpp'), '-o', str(binary)], check=True)
++    subprocess.run([str(binary)], check=True, env=env, timeout=120)
++
++    # Four entry points and no storage: a data symbol here would be a
++    # transaction the module remembers between calls.
++    obj = temp / 'executor.o'
++    subprocess.run([compiler, '-std=c++17', '-O2', '-DARM64_BOARD_CONFIG_MH2LM=1',
++                    '-I', str(temp / 'include'), '-I', str(arm), '-c',
++                    str(arm / 'SweetRPMhExecutor.cpp'), '-o', str(obj)], check=True)
++    nm = shutil.which('llvm-nm-19') or shutil.which('llvm-nm') or 'nm'
++    listed = subprocess.run([nm, '-S', '--defined-only', str(obj)],
++                            check=True, capture_output=True, text=True).stdout
++    defined = {}
++    for line in listed.splitlines():
++        fields = line.split()
++        if len(fields) >= 4:
++            defined[fields[-1]] = int(fields[1], 16)
++    assert set(defined) == {
++        '_ZN17SweetRPMhExecutor3armERNS_5PortsERK15SweetRPMhLayoutjPj',
++        '_ZN17SweetRPMhExecutor4stepERNS_5PortsERK15SweetRPMhLayoutRK13SweetRPMhWordPbmmPj',
++        '_ZN17SweetRPMhExecutor6verifyERNS_5PortsERK15SweetRPMhLayoutjjjPj',
++        '_ZN17SweetRPMhExecutor12stageCleanupERNS_5PortsERK15SweetRPMhLayoutjP13SweetRPMhWordPjjjj',
++    }, sorted(defined)
++
++    # Now the shipped owner, through the display fixture it already ships with.
++    parent = Path(__file__).with_name('test-mh2lm-rpmh-resources.py')
++    ns = {'__file__': str(parent), '__name__': 'rpmh_executor_fixture'}
++    exec(compile(parent.read_text().rsplit('\nwith tempfile.TemporaryDirectory(', 1)[0],
++                 str(parent), 'exec'), ns)
++    common = ns['ns']
++    helpers = ns['tests'].split('int main(){')[0]
++    cpp = temp / 'dump.cpp'
++    cpp.write_text(common['prelude'] + common['DSI_MEMORY_FIXTURE'] +
++                   common['pool_fixture'] + common['header'] + common['source'] +
++                   helpers + DUMP)
++    binary = temp / 'dump'
++    subprocess.run([compiler] + flags + [str(cpp), '-o', str(binary)], check=True)
++    capture = subprocess.run([str(binary)], check=True, env=env, timeout=300,
++                             capture_output=True, text=True).stdout
++    again = subprocess.run([str(binary)], check=True, env=env, timeout=300,
++                           capture_output=True, text=True).stdout
++    assert capture == again, 'the recorded trajectory is not reproducible in one binary'
++
++seen = {}
++label = None
++messages = []
++for line in capture.splitlines():
++    if line.startswith('## '):
++        label = line[3:].strip()
++        seen[label] = []
++    elif line.startswith('#MSG '):
++        messages.append(line[5:])
++    elif line[:1] in ('W', 'R') and label:
++        seen[label].append(line)
++    elif line:
++        assert line == 'DUMP-OK', line
++assert set(seen) == set(PINNED), sorted(seen)
++
++for name, (records, reads, digest, writes) in PINNED.items():
++    body = seen[name]
++    assert len(body) == records, (name, len(body), records)
++    assert len(body) - sum(1 for line in body if line[0] == 'W') == reads, name
++    assert [line for line in body if line[0] == 'W'] == writes, name
++    assert hashlib.sha256('\n'.join(body).encode()).hexdigest() == digest, name
++
++# The old service still owns the hardware and says so, once, on a line that the
++# boot log level keeps; the module never announces a completion of its own.
++owner_lines = [m for m in messages if 'executor=module' in m]
++assert owner_lines, messages[-4:]
++for line in owner_lines:
++    assert re.fullmatch(r'SWEET RPMH: executor=module tcs=\d+ commands=\d+ open=0 '
++                        r'hardware-owner=SweetRPMh\n?', line), line
++assert [m for m in messages if 'ACTIVE ACK' in m], 'the owner must still announce its own ACKs'
++
++print('PASS: actual executor module compiled alone; four entry points and no storage, '
++      'mechanics unit cases, and the shipped owner reproducing the pre-extraction '
++      'ACTIVE trajectory record for record (%d records over %d scenarios)' %
++      (sum(pin[0] for pin in PINNED.values()), len(PINNED)))
+\ No newline at end of file
