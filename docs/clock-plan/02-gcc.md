@@ -1,6 +1,6 @@
 # C2：GCC 的最小本地时钟与 reset 能力
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C2-01／C2-02 已在 0126 默认档实机验收通过（补丁 `0233`／`0234`，零写入）；**C2-08 已实机收口：0127 测量档验证测量链路（23 次写、19.2 MHz、关闭样本 NotRunning、账本完整往返），暴露的唯一缺陷是恢复核验把分支的 halt 状态位当成要写回的值；补丁 `0236` 把判据收窄为“只比配置位”，0128 测量档复验 `mismatches=0`（同一次运行里 `0x162008` 读回 `0`、`0x143008` 读回 `0x80000000`，两条同一谓词都通过），19.2 MHz 与解码值差 +1 ppm；0128 默认档用同一内核、只去掉门，复验零写入（25 行、`writes=0`、无 `gate`／`write-issued`／`measure`／`restore`／`acquire`／`release`）**。**C2-08 整卡收口**。**C2-03 分支门控已在 0130 门控档实机验收通过**：补丁 `0237` 用一条 store 打开 `gcc_pdm_xo4_clk` 分支，判据是硬件 halt 位而不是写进去的值，邻位前后读回，需求由账本单独持有、样本留到重启（关钟是 C2-04、共享是 C2-05）；实测该分支第一次读回即 `enable=1 off=0`（`polls=0`）、四个邻位零变化、屏幕与 0126／0129 基线无差别。顺带把 `0x143008` 的身份更正为 `gcc_xo_div4_clk`（localID 7，C2-08 计数参考），描述表由 6 条变 7 条。**0130-1 门控＋测频档把 `gcc_pdm_xo4_clk` 接成计数器第三源：门控侧全部判据照旧通过，但该 branch 的实测频率是声明父源的 ×4——0130 把它按名字标成 XO/4（4.8 MHz），计数器当场反驳（19200036，3000007 ppm，`BadArgument`）。补丁 `0238` 把父源改成 XO（19.2 MHz），并把这条 `MUX_SRC_LIST`＋无 `parent_names` 的证据写进补丁正文。C2-03 的门控行为因此定案。**0131 门控＋测频档结账（补丁 `0238`）**：第三源在改正后的描述下测得 `19199963` Hz、`decoded-hz=19200000`、`delta-ppm=-1`、`result=0`，审计器 `verdict=pass`（且不需要任何 `--allow-*`），门控侧行与 0130／0130-1 逐字相同——**描述与计数器现在交叉验证了两个不同的时钟，C2-03 全卡收口**。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C2-01／C2-02 已在 0126 默认档实机验收通过（补丁 `0233`／`0234`，零写入）；**C2-08 已实机收口：0127 测量档验证测量链路（23 次写、19.2 MHz、关闭样本 NotRunning、账本完整往返），暴露的唯一缺陷是恢复核验把分支的 halt 状态位当成要写回的值；补丁 `0236` 把判据收窄为“只比配置位”，0128 测量档复验 `mismatches=0`（同一次运行里 `0x162008` 读回 `0`、`0x143008` 读回 `0x80000000`，两条同一谓词都通过），19.2 MHz 与解码值差 +1 ppm；0128 默认档用同一内核、只去掉门，复验零写入（25 行、`writes=0`、无 `gate`／`write-issued`／`measure`／`restore`／`acquire`／`release`）**。**C2-08 整卡收口**。**C2-03 分支门控已在 0130 门控档实机验收通过**：补丁 `0237` 用一条 store 打开 `gcc_pdm_xo4_clk` 分支，判据是硬件 halt 位而不是写进去的值，邻位前后读回，需求由账本单独持有、样本留到重启（关钟是 C2-04、共享是 C2-05）；实测该分支第一次读回即 `enable=1 off=0`（`polls=0`）、四个邻位零变化、屏幕与 0126／0129 基线无差别。顺带把 `0x143008` 的身份更正为 `gcc_xo_div4_clk`（localID 7，C2-08 计数参考），描述表由 6 条变 7 条。**0130-1 门控＋测频档把 `gcc_pdm_xo4_clk` 接成计数器第三源：门控侧全部判据照旧通过，但该 branch 的实测频率是声明父源的 ×4——0130 把它按名字标成 XO/4（4.8 MHz），计数器当场反驳（19200036，3000007 ppm，`BadArgument`）。补丁 `0238` 把父源改成 XO（19.2 MHz），并把这条 `MUX_SRC_LIST`＋无 `parent_names` 的证据写进补丁正文。C2-03 的门控行为因此定案。**0131 门控＋测频档结账（补丁 `0238`）**：第三源在改正后的描述下测得 `19199963` Hz、`decoded-hz=19200000`、`delta-ppm=-1`、`result=0`，审计器 `verdict=pass`（且不需要任何 `--allow-*`），门控侧行与 0130／0130-1 逐字相同——**描述与计数器现在交叉验证了两个不同的时钟，C2-03 全卡收口**。**0139 reset 档收束 C2-07（补丁 `0245`）**：`sweet,clock-reset`（4 字节）只做一件事——在一个能证明是停着的块上打一次厂商脉宽。载荷 `900bad03…`（17 966 752 B）、reset 树 `db9e132e…`（23 624 B，＝clock 树 + 一条属性 + 第五个 range，摘属性时须同时截回 `4*16`）、镜像 `7fccb0f9…`，参数表仍 605 字节；`--c2-03 --c2-07` **rc=0**：`0x14d000` 到达 `0x0`、断言写 `0x1`（读回 `0x1`、掩码 `0xfffffff` 内只动 bit0）、`IODelay(1)`、释放写 `0x0`、`reset-done writes=2 stores=2 pulsed=1 restored=1 collateral=1 held-arrival=0 before=0 after=0`，`start … reads=30 writes=2 reset=1`（`19+1+4+1+1+4` 与行上逐值相等）；同页四支 CBCR 前后逐字节相同，`0x4d004` 仍 `0x80000002`。**BCR 回读看不见 FSM**，所以本轮只记“字写了一笔又回原值、四邻没动”，不写“NPU 已复位”，NPU 在 C0-04 里仍是暂缓（无需求）。reset 与探针、投票两者互斥（同一条 map 行只能有一个理由），拒绝时零映射零写。**C2 至此 8/8 收口**，下一阶段 C3（apps RSC 迁移）。
 
 ## 阶段目标与退出条件
 
@@ -401,3 +401,45 @@ start resource=cc1 result=0 windows=5 snapshot=11 reads=23 writes=0 variant=0x81
 - **非时钟基线等于 b32**，标记齐全且不多于参考（`touch_armed` 2、`touch_app_format` 1、`scanout_transfer` 1、`fb_handoff` 1、`touch_mode3` 1、`probe_drained` 1），`decode_sample_hz=19200000`、`variant=0x8150`。
 - **结论**：C2-06 收束，范围为“本方票可独立取得与撤回”这一半；整体 OFF 与共享硬件场景按计划保持未覆盖。下一张卡是 C2-07（已停止外设的 reset 脉冲），前置是 reset 样本卡。
 
+
+## 本候选实现（C2-07 reset 脉冲，补丁 0245）
+
+- **属性与互斥**：`sweet,clock-reset`（4 字节）自成一条 opt-in，且**不与**第五页的另一位使用者并列——第五页只有一条 `map` 行说明它为什么被映射，所以一张启动只能武装一个：探针在时 `WARN detail=clock-reset-needs-no-probe`、投票在时 `WARN detail=clock-reset-needs-no-vote`，两种都在 `start()` 里拒绝，一次映射都不做（`mapCalls` 为空、`phase=reset` 行零条）。生成器与后端双强制。reset 树 `db9e132e…`（23624 字节）＝clock 树 + 恰好一条属性 + 第五个 `reg` range，其余十一棵树逐字节不变，参数表仍 605 字节；摘掉属性时生成器要**同时**把 `reg` 截回 `4*16` 才能与四页树逐字节相等——打包门禁第一版漏了这半步，被自己写的断言当场拦下（`AssertionError: the reset tree must be the clock tree plus one property`）。
+- **不给 `gccClocks[]` 加行**：与 C2-06 同一理由（多一个描述符会给每张镜像的清单多一行，而四张镜像根本不映射这页）。reset 保留自己的本地 ID `3`——它正是 `gcc_sm8150_resets[]` 里 `GCC_NPU_BCR` 的下标（`{ 0x4d000 }`），页内偏移 `0x000`、`bit=0`，三者与厂商表逐值相同，不是另起的编号。
+- **极性写对**：`ipa_gcc_hwio.h` 的 `BLK_ARES` 在 bit0、`ENABLE_FVAL 0x1`，所以 bit0=1 表示**在复位中**。写只动 bit0（`configMask = 0x0FFFFFFF` 保配置位），status 位从不写——与一支 branch 的规矩相同。
+- **脉宽取厂商值**：`qcom_reset()` 是 assert → `udelay(map.udelay ?: 1)` → deassert，本 BCR 没有 `udelay`，所以 `?: 1` ⇒ `IODelay(1)`。这个数不是猜的，是那张表里缺省出来的。
+- **八行文法**：`phase=reset`（武装标记，`detail=armed name=gcc_npu reset-id=3 offset=0 bit=0 pulse-us=1`，早于任何映射）→ `reset-request`（存前读，一页五个字一次说清：`held`／`value`／`cfg`／`axi`／`trig`／`at`）→ `write-issued … stage=reset-assert`（第几笔）→ `reset-assert`（读回 `asserted`／`value`／`mask`）→ `write-issued … stage=reset-release` → `reset-release`（`released`／`delay-us`）→ `reset-done`（`writes`／`stores`／`pulsed`／`restored`／`collateral`／`held-arrival`／`before`／`after`／`delay-us` 一行对账）。可选 `reset-restore`（到达即持有那条路）。
+- **到达即持有不冒充“打了脉宽”**：若存前读就见到 bit0 已置（块停在复位里），脉冲照样打一次，然后**把到达字写回去再读一次**，`detail=…` 由 `reset-restore` 行记录成败，`reset-done` 带 `held-arrival=1`；恢复不回原值就 `ERROR detail=restore-mismatch`，不写成成功。
+- **未落地也不冒充**：assert 读回没见到 bit0 ⇒ 写回到达字 + `ERROR detail=assert-not-landed writes=… before=… observed=…`；release 写失败 ⇒ `detail=release-store-failed`（`restored=0`）；release 读回仍置位 ⇒ `reset-done` 记 `pulsed=0` 再补一条 `WARN detail=release-not-landed value=…`。三种都 `NotReady`，都留痕。
+- **旁证只到页内**：同页另外四支 CBCR（0x4d004／0x4d008／0x4d00c／0x4d010）脉冲前后各读一次，`collateral=1` 只说明这四个字没动。它不能说明别的块没被这次写碰到，也不能说明 NPU 内部状态。
+- **本卡不能证明的事**：BCR 回读只能说明“一个字被写了一笔、又回到原值、旁边四个字没动”。NPU FSM 有没有真的走一遍复位，不在这张寄存器表的可见范围内——所以本卡**不宣称“NPU 已复位”**，也不因此打开 NPU 的任何功能。
+- **为什么是 NPU**：`gcc_sm8150_resets[]` 里 15 条 BCR，只有 NPU 这一块能证明是停着的（0137 实测三支 branch bit31 置位、bit0 清零；0x4d004 `0x80000002` 处在硬件门控），PDM 页与 C2-02 的 RCG 共用、MMSS／GPU／VIDEO 的 BCR 会打掉正在跑的子系统，全部排除；厂商内核里也没有任何 DT 消费者取 `GCC_NPU_BCR`（id 3），所以这一笔不抢别人的复位。
+- **主机证据**：`tools/tests/test-mh2lm-gcc-backend.py` 增至 11 例——accept 路径 `30 读 / 2 写`（`reset-done` 逐字段、`gccDelayCalls==1`、`regs[0x0014d000]==0`、`start` 行 `reads=30 writes=2 reset=1`）、到达即持有 `31 / 3`、assert 未落地 `25 / 2`、release 未落地 `31 / 3`、旁证移动 `30 / 2`、拒绝路径 `24 / 0`（零写、零映射）、probe+reset 与 vote+reset 两条互斥、无属性时零 `phase=reset` 行。`tools/tests/test-mh2lm-mdss-adt.py` 增五项：属性隐含 `sweet,clock-gcc`、与探针／投票树互不相同、五窗且 `reg` 与探针逐字节相同、摘属性后回到普通 GCC 树、与 `clock_share` 可组合。补丁 `0245` 在 `0244` 之上增量：基线 + 全部补丁重放后与原工作树逐字节相同。
+- **审计器第八人格 `--c2-07`**（叠在 `--c2-03` 上，与 `--c2-04`／`--c2-05`／`--c2-06`／`--c2-06-write` 互斥）：`check_reset()` 按结果复算读账（accept `19+11=30`、到达即持有 `31`＋第三笔 store、assert 未落地 `25`、拒绝 `24` 且 `writes=0`），要求 `reset-done` 落在它汇总的每一行之后、要求 assert 值 = 到达字配置位 | bit、release 值 = 到达字配置位 & ~bit（不信行上的字）、要求 `collateral` 与 `pulsed`／`restored` 互相自洽。`make-reset-ring.py` 合成 7 个接受变体（`ok`／`held`／`refused`／`running`／`collateral`／`stuck`／`unlatched`）与 12 个拒绝变体，`selftest-reset-auditor.py` 18/18 PASS。
+
+## 实机验收（0139 reset 档：一次脉冲打在停着的块上，`pulsed`）
+
+- **镜像**：`boot-16k-0139-gpioirq-panel-pipeline-clockreset.img`＝`7fccb0f9…`（35 545 088 B，与 0137／0138 同底座 gpioirq，只多复位属性）；载荷 `kernel.macho`＝`900bad03…`（17 966 752 B，CI 产出的 `xnu-kernel-0139`，其 `SHA256SUMS` 与解包一致；0138 是 17 966 648 B，+104 B 就是复位代码与文案），`kernel.macho.adt`＝`db9e132e…`（23 624 B），kernel 槽仍是 `27e7a1d1…` 的带 MHPANEL1 固件卷，参数表 605 字节。包装前逐符号核对过内核：`__ZN9IOQcomGCC10resetBlockEv` 与 `__ZN9IOQcomGCC18writeResetRegisterEjjPKc` 都存在且与脚本里写死的名字逐字符相同。
+- **环**：`logs/sweetlog-0139-0.bin`（`e035ac39…`，`total=315733`、`flush_sequence=8`、未回绕、3954 行）`--c2-03 --c2-07` **rc=0**：`clock_warn=0`、`clock_error=0`，34 条时钟行分布 `start 2`／`map 5`／`snapshot 11`／`register 1`／`decode 7`／`decode-sample 1`／`reset 1`／`reset-request 1`／`write-issued 2`／`reset-assert 1`／`reset-release 1`／`reset-done 1`。
+- **原文（环行号）**：
+
+```
+144 resource=gcc:0x14d000 phase=reset result=0 detail=armed name=gcc_npu reset-id=3 offset=0 bit=0 pulse-us=1
+190 resource=gcc:0x14d000 phase=map result=0 length=0x1000 offset=0x4d000 reset=1
+230 resource=gcc:0x14d000 name=gcc_npu consumer=sweetclock-reset phase=reset-request result=0 detail=idle held=0 value=0 cfg=0x80000002 axi=0x80000000 trig=0x80000000 at=0x80000000
+231 resource=gcc:0x14d000 … phase=write-issued result=0 stage=reset-assert write=1 value=0x1
+232 resource=gcc:0x14d000 … phase=reset-assert result=0 asserted=1 bit=0 value=0x1 mask=0xfffffff
+233 resource=gcc:0x14d000 … phase=write-issued result=0 stage=reset-release write=2 value=0
+234 resource=gcc:0x14d000 … phase=reset-release result=0 released=1 bit=0 value=0 delay-us=1
+235 resource=gcc:0x14d000 … phase=reset-done result=0 writes=2 stores=2 pulsed=1 restored=1 collateral=1 held-arrival=0 before=0 after=0 delay-us=1
+236 resource=cc1 phase=start result=0 windows=5 snapshot=11 reads=30 writes=2 variant=0x8150 reset=1
+```
+
+- **读账恒等式在设备上成立**：`19`（走查）+`1`（请求读 BCR）+`4`（同页四支）+`1`（assert 读回）+`1`（release 读回）+`4`（旁证再读）＝**30**，与 `start` 行的 `reads=30`、`writes=2` 逐值相等；审计器 `reset.reads=11`、`stores=2`、`done_rows=1`。
+- **四件事分开成立**：`stores=2`（`0x0`→`0x1`→`0x0`，两笔 `write-issued` 各记一次序号）；`pulsed=1`（assert 读回见到 bit0、release 读回见到 bit0 清零）；`restored=1`（最终字与到达字在配置掩码内相等，`before=0 after=0`）；`collateral=1`（同页四个 CBCR 前后逐字节相同）。`held-arrival=0` 说明这一块到达时就在跑（BCR 没被断言），所以走的是干净路径；`delay-us=1` 是厂商表缺省的那一微秒。
+- **到达状态本来就是“停着”**：`reset-request` 行把五个字一起记下——BCR `0x0`、`cfg=0x80000002`（bit31 停、bit1 硬件门控）、`axi`／`trig`／`at` 全是 `0x80000000`（bit31 停、bit0 无人投票）。这与 0137 的三支读数逐值一致，说明本卡的“已停止外设”不是纸面条件。
+- **`0x4d004` 仍是 `0x80000002`**：脉冲前后都没变，S4 里那条“厂商对 HWCG 模式不看 halt”的风险继续成立，本轮任何 halt 判读都不涉及这一支。
+- **非时钟基线等于 b32**：标记齐全且不多于参考（`touch_armed` 2、`touch_app_format` 1、`scanout_transfer` 1、`fb_handoff` 1、`touch_mode3` 1、`probe_drained` 1），`decode_sample_hz=19200000`、`variant=0x8150`；`SWEET IOWORKLOOP` 只剩 12 行（占环 0.003），0142 之前那版刷屏没有回来。
+- **本轮只飞了 reset 档**：默认档镜像 `226deae6…` 与 0139 的其余六张派生都打包了但没启动（用户这次只取了 reset 档那张环），所以“属性缺席时第五页不映射、`phase=reset` 行零条”在 0139 仍只有**主机证据**（`test-mh2lm-gcc-backend.py` 的零行断言＋`test-mh2lm-mdss-adt.py` 的摘属性逐字节相等），加上 0137／0138 同型设备对照，不冒充本轮实测。
+- **本轮的负向验证**：打包门禁第一版把“reset 树 = clock 树 + 一条属性”当成字面等式，跑出来 `AssertionError` 停在属性摘掉之后——补上“同时截回第五个 `reg` range”才逐字节相等。门禁拒的是我写的错断言，不是内核。
+- **结论**：C2-07 收束，范围就是**能力样本**——一个停着的块上，一笔断言、一微秒、一笔释放，落点、脉宽、回原值、四邻不动都能对账；**“NPU 被复位了”这句不写**，因为这张寄存器表看不见 FSM。C0-04 里 NPU 仍是“暂缓（无需求）”，本卡只把“没人要的复位也做对了”这件事记下来。**C2 至此 8/8 收口**（C2-01／02／08／03／04／05／06／07 各自在 0126～0139 的实测里成立，未覆盖项逐卡标注）。下一阶段接 C3（apps RSC 迁移）。
