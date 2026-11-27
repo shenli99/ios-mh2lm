@@ -72,6 +72,50 @@ clang 侧每次构建都不同）。也就是说可执行代码只差这条立�
 - **预期结果**：资源驱动可共享只读元数据；没有原始地址面向普通外设的接口。
 - **失败归属**：C3-02 locate／parse／lookup；资源不存在与传输失败分别记录。
 
+#### 实现与本地证据（C3-02 代码完成，待 0142 实机）
+
+**查询搬成一个独立翻译单元**：`SweetRSCDatabase.h/.cpp`（248／91 行）里没有任何 IOKit——`lookup()` 收字节数、资源名、
+辅助位掩码和一个读字回调，走 chunk 描述符、比 8 字节键、按生效的 slave 类施加判据，返回一个纯结构
+`SweetRSCResource{found,slave,matches,address,entry,aux,auxBytes,unit,width,vcd,levels[16],levelCount,reserved}`
+加一个 `SweetRSCStage` 说明**在哪一步拒绝**。一个只读模块不该有写助手的可能：这个类里根本没有 store。
+
+**判据抄的是 owner 的顺序，不是它的实现**（`SweetRPMh.cpp`）：公共 chunk 门（slave 3..5、entry 表字对齐、entry 表在块内、
+aux 基在块内）→ rail：地址高字 4、16 字节槽、辅助窗口在块内；ARC：地址高字 3、地址字对齐、电平表半字对齐、4..32 偶数字节、
+表与补齐都在块内、再校电平本身（首级为 0、严格递增、零只在末级之后、至少两级）；BCM：地址高字 5、地址字对齐、aux 恰 8 字节
+且表字对齐、两字都在块内、再校 unit／width／vcd。载入顺序同样照抄（2 描述符字 → 每项 2 键字直到命中 → 地址＋aux 描述字 →
+该类自己的字），`matches!=1` 即拒绝。
+
+**两处刻意不搬**，都写进了补丁说明：① owner 的同类兄弟 alias 检查读的是它自己的 `fBCMAvailable` 表，那是 owner 的账本而非
+DB 内容，公共模块表达不了，原样留在 owner；② 公共 chunk 门**不要求辅助基字对齐**——owner 只对 aux 做 `range(aux,0)`，
+一个比 owner 更严的第二读者本身就是分歧。夹具因此专门造了一个 aux 基偏两个字节的块并要求其中的 rail 项解析成功，
+把 `(aux&3)` 加回去这条立刻失败（双向已验证）。半字电平表按 `offset & ~3` 读下面那个字并缓存成对，和 owner 的 `db16()` 一致。
+
+**通道侧接入是一处 opt-in 属性**：节点上的 `sweet,rsc-query`（4 字节，值 1）；长度或值不对各打一条 ERROR 并点名实际值与
+期望值，没有这条属性就既不出行也不载入。`start()` 的顺序因此是 identity → command-db → **db-query** → tcs：
+查询只能在这里跑，块已映射、几何已知。**账分开记**：`fReads` 仍是 0141 环钉住的十次身份载入，查询的载入由 lookup 自己数，
+在总结行里单列 `query-reads=%u`，行里单列 `reads=%u`——"十次载入"继续是 C3-01 立下的那句话，查询的代价可见而不被摊进去。
+两条路径共用同一个 `readWindow()`，所以整份驱动里 `*(volatile uint32_t *)` 仍然只有一处。
+
+**两条失败分开记**：资源不存在是 `kIOReturnNotFound`（`stage=matches`），传输失败是 `kIOReturnNotReady`（其余 stage）；
+两者都是 WARN 加 `detail=query-refused` 并点名 stage 与实际载入数，然后**照常启动**——通道的证据不依赖 DB 可读，
+这一票由 owner 投。成功是一条 INFO：类、地址、entry、aux 地址／长度、unit／width／vcd、`matches` 与载入数。
+
+**本地检验**（三条，全部绿）：`test-mh2lm-rsc-database.py` 拿夹具从高层描述造块再让模块解析回来，每个门都有双向档，
+接受档钉死载入数（CN0 26 次、`ldoa14` 10 次、`mx` 13 次、八描述符全空 16 次），越界／截断／错误类型／辅助长度各归自己的 stage；
+`test-mh2lm-rsc-channel.py` 加了四条属性档与一条查询环（9 行、`query-reads=18`、`fReads` 仍 10）；
+`test-mh2lm-mdss-adt.py` 证明 `--rsc-query` 离不开 `--rsc-channel`（否则 `ValueError`）、不多加节点也不多加窗口、
+且被门控的十一棵时钟树依旧完全没有通道节点。
+
+**审计器**：`--c3-02`（蕴含 `--c3-01`）认 `phase=db-query`，要求环与旗标双向一致（查询环不许当 C3-01 判、通道环不许当 C3-02 判），
+并把它与**同一环里 owner 自己那条** `SWEET RPMH BCM: name=CN0 …` 逐字段比（`address`／`unit`／`width`／`vcd` 相等、`slave=5`、
+`matches=1`、`aux` 以 `/8` 结尾）；`enable-mask` 不比，那是调用方策略不是 DB 内容。自测 `selftest-channel-auditor.py`
+**PASS - 37 变体**（24 个 C3-01 ＋ 2 个合格查询环 ＋ 9 个应当被拒的查询环 ＋ 两个跨人格互拒）。
+
+**待实机**：0142 档（节点加一条属性、ADT `999e2705…`／23 924 B、十三张镜像、605 字节参数与十一棵门控树摘要不变）。
+判据：`SWEET RSC:` **9 行**（`db-query` 严格夹在 `command-db` 与 `tcs` 之间）、`reads=10`／`writes=0` 不动、
+`query-reads` 等于行内 `reads`、`query=ok`、与 owner 的 CN0 行逐字段相等、**零新增 WARN**（成功是 INFO，失败才 WARN）。
+补丁 `xnu/patches/0248-mh2lm-rsc-database.patch`（1 527 行），在基线上严格重放后与工作树逐字节相同。
+
 ### C3-03 原样提取现有 ACTIVE 执行器
 
 - **目标**：把现有 TCS 执行代码提取为内部模块，同时保持原服务为唯一硬件 owner。
