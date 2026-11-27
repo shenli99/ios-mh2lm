@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Actual C3-01 apps RSC channel against contract-only MMIO fixtures.
+"""Actual C3-01/C3-02 apps RSC channel against contract-only MMIO fixtures.
 Only OS allocation/locking primitives, the device memory backing store and the
 command DB descriptor are fixtures: the shipped IOQcomRSCChannel is compiled as
 written, with its single register accessor routed to the fixture register file.
 The structural checks pin the source to one load and no store at all - the
 channel's whole claim is that it cannot write - and the functional cases prove
 the ten-load read budget, every start refusal, the observation of the owner's
-TCS words without touching them, and a submit that answers NotReady.
+TCS words without touching them, a submit that answers NotReady, and - once the
+tree opts in - one read-only command DB query whose result is checked field by
+field against the words the fixture laid down.
 Usage: test-mh2lm-rsc-channel.py EXTRACTED_XNU
 """
 from pathlib import Path
@@ -120,6 +122,14 @@ rsc_source = rsc_source.replace('observed=*(volatile uint32_t *)(w.base+offset);
 rsc_source = rsc_source.replace('__asm__ volatile("dmb oshld" ::: "memory");', '(void)0;')
 assert 'readReg(w.base,offset)' in rsc_source and 'volatile uint32_t *)' not in rsc_source
 rsc_source = '\n#undef super\n' + rsc_source
+# The query module is a second file in the same kext: it owns the command DB
+# decoding and takes nothing but a reader, so the harness links the two exactly
+# as the build does - the header before the channel that includes it, the source
+# beside it - and no fixture stands in for either.
+db_header = re.sub(r'^#include.*\n', '', (arm/'SweetRSCDatabase.h').read_text(), flags=re.M)
+db_source = re.sub(r'^#include.*\n', '', (arm/'SweetRSCDatabase.cpp').read_text(), flags=re.M)
+assert 'kSweetRscDbHeader' in db_source and 'ReadWord' in db_header
+assert 'IOQcomRSC.cpp' not in db_source
 
 tests = r'''
 static unsigned writes(){unsigned n=0;for(auto&o:trace)if(o.write)++n;return n;}
@@ -145,14 +155,36 @@ static void seedRSC(){
  regs[0x0c3f000c]=dbPA;regs[0x0c3f0010]=dbBytes;
  regs[dbPA]=dbVersion;regs[dbPA+4]=dbMagic;regs[dbPA+140]=dbFlags;
 }
+/* The block's contents, laid out the way the format says and not the way the
+   query module computes: the header, then a rail chunk and a bandwidth chunk,
+   their entries, one auxiliary table, and the zero slave that ends the walk.
+   The panel's CN0 is the third name in the file, so a query has to walk past
+   the two rail entries before it can find it. */
+static void seedDb(){
+ regs[dbPA+8]=4u;regs[dbPA+12]=(240u-144u)|(2u<<16);          /* slave 4, entries at 144, aux at 240 */
+ regs[dbPA+24]=5u|((192u-144u)<<16);regs[dbPA+28]=(240u-144u)|(2u<<16);
+ regs[dbPA+40]=0u;regs[dbPA+44]=0u;                            /* the end of the chunk list */
+ regs[dbPA+144]=0x616f646cu;regs[dbPA+148]=0x3431u;            /* "ldoa14" */
+ regs[dbPA+160]=0x42100u;regs[dbPA+164]=0u;
+ regs[dbPA+168]=0x636f646cu;regs[dbPA+172]=0x33u;              /* "ldoc3" */
+ regs[dbPA+184]=0x42300u;regs[dbPA+188]=0u;
+ regs[dbPA+192]=0x304e43u;regs[dbPA+196]=0u;                   /* "CN0" */
+ regs[dbPA+208]=0x500a8u;regs[dbPA+212]=8u;                    /* eight bytes of aux, delta 0 */
+ regs[dbPA+216]=0x564341u;regs[dbPA+220]=0u;                   /* "ACV" */
+ regs[dbPA+232]=0x50ac0u;regs[dbPA+236]=8u|(8u<<16);           /* aux at 248 */
+ regs[dbPA+240]=20000u;regs[dbPA+244]=4u|(5u<<16);             /* CN0: unit, width 4, vcd 5 */
+ regs[dbPA+248]=1u;regs[dbPA+252]=0u;                          /* ACV: unit and no width */
+}
 /* abi/irqAbi/intid: 0 absent, otherwise (length,value) as given. */
 static IOService*rscNub(unsigned abiLen=4,uint32_t abiValue=1,
  unsigned irqAbiLen=4,uint32_t irqAbiValue=1,
- unsigned intidLen=4,uint32_t intidValue=37){
+ unsigned intidLen=4,uint32_t intidValue=37,
+ unsigned queryLen=0,uint32_t queryValue=1){
  auto*n=fixtureAlloc<IOService>();
  if(abiLen){uint32_t v=abiValue;setData(n,"sweet,rsc-abi",&v,abiLen);}
  if(irqAbiLen){uint32_t v=irqAbiValue;setData(n,"sweet,rsc-irq-abi",&v,irqAbiLen);}
  if(intidLen){uint32_t v=intidValue;setData(n,"sweet,rsc-intid",&v,intidLen);}
+ if(queryLen){uint32_t v=queryValue;setData(n,"sweet,rsc-query",&v,queryLen);}
  return n;
 }
 /* One refusal: no writes, no successful start row, every map released. */
@@ -214,6 +246,17 @@ int main(){
  {	/* another RSC's completion line must not be adopted as this one's */
   auto*n=rscNub(4,1,4,1,4,38);
   refusal(n,true,"detail=bad-rsc-intid value=38 expected=37");
+  n->release();
+ }
+ {	/* the query opt-in is versioned like the rest, and a short property is a
+      wrong tree rather than a version to guess at */
+  auto*n=rscNub(4,1,4,1,4,37,3);
+  refusal(n,true,"detail=bad-rsc-query length=3");
+  n->release();
+ }
+ {	/* an opt-in this firmware does not speak */
+  auto*n=rscNub(4,1,4,1,4,37,4,2);
+  refusal(n,true,"detail=bad-rsc-query value=0x2 expected=0x1");
   n->release();
  }
  {	/* a display RSC description pointed at this class: the DRV base differs */
@@ -373,7 +416,7 @@ int main(){
   assert(logged("phase=map resource=apps-db-locator result=0"));
   assert(logged("phase=command-db address=0xb0000100 bytes=1024 version=0x1 flags=0 detail=read-only-map"));
   assert(logged("phase=irq intid=37 detail=described-not-armed"));
-  assert(logged("phase=start result=0 windows=4 ranges=3 reads=10 writes=0 id=0x21000 tcs=8 ncpt=4 db=0xb0000100 db-size=1024 irq=37 submit=not-ready"));
+  assert(logged("phase=start result=0 windows=4 ranges=3 reads=10 query-reads=0 writes=0 id=0x21000 tcs=8 ncpt=4 db=0xb0000100 db-size=1024 irq=37 query=absent submit=not-ready"));
   /* the owner's TCS words were read and left exactly as they were */
   assert(logged("phase=tcs irq-enable=0x1f irq-status=0x40 detail=observed-not-owned"));
   assert(regs[0x18220d00]==0x1fu&&regs[0x18220d04]==0x40u);
@@ -411,6 +454,62 @@ int main(){
   assert(writes()==0);
   p->release();
   n->release();
+ }
+ {	/* C3-02: an opted-in tree gets one resource read out of the block through
+      the same single load site, and the row has to agree with the words the
+      fixture laid down - the panel's bandwidth resource, its unit, and the
+      width and vcd the encoder packs above it */
+  auto*n=rscNub(4,1,4,1,4,37,4,1);seedRSC();seedDb();messages.clear();mapCalls.clear();
+  unsigned maps=liveMaps;
+  auto*p=fixtureAlloc<IOQcomRSCChannel>();
+  assert(p->start(n));
+  /* the identity budget is untouched: the query has its own count */
+  assert(p->channelReads()==10);
+  assert(p->fQueryReads==18);
+  assert(logged("phase=db-query name=CN0 result=0 slave=5 address=0x500a8 entry=0xc0 aux=0xf0/8 unit=20000 width=4 vcd=5 matches=1 reads=18"));
+  assert(logged("phase=start result=0 windows=4 ranges=3 reads=10 query-reads=18"));
+  assert(logged("query=ok"));
+  assert(p->fIdentity.queryDone);
+  assert(p->fIdentity.querySlave==5u&&p->fIdentity.queryAddress==0x500a8u);
+  assert(p->fIdentity.queryUnit==20000u&&p->fIdentity.queryWidth==4u&&p->fIdentity.queryVcd==5u);
+  assert(p->fIdentity.queryAuxBytes==8u);
+  /* the query sits after the block is mapped and before the owner's TCS words */
+  assert(rowAt("phase=command-db")<rowAt("phase=db-query"));
+  assert(rowAt("phase=db-query")<rowAt("phase=tcs"));
+  assert(counted("phase=")==9);
+  assert(writes()==0);
+  p->stop(n);
+  assert(liveMaps==maps);
+  p->release();n->release();
+ }
+ {	/* without the opt-in the channel is the C3-01 one exactly: no query row, no
+      query loads, and a summary that says absent instead of pretending ok */
+  auto*n=rscNub();seedRSC();seedDb();messages.clear();
+  auto*p=fixtureAlloc<IOQcomRSCChannel>();
+  assert(p->start(n));
+  assert(!logged("phase=db-query"));
+  assert(p->channelReads()==10);
+  assert(p->fQueryReads==0);
+  assert(logged("query-reads=0"));
+  assert(logged("query=absent"));
+  assert(counted("phase=")==8);
+  assert(writes()==0);
+  p->stop(n);p->release();n->release();
+ }
+ {	/* an opted-in tree whose name is not in this block is a warning with a
+      reason, not a failed start: the display owner is the voter, and the
+      channel's evidence never depended on that one resource */
+  auto*n=rscNub(4,1,4,1,4,37,4,1);seedRSC();seedDb();messages.clear();
+  regs[dbPA+192]=0u;                    /* the panel's name is gone */
+  auto*p=fixtureAlloc<IOQcomRSCChannel>();
+  assert(p->start(n));
+  assert(logged("phase=db-query name=CN0 result="));
+  assert(logged("stage=matches"));
+  assert(logged("detail=query-refused"));
+  assert(logged("query=missing"));
+  assert(!p->fIdentity.queryDone);
+  assert(writes()==0);
+  p->stop(n);p->release();n->release();
  }
  {	/* a second start after stop is a real first start, not a refused one */
   auto*n=rscNub();seedRSC();messages.clear();
@@ -474,7 +573,7 @@ int main(){
 
 with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-') as temp:
     cpp = Path(temp)/'test.cpp'
-    cpp.write_text(prelude+extra+rsc_header+rsc_source+tests)
+    cpp.write_text(prelude+extra+db_header+rsc_header+rsc_source+db_source+tests)
     if os.environ.get('MH2LM_KEEP_CPP'):
         Path('/tmp/mh2lm-rsc-kept.cpp').write_text(cpp.read_text())
     binary = Path(temp)/'test'

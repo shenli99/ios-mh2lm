@@ -37,6 +37,7 @@ iokit/Kernel/arm/SweetRPMh.cpp                                    optional iokit
 iokit/Kernel/arm/IOQcomClock.cpp                                   optional iokitcpp
 iokit/Kernel/arm/IOQcomGCC.cpp                                     optional iokitcpp
 iokit/Kernel/arm/IOQcomRSC.cpp                                     optional iokitcpp
+iokit/Kernel/arm/SweetRSCDatabase.cpp                              optional iokitcpp
 
 iokit/Kernel/arm/SweetPanelPins.cpp                               optional iokitcpp
 

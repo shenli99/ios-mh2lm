@@ -1,0 +1,1527 @@
+From: mh2lm clock work <clock@mh2lm>
+Subject: [PATCH 0248] feat(rsc): read one resource out of the command DB through a shared query
+
+C3-02 asks for one thing the C3-01 channel does not yet have: a way to turn a
+resource name into the metadata the block holds for it, without a second
+interpretation of the block.  The 0141 ring proved the channel can map the three
+windows, read the header and describe the line; it reads the identity, the DB
+header and the TCS word, and it has no query at all.  This patch adds the query
+as a separate translation unit, one row in the ring, and one property in the
+tree, and it holds the channel's own budget fixed at ten loads while it does it.
+
+The module.  SweetRSCDatabase.h/.cpp is a plain C++ class with no IOKit in it:
+lookup() takes a byte count, a name, an auxiliary mask and a read thunk, walks
+the chunk descriptors at the top of the header, matches the eight-byte key the
+owner builds, applies the owner's per-class admission for the chunk's slave
+class, and returns a SweetRSCResource.  Every gate carries the stage it refused
+at, so a caller can tell "this block has no such resource" from "this block
+could not be read" - which the two failure modes need, because one is a tree
+that names a resource the firmware does not ship and the other is a mapping
+that is not there.
+
+Parity, and where it stops.  The admission rules are the owner's, in the owner's
+order, from SweetRPMh.cpp: the shared chunk gate (slave 3..5, word-aligned entry
+table, entry table inside the block, auxiliary base inside the block), then per
+class - rail: address high word 4 and a 16-byte slot, auxiliary window inside
+the block; ARC: address high word 3, word-aligned address, halfword-aligned
+level table, four to thirty-two even bytes, the table and its padding inside the
+block, then the levels themselves (first level zero, strictly ascending, a zero
+prefix only after the last real level, at least two levels); bandwidth: address
+high word 5, word-aligned address, exactly eight auxiliary bytes on a
+word-aligned table with both words inside the block, then the unit, the width
+and the vcd the owner demands before it votes.  The load order is the owner's
+too: two descriptor words, then two key words per entry until the key matches,
+then the address and the auxiliary descriptor, then the class's own words.  What
+is deliberately *not* copied is the owner's sibling alias check: that reads
+fBCMAvailable, the owner's own bookkeeping, not DB content, and a shared module
+cannot express it.  It stays where it is.
+
+Two places where this reader is less strict than the draft, both to match the
+owner.  First, the shared chunk gate does not require the auxiliary base to be
+word aligned; the owner only range-checks it, and a reader that refuses a chunk
+the owner resolves is a disagreement in the one direction this card cannot
+afford.  The fixture now builds a block whose second chunk has its auxiliary base
+two bytes off the running end and requires the rail entry in it to resolve;
+putting the alignment test back makes that case fail.  Second, the ARC level
+table is only halfword aligned, so the word holding a level is the word below
+it, read through `offset & ~3` and cached across the pair - the owner's db16()
+does the same, and a load at the halfword address would fault on this mapping.
+
+The channel.  The query is opt-in per boot, because a tree that does not name a
+resource gets no row and no load: `sweet,rsc-query` is a four-byte integer
+property on the channel node, value 1, and the channel refuses any other length
+or value with an ERROR row that names both the value it found and the one it
+expects.  With the property present start() reads the identity, the DB header
+and then the query, and only after that the TCS word: the query is the one place
+it can run, with the block mapped and the geometry known.  The load accounting
+is kept apart on purpose.  fReads stays the ten identity loads the 0141 ring
+pins, and the query's loads are counted by the lookup itself and printed in the
+row and in the summary separately, so "ten loads" keeps meaning what C3-01
+established and the query's cost is visible instead of folded in.  One load site:
+the query's thunk goes through the same readWindow() the rest of the channel
+uses, so the translation unit still has exactly one volatile read in it.
+
+The rows.  Success is one INFO row with the resource's class, address, entry,
+auxiliary address and length, unit, width and vcd, its match count and the loads
+it took.  Failure is one WARN naming the stage, the load count and
+detail=query-refused - a warning on purpose: a boot where the tree names a
+resource the block does not have is a boot this binary should make loud, and one
+that does not name a resource prints nothing at all.  Neither path can write:
+the class has no store helper, and the channel's submit() is still
+kIOReturnNotReady.
+
+The test-side comparison.  C3-02's own criterion is that the new reader agrees
+with the old one about a resource this platform is known to use, so the device
+check compares the db-query row against the display owner's own INFO row for
+CN0, which this boot prints earlier: name, address, unit, width and vcd, field
+by field.  enable-mask is excluded because it is caller policy (the mask the
+channel passes in), not DB content.  The auditor grew --c3-02 for that ring and
+refuses to judge a query ring as C3-01 or a channel ring as C3-02, because the
+row shape and the summary row have to agree with the binary that printed them.
+
+Host evidence.  tools/tests/test-mh2lm-rsc-database.py compiles the shipped
+module against a fixture that builds the block from a description and parses it
+back, with a two-sided case for every gate and the load count pinned (CN0 takes
+26 loads out of the fixture block, the channel's own fixture 18, a missing name
+14).  test-mh2lm-rsc-channel.py gained the four property cases and a query ring:
+9 rows, 18 query loads, query-reads accounted separately.  test-mh2lm-mdss-adt.py
+proves the property needs the node (`--rsc-query` without `--rsc-channel` is a
+ValueError), that it adds no node and no window, and that the gated clock trees
+still carry no channel node at all.
+
+No clocks, no votes, no writes: C3-02 moves a query, not a policy.  The display
+owner remains the only voter and the only writer in this stage.
+
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp
+index 4d4e499..20f678b 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp
+@@ -23,8 +23,16 @@
+  *    three command DB words and the TCS enable/status pair - ten loads. The
+  *    start row states the count, so a ring and this source can be reconciled
+  *    without guessing.
++ *  - C3-02 adds one query behind its own opt-in property and its own counter:
++ *    the shared read-only command DB module (SweetRSCDatabase) looks CN0 up and
++ *    the row reports class, address, entry/aux offsets and the validated
++ *    unit/width/vcd beside the display owner's own row for the same resource.
++ *    The module is the migration; this file only supplies the reader, so the
++ *    query cannot reach memory the channel could not already read, and a query
++ *    that fails is a WARN rather than a start refusal.
+  */
+ #include "IOQcomRSC.h"
++#include "SweetRSCDatabase.h"
+ #include <IOKit/IOLib.h>
+ #include <libkern/c++/OSData.h>
+ #include <string.h>
+@@ -88,7 +96,28 @@ IOQcomRSCChannel::validateProperties(IOService *provider)
+ 	 * for the same reason the ranges are: a channel that cannot say which line
+ 	 * completes it is not the apps RSC, and saying it is how the next card
+ 	 * avoids inventing a second owner. */
+-	return describeIRQ(provider);
++	if (!describeIRQ(provider)) return false;
++	/* C3-02 is its own opt-in, and present means versioned. A tree that asked
++	 * for the channel but not for the query keeps exactly the C3-01 read budget
++	 * and no query row; a tree that asked with the wrong shape is refused
++	 * rather than read "as far as it goes". */
++	OSData *query=OSDynamicCast(OSData,provider?provider->getProperty("sweet,rsc-query"):NULL);
++	if (query) {
++		if (query->getLength()!=4) {
++			SWEET_LOG_ERROR("SWEET RSC: phase=start result=%d detail=bad-rsc-query length=%u\n",
++			 kIOReturnBadArgument,(unsigned)query->getLength());
++			return false;
++		}
++		uint32_t wanted=0;
++		memcpy(&wanted,query->getBytesNoCopy(),4);
++		if (wanted!=kIOQcomRscQueryAbi) {
++			SWEET_LOG_ERROR("SWEET RSC: phase=start result=%d detail=bad-rsc-query value=%#x expected=%#x\n",
++			 kIOReturnBadArgument,wanted,kIOQcomRscQueryAbi);
++			return false;
++		}
++		fQueryEnabled=true;
++	}
++	return true;
+ }
+ 
+ bool
+@@ -318,9 +347,10 @@ IOQcomRSCChannel::observeTCS(void)
+ }
+ 
+ bool
+-IOQcomRSCChannel::readRegister(unsigned window,uint32_t offset,uint32_t *value)
++IOQcomRSCChannel::readWindow(unsigned window,uint32_t offset,uint32_t *value,
++ unsigned *loads)
+ {
+-	if (!value||window>=kIOQcomRscWindowCount||!fLock) return false;
++	if (!value||!loads||window>=kIOQcomRscWindowCount||!fLock) return false;
+ 	bool ok=false;
+ 	uint32_t observed=0;
+ 	IOLockLock(fLock);
+@@ -329,7 +359,7 @@ IOQcomRSCChannel::readRegister(unsigned window,uint32_t offset,uint32_t *value)
+ 		observed=*(volatile uint32_t *)(w.base+offset);
+ 		__asm__ volatile("dmb oshld" ::: "memory");
+ 		ok=true;
+-		fReads++;
++		(*loads)++;
+ 	} else {
+ 		fReadFailures++;
+ 	}
+@@ -339,6 +369,66 @@ IOQcomRSCChannel::readRegister(unsigned window,uint32_t offset,uint32_t *value)
+ 	return true;
+ }
+ 
++bool
++IOQcomRSCChannel::readRegister(unsigned window,uint32_t offset,uint32_t *value)
++{
++	/* The identity budget is the card's promise: ten loads, whatever the DB
++	 * holds. The query is charged to fQueryReads instead. */
++	return readWindow(window,offset,value,&fReads);
++}
++
++bool
++IOQcomRSCChannel::readDatabaseWord(uint32_t offset,uint32_t *value)
++{
++	return readWindow(kIOQcomRscWindowDB,offset,value,&fQueryReads);
++}
++
++bool
++IOQcomRSCChannel::readDatabaseThunk(void *context,uint32_t offset,uint32_t *value)
++{
++	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
++	return channel?channel->readDatabaseWord(offset,value):false;
++}
++
++void
++IOQcomRSCChannel::queryCommandDB(void)
++{
++	fIdentity.queryDone=false;
++	if (!fQueryEnabled) return;
++	/* One resource, the one the display owner already resolves for the panel:
++	 * CN0 is a class 5 bandwidth resource and its auxiliary block is the two
++	 * words the owner's own INFO row prints. The answer here has to agree with
++	 * that row field by field, which is what makes this a migration rather than
++	 * a second interpretation of the DB. */
++	SweetRSCResource resource={};
++	unsigned loads=0;
++	SweetRSCStage stage=SweetRSCStageNone;
++	if (!SweetRSCDatabase::lookup(this,&IOQcomRSCChannel::readDatabaseThunk,
++	    fIdentity.dbBytes,kIOQcomRscQueryName,kIOQcomRscQueryAuxMask,&resource,
++	    &loads,&stage)) {
++		/* Not a start refusal. The channel's evidence does not depend on the DB
++		 * being readable, and the display owner is the voter that already
++		 * accepts this boot. The row keeps "no such resource" apart from "could
++		 * not read it" by naming the stage that refused. */
++		SWEET_LOG_WARN("SWEET RSC: phase=db-query name=%s result=%d stage=%s reads=%u detail=query-refused\n",
++		 kIOQcomRscQueryName,
++		 (stage==SweetRSCStageMatches)?kIOReturnNotFound:kIOReturnNotReady,
++		 SweetRSCDatabase::stageName(stage),loads);
++		return;
++	}
++	fIdentity.queryDone=true;
++	fIdentity.queryAddress=resource.address;
++	fIdentity.querySlave=resource.slave;
++	fIdentity.queryAuxBytes=resource.auxBytes;
++	fIdentity.queryUnit=resource.unit;
++	fIdentity.queryWidth=resource.width;
++	fIdentity.queryVcd=resource.vcd;
++	SWEET_LOG_INFO("SWEET RSC: phase=db-query name=%s result=0 slave=%u address=%#x entry=%#x aux=%#x/%u unit=%u width=%u vcd=%u matches=%u reads=%u\n",
++	 kIOQcomRscQueryName,resource.slave,resource.address,resource.entry,
++	 resource.aux,resource.auxBytes,resource.unit,resource.width,resource.vcd,
++	 resource.matches,loads);
++}
++
+ void
+ IOQcomRSCChannel::unmapWindows(void)
+ {
+@@ -360,6 +450,15 @@ IOQcomRSCChannel::start(IOService *provider)
+ 	fReads=0;
+ 	fReadFailures=0;
+ 	fSubmitAttempts=0;
++	fQueryReads=0;
++	fQueryEnabled=false;
++	fIdentity.queryDone=false;
++	fIdentity.queryAddress=0;
++	fIdentity.queryUnit=0;
++	fIdentity.querySlave=0;
++	fIdentity.queryWidth=0;
++	fIdentity.queryVcd=0;
++	fIdentity.queryAuxBytes=0;
+ 	fLock=IOLockAlloc();
+ 	if (!fLock) {
+ 		SWEET_LOG_ERROR("SWEET RSC: phase=start result=%d detail=lock-absent\n",kIOReturnNoMemory);
+@@ -370,6 +469,7 @@ IOQcomRSCChannel::start(IOService *provider)
+ 	fMapped=true;
+ 	if (!readIdentity()) goto fail;
+ 	if (!mapCommandDB()) goto fail;
++	queryCommandDB();
+ 	if (!observeTCS()) goto fail;
+ 	/* Nothing below can write, so this is the whole published surface: an
+ 	 * identity, a read count, and a channel that refuses to submit. */
+@@ -381,9 +481,10 @@ IOQcomRSCChannel::start(IOService *provider)
+ 	setProperty("SweetRSCChannelIRQ",(unsigned long long)fIntid,32);
+ 	registerService();
+ 	fRegistered=true;
+-	SWEET_LOG_INFO("SWEET RSC: phase=start result=0 windows=%u ranges=%u reads=%u writes=0 id=%#x tcs=%u ncpt=%u db=%#x db-size=%u irq=%u submit=not-ready\n",
+-	 kIOQcomRscWindowCount,kIOQcomRscRangeCount,fReads,fIdentity.id,
+-	 fIdentity.tcsCount,fIdentity.ncpt,fIdentity.dbAddress,fIdentity.dbBytes,fIntid);
++	SWEET_LOG_INFO("SWEET RSC: phase=start result=0 windows=%u ranges=%u reads=%u query-reads=%u writes=0 id=%#x tcs=%u ncpt=%u db=%#x db-size=%u irq=%u query=%s submit=not-ready\n",
++	 kIOQcomRscWindowCount,kIOQcomRscRangeCount,fReads,fQueryReads,fIdentity.id,
++	 fIdentity.tcsCount,fIdentity.ncpt,fIdentity.dbAddress,fIdentity.dbBytes,fIntid,
++	 !fQueryEnabled?"absent":(fIdentity.queryDone?"ok":"missing"));
+ 	return true;
+ fail:
+ 	fAccepting=false;
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
+index 23d64db..4f9ea6c 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
+@@ -26,8 +26,17 @@
+  *    reported so a ring shows the caller was told no.
+  *  - The display owner keeps writing while this channel observes, so the TCS
+  *    interrupt-enable/status words are read once and reported as
+- *    observed-not-owned. That is the whole read budget: ten loads, zero
++ *    observed-not-owned. That is the whole fixed read budget: ten loads, zero
+  *    stores, and the ring states both.
++ *  - C3-02 adds one optional query, off by default: when the tree carries
++ *    sweet,rsc-query the channel asks the shared read-only command DB module
++ *    for the one resource the display owner already resolves (CN0) and reports
++ *    its class, address and auxiliary metadata next to the owner's own row.
++ *    The query is a separate read budget with its own counter, so the ten-load
++ *    identity budget stays a fixed number and the ring can show the two apart.
++ *    A query that fails is a WARN and never a start refusal: the channel's
++ *    evidence does not depend on the DB being readable, and the display owner
++ *    remains the only writer either way.
+  */
+ #ifndef IOQCOM_RSC_H
+ #define IOQCOM_RSC_H
+@@ -93,6 +102,13 @@ enum : uint32_t {
+  * card hands to the next one. */
+ enum : uint32_t { kIOQcomRscIntid = 37, kIOQcomRscIrqAbi = 1 };
+ 
++/* C3-02: the query opt-in and the one resource it asks about. The name and the
++ * zero auxiliary mask are the display owner's own entry for CN0
++ * (SweetRPMh.cpp, displayBCMs), so the two rows in a ring are comparable field
++ * by field: same name, same class, same address, same unit/width/vcd. */
++enum : uint32_t { kIOQcomRscQueryAbi = 1, kIOQcomRscQueryAuxMask = 0 };
++static const char *const kIOQcomRscQueryName = "CN0";
++
+ class IOQcomRSCChannel : public IOService {
+ 	OSDeclareDefaultStructors(IOQcomRSCChannel);
+ 	struct Window {
+@@ -111,15 +127,24 @@ class IOQcomRSCChannel : public IOService {
+ 		uint32_t major, tcsCount, ncpt;
+ 		uint32_t dbAddress, dbBytes, dbVersion, dbFlags;
+ 		uint32_t irqEnable, irqStatus;
++		/* C3-02 answer for the queried resource, zero when no query ran. */
++		uint32_t queryAddress, queryUnit;
++		unsigned querySlave, queryWidth, queryVcd, queryAuxBytes;
++		bool queryDone;
+ 		bool valid;
+ 	} fIdentity;
+ 	uint32_t fIntid;
+ 	unsigned fReads, fReadFailures, fSubmitAttempts;
++	/* Query loads are counted apart from the identity budget: one is a fixed
++	 * number this card promises, the other depends on where the entry sits. */
++	unsigned fQueryReads;
++	bool fQueryEnabled;
+ 	bool fMapped, fRegistered, fAccepting;
+ 	bool validateProperties(IOService *provider);
+ 	bool mapWindows(IOService *provider);
+ 	bool readIdentity(void);
+ 	bool mapCommandDB(void);
++	void queryCommandDB(void);
+ 	bool observeTCS(void);
+ 	bool describeIRQ(IOService *provider);
+ 	void unmapWindows(void);
+@@ -127,8 +152,15 @@ class IOQcomRSCChannel : public IOService {
+ 	 * against the declared window before the load, the load carries the read
+ 	 * barrier this SoC needs, and the access runs under the channel lock so a
+ 	 * late caller cannot observe a half-released mapping. Loads only: there is
+-	 * no store counterpart to audit, which is the card's whole point. */
++	 * no store counterpart to audit, which is the card's whole point. The load
++	 * counter is a parameter so the query can charge its own budget. */
++	bool readWindow(unsigned window, uint32_t offset, uint32_t *value,
++	 unsigned *loads);
+ 	bool readRegister(unsigned window, uint32_t offset, uint32_t *value);
++	/* The command DB reader handed to the shared query module: same accessor,
++	 * same DB window, its own counter. */
++	bool readDatabaseWord(uint32_t offset, uint32_t *value);
++	static bool readDatabaseThunk(void *context, uint32_t offset, uint32_t *value);
+ public:
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRSCDatabase.cpp b/dxb/xnu/iokit/Kernel/arm/SweetRSCDatabase.cpp
+new file mode 100644
+index 0000000..063fe6a
+--- /dev/null
++++ b/dxb/xnu/iokit/Kernel/arm/SweetRSCDatabase.cpp
+@@ -0,0 +1,248 @@
++/* SM8150 apps RSC command DB: C3-02, one read-only lookup.
++ *
++ * The whole module is a walk over firmware data. Every load goes through the
++ * caller's reader, every field is validated before the next load, and the only
++ * outputs are the class, the address, the auxiliary window and - for a
++ * bandwidth resource - the two validated auxiliary words. There is no store
++ * here, no scratch buffer and no state that outlives one call.
++ */
++#include "SweetRSCDatabase.h"
++
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++
++/* Firmware layout, taken from the vendor's rpmh-rsc command DB and from the
++ * display owner in this tree, which already parses the same block. */
++enum : uint32_t {
++	kSweetRscDbHeader = 144,  /* bytes of header before any entry table */
++	kSweetRscDbEntry = 24,    /* name 0..7, address 16, aux size 20, aux delta 22 */
++	kSweetRscDbChunkBase = 8, /* first chunk descriptor, inside the header */
++	kSweetRscDbChunkStride = 16,
++};
++enum : unsigned { kSweetRscDbChunks = 8, kSweetRscDbKeyBytes = 8 };
++
++/* One load, counted whether or not it answered: a ring that shows the attempts
++ * is more useful than one that shows the successes. */
++static bool
++sweetRscWord(void *context, SweetRSCDatabase::ReadWord read, uint32_t offset,
++ uint32_t *value, unsigned *loads)
++{
++	if (loads) ++*loads;
++	if (offset & 3u) return false;
++	return read && read(context, offset, value);
++}
++
++/* A window is inside the block when it starts inside it and fits in what is
++ * left. Both bounds are unsigned and the subtraction cannot wrap because the
++ * first test already failed. */
++static bool
++sweetRscRanges(unsigned dbBytes, uint32_t offset, uint32_t bytes)
++{
++	return offset <= dbBytes && bytes <= dbBytes - offset;
++}
++
++bool
++SweetRSCDatabase::lookup(void *context, ReadWord read, unsigned dbBytes,
++ const char *name, unsigned auxMask, SweetRSCResource *resource,
++ unsigned *loads, SweetRSCStage *stage)
++{
++	SweetRSCStage refused = SweetRSCStageNone;
++	SweetRSCResource found = {};
++
++	if (loads) *loads = 0;
++	if (!read || !name || !resource || !dbBytes) {
++		if (stage) *stage = SweetRSCStageName;
++		return false;
++	}
++	if (dbBytes < kSweetRscDbHeader) {
++		if (stage) *stage = SweetRSCStageHeader;
++		return false;
++	}
++	/* The key is the name as eight bytes, the way the owner builds it: the
++	 * string has to end inside those eight, so a longer name is a refusal
++	 * rather than a truncated match. */
++	uint32_t key[2] = { 0, 0 };
++	unsigned chars = 0;
++	while (chars < kSweetRscDbKeyBytes && name[chars])
++		key[chars / 4] |= (uint32_t)(uint8_t)name[chars] << (8 * (chars % 4)), ++chars;
++	if (!chars || name[chars]) {
++		if (stage) *stage = SweetRSCStageName;
++		return false;
++	}
++	unsigned matches = 0;
++	for (unsigned i = 0; i < kSweetRscDbChunks && !refused; i++) {
++		uint32_t at = kSweetRscDbChunkBase + kSweetRscDbChunkStride * i;
++		uint32_t head = 0, tail = 0;
++		if (!sweetRscWord(context, read, at, &head, loads) ||
++		    !sweetRscWord(context, read, at + 4, &tail, loads)) {
++			refused = SweetRSCStageHeader;
++			break;
++		}
++		unsigned slave = head & 0xffffu;
++		/* A zero slave ends the descriptor list: the firmware does not leave
++		 * holes and the owner stops here too. */
++		if (!slave) break;
++		uint32_t entries = kSweetRscDbHeader + (head >> 16);
++		uint32_t aux = kSweetRscDbHeader + (tail & 0xffffu);
++		unsigned count = tail >> 16;
++		/* Only the entry table has to be word aligned: the owner's header
++		 * gate asks for `range(aux, 0)` and nothing more, and the auxiliary
++		 * block is addressed in halfwords by an entry that carries its own
++		 * alignment rule. Requiring alignment of the base would refuse a
++		 * chunk the owner accepts, and this card's claim is that the two
++		 * readers agree - a stricter second reader is still a disagreement. */
++		if (slave < SweetRSCSlaveArc || slave > SweetRSCSlaveBcm ||
++		    (entries & 3u) ||
++		    !sweetRscRanges(dbBytes, entries, count * kSweetRscDbEntry) ||
++		    !sweetRscRanges(dbBytes, aux, 0)) {
++			refused = SweetRSCStageHeader;
++			break;
++		}
++		for (unsigned j = 0; j < count; j++) {
++			uint32_t entry = entries + kSweetRscDbEntry * j;
++			uint32_t word0 = 0, word1 = 0, address = 0, auxWords = 0;
++			if (!sweetRscWord(context, read, entry, &word0, loads) ||
++			    !sweetRscWord(context, read, entry + 4, &word1, loads)) {
++				refused = SweetRSCStageEntry;
++				break;
++			}
++			if (word0 != key[0] || word1 != key[1]) continue;
++			if (!sweetRscWord(context, read, entry + 16, &address, loads) ||
++			    !sweetRscWord(context, read, entry + 20, &auxWords, loads)) {
++				refused = SweetRSCStageEntry;
++				break;
++			}
++			unsigned auxBytes = auxWords & 0xffffu;
++			uint32_t table = aux + (auxWords >> 16);
++			uint32_t unit = 0;
++			unsigned width = 0, vcd = 0, reserved = 0;
++			unsigned levels[16] = {}, levelCount = 0;
++			if (slave == SweetRSCSlaveRail) {
++				/* A rail answers with a VRM address: high word 4, sixteen
++				 * byte slots, and an auxiliary block inside the DB. */
++				if ((address >> 16) != 4 || (address & 15u)) {
++					refused = SweetRSCStageAddress;
++					break;
++				}
++				if (!sweetRscRanges(dbBytes, table, auxBytes)) {
++					refused = SweetRSCStageAux;
++					break;
++				}
++			} else if (slave == SweetRSCSlaveArc) {
++				/* An ARC resource answers with a level table: high word 3,
++				 * word-aligned address and table, four to thirty-two bytes of
++				 * even length, and the table padded to its own alignment. */
++				if ((address >> 16) != 3 || (address & 3u) || (table & 1u)) {
++					refused = SweetRSCStageAddress;
++					break;
++				}
++				if (auxBytes < 4 || auxBytes > 32 || (auxBytes & 1u) ||
++				    !sweetRscRanges(dbBytes, table, auxBytes) ||
++				    !sweetRscRanges(dbBytes, table & ~3u,
++				     ((table & 3u) + auxBytes + 3u) & ~3u)) {
++					refused = SweetRSCStageAux;
++					break;
++				}
++				/* The table is a sequence of 16-bit levels and it is only
++				 * halfword aligned, so the word holding a level is the one
++				 * below it: the owner's db16() does the same, and a load at the
++				 * halfword address would fault on this mapping. One load covers
++				 * both levels of a word, so the loop reloads only when the word
++				 * changes. The head level is zero, the rest ascend, and once a
++				 * zero appears the tail must be zeros: that is what the consumer
++				 * downstream will index into. */
++				uint32_t pair = 0, pairAt = ~0u;
++				bool padding = false, bad = false;
++				for (unsigned k = 0; k < auxBytes / 2u; k++) {
++					uint32_t off = table + 2u * k;
++					if ((off & ~3u) != pairAt) {
++						if (!sweetRscWord(context, read, off & ~3u,
++						    &pair, loads)) {
++							bad = true;
++							break;
++						}
++						pairAt = off & ~3u;
++					}
++					unsigned level = (pair >> (8u * (off & 3u))) & 0xffffu;
++					if (!k) {
++						if (level) bad = true;
++					} else if (!level) {
++						padding = true;
++					} else if (padding || level <= levels[levelCount - 1]) {
++						bad = true;
++					}
++					if (bad) break;
++					if (!padding && levelCount < 16) levels[levelCount++] = level;
++				}
++				if (bad || levelCount < 2) {
++					refused = SweetRSCStageValues;
++					break;
++				}
++			} else {
++				/* A bandwidth resource answers with two words: the unit and
++				 * the packed width/vcd, both of which have to make sense
++				 * before anyone votes with them. */
++				if ((address >> 16) != 5 || (address & 3u)) {
++					refused = SweetRSCStageAddress;
++					break;
++				}
++				uint32_t packed = 0;
++				if (auxBytes != 8 || (table & 3u) ||
++				    !sweetRscRanges(dbBytes, table, 8) ||
++				    !sweetRscWord(context, read, table, &unit, loads) ||
++				    !sweetRscWord(context, read, table + 4, &packed, loads)) {
++					refused = SweetRSCStageAux;
++					break;
++				}
++				width = packed & 0xffffu;
++				vcd = (packed >> 16) & 255u;
++				reserved = packed >> 24;
++				/* An enable-only resource carries its meaning in the mask, so
++				 * a zero width is fine there; a bandwidth resource without a
++				 * width is not. */
++				if (!unit || (!width && !auxMask) || vcd >= 16 || reserved) {
++					refused = SweetRSCStageValues;
++					break;
++				}
++			}
++			found.slave = slave;
++			found.address = address;
++			found.entry = entry;
++			found.aux = table;
++			found.auxBytes = auxBytes;
++			found.unit = unit;
++			found.width = width;
++			found.vcd = vcd;
++			found.reserved = reserved;
++			found.levelCount = levelCount;
++			for (unsigned k = 0; k < levelCount; k++) found.levels[k] = levels[k];
++			++matches;
++		}
++	}
++	if (!refused && matches != 1) refused = SweetRSCStageMatches;
++	if (refused) {
++		if (stage) *stage = refused;
++		return false;
++	}
++	found.found = true;
++	found.matches = matches;
++	*resource = found;
++	if (stage) *stage = SweetRSCStageNone;
++	return true;
++}
++
++const char *
++SweetRSCDatabase::stageName(SweetRSCStage stage)
++{
++	switch (stage) {
++	case SweetRSCStageName: return "name";
++	case SweetRSCStageHeader: return "header";
++	case SweetRSCStageEntry: return "entry";
++	case SweetRSCStageAddress: return "address";
++	case SweetRSCStageAux: return "aux";
++	case SweetRSCStageValues: return "values";
++	case SweetRSCStageMatches: return "matches";
++	default: return "none";
++	}
++}
++
++#endif /* ARM64_BOARD_CONFIG_MH2LM */
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRSCDatabase.h b/dxb/xnu/iokit/Kernel/arm/SweetRSCDatabase.h
+new file mode 100644
+index 0000000..84a2df7
+--- /dev/null
++++ b/dxb/xnu/iokit/Kernel/arm/SweetRSCDatabase.h
+@@ -0,0 +1,91 @@
++/* SM8150 apps RSC command DB: C3-02, one read-only lookup.
++ *
++ * Contract of this module, in one place:
++ *  - The command DB is firmware data behind a 144-byte header. At offset 8 sit
++ *    up to eight 16-byte chunk descriptors - slave id, entry and auxiliary
++ *    deltas from the header, and an entry count - and the entries themselves
++ *    follow at 24 bytes each: an eight-byte name key, the resource address at
++ *    +16, the auxiliary length at +20 and the auxiliary delta at +22. Both
++ *    numbers at +20 share one word, so an entry costs one load, not two.
++ *  - This module reads that block and nothing else. It has no store, no cache,
++ *    no allocation and no state of its own: the caller passes the same word
++ *    reader its driver already uses for the mapped DB, so memory this card
++ *    cannot read is memory it cannot query either.
++ *  - Every field is validated before the next load: header geometry, the
++ *    slave/size class of each entry, the address high word and alignment, the
++ *    auxiliary window, and for class 5 the two auxiliary words. A block that
++ *    disagrees fails at the stage that disagreed and the stage comes back, so
++ *    a ring can say whether the DB was missing, malformed or simply had no
++ *    entry by that name.
++ *  - The answer is metadata, never a raw-address API: class, address, the
++ *    auxiliary offset/size and, for the classes that carry one, the validated
++ *    auxiliary content - class 5's unit and packed width/vcd, class 3's level
++ *    table. Decoding it here is what keeps the consumer from writing a second
++ *    parser against the same firmware bytes. Nothing here can be turned into a
++ *    value to write.
++ *  - The rules are the display owner's own (SweetRPMh::lookup/lookupArc/
++ *    lookupBCM): same classes, same alignments, same auxiliary sizes, exactly
++ *    one match. That is what makes a second reader comparable field by field
++ *    with the voter that already accepts the boot.
++ */
++#ifndef SWEET_RSC_DATABASE_H
++#define SWEET_RSC_DATABASE_H
++
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++
++#include <stdint.h>
++
++/* Slave id classes, as the RSC numbers them. 3 answers with a level table
++ * (display ARC), 4 with a rail address, 5 with a bandwidth block. */
++enum SweetRSCSlave : unsigned {
++	SweetRSCSlaveArc = 3,
++	SweetRSCSlaveRail = 4,
++	SweetRSCSlaveBcm = 5,
++};
++
++/* Which check refused, so a caller can log the stage instead of a bare false. */
++enum SweetRSCStage : unsigned {
++	SweetRSCStageNone = 0,
++	SweetRSCStageName,      /* absent, empty or longer than the 8-byte key */
++	SweetRSCStageHeader,    /* chunk descriptor geometry or DB size */
++	SweetRSCStageEntry,     /* an entry could not be read */
++	SweetRSCStageAddress,   /* address class or alignment, or table alignment */
++	SweetRSCStageAux,       /* auxiliary size or window */
++	SweetRSCStageValues,    /* class 5 unit/width/vcd/reserved */
++	SweetRSCStageMatches,   /* zero or several entries answered */
++};
++
++struct SweetRSCResource {
++	bool found;
++	unsigned slave;         /* SweetRSCSlave of the matching chunk */
++	unsigned matches;       /* entries that answered; success means exactly one */
++	uint32_t address;       /* resource address a TCS command names */
++	uint32_t entry;         /* DB offset of the matched entry, evidence only */
++	uint32_t aux;           /* DB offset of the auxiliary block */
++	unsigned auxBytes;      /* its declared length */
++	/* Class 5 only, already validated; zero for the other classes. */
++	uint32_t unit;
++	unsigned width, vcd, reserved;
++	/* Class 3 only: the level table, decoded and validated here so the ARC
++	 * consumer does not need a second parser (first entry zero, strictly
++	 * ascending, zero padding only at the end, at least two real levels). */
++	unsigned levels[16], levelCount;
++};
++
++class SweetRSCDatabase {
++public:
++	/* Reads one word of the mapped DB. Returns false when the load failed, so a
++	 * caller whose mapping is gone cannot get a partial answer. */
++	typedef bool (*ReadWord)(void *context, uint32_t offset, uint32_t *value);
++	/* Looks one resource up by its 8-byte name. auxMask is the caller's policy
++	 * bit for an enable-only resource (zero for a bandwidth resource); it is the
++	 * one input that is not in the DB, and it is the caller's to know.
++	 * loads, when not null, receives the number of word loads attempted. */
++	static bool lookup(void *context, ReadWord read, unsigned dbBytes,
++	 const char *name, unsigned auxMask, SweetRSCResource *resource,
++	 unsigned *loads, SweetRSCStage *stage);
++	static const char *stageName(SweetRSCStage stage);
++};
++
++#endif /* ARM64_BOARD_CONFIG_MH2LM */
++#endif /* SWEET_RSC_DATABASE_H */
+diff --git a/dxb/xnu/iokit/conf/files.arm64 b/dxb/xnu/iokit/conf/files.arm64
+index bacf919..8358836 100644
+--- a/dxb/xnu/iokit/conf/files.arm64
++++ b/dxb/xnu/iokit/conf/files.arm64
+@@ -37,6 +37,7 @@ iokit/Kernel/arm/SweetRPMh.cpp                                    optional iokit
+ iokit/Kernel/arm/IOQcomClock.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/IOQcomGCC.cpp                                     optional iokitcpp
+ iokit/Kernel/arm/IOQcomRSC.cpp                                     optional iokitcpp
++iokit/Kernel/arm/SweetRSCDatabase.cpp                              optional iokitcpp
+ 
+ iokit/Kernel/arm/SweetPanelPins.cpp                               optional iokitcpp
+ 
+diff --git a/tools/mk-mh2lm-mdss-adt.py b/tools/mk-mh2lm-mdss-adt.py
+index bd0bc19..8f7c58e 100644
+--- a/tools/mk-mh2lm-mdss-adt.py
++++ b/tools/mk-mh2lm-mdss-adt.py
+@@ -42,7 +42,7 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
+ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
+             clock_gate=False, clock_disable=False, clock_share=False,
+             clock_vote_probe=False, clock_vote=False, clock_reset=False,
+-            rsc_channel=False):
++            rsc_channel=False, rsc_query=False):
+     # C2-05 stands on both cards below it, so the two switch it needs are implied
+     # here rather than trusted to every caller: a share node without them would be
+     # refused at start and the image would carry a property that can do nothing.
+@@ -52,6 +52,10 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+     # implies the probe: a node that asked for the vote alone would be refused at
+     # start, and the generator will not emit one.
+     clock_vote_probe = clock_vote_probe or clock_vote
++    # C3-02's query lives on the C3-01 channel: a tree that asked for the query
++    # without the channel would carry a property nothing reads.
++    if rsc_query and not rsc_channel:
++        raise ValueError('--rsc-query needs --rsc-channel')
+     display_noc = display_noc or panel_pipeline
+     display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
+     root, end = adt.parse(blob)
+@@ -172,6 +176,11 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+                      ('sweet,rsc-abi', 0, struct.pack('<I', 1)),
+                      ('sweet,rsc-irq-abi', 0, struct.pack('<I', 1)),
+                      ('sweet,rsc-intid', 0, struct.pack('<I', 37))]
++        if rsc_query:
++            # C3-02: permission to ask the command DB about one known resource.
++            # Its own versioned opt-in, so a tree that keeps the C3-01 read
++            # budget keeps exactly that budget and emits no query row.
++            rsc.props.append(('sweet,rsc-query', 0, struct.pack('<I', 1)))
+         arm.children.append(rsc)
+     if panel_pins:
+         pins = adt.Node()
+@@ -287,6 +296,7 @@ if __name__ == '__main__':
+     parser.add_argument('--clock-vote', action='store_true', help='append the C2-06 vote opt-in (implies --clock-vote-probe); stores one vote bit, waits for the aggregate, and withdraws it again')
+     parser.add_argument('--clock-reset', action='store_true', help='append the C2-07 reset opt-in (implies --gcc); maps the NPC page for itself and pulses the NPU reset bit once, 1 us wide, only after proving the block stopped')
+     parser.add_argument('--rsc-channel', action='store_true', help='append the C3-01 read-only apps RSC channel; same three ranges as the display owner, no GIC range, zero stores')
++    parser.add_argument('--rsc-query', action='store_true', help='C3-02: let the channel query the read-only command DB for one known resource; requires --rsc-channel')
+     parser.add_argument('source', type=Path)
+     parser.add_argument('destination', type=Path)
+     args = parser.parse_args()
+@@ -295,4 +305,5 @@ if __name__ == '__main__':
+         sys.exit('output must differ from the baseline ADT')
+     destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
+                       args.clock_disable, args.clock_share, args.clock_vote_probe,
+-                      args.clock_vote, args.clock_reset, args.rsc_channel))
++                      args.clock_vote, args.clock_reset, args.rsc_channel,
++                      args.rsc_query))
+diff --git a/tools/tests/test-mh2lm-mdss-adt.py b/tools/tests/test-mh2lm-mdss-adt.py
+index 1f0f470..caed603 100644
+--- a/tools/tests/test-mh2lm-mdss-adt.py
++++ b/tools/tests/test-mh2lm-mdss-adt.py
+@@ -710,6 +710,44 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-channel-adt-') as temp:
+                     str(source), str(output)], check=True)
+     assert output.read_bytes() == chan
+     assert source.read_bytes() == blob
++# C3-02 adds one property to that node and nothing else: the query is a request
++# the channel can honour, and a tree that does not ask for it must not carry the
++# word at all, so an older image and this one differ by exactly four bytes.
++assert b'sweet,rsc-query' not in chan
++query = m.derive(blob, rsc_channel=True, rsc_query=True)
++qtree, end = adt.parse(query)
++assert end == len(query)
++qreader = next(n for n in qtree.children[1].children if n.name == 'rsc-channel')
++assert qreader.prop('sweet,rsc-query') == struct.pack('<I', 1)
++assert qreader.prop('reg') == rsc.prop('reg')
++# The node keeps its place: the request adds a property, not a node. ctree was
++# stripped above to prove the node is removable, so compare against a fresh parse.
++plain, _ = adt.parse(m.derive(blob, rsc_channel=True))
++qnames = [n.name for n in qtree.children[1].children]
++assert qnames == [n.name for n in plain.children[1].children], qnames
++# The property is the only difference: take it out and the C3-01 tree is back.
++qreader.props = [x for x in qreader.props if x[0] != 'sweet,rsc-query']
++assert adt.serialize(qtree) == chan
++# It is a request about the channel, so a tree that does not declare one cannot
++# carry it: the generator refuses rather than describing a listener nobody owns.
++try:
++    m.derive(blob, rsc_query=True)
++except ValueError:
++    pass
++else:
++    raise AssertionError('--rsc-query without --rsc-channel must be refused')
++# And the display owner's own derivation is untouched by the reader's request.
++assert b'sweet,rsc-query' not in m.derive(blob, display_resources=True, rsc_channel=True)
++with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-query-adt-') as temp:
++    source, output = Path(temp)/'base.adt', Path(temp)/'query.adt'
++    source.write_bytes(blob)
++    subprocess.run([sys.executable, str(Path(m.__file__)), '--rsc-channel',
++                    '--rsc-query', str(source), str(output)], check=True)
++    assert output.read_bytes() == query
++    assert source.read_bytes() == blob
++    refused = subprocess.run([sys.executable, str(Path(m.__file__)), '--rsc-query',
++                              str(source), str(output)], capture_output=True)
++    assert refused.returncode != 0, refused
+ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
+       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
+       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
+@@ -718,4 +756,5 @@ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order
+       'top of it as a property of its own, and the C2-07 reset, which shares the '
+       'fifth range with the probe but implies neither it nor the vote, and the '
+       'C3-01 read-only apps RSC channel, which names the owner\'s three ranges and '
+-      'no GIC range at all')
++      'no GIC range at all, and the C3-02 query request, which is one property on '
++      'that node and refuses to exist without it')
+diff --git a/tools/tests/test-mh2lm-rsc-channel.py b/tools/tests/test-mh2lm-rsc-channel.py
+index a8e5aa8..91f97ec 100755
+--- a/tools/tests/test-mh2lm-rsc-channel.py
++++ b/tools/tests/test-mh2lm-rsc-channel.py
+@@ -1,12 +1,14 @@
+ #!/usr/bin/env python3
+-"""Actual C3-01 apps RSC channel against contract-only MMIO fixtures.
++"""Actual C3-01/C3-02 apps RSC channel against contract-only MMIO fixtures.
+ Only OS allocation/locking primitives, the device memory backing store and the
+ command DB descriptor are fixtures: the shipped IOQcomRSCChannel is compiled as
+ written, with its single register accessor routed to the fixture register file.
+ The structural checks pin the source to one load and no store at all - the
+ channel's whole claim is that it cannot write - and the functional cases prove
+ the ten-load read budget, every start refusal, the observation of the owner's
+-TCS words without touching them, and a submit that answers NotReady.
++TCS words without touching them, a submit that answers NotReady, and - once the
++tree opts in - one read-only command DB query whose result is checked field by
++field against the words the fixture laid down.
+ Usage: test-mh2lm-rsc-channel.py EXTRACTED_XNU
+ """
+ from pathlib import Path
+@@ -120,6 +122,14 @@ rsc_source = rsc_source.replace('observed=*(volatile uint32_t *)(w.base+offset);
+ rsc_source = rsc_source.replace('__asm__ volatile("dmb oshld" ::: "memory");', '(void)0;')
+ assert 'readReg(w.base,offset)' in rsc_source and 'volatile uint32_t *)' not in rsc_source
+ rsc_source = '\n#undef super\n' + rsc_source
++# The query module is a second file in the same kext: it owns the command DB
++# decoding and takes nothing but a reader, so the harness links the two exactly
++# as the build does - the header before the channel that includes it, the source
++# beside it - and no fixture stands in for either.
++db_header = re.sub(r'^#include.*\n', '', (arm/'SweetRSCDatabase.h').read_text(), flags=re.M)
++db_source = re.sub(r'^#include.*\n', '', (arm/'SweetRSCDatabase.cpp').read_text(), flags=re.M)
++assert 'kSweetRscDbHeader' in db_source and 'ReadWord' in db_header
++assert 'IOQcomRSC.cpp' not in db_source
+ 
+ tests = r'''
+ static unsigned writes(){unsigned n=0;for(auto&o:trace)if(o.write)++n;return n;}
+@@ -145,14 +155,36 @@ static void seedRSC(){
+  regs[0x0c3f000c]=dbPA;regs[0x0c3f0010]=dbBytes;
+  regs[dbPA]=dbVersion;regs[dbPA+4]=dbMagic;regs[dbPA+140]=dbFlags;
+ }
++/* The block's contents, laid out the way the format says and not the way the
++   query module computes: the header, then a rail chunk and a bandwidth chunk,
++   their entries, one auxiliary table, and the zero slave that ends the walk.
++   The panel's CN0 is the third name in the file, so a query has to walk past
++   the two rail entries before it can find it. */
++static void seedDb(){
++ regs[dbPA+8]=4u;regs[dbPA+12]=(240u-144u)|(2u<<16);          /* slave 4, entries at 144, aux at 240 */
++ regs[dbPA+24]=5u|((192u-144u)<<16);regs[dbPA+28]=(240u-144u)|(2u<<16);
++ regs[dbPA+40]=0u;regs[dbPA+44]=0u;                            /* the end of the chunk list */
++ regs[dbPA+144]=0x616f646cu;regs[dbPA+148]=0x3431u;            /* "ldoa14" */
++ regs[dbPA+160]=0x42100u;regs[dbPA+164]=0u;
++ regs[dbPA+168]=0x636f646cu;regs[dbPA+172]=0x33u;              /* "ldoc3" */
++ regs[dbPA+184]=0x42300u;regs[dbPA+188]=0u;
++ regs[dbPA+192]=0x304e43u;regs[dbPA+196]=0u;                   /* "CN0" */
++ regs[dbPA+208]=0x500a8u;regs[dbPA+212]=8u;                    /* eight bytes of aux, delta 0 */
++ regs[dbPA+216]=0x564341u;regs[dbPA+220]=0u;                   /* "ACV" */
++ regs[dbPA+232]=0x50ac0u;regs[dbPA+236]=8u|(8u<<16);           /* aux at 248 */
++ regs[dbPA+240]=20000u;regs[dbPA+244]=4u|(5u<<16);             /* CN0: unit, width 4, vcd 5 */
++ regs[dbPA+248]=1u;regs[dbPA+252]=0u;                          /* ACV: unit and no width */
++}
+ /* abi/irqAbi/intid: 0 absent, otherwise (length,value) as given. */
+ static IOService*rscNub(unsigned abiLen=4,uint32_t abiValue=1,
+  unsigned irqAbiLen=4,uint32_t irqAbiValue=1,
+- unsigned intidLen=4,uint32_t intidValue=37){
++ unsigned intidLen=4,uint32_t intidValue=37,
++ unsigned queryLen=0,uint32_t queryValue=1){
+  auto*n=fixtureAlloc<IOService>();
+  if(abiLen){uint32_t v=abiValue;setData(n,"sweet,rsc-abi",&v,abiLen);}
+  if(irqAbiLen){uint32_t v=irqAbiValue;setData(n,"sweet,rsc-irq-abi",&v,irqAbiLen);}
+  if(intidLen){uint32_t v=intidValue;setData(n,"sweet,rsc-intid",&v,intidLen);}
++ if(queryLen){uint32_t v=queryValue;setData(n,"sweet,rsc-query",&v,queryLen);}
+  return n;
+ }
+ /* One refusal: no writes, no successful start row, every map released. */
+@@ -216,6 +248,17 @@ int main(){
+   refusal(n,true,"detail=bad-rsc-intid value=38 expected=37");
+   n->release();
+  }
++ {	/* the query opt-in is versioned like the rest, and a short property is a
++      wrong tree rather than a version to guess at */
++  auto*n=rscNub(4,1,4,1,4,37,3);
++  refusal(n,true,"detail=bad-rsc-query length=3");
++  n->release();
++ }
++ {	/* an opt-in this firmware does not speak */
++  auto*n=rscNub(4,1,4,1,4,37,4,2);
++  refusal(n,true,"detail=bad-rsc-query value=0x2 expected=0x1");
++  n->release();
++ }
+  {	/* a display RSC description pointed at this class: the DRV base differs */
+   rscWrongPA=0;
+   auto*n=rscNub();
+@@ -373,7 +416,7 @@ int main(){
+   assert(logged("phase=map resource=apps-db-locator result=0"));
+   assert(logged("phase=command-db address=0xb0000100 bytes=1024 version=0x1 flags=0 detail=read-only-map"));
+   assert(logged("phase=irq intid=37 detail=described-not-armed"));
+-  assert(logged("phase=start result=0 windows=4 ranges=3 reads=10 writes=0 id=0x21000 tcs=8 ncpt=4 db=0xb0000100 db-size=1024 irq=37 submit=not-ready"));
++  assert(logged("phase=start result=0 windows=4 ranges=3 reads=10 query-reads=0 writes=0 id=0x21000 tcs=8 ncpt=4 db=0xb0000100 db-size=1024 irq=37 query=absent submit=not-ready"));
+   /* the owner's TCS words were read and left exactly as they were */
+   assert(logged("phase=tcs irq-enable=0x1f irq-status=0x40 detail=observed-not-owned"));
+   assert(regs[0x18220d00]==0x1fu&&regs[0x18220d04]==0x40u);
+@@ -412,6 +455,62 @@ int main(){
+   p->release();
+   n->release();
+  }
++ {	/* C3-02: an opted-in tree gets one resource read out of the block through
++      the same single load site, and the row has to agree with the words the
++      fixture laid down - the panel's bandwidth resource, its unit, and the
++      width and vcd the encoder packs above it */
++  auto*n=rscNub(4,1,4,1,4,37,4,1);seedRSC();seedDb();messages.clear();mapCalls.clear();
++  unsigned maps=liveMaps;
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(p->start(n));
++  /* the identity budget is untouched: the query has its own count */
++  assert(p->channelReads()==10);
++  assert(p->fQueryReads==18);
++  assert(logged("phase=db-query name=CN0 result=0 slave=5 address=0x500a8 entry=0xc0 aux=0xf0/8 unit=20000 width=4 vcd=5 matches=1 reads=18"));
++  assert(logged("phase=start result=0 windows=4 ranges=3 reads=10 query-reads=18"));
++  assert(logged("query=ok"));
++  assert(p->fIdentity.queryDone);
++  assert(p->fIdentity.querySlave==5u&&p->fIdentity.queryAddress==0x500a8u);
++  assert(p->fIdentity.queryUnit==20000u&&p->fIdentity.queryWidth==4u&&p->fIdentity.queryVcd==5u);
++  assert(p->fIdentity.queryAuxBytes==8u);
++  /* the query sits after the block is mapped and before the owner's TCS words */
++  assert(rowAt("phase=command-db")<rowAt("phase=db-query"));
++  assert(rowAt("phase=db-query")<rowAt("phase=tcs"));
++  assert(counted("phase=")==9);
++  assert(writes()==0);
++  p->stop(n);
++  assert(liveMaps==maps);
++  p->release();n->release();
++ }
++ {	/* without the opt-in the channel is the C3-01 one exactly: no query row, no
++      query loads, and a summary that says absent instead of pretending ok */
++  auto*n=rscNub();seedRSC();seedDb();messages.clear();
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(p->start(n));
++  assert(!logged("phase=db-query"));
++  assert(p->channelReads()==10);
++  assert(p->fQueryReads==0);
++  assert(logged("query-reads=0"));
++  assert(logged("query=absent"));
++  assert(counted("phase=")==8);
++  assert(writes()==0);
++  p->stop(n);p->release();n->release();
++ }
++ {	/* an opted-in tree whose name is not in this block is a warning with a
++      reason, not a failed start: the display owner is the voter, and the
++      channel's evidence never depended on that one resource */
++  auto*n=rscNub(4,1,4,1,4,37,4,1);seedRSC();seedDb();messages.clear();
++  regs[dbPA+192]=0u;                    /* the panel's name is gone */
++  auto*p=fixtureAlloc<IOQcomRSCChannel>();
++  assert(p->start(n));
++  assert(logged("phase=db-query name=CN0 result="));
++  assert(logged("stage=matches"));
++  assert(logged("detail=query-refused"));
++  assert(logged("query=missing"));
++  assert(!p->fIdentity.queryDone);
++  assert(writes()==0);
++  p->stop(n);p->release();n->release();
++ }
+  {	/* a second start after stop is a real first start, not a refused one */
+   auto*n=rscNub();seedRSC();messages.clear();
+   auto*p=fixtureAlloc<IOQcomRSCChannel>();
+@@ -474,7 +573,7 @@ int main(){
+ 
+ with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-') as temp:
+     cpp = Path(temp)/'test.cpp'
+-    cpp.write_text(prelude+extra+rsc_header+rsc_source+tests)
++    cpp.write_text(prelude+extra+db_header+rsc_header+rsc_source+db_source+tests)
+     if os.environ.get('MH2LM_KEEP_CPP'):
+         Path('/tmp/mh2lm-rsc-kept.cpp').write_text(cpp.read_text())
+     binary = Path(temp)/'test'
+diff --git a/tools/tests/test-mh2lm-rsc-database.py b/tools/tests/test-mh2lm-rsc-database.py
+new file mode 100644
+index 0000000..f0e2a83
+--- /dev/null
++++ b/tools/tests/test-mh2lm-rsc-database.py
+@@ -0,0 +1,527 @@
++#!/usr/bin/env python3
++"""Actual C3-02 command DB query module against a fixture-built database.
++The module is compiled as written and reads through a fixture reader (the same
++word-granular accessor the channel hands it), so the fixture is also the only
++place the DB layout is written down twice: the fixture builds the block from a
++high-level description and the module parses it back. Every gate the module
++declares has a two-sided case - the same block with the one field fixed must
++pass - and the accepted cases pin the load count and the entry/auxiliary
++offsets, so an off-by-one in a stride or a header size fails here instead of in
++a ring.
++Usage: test-mh2lm-rsc-database.py EXTRACTED_XNU
++"""
++from pathlib import Path
++import os
++import re
++import subprocess
++import sys
++import tempfile
++
++if len(sys.argv) != 2:
++    sys.exit(__doc__)
++arm = Path(sys.argv[1]) / 'iokit' / 'Kernel' / 'arm'
++header = (arm / 'SweetRSCDatabase.h').read_text()
++source = (arm / 'SweetRSCDatabase.cpp').read_text()
++# The module is header-only in its dependencies, so the fixture strips the
++# includes and supplies the board define itself.
++for name, text in (('header', header), ('source', source)):
++    if '#include' not in text:
++        sys.exit('%s: expected the shipped include lines' % name)
++strip = lambda text: re.sub(r'^#include.*$', '', text, flags=re.M)
++header, source = strip(header), strip(source)
++if 'ARM64_BOARD_CONFIG_MH2LM' not in source:
++    sys.exit('source: expected the board guard')
++
++prelude = r'''
++#include <cstdio>
++#include <cstring>
++#include <cassert>
++#include <cstdint>
++#include <map>
++#include <string>
++#include <vector>
++#define ARM64_BOARD_CONFIG_MH2LM 1
++'''
++
++fixture = r'''
++/* ---- the database the fixture builds, from a description ---- */
++/* Literals, not the module's constants: a wrong constant in the module has to
++   fail here, and a fixture that shares it would agree with the mistake. */
++static constexpr uint32_t HDR = 144, ENT = 24, CHUNK = 8, STRIDE = 16;
++
++struct Db {
++ std::map<uint32_t, uint32_t> words;
++ unsigned loads = 0, misaligned = 0;
++};
++static bool reader(void *context, uint32_t off, uint32_t *value)
++{
++ Db *db = (Db *)context;
++ if (off & 3u) { ++db->misaligned; return false; }
++ ++db->loads;
++ auto it = db->words.find(off);
++ if (it == db->words.end()) return false;
++ *value = it->second;
++ return true;
++}
++static void put(Db &db, uint32_t off, uint32_t word) { db.words[off] = word; }
++
++struct Entry {
++ std::string name;
++ uint32_t address = 0;
++ std::vector<uint32_t> aux; /* written 4-aligned, little endian */
++ unsigned declared = 0;     /* declared auxiliary bytes; 0 means 4*aux.size() */
++};
++struct Chunk {
++ unsigned slave;
++ std::vector<Entry> entries;
++ /* Bytes of padding before this chunk's auxiliary base. The owner's header gate
++  * range-checks that base and nothing else, so a real block may place it on a
++  * halfword; a reader that also demands word alignment reads those chunks as
++  * absent. */
++ unsigned skew = 0;
++};
++struct Layout {
++ std::vector<uint32_t> entries, aux;
++ uint32_t end = 0; /* one past the last byte written */
++ unsigned entryOf(size_t chunk, size_t index) const
++ { return entries[chunk] + (unsigned)index * ENT; }
++};
++
++static Layout build(Db &db, const std::vector<Chunk> &chunks)
++{
++ Layout layout;
++ uint32_t total = 0;
++ for (auto &c : chunks) total += (uint32_t)c.entries.size();
++ uint32_t e = HDR, a = HDR + total * ENT;
++ for (uint32_t i = 0; i < chunks.size(); ++i) {
++  layout.entries.push_back(e);
++  a += chunks[i].skew;
++  layout.aux.push_back(a);
++  for (uint32_t j = 0; j < chunks[i].entries.size(); ++j) {
++   const Entry &entry = chunks[i].entries[j];
++   assert(entry.name.size() <= 8);
++   uint32_t key[2] = {0, 0};
++   for (size_t k = 0; k < entry.name.size(); ++k)
++    key[k / 4] |= (uint32_t)(uint8_t)entry.name[k] << (8 * (k % 4));
++   uint32_t off = e + j * ENT;
++   put(db, off, key[0]);
++   put(db, off + 4, key[1]);
++   put(db, off + 16, entry.address);
++   unsigned declared = entry.declared ? entry.declared
++    : (unsigned)entry.aux.size() * 4;
++   /* The entry's auxiliary delta is relative to its chunk's auxiliary base,
++      which is what the display owner adds it to: a delta measured from the
++      header instead lands every table 144 bytes late. */
++   put(db, off + 20, declared | ((a - layout.aux[i]) << 16));
++   for (size_t w = 0; w < entry.aux.size(); ++w) put(db, a + 4 * (uint32_t)w, entry.aux[w]);
++   a += (uint32_t)entry.aux.size() * 4;
++  }
++  e += (uint32_t)chunks[i].entries.size() * ENT;
++  put(db, CHUNK + STRIDE * i, chunks[i].slave | ((layout.entries[i] - HDR) << 16));
++  put(db, CHUNK + STRIDE * i + 4,
++   (layout.aux[i] - HDR) | ((uint32_t)chunks[i].entries.size() << 16));
++ }
++ /* Every descriptor slot inside the header exists even when no chunk uses it:
++   the slot is inside the 144-byte header, so an unreadable one would mean the
++   mapping is gone, not that the list is short. Unused slots are the zero slave
++   that ends the walk. */
++ for (uint32_t i = (uint32_t)chunks.size(); i < 8; ++i) {
++  put(db, CHUNK + STRIDE * i, 0);
++  put(db, CHUNK + STRIDE * i + 4, 0);
++ }
++ layout.end = a;
++ return layout;
++}
++
++static SweetRSCResource run(Db &db, unsigned dbBytes, const char *name,
++ unsigned mask, unsigned *loads = nullptr, SweetRSCStage *stage = nullptr)
++{
++ SweetRSCResource resource = {};
++ unsigned count = 0;
++ SweetRSCStage refused = SweetRSCStageNone;
++ db.loads = 0;
++ db.misaligned = 0;
++ bool ok = SweetRSCDatabase::lookup(&db, reader, dbBytes, name, mask, &resource,
++  &count, &refused);
++ /* The counter the caller sees has to be the number of loads that happened,
++   and the module must never hand the reader a misaligned offset: the channel's
++   DB mapping is word-addressed. */
++ assert(db.misaligned == 0);
++ assert(db.loads == count);
++ assert(ok == resource.found);
++ if (loads) *loads = count;
++ if (stage) *stage = refused;
++ return resource;
++}
++static void refuses(Db &db, unsigned dbBytes, const char *name,
++ SweetRSCStage want, unsigned mask = 0)
++{
++ SweetRSCStage stage = SweetRSCStageNone;
++ SweetRSCResource resource = run(db, dbBytes, name, mask, nullptr, &stage);
++ assert(!resource.found);
++ assert(stage == want);
++}
++
++/* The display owner's own resource set: four rails, one ARC supply and the
++   panel's three bandwidth resources. CN0's unit/width/vcd are the numbers the
++   owner prints for it on this platform. */
++static std::vector<Chunk> base()
++{
++ return {
++  {4, {{"ldoa14", 0x42100}, {"ldoa17", 0x42200}, {"ldoc3", 0x42300}, {"ldoa5", 0x42400}}},
++  {3, {{"mx", 0x30000, {0x00010000u, 0x00030002u, 0u}}}},
++  {5, {{"CN0", 0x500a8, {20000u, (5u << 16) | 4u}},
++       {"ACV", 0x50ac0, {1u, 0u}}}},
++ };
++}
++
++static void accepted()
++{
++ Db db; Layout layout = build(db, base());
++ unsigned loads = 0;
++ SweetRSCResource r = run(db, layout.end, "CN0", 0, &loads);
++ assert(r.found && r.slave == SweetRSCSlaveBcm && r.matches == 1);
++ assert(r.address == 0x500a8u && r.unit == 20000u);
++ assert(r.width == 4u && r.vcd == 5u && r.reserved == 0u && r.auxBytes == 8u);
++ /* The offsets are evidence a ring can be reconciled with: the entry sits where
++   the descriptor says and the auxiliary block where the entry says. */
++ assert(r.entry == (uint32_t)layout.entryOf(2, 0));
++ assert(r.aux == layout.aux[2]);
++ /* What the query costs: four descriptor slots (the three chunks and the zero
++   slave that ends the walk), one key for each of the seven entries - a name is
++   only known by reading it, so the whole name column is scanned - and CN0's two
++   field words plus its two auxiliary words. Twenty-six loads is the number a
++   ring has to show, and the size of the name column is why it is not a
++   constant. */
++ assert(loads == 4 * 2 + 7 * 2 + 4);
++
++ r = run(db, layout.end, "ldoa14", 0);
++ assert(r.found && r.slave == SweetRSCSlaveRail && r.address == 0x42100u);
++ assert(r.auxBytes == 0u && r.unit == 0u && r.width == 0u && r.levelCount == 0u);
++ assert(r.entry == (uint32_t)layout.entryOf(0, 0));
++
++ r = run(db, layout.end, "ldoa5", 0);
++ assert(r.found && r.address == 0x42400u && r.entry == (uint32_t)layout.entryOf(0, 3));
++
++ r = run(db, layout.end, "mx", 0);
++ assert(r.found && r.slave == SweetRSCSlaveArc && r.address == 0x30000u);
++ assert(r.auxBytes == 12u && r.levelCount == 4u);
++ assert(r.levels[0] == 0u && r.levels[1] == 1u && r.levels[2] == 2u && r.levels[3] == 3u);
++
++ /* ACV is enable-only: its width is zero and the caller's mask is the only
++   thing that makes that legal, so the same bytes answer differently to the two
++   callers. */
++ r = run(db, layout.end, "ACV", 8u);
++ assert(r.found && r.address == 0x50ac0u && r.width == 0u && r.vcd == 0u);
++ refuses(db, layout.end, "ACV", SweetRSCStageValues, 0u);
++}
++
++static void nameStage()
++{
++ Db db; Layout layout = build(db, base());
++ refuses(db, layout.end, "", SweetRSCStageName);
++ refuses(db, layout.end, "CN0-extra", SweetRSCStageName);
++ refuses(db, layout.end, "ABCDEFGHI", SweetRSCStageName);
++ /* Eight characters is the key, so it is a legal name even when nothing has
++   it: the refusal is then about the entry, not the name. */
++ refuses(db, layout.end, "ZZZZZZZZ", SweetRSCStageMatches);
++ /* A shorter name is a different key, never a prefix match. */
++ refuses(db, layout.end, "CN", SweetRSCStageMatches);
++}
++
++static void headerStage()
++{
++ Db db; Layout layout = build(db, base());
++ /* Short of the header: the descriptors cannot all be there. */
++ refuses(db, 0, "CN0", SweetRSCStageName);
++ refuses(db, HDR - 4, "CN0", SweetRSCStageHeader);
++ refuses(db, HDR, "CN0", SweetRSCStageHeader);
++
++ /* A slave outside the three classes this platform numbers. */
++ std::vector<Chunk> chunks = base();
++ chunks[2].slave = 6;
++ Db wrong; Layout wrongLayout = build(wrong, chunks);
++ refuses(wrong, wrongLayout.end, "CN0", SweetRSCStageHeader);
++
++ /* Entries that start off a word boundary, and an entry table that does not
++   fit in the block. */
++ chunks = base();
++ Db shifted; Layout shiftedLayout = build(shifted, chunks);
++ put(shifted, CHUNK + STRIDE * 1, chunks[1].slave | ((uint32_t)(2u) << 16));
++ refuses(shifted, shiftedLayout.end, "CN0", SweetRSCStageHeader);
++ /* A block that ends inside the last chunk's entry table: the entries cannot
++   all be there, so the header is what disagrees, not an entry read. */
++ refuses(db, layout.entries[2] + ENT, "CN0", SweetRSCStageHeader);
++
++ /* The auxiliary base past the end of the block. */
++ Db auxOut = db;
++ put(auxOut, CHUNK + STRIDE * 2 + 4,
++  (0xff00u) | ((uint32_t)chunks[2].entries.size() << 16));
++ refuses(auxOut, layout.end, "CN0", SweetRSCStageHeader);
++
++ /* A chunk whose auxiliary base is not word aligned is still a readable chunk:
++   the owner's header gate only range-checks that base, and the entry carries
++   its own alignment rule. Demanding alignment of the base here would make this
++   reader refuse a block the display owner resolves, which is the one kind of
++   disagreement this card cannot have. The rail entry is the sharpest case: it
++   reads no auxiliary word at all, so the base is the only thing the gate sees. */
++ std::vector<Chunk> skewed(3);
++ skewed[0].slave = 4;
++ skewed[1].slave = 4;
++ skewed[2].slave = 5;
++ skewed[1].skew = 2;
++ skewed[0].entries.push_back({"vddcx", 0x40010, {}, 4});
++ skewed[1].entries.push_back({"ldoa14", 0x40020, {}, 4});
++ skewed[2].entries.push_back({"CN0", 0x500a8, {20000, (5u << 16) | 4u}, 8});
++ Db odd; Layout oddLayout = build(odd, skewed);
++ assert(oddLayout.aux[1] % 4u != 0);
++ SweetRSCResource rail = run(odd, oddLayout.end, "ldoa14", 0);
++ assert(rail.found && rail.slave == 4 && rail.address == 0x40020);
++}
++
++static void entryStage()
++{
++ Db db; Layout layout = build(db, base());
++ /* An unreadable entry word is its own stage: the block is fine, the load was
++   not. Both halves of the key matter, so either one missing refuses. */
++ Db missing = db;
++ missing.words.erase(layout.entryOf(2, 0));
++ refuses(missing, layout.end, "CN0", SweetRSCStageEntry);
++ missing = db;
++ missing.words.erase(layout.entryOf(2, 0) + 4);
++ refuses(missing, layout.end, "CN0", SweetRSCStageEntry);
++ missing = db;
++ missing.words.erase(layout.entryOf(2, 0) + 16);
++ refuses(missing, layout.end, "CN0", SweetRSCStageEntry);
++ missing = db;
++ missing.words.erase(layout.entryOf(2, 0) + 20);
++ refuses(missing, layout.end, "CN0", SweetRSCStageEntry);
++ /* A descriptor that cannot be read is the header stage, not the entry one. */
++ missing = db;
++ missing.words.erase(CHUNK + STRIDE * 2);
++ refuses(missing, layout.end, "CN0", SweetRSCStageHeader);
++}
++
++static void addressStage()
++{
++ /* Rail: high word must be 4 and the address must sit on a sixteen byte slot. */
++ std::vector<Chunk> chunks = base();
++ chunks[0].entries[0].address = 0x52100;
++ Db db; Layout layout = build(db, chunks);
++ refuses(db, layout.end, "ldoa14", SweetRSCStageAddress);
++ chunks[0].entries[0].address = 0x42104;
++ Db misaligned; Layout misalignedLayout = build(misaligned, chunks);
++ refuses(misaligned, misalignedLayout.end, "ldoa14", SweetRSCStageAddress);
++
++ /* BCM: high word 5, word aligned address. */
++ chunks = base();
++ chunks[2].entries[0].address = 0x400a8;
++ Db bcm; Layout bcmLayout = build(bcm, chunks);
++ refuses(bcm, bcmLayout.end, "CN0", SweetRSCStageAddress);
++ chunks[2].entries[0].address = 0x500aa;
++ Db odd; Layout oddLayout = build(odd, chunks);
++ refuses(odd, oddLayout.end, "CN0", SweetRSCStageAddress);
++
++ /* ARC: high word 3, word aligned address, halfword aligned table. The table
++   moves by two bytes, which shifts every level under the reader. */
++ chunks = base();
++ chunks[1].entries[0].address = 0x20000;
++ Db arc; Layout arcLayout = build(arc, chunks);
++ refuses(arc, arcLayout.end, "mx", SweetRSCStageAddress);
++
++ /* The class comes from the chunk, so a bandwidth address in the rail chunk is
++   refused even though the entry itself is well formed. */
++ chunks = base();
++ chunks[0].entries[1].address = 0x500a8;
++ Db other; Layout otherLayout = build(other, chunks);
++ refuses(other, otherLayout.end, "ldoa17", SweetRSCStageAddress);
++ /* The same block still answers for its other entries: one bad entry does not
++   poison a lookup that does not name it. */
++ assert(run(other, otherLayout.end, "ldoa14", 0).found);
++}
++
++static void auxStage()
++{
++ /* BCM: exactly two auxiliary words, word aligned. */
++ std::vector<Chunk> chunks = base();
++ chunks[2].entries[0].aux = {20000u};
++ Db shortAux; Layout shortLayout = build(shortAux, chunks);
++ refuses(shortAux, shortLayout.end, "CN0", SweetRSCStageAux);
++ chunks[2].entries[0].aux = {20000u, (5u << 16) | 4u, 7u};
++ Db longAux; Layout longLayout = build(longAux, chunks);
++ refuses(longAux, longLayout.end, "CN0", SweetRSCStageAux);
++ /* Declared eight bytes but only one word behind them, with nothing after it
++   that could be mistaken for the second one. */
++ chunks = base();
++ chunks[2].entries.resize(1);
++ chunks[2].entries[0].aux = {20000u};
++ chunks[2].entries[0].declared = 8;
++ Db truncated; Layout truncatedLayout = build(truncated, chunks);
++ refuses(truncated, truncatedLayout.end + 4, "CN0", SweetRSCStageAux);
++ refuses(truncated, truncatedLayout.end, "CN0", SweetRSCStageAux);
++
++ /* ARC: four to thirty-two bytes, even. */
++ unsigned bad[] = {2u, 34u, 5u};
++ for (unsigned bytes : bad) {
++  chunks = base();
++  chunks[1].entries[0].declared = bytes;
++  Db arc; Layout layout = build(arc, chunks);
++  refuses(arc, layout.end, "mx", SweetRSCStageAux);
++ }
++ /* An auxiliary block that runs off the end of the DB. */
++ chunks = base();
++ chunks[1].entries[0].declared = 32u;
++ Db off; Layout offLayout = build(off, chunks);
++ refuses(off, offLayout.end, "mx", SweetRSCStageAux);
++ /* Rail: its auxiliary window must be inside the block too. */
++ chunks = base();
++ chunks[0].entries[0].declared = 64u;
++ Db rail; Layout railLayout = build(rail, chunks);
++ refuses(rail, railLayout.end, "ldoa14", SweetRSCStageAux);
++}
++
++static void valuesStage()
++{
++ /* A bandwidth resource without a unit cannot be scaled, and an enable-only
++   resource needs the caller's mask to explain a zero width. */
++ struct Case { uint32_t unit, packed; unsigned mask; bool accepted; } cases[] = {
++  {0u, (5u << 16) | 4u, 0u, false},        /* no unit */
++  {20000u, 5u << 16, 0u, false},           /* no width */
++  {20000u, 5u << 16, 8u, true},            /* width is the mask's business */
++  {20000u, (16u << 16) | 4u, 0u, false},   /* vcd out of the range the encoder knows */
++  {20000u, (5u << 16) | 4u | (1u << 24), 0u, false}, /* reserved bits set */
++ };
++ for (unsigned i = 0; i < sizeof cases / sizeof *cases; ++i) {
++  std::vector<Chunk> chunks = base();
++  chunks[2].entries[0].aux = {cases[i].unit, cases[i].packed};
++  Db db; Layout layout = build(db, chunks);
++  if (cases[i].accepted) {
++   SweetRSCResource r = run(db, layout.end, "CN0", cases[i].mask);
++   assert(r.found && r.width == 0u);
++  } else {
++   refuses(db, layout.end, "CN0", SweetRSCStageValues, cases[i].mask);
++  }
++ }
++
++ /* ARC levels: zero head, strictly ascending, zero padding only at the end. */
++ struct Levels { uint32_t word0, word1; } bad[] = {
++  {0x00000001u, 0u},               /* head is not zero */
++  {0x00020000u, 0x00000001u},      /* third level descends */
++  {0x00010000u, 0x00000001u},      /* repeated level */
++  {0x00000000u, 0u},               /* only the head level */
++ };
++ for (unsigned i = 0; i < sizeof bad / sizeof *bad; ++i) {
++  std::vector<Chunk> chunks = base();
++  chunks[1].entries[0].aux = {bad[i].word0, bad[i].word1};
++  Db db; Layout layout = build(db, chunks);
++  refuses(db, layout.end, "mx", SweetRSCStageValues);
++ }
++ /* Padding then a real level again is not a table. */
++ {
++  std::vector<Chunk> chunks = base();
++  chunks[1].entries[0].aux = {0x00010000u, 0u, 0x00020000u};
++  Db db; Layout layout = build(db, chunks);
++  refuses(db, layout.end, "mx", SweetRSCStageValues);
++ }
++ /* A two level table is a table: the head zero is one of the two. */
++ {
++  std::vector<Chunk> chunks = base();
++  chunks[1].entries[0].aux = {0x00010000u, 0, 0};
++  Db db; Layout layout = build(db, chunks);
++  SweetRSCResource r = run(db, layout.end, "mx", 0);
++  assert(r.found && r.levelCount == 2u && r.levels[1] == 1u);
++ }
++}
++
++static void matchStage()
++{
++ /* Two entries by the same name: the caller cannot pick one. */
++ std::vector<Chunk> chunks = base();
++ chunks[2].entries.push_back({"CN0", 0x500b0u, {20001u, (6u << 16) | 4u}});
++ Db db; Layout layout = build(db, chunks);
++ refuses(db, layout.end, "CN0", SweetRSCStageMatches);
++ /* Two chunks that both answer, which the per-chunk gates cannot catch. */
++ chunks = base();
++ chunks[0].entries.push_back({"CN0", 0x42110u});
++ Db split; Layout splitLayout = build(split, chunks);
++ refuses(split, splitLayout.end, "CN0", SweetRSCStageMatches);
++ /* No entry at all. */
++ refuses(db, layout.end, "MM1", SweetRSCStageMatches);
++
++ /* A zero slave ends the descriptor list: whatever follows is not read, so a
++   broken descriptor after the terminator cannot refuse the block. */
++ chunks = base();
++ chunks.insert(chunks.begin() + 1, {0u, {}});
++ chunks.push_back({6u, {{"CN0", 0x500a8u}}});
++ Db terminated; Layout terminatedLayout = build(terminated, chunks);
++ refuses(terminated, terminatedLayout.end, "CN0", SweetRSCStageMatches);
++ refuses(terminated, terminatedLayout.end, "MM1", SweetRSCStageMatches);
++ assert(terminated.words.count(CHUNK + STRIDE * 3));
++
++ /* All eight descriptor slots used, none of them terminating: the walk stops
++   at eight without refusing. */
++ std::vector<Chunk> eight;
++ for (unsigned i = 0; i < 8; ++i) eight.push_back({4u, {}});
++ Db full; Layout fullLayout = build(full, eight);
++ refuses(full, fullLayout.end, "CN0", SweetRSCStageMatches);
++ unsigned loads = 0;
++ SweetRSCResource none = {};
++ assert(!SweetRSCDatabase::lookup(&full, reader, fullLayout.end, "CN0", 0u, &none, &loads, nullptr));
++ assert(loads == 16u && !none.found);
++}
++
++static void contract()
++{
++ /* The optional arguments are optional, and a caller that cannot supply a
++   reader or a name is refused instead of dereferenced. */
++ Db db; Layout layout = build(db, base());
++ SweetRSCResource r = {};
++ SweetRSCStage stage = SweetRSCStageNone;
++ assert(!SweetRSCDatabase::lookup(&db, nullptr, layout.end, "CN0", 0, &r, nullptr, &stage));
++ assert(stage == SweetRSCStageName);
++ assert(!SweetRSCDatabase::lookup(&db, reader, layout.end, nullptr, 0, &r, nullptr, &stage));
++ assert(stage == SweetRSCStageName);
++ assert(!SweetRSCDatabase::lookup(&db, reader, layout.end, "CN0", 0, nullptr, nullptr, &stage));
++ assert(stage == SweetRSCStageName);
++ /* A block with no bytes at all is refused as a name: there is nothing to
++   resolve the name against. */
++ assert(!SweetRSCDatabase::lookup(&db, reader, 0, "CN0", 0, &r, nullptr, &stage));
++ assert(stage == SweetRSCStageName);
++ /* A call that is refused before it reaches the block loads nothing. */
++ unsigned loads = 99;
++ assert(!SweetRSCDatabase::lookup(&db, nullptr, layout.end, "CN0", 0, &r, &loads, &stage));
++ assert(loads == 0 && stage == SweetRSCStageName);
++ assert(!strcmp(SweetRSCDatabase::stageName(SweetRSCStageNone), "none"));
++ assert(!strcmp(SweetRSCDatabase::stageName((SweetRSCStage)99), "none"));
++}
++
++int main()
++{
++ accepted();
++ nameStage();
++ headerStage();
++ entryStage();
++ addressStage();
++ auxStage();
++ valuesStage();
++ matchStage();
++ contract();
++ printf("test-mh2lm-rsc-database: PASS\n");
++ return 0;
++}
++'''
++
++
++with tempfile.TemporaryDirectory(prefix='mh2lm-db-') as temp:
++    cpp = Path(temp) / 'test.cpp'
++    cpp.write_text(prelude + header + source + fixture)
++    if os.environ.get('MH2LM_KEEP_CPP'):
++        Path('/tmp/mh2lm-db-kept.cpp').write_text(cpp.read_text())
++    binary = Path(temp) / 'test'
++    subprocess.run([os.environ.get('CXX', 'clang++-19'), '-std=c++17', '-g',
++                    '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
++                    str(cpp), '-o', str(binary)], check=True)
++    env = dict(os.environ)
++    env['ASAN_OPTIONS'] = env.get('ASAN_OPTIONS', '') + ':detect_leaks=0'
++    env['UBSAN_OPTIONS'] = env.get('UBSAN_OPTIONS', '') + ':halt_on_error=1:print_stacktrace=1'
++    subprocess.run([str(binary)], check=True, env=env, timeout=60)

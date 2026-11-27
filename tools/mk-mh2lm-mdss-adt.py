@@ -42,7 +42,7 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
 def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
             clock_gate=False, clock_disable=False, clock_share=False,
             clock_vote_probe=False, clock_vote=False, clock_reset=False,
-            rsc_channel=False):
+            rsc_channel=False, rsc_query=False):
     # C2-05 stands on both cards below it, so the two switch it needs are implied
     # here rather than trusted to every caller: a share node without them would be
     # refused at start and the image would carry a property that can do nothing.
@@ -52,6 +52,10 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
     # implies the probe: a node that asked for the vote alone would be refused at
     # start, and the generator will not emit one.
     clock_vote_probe = clock_vote_probe or clock_vote
+    # C3-02's query lives on the C3-01 channel: a tree that asked for the query
+    # without the channel would carry a property nothing reads.
+    if rsc_query and not rsc_channel:
+        raise ValueError('--rsc-query needs --rsc-channel')
     display_noc = display_noc or panel_pipeline
     display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
     root, end = adt.parse(blob)
@@ -172,6 +176,11 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
                      ('sweet,rsc-abi', 0, struct.pack('<I', 1)),
                      ('sweet,rsc-irq-abi', 0, struct.pack('<I', 1)),
                      ('sweet,rsc-intid', 0, struct.pack('<I', 37))]
+        if rsc_query:
+            # C3-02: permission to ask the command DB about one known resource.
+            # Its own versioned opt-in, so a tree that keeps the C3-01 read
+            # budget keeps exactly that budget and emits no query row.
+            rsc.props.append(('sweet,rsc-query', 0, struct.pack('<I', 1)))
         arm.children.append(rsc)
     if panel_pins:
         pins = adt.Node()
@@ -287,6 +296,7 @@ if __name__ == '__main__':
     parser.add_argument('--clock-vote', action='store_true', help='append the C2-06 vote opt-in (implies --clock-vote-probe); stores one vote bit, waits for the aggregate, and withdraws it again')
     parser.add_argument('--clock-reset', action='store_true', help='append the C2-07 reset opt-in (implies --gcc); maps the NPC page for itself and pulses the NPU reset bit once, 1 us wide, only after proving the block stopped')
     parser.add_argument('--rsc-channel', action='store_true', help='append the C3-01 read-only apps RSC channel; same three ranges as the display owner, no GIC range, zero stores')
+    parser.add_argument('--rsc-query', action='store_true', help='C3-02: let the channel query the read-only command DB for one known resource; requires --rsc-channel')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
@@ -295,4 +305,5 @@ if __name__ == '__main__':
         sys.exit('output must differ from the baseline ADT')
     destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
                       args.clock_disable, args.clock_share, args.clock_vote_probe,
-                      args.clock_vote, args.clock_reset, args.rsc_channel))
+                      args.clock_vote, args.clock_reset, args.rsc_channel,
+                      args.rsc_query))

@@ -710,6 +710,44 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-channel-adt-') as temp:
                     str(source), str(output)], check=True)
     assert output.read_bytes() == chan
     assert source.read_bytes() == blob
+# C3-02 adds one property to that node and nothing else: the query is a request
+# the channel can honour, and a tree that does not ask for it must not carry the
+# word at all, so an older image and this one differ by exactly four bytes.
+assert b'sweet,rsc-query' not in chan
+query = m.derive(blob, rsc_channel=True, rsc_query=True)
+qtree, end = adt.parse(query)
+assert end == len(query)
+qreader = next(n for n in qtree.children[1].children if n.name == 'rsc-channel')
+assert qreader.prop('sweet,rsc-query') == struct.pack('<I', 1)
+assert qreader.prop('reg') == rsc.prop('reg')
+# The node keeps its place: the request adds a property, not a node. ctree was
+# stripped above to prove the node is removable, so compare against a fresh parse.
+plain, _ = adt.parse(m.derive(blob, rsc_channel=True))
+qnames = [n.name for n in qtree.children[1].children]
+assert qnames == [n.name for n in plain.children[1].children], qnames
+# The property is the only difference: take it out and the C3-01 tree is back.
+qreader.props = [x for x in qreader.props if x[0] != 'sweet,rsc-query']
+assert adt.serialize(qtree) == chan
+# It is a request about the channel, so a tree that does not declare one cannot
+# carry it: the generator refuses rather than describing a listener nobody owns.
+try:
+    m.derive(blob, rsc_query=True)
+except ValueError:
+    pass
+else:
+    raise AssertionError('--rsc-query without --rsc-channel must be refused')
+# And the display owner's own derivation is untouched by the reader's request.
+assert b'sweet,rsc-query' not in m.derive(blob, display_resources=True, rsc_channel=True)
+with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-query-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'query.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--rsc-channel',
+                    '--rsc-query', str(source), str(output)], check=True)
+    assert output.read_bytes() == query
+    assert source.read_bytes() == blob
+    refused = subprocess.run([sys.executable, str(Path(m.__file__)), '--rsc-query',
+                              str(source), str(output)], capture_output=True)
+    assert refused.returncode != 0, refused
 print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
@@ -718,4 +756,5 @@ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order
       'top of it as a property of its own, and the C2-07 reset, which shares the '
       'fifth range with the probe but implies neither it nor the vote, and the '
       'C3-01 read-only apps RSC channel, which names the owner\'s three ranges and '
-      'no GIC range at all')
+      'no GIC range at all, and the C3-02 query request, which is one property on '
+      'that node and refuses to exist without it')

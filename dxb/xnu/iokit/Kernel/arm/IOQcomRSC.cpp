@@ -23,8 +23,16 @@
  *    three command DB words and the TCS enable/status pair - ten loads. The
  *    start row states the count, so a ring and this source can be reconciled
  *    without guessing.
+ *  - C3-02 adds one query behind its own opt-in property and its own counter:
+ *    the shared read-only command DB module (SweetRSCDatabase) looks CN0 up and
+ *    the row reports class, address, entry/aux offsets and the validated
+ *    unit/width/vcd beside the display owner's own row for the same resource.
+ *    The module is the migration; this file only supplies the reader, so the
+ *    query cannot reach memory the channel could not already read, and a query
+ *    that fails is a WARN rather than a start refusal.
  */
 #include "IOQcomRSC.h"
+#include "SweetRSCDatabase.h"
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSData.h>
 #include <string.h>
@@ -88,7 +96,28 @@ IOQcomRSCChannel::validateProperties(IOService *provider)
 	 * for the same reason the ranges are: a channel that cannot say which line
 	 * completes it is not the apps RSC, and saying it is how the next card
 	 * avoids inventing a second owner. */
-	return describeIRQ(provider);
+	if (!describeIRQ(provider)) return false;
+	/* C3-02 is its own opt-in, and present means versioned. A tree that asked
+	 * for the channel but not for the query keeps exactly the C3-01 read budget
+	 * and no query row; a tree that asked with the wrong shape is refused
+	 * rather than read "as far as it goes". */
+	OSData *query=OSDynamicCast(OSData,provider?provider->getProperty("sweet,rsc-query"):NULL);
+	if (query) {
+		if (query->getLength()!=4) {
+			SWEET_LOG_ERROR("SWEET RSC: phase=start result=%d detail=bad-rsc-query length=%u\n",
+			 kIOReturnBadArgument,(unsigned)query->getLength());
+			return false;
+		}
+		uint32_t wanted=0;
+		memcpy(&wanted,query->getBytesNoCopy(),4);
+		if (wanted!=kIOQcomRscQueryAbi) {
+			SWEET_LOG_ERROR("SWEET RSC: phase=start result=%d detail=bad-rsc-query value=%#x expected=%#x\n",
+			 kIOReturnBadArgument,wanted,kIOQcomRscQueryAbi);
+			return false;
+		}
+		fQueryEnabled=true;
+	}
+	return true;
 }
 
 bool
@@ -318,9 +347,10 @@ IOQcomRSCChannel::observeTCS(void)
 }
 
 bool
-IOQcomRSCChannel::readRegister(unsigned window,uint32_t offset,uint32_t *value)
+IOQcomRSCChannel::readWindow(unsigned window,uint32_t offset,uint32_t *value,
+ unsigned *loads)
 {
-	if (!value||window>=kIOQcomRscWindowCount||!fLock) return false;
+	if (!value||!loads||window>=kIOQcomRscWindowCount||!fLock) return false;
 	bool ok=false;
 	uint32_t observed=0;
 	IOLockLock(fLock);
@@ -329,7 +359,7 @@ IOQcomRSCChannel::readRegister(unsigned window,uint32_t offset,uint32_t *value)
 		observed=*(volatile uint32_t *)(w.base+offset);
 		__asm__ volatile("dmb oshld" ::: "memory");
 		ok=true;
-		fReads++;
+		(*loads)++;
 	} else {
 		fReadFailures++;
 	}
@@ -337,6 +367,66 @@ IOQcomRSCChannel::readRegister(unsigned window,uint32_t offset,uint32_t *value)
 	if (!ok) return false;
 	*value=observed;
 	return true;
+}
+
+bool
+IOQcomRSCChannel::readRegister(unsigned window,uint32_t offset,uint32_t *value)
+{
+	/* The identity budget is the card's promise: ten loads, whatever the DB
+	 * holds. The query is charged to fQueryReads instead. */
+	return readWindow(window,offset,value,&fReads);
+}
+
+bool
+IOQcomRSCChannel::readDatabaseWord(uint32_t offset,uint32_t *value)
+{
+	return readWindow(kIOQcomRscWindowDB,offset,value,&fQueryReads);
+}
+
+bool
+IOQcomRSCChannel::readDatabaseThunk(void *context,uint32_t offset,uint32_t *value)
+{
+	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
+	return channel?channel->readDatabaseWord(offset,value):false;
+}
+
+void
+IOQcomRSCChannel::queryCommandDB(void)
+{
+	fIdentity.queryDone=false;
+	if (!fQueryEnabled) return;
+	/* One resource, the one the display owner already resolves for the panel:
+	 * CN0 is a class 5 bandwidth resource and its auxiliary block is the two
+	 * words the owner's own INFO row prints. The answer here has to agree with
+	 * that row field by field, which is what makes this a migration rather than
+	 * a second interpretation of the DB. */
+	SweetRSCResource resource={};
+	unsigned loads=0;
+	SweetRSCStage stage=SweetRSCStageNone;
+	if (!SweetRSCDatabase::lookup(this,&IOQcomRSCChannel::readDatabaseThunk,
+	    fIdentity.dbBytes,kIOQcomRscQueryName,kIOQcomRscQueryAuxMask,&resource,
+	    &loads,&stage)) {
+		/* Not a start refusal. The channel's evidence does not depend on the DB
+		 * being readable, and the display owner is the voter that already
+		 * accepts this boot. The row keeps "no such resource" apart from "could
+		 * not read it" by naming the stage that refused. */
+		SWEET_LOG_WARN("SWEET RSC: phase=db-query name=%s result=%d stage=%s reads=%u detail=query-refused\n",
+		 kIOQcomRscQueryName,
+		 (stage==SweetRSCStageMatches)?kIOReturnNotFound:kIOReturnNotReady,
+		 SweetRSCDatabase::stageName(stage),loads);
+		return;
+	}
+	fIdentity.queryDone=true;
+	fIdentity.queryAddress=resource.address;
+	fIdentity.querySlave=resource.slave;
+	fIdentity.queryAuxBytes=resource.auxBytes;
+	fIdentity.queryUnit=resource.unit;
+	fIdentity.queryWidth=resource.width;
+	fIdentity.queryVcd=resource.vcd;
+	SWEET_LOG_INFO("SWEET RSC: phase=db-query name=%s result=0 slave=%u address=%#x entry=%#x aux=%#x/%u unit=%u width=%u vcd=%u matches=%u reads=%u\n",
+	 kIOQcomRscQueryName,resource.slave,resource.address,resource.entry,
+	 resource.aux,resource.auxBytes,resource.unit,resource.width,resource.vcd,
+	 resource.matches,loads);
 }
 
 void
@@ -360,6 +450,15 @@ IOQcomRSCChannel::start(IOService *provider)
 	fReads=0;
 	fReadFailures=0;
 	fSubmitAttempts=0;
+	fQueryReads=0;
+	fQueryEnabled=false;
+	fIdentity.queryDone=false;
+	fIdentity.queryAddress=0;
+	fIdentity.queryUnit=0;
+	fIdentity.querySlave=0;
+	fIdentity.queryWidth=0;
+	fIdentity.queryVcd=0;
+	fIdentity.queryAuxBytes=0;
 	fLock=IOLockAlloc();
 	if (!fLock) {
 		SWEET_LOG_ERROR("SWEET RSC: phase=start result=%d detail=lock-absent\n",kIOReturnNoMemory);
@@ -370,6 +469,7 @@ IOQcomRSCChannel::start(IOService *provider)
 	fMapped=true;
 	if (!readIdentity()) goto fail;
 	if (!mapCommandDB()) goto fail;
+	queryCommandDB();
 	if (!observeTCS()) goto fail;
 	/* Nothing below can write, so this is the whole published surface: an
 	 * identity, a read count, and a channel that refuses to submit. */
@@ -381,9 +481,10 @@ IOQcomRSCChannel::start(IOService *provider)
 	setProperty("SweetRSCChannelIRQ",(unsigned long long)fIntid,32);
 	registerService();
 	fRegistered=true;
-	SWEET_LOG_INFO("SWEET RSC: phase=start result=0 windows=%u ranges=%u reads=%u writes=0 id=%#x tcs=%u ncpt=%u db=%#x db-size=%u irq=%u submit=not-ready\n",
-	 kIOQcomRscWindowCount,kIOQcomRscRangeCount,fReads,fIdentity.id,
-	 fIdentity.tcsCount,fIdentity.ncpt,fIdentity.dbAddress,fIdentity.dbBytes,fIntid);
+	SWEET_LOG_INFO("SWEET RSC: phase=start result=0 windows=%u ranges=%u reads=%u query-reads=%u writes=0 id=%#x tcs=%u ncpt=%u db=%#x db-size=%u irq=%u query=%s submit=not-ready\n",
+	 kIOQcomRscWindowCount,kIOQcomRscRangeCount,fReads,fQueryReads,fIdentity.id,
+	 fIdentity.tcsCount,fIdentity.ncpt,fIdentity.dbAddress,fIdentity.dbBytes,fIntid,
+	 !fQueryEnabled?"absent":(fIdentity.queryDone?"ok":"missing"));
 	return true;
 fail:
 	fAccepting=false;

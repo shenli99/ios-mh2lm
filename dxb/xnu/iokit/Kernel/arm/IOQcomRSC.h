@@ -26,8 +26,17 @@
  *    reported so a ring shows the caller was told no.
  *  - The display owner keeps writing while this channel observes, so the TCS
  *    interrupt-enable/status words are read once and reported as
- *    observed-not-owned. That is the whole read budget: ten loads, zero
+ *    observed-not-owned. That is the whole fixed read budget: ten loads, zero
  *    stores, and the ring states both.
+ *  - C3-02 adds one optional query, off by default: when the tree carries
+ *    sweet,rsc-query the channel asks the shared read-only command DB module
+ *    for the one resource the display owner already resolves (CN0) and reports
+ *    its class, address and auxiliary metadata next to the owner's own row.
+ *    The query is a separate read budget with its own counter, so the ten-load
+ *    identity budget stays a fixed number and the ring can show the two apart.
+ *    A query that fails is a WARN and never a start refusal: the channel's
+ *    evidence does not depend on the DB being readable, and the display owner
+ *    remains the only writer either way.
  */
 #ifndef IOQCOM_RSC_H
 #define IOQCOM_RSC_H
@@ -93,6 +102,13 @@ enum : uint32_t {
  * card hands to the next one. */
 enum : uint32_t { kIOQcomRscIntid = 37, kIOQcomRscIrqAbi = 1 };
 
+/* C3-02: the query opt-in and the one resource it asks about. The name and the
+ * zero auxiliary mask are the display owner's own entry for CN0
+ * (SweetRPMh.cpp, displayBCMs), so the two rows in a ring are comparable field
+ * by field: same name, same class, same address, same unit/width/vcd. */
+enum : uint32_t { kIOQcomRscQueryAbi = 1, kIOQcomRscQueryAuxMask = 0 };
+static const char *const kIOQcomRscQueryName = "CN0";
+
 class IOQcomRSCChannel : public IOService {
 	OSDeclareDefaultStructors(IOQcomRSCChannel);
 	struct Window {
@@ -111,15 +127,24 @@ class IOQcomRSCChannel : public IOService {
 		uint32_t major, tcsCount, ncpt;
 		uint32_t dbAddress, dbBytes, dbVersion, dbFlags;
 		uint32_t irqEnable, irqStatus;
+		/* C3-02 answer for the queried resource, zero when no query ran. */
+		uint32_t queryAddress, queryUnit;
+		unsigned querySlave, queryWidth, queryVcd, queryAuxBytes;
+		bool queryDone;
 		bool valid;
 	} fIdentity;
 	uint32_t fIntid;
 	unsigned fReads, fReadFailures, fSubmitAttempts;
+	/* Query loads are counted apart from the identity budget: one is a fixed
+	 * number this card promises, the other depends on where the entry sits. */
+	unsigned fQueryReads;
+	bool fQueryEnabled;
 	bool fMapped, fRegistered, fAccepting;
 	bool validateProperties(IOService *provider);
 	bool mapWindows(IOService *provider);
 	bool readIdentity(void);
 	bool mapCommandDB(void);
+	void queryCommandDB(void);
 	bool observeTCS(void);
 	bool describeIRQ(IOService *provider);
 	void unmapWindows(void);
@@ -127,8 +152,15 @@ class IOQcomRSCChannel : public IOService {
 	 * against the declared window before the load, the load carries the read
 	 * barrier this SoC needs, and the access runs under the channel lock so a
 	 * late caller cannot observe a half-released mapping. Loads only: there is
-	 * no store counterpart to audit, which is the card's whole point. */
+	 * no store counterpart to audit, which is the card's whole point. The load
+	 * counter is a parameter so the query can charge its own budget. */
+	bool readWindow(unsigned window, uint32_t offset, uint32_t *value,
+	 unsigned *loads);
 	bool readRegister(unsigned window, uint32_t offset, uint32_t *value);
+	/* The command DB reader handed to the shared query module: same accessor,
+	 * same DB window, its own counter. */
+	bool readDatabaseWord(uint32_t offset, uint32_t *value);
+	static bool readDatabaseThunk(void *context, uint32_t offset, uint32_t *value);
 public:
 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
 	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
