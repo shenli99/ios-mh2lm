@@ -1,6 +1,6 @@
 # C3：apps RSC 公共事务通道
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 代码＋补丁＋门禁＋审计器完成（本地全绿），0145／0146 两轮构建失败于漏登记与一处访问控制（均已修、均已补本地门禁），待 0147 双默认树实机；C3-04b 暂缓（无需求），C3-05～C3-08 未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 委派档已在 0147 上**验收通过**（`executor=delegated … hardware-owner=IOQcomRSCChannel`，交接四行按序到齐、第一笔自然完成紧跟 ownership 行、十笔完成与七条 ACK 一笔未丢），对照档同一内核待启（0145／0146 两轮构建失败于漏登记与一处访问控制，均已修、均已补本地门禁）；C3-04b 暂缓（无需求），C3-05～C3-08 未开始。
 
 ## 阶段目标与退出条件
 
@@ -310,16 +310,58 @@ IOQcomRSC.h:202:11: note: declared protected here
 扫描器做反证（它必须只报那一个文件），因为一个永远不会失败的检查不算检查。那次日志里仅有的两条 warning 是
 `-Wnewline-eof`（本卡新增文件末尾缺换行），也一并补上了。
 
+**0147 通过**：编译、链接、打包全绿，14 个映像。委派档 `…-rscexecutor.img` 已上机取环（见下）；
+对照档 `boot-16k-0147-gpioirq-panel-pipeline.img` 已就绪待启——同一个内核、树里没有那两条属性，
+出来的环应当与 0143 的 `executor=module … hardware-owner=SweetRPMh` 无从分辨，这是本卡"双默认树"的另一半。
+
 **为什么本地没先知**：五个夹具为了让用例能戳成员，把 `class X` 改写成 `struct X` 再编译，这一步把访问控制整个删掉了，
 于是"别的作用域能不能碰到这个成员"在本地永远不成立。现在编译这两个受影响单元的夹具
 （`test-mh2lm-rsc-channel.py`、`test-mh2lm-rsc-executor-door.py`）各自多走一遍**不改写**的语法检查：
 用出厂原文（只摘 `#include`）加假 IOKit 前导跑 `clang++ -fsyntax-only`，再用同一份 TU 追加一个文件作用域辅助函数
 作为反证，要求编译器**拒绝**它。反证那次必须看得见拒绝，否则门禁自己就是瞎的。
 
-**0147 待实机**（本卡收口要一次双默认树的启动）：环里应有 `SWEET APPS DOOR: phase=publish`、
-`SWEET RSC: phase=executor … workloop=own`、`executor=delegated … hardware-owner=IOQcomRSCChannel` 与 `phase=delegate`；
-**不该**有 `SWEET RPMH IRQ: INTID37 configured`、`executor=module`、以及任何旧入口的 store 行（`stores-here=0`）；
-自然 VRM／ARC／CN0 请求的 ACTIVE 完成与 cleanup 继续到达，USB／根卷、显示、触摸回归。
+#### 实机验收：0147 委派档（C3-04 前半，2026-11-28）
+
+环 `logs/sweetlog-0147-0.bin`（4 198 400 字节，sha256 `906d8c9b…`；头 `total=4194304 flush-seq=316228
+capacity=9`，54 577 行，已回绕），内核 `a848acb8…`（`ci-0147/`，18 008 112 字节，13 个新符号全落在
+`fffffe0007afb3xx`）。`audit-clock-log.py --c2-03 --c3-04` 严格 rc=0，无 `--allow-baseline-drift`。
+
+启动顺序与设计逐行对上：145 `phase=irq intid=37 detail=described-for-executor` → 146–149 四段 range（末条
+`apps-gic length=0x10000`）→ 150 `phase=identity id=0x10700 … tcs=8 ncpt=16` → 151 `phase=command-db …
+detail=read-only-map` → 155 `db-query … CN0 … reads=292` → 156 `tcs irq-enable=0x1 irq-status=0
+detail=observed-before-owner` → 162 `SWEET APPS DOOR: phase=publish result=0 owner=IOQcomRSCChannel intid=37
+stores=0 irqs=0` → 163 `phase=executor … windows=5 ranges=4 stores=0 writes-at-start=0 workloop=own` →
+167 `phase=start … reads=10 query-reads=292 writes=0 … irq=37 query=ok`。第一次飞行时交接四行按设计顺序到齐：
+1778 `identity adopted from hardware owner id=0x10700 config=0x800c8104 ncpt=16`（旧侧不再自己读块）→
+1779 `phase=install result=0 detail=completion-client` → 1780 `phase=delegate … stores-here=0
+irq-handlers-here=0` → 1781 `phase=line … owner=channel; ACTIVE completion on own workloop, no status
+polling`；1782 是 `executor=delegated tcs=0 commands=3 open=0 hardware-owner=IOQcomRSCChannel`，**正下方 1783
+就是本次开机第一笔自然完成**。全环 10 条 `SWEET RPMH IRQ: fresh ACTIVE completion`（4 条 rail `commands=3` ＋
+6 条 ARC `commands=1`）一笔未丢，7 条 `ACTIVE ACK`（token 1–7）照旧到达，LDO／ARC 电压与 `CN0` 请求全部落地，
+USB／根卷、显示、触摸回归照旧。不该出现的三样东西一条没有：`INTID37 configured`、`executor=module`、任何旧入口
+store 行（`stores-here=0`、`phase=start … writes=0`、`phase=executor … stores=0`）。时钟 verdict 不变
+（`maps=4 reads=19 writes=0`、`measurement=absent`），非时钟 WARN/ERROR 与 b32 逐项相等、环内 `[ERROR]` 零条。
+另 4 条 `SWEET MDSS NOC IRQ:` 完成（`tcs=2`、`entries` 1→4）属显示 NoC 自己的服务，与本卡无关，审计器按服务名分开。
+
+**审计器两个真发现，改的都是判据，不是驱动**：
+
+1. `entries` 在委派档**必须是 0**。`fIRQEntries` 只在 `SweetRPMh::handleIRQ()` 里递增，而这一档根本没装那个
+   handler——同一份环用 `irq-handlers-here=0` 自己作证。所以"entries 单调增长"是 C3-03 的判据，不是 C3-04 的；
+   换成"恒为 0 才算唯一调度者"之后，`entries>0` 反而成了"有第二个调度者"的反证，正是本卡要防的那件事。
+2. identity 与 irq 两行的**先后**不能钉死。模块档里旧侧自己读了块，channel 的独立读必须在它之后；委派档里旧侧
+   根本不读，它印的是"采纳 channel 发布的那份身份"，两行谁先只由探测顺序决定（实环 150 在 1778 之前）。硬钉一个
+   方向等于把偶然当契约，于是改成：委派档断言环里**没有 `pre-v3 RSC` 那一行**、并按 id／ncpt 值比对，顺序只在
+   模块档断言。
+
+合成环跟着换成设备形状（`delegated` 变体：完成行 `entries=0`、旧侧身份行换成 adopted 行、交接四行按 1778–1781
+的顺序），门禁从 **71 变体扩到 76**，新增五个必须被拒的变体全 PASS：`delegateentries`（旧侧计数它并不拥有的中断
+条目）、`delegatenoinstall`（线路布防却没有完成客户端）、`delegatelinefirst`（先拿线后装客户端）、`delegateprev3`
+（委派的旧侧还在自己读块）、`execinstall`（模块环带着交接那两行）。0143 环用同一个审计器复判仍 rc=0
+（`mode=module entries_max=10 handler=display-owner`），两个方向没有互相污染。
+
+**本卡还差的一半**：对照档 `boot-16k-0147-gpioirq-panel-pipeline.img` 的启动——同一个内核、树里没有两条属性，
+环应与 0143 同形（`executor=module tcs=0 commands=3 open=0 hardware-owner=SweetRPMh`、`INTID37 configured` 在场、
+无 door／executor／install／line 行）。那一环到手前，C3-04 只算"委派侧通过"。
 
 ### C3-04b （可选）运行中将 apps 执行器从旧服务交接给 channel
 

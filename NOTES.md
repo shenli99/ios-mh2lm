@@ -10366,6 +10366,16 @@ protected，宿主 clang 19 对同一处措辞是 private——成员落在类�
 **顺手修掉的噪声**：那次日志里两条 `-Wnewline-eof`（`SweetAppsDoor.h:92`、`SweetAppsLine.h:66`）——本卡新增的 `.h`／`.cpp`
 末尾缺换行，补上（`IOQcomRSC.h` 也是）。
 
+**0147 一次过，打包门禁先自己绊了四跤**：0147 编、链、打包全通（14 个映像，kernel `a848acb8…` 18 008 112 B，
+executor ADT `a81e8b56…` 钉住），但 `mk16k-0147.sh` 第一次跑就被自己的字符串门禁拦了四次。四条的错法是同一类：
+**它们是照"环里长什么样"抄的，而那种文本从不是二进制里的字面量**——`writes=0` 现在是 `writes=%u`（通道会把自己的写次数报出来），
+`executor=module tcs=… hardware-owner=SweetRPMh` 是 `executor=%s … hardware-owner=%s` 渲染出来的，`detail=described-for-executor`
+的 `detail=` 来自前缀而二进制里只有 `described-for-executor` 这个值。符号门禁也错了两处，同一个病根的对偶：`retired`/`admit` 的两个
+`unsigned long long` 参数是 `yy` 不是 `mm`，C++ 自由函数在 Mach-O 里是 `__Z…`（多一个下划线）而不是 `_Z…`。
+规矩因此收紧成两条：**门禁里的字面量只能从 `strings -a kernel` 抄，mangle 只能从 `llvm-nm` 抄**，不许凭源码里的 print 语句
+或环里的样子推。现在 245 条文本、83 个符号全部对着 0147 产物逐条核过（结构化的核法：把两个 `for … in` 数组解析出来重新比对，
+一次找出剩下所有过期项，比一条一条撞门禁快）。
+
 **坑（本地为什么没先知）**：五个夹具为了让用例能戳成员，把 `class X` 改写成 `struct X` 再编译，这一步把访问控制整个删掉了，
 于是"别的作用域能不能碰这个成员"在本地永远不成立。现在编译这两个受影响单元的两个夹具（`test-mh2lm-rsc-channel.py`、
 `test-mh2lm-rsc-executor-door.py`）各多走一遍**不改写**的 `-fsyntax-only`：出厂原文只摘 `#include` 加假 IOKit 前导，
@@ -10377,6 +10387,25 @@ protected，宿主 clang 19 对同一处措辞是 private——成员落在类�
 从 `xnu/<component>/` 软链成 overlay 后，会掉进 `ipc_entry_bits_t` 未定义——出厂的私有头并不等于安装出去的导出头。
 结论：没有未裁剪的 buildtree，本地无法忠实重放单翻译单元编译；该单元的可移植检查就靠上面那遍原文 `-fsyntax-only`。
 
-**0147 待实机**（判据）：环里应有 `SWEET APPS DOOR: phase=publish`、`SWEET RSC: phase=executor … workloop=own`、
-`executor=delegated … hardware-owner=IOQcomRSCChannel`、`phase=delegate`；**不该**有 `SWEET RPMH IRQ: INTID37 configured`、
-`executor=module`、任何旧入口 store 行；自然 VRM／ARC／CN0 请求的 ACTIVE 完成与 cleanup 继续到达，USB／根卷、显示、触摸回归。
+**0147 委派档实机通过，判据本身被改了两次**：环 `sweetlog-0147-0.bin`（4 198 400 B、`906d8c9b…`、54 577 行、已回绕）
+用 `--c2-03 --c3-04` 严格 rc=0。四行交接按设备顺序到齐——1778 旧侧 `identity adopted from hardware owner`（它不再自己读块）、
+1779 `phase=install … detail=completion-client`、1780 `phase=delegate … irq-handlers-here=0`、1781 `phase=line … owner=channel`，
+1782 是 `executor=delegated tcs=0 commands=3 open=0 hardware-owner=IOQcomRSCChannel`，1783 就是本次开机第一笔自然完成；
+十笔 RPMH 完成、七条 ACK 一笔未丢，`INTID37 configured`／`executor=module`／旧入口 store 全无。审计器在这里拦了两次，
+两次都是**我把旧判据带进了新模式**：
+
+1. 它断言 `entries` 单调增长。可 `fIRQEntries` 只在 `SweetRPMh::handleIRQ()` 里递增，而委派档根本没装那个 handler——
+   同一份环用 `irq-handlers-here=0` 自己作证，`entries=0` 才是对的。改法是把这条判据也按模式分叉：委派档要求
+   **恒为 0**，于是 `entries>0` 从"正常"变成"有第二个调度者"，正好是本卡要防的那件事。别为了让判据通过去改驱动。
+2. 它断言 channel 的身份行在旧侧 RSC 行**之后**（模块档确实如此：旧侧先读，通道复读）。委派档里旧侧不读块、
+   只采纳通道发布的那份身份，两行谁先由探测顺序决定（实环 150 < 1778）。硬钉一个方向等于把偶然当契约；
+   正确断言是"委派环里**没有** `pre-v3 RSC` 那一行"＋按 id／ncpt 值比对，顺序只在模块档断言。
+
+**规矩**：换所有权的卡要检查旧卡的**每一条判据**是否还在讲同一件事——同一个字段在两种模式下的合法值可能正好相反，
+而"让它过"和"判对它"是两件事。合成环同步换成设备形状，`selftest-channel-auditor.py` 71 → **76 变体全 PASS**
+（`delegateentries`／`delegatenoinstall`／`delegatelinefirst`／`delegateprev3`／`execinstall` 五个新反证），
+0143 环用同一审计器复判仍是 `mode=module entries_max=10`，两个方向没互相污染。
+
+**还差一半**：对照档 `boot-16k-0147-gpioirq-panel-pipeline.img`（同内核、树里无那两条属性）待启，环应与 0143 同形——
+`executor=module … hardware-owner=SweetRPMh`、`INTID37 configured` 在场、无 door／executor／install／line 行。
+那一环到手前，C3-04 只算委派侧通过。
