@@ -10577,6 +10577,28 @@ xnu 控制台把一行装进 `char str[SERIAL_CONS_BUF_SIZE]`（256 字节），
 （1014 行、最长 236）、0 条 `phase=cancel-selftest`。**修法 `0255`** 只改这一行（不动控制台、不动别人写的 47 行）：字段在前、
 句子在后，实测 203 字节、字段取满 253，整行上限 254；机器字段一个不少，所以截断仍可区分——被截断的行依旧被拒。
 宿主 fixture 现在真驱动第 2、3 步（pair 的两笔账本由公共调用造出，示意本身归 C3-05 的 fixture），并断言两行都装得下。
-真实 provider 热终止仍只能宿主证明，"退出发生在某笔正在飞的时候"这一半记 host-only。**0152 重抓**：候选环读到上面六行且
-`step=2` 行完整、`console_rows` 通过；对照环用 `--c3-05` 通过、`--c3-06` 被拒。**实机环到齐前 C3 仍记 5/8**，
-下一张是 C3-07（超时／不确定／隔离状态）。
+真实 provider 热终止仍只能宿主证明，"退出发生在某笔正在飞的时候"这一半记 host-only。
+
+**0152 实机结果（`0255` 上验收通过，C3-06 关闭）**：候选环 `sweetlog-0152-0.bin`（`f71beae2…`、4 134 行、未回卷）把六行
+按序读全：`phase=cancel-selftest … bytes0=100000 bytes1=120000 bytes2=140000 depth=2 high-water=2; first in flight, two waiting`
+（三笔各差一个编码单位，`client0=3 client1=4 client2=5`）、`enqueue … seq=2 depth=1` 与 `seq=3 depth=2`、
+两条 `withdraw … previous=20000`／`previous=40000 aggregate=100000 others=100000 hardware=unchanged`、
+`cancel … token=5 why=caller` 与 `token=6 why=exit`、
+`step=2 result=ok a=4 b1=5 b1-state=3 b1-result=0xe00002eb b2=6 exit-withdrew=1 lower=7 ledger=2/2 told=100000 depth=0; one withdrew, one exited, neither ran`
+（**整行 203 字节**，`console_rows` 判最紧但不越界）、真实降票 `dispatch … client=3 token=7 … wait=direct`、
+`step=3 result=ok exited=3 aggregate=0 owned=1 depth=0 cancelled=2; two waits never dispatched, every ledger entry handed back`。
+被撤的 token 5／6 全环从未派发；`executor=delegated` 与 45 条 RPMH／RSC 线缆行、既有 Rail／ARC／CN0 自然投票与完成行一条不变；
+`--c2-03 --c3-05 --c3-06` **rc=0**，`console_rows` 1035 行、最长 236（`SWEET MDSS LINK`）。对照环
+`sweetlog-0152-1.bin`（`c227b3b2…`、4 017 行）`--c2-03 --c3-05` rc=0（`console_rows` 1082 行、最长 236）、`--c3-06` 被拒
+（"carries no phase=cancel-selftest row"）。
+
+**这一环纠正了审计器两处，都是工具漏了合同、不是内核错**。其一：离开示意的身份是**四个**——pair 两条、退出那条、以及
+降票自己的客户端；`step=3` 的 `exited=3` 数的正是最后这个，而它必须在 `step=3` 之前交回，所以"恰好三条 detach"的断言
+从一开始就比合同少一行（合成环也照着少了，所以矩阵一直自洽地绿着）。现按身份判：三条 `cancelled=0`（pair 两条 `depth=2`，
+降票那条 `depth=0` 且等于 trio 的首个客户端）、一条 `cancelled=1 depth=0`；新增反例 `nolowerdetach`、`lowercancelled`。
+其二：判定窗口必须**止于 `step=3`**——实机在示意之后还有自己的派发（`token=8/9/10` rail 票、`token=11` display corner、
+`token=12/13` register-bandwidth），把"示意内三笔"写成"截断点之后所有派发"会把它们一并吞进来；合成环新增正例 `bootafter`。
+`selftest-cancel-auditor.py` 现 26 变体全 PASS。教训：合成环只能证明断言自洽，**只有真环能证明断言与合同一致**——
+把演示的形状写进测试时，要照着驱动的第 3 步代码逐行走，而不是照着上一版断言写。
+
+C3 至此 **6/8**，下一张是 C3-07（超时／不确定／隔离状态）。
