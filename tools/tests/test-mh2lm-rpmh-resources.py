@@ -154,6 +154,36 @@ int main(){
  assert(!status(s,other,token).enabled&&regs[TCS+0x34]==0x40004&&regs[TCS+0x38]==0);
  assert(s->detachConsumer(other)==0);destroy(s,n);assert(rpmhOwner==2);
  s=new SweetRPMh();assert(!s->start(n));s->release();reboot();
+ // C3-05, device evidence 0148: this boot's own consumer votes each rail as a
+ // point (min == max), and the aggregate takes the maximum of the floors with
+ // the minimum of the ceilings, so a point vote pins both ends at once. A
+ // second consumer that moves the floor is therefore illegal - even inside the
+ // rail's own range - and the screen refuses it before it costs a token, a
+ // queue slot or a write, leaving the first consumer's completion readable.
+ // The one admissible second vote is one whose aggregate is identical, which is
+ // a no-op and cannot demonstrate order. That is why the demonstration had to
+ // move to a resource that aggregates by maximum.
+ fixtures();resourceMode=2;s=make(n);id=attach(s);other=attach(s);
+ token=vote(s,id,SweetRailVDDI,{true,1800,1800,6000});tick(s);ack(s);
+ assert(status(s,id,token).millivolts==1800);
+ uint64_t held=token,refused=7;auto pointWrites=writes();
+ assert(s->requestVote(other,SweetRailVDDI,{true,1808,1808,6000},&refused)==kIOReturnBadArgument);
+ assert(refused==0&&writes()==pointWrites&&s->fQueue.empty()&&s->fNextToken==held);
+ assert(status(s,id,held).state==SweetRPMhComplete&&status(s,id,held).millivolts==1800);
+ assert(s->requestVote(other,SweetRailVDDI,{true,1808,1800,6000},&refused)==kIOReturnBadArgument);
+ assert(refused==0&&writes()==pointWrites&&s->fQueue.empty());
+ token=vote(s,other,SweetRailVDDI,{true,1800,1880,0});
+ assert(token!=held);assert(!s->fBusy);assert(writes()==pointWrites);assert(s->fQueue.empty());
+ assert(status(s,other,token).state==SweetRPMhComplete&&status(s,other,token).millivolts==1800);
+ assert(s->fAggregate[SweetRailVDDI].minMV==1800&&s->fAggregate[SweetRailVDDI].maxMV==1800);
+ // Withdrawing the point vote opens no hardware flight either: the floor and
+ // the mode are what a write carries, and neither moved.
+ token=vote(s,id,SweetRailVDDI,{false,0,0,0});
+ assert(!s->fBusy&&writes()==pointWrites);
+ assert(s->fAggregate[SweetRailVDDI].minMV==1800&&s->fAggregate[SweetRailVDDI].maxMV==1880);
+ token=vote(s,other,SweetRailVDDI,{false,0,0,0});tick(s);ack(s);
+ assert(!s->fAggregate[SweetRailVDDI].enabled);
+ assert(s->detachConsumer(id)==0&&s->detachConsumer(other)==0);destroy(s,n);reboot();
  // Every known shared rail vetoes a last aggregate disable; all client
  // slots participate. A refusal must preserve the previously completed status and ledger.
  // Non-last removal and unowned no-op remain usable; VPNL's original disable

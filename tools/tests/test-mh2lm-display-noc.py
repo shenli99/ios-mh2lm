@@ -102,6 +102,16 @@ static std::vector<uint32_t> acvPayloads(){
  return payloads;
 }
 
+// Complete exactly the flight in progress: arm the TCS the driver selected and
+// deliver its interrupt. Unlike ack() this asserts nothing about the queue,
+// because this demonstration deliberately leaves a request waiting.
+static void step(SweetRPMh*s){
+ tick(s);uint32_t b=s->fTCSIndex*0x2a0;
+ regs[TCS+4]|=1u<<s->fTCSIndex;regs[TCS+b+0x18]=1;
+ for(unsigned c=0;c<s->fCommandCount;++c)regs[TCS+b+0x3c+c*0x14]=(1<<8)|(1<<16);
+ tick(s);tick(s);
+}
+
 int main(){
  // Metadata identity must omit the NoC extension when resource1/clock0.
  // The original lifecycle matrix declared NoC and could not reach identity
@@ -238,6 +248,67 @@ int main(){
  assert(r->requestRegisterBandwidth(a,0,&rt)==0&&!r->fBusy&&r->fRegisterAggregate==150000000);
  assert(r->detachConsumer(a)==0&&r->detachConsumer(b)==kIOReturnBusy);
  assert(r->requestRegisterBandwidth(b,0,&rt)==0);tick(r);ack(r);assert(r->detachConsumer(b)==0);
+ destroy(r,n);dropNub(n);reboot();
+ // C3-05 demonstration: two consumers raise one max-aggregated resource by one
+ // encoded step each. The first flies, the second waits with a token its caller
+ // can already read, and it dispatches only when the first retires.
+ nocFixtures();n=nub();uint32_t demo=1;
+ n->properties["sweet,rpmh-queue-selftest"]=OSData::withBytes(&demo,4);
+ r=make(n);a=attach(r);rt=0;messages.clear();
+ assert(r->fQueueSelfTest&&!r->fQueueTestRun);
+ assert(r->requestRegisterBandwidth(a,76800000,&rt)==0);
+ step(r);assert(r->fQueueTestRun&&r->fBusy&&r->fQueue.depth()==1&&r->fQueue.highWater()==1);
+ assert(r->fClients[1].registerStatus.state==SweetRPMhPending);
+ assert(r->fClients[1].registerStatus.bytesPerSecond==77800000&&!r->fClients[1].registerVote);
+ assert(r->fClients[2].registerStatus.state==SweetRPMhPending);
+ assert(r->fClients[2].registerStatus.bytesPerSecond==78800000&&!r->fClients[2].registerVote);
+ assert(r->fClients[1].registerStatus.token&&r->fClients[2].registerStatus.token);
+ assert(r->fClients[1].registerStatus.token!=r->fClients[2].registerStatus.token);
+ // A consumer whose request is already parked is still refused a second one,
+ // and so is one whose request the queue has just dispatched: a caller names
+ // its own handle, so the refusal has to follow the handle, not the slot.
+ uint64_t dupe=7;
+ assert(r->requestRegisterBandwidth(r->fClients[2].id,demo,&dupe)==kIOReturnBusy&&dupe==0);
+ step(r);assert(r->fBusy&&r->fQueue.empty()&&r->fCurrentValid);
+ assert(r->fCurrent.kind==SweetAppsRequestRegisterBandwidth&&r->fCurrent.client==2&&r->fCurrent.seq);
+ assert(r->fClients[1].registerStatus.state==SweetRPMhComplete&&r->fClients[1].registerVote==77800000);
+ // The dispatched request is the current one, so a duplicate is refused now too.
+ assert(r->requestRegisterBandwidth(r->fClients[2].id,demo,&dupe)==kIOReturnBusy&&dupe==0);
+ step(r);assert(!r->fBusy&&!r->fCurrentValid&&r->fQueue.empty());
+ assert(r->fClients[2].registerVote==78800000&&r->fRegisterAggregate==78800000);
+ assert(r->fClients[2].registerStatus.state==SweetRPMhComplete);
+ unsigned seen=0;
+ for(auto&m:messages){
+  if(m.find("SWEET APPS QUEUE: phase=selftest ")!=std::string::npos){
+   assert(m.find("kind=register-bandwidth")!=std::string::npos);
+   assert(m.find(" bytes0=77800000 bytes1=78800000")!=std::string::npos);
+   assert(m.find(" client0=1 client1=2")!=std::string::npos);
+   assert(m.find(" depth=1 high-water=1")!=std::string::npos);
+   ++seen;
+  }
+  assert(m.find("phase=selftest result=failed")==std::string::npos);
+  assert(m.find("kind=rail-vote")==std::string::npos);}
+ assert(seen==1);
+ unsigned order=0;
+ for(auto&m:messages){
+  const char*d="phase=dispatch kind=register-bandwidth client=1 resource=";
+  const char*e="phase=enqueue kind=register-bandwidth client=2 resource=";
+  const char*q="phase=dispatch kind=register-bandwidth client=2 resource=";
+  if(m.find(d)!=std::string::npos){
+   assert(m.find("wait=direct")!=std::string::npos&&m.find(" seq=0 ")==std::string::npos?false:true);
+   if(m.find("wait=direct")!=std::string::npos){assert(order==0);order=1;}
+  } else if(m.find(e)!=std::string::npos){assert(order==1);order=2;}
+  else if(m.find(q)!=std::string::npos&&m.find("wait=queued")!=std::string::npos){
+   assert(order==2);assert(m.find(" seq=0 ")==std::string::npos);order=3;}
+ }
+ assert(order==3);
+ destroy(r,n);dropNub(n);reboot();
+ // Without the property nothing is demonstrated, on the same boot sequence.
+ nocFixtures();n=nub();r=make(n);a=attach(r);messages.clear();
+ assert(!r->fQueueSelfTest);
+ assert(r->requestRegisterBandwidth(a,76800000,&rt)==0);
+ step(r);assert(!r->fQueueTestRun&&!r->fBusy&&r->fQueue.empty()&&r->fQueue.highWater()==0);
+ for(auto&m:messages)assert(m.find("phase=selftest")==std::string::npos);
  destroy(r,n);dropNub(n);reboot();
  nocFixtures();n=nub();r=make(n);a=attach(r);assert(r->requestRegisterBandwidth(a,76800000,&rt)==0);
  regs[TCS+0x2a0+0x1c]=1;regs[TCS+0x2a0+0x34]=0x50000;tick(r);

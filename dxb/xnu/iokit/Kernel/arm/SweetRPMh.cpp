@@ -410,43 +410,59 @@ static const char *sweetRequestName(unsigned kind)
 }
 
 /* C3-05 device demonstration, requested explicitly by an ADT property and off
- * for every other boot. Two legal votes on two rails this boot already drives,
- * submitted through the same admission path a client uses, so the second one
- * has to wait in the queue for the first to retire. Each rail moves by one
- * rounding step at the far end of its own range, which is a real flight rather
- * than the silent no-op an unchanged vote would be; the votes are retained
- * afterwards like any other vote, because withdrawing one is C3-06. */
+ * for every other boot. Two consumers each raise register bandwidth by one
+ * whole encoded step, through the same admission path a client uses, so the
+ * second one has to wait in the queue for the first to retire.
+ *
+ * A rail vote cannot carry this demonstration on this boot: the display client
+ * votes every rail as a point (min == max), the aggregate takes the maximum of
+ * the floors and the minimum of the ceilings, so any second consumer that moves
+ * a floor is illegal and is refused by the admission screen before it costs a
+ * token (0148 device evidence: phase=refuse kind=rail-vote detail=invalid
+ * result=0xe00002c2 twice, then pair-did-not-serialize). Register bandwidth
+ * aggregates by maximum instead, so a consumer that asks for more is legal and
+ * produces a real flight rather than the silent no-op an unchanged vote is.
+ *
+ * The step is one unit of the y field scale() rounds to, never a percentage: a
+ * raise smaller than that rounds to the same y and the aggregate would not move.
+ * Nothing is submitted unless scale() accepts both targets, and nothing is
+ * demonstrated by a pair that could not be written. The votes are retained
+ * afterwards like any other vote, because withdrawing one is C3-06; the boot's
+ * own display vote for this resource subsumes them. */
 bool
 SweetRPMh::queueSelfTest(void)
 {
  if (fQueueTestTries++ >= 6) return true;
- int client=-1;
- for (unsigned i=0;i<8;++i) if (!fClients[i].id) { client=(int)i; break; }
- if (client<0) return false;
- unsigned rails[2]={0,0}; unsigned found=0;
- for (unsigned r=0;r<SweetRailCount && found<2;++r) {
-  if (!fOwned[r] || !fAggregate[r].enabled) continue;
-  if (fAggregate[r].minMV>=railLimits[r].maxMV) continue;
-  rails[found++]=r;
- }
- /* No rail this boot drives can move: nothing to demonstrate, and inventing a
-  * rail whose inherited state nobody described is exactly what is refused. */
- if (found<2) return false;
  if (fNextClient==~0ULL) return false;
- fClients[client]={}; fClients[client].id=++fNextClient;
+ if (!lookupBCM(SweetBCMCN0)) return false;
+ /* One encoded unit of CN0 at this vote's own bus width (4 bytes, one port):
+  * divisor = busWidth*ports*unit in scale(), so the rate that moves y by one is
+  * that divisor divided by the register width. */
+ uint64_t divisor=(uint64_t)fBCM[SweetBCMCN0].unit*4;
+ if (!divisor || !fBCM[SweetBCMCN0].width) return false;
+ uint64_t step=(divisor+fBCM[SweetBCMCN0].width-1)/fBCM[SweetBCMCN0].width;
+ uint64_t base=fRegisterOwned ? fRegisterAggregate : 0;
+ uint64_t proposal[2]={base+step,base+2*step};
+ for (unsigned k=0;k<2;++k) {
+  unsigned y=0;
+  if (!fBCM[SweetBCMCN0].scale(proposal[k],4,1,&y)) return false;
+ }
+ int clients[2]={-1,-1};
+ for (unsigned i=0;i<8 && clients[1]<0;++i) {
+  if (fClients[i].id) continue;
+  if (clients[0]<0) clients[0]=(int)i; else clients[1]=(int)i;
+ }
+ if (clients[1]<0) return false;
  unsigned tokens[2]={0,0}; unsigned results[2]={0,0};
  for (unsigned k=0;k<2;++k) {
-  SweetRailVote vote=fAggregate[rails[k]];
-  unsigned step=vote.minMV+8;
-  if (step>railLimits[rails[k]].maxMV) step=railLimits[rails[k]].maxMV;
-  vote.minMV=step;
-  IOReturn result=begin((unsigned)client,rails[k],vote);
+  fClients[clients[k]]={}; fClients[clients[k]].id=++fNextClient;
+  IOReturn result=beginRegisterBandwidth((unsigned)clients[k],proposal[k]);
   results[k]=(unsigned)result;
-  tokens[k]=(unsigned)fClients[client].status.token;
+  tokens[k]=(unsigned)fClients[clients[k]].registerStatus.token;
  }
- SWEET_LOG_INFO("SWEET APPS QUEUE: phase=selftest rail0=%s rail1=%s token0=%u token1=%u result0=%#x result1=%#x depth=%u high-water=%u; two admissions, one flight window\n",
-     railNames[rails[0]],railNames[rails[1]],tokens[0],tokens[1],results[0],results[1],
-     fQueue.depth(),fQueue.highWater());
+ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=selftest kind=register-bandwidth resource=%u bytes0=%llu bytes1=%llu client0=%u client1=%u token0=%u token1=%u result0=%#x result1=%#x depth=%u high-water=%u; two admissions, one flight window\n",
+     (unsigned)SweetBCMCN0,proposal[0],proposal[1],(unsigned)clients[0],(unsigned)clients[1],
+     tokens[0],tokens[1],results[0],results[1],fQueue.depth(),fQueue.highWater());
  /* The pair is only evidence if the first one really holds the array when the
   * second arrives; a pair that both ran directly would prove nothing and must
   * not be reported as a demonstration. */
@@ -614,6 +630,11 @@ SweetRPMh::dispatchNext(void)
   fQueue.pop();
   SWEET_LOG_INFO("SWEET APPS QUEUE: phase=dispatch kind=%s client=%u resource=%u token=%llu seq=%u depth=%u wait=queued\n",
       sweetRequestName(request.kind),request.client,request.rail,request.token,request.seq,remaining);
+  /* The request leaving the queue is the current one from here on: it is what
+   * a second submission for the same resource is refused against, and it is
+   * why the duplicate screen does not weaken once a waiting request starts.
+   * launch() clears this again if the dispatch needed no flight. */
+  fCurrent=request; fCurrentValid=true;
   IOReturn result=launch(request);
   /* A refused request does not block the ones behind it; it was refused
    * rather than started, so nothing of it reached the array. The caller is

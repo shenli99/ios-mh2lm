@@ -1,0 +1,283 @@
+From: mh2lm clock work <clock@mh2lm>
+Subject: [PATCH 0252] fix(apps): the dispatched request stays the current one
+
+Two corrections to the card 0251 opened, both found by the demonstration rather
+than by reading it.
+
+The demonstration has to move register bandwidth, not a rail.  0148 booted the
+rail pair and the admission screen refused both halves before either cost a
+token:
+
+  [ERROR] SWEET APPS QUEUE: phase=refuse kind=rail-vote client=1 resource=0 detail=invalid result=0xe00002c2
+  [ERROR] SWEET APPS QUEUE: phase=refuse kind=rail-vote client=1 resource=1 detail=invalid result=0xe00002c2
+  [ERROR] SWEET APPS QUEUE: phase=selftest result=failed detail=pair-did-not-serialize
+
+That is the screen working and the demonstration being wrong.  This boot's
+display client votes every rail as a point, min == max, and the aggregate takes
+the maximum of the floors and the minimum of the ceilings, so any second
+consumer that raises a floor is illegal by the same rule that protects the
+first one; the old code also cut its step at maxMV, which produced a vote equal
+to the one already held and therefore a submission that never left the array.
+Register bandwidth is the one quantity that can be moved legally here: it
+aggregates by maximum, so asking for more is always accepted and always flies.
+The pair now asks for one whole encoded step of CN0 twice - the step being one
+unit of the y field scale() rounds to at the vote's own bus width, never a
+percentage, because anything smaller rounds to the same y and moves nothing.
+Both targets are proved before a token is spent, two fresh consumers are taken
+so the two admissions cannot merge, and the row names the resource and both
+byte rates so the demonstration can be read against the aggregate.
+
+The second correction is a real hole in the dispatch path.  A request taken out
+of the queue was never made current, so from the moment it started flying a
+second submission for the same resource was screened only against the queue -
+which no longer held it - and against fCurrent, which still described whatever
+ran before.  The duplicate screen is what keeps one caller from stacking two
+votes on one resource, and it must not weaken exactly when the path it protects
+is the one being exercised.  dispatchNext() now makes the request it is about to
+launch the current one, and launch() clears it again when the dispatch needed no
+write, so a request that never reached the array does not hold the screen
+against its successor.
+
+The host evidence is the demonstration itself, extended by this patch: two
+clients submit through the ordinary entry point on a boot that asked for the
+property, the first dispatches directly under seq 0, the second is parked at
+depth 1 and dispatched from the queue only after the first retired, and a
+duplicate submission from the second client is refused with already-outstanding
+both while it waits and while it flies.  A control boot without the property
+runs one vote, dispatches it directly and leaves the queue empty with a
+high-water mark of zero.
+
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
+index 0f29647..e3deaf2 100644
+--- a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
+@@ -410,43 +410,59 @@ static const char *sweetRequestName(unsigned kind)
+ }
+ 
+ /* C3-05 device demonstration, requested explicitly by an ADT property and off
+- * for every other boot. Two legal votes on two rails this boot already drives,
+- * submitted through the same admission path a client uses, so the second one
+- * has to wait in the queue for the first to retire. Each rail moves by one
+- * rounding step at the far end of its own range, which is a real flight rather
+- * than the silent no-op an unchanged vote would be; the votes are retained
+- * afterwards like any other vote, because withdrawing one is C3-06. */
++ * for every other boot. Two consumers each raise register bandwidth by one
++ * whole encoded step, through the same admission path a client uses, so the
++ * second one has to wait in the queue for the first to retire.
++ *
++ * A rail vote cannot carry this demonstration on this boot: the display client
++ * votes every rail as a point (min == max), the aggregate takes the maximum of
++ * the floors and the minimum of the ceilings, so any second consumer that moves
++ * a floor is illegal and is refused by the admission screen before it costs a
++ * token (0148 device evidence: phase=refuse kind=rail-vote detail=invalid
++ * result=0xe00002c2 twice, then pair-did-not-serialize). Register bandwidth
++ * aggregates by maximum instead, so a consumer that asks for more is legal and
++ * produces a real flight rather than the silent no-op an unchanged vote is.
++ *
++ * The step is one unit of the y field scale() rounds to, never a percentage: a
++ * raise smaller than that rounds to the same y and the aggregate would not move.
++ * Nothing is submitted unless scale() accepts both targets, and nothing is
++ * demonstrated by a pair that could not be written. The votes are retained
++ * afterwards like any other vote, because withdrawing one is C3-06; the boot's
++ * own display vote for this resource subsumes them. */
+ bool
+ SweetRPMh::queueSelfTest(void)
+ {
+  if (fQueueTestTries++ >= 6) return true;
+- int client=-1;
+- for (unsigned i=0;i<8;++i) if (!fClients[i].id) { client=(int)i; break; }
+- if (client<0) return false;
+- unsigned rails[2]={0,0}; unsigned found=0;
+- for (unsigned r=0;r<SweetRailCount && found<2;++r) {
+-  if (!fOwned[r] || !fAggregate[r].enabled) continue;
+-  if (fAggregate[r].minMV>=railLimits[r].maxMV) continue;
+-  rails[found++]=r;
+- }
+- /* No rail this boot drives can move: nothing to demonstrate, and inventing a
+-  * rail whose inherited state nobody described is exactly what is refused. */
+- if (found<2) return false;
+  if (fNextClient==~0ULL) return false;
+- fClients[client]={}; fClients[client].id=++fNextClient;
++ if (!lookupBCM(SweetBCMCN0)) return false;
++ /* One encoded unit of CN0 at this vote's own bus width (4 bytes, one port):
++  * divisor = busWidth*ports*unit in scale(), so the rate that moves y by one is
++  * that divisor divided by the register width. */
++ uint64_t divisor=(uint64_t)fBCM[SweetBCMCN0].unit*4;
++ if (!divisor || !fBCM[SweetBCMCN0].width) return false;
++ uint64_t step=(divisor+fBCM[SweetBCMCN0].width-1)/fBCM[SweetBCMCN0].width;
++ uint64_t base=fRegisterOwned ? fRegisterAggregate : 0;
++ uint64_t proposal[2]={base+step,base+2*step};
++ for (unsigned k=0;k<2;++k) {
++  unsigned y=0;
++  if (!fBCM[SweetBCMCN0].scale(proposal[k],4,1,&y)) return false;
++ }
++ int clients[2]={-1,-1};
++ for (unsigned i=0;i<8 && clients[1]<0;++i) {
++  if (fClients[i].id) continue;
++  if (clients[0]<0) clients[0]=(int)i; else clients[1]=(int)i;
++ }
++ if (clients[1]<0) return false;
+  unsigned tokens[2]={0,0}; unsigned results[2]={0,0};
+  for (unsigned k=0;k<2;++k) {
+-  SweetRailVote vote=fAggregate[rails[k]];
+-  unsigned step=vote.minMV+8;
+-  if (step>railLimits[rails[k]].maxMV) step=railLimits[rails[k]].maxMV;
+-  vote.minMV=step;
+-  IOReturn result=begin((unsigned)client,rails[k],vote);
++  fClients[clients[k]]={}; fClients[clients[k]].id=++fNextClient;
++  IOReturn result=beginRegisterBandwidth((unsigned)clients[k],proposal[k]);
+   results[k]=(unsigned)result;
+-  tokens[k]=(unsigned)fClients[client].status.token;
++  tokens[k]=(unsigned)fClients[clients[k]].registerStatus.token;
+  }
+- SWEET_LOG_INFO("SWEET APPS QUEUE: phase=selftest rail0=%s rail1=%s token0=%u token1=%u result0=%#x result1=%#x depth=%u high-water=%u; two admissions, one flight window\n",
+-     railNames[rails[0]],railNames[rails[1]],tokens[0],tokens[1],results[0],results[1],
+-     fQueue.depth(),fQueue.highWater());
++ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=selftest kind=register-bandwidth resource=%u bytes0=%llu bytes1=%llu client0=%u client1=%u token0=%u token1=%u result0=%#x result1=%#x depth=%u high-water=%u; two admissions, one flight window\n",
++     (unsigned)SweetBCMCN0,proposal[0],proposal[1],(unsigned)clients[0],(unsigned)clients[1],
++     tokens[0],tokens[1],results[0],results[1],fQueue.depth(),fQueue.highWater());
+  /* The pair is only evidence if the first one really holds the array when the
+   * second arrives; a pair that both ran directly would prove nothing and must
+   * not be reported as a demonstration. */
+@@ -614,6 +630,11 @@ SweetRPMh::dispatchNext(void)
+   fQueue.pop();
+   SWEET_LOG_INFO("SWEET APPS QUEUE: phase=dispatch kind=%s client=%u resource=%u token=%llu seq=%u depth=%u wait=queued\n",
+       sweetRequestName(request.kind),request.client,request.rail,request.token,request.seq,remaining);
++  /* The request leaving the queue is the current one from here on: it is what
++   * a second submission for the same resource is refused against, and it is
++   * why the duplicate screen does not weaken once a waiting request starts.
++   * launch() clears this again if the dispatch needed no flight. */
++  fCurrent=request; fCurrentValid=true;
+   IOReturn result=launch(request);
+   /* A refused request does not block the ones behind it; it was refused
+    * rather than started, so nothing of it reached the array. The caller is
+diff --git a/tools/tests/test-mh2lm-display-noc.py b/tools/tests/test-mh2lm-display-noc.py
+index 63d581e..8fa4126 100644
+--- a/tools/tests/test-mh2lm-display-noc.py
++++ b/tools/tests/test-mh2lm-display-noc.py
+@@ -102,6 +102,16 @@ static std::vector<uint32_t> acvPayloads(){
+  return payloads;
+ }
+ 
++// Complete exactly the flight in progress: arm the TCS the driver selected and
++// deliver its interrupt. Unlike ack() this asserts nothing about the queue,
++// because this demonstration deliberately leaves a request waiting.
++static void step(SweetRPMh*s){
++ tick(s);uint32_t b=s->fTCSIndex*0x2a0;
++ regs[TCS+4]|=1u<<s->fTCSIndex;regs[TCS+b+0x18]=1;
++ for(unsigned c=0;c<s->fCommandCount;++c)regs[TCS+b+0x3c+c*0x14]=(1<<8)|(1<<16);
++ tick(s);tick(s);
++}
++
+ int main(){
+  // Metadata identity must omit the NoC extension when resource1/clock0.
+  // The original lifecycle matrix declared NoC and could not reach identity
+@@ -239,6 +249,67 @@ int main(){
+  assert(r->detachConsumer(a)==0&&r->detachConsumer(b)==kIOReturnBusy);
+  assert(r->requestRegisterBandwidth(b,0,&rt)==0);tick(r);ack(r);assert(r->detachConsumer(b)==0);
+  destroy(r,n);dropNub(n);reboot();
++ // C3-05 demonstration: two consumers raise one max-aggregated resource by one
++ // encoded step each. The first flies, the second waits with a token its caller
++ // can already read, and it dispatches only when the first retires.
++ nocFixtures();n=nub();uint32_t demo=1;
++ n->properties["sweet,rpmh-queue-selftest"]=OSData::withBytes(&demo,4);
++ r=make(n);a=attach(r);rt=0;messages.clear();
++ assert(r->fQueueSelfTest&&!r->fQueueTestRun);
++ assert(r->requestRegisterBandwidth(a,76800000,&rt)==0);
++ step(r);assert(r->fQueueTestRun&&r->fBusy&&r->fQueue.depth()==1&&r->fQueue.highWater()==1);
++ assert(r->fClients[1].registerStatus.state==SweetRPMhPending);
++ assert(r->fClients[1].registerStatus.bytesPerSecond==77800000&&!r->fClients[1].registerVote);
++ assert(r->fClients[2].registerStatus.state==SweetRPMhPending);
++ assert(r->fClients[2].registerStatus.bytesPerSecond==78800000&&!r->fClients[2].registerVote);
++ assert(r->fClients[1].registerStatus.token&&r->fClients[2].registerStatus.token);
++ assert(r->fClients[1].registerStatus.token!=r->fClients[2].registerStatus.token);
++ // A consumer whose request is already parked is still refused a second one,
++ // and so is one whose request the queue has just dispatched: a caller names
++ // its own handle, so the refusal has to follow the handle, not the slot.
++ uint64_t dupe=7;
++ assert(r->requestRegisterBandwidth(r->fClients[2].id,demo,&dupe)==kIOReturnBusy&&dupe==0);
++ step(r);assert(r->fBusy&&r->fQueue.empty()&&r->fCurrentValid);
++ assert(r->fCurrent.kind==SweetAppsRequestRegisterBandwidth&&r->fCurrent.client==2&&r->fCurrent.seq);
++ assert(r->fClients[1].registerStatus.state==SweetRPMhComplete&&r->fClients[1].registerVote==77800000);
++ // The dispatched request is the current one, so a duplicate is refused now too.
++ assert(r->requestRegisterBandwidth(r->fClients[2].id,demo,&dupe)==kIOReturnBusy&&dupe==0);
++ step(r);assert(!r->fBusy&&!r->fCurrentValid&&r->fQueue.empty());
++ assert(r->fClients[2].registerVote==78800000&&r->fRegisterAggregate==78800000);
++ assert(r->fClients[2].registerStatus.state==SweetRPMhComplete);
++ unsigned seen=0;
++ for(auto&m:messages){
++  if(m.find("SWEET APPS QUEUE: phase=selftest ")!=std::string::npos){
++   assert(m.find("kind=register-bandwidth")!=std::string::npos);
++   assert(m.find(" bytes0=77800000 bytes1=78800000")!=std::string::npos);
++   assert(m.find(" client0=1 client1=2")!=std::string::npos);
++   assert(m.find(" depth=1 high-water=1")!=std::string::npos);
++   ++seen;
++  }
++  assert(m.find("phase=selftest result=failed")==std::string::npos);
++  assert(m.find("kind=rail-vote")==std::string::npos);}
++ assert(seen==1);
++ unsigned order=0;
++ for(auto&m:messages){
++  const char*d="phase=dispatch kind=register-bandwidth client=1 resource=";
++  const char*e="phase=enqueue kind=register-bandwidth client=2 resource=";
++  const char*q="phase=dispatch kind=register-bandwidth client=2 resource=";
++  if(m.find(d)!=std::string::npos){
++   assert(m.find("wait=direct")!=std::string::npos&&m.find(" seq=0 ")==std::string::npos?false:true);
++   if(m.find("wait=direct")!=std::string::npos){assert(order==0);order=1;}
++  } else if(m.find(e)!=std::string::npos){assert(order==1);order=2;}
++  else if(m.find(q)!=std::string::npos&&m.find("wait=queued")!=std::string::npos){
++   assert(order==2);assert(m.find(" seq=0 ")==std::string::npos);order=3;}
++ }
++ assert(order==3);
++ destroy(r,n);dropNub(n);reboot();
++ // Without the property nothing is demonstrated, on the same boot sequence.
++ nocFixtures();n=nub();r=make(n);a=attach(r);messages.clear();
++ assert(!r->fQueueSelfTest);
++ assert(r->requestRegisterBandwidth(a,76800000,&rt)==0);
++ step(r);assert(!r->fQueueTestRun&&!r->fBusy&&r->fQueue.empty()&&r->fQueue.highWater()==0);
++ for(auto&m:messages)assert(m.find("phase=selftest")==std::string::npos);
++ destroy(r,n);dropNub(n);reboot();
+  nocFixtures();n=nub();r=make(n);a=attach(r);assert(r->requestRegisterBandwidth(a,76800000,&rt)==0);
+  regs[TCS+0x2a0+0x1c]=1;regs[TCS+0x2a0+0x34]=0x50000;tick(r);
+  SweetRegisterBandwidthStatus rs{};assert(r->copyRegisterBandwidthStatus(a,rt,&rs)==0&&rs.state==SweetRPMhFailed&&rs.uncertain);
+diff --git a/tools/tests/test-mh2lm-rpmh-resources.py b/tools/tests/test-mh2lm-rpmh-resources.py
+index 5d247d0..4c99ddb 100644
+--- a/tools/tests/test-mh2lm-rpmh-resources.py
++++ b/tools/tests/test-mh2lm-rpmh-resources.py
+@@ -154,6 +154,36 @@ int main(){
+  assert(!status(s,other,token).enabled&&regs[TCS+0x34]==0x40004&&regs[TCS+0x38]==0);
+  assert(s->detachConsumer(other)==0);destroy(s,n);assert(rpmhOwner==2);
+  s=new SweetRPMh();assert(!s->start(n));s->release();reboot();
++ // C3-05, device evidence 0148: this boot's own consumer votes each rail as a
++ // point (min == max), and the aggregate takes the maximum of the floors with
++ // the minimum of the ceilings, so a point vote pins both ends at once. A
++ // second consumer that moves the floor is therefore illegal - even inside the
++ // rail's own range - and the screen refuses it before it costs a token, a
++ // queue slot or a write, leaving the first consumer's completion readable.
++ // The one admissible second vote is one whose aggregate is identical, which is
++ // a no-op and cannot demonstrate order. That is why the demonstration had to
++ // move to a resource that aggregates by maximum.
++ fixtures();resourceMode=2;s=make(n);id=attach(s);other=attach(s);
++ token=vote(s,id,SweetRailVDDI,{true,1800,1800,6000});tick(s);ack(s);
++ assert(status(s,id,token).millivolts==1800);
++ uint64_t held=token,refused=7;auto pointWrites=writes();
++ assert(s->requestVote(other,SweetRailVDDI,{true,1808,1808,6000},&refused)==kIOReturnBadArgument);
++ assert(refused==0&&writes()==pointWrites&&s->fQueue.empty()&&s->fNextToken==held);
++ assert(status(s,id,held).state==SweetRPMhComplete&&status(s,id,held).millivolts==1800);
++ assert(s->requestVote(other,SweetRailVDDI,{true,1808,1800,6000},&refused)==kIOReturnBadArgument);
++ assert(refused==0&&writes()==pointWrites&&s->fQueue.empty());
++ token=vote(s,other,SweetRailVDDI,{true,1800,1880,0});
++ assert(token!=held);assert(!s->fBusy);assert(writes()==pointWrites);assert(s->fQueue.empty());
++ assert(status(s,other,token).state==SweetRPMhComplete&&status(s,other,token).millivolts==1800);
++ assert(s->fAggregate[SweetRailVDDI].minMV==1800&&s->fAggregate[SweetRailVDDI].maxMV==1800);
++ // Withdrawing the point vote opens no hardware flight either: the floor and
++ // the mode are what a write carries, and neither moved.
++ token=vote(s,id,SweetRailVDDI,{false,0,0,0});
++ assert(!s->fBusy&&writes()==pointWrites);
++ assert(s->fAggregate[SweetRailVDDI].minMV==1800&&s->fAggregate[SweetRailVDDI].maxMV==1880);
++ token=vote(s,other,SweetRailVDDI,{false,0,0,0});tick(s);ack(s);
++ assert(!s->fAggregate[SweetRailVDDI].enabled);
++ assert(s->detachConsumer(id)==0&&s->detachConsumer(other)==0);destroy(s,n);reboot();
+  // Every known shared rail vetoes a last aggregate disable; all client
+  // slots participate. A refusal must preserve the previously completed status and ledger.
+  // Non-last removal and unowned no-op remain usable; VPNL's original disable
