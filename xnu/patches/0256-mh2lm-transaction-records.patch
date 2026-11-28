@@ -1,0 +1,683 @@
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
+index 7ee5869..edb9a0d 100644
+--- a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
+@@ -215,7 +215,8 @@ void SweetRPMh::irqAction(OSObject *owner,IOInterruptEventSource *,int)
+ void SweetRPMh::completionArrived(void)
+ {
+  SweetRPMh *self=this;
+- if (!self->fBusy || !self->fExecuting || self->fOperationCount ||
++ if (!self->fBusy) { self->lateCompletion(); return; }
++ if (!self->fExecuting || self->fOperationCount ||
+      !(tcsRead(IRQStatus)&(1u<<self->fTCSIndex))) {
+   SWEET_LOG_ERROR("SWEET RPMH IRQ: unexpected ACTIVE completion; source retained, no foreign ACK\n");
+   self->quietIRQ(); self->fPoisoned=true;
+@@ -673,6 +674,365 @@ SweetRPMh::cancelSelfTestFinish(void)
+  return true;
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * C3-07: naming a transaction, so a failure can be reported against the attempt
++ * that earned it and a completion that arrives too late can be told apart from
++ * the one now in flight.
++ *
++ * Three facts are kept, each in one place. The token names a submission for the
++ * whole boot and is never reused. The generation names the attempt that
++ * actually reached the array, taken when the first command of that request is
++ * armed and kept for the rest of its chain, so a request that never needed a
++ * TCS keeps generation 0 instead of pretending it did. The retained rows are
++ * this service's own record of the last few attempts, and they are what a
++ * caller is answered from once its request has retired: a client row may since
++ * belong to somebody else, and the queue is empty by then.
++ *
++ * Nothing in here retries, resets or re-reads the array. A wrong answer would
++ * be worse than a refusal, so a mismatched generation and an unknown token are
++ * both refusals.
++ * ------------------------------------------------------------------------ */
++
++const char *
++SweetRPMh::verdictName(unsigned verdict)
++{
++ switch (verdict) {
++ case SweetTransactionPending: return "pending";
++ case SweetTransactionComplete: return "complete";
++ case SweetTransactionFailed: return "failed";
++ case SweetTransactionUncertain: return "uncertain";
++ default: return "unknown";
++ }
++}
++
++/* The attempt that is about to reach the array takes the next generation. Every
++ * later arm of the same request keeps it, because a multi-stage display chain
++ * is one attempt to its caller and must answer as one. */
++void
++SweetRPMh::armFlight(uint64_t token)
++{
++ if (fFlightGeneration && fFlightToken==token) return;
++ fFlightToken=token; fFlightGeneration=++fGeneration;
++}
++
++/* Keep this attempt's own outcome. The ring holds the last eight, which is more
++ * than the queue can hold, so an answer that is still being asked for cannot
++ * have been pushed out by the traffic that followed it. */
++void
++SweetRPMh::retainTransaction(uint64_t token,uint64_t generation,uint64_t client,
++    unsigned kind,unsigned state,IOReturn result,bool executed,bool uncertain)
++{
++ if (!token) return;
++ Transaction &row=fRetained[fRetainedNext];
++ row.token=token; row.generation=generation; row.client=client; row.kind=kind;
++ row.state=state; row.result=result; row.executed=executed; row.uncertain=uncertain;
++ fRetainedNext=(fRetainedNext+1)&7;
++ if (fRetainedCount<8) fRetainedCount++;
++}
++
++const SweetRPMh::Transaction *
++SweetRPMh::retainedTransaction(uint64_t token,uint64_t generation) const
++{
++ for (unsigned i=0;i<fRetainedCount;++i) {
++  const Transaction &row=fRetained[(fRetainedNext+8-i-1)&7];
++  if (row.token!=token) continue;
++  /* The token is the caller's, the generation is the attempt's: an answer for
++   * a different generation of the same token would hand this attempt the next
++   * one's outcome, so it is not this row. */
++  if (row.generation!=generation) return NULL;
++  return &row;
++ }
++ return NULL;
++}
++
++/* One place where an attempt stops being in flight: its identity becomes part
++ * of the retained record, the array gets the damage marker if the outcome says
++ * something may have executed, and the flight identity is named as retired so
++ * a completion that arrives afterwards can be recognised instead of applied. */
++void
++SweetRPMh::settle(uint64_t token,unsigned kind,unsigned client,IOReturn result,bool uncertain)
++{
++ const bool executed=fFlightGeneration && fFlightToken==token;
++ const uint64_t generation=executed ? fFlightGeneration : 0;
++ const unsigned state=result==kIOReturnSuccess ? SweetRPMhComplete : SweetRPMhFailed;
++ /* The record is keyed by the identity the client was given, not by the slot
++  * it holds: a slot is reused by the next client, an identity never is. */
++ const uint64_t owner=client<8 ? fClients[client].id : 0;
++ retainTransaction(token,generation,owner,kind,state,result,executed,uncertain);
++ fRetiredToken=token; fRetiredGeneration=generation; fRetiredUncertain=uncertain;
++ if (!uncertain) return;
++ /* Something may have executed and nothing here can name its result: stop
++  * asking. The TCS is remembered because a slot that reads empty may still be
++  * holding a command the array never finished with; it is not reused. */
++ const unsigned tcs=fTCSIndex;
++ if (!fQuarantine) {
++  fQuarantine=true; fQuarantineCause=result; fQuarantineTcs=tcs;
++ }
++ SWEET_LOG_ERROR("SWEET RPMH: quarantine token=%llu generation=%llu tcs=%u cause=%#x kind=%s executed=%u; array state unknown, new submissions refused, nothing retried\n",
++     token,generation,tcs,(unsigned)result,sweetRequestName(kind),executed?1u:0u);
++}
++
++/* A completion that arrives when nothing is in flight belongs to an attempt
++ * this service already retired, and in every path that reaches here an attempt
++ * it stopped waiting for. It is named by the identity that posted it and
++ * dropped: the result the caller already has stands, no ledger entry or status
++ * moves, and the array is marked because a completion nobody consumed means the
++ * slot cannot be trusted to be idle. It is never treated as the current
++ * transaction's completion. */
++void
++SweetRPMh::lateCompletion(void)
++{
++ const uint64_t token=fRetiredToken, generation=fRetiredGeneration;
++ fLateCompletions++; fPoisoned=true;
++ if (!fRetiredUncertain) {
++  /* The attempt this belongs to already answered: this is a second completion
++   * nobody is waiting for. Still a completion this service cannot account for,
++   * so new work stops, but no attempt is left in doubt. */
++  SWEET_LOG_WARN("SWEET RPMH IRQ: stray completion token=%llu generation=%llu tcs=%u in-flight=0 late=%u; already answered, dropped, no ledger moved\n",
++      token,generation,fTCSIndex,fLateCompletions);
++  quietIRQ(); dispatchNext(); return;
++ }
++ /* The attempt was given up on: this is the completion it was still able to
++  * produce. Named as that attempt's and dropped, and the array is marked
++  * because a slot whose completion nobody consumed is not idle. */
++ if (!fQuarantine) {
++  fQuarantine=true; fQuarantineCause=kIOReturnTimeout; fQuarantineTcs=fTCSIndex;
++ }
++ SWEET_LOG_WARN("SWEET RPMH IRQ: late completion token=%llu generation=%llu tcs=%u in-flight=0 late=%u; dropped, no ledger moved, channel quarantined\n",
++     token,generation,fTCSIndex,fLateCompletions);
++ quietIRQ();
++ /* Whatever is waiting cannot run on a channel whose last completion has no
++  * owner; it is failed against its own token instead of being left to time out. */
++ dispatchNext();
++}
++
++IOReturn
++SweetRPMh::copyTransactionStatus(uint64_t client,uint64_t token,uint64_t generation,
++    SweetTransactionStatus *out)
++{
++ if (!out || !token) return kIOReturnBadArgument;
++ *out=SweetTransactionStatus{};
++ out->token=token; out->generation=generation; out->verdict=SweetTransactionUnknown;
++ out->quarantined=fQuarantine;
++ /* The caller names itself by identity; the queue and the current request name
++  * their owner by slot. A client that has already left resolves to no slot,
++  * and only its retained record can answer for it. */
++ unsigned slot=8;
++ for (unsigned i=0;i<8;++i) if (fClients[i].id && fClients[i].id==client) { slot=i; break; }
++ /* Waiting: nothing of it has reached the array, so it has no generation of
++  * its own and its outcome is exactly Pending. */
++ const SweetAppsRequest *waiting=fQueue.findToken(token);
++ if (waiting) {
++  if (waiting->client!=slot) return kIOReturnNotPermitted;
++  out->kind=waiting->kind; out->verdict=SweetTransactionPending; out->result=kIOReturnSuccess;
++  out->generation=0; return kIOReturnSuccess;
++ }
++ if (fCurrentValid && fCurrent.token==token) {
++  if (fCurrent.client!=slot) return kIOReturnNotPermitted;
++  const bool executed=fFlightGeneration && fFlightToken==token;
++  out->kind=fCurrent.kind; out->verdict=SweetTransactionPending;
++  out->result=kIOReturnSuccess; out->executed=executed;
++  out->generation=executed ? fFlightGeneration : 0;
++  return kIOReturnSuccess;
++ }
++ const Transaction *row=retainedTransaction(token,generation);
++ /* A record whose owner was already gone when it was written names nobody, so
++  * there is no caller it may be handed to. */
++ if (!row || !row->client) return kIOReturnNotFound;
++ if (row->client!=client) return kIOReturnNotPermitted;
++ out->kind=row->kind; out->generation=row->generation; out->result=row->result;
++ out->executed=row->executed; out->uncertain=row->uncertain; out->retained=true;
++ out->verdict=row->state==SweetRPMhComplete ? SweetTransactionComplete :
++     (row->uncertain ? SweetTransactionUncertain : SweetTransactionFailed);
++ return kIOReturnSuccess;
++}
++
++void
++SweetRPMh::quarantineInfo(unsigned *tcs,IOReturn *cause,unsigned *refused)
++{
++ if (tcs) *tcs=fQuarantine ? fQuarantineTcs : 0u;
++ if (cause) *cause=fQuarantine ? fQuarantineCause : kIOReturnSuccess;
++ if (refused) *refused=fQuarantined+fLateCompletions;
++}
++
++/* The device half of C3-07: what a caller is told about a transaction it can
++ * no longer find in its own row.
++ *
++ * It submits real votes, because a record of something that did not happen
++ * would prove nothing: one raise of the CN0 rate, the restore that puts the
++ * boot's own value back, and one request for the value the array is already
++ * telling. Then it asks about each attempt by (token, generation) - while it
++ * flies, after it retires, with the generation it did not take, with a token
++ * nobody was given, for a request the array was never told about, and finally
++ * after the client that owned them has left.
++ *
++ * It takes only windows that start empty and it restores what it raised, so a
++ * boot that is already talking to the array is never driven further than the
++ * demonstration itself. Every request it submits can retire synchronously, and
++ * the demonstration therefore keeps a re-entrancy flag: a settlement that
++ * happens inside its own submission must not start the next step. */
++bool
++SweetRPMh::querySelfTest(void)
++{
++ if (fQueryActive) return false;
++ if (fBusy || !fQueue.empty()) return false;
++ if (fQueryPhase==0 && fQueryTries++>=6) return true;
++ if (fNextClient==~0ULL) return false;
++ if (!lookupBCM(SweetBCMCN0)) return false;
++ const uint64_t step=cn0Step();
++ if (!step) return false;
++ fQueryActive=true;
++ bool done=false;
++ /* Steps that need no flight are taken here, one after another, so the
++  * demonstration cannot wait for a retirement that will never come. */
++ for (unsigned guard=0;guard<4;++guard) {
++  done=(fQueryPhase==0 ? querySelfTestRaise(step) :
++      (fQueryPhase==1 ? querySelfTestRetired() : querySelfTestSettle()));
++  if (!done || fBusy || !fQueue.empty() || fQueryPhase>=4 || fQueryPhase<2) break;
++ }
++ fQueryActive=false;
++ return done;
++}
++
++/* Step 1: a real raise, asked about while the array is still being told. */
++bool
++SweetRPMh::querySelfTestRaise(uint64_t step)
++{
++ fQueryBase=fRegisterOwned ? fRegisterAggregate : 0;
++ unsigned y=0;
++ if (!fBCM[SweetBCMCN0].scale(fQueryBase+step,4,1,&y)) return false;
++ int slot=-1;
++ for (unsigned i=0;i<8;++i) if (!fClients[i].id) { slot=(int)i; break; }
++ if (slot<0) return true;
++ fQuerySlot=(unsigned)slot;
++ fClients[fQuerySlot]={}; fClients[fQuerySlot].id=++fNextClient;
++ fQueryClient=fClients[fQuerySlot].id;
++ const IOReturn raised=beginRegisterBandwidth(fQuerySlot,fQueryBase+step);
++ fQueryToken=fClients[fQuerySlot].registerStatus.token;
++ if (raised!=kIOReturnSuccess || !fQueryToken) {
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=transaction step=1 result=failed detail=raise-refused rc=%#x token=%llu base=%llu\n",
++      (unsigned)raised,fQueryToken,fQueryBase);
++  fQueryPhase=4;
++  return true;
++ }
++ /* Asked before the request it names has retired: the answer has to be Pending
++  * with the generation this attempt took, which is what makes the later answer
++  * about the same attempt comparable to it. */
++ SweetTransactionStatus status={};
++ const IOReturn asked=copyTransactionStatus(fQueryClient,fQueryToken,0,&status);
++ const bool inFlight=asked==kIOReturnSuccess && status.verdict==SweetTransactionPending &&
++     status.executed && status.generation && !status.retained;
++ if (!inFlight) {
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=transaction step=1 result=failed detail=not-in-flight rc=%#x verdict=%s executed=%u generation=%llu token=%llu\n",
++      (unsigned)asked,verdictName(status.verdict),status.executed?1u:0u,status.generation,fQueryToken);
++  fQueryPhase=4;
++  return true;
++ }
++ fQueryGeneration=status.generation;
++ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=transaction step=1 result=ok token=%llu generation=%llu verdict=%s executed=1 retained=0 client=%llu base=%llu target=%llu; asked while the attempt it names was in flight\n",
++     fQueryToken,fQueryGeneration,verdictName(status.verdict),fQueryClient,fQueryBase,fQueryBase+step);
++ fQueryPhase=1;
++ return true;
++}
++
++/* Step 2: the attempt has retired, so its outcome exists only in this
++ * service's record - the client row already names the next one. It answers for
++ * its own generation and refuses the other two questions. */
++bool
++SweetRPMh::querySelfTestRetired(void)
++{
++ SweetTransactionStatus own={}, crossed={}, unissued={};
++ const IOReturn asked=copyTransactionStatus(fQueryClient,fQueryToken,fQueryGeneration,&own);
++ const uint64_t other=fQueryGeneration ? fQueryGeneration-1 : fQueryGeneration+1;
++ const IOReturn missed=copyTransactionStatus(fQueryClient,fQueryToken,other,&crossed);
++ const IOReturn unknown=copyTransactionStatus(fQueryClient,~fQueryToken,0,&unissued);
++ const bool complete=asked==kIOReturnSuccess && own.verdict==SweetTransactionComplete &&
++     own.retained && own.executed;
++ const bool refused=missed==kIOReturnNotFound && unknown==kIOReturnNotFound &&
++     crossed.verdict==SweetTransactionUnknown && unissued.verdict==SweetTransactionUnknown;
++ if (!complete || !refused) {
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=transaction step=2 result=failed detail=%s own=%#x verdict=%s retained=%u missed=%#x unissued=%#x token=%llu generation=%llu\n",
++      complete?"query-refused":"record-disagrees",(unsigned)asked,verdictName(own.verdict),
++      own.retained?1u:0u,(unsigned)missed,(unsigned)unknown,fQueryToken,fQueryGeneration);
++  fQueryPhase=4;
++  return true;
++ }
++ /* A second, later submission of the same client: it asks for what the array is
++  * already being told, so it settles without a flight of its own and takes the
++  * client row's token with it. That is what makes the next step able to say
++  * "answered from the record" instead of "answered from whoever holds the row". */
++ unsigned y=0;
++ if (!fBCM[SweetBCMCN0].scale(fRegisterAggregate,4,1,&y)) return false;
++ const IOReturn restored=beginRegisterBandwidth(fQuerySlot,fRegisterAggregate);
++ fQueryRestore=fClients[fQuerySlot].registerStatus.token;
++ const bool later=restored==kIOReturnSuccess && fQueryRestore && fQueryRestore!=fQueryToken;
++ if (!later) {
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=transaction step=2 result=failed detail=second-token-missing rc=%#x restore=%#x token=%llu\n",
++      (unsigned)restored,(unsigned)fQueryRestore,fQueryToken);
++  fQueryPhase=4;
++  return true;
++ }
++ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=transaction step=2 result=ok token=%llu generation=%llu verdict=%s executed=1 retained=1 other=%#x unissued=%#x next=%llu rc=%#x; own record answered, other generation and unissued token refused\n",
++     fQueryToken,fQueryGeneration,verdictName(own.verdict),(unsigned)missed,(unsigned)unknown,
++     fQueryRestore,(unsigned)restored);
++ fQueryPhase=2;
++ return true;
++}
++
++/* Step 3 and 4: a request the array is already telling settles without a
++ * transaction of its own, and its record outlives the client that asked. Both
++ * are visible the moment the submission returns, so neither needs another
++ * retirement to be observed. */
++bool
++SweetRPMh::querySelfTestSettle(void)
++{
++ SweetTransactionStatus again={}, restore={};
++ const IOReturn kept=copyTransactionStatus(fQueryClient,fQueryToken,fQueryGeneration,&again);
++ const IOReturn asked=copyTransactionStatus(fQueryClient,fQueryRestore,0,&restore);
++ const bool held=kept==kIOReturnSuccess && again.verdict==SweetTransactionComplete && again.retained;
++ /* No generation to name at all: the array was already telling this, so the
++  * attempt settled complete without ever being executed. */
++ const bool landed=asked==kIOReturnSuccess && restore.verdict==SweetTransactionComplete &&
++     restore.retained && !restore.executed && !restore.generation &&
++     restore.result==kIOReturnSuccess;
++ if (!held || !landed) {
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=transaction step=3 result=failed detail=%s kept=%#x verdict=%s restore=%#x verdict=%s executed=%u generation=%llu token=%llu\n",
++      held?"restore-not-answered":"record-lost",(unsigned)kept,verdictName(again.verdict),
++      (unsigned)asked,verdictName(restore.verdict),restore.executed?1u:0u,
++      restore.generation,fQueryToken);
++  fQueryPhase=4;
++  return true;
++ }
++ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=transaction step=3 result=ok token=%llu generation=0 verdict=%s executed=0 retained=1 client=%llu first=%llu; a request the array was already telling settles complete and unexecuted\n",
++     fQueryRestore,verdictName(restore.verdict),fQueryClient,fQueryToken);
++ /* Its own vote is zero, so it holds nothing the array is still being told. */
++ unsigned exitedWith=0;
++ const IOReturn detached=detachClient(fQuerySlot,&exitedWith);
++ SweetTransactionStatus after={};
++ unsigned tcs=0, refused=0; IOReturn cause=kIOReturnSuccess;
++ quarantineInfo(&tcs,&cause,&refused);
++ const IOReturn last=detached==kIOReturnSuccess ?
++     copyTransactionStatus(fQueryClient,fQueryToken,fQueryGeneration,&after) : kIOReturnNotPermitted;
++ /* A client that never asked for this attempt may not read it even though the
++  * record survived its owner. */
++ const IOReturn alien=detached==kIOReturnSuccess ?
++     copyTransactionStatus(fQueryClient+1,fQueryToken,fQueryGeneration,&after) : kIOReturnSuccess;
++ const bool stayed=last==kIOReturnSuccess && after.verdict==SweetTransactionComplete &&
++     after.retained && alien==kIOReturnNotPermitted;
++ if (!stayed) {
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=transaction step=4 result=failed detail=%s detach=%#x query=%#x alien=%#x verdict=%s retained=%u late=%u refused=%u quarantined=%u\n",
++      detached==kIOReturnSuccess?"record-lost":"detach-refused",(unsigned)detached,(unsigned)last,
++      (unsigned)alien,verdictName(after.verdict),after.retained?1u:0u,fLateCompletions,refused,fQuarantine?1u:0u);
++  fQueryPhase=4;
++  return true;
++ }
++ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=transaction step=4 result=ok token=%llu verdict=%s retained=1 client=%llu detach=%#x exited=%u alien=%#x late=%u quarantined=%u; answered after the client that owned it had left\n",
++     fQueryToken,verdictName(after.verdict),fQueryClient,(unsigned)detached,exitedWith,
++     (unsigned)alien,fLateCompletions,fQuarantine?1u:0u);
++ fQueryPhase=4;
++ return true;
++}
++
+ /* A queued vote is rebuilt from these two words, never from the caller's
+  * reference: the caller may return as soon as its token exists, and the queue
+  * must still hold everything the dispatch needs. */
+@@ -737,7 +1097,17 @@ IOReturn
+ SweetRPMh::admit(SweetAppsRequest &request)
+ {
+  if (fMode!=2) return kIOReturnNotPermitted;
+- if (fPoisoned) return kIOReturnNotReady;
++ if (fPoisoned) {
++  /* Something may have executed and nothing here can name its result, so this
++   * service refuses rather than guess. The refusal is named and counted: a
++   * caller that never receives a token has no other way to learn why. */
++  fQuarantined++;
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u detail=%s tcs=%u cause=%#x refused=%u result=%#x\n",
++      sweetRequestName(request.kind),request.client,request.rail,
++      fQuarantine?"quarantined":"stopped",fQuarantineTcs,
++      (unsigned)fQuarantineCause,fQuarantined,(unsigned)kIOReturnNotReady);
++  return kIOReturnNotReady;
++ }
+  if (!ensureExecutor()) return kIOReturnNotReady;
+  if (!fAccepting || isInactive()) return kIOReturnNotReady;
+  if (request.kind!=SweetAppsRequestRailVote && request.kind!=SweetAppsRequestDisplayCorner &&
+@@ -800,6 +1170,7 @@ SweetRPMh::admit(SweetAppsRequest &request)
+ IOReturn
+ SweetRPMh::launch(const SweetAppsRequest &request)
+ {
++ fLaunchToken=request.token;
+  IOReturn result;
+  switch (request.kind) {
+  case SweetAppsRequestRailVote: result=launchRail(request); break;
+@@ -860,7 +1231,6 @@ SweetRPMh::drainQueue(IOReturn result,const char *reason)
+   SweetAppsRequest request=*fQueue.head();
+   fQueue.pop();
+   markFailure(request,result);
+-  fQuarantined++;
+   SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u token=%llu seq=%u detail=%s result=%#x\n",
+       sweetRequestName(request.kind),request.client,request.rail,request.token,request.seq,
+       reason,(unsigned)result);
+@@ -1028,6 +1398,12 @@ SweetRPMh::markPending(const SweetAppsRequest &request)
+ void
+ SweetRPMh::markFailure(const SweetAppsRequest &request,IOReturn result)
+ {
++ /* Kept before the client-row check: a request withdrawn by its client's exit
++  * is exactly the one whose record has to outlive the row, and it never
++  * reached the array, so its generation is 0. Whose it was is read from the row
++  * while the row still names it. */
++ const uint64_t owner=request.client<8 ? fClients[request.client].id : 0;
++ retainTransaction(request.token,0,owner,request.kind,SweetRPMhFailed,result,false,false);
+  if (request.client>=8 || !fClients[request.client].id) return;
+  switch (request.kind) {
+  case SweetAppsRequestRailVote: {
+@@ -1089,6 +1465,7 @@ IOReturn SweetRPMh::launchRegisterBandwidth(const SweetAppsRequest &request)
+  fArcRequest=false; fRegisterRequest=true; fBusy=true;
+  if (noWrite) { finish(kIOReturnSuccess,false); return kIOReturnSuccess; }
+  fTCSIndex=chosen; fExecuting=false; fIRQObserved=false; fOperation=fOperationCount=0; fWriteIssued=false;
++ armFlight(request.token);
+  fCommandCount=fCommandMask=1;
+  uint32_t b=chosen*Stride, bit=1u<<chosen;
+  addOperation(IRQEnable,fSavedIRQ&~bit); addOperation(IRQClear,bit,true); addOperation(b+Message,WriteACK);
+@@ -1160,6 +1537,7 @@ IOReturn SweetRPMh::queueArcStage(void)
+  uint32_t irq=tcsRead(IRQEnable);
+  if (irq==~0u || !emptyTCS(chosen)) return kIOReturnBusy;
+  fTCSIndex=chosen; fSavedIRQ=irq;
++ armFlight(fLaunchToken);
+  fExecuting=false; fIRQObserved=false; fOperation=fOperationCount=0; fWriteIssued=false;
+  fCommandCount=1; fCommandMask=1;
+  uint32_t b=chosen*Stride, bit=1u<<chosen;
+@@ -1377,6 +1755,13 @@ bool SweetRPMh::start(IOService *provider)
+  if (mode<1 || mode>2 || !IOService::start(provider)) return false;
+  fMode=(unsigned)mode;
+  fQueue.reset();
++ /* C3-07: nothing from a previous life of this object is inherited by this
++  * boot - not a generation, not a retained outcome, not a damage marker. */
++ fGeneration=fFlightToken=fFlightGeneration=fLaunchToken=0;
++ fRetiredToken=fRetiredGeneration=0; fRetiredUncertain=false;
++ fRetainedCount=fRetainedNext=fLateCompletions=0;
++ for (unsigned i=0;i<8;++i) fRetained[i]=Transaction{};
++ fQuarantine=false; fQuarantineCause=kIOReturnSuccess; fQuarantineTcs=0;
+  /* An explicit tree request to demonstrate the submission queue on this boot.
+   * Absent, zero or anything but 1 means the demonstration does not run. */
+  fQueueSelfTest=propertyRequested(provider,"sweet,rpmh-queue-selftest");
+@@ -1387,12 +1772,21 @@ bool SweetRPMh::start(IOService *provider)
+   * refusal and retirement rows before its own. */
+  fQueueCancel=propertyRequested(provider,"sweet,rpmh-queue-cancel");
+  if (fQueueCancel) fQueueSelfTest=true;
++ /* C3-07: naming a transaction is its own explicit tree request. It implies
++  * neither of the two above - it asks about a request it submits itself - but a
++  * tree may carry all three, and then it runs last, because it asks about
++  * attempts that have already retired. */
++ fQuerySelfTest=propertyRequested(provider,"sweet,rpmh-transaction-query");
++ fQueryActive=false;
+  /* Both demonstrations start from nothing to say, so a restart cannot inherit a
+   * step from the boot before it. */
+  fCancelStep=0; fCancelLower=0; fCancelLedger=false;
+  fCancelTokens[0]=fCancelTokens[1]=fCancelTokens[2]=0;
+  fSelfClients[0]=fSelfClients[1]=0;
+  fCancelClients[0]=fCancelClients[1]=fCancelClients[2]=0;
++ fQueryPhase=0; fQueryTries=0; fQuerySlot=0;
++ fQueryClient=fQueryToken=fQueryGeneration=fQueryBase=0;
++ fQueryRestore=fQueryIdle=0;
+  /* C3-04: the owner comes from the tree, before the first register access and
+   * without a boot arg (the boot-arg budget is spent). A tree that says both
+   * sides program the line resolves to SweetAppsOwnerNone and nothing starts. */
+@@ -1431,11 +1825,19 @@ bool SweetRPMh::start(IOService *provider)
+  unsigned sharedMask=0;
+  for (unsigned r=0;r<SweetRailCount;++r) if (railLimits[r].lastDisableRequiresHandoff) sharedMask|=1u<<r;
+  setProperty("SweetRPMhLastDisableBlockedMask",(unsigned long long)sharedMask,32);
++ /* A capability marker, set once and never a claim about runtime state: what
++  * this service can answer about a transaction is stated here, and what it
++  * actually saw is only ever in the rows and in quarantineInfo(). */
++ setProperty("SweetRPMhTransactions",1ULL,32);
+  registerService(); return true;
+ }
+ 
+ bool SweetRPMh::emptyTCS(unsigned t)
+ {
++ /* The software veto comes first: after an attempt that may still be executing,
++  * this slot can read empty while the array is still finishing a command that
++  * nobody consumed, so it is never offered again in this boot. */
++ if (fQuarantine && t==fQuarantineTcs) return false;
+  uint32_t b=t*Stride, idle=tcsRead(b+Status);
+  return idle && idle!=~0u && tcsRead(b+Control)==0 && tcsRead(b+Enable)==0 && tcsRead(b+Wait)==0 && !(tcsRead(IRQStatus)&(1u<<t));
+ }
+@@ -1676,6 +2078,7 @@ IOReturn SweetRPMh::launchRail(const SweetAppsRequest &request)
+  if (chosen<0 || (fSavedIRQ=tcsRead(IRQEnable))==~0u) return kIOReturnBusy;
+  fTCSIndex=(unsigned)chosen;
+  if (!emptyTCS(fTCSIndex)) return kIOReturnBusy;
++ armFlight(request.token);
+  fClients[client].status=status; fClients[client].status.state=SweetRPMhPending;
+  fBusy=true; fExecuting=false; fIRQObserved=false; fOperation=0; fOperationCount=0; fWriteIssued=false;
+  uint32_t b=fTCSIndex*Stride, bit=1u<<fTCSIndex;
+@@ -1710,6 +2113,7 @@ void SweetRPMh::finish(IOReturn result,bool uncertain)
+    fPoisoned|=uncertain;
+    SWEET_LOG_ERROR("SWEET RPMH: token=%llu CN0 rc=%#x uncertain=%u; no retry/reset\n",s.token,(unsigned)result,uncertain);
+   }
++  settle(s.token,SweetAppsRequestRegisterBandwidth,fClientIndex,result,uncertain);
+   retireFlight(); return;
+  }
+  if (fArcRequest) {
+@@ -1725,6 +2129,7 @@ void SweetRPMh::finish(IOReturn result,bool uncertain)
+    SWEET_LOG_ERROR("SWEET RPMH: token=%llu display ARC failed rc=%#x acked=%#x uncertain=%u; votes retained, no rollback/reset\n",
+        s.token,(unsigned)result,s.acknowledged,uncertain);
+   }
++  settle(s.token,SweetAppsRequestDisplayCorner,fClientIndex,result,uncertain);
+   retireFlight(); return;
+  }
+  SweetRPMhStatus &s=fClients[fClientIndex].status;
+@@ -1737,6 +2142,7 @@ void SweetRPMh::finish(IOReturn result,bool uncertain)
+   fPoisoned|=uncertain;
+   SWEET_LOG_ERROR("SWEET RPMH: token=%llu %s failed rc=%#x uncertain=%u; no reset/retry\n",s.token,railNames[fRail],(unsigned)result,uncertain);
+  }
++ settle(s.token,SweetAppsRequestRailVote,fClientIndex,result,uncertain);
+  retireFlight();
+ }
+ 
+@@ -1745,6 +2151,10 @@ void SweetRPMh::finish(IOReturn result,bool uncertain)
+ void SweetRPMh::retireFlight(void)
+ {
+  fBusy=false; fCurrentValid=false;
++ /* Nothing is in flight from here on, so the attempt's identity moves to the
++  * retired slot: a completion that still arrives can be named as that
++  * attempt's instead of being mistaken for whatever runs next. */
++ fFlightToken=0; fFlightGeneration=0;
+  if (fTimer) fTimer->cancelTimeout();
+  /* The explicit ADT demonstration runs once this boot has actually completed
+   * a transaction, because that is the first moment a rail it may re-vote is
+@@ -1770,6 +2180,11 @@ void SweetRPMh::retireFlight(void)
+    if (cancelSelfTestFinish()) fCancelStep=3;
+   }
+  }
++ /* C3-07: four more moments, each reachable only after the previous one really
++  * landed on the array. It runs last, because it asks about attempts that have
++  * already retired, and it asks for its own windows: a boot request that
++  * intervenes is allowed to go first rather than being queued behind it. */
++ if (fQuerySelfTest && !fPoisoned && fAccepting && fQueryPhase<4) querySelfTest();
+  dispatchNext();
+ }
+ 
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h
+index d8c341e..3d5bdc3 100644
+--- a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h
++++ b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h
+@@ -84,6 +84,28 @@ struct SweetNoCStatus {
+  bool uncertain, registerAcknowledged;
+ };
+ 
++/* C3-07: one transaction, asked about by the identity its caller already holds
++ * instead of by its kind. A token names a submission for the life of the boot
++ * and is never reused; the generation names the attempt that actually reached
++ * the array, because a request still waiting in the queue has not been
++ * triggered and a retired attempt must never answer for the next one. The
++ * verdict is the answer a caller can act on without knowing which row stores
++ * it: Pending and Complete are the shapes that let `confirmed` advance, Failed
++ * is a request that never reached the array, and Uncertain is the one state
++ * that forbids any of that - something may have executed and nothing here can
++ * name its physical result. Retained means this service answered from its own
++ * record of that attempt rather than from a live row that may since belong to
++ * another, and quarantined says the channel which carried it is damaged now. */
++enum SweetTransactionVerdict : unsigned { SweetTransactionUnknown,
++ SweetTransactionPending, SweetTransactionComplete, SweetTransactionFailed,
++ SweetTransactionUncertain, SweetTransactionVerdictCount };
++struct SweetTransactionStatus {
++ uint64_t token, generation; /* Generation 0: this attempt never reached the array. */
++ unsigned kind, verdict;     /* SweetAppsRequestKind, SweetTransactionVerdict */
++ IOReturn result;
++ bool executed, uncertain, retained, quarantined;
++};
++
+ class SweetPanelPins;
+ class SweetTouchPanel;
+ /* Exact exclusive leaf-provider leases for ONE panel vote. The caller owns
+@@ -130,6 +152,35 @@ class SweetRPMh : public IOService {
+  SweetRailVote fAggregate[SweetRailCount];
+  bool fOwned[SweetRailCount];
+  uint64_t fNextClient, fNextToken, fDeadline, fWriteDeadline;
++ /* C3-07: which attempt the array is being told about. fFlightToken/fFlight-
++  * Generation name the transaction that posted commands and are moved to
++  * fRetired* when it retires, so a completion that arrives afterwards can be
++  * named as the attempt it belonged to instead of being applied to whatever
++  * runs next. A request that needs no TCS keeps generation 0. */
++ uint64_t fGeneration, fFlightToken, fFlightGeneration;
++ uint64_t fLaunchToken;
++ uint64_t fRetiredToken, fRetiredGeneration;
++ bool fRetiredUncertain;
++ /* The last few attempts, kept so a caller that still holds a token can be
++  * answered after its request retired - including one that was refused or
++  * cancelled and therefore never reached the array. A retained row answers
++  * only for its own generation and only to the client that owned it. */
++ struct Transaction {
++  uint64_t token, generation, client;
++  unsigned kind, state;
++  IOReturn result;
++  bool executed, uncertain;
++ };
++ Transaction fRetained[8];
++ unsigned fRetainedCount, fRetainedNext, fLateCompletions;
++ /* The damage marker, set once and cleared by nothing: an attempt that may
++  * still be executing leaves the array in a state this service cannot name, so
++  * it stops asking, remembers the TCS it must never reuse even when that slot
++  * reads empty, and refuses every new submission. There is no retry, reset,
++  * recovery or acknowledgement path that could lift it before this boot ends. */
++ bool fQuarantine;
++ IOReturn fQuarantineCause;
++ unsigned fQuarantineTcs;
+  unsigned fClientIndex, fRail, fTCSIndex, fCommandCount, fOperation, fOperationCount;
+  uint32_t fSavedIRQ, fCommandMask;
+  bool fBusy, fIRQObserved, fWriteIssued, fExecuting;
+@@ -174,6 +225,16 @@ class SweetRPMh : public IOService {
+  unsigned fSelfClients[2], fCancelClients[3];
+  uint64_t fCancelTokens[3], fCancelLower;
+  unsigned fQueueRefused, fQuarantined, fQueueTestTries;
++ /* C3-07's own explicit request. It asks the generic query about a real
++  * transaction of this boot, about the generation its own attempt did not use,
++  * and about a token nobody was given. It submits through admit() like any
++  * client and restores the value it changed, so it cannot leave the array told
++  * something the boot did not ask for. */
++ bool fQuerySelfTest;
++ bool fQueryActive;
++ unsigned fQueryPhase, fQuerySlot, fQueryTries;
++ uint64_t fQueryClient, fQueryToken, fQueryGeneration, fQueryBase;
++ uint64_t fQueryRestore, fQueryIdle;
+  IOReturn admit(SweetAppsRequest &);
+  IOReturn validate(const SweetAppsRequest &);
+  IOReturn vetoRail(unsigned,unsigned,const SweetRailVote &,SweetRailVote *) const;
+@@ -188,6 +249,16 @@ class SweetRPMh : public IOService {
+  bool cancelSelfTest(void);
+  bool cancelSelfTestCancel(void);
+  bool cancelSelfTestFinish(void);
++ bool querySelfTest(void);
++ bool querySelfTestRaise(uint64_t);
++ bool querySelfTestRetired(void);
++ bool querySelfTestSettle(void);
++ void armFlight(uint64_t);
++ void settle(uint64_t,unsigned,unsigned,IOReturn,bool);
++ void retainTransaction(uint64_t,uint64_t,uint64_t,unsigned,unsigned,IOReturn,bool,bool);
++ const Transaction *retainedTransaction(uint64_t,uint64_t) const;
++ void lateCompletion(void);
++ static const char *verdictName(unsigned);
+  IOReturn cancelWaiting(unsigned,uint64_t,const char *);
+  unsigned cancelClientQueue(unsigned,const char *);
+  IOReturn detachClient(unsigned,unsigned *);
+@@ -323,6 +394,24 @@ public:
+   * Same client/gate/completion engine. Bytes/sec, no raw BCM bitfields. */
+  IOReturn requestRegisterBandwidth(uint64_t,uint64_t,uint64_t *);
+  IOReturn copyRegisterBandwidthStatus(uint64_t,uint64_t,SweetRegisterBandwidthStatus *);
++ /* C3-07: one answer for every kind of transaction, keyed by the identity the
++  * caller already holds rather than by which row stores it. A waiting request
++  * answers Pending with generation 0; a dispatched one answers Pending with
++  * the generation the array is being told about; a retired one answers from
++  * this service's own record, so a caller whose request is already over still
++  * gets its own outcome instead of whatever the client row holds now. A
++  * generation that does not match that record, and a token nobody was given,
++  * are refused with NotFound rather than answered - never with a different
++  * attempt's result. The verdict says which of Pending/Complete/Failed/
++  * Uncertain applies; Uncertain is the outcome that forbids treating the
++  * transaction as confirmed. */
++ IOReturn copyTransactionStatus(uint64_t,uint64_t,uint64_t,SweetTransactionStatus *);
++ /* The channel's damage marker, for a caller that wants to know whether this
++  * service is still willing to touch the array at all: the TCS that may still
++  * be executing (when there is one), the result that damaged it, and how many
++  * submissions have been refused because of it. Nothing here is a request to
++  * recover; there is no recovery path. */
++ void quarantineInfo(unsigned *,IOReturn *,unsigned *);
+  /* C3-06: withdraw one request that is still waiting, by the token the caller
+   * already holds. A request that has been triggered is not cancellable here and
+   * is refused instead: its storage and its TCS slot belong to the provider,

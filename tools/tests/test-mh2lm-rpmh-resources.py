@@ -696,9 +696,235 @@ int main(){
  // The trio stays where the demonstration put it; stop() is what takes it back.
  s->fQueueCancel=false;s->fCancelStep=3;
  destroy(s,n);reboot();
+ // C3-07: one answer per transaction, keyed by the identity the caller holds -
+ // while it flies, after it retires, on a generation it never took, for a token
+ // nobody was given, and after the client that owned it has left; plus the two
+ // ways a completion can arrive with nothing in flight, and what each may change.
+ {
+  fixtures();resourceMode=2;s=make(n);messages.clear();
+  uint64_t cid=attach(s),owner=0,foreign=0;
+  owner=vote(s,cid,SweetRailVDDI,{true,1800,1880,62000});
+  SweetTransactionStatus st={};
+  // In flight: Pending, naming the generation the array is being told about.
+  assert(s->copyTransactionStatus(cid,owner,0,&st)==kIOReturnSuccess);
+  assert(st.verdict==SweetTransactionPending&&st.executed&&st.generation);
+  assert(st.kind==SweetAppsRequestRailVote&&!st.retained&&!st.uncertain&&!st.quarantined);
+  const uint64_t gen=st.generation;
+  // A client that does not hold the token is refused, not told its outcome.
+  foreign=attach(s);
+  SweetTransactionStatus other={};
+  assert(s->copyTransactionStatus(foreign,owner,gen,&other)==kIOReturnNotPermitted);
+  assert(other.verdict==SweetTransactionUnknown);
+  // A token nobody was handed is NotFound; no answer at all is BadArgument.
+  assert(s->copyTransactionStatus(cid,~owner,0,&other)==kIOReturnNotFound);
+  assert(s->copyTransactionStatus(cid,owner,0,nullptr)==kIOReturnBadArgument);
+  tick(s);ack(s);assert(!s->fBusy);
+  // Retired: the attempt still answers, from this service's own record.
+  assert(s->copyTransactionStatus(cid,owner,gen,&st)==kIOReturnSuccess);
+  assert(st.verdict==SweetTransactionComplete&&st.retained&&st.executed);
+  // The same token with a generation the attempt did not take is refused, and
+  // no other attempt's outcome is offered in its place.
+  assert(s->copyTransactionStatus(cid,owner,gen+1,&other)==kIOReturnNotFound);
+  assert(other.verdict==SweetTransactionUnknown&&!other.executed);
+  // A later request of the same client must not overwrite the first record.
+  uint64_t later=vote(s,cid,SweetRailVDDI,{true,1880,1880,1});
+  SweetTransactionStatus pending={};
+  assert(s->copyTransactionStatus(cid,later,0,&pending)==kIOReturnSuccess);
+  assert(pending.verdict==SweetTransactionPending&&pending.executed&&pending.generation);
+  const uint64_t laterGen=pending.generation;
+  tick(s);ack(s);assert(!s->fBusy);
+  // The row path only ever describes the client's latest request - once the
+  // same client has submitted again it no longer names the first attempt,
+  // which is exactly why a record has to exist.
+  SweetRPMhStatus row={};
+  assert(s->copyStatus(cid,later,&row)==kIOReturnSuccess&&row.token==later);
+  assert(s->copyStatus(cid,owner,&row)==kIOReturnNotFound);
+  SweetTransactionStatus second={};
+  assert(s->copyTransactionStatus(cid,later,laterGen,&second)==kIOReturnSuccess);
+  assert(second.verdict==SweetTransactionComplete&&laterGen>gen);
+  assert(s->copyTransactionStatus(cid,owner,gen,&st)==kIOReturnSuccess);
+  assert(st.verdict==SweetTransactionComplete&&st.retained&&st.generation==gen);
+  // By token alone an executed attempt is not answered: the caller has to name
+  // the generation it was given while the attempt was in flight, or it is
+  // asking about an attempt nobody can name.
+  assert(s->copyTransactionStatus(cid,later,0,&second)==kIOReturnNotFound);
+  assert(second.verdict==SweetTransactionUnknown);
+  destroy(s,n);reboot();
+ }
+ // A completion for an attempt that already answered: dropped and named as that
+ // attempt's, no ledger moved, and no further work accepted on its account.
+ {
+  fixtures();resourceMode=2;s=make(n);messages.clear();
+  uint64_t cid=attach(s);
+  uint64_t tok=vote(s,cid,SweetRailVDDI,{true,1800,1880,62000});
+  SweetTransactionStatus st={};
+  assert(s->copyTransactionStatus(cid,tok,0,&st)==kIOReturnSuccess);
+  const uint64_t gen=st.generation;
+  tick(s);ack(s);assert(!s->fBusy);
+  const unsigned tcs=s->fTCSIndex;
+  assert(s->fRetiredToken==tok&&s->fRetiredGeneration==gen&&!s->fRetiredUncertain);
+  // A completion raised after the line was disarmed never reaches the ledger:
+  // the top half is what latches one, and it latches nothing without the arm.
+  messages.clear();
+  regs[TCS]|=1u<<tcs;regs[TCS+4]|=1u<<tcs;regs[TCS+tcs*0x2a0+0x18]=1;
+  regs[0x17a00104]|=1u<<5;
+  assert(!s->fIRQArmed);
+  assert(deliverRPMhIRQ());
+  assert(!s->fIRQPosted&&!s->fLateCompletions&&!s->fQuarantine&&!s->fPoisoned&&messages.empty());
+  // The window that does reach it: the top half latched a completion while the
+  // flight was live and the work loop drains it afterwards. Nothing else can
+  // set that latch, so it is set here exactly as the top half leaves it.
+  s->fIRQPosted=1;
+  s->irqAction(s,nullptr,0);
+  assert(s->fLateCompletions==1&&!s->fQuarantine&&s->fPoisoned&&!s->fBusy);
+  std::string stray;for(auto &m:messages)if(m.find("stray completion")!=std::string::npos&&
+      m.find("token="+std::to_string(tok))!=std::string::npos&&
+      m.find("generation="+std::to_string(gen))!=std::string::npos)stray=m;
+  assert(!stray.empty());
+  // The record is untouched: a completion nobody waited for cannot rewrite it.
+  assert(s->copyTransactionStatus(cid,tok,gen,&st)==kIOReturnSuccess);
+  assert(st.verdict==SweetTransactionComplete&&st.retained&&!st.uncertain);
+  unsigned tcsOut=99,refused=99;IOReturn cause=kIOReturnNotReady;
+  s->quarantineInfo(&tcsOut,&cause,&refused);
+  assert(!tcsOut&&cause==kIOReturnSuccess&&refused==1);
+  // New work is refused with a named row instead of being accepted silently.
+  messages.clear();
+  uint64_t denied2=0;
+  assert(s->requestVote(cid,SweetRailPHY,{true,880,880,1},&denied2)==kIOReturnNotReady&&!denied2);
+  std::string named;for(auto &m:messages)if(m.find("phase=refuse")!=std::string::npos&&
+      m.find("detail=stopped")!=std::string::npos)named=m;
+  assert(!named.empty());
+  // A row that does not fit the console line buffer arrives cut off, newline
+  // included, and the audit refuses a ring carrying one.
+  assert(stray.size()<=255&&named.size()<=255);
+  printf("failure rows: stray=%u refused=%u\n",(unsigned)stray.size(),(unsigned)named.size());
+  destroy(s,n);reboot();
+ }
+ // Deadline first, completion after: the attempt was given up on, so its late
+ // completion is that attempt's own - dropped, and its slot quarantined.
+ {
+  fixtures();resourceMode=2;s=make(n);messages.clear();
+  uint64_t cid=attach(s);
+  uint64_t tok=vote(s,cid,SweetRailVDDI,{true,1800,1880,62000});
+  tick(s);assert(s->fBusy&&s->fIRQArmed);
+  const unsigned tcs=s->fTCSIndex;
+  // The completion is raised and taken by the top half while the flight is
+  // still live; the deadline expires before the work loop drains it.
+  regs[TCS]|=1u<<tcs;regs[TCS+4]|=1u<<tcs;regs[TCS+tcs*0x2a0+0x18]=1;
+  regs[0x17a00104]|=1u<<5;
+  assert(sweet_rpmh_irq(37));
+  queued.clear();
+  assert(s->fIRQPosted);
+  fakeTicks+=200000*1000;s->advance();
+  assert(!s->fBusy&&s->fRetiredUncertain);
+  SweetTransactionStatus st={};
+  assert(s->fQuarantine&&s->fQuarantineTcs==tcs&&s->fQuarantineCause==kIOReturnTimeout);
+  assert(s->copyTransactionStatus(cid,tok,s->fRetiredGeneration,&st)==kIOReturnSuccess);
+  // The trigger did reach the array - what is unknown is whether the write
+  // landed - so the attempt has a generation and says so.
+  assert(st.verdict==SweetTransactionUncertain&&st.uncertain&&st.executed&&st.generation);
+  // The slot whose completion has no owner is never offered again.
+  assert(!s->emptyTCS(tcs));
+  // The refusal is a named, counted row, not a silent NotReady.
+  messages.clear();
+  uint64_t denied2=0;
+  assert(s->requestVote(cid,SweetRailPHY,{true,880,880,1},&denied2)==kIOReturnNotReady&&!denied2);
+  // The fixture's IOReturn values are the small integers it defines, so the
+  // expected spelling is built from the constant instead of the kernel number.
+  char causeText[16]={};snprintf(causeText,sizeof(causeText),"cause=%#x",(unsigned)kIOReturnTimeout);
+  std::string quarantineRow;for(auto &m:messages)if(m.find("detail=quarantined")!=std::string::npos&&
+      m.find(causeText)!=std::string::npos)quarantineRow=m;
+  assert(!quarantineRow.empty()&&s->fQuarantined==1);
+  unsigned tcsOut=99,refused=0;IOReturn cause=kIOReturnSuccess;
+  s->quarantineInfo(&tcsOut,&cause,&refused);
+  assert(tcsOut==tcs&&cause==kIOReturnTimeout&&refused==1);
+  messages.clear();
+  s->irqAction(s,nullptr,0); // the drain finally runs, on an attempt that is over
+  std::string late;for(auto &m:messages)if(m.find("late completion")!=std::string::npos&&
+      m.find("quarantined")!=std::string::npos)late=m;
+  assert(!late.empty()&&s->fLateCompletions==1);
+  // The record still says what was actually known, and nothing more.
+  assert(s->copyTransactionStatus(cid,tok,s->fRetiredGeneration,&st)==kIOReturnSuccess);
+  assert(st.verdict==SweetTransactionUncertain&&st.quarantined);
+  unsigned tcsAgain=0;refused=0;s->quarantineInfo(&tcsAgain,&cause,&refused);
+  assert(tcsAgain==tcs&&cause==kIOReturnTimeout&&refused==2);
+  assert(quarantineRow.size()<=255&&late.size()<=255);
+  printf("failure rows: quarantined=%u late=%u\n",
+      (unsigned)quarantineRow.size(),(unsigned)late.size());
+  destroy(s,n);reboot();
+ }
+ // A request withdrawn before it ran never reached the array: it answers as
+ // aborted with no generation at all, and no question can name another attempt.
+ {
+  fixtures();resourceMode=2;s=make(n);messages.clear();
+  uint64_t a=attach(s),b=attach(s);
+  vote(s,a,SweetRailVDDI,{true,1800,1880,62000});
+  uint64_t tok=0;assert(s->requestVote(b,SweetRailPHY,{true,880,880,1},&tok)==kIOReturnSuccess&&tok);
+  SweetTransactionStatus st={};
+  assert(s->copyTransactionStatus(b,tok,0,&st)==kIOReturnSuccess);
+  assert(st.verdict==SweetTransactionPending&&!st.executed&&!st.generation);
+  assert(s->cancelRequest(b,tok)==kIOReturnSuccess);
+  assert(s->copyTransactionStatus(b,tok,0,&st)==kIOReturnSuccess);
+  assert(st.verdict==SweetTransactionFailed&&st.result==kIOReturnAborted);
+  assert(!st.executed&&st.retained);
+  assert(s->copyTransactionStatus(b,tok,1,&st)==kIOReturnNotFound);
+  destroy(s,n);reboot();
+ }
+ // The record is bounded: the oldest attempt is evicted, not answered with a
+ // neighbour's outcome, and the newest ten are all still readable.
+ {
+  fixtures();resourceMode=2;s=make(n);messages.clear();
+  uint64_t cid=attach(s),first=0,last=0,firstGen=0,lastGen=0;
+  for(unsigned k=0;k<10;++k){
+   uint64_t tok=vote(s,cid,SweetRailVDDI,{true,(k&1)?1880u:1800u,1880,62000});
+   SweetTransactionStatus pending={};
+   assert(s->copyTransactionStatus(cid,tok,0,&pending)==kIOReturnSuccess);
+   assert(pending.verdict==SweetTransactionPending&&pending.generation);
+   if(!k){first=tok;firstGen=pending.generation;}
+   last=tok;lastGen=pending.generation;
+   tick(s);ack(s);
+  }
+  assert(s->fRetainedCount==8);
+  SweetTransactionStatus st={};
+  assert(s->copyTransactionStatus(cid,first,firstGen,&st)==kIOReturnNotFound);
+  assert(s->copyTransactionStatus(cid,last,lastGen,&st)==kIOReturnSuccess);
+  assert(st.verdict==SweetTransactionComplete&&st.retained);
+  destroy(s,n);reboot();
+ }
+ // The demonstration itself, driven by hand at the device's boot level: its own
+ // raise really runs, the rest of the answers need no flight, and every row it
+ // writes must fit the console.
+ {
+  bandwidthFixtures();resourceMode=2;s=make(n);messages.clear();
+  s->fQuerySelfTest=true;
+  uint64_t cid=attach(s);
+  vote(s,cid,SweetRailVDDI,{true,1800,1880,62000});
+  // The client's vote retires and the demonstration's own raise takes the
+  // array; that raise retires in turn, and every step after it needs no flight
+  // of its own, so the second retirement carries the rest.
+  tick(s);ack(s);assert(s->fQueryPhase==1&&s->fBusy);
+  // The demonstration's own raise completes like any other flight: the payload
+  // is written first, then the completion it waits for is raised.
+  tick(s);assert(s->fBusy);
+  const unsigned dt=s->fTCSIndex;const uint32_t db=dt*0x2a0;
+  regs[TCS]|=1u<<dt;regs[TCS+4]|=1u<<dt;regs[TCS+db+0x18]=1;
+  for(unsigned c=0;c<s->fCommandCount&&c<3;++c)regs[TCS+db+0x3c+c*0x14]=(1<<8)|(1<<16);
+  regs[0x17a00104]|=1u<<5;
+  for(unsigned n=0;n<8&&s->fBusy;++n)tick(s);
+  assert(!s->fBusy&&s->fQueryPhase==4);
+  unsigned rows=0,longest=0;
+  for(auto &m:messages)if(m.find("phase=transaction")!=std::string::npos){
+   ++rows;longest=longest>(unsigned)m.size()?longest:(unsigned)m.size();
+  }
+  assert(rows==4&&longest<=255);
+  printf("transaction rows: count=%u longest=%u of 255 bytes\n",rows,longest);
+  assert(s->fRetainedCount>=2);
+  destroy(s,n);reboot();
+ }
+
   dropNub(n);assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
  puts("PASS: actual display ARC chain: typed corners, rounded parents, staged fresh ACK, client aggregate, reverse withdrawal, shared VRM gate, inherited conflicts, optional malformed metadata, partial-failure ledger, no rollback, stop/retirement and exhaustion");
- puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement, one TCS owner across queued arrivals, explicit queue-full refusal, waiters refused at the isolation state, owner-only cancellation of a waiting request with no hardware write and no reverse vote, in-flight and neighbour cancels refused, exit withdrawal newest-first after its retain checks, ledger-only register withdrawal refused when it would move hardware, 11 malformed resources, actual matching/termination");
+ puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement, one TCS owner across queued arrivals, explicit queue-full refusal, waiters refused at the isolation state, owner-only cancellation of a waiting request with no hardware write and no reverse vote, in-flight and neighbour cancels refused, exit withdrawal newest-first after its retain checks, ledger-only register withdrawal refused when it would move hardware, 11 malformed resources, owner-scoped transaction records with generation/cross-client/unissued refusal and bounded eviction, stray and late completions dropped without moving the ledger, quarantine veto and named refusal, cancelled request answered aborted without a generation, actual matching/termination");
 }
 '''
 # ack helper normally asserts successful cleanup; uncleared IRQ deliberately

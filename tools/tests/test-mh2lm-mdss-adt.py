@@ -891,6 +891,65 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-cancel-adt-') as temp:
                              capture_output=True)
     assert refused.returncode != 0, refused
     assert output.read_bytes() == cancel_tree
+# C3-07's demonstration names requests it submits itself, so its property is the
+# first one in the chain that stands on its own: no queue demonstration has to
+# precede it, and asking for it names one thing. It is still one 4-byte property
+# on the node whose driver reads it, and it is exactly removable - dropping it
+# gives the C3-04 bytes back, so a round that adds it differs by that and
+# nothing else.
+for earlier in (blob, exec_tree, queue_tree, cancel_tree):
+    assert b'sweet,rpmh-transaction-query' not in earlier
+probe_tree = m.derive(blob, rpmh_irq=True, rsc_channel=True, rsc_executor=True,
+                      rpmh_transaction_query=True)
+ptree, pend = adt.parse(probe_tree)
+assert pend == len(probe_tree)
+powner = next(n for n in ptree.children[1].children if n.name == 'display-rpmh')
+assert powner.prop('sweet,rpmh-transaction-query') == struct.pack('<I', 1)
+assert probe_tree.count(b'sweet,rpmh-transaction-query\0') == 1
+# It implies neither demonstration above it: the tree that asks only for this
+# one carries neither property, and its node list is the executor one's.
+assert b'sweet,rpmh-queue-selftest' not in probe_tree
+assert b'sweet,rpmh-queue-cancel' not in probe_tree
+assert [n.name for n in ptree.children[1].children] == [n.name for n in etree.children[1].children]
+powner.props = [x for x in powner.props if x[0] != 'sweet,rpmh-transaction-query']
+assert adt.serialize(ptree) == exec_tree
+# A boot may carry all three, and then they are appended in the order the
+# demonstrations run: the queue's, the withdrawal's, and this one last.
+all_tree = m.derive(blob, rpmh_irq=True, rsc_channel=True, rsc_executor=True,
+                    rpmh_queue_selftest=True, rpmh_queue_cancel=True,
+                    rpmh_transaction_query=True)
+atree, aend = adt.parse(all_tree)
+assert aend == len(all_tree)
+aowner = next(n for n in atree.children[1].children if n.name == 'display-rpmh')
+names = [x[0] for x in aowner.props]
+assert names[-1] == 'sweet,rpmh-transaction-query'
+assert names.index('sweet,rpmh-queue-selftest') < names.index('sweet,rpmh-queue-cancel') \
+    < names.index('sweet,rpmh-transaction-query')
+assert aowner.prop('sweet,rpmh-transaction-query') == struct.pack('<I', 1)
+assert aowner.prop('sweet,rpmh-queue-cancel') == struct.pack('<I', 1)
+aowner.props = [x for x in aowner.props if x[0] != 'sweet,rpmh-transaction-query']
+assert adt.serialize(atree) == cancel_tree
+# The property is read by the display owner, so a tree without the node that
+# reads it must be refused rather than built with a flag nothing consumes.
+try:
+    m.derive(blob, rpmh_transaction_query=True)
+except ValueError:
+    pass
+else:
+    raise AssertionError('a transaction-query property with no owner node must be refused')
+with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-query-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'query.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--rpmh-irq', '--rsc-channel',
+                    '--rsc-executor', '--rpmh-transaction-query',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == probe_tree
+    assert source.read_bytes() == blob
+    refused = subprocess.run([sys.executable, str(Path(m.__file__)),
+                              '--rpmh-transaction-query', str(source), str(output)],
+                             capture_output=True)
+    assert refused.returncode != 0, refused
+    assert output.read_bytes() == probe_tree
 print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
@@ -908,4 +967,6 @@ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order
       'C3-04 bytes and refused without the node that reads it, and the C3-06 '
       'withdrawal, which is a second property on that same node, refused '
       'without the demonstration it takes requests back from, and exactly '
-      'removable to the C3-05 bytes')
+      'removable to the C3-05 bytes, and the C3-07 transaction query, which is '
+      'one property that implies neither demonstration, sits last when a boot '
+      'carries all three, and is exactly removable to the C3-04 bytes')

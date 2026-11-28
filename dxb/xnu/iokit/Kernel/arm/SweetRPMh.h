@@ -84,6 +84,28 @@ struct SweetNoCStatus {
  bool uncertain, registerAcknowledged;
 };
 
+/* C3-07: one transaction, asked about by the identity its caller already holds
+ * instead of by its kind. A token names a submission for the life of the boot
+ * and is never reused; the generation names the attempt that actually reached
+ * the array, because a request still waiting in the queue has not been
+ * triggered and a retired attempt must never answer for the next one. The
+ * verdict is the answer a caller can act on without knowing which row stores
+ * it: Pending and Complete are the shapes that let `confirmed` advance, Failed
+ * is a request that never reached the array, and Uncertain is the one state
+ * that forbids any of that - something may have executed and nothing here can
+ * name its physical result. Retained means this service answered from its own
+ * record of that attempt rather than from a live row that may since belong to
+ * another, and quarantined says the channel which carried it is damaged now. */
+enum SweetTransactionVerdict : unsigned { SweetTransactionUnknown,
+ SweetTransactionPending, SweetTransactionComplete, SweetTransactionFailed,
+ SweetTransactionUncertain, SweetTransactionVerdictCount };
+struct SweetTransactionStatus {
+ uint64_t token, generation; /* Generation 0: this attempt never reached the array. */
+ unsigned kind, verdict;     /* SweetAppsRequestKind, SweetTransactionVerdict */
+ IOReturn result;
+ bool executed, uncertain, retained, quarantined;
+};
+
 class SweetPanelPins;
 class SweetTouchPanel;
 /* Exact exclusive leaf-provider leases for ONE panel vote. The caller owns
@@ -130,6 +152,35 @@ class SweetRPMh : public IOService {
  SweetRailVote fAggregate[SweetRailCount];
  bool fOwned[SweetRailCount];
  uint64_t fNextClient, fNextToken, fDeadline, fWriteDeadline;
+ /* C3-07: which attempt the array is being told about. fFlightToken/fFlight-
+  * Generation name the transaction that posted commands and are moved to
+  * fRetired* when it retires, so a completion that arrives afterwards can be
+  * named as the attempt it belonged to instead of being applied to whatever
+  * runs next. A request that needs no TCS keeps generation 0. */
+ uint64_t fGeneration, fFlightToken, fFlightGeneration;
+ uint64_t fLaunchToken;
+ uint64_t fRetiredToken, fRetiredGeneration;
+ bool fRetiredUncertain;
+ /* The last few attempts, kept so a caller that still holds a token can be
+  * answered after its request retired - including one that was refused or
+  * cancelled and therefore never reached the array. A retained row answers
+  * only for its own generation and only to the client that owned it. */
+ struct Transaction {
+  uint64_t token, generation, client;
+  unsigned kind, state;
+  IOReturn result;
+  bool executed, uncertain;
+ };
+ Transaction fRetained[8];
+ unsigned fRetainedCount, fRetainedNext, fLateCompletions;
+ /* The damage marker, set once and cleared by nothing: an attempt that may
+  * still be executing leaves the array in a state this service cannot name, so
+  * it stops asking, remembers the TCS it must never reuse even when that slot
+  * reads empty, and refuses every new submission. There is no retry, reset,
+  * recovery or acknowledgement path that could lift it before this boot ends. */
+ bool fQuarantine;
+ IOReturn fQuarantineCause;
+ unsigned fQuarantineTcs;
  unsigned fClientIndex, fRail, fTCSIndex, fCommandCount, fOperation, fOperationCount;
  uint32_t fSavedIRQ, fCommandMask;
  bool fBusy, fIRQObserved, fWriteIssued, fExecuting;
@@ -174,6 +225,16 @@ class SweetRPMh : public IOService {
  unsigned fSelfClients[2], fCancelClients[3];
  uint64_t fCancelTokens[3], fCancelLower;
  unsigned fQueueRefused, fQuarantined, fQueueTestTries;
+ /* C3-07's own explicit request. It asks the generic query about a real
+  * transaction of this boot, about the generation its own attempt did not use,
+  * and about a token nobody was given. It submits through admit() like any
+  * client and restores the value it changed, so it cannot leave the array told
+  * something the boot did not ask for. */
+ bool fQuerySelfTest;
+ bool fQueryActive;
+ unsigned fQueryPhase, fQuerySlot, fQueryTries;
+ uint64_t fQueryClient, fQueryToken, fQueryGeneration, fQueryBase;
+ uint64_t fQueryRestore, fQueryIdle;
  IOReturn admit(SweetAppsRequest &);
  IOReturn validate(const SweetAppsRequest &);
  IOReturn vetoRail(unsigned,unsigned,const SweetRailVote &,SweetRailVote *) const;
@@ -188,6 +249,16 @@ class SweetRPMh : public IOService {
  bool cancelSelfTest(void);
  bool cancelSelfTestCancel(void);
  bool cancelSelfTestFinish(void);
+ bool querySelfTest(void);
+ bool querySelfTestRaise(uint64_t);
+ bool querySelfTestRetired(void);
+ bool querySelfTestSettle(void);
+ void armFlight(uint64_t);
+ void settle(uint64_t,unsigned,unsigned,IOReturn,bool);
+ void retainTransaction(uint64_t,uint64_t,uint64_t,unsigned,unsigned,IOReturn,bool,bool);
+ const Transaction *retainedTransaction(uint64_t,uint64_t) const;
+ void lateCompletion(void);
+ static const char *verdictName(unsigned);
  IOReturn cancelWaiting(unsigned,uint64_t,const char *);
  unsigned cancelClientQueue(unsigned,const char *);
  IOReturn detachClient(unsigned,unsigned *);
@@ -323,6 +394,24 @@ public:
   * Same client/gate/completion engine. Bytes/sec, no raw BCM bitfields. */
  IOReturn requestRegisterBandwidth(uint64_t,uint64_t,uint64_t *);
  IOReturn copyRegisterBandwidthStatus(uint64_t,uint64_t,SweetRegisterBandwidthStatus *);
+ /* C3-07: one answer for every kind of transaction, keyed by the identity the
+  * caller already holds rather than by which row stores it. A waiting request
+  * answers Pending with generation 0; a dispatched one answers Pending with
+  * the generation the array is being told about; a retired one answers from
+  * this service's own record, so a caller whose request is already over still
+  * gets its own outcome instead of whatever the client row holds now. A
+  * generation that does not match that record, and a token nobody was given,
+  * are refused with NotFound rather than answered - never with a different
+  * attempt's result. The verdict says which of Pending/Complete/Failed/
+  * Uncertain applies; Uncertain is the outcome that forbids treating the
+  * transaction as confirmed. */
+ IOReturn copyTransactionStatus(uint64_t,uint64_t,uint64_t,SweetTransactionStatus *);
+ /* The channel's damage marker, for a caller that wants to know whether this
+  * service is still willing to touch the array at all: the TCS that may still
+  * be executing (when there is one), the result that damaged it, and how many
+  * submissions have been refused because of it. Nothing here is a request to
+  * recover; there is no recovery path. */
+ void quarantineInfo(unsigned *,IOReturn *,unsigned *);
  /* C3-06: withdraw one request that is still waiting, by the token the caller
   * already holds. A request that has been triggered is not cancellable here and
   * is refused instead: its storage and its TCS slot belong to the provider,
