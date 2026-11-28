@@ -635,7 +635,13 @@ SweetRPMh::cancelSelfTestCancel(void)
       exitedWith,(unsigned)(lowered?(IOReturn)0:kIOReturnAborted),fQueue.depth());
   return true;
  }
- SWEET_LOG_INFO("SWEET APPS QUEUE: phase=cancel-selftest step=2 result=ok a-token=%u b1-token=%u b1-state=%u b1-result=%#x b2-token=%u exit-withdrew=%u lower-token=%u ledger-withdrew=%u ledger-exited=%u told=%llu depth=%u; one explicit withdrawal, one exit withdrawal, neither dispatched, the pair handed back on the completed request's vote\n",
+ /* The console keeps one row in a 255-byte line buffer and silently drops the
+  * rest of a longer one, newline included - 0151 lost this row's tail exactly
+  * that way. So the fields come first and the sentence last: minus the newline
+  * the row measures 203 bytes with this demonstration's own values and 253 with
+  * the widest values these fields admit, against the 254 a whole row has.
+  * `ledger` is withdrawals/exits. */
+ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=cancel-selftest step=2 result=ok a=%u b1=%u b1-state=%u b1-result=%#x b2=%u exit-withdrew=%u lower=%u ledger=%u/%u told=%llu depth=%u; one withdrew, one exited, neither ran\n",
      (unsigned)fCancelTokens[0],(unsigned)fCancelTokens[1],statusB1.state,
      (unsigned)statusB1.result,(unsigned)fCancelTokens[2],exitedWith,
      (unsigned)fCancelLower,withdrew,exited,told,fQueue.depth());

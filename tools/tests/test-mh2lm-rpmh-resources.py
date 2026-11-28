@@ -651,6 +651,17 @@ int main(){
  s->fQueueCancel=false;
  tick(s);ack(s);
  assert(!s->fBusy&&s->fQueue.empty()&&s->fCancelStep==0);
+ // The pair demonstration would have left two ledger entries behind by now.
+ // This fixture makes the same two through the public calls - C3-05 drives the
+ // demonstration itself - because step 2's subject is handing a pair back, not
+ // creating one: both values are real, both landed, and neither can be
+ // withdrawn until somebody else holds the array up.
+ uint64_t pair=0;
+ assert(s->requestRegisterBandwidth(id,40000,&pair)==0&&pair);
+ tick(s);ack(s);
+ assert(s->fRegisterAggregate==40000&&!s->fBusy&&s->fQueue.empty());
+ assert(s->fClients[1].registerVote==20000&&s->fClients[0].registerVote==40000);
+ s->fSelfClients[0]=1;s->fSelfClients[1]=0;
  s->fQueueCancel=true;
  messages.clear();
  s->retireFlight();
@@ -659,6 +670,29 @@ int main(){
  for(auto &m:messages)if(m.find("phase=cancel-selftest")!=std::string::npos&&
    m.find("depth=2 high-water=2")!=std::string::npos)trio=true;
  assert(trio);
+ // Steps 2 and 3 are each reached by the transaction before them actually
+ // completing, so driving them here is the only way the host sees the rows the
+ // device would print - including the one that outgrew the console line buffer
+ // on the first round.
+ messages.clear();
+ tick(s);ack(s);
+ assert(s->fCancelStep==2);
+ std::string step2,step3;
+ for(auto &m:messages)if(m.find("phase=cancel-selftest step=2 result=ok")!=std::string::npos)step2=m;
+ assert(!step2.empty()&&step2.find("b1-state=3")!=std::string::npos);
+ // The console keeps 255 bytes of a row, the newline among them, and drops the
+ // rest without replacing it: a row that does not fit is a row the ring cannot
+ // carry, and the audit refuses a ring whose row arrived cut off.
+ assert(step2.size()<=255);
+ tick(s);ack(s);
+ assert(s->fCancelStep==3);
+ for(auto &m:messages)if(m.find("phase=cancel-selftest step=3 result=ok")!=std::string::npos)step3=m;
+ assert(!step3.empty());
+ assert(step3.size()<=255);
+ // The budget is the whole point of the row's shape, so the measured sizes are
+ // printed rather than left to be guessed from the ring.
+ printf("log rows: step2=%u step3=%u of 255 bytes\n",
+     (unsigned)step2.size(),(unsigned)step3.size());
  // The trio stays where the demonstration put it; stop() is what takes it back.
  s->fQueueCancel=false;s->fCancelStep=3;
  destroy(s,n);reboot();
