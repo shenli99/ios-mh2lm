@@ -10538,6 +10538,12 @@ first in flight, two waiting` → 两行 `phase=withdraw … hardware=unchanged`
 环里应有同一对示意图行而**没有**撤回行）、其余十四张是旧树的控制。**故意不在设备上制造 `would-change-hardware`**：
 它按设计打 ERROR，会把一次健康启动变成需要解释的启动，这条边界由宿主 fixture 与队列单测覆盖。
 
+**ARM64 单编译（真实 CI 参数）**：用 0149 buildtree 的 `.CFLAGS`／保存的 CI 原生编译行（`scratch/c3-06-verify/`，
+clang++-19 + 内核 KDK 头的 shim）编译改动过的两个翻译单元，`SweetRPMh.cpp`（2175 行）与 `SweetAppsQueue.cpp`（135 行）
+**都是 0 error**；把改动前后的版本各编一遍比对告警，**没有新类别**——只多出 `-Wunsafe-buffer-usage` 这一类，
+`SweetRPMh.cpp` 213→270 条、`SweetAppsQueue.cpp` 7→15 条（该告警对每处指针下标都报一次，全树普遍存在，
+旧版本就有一百多条，不是本轮引入的形状）。基线目录 `base/` 取自 `43fe516`（C3-05 收口时的树），`edited/` 即待提交树。
+
 **0150 待抓的环**：候选环读到上面六行，且被撤的两笔在任何位置都没有派发出现在环里；所有既有的 Rail／ARC／CN0 自然投票与完成行、
 `executor=delegated`、45 条 RPMH／RSC 线缆行一条不变。对照环用 `--c3-05` 判通过、用 `--c3-06` 判被拒。
 真实 provider 热终止本轮无法触发，所以"退出发生在某笔正在飞的时候"只有宿主证据（`in-flight` 拒绝＋字段全不变），实机这一半记为 host-only。
