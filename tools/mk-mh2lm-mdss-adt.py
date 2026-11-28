@@ -42,7 +42,8 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
 def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
             clock_gate=False, clock_disable=False, clock_share=False,
             clock_vote_probe=False, clock_vote=False, clock_reset=False,
-            rsc_channel=False, rsc_query=False, rsc_executor=False):
+            rsc_channel=False, rsc_query=False, rsc_executor=False,
+            rpmh_queue_selftest=False):
     # C2-05 stands on both cards below it, so the two switch it needs are implied
     # here rather than trusted to every caller: a share node without them would be
     # refused at start and the image would carry a property that can do nothing.
@@ -64,6 +65,10 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
         raise ValueError('--rsc-executor needs --rsc-channel')
     if rsc_executor and not rpmh_irq:
         raise ValueError('--rsc-executor needs --rpmh-irq (the old owner must be told to stand down)')
+    # C3-05's demonstration runs inside the display owner, which is where the
+    # queue lives; without that node the property would be read by nobody.
+    if rpmh_queue_selftest and not rpmh_irq:
+        raise ValueError('--rpmh-queue-selftest needs --rpmh-irq (the property is read by the display owner node)')
     display_noc = display_noc or panel_pipeline
     display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
     root, end = adt.parse(blob)
@@ -177,6 +182,11 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             # completion line for this boot. The range list is left exactly as
             # shipped so a rollback only has to drop this property.
             rpmh.props.append(('sweet,rpmh-executor-delegated', 0, struct.pack('<I', 1)))
+        if rpmh_queue_selftest:
+            # C3-05: one boot-time demonstration of the bounded submission
+            # queue. Absent by default, and exactly 1 when present - the driver
+            # treats every other length or value as "do not run".
+            rpmh.props.append(('sweet,rpmh-queue-selftest', 0, struct.pack('<I', 1)))
         arm.children.append(rpmh)
     if rsc_channel:
         # C3-01: a second, read-only reader of the apps RSC. It carries the same
@@ -320,6 +330,7 @@ if __name__ == '__main__':
     parser.add_argument('--rsc-channel', action='store_true', help='append the C3-01 read-only apps RSC channel; same three ranges as the display owner, no GIC range, zero stores')
     parser.add_argument('--rsc-query', action='store_true', help='C3-02: let the channel query the read-only command DB for one known resource; requires --rsc-channel')
     parser.add_argument('--rsc-executor', action='store_true', help='C3-04: the channel becomes the sole apps executor (fourth GIC range, sweet,rsc-executor) and the display node stands down; requires --rsc-channel and --rpmh-irq')
+    parser.add_argument('--rpmh-queue-selftest', action='store_true', help='C3-05: the display owner demonstrates the bounded submission queue once on this boot (sweet,rpmh-queue-selftest=1); requires --rpmh-irq')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
@@ -329,4 +340,5 @@ if __name__ == '__main__':
     destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
                       args.clock_disable, args.clock_share, args.clock_vote_probe,
                       args.clock_vote, args.clock_reset, args.rsc_channel,
-                      args.rsc_query, args.rsc_executor))
+                      args.rsc_query, args.rsc_executor,
+                      args.rpmh_queue_selftest))

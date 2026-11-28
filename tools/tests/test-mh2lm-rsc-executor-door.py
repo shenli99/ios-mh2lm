@@ -223,9 +223,11 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-door-') as temp:
     pristine=Path(temp)/'pristine.cpp'
     pristine.write_text(ns['prelude']+common['DSI_MEMORY_FIXTURE']+pool+
                         tu('SweetAppsDoor.h')+tu('SweetAppsLine.h')+
+                        tu('SweetAppsQueue.h')+
                         tu('SweetRPMhExecutor.h')+tu('SweetRPMh.h')+
                         tu('SweetPanelPins.h')+tu('SweetTouchPanel.h')+
                         tu('SweetAppsDoor.cpp')+tu('SweetAppsLine.cpp')+
+                        tu('SweetAppsQueue.cpp')+
                         tu('SweetRPMhExecutor.cpp')+tu('SweetRPMh.cpp'))
     r=subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-fsyntax-only',
                       str(pristine)],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)

@@ -56,9 +56,16 @@ static bool deliverRPMhIRQ(){
 }
 static void tick(SweetRPMh*s,unsigned us=100){fakeTicks+=us*1000;assert(s->fTimerAdded);if(!deliverRPMhIRQ())s->fTimer->action(s,s->fTimer);}
 static void ack(SweetRPMh*s){
+ // C3-05: retiring a flight can start the next waiting request inside the same
+ // window, so "the machine is idle afterwards" only holds for an empty queue.
+ unsigned waiting=s->fQueue.depth();
  uint32_t b=s->fTCSIndex*0x2a0;regs[TCS+4]|=1u<<s->fTCSIndex;regs[TCS+b+0x18]=1;
  for(unsigned c=0;c<s->fCommandCount;++c)regs[TCS+b+0x3c+c*0x14]=(1<<8)|(1<<16);
- tick(s);assert(s->fBusy);tick(s);assert(!s->fBusy);
+ tick(s);assert(s->fBusy);tick(s);
+ // A waiting request is dispatched in the same window, but only a request
+ // that is actually legal starts a flight - either way the queue shrinks and
+ // nothing is left waiting without an owner.
+ assert(!s->fBusy||s->fQueue.empty());assert(!waiting||s->fQueue.depth()<waiting);
 }
 static SweetRPMh*make(IOService*n){auto*s=new SweetRPMh();assert(s->start(n));assert(!writes());return s;}
 static void destroy(SweetRPMh*s,IOService*n){s->stop(n);s->release();}
@@ -126,7 +133,13 @@ int main(){
  token=vote(s,id,SweetRailVDDI,{true,1800,1880,6000});tick(s);
  assert(s->fBusy&&regs[TCS]==0x41);tick(s);assert(s->fBusy);
  assert(status(s,id,token).state==SweetRPMhPending);
- uint64_t denied=123;assert(s->requestVote(other,SweetRailPHY,{true,880,880,36000},&denied)==kIOReturnBusy&&denied==0);
+ // C3-05: a different resource is no longer refused while one is in flight -
+ // it waits in the queue. What is still refused is the resource already
+ // outstanding, and that refusal costs no token, no queue slot and no write.
+ uint64_t denied=123,serial=s->fNextToken;auto issued=writes();
+ assert(s->requestVote(id,SweetRailVDDI,{true,1800,1880,6000},&denied)==kIOReturnBusy&&denied==0);
+ assert(s->fNextToken==serial&&s->fQueue.empty()&&writes()==issued);
+ assert(status(s,id,token).state==SweetRPMhPending);
  // An unrelated IRQ-enable bit changes during completion; preserve it.
  regs[TCS]|=0x80;ack(s);auto q=status(s,id,token);assert(q.state==SweetRPMhComplete&&q.mode==4&&!q.uncertain);
  assert(regs[TCS]==0xc1&&!(regs[TCS+4]&1));
@@ -180,14 +193,20 @@ int main(){
   }
   destroy(s,n);reboot();
  }
- // Competing clients run through the same provider gate. Exactly one request
- // is admitted; the other gets Busy rather than overwriting the active slot.
+ // Competing clients run through the same provider gate. Both are admitted -
+ // one starts and the other waits its turn - and each keeps its own token, so
+ // neither overwrites the slot the machine is working on. The gate still runs
+ // exactly one flight at a time, which is why the second needs a second ACK.
  fixtures();s=make(n);id=attach(s);other=attach(s);
  IOReturn rc1=-1,rc2=-1;uint64_t tok1=0,tok2=0;
  std::thread a([&]{rc1=s->requestVote(id,SweetRailVDDI,{true,1800,1880,62000},&tok1);});
  std::thread b([&]{rc2=s->requestVote(other,SweetRailPHY,{true,880,880,36000},&tok2);});
- a.join();b.join();assert((rc1==0&&rc2==kIOReturnBusy)||(rc2==0&&rc1==kIOReturnBusy));
- tick(s);ack(s);destroy(s,n);reboot();
+ a.join();b.join();assert(rc1==0&&rc2==0&&tok1&&tok2&&tok1!=tok2);
+ assert(s->fCurrentValid&&s->fCurrent.token==(s->fBusy?s->fCurrent.token:0));
+ for(unsigned i=0;i<4&&s->fBusy;++i){tick(s);ack(s);}
+ assert(!s->fBusy&&s->fQueue.empty());
+ assert(status(s,id,tok1).state==SweetRPMhComplete&&status(s,other,tok2).state==SweetRPMhComplete);
+ destroy(s,n);reboot();
  // A real workloop-gated MMIO action and stop synchronize before unmapping.
  fixtures();s=make(n);id=attach(s);token=vote(s,id,SweetRailVDDI,{true,1800,1880,62000});
  pauseRead=true;pauseAddress=TCS;enteredRead=false;releaseRead=false;
@@ -293,7 +312,10 @@ int main(){
  token=displayVote(s,id,SweetDisplayOff);assert(!writes()&&!s->fBusy&&!s->fArcOwned[0]);
  token=displayVote(s,id,SweetDisplayLowSVS);first=token;
  assert(s->detachConsumer(id)==kIOReturnBusy);
- assert(s->requestVote(other,SweetRailPHY,{true,880,880,36000},&denied)==kIOReturnBusy&&!denied);
+ // C3-05: what is refused while a chain runs is the resource already in flight,
+ // not an unrelated one (that one waits, see test-mh2lm-apps-queue.py).
+ for(unsigned c=0;c<2;++c)assert(s->requestDisplayPower(id,SweetDisplayLowSVS,&denied)==
+     kIOReturnBusy&&!denied&&!writes());
  arcStage(s,0,6);assert(s->fBusy&&s->fClients[0].displayVote==SweetDisplayOff);
  assert(displayStatus(s,id,token).acknowledged==1);
  arcStage(s,1,6);assert(s->fBusy&&s->fClients[0].displayVote==SweetDisplayOff);
@@ -350,14 +372,47 @@ int main(){
  arcAcquire(s);
  assert(regs[TCS+0x1c]==1&&regs[TCS+0x34]==0x51234&&regs[TCS+4]==0&&regs[TCS]==0x41);
  destroy(s,n);reboot();
- // Independent clients and VRM/ARC requests cannot interleave transactions.
+ // Independent clients and VRM/ARC requests cannot interleave transactions: a
+// request submitted while a display chain owns the TCS waits for the whole
+// chain to retire, then runs alone on the slot the chain released.
  arcFixtures();s=make(n);id=attach(s);other=attach(s);tok1=tok2=0;
- std::thread c([&]{rc1=s->requestDisplayPower(id,SweetDisplayLowSVS,&tok1);});
- std::thread e([&]{rc2=s->requestVote(other,SweetRailPHY,{true,880,880,36000},&tok2);});
- c.join();e.join();assert((rc1==0&&rc2==kIOReturnBusy)||(rc2==0&&rc1==kIOReturnBusy));
- if(rc1==0){arcAcquire(s);}else{tick(s);ack(s);}
+ tok1=displayVote(s,id,SweetDisplayLowSVS);
+ assert(s->requestVote(other,SweetRailPHY,{true,880,880,36000},&tok2)==0&&tok2&&tok2!=tok1);
+ assert(s->fBusy&&s->fArcRequest&&s->fQueue.depth()==1);
+ arcStage(s,0,6);arcStage(s,1,6);arcStage(s,2,1);arcStage(s,1,3);arcStage(s,0,2);
+ assert(s->fBusy&&!s->fArcRequest&&s->fQueue.empty());
+ tick(s);ack(s);
+ assert(!s->fBusy&&s->fQueue.empty()&&status(s,other,tok2).state==SweetRPMhComplete);
+ assert(displayStatus(s,id,tok1).state==SweetRPMhComplete);
  destroy(s,n);reboot();
- // A failure at any stage retains confirmed parents and stops all later writes.
+// C3-05: a request still waiting when the owner loses its footing never crosses
+// the isolation state - it is refused with the isolation reason, is not
+// programmed onto any TCS, and does not linger in the queue.
+ arcFixtures();s=make(n);id=attach(s);other=attach(s);tok1=tok2=0;
+ tok1=displayVote(s,id,SweetDisplayLowSVS);
+ assert(s->requestVote(other,SweetRailPHY,{true,880,880,36000},&tok2)==0&&tok2&&s->fQueue.depth()==1);
+ tick(s);tick(s,100001);
+ assert(s->fPoisoned&&s->fQueue.empty()&&!s->fBusy&&!s->fCurrentValid);
+ SweetRPMhStatus qst2=status(s,other,tok2);
+ assert(qst2.state==SweetRPMhFailed&&qst2.result==kIOReturnNotReady&&!qst2.uncertain&&!s->fOwned[SweetRailPHY]);
+ auto settled=trace.size();tick(s);assert(trace.size()==settled);destroy(s,n);reboot();
+// A full queue refuses the next submission explicitly: QueueFull, not a drop, a
+// merge or a quiet reorder, and the refusal spends no token and no status slot.
+ arcFixtures();s=make(n);
+ uint64_t q5[8];for(unsigned i=0;i<8;++i)q5[i]=attach(s);
+ uint64_t chainToken=displayVote(s,q5[0],SweetDisplayLowSVS);
+ const SweetRail q5Rails[4]={SweetRailVDDI,SweetRailVPNL,SweetRailHost,SweetRailPHY};
+ uint64_t q5Tokens[8];unsigned filled=0;
+ for(unsigned i=1;i<8;++i)q5Tokens[filled++]=vote(s,q5[i],q5Rails[i%4],{});
+ q5Tokens[filled++]=vote(s,q5[0],SweetRailPHY,{}); /* client 0, own distinct rail */
+ assert(filled==8&&s->fQueue.full()&&s->fQueue.accepted()==8&&s->fArcRequest);
+ uint64_t extra=99;auto q5Writes=writes();
+ assert(s->requestVote(q5[1],SweetRailHost,{},&extra)==kIOReturnNoResources&&!extra);
+ assert(writes()==q5Writes&&s->fQueue.depth()==8&&s->fQueueRefused==1);
+ SweetRPMhStatus qst={};assert(s->copyStatus(q5[1],q5Tokens[0],&qst)==0&&qst.state==SweetRPMhPending);
+ assert(displayStatus(s,q5[0],chainToken).state==SweetRPMhPending);
+ destroy(s,n);reboot();
+// A failure at any stage retains confirmed parents and stops all later writes.
  for(unsigned stage=0;stage<5;++stage){arcFixtures();s=make(n);id=attach(s);
   token=displayVote(s,id,SweetDisplayLowSVS);
   if(stage>0)arcStage(s,0,6);if(stage>1)arcStage(s,1,6);
@@ -417,7 +472,7 @@ int main(){
  destroy(s,n);reboot();
  dropNub(n);assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
  puts("PASS: actual display ARC chain: typed corners, rounded parents, staged fresh ACK, client aggregate, reverse withdrawal, shared VRM gate, inherited conflicts, optional malformed metadata, partial-failure ledger, no rollback, stop/retirement and exhaustion");
- puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement,11 malformed resources, actual matching/termination");
+ puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement, one TCS owner across queued arrivals, explicit queue-full refusal, waiters refused at the isolation state, 11 malformed resources, actual matching/termination");
 }
 '''
 # ack helper normally asserts successful cleanup; uncleared IRQ deliberately

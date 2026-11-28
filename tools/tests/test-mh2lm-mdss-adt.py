@@ -798,6 +798,48 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-executor-adt-') as temp:
     refused = subprocess.run([sys.executable, str(Path(m.__file__)), '--rsc-channel',
                               '--rsc-executor', str(source), str(output)], capture_output=True)
     assert refused.returncode != 0, refused
+# C3-05's demonstration is one property on the display owner node - the node the
+# driver reads it from - and it is exactly removable: dropping it gives the
+# C3-04 executor bytes back, so the round's image differs from that candidate by
+# the demonstration and nothing else.
+assert b'sweet,rpmh-queue-selftest' not in exec_tree
+queue_tree = m.derive(blob, rpmh_irq=True, rsc_channel=True, rsc_executor=True,
+                      rpmh_queue_selftest=True)
+qtree, qend = adt.parse(queue_tree)
+assert qend == len(queue_tree)
+qowner = next(n for n in qtree.children[1].children if n.name == 'display-rpmh')
+qchannel = next(n for n in qtree.children[1].children if n.name == 'rsc-channel')
+assert qowner.prop('sweet,rpmh-queue-selftest') == struct.pack('<I', 1)
+assert qowner.prop('sweet,rpmh-executor-delegated') == struct.pack('<I', 1)
+assert qchannel.prop('sweet,rsc-executor') == struct.pack('<I', 1)
+# Exactly one node carries it, and no node was added or reordered for it.
+assert queue_tree.count(b'sweet,rpmh-queue-selftest\0') == 1
+assert [n.name for n in qtree.children[1].children] == [n.name for n in etree.children[1].children]
+qowner.props = [x for x in qowner.props if x[0] != 'sweet,rpmh-queue-selftest']
+assert adt.serialize(qtree) == exec_tree
+# The property is read by the display owner, so a tree without that node must be
+# refused rather than built with a flag nothing consumes.
+for bad in ({'panel_identity': True, 'display_resources': True, 'rpmh_queue_selftest': True},
+            {'display_resources': True, 'rpmh_queue_selftest': True}):
+    try:
+        m.derive(blob, **bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('a self-test property with no owner node must be refused: %r' % (bad,))
+with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-queue-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'queue.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--rpmh-irq', '--rsc-channel',
+                    '--rsc-executor', '--rpmh-queue-selftest',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == queue_tree
+    assert source.read_bytes() == blob
+    refused = subprocess.run([sys.executable, str(Path(m.__file__)),
+                              '--rpmh-queue-selftest', str(source), str(output)],
+                             capture_output=True)
+    assert refused.returncode != 0, refused
+    assert output.read_bytes() == queue_tree
 print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
@@ -810,4 +852,6 @@ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order
       'that node and refuses to exist without it, and the C3-04 executor role, '
       'which gives the channel the fourth range and stands the display owner '
       'down without touching its ranges or INTID, one property per side away '
-      'from the C3-03 bytes')
+      'from the C3-03 bytes, and the C3-05 demonstration, which is one '
+      '4-byte property on the display owner node, exactly removable to the '
+      'C3-04 bytes and refused without the node that reads it')

@@ -399,11 +399,316 @@ bool SweetRPMh::ensureExecutor(void)
  return true;
 }
 
-IOReturn SweetRPMh::beginRegisterBandwidth(unsigned client,uint64_t proposal)
+static const char *sweetRequestName(unsigned kind)
+{
+ switch (kind) {
+ case SweetAppsRequestRailVote: return "rail-vote";
+ case SweetAppsRequestDisplayCorner: return "display-corner";
+ case SweetAppsRequestRegisterBandwidth: return "register-bandwidth";
+ default: return "unknown";
+ }
+}
+
+/* C3-05 device demonstration, requested explicitly by an ADT property and off
+ * for every other boot. Two legal votes on two rails this boot already drives,
+ * submitted through the same admission path a client uses, so the second one
+ * has to wait in the queue for the first to retire. Each rail moves by one
+ * rounding step at the far end of its own range, which is a real flight rather
+ * than the silent no-op an unchanged vote would be; the votes are retained
+ * afterwards like any other vote, because withdrawing one is C3-06. */
+bool
+SweetRPMh::queueSelfTest(void)
+{
+ if (fQueueTestTries++ >= 6) return true;
+ int client=-1;
+ for (unsigned i=0;i<8;++i) if (!fClients[i].id) { client=(int)i; break; }
+ if (client<0) return false;
+ unsigned rails[2]={0,0}; unsigned found=0;
+ for (unsigned r=0;r<SweetRailCount && found<2;++r) {
+  if (!fOwned[r] || !fAggregate[r].enabled) continue;
+  if (fAggregate[r].minMV>=railLimits[r].maxMV) continue;
+  rails[found++]=r;
+ }
+ /* No rail this boot drives can move: nothing to demonstrate, and inventing a
+  * rail whose inherited state nobody described is exactly what is refused. */
+ if (found<2) return false;
+ if (fNextClient==~0ULL) return false;
+ fClients[client]={}; fClients[client].id=++fNextClient;
+ unsigned tokens[2]={0,0}; unsigned results[2]={0,0};
+ for (unsigned k=0;k<2;++k) {
+  SweetRailVote vote=fAggregate[rails[k]];
+  unsigned step=vote.minMV+8;
+  if (step>railLimits[rails[k]].maxMV) step=railLimits[rails[k]].maxMV;
+  vote.minMV=step;
+  IOReturn result=begin((unsigned)client,rails[k],vote);
+  results[k]=(unsigned)result;
+  tokens[k]=(unsigned)fClients[client].status.token;
+ }
+ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=selftest rail0=%s rail1=%s token0=%u token1=%u result0=%#x result1=%#x depth=%u high-water=%u; two admissions, one flight window\n",
+     railNames[rails[0]],railNames[rails[1]],tokens[0],tokens[1],results[0],results[1],
+     fQueue.depth(),fQueue.highWater());
+ /* The pair is only evidence if the first one really holds the array when the
+  * second arrives; a pair that both ran directly would prove nothing and must
+  * not be reported as a demonstration. */
+ if (results[0]!=kIOReturnSuccess || results[1]!=kIOReturnSuccess ||
+     tokens[0]==tokens[1] || !fQueue.depth()) {
+  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=selftest result=failed detail=pair-did-not-serialize\n");
+  return true;
+ }
+ return true;
+}
+
+/* A queued vote is rebuilt from these two words, never from the caller's
+ * reference: the caller may return as soon as its token exists, and the queue
+ * must still hold everything the dispatch needs. */
+static void
+sweetPackRail(SweetAppsRequest &request,const SweetRailVote &vote)
+{
+ request.param[0]=(uint64_t)vote.minMV|((uint64_t)vote.maxMV<<16)|(vote.enabled ? 1ULL<<32 : 0ULL);
+ request.param[1]=vote.loadUA;
+}
+
+static SweetRailVote
+sweetUnpackRail(const SweetAppsRequest &request)
+{
+ SweetRailVote vote={};
+ vote.enabled=(request.param[0]&(1ULL<<32))!=0;
+ vote.minMV=(unsigned)(request.param[0]&0xffffULL);
+ vote.maxMV=(unsigned)((request.param[0]>>16)&0xffffULL);
+ vote.loadUA=(unsigned)request.param[1];
+ return vote;
+}
+
+/* The admission screen. It holds the refusals that used to run at the top of
+ * each entry point, before that entry point touched a token, a status or the
+ * array, so admitting a request that is going to be refused cannot cost the
+ * caller anything. */
+IOReturn
+SweetRPMh::validate(const SweetAppsRequest &request)
+{
+ switch (request.kind) {
+ case SweetAppsRequestRailVote: {
+  if (request.rail>=SweetRailCount) return kIOReturnBadArgument;
+  return vetoRail(request.client,request.rail,sweetUnpackRail(request),NULL); }
+ case SweetAppsRequestDisplayCorner: {
+  SweetDisplayCorner corner=(SweetDisplayCorner)request.param[0];
+  if ((unsigned)corner>=SweetDisplayCornerCount) return kIOReturnBadArgument;
+  if (!loadDisplayPower()) return kIOReturnNotReady;
+  SweetDisplayCorner aggregate=corner;
+  for (unsigned i=0;i<8;++i)
+   if (i!=request.client && fClients[i].id && fClients[i].displayVote>aggregate)
+    aggregate=fClients[i].displayVote;
+  unsigned target[SweetDisplaySupplyCount]={};
+  if (!displayTargets(aggregate,target)) return kIOReturnBadArgument;
+  return kIOReturnSuccess; }
+ case SweetAppsRequestRegisterBandwidth: {
+  uint64_t target=request.param[0];
+  for (unsigned i=0;i<8;++i)
+   if (i!=request.client && fClients[i].id && fClients[i].registerVote>target)
+    target=fClients[i].registerVote;
+  if (!lookupBCM(SweetBCMCN0)) return kIOReturnNotReady;
+  unsigned y=0;
+  return fBCM[SweetBCMCN0].scale(target,4,1,&y) ? kIOReturnSuccess : kIOReturnBadArgument; }
+ default: return kIOReturnBadArgument;
+ }
+}
+
+/* C3-05: one place decides what happens to a submission - run it now, wait
+ * behind the transaction in flight, or refuse it. Whatever survives this
+ * function is a copy in fQueue or fCurrent, so nothing here points at the
+ * caller's stack, and a caller that returns once its token exists can no
+ * longer change what will be dispatched on its behalf. */
+IOReturn
+SweetRPMh::admit(SweetAppsRequest &request)
 {
  if (fMode!=2) return kIOReturnNotPermitted;
  if (fPoisoned) return kIOReturnNotReady;
- if (fBusy) return kIOReturnBusy;
+ if (!ensureExecutor()) return kIOReturnNotReady;
+ if (!fAccepting || isInactive()) return kIOReturnNotReady;
+ if (request.kind!=SweetAppsRequestRailVote && request.kind!=SweetAppsRequestDisplayCorner &&
+     request.kind!=SweetAppsRequestRegisterBandwidth) return kIOReturnBadArgument;
+ /* A request that cannot run is refused before it costs a token, so the
+  * caller's previous completion stays readable and its sequence number does
+  * not advance - the contract the single-flight path already had. */
+ IOReturn veto=validate(request);
+ if (veto!=kIOReturnSuccess) {
+  SWEET_LOG_INFO("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u detail=invalid result=%#x\n",
+      sweetRequestName(request.kind),request.client,request.rail,(unsigned)veto);
+  return veto;
+ }
+ /* Two outstanding requests for one resource would drive the same field once
+  * dispatched, and merging them would invent an order the caller never asked
+  * for. The second one is refused against its own row instead. A direct
+  * request keeps seq=0, which is how a ring reader tells it from a queued one. */
+ if (fQueue.find(request.kind,request.client,request.rail) ||
+     (fCurrentValid && fCurrent.kind==request.kind &&
+      fCurrent.client==request.client && fCurrent.rail==request.rail)) {
+  fQueueRefused++;
+  SWEET_LOG_INFO("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u detail=already-outstanding depth=%u\n",
+      sweetRequestName(request.kind),request.client,request.rail,fQueue.depth());
+  return kIOReturnBusy;
+ }
+ if (fBusy && fQueue.full()) {
+  fQueueRefused++;
+  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u detail=queue-full depth=%u\n",
+      sweetRequestName(request.kind),request.client,request.rail,fQueue.depth());
+  return kIOReturnNoResources;
+ }
+ if (fNextToken==~0ULL) return kIOReturnNoResources;
+ if (!fBusy) {
+  /* A direct caller reads the outcome from this return value and from the
+  * status the dispatch publishes, exactly as before; nothing is written on
+  * its behalf when the dispatch refuses, so its previous completion stands. */
+  request.token=++fNextToken; request.seq=0;
+  fCurrent=request; fCurrentValid=true;
+  SWEET_LOG_INFO("SWEET APPS QUEUE: phase=dispatch kind=%s client=%u resource=%u token=%llu seq=%u depth=%u wait=direct\n",
+      sweetRequestName(request.kind),request.client,request.rail,request.token,request.seq,fQueue.depth());
+  return launch(fCurrent);
+ }
+ request.token=++fNextToken;
+ /* A waiting caller holds only its token, so the token has to exist and be
+  * readable before the request runs; the fields a dispatch has not computed
+  * are Pending, never a stale value from its previous request. */
+ markPending(request);
+ if (!fQueue.push(request,&request)) {
+  fQueueRefused++;
+  return kIOReturnNoResources;
+ }
+ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=enqueue kind=%s client=%u resource=%u token=%llu seq=%u depth=%u\n",
+     sweetRequestName(request.kind),request.client,request.rail,request.token,request.seq,fQueue.depth());
+ return kIOReturnSuccess;
+}
+
+/* Dispatch exactly one request. Success means the transaction started, or it
+ * completed without needing a write. Anything else is recorded against that
+ * request's own token, because a queued caller never sees this return value. */
+IOReturn
+SweetRPMh::launch(const SweetAppsRequest &request)
+{
+ IOReturn result;
+ switch (request.kind) {
+ case SweetAppsRequestRailVote: result=launchRail(request); break;
+ case SweetAppsRequestDisplayCorner: result=launchDisplayPower(request); break;
+ case SweetAppsRequestRegisterBandwidth: result=launchRegisterBandwidth(request); break;
+ default: result=kIOReturnUnsupported; break;
+ }
+ /* A request that completed without a flight owns nothing any more. A
+  * refused one is reported by the caller that can report it: the admission
+  * path returns this value, and the drain path writes it against the token. */
+ if (!fBusy) fCurrentValid=false;
+ return result;
+}
+
+/* Run whatever can run. The guard matters: a request that needs no write
+ * retires inside this loop, and that retirement calls back here. The nested
+ * call returns immediately and the outer loop keeps draining, so the drain
+ * depth stays bounded by the queue capacity instead of by the call stack. */
+void
+SweetRPMh::dispatchNext(void)
+{
+ if (fDispatching) return;
+ fDispatching=true;
+ while (!fBusy && !fPoisoned && fQueue.depth()) {
+  SweetAppsRequest request=*fQueue.head();
+  const unsigned remaining=fQueue.depth()-1;
+  fQueue.pop();
+  SWEET_LOG_INFO("SWEET APPS QUEUE: phase=dispatch kind=%s client=%u resource=%u token=%llu seq=%u depth=%u wait=queued\n",
+      sweetRequestName(request.kind),request.client,request.rail,request.token,request.seq,remaining);
+  IOReturn result=launch(request);
+  /* A refused request does not block the ones behind it; it was refused
+   * rather than started, so nothing of it reached the array. The caller is
+   * gone, so the refusal has to land on the token it was handed. */
+  if (result!=kIOReturnSuccess) {
+   markFailure(request,result);
+   SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u token=%llu seq=%u detail=dispatch-refused result=%#x remaining=%u\n",
+       sweetRequestName(request.kind),request.client,request.rail,request.token,request.seq,
+       (unsigned)result,fQueue.depth());
+  }
+ }
+ if (fPoisoned) drainQueue(kIOReturnNotReady,"isolation-state-set");
+ fDispatching=false;
+}
+
+/* Fail every waiting request against its own token. Used when this service can
+ * no longer honour the order it accepted: a transaction that left the array in
+ * an unknown state, or a stop. Nothing is retried, merged or silently dropped -
+ * each one gets a row and a Failed status, and the queue ends empty. */
+void
+SweetRPMh::drainQueue(IOReturn result,const char *reason)
+{
+ while (fQueue.depth()) {
+  SweetAppsRequest request=*fQueue.head();
+  fQueue.pop();
+  markFailure(request,result);
+  fQuarantined++;
+  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u token=%llu seq=%u detail=%s result=%#x\n",
+      sweetRequestName(request.kind),request.client,request.rail,request.token,request.seq,
+      reason,(unsigned)result);
+ }
+}
+
+/* Publish the token before the request runs. Fields that a dispatch has not
+ * computed yet stay zero until it does; Pending is the state that says so. */
+void
+SweetRPMh::markPending(const SweetAppsRequest &request)
+{
+ if (request.client>=8 || !fClients[request.client].id) return;
+ switch (request.kind) {
+ case SweetAppsRequestRailVote: {
+  SweetRPMhStatus &status=fClients[request.client].status;
+  status={}; status.token=request.token; status.state=SweetRPMhPending;
+  status.rail=request.rail; status.result=kIOReturnSuccess; break; }
+ case SweetAppsRequestDisplayCorner: {
+  SweetDisplayPowerStatus &status=fClients[request.client].displayStatus;
+  status={}; status.token=request.token; status.state=SweetRPMhPending;
+  status.result=kIOReturnSuccess; status.corner=(SweetDisplayCorner)request.param[0];
+  status.enabled=status.corner!=SweetDisplayOff; break; }
+ case SweetAppsRequestRegisterBandwidth: {
+  SweetRegisterBandwidthStatus &status=fClients[request.client].registerStatus;
+  status={}; status.token=request.token; status.state=SweetRPMhPending;
+  status.result=kIOReturnSuccess; status.bytesPerSecond=request.param[0]; break; }
+ default: break;
+ }
+}
+
+/* A refusal is decisive for the request that earned it: Failed, against its own
+ * token, with the result that refused it. Not uncertain - these refusals all
+ * happen before the request touches the array. */
+void
+SweetRPMh::markFailure(const SweetAppsRequest &request,IOReturn result)
+{
+ if (request.client>=8 || !fClients[request.client].id) return;
+ switch (request.kind) {
+ case SweetAppsRequestRailVote: {
+  SweetRPMhStatus &status=fClients[request.client].status;
+  status.token=request.token; status.rail=request.rail;
+  status.state=SweetRPMhFailed; status.result=result; status.uncertain=false; break; }
+ case SweetAppsRequestDisplayCorner: {
+  SweetDisplayPowerStatus &status=fClients[request.client].displayStatus;
+  status.token=request.token; status.corner=(SweetDisplayCorner)request.param[0];
+  status.state=SweetRPMhFailed; status.result=result; status.uncertain=false; break; }
+ case SweetAppsRequestRegisterBandwidth: {
+  SweetRegisterBandwidthStatus &status=fClients[request.client].registerStatus;
+  status.token=request.token; status.bytesPerSecond=request.param[0];
+  status.state=SweetRPMhFailed; status.result=result; status.uncertain=false; break; }
+ default: break;
+ }
+}
+
+IOReturn SweetRPMh::beginRegisterBandwidth(unsigned client,uint64_t proposal)
+{
+ SweetAppsRequest request={};
+ request.kind=SweetAppsRequestRegisterBandwidth; request.client=client;
+ request.param[0]=proposal;
+ return admit(request);
+}
+
+IOReturn SweetRPMh::launchRegisterBandwidth(const SweetAppsRequest &request)
+{
+ unsigned client=request.client;
+ uint64_t proposal=request.param[0];
+ if (fMode!=2) return kIOReturnNotPermitted;
+ if (fPoisoned) return kIOReturnNotReady;
  /* NotReady keeps the client's retry semantics, never polling. */
  if (!ensureExecutor()) return kIOReturnNotReady;
  if (!lookupBCM(SweetBCMCN0)) return kIOReturnNotReady;
@@ -412,7 +717,6 @@ IOReturn SweetRPMh::beginRegisterBandwidth(unsigned client,uint64_t proposal)
   target=fClients[i].registerVote;
  unsigned y=0;
  if (!fBCM[SweetBCMCN0].scale(target,4,1,&y)) return kIOReturnBadArgument;
- if (fNextToken==~0ULL) return kIOReturnNoResources;
  bool noWrite=(!target && !fRegisterOwned) || (fRegisterOwned && target==fRegisterAggregate);
  unsigned chosen=0;
  if (!noWrite) {
@@ -428,7 +732,7 @@ IOReturn SweetRPMh::beginRegisterBandwidth(unsigned client,uint64_t proposal)
   chosen=(unsigned)empty;
   if (!emptyTCS(chosen)) return kIOReturnBusy;
  }
- SweetRegisterBandwidthStatus status={++fNextToken,target,SweetRPMhPending,kIOReturnSuccess,false};
+ SweetRegisterBandwidthStatus status={request.token,target,SweetRPMhPending,kIOReturnSuccess,false};
  fClients[client].registerStatus=status;
  fClientIndex=client; fRegisterProposal=proposal; fRegisterTarget=target;
  fArcRequest=false; fRegisterRequest=true; fBusy=true;
@@ -521,18 +825,26 @@ IOReturn SweetRPMh::queueArcStage(void)
 
 IOReturn SweetRPMh::beginDisplayPower(unsigned client,SweetDisplayCorner proposal)
 {
+ if ((unsigned)proposal>=SweetDisplayCornerCount) return kIOReturnBadArgument;
+ SweetAppsRequest request={};
+ request.kind=SweetAppsRequestDisplayCorner; request.client=client;
+ request.param[0]=(uint64_t)proposal;
+ return admit(request);
+}
+
+IOReturn SweetRPMh::launchDisplayPower(const SweetAppsRequest &request)
+{
+ unsigned client=request.client;
+ SweetDisplayCorner proposal=(SweetDisplayCorner)request.param[0];
  if (fMode!=2) return kIOReturnNotPermitted;
  if (fPoisoned) return kIOReturnNotReady;
  if (!ensureExecutor()) return kIOReturnNotReady;
- if (fBusy) return kIOReturnBusy;
- if ((unsigned)proposal>=SweetDisplayCornerCount) return kIOReturnBadArgument;
  if (!loadDisplayPower()) return kIOReturnNotReady;
  SweetDisplayCorner aggregate=proposal;
  for (unsigned i=0;i<8;++i) if (i!=client && fClients[i].id && fClients[i].displayVote>aggregate)
   aggregate=fClients[i].displayVote;
  unsigned target[SweetDisplaySupplyCount]={};
  if (!displayTargets(aggregate,target)) return kIOReturnBadArgument;
- if (fNextToken==~0ULL) return kIOReturnNoResources;
  fArcStage=fArcStageCount=0;
  /* An inherited child may still be at a high corner. First guard unknown
   * parents at their highest DB-supported selector before changing the child.
@@ -560,7 +872,7 @@ IOReturn SweetRPMh::beginDisplayPower(unsigned client,SweetDisplayCorner proposa
   if (result!=kIOReturnSuccess) return result; /* No write/status/token change. */
  }
  SweetDisplayPowerStatus status={};
- status.token=++fNextToken; status.state=SweetRPMhPending; status.corner=aggregate;
+ status.token=request.token; status.state=SweetRPMhPending; status.corner=aggregate;
  status.result=kIOReturnSuccess; status.enabled=aggregate!=SweetDisplayOff;
  for (unsigned r=0;r<SweetDisplaySupplyCount;++r) {
   status.levels[r]=fArc[r].levels[target[r]];
@@ -668,14 +980,23 @@ bool SweetRPMh::mapResources(IOService *provider)
  return true;
 }
 
+/* A tree flag is a four-byte property that says exactly 1. Anything else -
+ * missing, truncated, zero, another number - is not a request, so a malformed
+ * tree can only ever turn a feature off. */
+static bool
+propertyRequested(IOService *provider,const char *name)
+{
+ OSData *flag=OSDynamicCast(OSData,provider->getProperty(name));
+ if (!flag || flag->getLength()!=4) return false;
+ uint32_t value=0; memcpy(&value,flag->getBytesNoCopy(),4);
+ return value==1u;
+}
+
 /* The tree decides the owner, not a boot arg: the budget is spent and both
  * sides must read the same answer. */
 bool SweetRPMh::delegatedRequested(IOService *provider)
 {
- OSData *flag=OSDynamicCast(OSData,provider->getProperty("sweet,rpmh-executor-delegated"));
- if (!flag || flag->getLength()!=4) return false;
- uint32_t value=0; memcpy(&value,flag->getBytesNoCopy(),4);
- return value==1u;
+ return propertyRequested(provider,"sweet,rpmh-executor-delegated");
 }
 
 /* Delegated: bind this service's completion to the hardware owner's event
@@ -704,6 +1025,10 @@ bool SweetRPMh::start(IOService *provider)
  int mode=0; (void)PE_parse_boot_argn("sweetdisplayresources",&mode,sizeof(mode));
  if (mode<1 || mode>2 || !IOService::start(provider)) return false;
  fMode=(unsigned)mode;
+ fQueue.reset();
+ /* An explicit tree request to demonstrate the submission queue on this boot.
+  * Absent, zero or anything but 1 means the demonstration does not run. */
+ fQueueSelfTest=propertyRequested(provider,"sweet,rpmh-queue-selftest");
  /* C3-04: the owner comes from the tree, before the first register access and
   * without a boot arg (the boot-arg budget is spent). A tree that says both
   * sides program the line resolves to SweetAppsOwnerNone and nothing starts. */
@@ -913,22 +1238,25 @@ void SweetRPMh::clearPanelFence(void)
  fPanelFence={};
 }
 
-IOReturn SweetRPMh::begin(unsigned client,unsigned rail,const SweetRailVote &proposal)
+/* Every rail refusal that depends only on this request and the committed
+ * ledger. Admission runs it before a token exists, dispatch runs it again
+ * because the ledger may have moved while the request waited; neither call
+ * changes anything, so a refusal here has cost no token and no state. */
+IOReturn
+SweetRPMh::vetoRail(unsigned client,unsigned rail,const SweetRailVote &proposal,SweetRailVote *result) const
 {
- if (fMode!=2) return kIOReturnNotPermitted;
- if (fPoisoned) return kIOReturnNotReady;
- if (!ensureExecutor()) return kIOReturnNotReady;
- if (fBusy) return kIOReturnBusy;
  SweetRailVote target={false,railLimits[rail].minMV,railLimits[rail].maxMV,0};
- if (proposal.enabled && (proposal.minMV>proposal.maxMV || proposal.minMV<railLimits[rail].minMV || proposal.maxMV>railLimits[rail].maxMV)) return kIOReturnBadArgument;
+ if (proposal.enabled && (proposal.minMV>proposal.maxMV ||
+     proposal.minMV<railLimits[rail].minMV || proposal.maxMV>railLimits[rail].maxMV))
+  return kIOReturnBadArgument;
  uint64_t load=0;
  for (unsigned i=0;i<8;++i) if (fClients[i].id) {
-  const SweetRailVote &v=i==client ? proposal : fClients[i].votes[rail];
-  if (!v.enabled) continue;
+  const SweetRailVote &vote=i==client ? proposal : fClients[i].votes[rail];
+  if (!vote.enabled) continue;
   target.enabled=true;
-  if (target.minMV<v.minMV) target.minMV=v.minMV;
-  if (target.maxMV>v.maxMV) target.maxMV=v.maxMV;
-  load+=v.loadUA;
+  if (target.minMV<vote.minMV) target.minMV=vote.minMV;
+  if (target.maxMV>vote.maxMV) target.maxMV=vote.maxMV;
+  load+=vote.loadUA;
  }
  if (target.minMV>target.maxMV || load>0xffffffffULL) return kIOReturnBadArgument;
  /* Stopping the display link does not stop UFS/USB. Refuse BEFORE token,
@@ -941,11 +1269,33 @@ IOReturn SweetRPMh::begin(unsigned client,unsigned rail,const SweetRailVote &pro
   * ranges; reject constraints that cannot contain the rounded selection. */
  unsigned rounded=railLimits[rail].minMV+((target.minMV-railLimits[rail].minMV+7)/8)*8;
  if (rounded>target.maxMV) return kIOReturnBadArgument;
- if (fNextToken==~0ULL) return kIOReturnNoResources;
  target.minMV=rounded;
+ if (result) *result=target;
+ return kIOReturnSuccess;
+}
+
+IOReturn SweetRPMh::begin(unsigned client,unsigned rail,const SweetRailVote &proposal)
+{
+ SweetAppsRequest request={};
+ request.kind=SweetAppsRequestRailVote; request.client=client; request.rail=rail;
+ sweetPackRail(request,proposal);
+ return admit(request);
+}
+
+IOReturn SweetRPMh::launchRail(const SweetAppsRequest &request)
+{
+ unsigned client=request.client, rail=request.rail;
+ SweetRailVote proposal=sweetUnpackRail(request);
+ if (fMode!=2) return kIOReturnNotPermitted;
+ if (fPoisoned) return kIOReturnNotReady;
+ if (!ensureExecutor()) return kIOReturnNotReady;
+ SweetRailVote target={};
+ IOReturn veto=vetoRail(client,rail,proposal,&target);
+ if (veto!=kIOReturnSuccess) return veto;
+ unsigned rounded=target.minMV;
  fArcRequest=false; fRegisterRequest=false; fClientIndex=client; fRail=rail; fProposal=proposal; fTarget=target;
- SweetRPMhStatus status={++fNextToken,SweetRPMhComplete,rail,rounded,
-     load>=railLimits[rail].modeThresholdUA ? 7u : 4u,kIOReturnSuccess,target.enabled,false};
+ SweetRPMhStatus status={request.token,SweetRPMhComplete,rail,rounded,
+     target.loadUA>=railLimits[rail].modeThresholdUA ? 7u : 4u,kIOReturnSuccess,target.enabled,false};
  /* Never disable an inherited rail simply because software has no votes. */
  if ((!target.enabled && !fOwned[rail]) || (fOwned[rail] && target.enabled==fAggregate[rail].enabled &&
      (!target.enabled || (target.minMV==fAggregate[rail].minMV &&
@@ -996,7 +1346,7 @@ void SweetRPMh::finish(IOReturn result,bool uncertain)
    fPoisoned|=uncertain;
    SWEET_LOG_ERROR("SWEET RPMH: token=%llu CN0 rc=%#x uncertain=%u; no retry/reset\n",s.token,(unsigned)result,uncertain);
   }
-  fBusy=false; fTimer->cancelTimeout(); return;
+  retireFlight(); return;
  }
  if (fArcRequest) {
   SweetDisplayPowerStatus &s=fClients[fClientIndex].displayStatus;
@@ -1011,7 +1361,7 @@ void SweetRPMh::finish(IOReturn result,bool uncertain)
    SWEET_LOG_ERROR("SWEET RPMH: token=%llu display ARC failed rc=%#x acked=%#x uncertain=%u; votes retained, no rollback/reset\n",
        s.token,(unsigned)result,s.acknowledged,uncertain);
   }
-  fBusy=false; fTimer->cancelTimeout(); return;
+  retireFlight(); return;
  }
  SweetRPMhStatus &s=fClients[fClientIndex].status;
  s.result=result; s.uncertain=uncertain;
@@ -1023,7 +1373,23 @@ void SweetRPMh::finish(IOReturn result,bool uncertain)
   fPoisoned|=uncertain;
   SWEET_LOG_ERROR("SWEET RPMH: token=%llu %s failed rc=%#x uncertain=%u; no reset/retry\n",s.token,railNames[fRail],(unsigned)result,uncertain);
  }
- fBusy=false; fTimer->cancelTimeout();
+ retireFlight();
+}
+
+/* One retirement path: the flight is over, the request that owned it is no
+ * longer current, and the next waiting request may start. */
+void SweetRPMh::retireFlight(void)
+{
+ fBusy=false; fCurrentValid=false;
+ if (fTimer) fTimer->cancelTimeout();
+ /* The explicit ADT demonstration runs once this boot has actually completed
+  * a transaction, because that is the first moment a rail it may re-vote is
+  * owned. It submits through admit() like any client, so it cannot bypass the
+  * ordering it is meant to demonstrate. */
+ if (fQueueSelfTest && !fQueueTestRun && !fPoisoned && fAccepting) {
+  if (queueSelfTest()) fQueueTestRun=true;
+ }
+ dispatchNext();
 }
 
 void SweetRPMh::advance(void)
@@ -1187,6 +1553,9 @@ IOReturn SweetRPMh::action(OSObject *owner,void *arg,void *,void *,void *)
  SweetRPMh *self=(SweetRPMh *)owner; RPMhRequest &r=*(RPMhRequest *)arg;
  if (r.op==Shutdown) {
   self->fAccepting=false; self->quietIRQ();
+  /* Nothing queued may start after this point; each one fails against its own
+   * token instead of being forgotten. */
+  self->drainQueue(kIOReturnAborted,"stop");
   if (self->fBusy) self->finish(kIOReturnAborted,self->fEverWritten);
   if (self->fTimer) self->fTimer->cancelTimeout();
   return kIOReturnSuccess;
@@ -1216,6 +1585,9 @@ IOReturn SweetRPMh::action(OSObject *owner,void *arg,void *,void *,void *)
  for (unsigned i=0;i<8;++i) if (r.client && self->fClients[i].id==r.client) {
   if (r.op==Detach) {
    if (self->fBusy && self->fClientIndex==i) return kIOReturnBusy;
+   /* A waiting request still owns this identity: detaching now would dispatch
+    * it against a released client slot. Cancelling one is C3-06. */
+   if (self->fQueue.waiting(i)) return kIOReturnBusy;
    for (unsigned rail=0;rail<SweetRailCount;++rail) if (self->fClients[i].votes[rail].enabled) return kIOReturnBusy;
    if (self->fClients[i].displayVote!=SweetDisplayOff || self->fClients[i].displayStatus.uncertain) return kIOReturnBusy;
    if (self->fClients[i].registerVote || self->fClients[i].registerStatus.uncertain) return kIOReturnBusy;
@@ -1252,7 +1624,15 @@ IOReturn SweetRPMh::action(OSObject *owner,void *arg,void *,void *,void *)
   if (r.op==PanelVote) {
    if (self->fMode!=2) return kIOReturnNotPermitted;
    if (self->fPoisoned) return kIOReturnNotReady;
-   if (self->fBusy) return kIOReturnBusy;
+   /* A panel vote is not queued: its fence hands over exclusive leaf-provider
+    * references that would have to outlive the wait, which is the contract
+    * C3-06 owns. It therefore refuses while anything is in flight or waiting,
+    * instead of jumping ahead of requests that are already ordered. */
+   if (self->fBusy || !self->fQueue.empty()) {
+    SWEET_LOG_INFO("SWEET APPS QUEUE: phase=refuse kind=panel client=%u detail=not-a-queued-kind depth=%u\n",
+        i,self->fQueue.depth());
+    return kIOReturnBusy;
+   }
    if (!self->panelFenceValid(*r.panelFence)) return kIOReturnNotReady;
    self->fPanelFence=*r.panelFence;
    self->fPanelFence.pins->retain(); self->fPanelFence.touch->retain();

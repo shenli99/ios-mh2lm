@@ -63,7 +63,8 @@ for name in names:
 # The units this card added are the reason the check exists; keep them pinned so
 # that a future weight-loss pass cannot quietly drop one of them again.
 for unit in ('iokit/Kernel/arm/SweetAppsDoor.cpp',
-             'iokit/Kernel/arm/SweetAppsLine.cpp'):
+             'iokit/Kernel/arm/SweetAppsLine.cpp',
+             'iokit/Kernel/arm/SweetAppsQueue.cpp'):
     assert unit in seen, 'not in the build list: ' + unit
 
 print('test-mh2lm-build-file-list: %d units listed, %d sources under arm, '

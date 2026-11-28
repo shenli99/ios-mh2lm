@@ -160,8 +160,16 @@ int main(){
  {Harness h;auto f=prepare(h);auto token=panelVote(h,SweetRailVPNL,false,f);uint64_t denied=99;
   auto other=attach(h.r);auto pr=h.p->refs.load(),tr=h.t->refs.load();
   assert(h.r->requestPanelVote(other,SweetRailVDDI,{},f,&denied)==kIOReturnBusy&&!denied);
-  assert(h.r->requestVote(other,SweetRailVDDI,{},&denied)==kIOReturnBusy&&!denied);
+  // C3-05: an ordinary vote no longer displaces the pending transaction - it
+  // waits behind it, holding neither leaf, so the fence is still armed and the
+  // TCS is untouched. A fenced request is never queued, only waited on.
+  auto queued=writes();
+  assert(h.r->requestVote(other,SweetRailVDDI,{},&denied)==0&&denied&&h.r->fQueue.depth()==1);
+  assert(writes()==queued&&h.p->refs==pr&&h.t->refs==tr);
+  assert(h.r->fPanelFence.pins&&h.r->fPanelFence.touch&&h.r->fBusy);
+  assert(h.r->requestPanelVote(other,SweetRailVDDI,{},f,&denied)==kIOReturnBusy&&!denied);
   assert(h.p->refs==pr&&h.t->refs==tr);finishVote(h,token,false);
+  assert(h.r->fQueue.empty()&&!h.r->fBusy);
   token=vote(h.r,h.m->fRPMhConsumer,SweetRailVPNL,supplyVote(SweetRailVPNL,true));
   assert(h.r->cancelPanelVote(h.m->fRPMhConsumer,token)==0&&h.r->fBusy);
   finishVote(h,token,true);assert(h.r->detachConsumer(other)==0);

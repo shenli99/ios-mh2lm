@@ -1,0 +1,1434 @@
+From: mh2lm clock work <clock@mh2lm>
+Subject: [PATCH 0251] feat(apps): bounded submission queue in front of the apps RSC
+
+C3-05 is a storage change and nothing else.  The apps array has always run one
+transaction at a time, and a display-corner request is itself up to five flights
+(guard, guard, then three supplies).  Until now the owner answered every second
+caller with a refusal; from here the calls that used to be refused wait, in
+arrival order, until the previous transaction retires.  What does not change is
+the acceptance rule this card is judged by: with one request outstanding, the
+existing rows and the TCS command sequence are what 0147 sent.
+
+The queue.  SweetAppsQueue.h/.cpp is fixed storage and no policy: eight slots, a
+head and a count, counters for accepted/dispatched/high-water, and a sequence
+number stamped at push.  It allocates nothing, takes no lock, prints nothing and
+calls nothing in IOKit; the owner serializes every call from its gate and decides
+what a refusal looks like.  push() copies the record in and refuses when full
+instead of dropping the oldest, because two accepted votes for one resource have
+no defined order once they collapse; the refusal does not stamp a sequence.  The
+record is self-contained by necessity: the caller's stack and its live objects
+are gone by the time a waiting request is dispatched, so the kind, the owner's
+client slot, the resource tag, the payload and the token issued before the wait
+all travel inside it.  find() answers the one question the duplicate rule needs -
+same kind, same client, same resource - and waiting() answers whether a client
+still has anything parked, which is what detach has to ask.
+
+Admission is split in two.  validate() is the pre-admission screen: it takes a
+proposal that has not been stored anywhere, checks it against the same tables and
+the same committed ledger the launch uses, and refuses it before any token
+exists, so a refused submission leaves the caller's previous completion and its
+token sequence exactly as they were, with no writes, no status slot touched and
+no queue entry.  It is deliberately a second reading of the same rules rather
+than a call into launch: the launch needs a record to fail against, and a screen
+that first had to publish a token would turn a typo into a lost completion.  What
+the screen cannot decide is the state that may move while a request waits - the
+TCS, the executor door, the mode, the poison - so dispatch evaluates those again
+and reports them against the token the queued request already holds.  A direct
+(non-queued) dispatch publishes no status on failure and writes no Pending: the
+caller learns from the return value, which is what it got before this card.
+
+Dispatch and retirement.  admit() still owns the order of the checks it had -
+mode, poison, executor, accepting, inactive, kind - and then walks: screen,
+duplicate, capacity, token.  If nothing is in flight the request becomes the
+current one with seq 0 and is launched at once; otherwise the token is issued,
+the caller's slot is marked Pending so the queued request is queryable while it
+waits, and the record is pushed.  retireFlight() drives the queue: while a
+request is in flight nothing starts, and every waiting request is launched in
+sequence order by the same path a direct one took.  A queued request that fails
+at dispatch is marked Failed against its own token and does not stop the rest.
+The isolation state is a hard stop in both directions: dispatchNext() refuses to
+start anything once the owner is poisoned and drains the waiters with the
+isolation reason instead of running them behind a poisoned transaction, so the
+card's "A fails, B must not cross" holds even when B arrived before the failure.
+
+Panel votes are not a queue kind.  A fenced panel vote arms a real reset-low
+window around a supply that the display needs; letting it wait would mean either
+holding the fence across a stranger's transaction or releasing it before the
+supply is back.  A panel vote that arrives while anything is in flight - current
+or waiting - is refused with its own row, and the ownership of that short window
+is the subject of C3-06 instead of being quietly widened here.
+
+The diagnostic.  One row set marks every decision: the queue self-test, the
+dispatch with its wait mode, the refusals with their reason, and the drain.  The
+self-test is off unless the tree says otherwise: property sweet,rpmh-queue-selftest
+exactly four bytes of 1, at most six attempts, hooked on the first retirement
+because no rail is owned before then.  It submits two legal rail raises through
+the ordinary entry point from two different client slots, so it exercises the
+queue path it claims to exercise - the second raise can only be admitted because
+the first is in flight - and it leaves that effect visible: both rails stay
+raised for the boot.  Withdrawal is C3-06's, and the demo says so in its row.
+
+One status slot per client is a caveat, not a defect.  A client whose request is
+waiting has its newer token and its older completion cannot be queried any more
+(NotFound); the same is true of every direct request today when a second one
+arrives.  Queued requests are therefore documented as queryable by the token
+they were given, in arrival order per client, and nothing else is promised.
+
+The tree.  mk-mh2lm-mdss-adt.py learns one flag, --rpmh-queue-selftest, which
+appends a 4-byte property to the display owner node - the node the driver reads
+it from, which is where the queue lives - and refuses to emit it without that
+node, so a tree cannot carry a switch nobody consumes.  It is the only difference
+between this round's candidate and the C3-04 one, and the tests prove the removal
+is exact.
+
+Tests.  test-mh2lm-apps-queue.py is the unit on its own - capacity, the refusal
+without a stamp, arrival order across the array wrap, exact-resource lookup, the
+payload and pre-issued token surviving the caller, and the boot-time reset - and
+also compiles the unit without the board macro to prove it is empty there.  The
+resources fixture gains the driver-level contracts: one TCS owner across a
+cross-client arrival, an explicit queue-full refusal that spends no token and
+leaves the previous completion readable, and a waiter refused at the isolation
+state with its rail never programmed.  The other fixtures move to the new
+ordering where they asserted the old "second caller is Busy" outcome: a request
+that cannot replace a pending transaction is now the resource already in flight
+(duplicate) or a fenced panel vote, and the harness's acknowledgement helper
+learns that retiring a flight may start a waiting one in the same window, so it
+asserts that the queue shrinks and that nothing waits without an owner instead of
+asserting that the machine is idle.
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.cpp b/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.cpp
+new file mode 100644
+index 0000000..2f5fa9b
+--- /dev/null
++++ b/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.cpp
+@@ -0,0 +1,74 @@
++/* C3-05: fixed-capacity FIFO, no allocation and no policy.
++ *
++ * pop() only moves the head forward; the slot is overwritten by the next
++ * push(), so a retired request's bytes are not retained past the owner's
++ * dispatch. Nothing here calls into IOKit, locks, or the log: the owner
++ * serializes every call from its gate, and a refusal is the owner's row to
++ * print, not this unit's.
++ */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include "SweetAppsQueue.h"
++
++SweetAppsQueue::SweetAppsQueue()
++{
++	reset();
++}
++
++void
++SweetAppsQueue::reset(void)
++{
++	for (unsigned i = 0; i < kSweetAppsQueueCapacity; ++i) fSlots[i] = SweetAppsRequest();
++	fHead = fCount = fNextSeq = 0;
++	fAccepted = fDispatched = fHighWater = 0;
++}
++
++bool
++SweetAppsQueue::push(const SweetAppsRequest &request, SweetAppsRequest *stored)
++{
++	if (full()) return false;
++	unsigned tail = (fHead + fCount) % kSweetAppsQueueCapacity;
++	fSlots[tail] = request;
++	fSlots[tail].seq = ++fNextSeq;
++	fCount++;
++	fAccepted++;
++	if (fCount > fHighWater) fHighWater = fCount;
++	if (stored) *stored = fSlots[tail];
++	return true;
++}
++
++const SweetAppsRequest *
++SweetAppsQueue::head(void) const
++{
++	if (!fCount) return NULL;
++	return &fSlots[fHead];
++}
++
++void
++SweetAppsQueue::pop(void)
++{
++	if (!fCount) return;
++	fHead = (fHead + 1) % kSweetAppsQueueCapacity;
++	fCount--;
++	fDispatched++;
++}
++
++const SweetAppsRequest *
++SweetAppsQueue::find(unsigned kind, unsigned client, unsigned rail) const
++{
++	for (unsigned i = 0; i < fCount; ++i) {
++		const SweetAppsRequest &slot = fSlots[(fHead + i) % kSweetAppsQueueCapacity];
++		if (slot.kind == kind && slot.client == client && slot.rail == rail) return &slot;
++	}
++	return NULL;
++}
++
++bool
++SweetAppsQueue::waiting(unsigned client) const
++{
++	for (unsigned i = 0; i < fCount; ++i) {
++		const SweetAppsRequest &slot = fSlots[(fHead + i) % kSweetAppsQueueCapacity];
++		if (slot.client == client) return true;
++	}
++	return false;
++}
++#endif
+\ No newline at end of file
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.h b/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.h
+new file mode 100644
+index 0000000..90dc811
+--- /dev/null
++++ b/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.h
+@@ -0,0 +1,68 @@
++/* C3-05: the bounded submission queue in front of the apps RSC.
++ *
++ * The array runs one transaction at a time, and a display-corner request is
++ * itself up to five flights (guard, guard, then three supplies). Callers that
++ * arrive while one transaction is in flight used to be refused outright; they
++ * now wait here, in arrival order, until the owner retires the previous one.
++ *
++ * This unit owns no policy and touches no hardware. It stores a record the
++ * owner filled in, hands back the same bytes, and runs out of room explicitly.
++ * There is no dynamic storage, no timer, no reference counting, no coalescing
++ * and no drop-oldest: what it accepts it still holds until the owner retires
++ * it. The caller's stack and its live objects are gone by the time a queued
++ * request is dispatched, so everything needed to rebuild it must already be
++ * inside the record.
++ */
++#ifndef SWEET_APPS_QUEUE_H
++#define SWEET_APPS_QUEUE_H
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include <IOKit/IOTypes.h>
++
++/* Eight is one waiting request per client slot. A request larger than that is
++ * refused, never merged into an older one: two waiting votes for the same
++ * resource have no defined order once they collapse. */
++enum : unsigned { kSweetAppsQueueCapacity = 8 };
++
++struct SweetAppsRequest {
++	unsigned kind;		/* owner-defined tag */
++	unsigned client;	/* owner's client slot, not a caller pointer */
++	unsigned rail;		/* owner's resource tag; kinds without a
++				 * sub-target use 0 */
++	uint64_t param[2];	/* owner's payload, decoded by the owner */
++	uint64_t token;		/* issued before enqueueing, so the caller can
++				 * already query the request it submitted */
++	unsigned seq;		/* stamped by push(); never reused in a boot */
++};
++
++class SweetAppsQueue {
++	SweetAppsRequest fSlots[kSweetAppsQueueCapacity];
++	unsigned fHead, fCount, fNextSeq;
++	unsigned fAccepted, fDispatched, fHighWater;
++public:
++	SweetAppsQueue();
++	void reset(void);
++	bool empty(void) const { return fCount == 0; }
++	bool full(void) const { return fCount == kSweetAppsQueueCapacity; }
++	unsigned depth(void) const { return fCount; }
++	unsigned accepted(void) const { return fAccepted; }
++	unsigned dispatched(void) const { return fDispatched; }
++	unsigned highWater(void) const { return fHighWater; }
++	/* Copy in, never overwrite: false means the queue is full and the caller
++	 * must refuse the request - dropping an older one would silently reorder
++	 * two accepted votes. full() answers the same question before a token is
++	 * spent. The stamped sequence is what an ordering claim about a ring row
++	 * is checked against. */
++	bool push(const SweetAppsRequest &request, SweetAppsRequest *stored = NULL);
++	/* Oldest request, still owned by the queue. NULL when empty. */
++	const SweetAppsRequest *head(void) const;
++	/* Retire the head after it has been dispatched or failed. */
++	void pop(void);
++	/* One waiting request for exactly this resource, or NULL. Same client and
++	 * same resource means two requests would drive the same field once
++	 * dispatched, so the owner refuses the second one instead of queueing it. */
++	const SweetAppsRequest *find(unsigned kind, unsigned client, unsigned rail) const;
++	/* Whether this client still has a waiting request, without naming one. */
++	bool waiting(unsigned client) const;
++};
++#endif
++#endif
+\ No newline at end of file
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
+index 755a25d..0f29647 100644
+--- a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
+@@ -399,11 +399,316 @@ bool SweetRPMh::ensureExecutor(void)
+  return true;
+ }
+ 
++static const char *sweetRequestName(unsigned kind)
++{
++ switch (kind) {
++ case SweetAppsRequestRailVote: return "rail-vote";
++ case SweetAppsRequestDisplayCorner: return "display-corner";
++ case SweetAppsRequestRegisterBandwidth: return "register-bandwidth";
++ default: return "unknown";
++ }
++}
++
++/* C3-05 device demonstration, requested explicitly by an ADT property and off
++ * for every other boot. Two legal votes on two rails this boot already drives,
++ * submitted through the same admission path a client uses, so the second one
++ * has to wait in the queue for the first to retire. Each rail moves by one
++ * rounding step at the far end of its own range, which is a real flight rather
++ * than the silent no-op an unchanged vote would be; the votes are retained
++ * afterwards like any other vote, because withdrawing one is C3-06. */
++bool
++SweetRPMh::queueSelfTest(void)
++{
++ if (fQueueTestTries++ >= 6) return true;
++ int client=-1;
++ for (unsigned i=0;i<8;++i) if (!fClients[i].id) { client=(int)i; break; }
++ if (client<0) return false;
++ unsigned rails[2]={0,0}; unsigned found=0;
++ for (unsigned r=0;r<SweetRailCount && found<2;++r) {
++  if (!fOwned[r] || !fAggregate[r].enabled) continue;
++  if (fAggregate[r].minMV>=railLimits[r].maxMV) continue;
++  rails[found++]=r;
++ }
++ /* No rail this boot drives can move: nothing to demonstrate, and inventing a
++  * rail whose inherited state nobody described is exactly what is refused. */
++ if (found<2) return false;
++ if (fNextClient==~0ULL) return false;
++ fClients[client]={}; fClients[client].id=++fNextClient;
++ unsigned tokens[2]={0,0}; unsigned results[2]={0,0};
++ for (unsigned k=0;k<2;++k) {
++  SweetRailVote vote=fAggregate[rails[k]];
++  unsigned step=vote.minMV+8;
++  if (step>railLimits[rails[k]].maxMV) step=railLimits[rails[k]].maxMV;
++  vote.minMV=step;
++  IOReturn result=begin((unsigned)client,rails[k],vote);
++  results[k]=(unsigned)result;
++  tokens[k]=(unsigned)fClients[client].status.token;
++ }
++ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=selftest rail0=%s rail1=%s token0=%u token1=%u result0=%#x result1=%#x depth=%u high-water=%u; two admissions, one flight window\n",
++     railNames[rails[0]],railNames[rails[1]],tokens[0],tokens[1],results[0],results[1],
++     fQueue.depth(),fQueue.highWater());
++ /* The pair is only evidence if the first one really holds the array when the
++  * second arrives; a pair that both ran directly would prove nothing and must
++  * not be reported as a demonstration. */
++ if (results[0]!=kIOReturnSuccess || results[1]!=kIOReturnSuccess ||
++     tokens[0]==tokens[1] || !fQueue.depth()) {
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=selftest result=failed detail=pair-did-not-serialize\n");
++  return true;
++ }
++ return true;
++}
++
++/* A queued vote is rebuilt from these two words, never from the caller's
++ * reference: the caller may return as soon as its token exists, and the queue
++ * must still hold everything the dispatch needs. */
++static void
++sweetPackRail(SweetAppsRequest &request,const SweetRailVote &vote)
++{
++ request.param[0]=(uint64_t)vote.minMV|((uint64_t)vote.maxMV<<16)|(vote.enabled ? 1ULL<<32 : 0ULL);
++ request.param[1]=vote.loadUA;
++}
++
++static SweetRailVote
++sweetUnpackRail(const SweetAppsRequest &request)
++{
++ SweetRailVote vote={};
++ vote.enabled=(request.param[0]&(1ULL<<32))!=0;
++ vote.minMV=(unsigned)(request.param[0]&0xffffULL);
++ vote.maxMV=(unsigned)((request.param[0]>>16)&0xffffULL);
++ vote.loadUA=(unsigned)request.param[1];
++ return vote;
++}
++
++/* The admission screen. It holds the refusals that used to run at the top of
++ * each entry point, before that entry point touched a token, a status or the
++ * array, so admitting a request that is going to be refused cannot cost the
++ * caller anything. */
++IOReturn
++SweetRPMh::validate(const SweetAppsRequest &request)
++{
++ switch (request.kind) {
++ case SweetAppsRequestRailVote: {
++  if (request.rail>=SweetRailCount) return kIOReturnBadArgument;
++  return vetoRail(request.client,request.rail,sweetUnpackRail(request),NULL); }
++ case SweetAppsRequestDisplayCorner: {
++  SweetDisplayCorner corner=(SweetDisplayCorner)request.param[0];
++  if ((unsigned)corner>=SweetDisplayCornerCount) return kIOReturnBadArgument;
++  if (!loadDisplayPower()) return kIOReturnNotReady;
++  SweetDisplayCorner aggregate=corner;
++  for (unsigned i=0;i<8;++i)
++   if (i!=request.client && fClients[i].id && fClients[i].displayVote>aggregate)
++    aggregate=fClients[i].displayVote;
++  unsigned target[SweetDisplaySupplyCount]={};
++  if (!displayTargets(aggregate,target)) return kIOReturnBadArgument;
++  return kIOReturnSuccess; }
++ case SweetAppsRequestRegisterBandwidth: {
++  uint64_t target=request.param[0];
++  for (unsigned i=0;i<8;++i)
++   if (i!=request.client && fClients[i].id && fClients[i].registerVote>target)
++    target=fClients[i].registerVote;
++  if (!lookupBCM(SweetBCMCN0)) return kIOReturnNotReady;
++  unsigned y=0;
++  return fBCM[SweetBCMCN0].scale(target,4,1,&y) ? kIOReturnSuccess : kIOReturnBadArgument; }
++ default: return kIOReturnBadArgument;
++ }
++}
++
++/* C3-05: one place decides what happens to a submission - run it now, wait
++ * behind the transaction in flight, or refuse it. Whatever survives this
++ * function is a copy in fQueue or fCurrent, so nothing here points at the
++ * caller's stack, and a caller that returns once its token exists can no
++ * longer change what will be dispatched on its behalf. */
++IOReturn
++SweetRPMh::admit(SweetAppsRequest &request)
++{
++ if (fMode!=2) return kIOReturnNotPermitted;
++ if (fPoisoned) return kIOReturnNotReady;
++ if (!ensureExecutor()) return kIOReturnNotReady;
++ if (!fAccepting || isInactive()) return kIOReturnNotReady;
++ if (request.kind!=SweetAppsRequestRailVote && request.kind!=SweetAppsRequestDisplayCorner &&
++     request.kind!=SweetAppsRequestRegisterBandwidth) return kIOReturnBadArgument;
++ /* A request that cannot run is refused before it costs a token, so the
++  * caller's previous completion stays readable and its sequence number does
++  * not advance - the contract the single-flight path already had. */
++ IOReturn veto=validate(request);
++ if (veto!=kIOReturnSuccess) {
++  SWEET_LOG_INFO("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u detail=invalid result=%#x\n",
++      sweetRequestName(request.kind),request.client,request.rail,(unsigned)veto);
++  return veto;
++ }
++ /* Two outstanding requests for one resource would drive the same field once
++  * dispatched, and merging them would invent an order the caller never asked
++  * for. The second one is refused against its own row instead. A direct
++  * request keeps seq=0, which is how a ring reader tells it from a queued one. */
++ if (fQueue.find(request.kind,request.client,request.rail) ||
++     (fCurrentValid && fCurrent.kind==request.kind &&
++      fCurrent.client==request.client && fCurrent.rail==request.rail)) {
++  fQueueRefused++;
++  SWEET_LOG_INFO("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u detail=already-outstanding depth=%u\n",
++      sweetRequestName(request.kind),request.client,request.rail,fQueue.depth());
++  return kIOReturnBusy;
++ }
++ if (fBusy && fQueue.full()) {
++  fQueueRefused++;
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u detail=queue-full depth=%u\n",
++      sweetRequestName(request.kind),request.client,request.rail,fQueue.depth());
++  return kIOReturnNoResources;
++ }
++ if (fNextToken==~0ULL) return kIOReturnNoResources;
++ if (!fBusy) {
++  /* A direct caller reads the outcome from this return value and from the
++  * status the dispatch publishes, exactly as before; nothing is written on
++  * its behalf when the dispatch refuses, so its previous completion stands. */
++  request.token=++fNextToken; request.seq=0;
++  fCurrent=request; fCurrentValid=true;
++  SWEET_LOG_INFO("SWEET APPS QUEUE: phase=dispatch kind=%s client=%u resource=%u token=%llu seq=%u depth=%u wait=direct\n",
++      sweetRequestName(request.kind),request.client,request.rail,request.token,request.seq,fQueue.depth());
++  return launch(fCurrent);
++ }
++ request.token=++fNextToken;
++ /* A waiting caller holds only its token, so the token has to exist and be
++  * readable before the request runs; the fields a dispatch has not computed
++  * are Pending, never a stale value from its previous request. */
++ markPending(request);
++ if (!fQueue.push(request,&request)) {
++  fQueueRefused++;
++  return kIOReturnNoResources;
++ }
++ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=enqueue kind=%s client=%u resource=%u token=%llu seq=%u depth=%u\n",
++     sweetRequestName(request.kind),request.client,request.rail,request.token,request.seq,fQueue.depth());
++ return kIOReturnSuccess;
++}
++
++/* Dispatch exactly one request. Success means the transaction started, or it
++ * completed without needing a write. Anything else is recorded against that
++ * request's own token, because a queued caller never sees this return value. */
++IOReturn
++SweetRPMh::launch(const SweetAppsRequest &request)
++{
++ IOReturn result;
++ switch (request.kind) {
++ case SweetAppsRequestRailVote: result=launchRail(request); break;
++ case SweetAppsRequestDisplayCorner: result=launchDisplayPower(request); break;
++ case SweetAppsRequestRegisterBandwidth: result=launchRegisterBandwidth(request); break;
++ default: result=kIOReturnUnsupported; break;
++ }
++ /* A request that completed without a flight owns nothing any more. A
++  * refused one is reported by the caller that can report it: the admission
++  * path returns this value, and the drain path writes it against the token. */
++ if (!fBusy) fCurrentValid=false;
++ return result;
++}
++
++/* Run whatever can run. The guard matters: a request that needs no write
++ * retires inside this loop, and that retirement calls back here. The nested
++ * call returns immediately and the outer loop keeps draining, so the drain
++ * depth stays bounded by the queue capacity instead of by the call stack. */
++void
++SweetRPMh::dispatchNext(void)
++{
++ if (fDispatching) return;
++ fDispatching=true;
++ while (!fBusy && !fPoisoned && fQueue.depth()) {
++  SweetAppsRequest request=*fQueue.head();
++  const unsigned remaining=fQueue.depth()-1;
++  fQueue.pop();
++  SWEET_LOG_INFO("SWEET APPS QUEUE: phase=dispatch kind=%s client=%u resource=%u token=%llu seq=%u depth=%u wait=queued\n",
++      sweetRequestName(request.kind),request.client,request.rail,request.token,request.seq,remaining);
++  IOReturn result=launch(request);
++  /* A refused request does not block the ones behind it; it was refused
++   * rather than started, so nothing of it reached the array. The caller is
++   * gone, so the refusal has to land on the token it was handed. */
++  if (result!=kIOReturnSuccess) {
++   markFailure(request,result);
++   SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u token=%llu seq=%u detail=dispatch-refused result=%#x remaining=%u\n",
++       sweetRequestName(request.kind),request.client,request.rail,request.token,request.seq,
++       (unsigned)result,fQueue.depth());
++  }
++ }
++ if (fPoisoned) drainQueue(kIOReturnNotReady,"isolation-state-set");
++ fDispatching=false;
++}
++
++/* Fail every waiting request against its own token. Used when this service can
++ * no longer honour the order it accepted: a transaction that left the array in
++ * an unknown state, or a stop. Nothing is retried, merged or silently dropped -
++ * each one gets a row and a Failed status, and the queue ends empty. */
++void
++SweetRPMh::drainQueue(IOReturn result,const char *reason)
++{
++ while (fQueue.depth()) {
++  SweetAppsRequest request=*fQueue.head();
++  fQueue.pop();
++  markFailure(request,result);
++  fQuarantined++;
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u token=%llu seq=%u detail=%s result=%#x\n",
++      sweetRequestName(request.kind),request.client,request.rail,request.token,request.seq,
++      reason,(unsigned)result);
++ }
++}
++
++/* Publish the token before the request runs. Fields that a dispatch has not
++ * computed yet stay zero until it does; Pending is the state that says so. */
++void
++SweetRPMh::markPending(const SweetAppsRequest &request)
++{
++ if (request.client>=8 || !fClients[request.client].id) return;
++ switch (request.kind) {
++ case SweetAppsRequestRailVote: {
++  SweetRPMhStatus &status=fClients[request.client].status;
++  status={}; status.token=request.token; status.state=SweetRPMhPending;
++  status.rail=request.rail; status.result=kIOReturnSuccess; break; }
++ case SweetAppsRequestDisplayCorner: {
++  SweetDisplayPowerStatus &status=fClients[request.client].displayStatus;
++  status={}; status.token=request.token; status.state=SweetRPMhPending;
++  status.result=kIOReturnSuccess; status.corner=(SweetDisplayCorner)request.param[0];
++  status.enabled=status.corner!=SweetDisplayOff; break; }
++ case SweetAppsRequestRegisterBandwidth: {
++  SweetRegisterBandwidthStatus &status=fClients[request.client].registerStatus;
++  status={}; status.token=request.token; status.state=SweetRPMhPending;
++  status.result=kIOReturnSuccess; status.bytesPerSecond=request.param[0]; break; }
++ default: break;
++ }
++}
++
++/* A refusal is decisive for the request that earned it: Failed, against its own
++ * token, with the result that refused it. Not uncertain - these refusals all
++ * happen before the request touches the array. */
++void
++SweetRPMh::markFailure(const SweetAppsRequest &request,IOReturn result)
++{
++ if (request.client>=8 || !fClients[request.client].id) return;
++ switch (request.kind) {
++ case SweetAppsRequestRailVote: {
++  SweetRPMhStatus &status=fClients[request.client].status;
++  status.token=request.token; status.rail=request.rail;
++  status.state=SweetRPMhFailed; status.result=result; status.uncertain=false; break; }
++ case SweetAppsRequestDisplayCorner: {
++  SweetDisplayPowerStatus &status=fClients[request.client].displayStatus;
++  status.token=request.token; status.corner=(SweetDisplayCorner)request.param[0];
++  status.state=SweetRPMhFailed; status.result=result; status.uncertain=false; break; }
++ case SweetAppsRequestRegisterBandwidth: {
++  SweetRegisterBandwidthStatus &status=fClients[request.client].registerStatus;
++  status.token=request.token; status.bytesPerSecond=request.param[0];
++  status.state=SweetRPMhFailed; status.result=result; status.uncertain=false; break; }
++ default: break;
++ }
++}
++
+ IOReturn SweetRPMh::beginRegisterBandwidth(unsigned client,uint64_t proposal)
+ {
++ SweetAppsRequest request={};
++ request.kind=SweetAppsRequestRegisterBandwidth; request.client=client;
++ request.param[0]=proposal;
++ return admit(request);
++}
++
++IOReturn SweetRPMh::launchRegisterBandwidth(const SweetAppsRequest &request)
++{
++ unsigned client=request.client;
++ uint64_t proposal=request.param[0];
+  if (fMode!=2) return kIOReturnNotPermitted;
+  if (fPoisoned) return kIOReturnNotReady;
+- if (fBusy) return kIOReturnBusy;
+  /* NotReady keeps the client's retry semantics, never polling. */
+  if (!ensureExecutor()) return kIOReturnNotReady;
+  if (!lookupBCM(SweetBCMCN0)) return kIOReturnNotReady;
+@@ -412,7 +717,6 @@ IOReturn SweetRPMh::beginRegisterBandwidth(unsigned client,uint64_t proposal)
+   target=fClients[i].registerVote;
+  unsigned y=0;
+  if (!fBCM[SweetBCMCN0].scale(target,4,1,&y)) return kIOReturnBadArgument;
+- if (fNextToken==~0ULL) return kIOReturnNoResources;
+  bool noWrite=(!target && !fRegisterOwned) || (fRegisterOwned && target==fRegisterAggregate);
+  unsigned chosen=0;
+  if (!noWrite) {
+@@ -428,7 +732,7 @@ IOReturn SweetRPMh::beginRegisterBandwidth(unsigned client,uint64_t proposal)
+   chosen=(unsigned)empty;
+   if (!emptyTCS(chosen)) return kIOReturnBusy;
+  }
+- SweetRegisterBandwidthStatus status={++fNextToken,target,SweetRPMhPending,kIOReturnSuccess,false};
++ SweetRegisterBandwidthStatus status={request.token,target,SweetRPMhPending,kIOReturnSuccess,false};
+  fClients[client].registerStatus=status;
+  fClientIndex=client; fRegisterProposal=proposal; fRegisterTarget=target;
+  fArcRequest=false; fRegisterRequest=true; fBusy=true;
+@@ -521,18 +825,26 @@ IOReturn SweetRPMh::queueArcStage(void)
+ 
+ IOReturn SweetRPMh::beginDisplayPower(unsigned client,SweetDisplayCorner proposal)
+ {
++ if ((unsigned)proposal>=SweetDisplayCornerCount) return kIOReturnBadArgument;
++ SweetAppsRequest request={};
++ request.kind=SweetAppsRequestDisplayCorner; request.client=client;
++ request.param[0]=(uint64_t)proposal;
++ return admit(request);
++}
++
++IOReturn SweetRPMh::launchDisplayPower(const SweetAppsRequest &request)
++{
++ unsigned client=request.client;
++ SweetDisplayCorner proposal=(SweetDisplayCorner)request.param[0];
+  if (fMode!=2) return kIOReturnNotPermitted;
+  if (fPoisoned) return kIOReturnNotReady;
+  if (!ensureExecutor()) return kIOReturnNotReady;
+- if (fBusy) return kIOReturnBusy;
+- if ((unsigned)proposal>=SweetDisplayCornerCount) return kIOReturnBadArgument;
+  if (!loadDisplayPower()) return kIOReturnNotReady;
+  SweetDisplayCorner aggregate=proposal;
+  for (unsigned i=0;i<8;++i) if (i!=client && fClients[i].id && fClients[i].displayVote>aggregate)
+   aggregate=fClients[i].displayVote;
+  unsigned target[SweetDisplaySupplyCount]={};
+  if (!displayTargets(aggregate,target)) return kIOReturnBadArgument;
+- if (fNextToken==~0ULL) return kIOReturnNoResources;
+  fArcStage=fArcStageCount=0;
+  /* An inherited child may still be at a high corner. First guard unknown
+   * parents at their highest DB-supported selector before changing the child.
+@@ -560,7 +872,7 @@ IOReturn SweetRPMh::beginDisplayPower(unsigned client,SweetDisplayCorner proposa
+   if (result!=kIOReturnSuccess) return result; /* No write/status/token change. */
+  }
+  SweetDisplayPowerStatus status={};
+- status.token=++fNextToken; status.state=SweetRPMhPending; status.corner=aggregate;
++ status.token=request.token; status.state=SweetRPMhPending; status.corner=aggregate;
+  status.result=kIOReturnSuccess; status.enabled=aggregate!=SweetDisplayOff;
+  for (unsigned r=0;r<SweetDisplaySupplyCount;++r) {
+   status.levels[r]=fArc[r].levels[target[r]];
+@@ -668,16 +980,25 @@ bool SweetRPMh::mapResources(IOService *provider)
+  return true;
+ }
+ 
+-/* The tree decides the owner, not a boot arg: the budget is spent and both
+- * sides must read the same answer. */
+-bool SweetRPMh::delegatedRequested(IOService *provider)
++/* A tree flag is a four-byte property that says exactly 1. Anything else -
++ * missing, truncated, zero, another number - is not a request, so a malformed
++ * tree can only ever turn a feature off. */
++static bool
++propertyRequested(IOService *provider,const char *name)
+ {
+- OSData *flag=OSDynamicCast(OSData,provider->getProperty("sweet,rpmh-executor-delegated"));
++ OSData *flag=OSDynamicCast(OSData,provider->getProperty(name));
+  if (!flag || flag->getLength()!=4) return false;
+  uint32_t value=0; memcpy(&value,flag->getBytesNoCopy(),4);
+  return value==1u;
+ }
+ 
++/* The tree decides the owner, not a boot arg: the budget is spent and both
++ * sides must read the same answer. */
++bool SweetRPMh::delegatedRequested(IOService *provider)
++{
++ return propertyRequested(provider,"sweet,rpmh-executor-delegated");
++}
++
+ /* Delegated: bind this service's completion to the hardware owner's event
+  * source. Refused loudly, because a silently missing completion consumer would
+  * turn every ACTIVE ACK into a timeout. */
+@@ -704,6 +1025,10 @@ bool SweetRPMh::start(IOService *provider)
+  int mode=0; (void)PE_parse_boot_argn("sweetdisplayresources",&mode,sizeof(mode));
+  if (mode<1 || mode>2 || !IOService::start(provider)) return false;
+  fMode=(unsigned)mode;
++ fQueue.reset();
++ /* An explicit tree request to demonstrate the submission queue on this boot.
++  * Absent, zero or anything but 1 means the demonstration does not run. */
++ fQueueSelfTest=propertyRequested(provider,"sweet,rpmh-queue-selftest");
+  /* C3-04: the owner comes from the tree, before the first register access and
+   * without a boot arg (the boot-arg budget is spent). A tree that says both
+   * sides program the line resolves to SweetAppsOwnerNone and nothing starts. */
+@@ -913,22 +1238,25 @@ void SweetRPMh::clearPanelFence(void)
+  fPanelFence={};
+ }
+ 
+-IOReturn SweetRPMh::begin(unsigned client,unsigned rail,const SweetRailVote &proposal)
++/* Every rail refusal that depends only on this request and the committed
++ * ledger. Admission runs it before a token exists, dispatch runs it again
++ * because the ledger may have moved while the request waited; neither call
++ * changes anything, so a refusal here has cost no token and no state. */
++IOReturn
++SweetRPMh::vetoRail(unsigned client,unsigned rail,const SweetRailVote &proposal,SweetRailVote *result) const
+ {
+- if (fMode!=2) return kIOReturnNotPermitted;
+- if (fPoisoned) return kIOReturnNotReady;
+- if (!ensureExecutor()) return kIOReturnNotReady;
+- if (fBusy) return kIOReturnBusy;
+  SweetRailVote target={false,railLimits[rail].minMV,railLimits[rail].maxMV,0};
+- if (proposal.enabled && (proposal.minMV>proposal.maxMV || proposal.minMV<railLimits[rail].minMV || proposal.maxMV>railLimits[rail].maxMV)) return kIOReturnBadArgument;
++ if (proposal.enabled && (proposal.minMV>proposal.maxMV ||
++     proposal.minMV<railLimits[rail].minMV || proposal.maxMV>railLimits[rail].maxMV))
++  return kIOReturnBadArgument;
+  uint64_t load=0;
+  for (unsigned i=0;i<8;++i) if (fClients[i].id) {
+-  const SweetRailVote &v=i==client ? proposal : fClients[i].votes[rail];
+-  if (!v.enabled) continue;
++  const SweetRailVote &vote=i==client ? proposal : fClients[i].votes[rail];
++  if (!vote.enabled) continue;
+   target.enabled=true;
+-  if (target.minMV<v.minMV) target.minMV=v.minMV;
+-  if (target.maxMV>v.maxMV) target.maxMV=v.maxMV;
+-  load+=v.loadUA;
++  if (target.minMV<vote.minMV) target.minMV=vote.minMV;
++  if (target.maxMV>vote.maxMV) target.maxMV=vote.maxMV;
++  load+=vote.loadUA;
+  }
+  if (target.minMV>target.maxMV || load>0xffffffffULL) return kIOReturnBadArgument;
+  /* Stopping the display link does not stop UFS/USB. Refuse BEFORE token,
+@@ -941,11 +1269,33 @@ IOReturn SweetRPMh::begin(unsigned client,unsigned rail,const SweetRailVote &pro
+   * ranges; reject constraints that cannot contain the rounded selection. */
+  unsigned rounded=railLimits[rail].minMV+((target.minMV-railLimits[rail].minMV+7)/8)*8;
+  if (rounded>target.maxMV) return kIOReturnBadArgument;
+- if (fNextToken==~0ULL) return kIOReturnNoResources;
+  target.minMV=rounded;
++ if (result) *result=target;
++ return kIOReturnSuccess;
++}
++
++IOReturn SweetRPMh::begin(unsigned client,unsigned rail,const SweetRailVote &proposal)
++{
++ SweetAppsRequest request={};
++ request.kind=SweetAppsRequestRailVote; request.client=client; request.rail=rail;
++ sweetPackRail(request,proposal);
++ return admit(request);
++}
++
++IOReturn SweetRPMh::launchRail(const SweetAppsRequest &request)
++{
++ unsigned client=request.client, rail=request.rail;
++ SweetRailVote proposal=sweetUnpackRail(request);
++ if (fMode!=2) return kIOReturnNotPermitted;
++ if (fPoisoned) return kIOReturnNotReady;
++ if (!ensureExecutor()) return kIOReturnNotReady;
++ SweetRailVote target={};
++ IOReturn veto=vetoRail(client,rail,proposal,&target);
++ if (veto!=kIOReturnSuccess) return veto;
++ unsigned rounded=target.minMV;
+  fArcRequest=false; fRegisterRequest=false; fClientIndex=client; fRail=rail; fProposal=proposal; fTarget=target;
+- SweetRPMhStatus status={++fNextToken,SweetRPMhComplete,rail,rounded,
+-     load>=railLimits[rail].modeThresholdUA ? 7u : 4u,kIOReturnSuccess,target.enabled,false};
++ SweetRPMhStatus status={request.token,SweetRPMhComplete,rail,rounded,
++     target.loadUA>=railLimits[rail].modeThresholdUA ? 7u : 4u,kIOReturnSuccess,target.enabled,false};
+  /* Never disable an inherited rail simply because software has no votes. */
+  if ((!target.enabled && !fOwned[rail]) || (fOwned[rail] && target.enabled==fAggregate[rail].enabled &&
+      (!target.enabled || (target.minMV==fAggregate[rail].minMV &&
+@@ -996,7 +1346,7 @@ void SweetRPMh::finish(IOReturn result,bool uncertain)
+    fPoisoned|=uncertain;
+    SWEET_LOG_ERROR("SWEET RPMH: token=%llu CN0 rc=%#x uncertain=%u; no retry/reset\n",s.token,(unsigned)result,uncertain);
+   }
+-  fBusy=false; fTimer->cancelTimeout(); return;
++  retireFlight(); return;
+  }
+  if (fArcRequest) {
+   SweetDisplayPowerStatus &s=fClients[fClientIndex].displayStatus;
+@@ -1011,7 +1361,7 @@ void SweetRPMh::finish(IOReturn result,bool uncertain)
+    SWEET_LOG_ERROR("SWEET RPMH: token=%llu display ARC failed rc=%#x acked=%#x uncertain=%u; votes retained, no rollback/reset\n",
+        s.token,(unsigned)result,s.acknowledged,uncertain);
+   }
+-  fBusy=false; fTimer->cancelTimeout(); return;
++  retireFlight(); return;
+  }
+  SweetRPMhStatus &s=fClients[fClientIndex].status;
+  s.result=result; s.uncertain=uncertain;
+@@ -1023,7 +1373,23 @@ void SweetRPMh::finish(IOReturn result,bool uncertain)
+   fPoisoned|=uncertain;
+   SWEET_LOG_ERROR("SWEET RPMH: token=%llu %s failed rc=%#x uncertain=%u; no reset/retry\n",s.token,railNames[fRail],(unsigned)result,uncertain);
+  }
+- fBusy=false; fTimer->cancelTimeout();
++ retireFlight();
++}
++
++/* One retirement path: the flight is over, the request that owned it is no
++ * longer current, and the next waiting request may start. */
++void SweetRPMh::retireFlight(void)
++{
++ fBusy=false; fCurrentValid=false;
++ if (fTimer) fTimer->cancelTimeout();
++ /* The explicit ADT demonstration runs once this boot has actually completed
++  * a transaction, because that is the first moment a rail it may re-vote is
++  * owned. It submits through admit() like any client, so it cannot bypass the
++  * ordering it is meant to demonstrate. */
++ if (fQueueSelfTest && !fQueueTestRun && !fPoisoned && fAccepting) {
++  if (queueSelfTest()) fQueueTestRun=true;
++ }
++ dispatchNext();
+ }
+ 
+ void SweetRPMh::advance(void)
+@@ -1187,6 +1553,9 @@ IOReturn SweetRPMh::action(OSObject *owner,void *arg,void *,void *,void *)
+  SweetRPMh *self=(SweetRPMh *)owner; RPMhRequest &r=*(RPMhRequest *)arg;
+  if (r.op==Shutdown) {
+   self->fAccepting=false; self->quietIRQ();
++  /* Nothing queued may start after this point; each one fails against its own
++   * token instead of being forgotten. */
++  self->drainQueue(kIOReturnAborted,"stop");
+   if (self->fBusy) self->finish(kIOReturnAborted,self->fEverWritten);
+   if (self->fTimer) self->fTimer->cancelTimeout();
+   return kIOReturnSuccess;
+@@ -1216,6 +1585,9 @@ IOReturn SweetRPMh::action(OSObject *owner,void *arg,void *,void *,void *)
+  for (unsigned i=0;i<8;++i) if (r.client && self->fClients[i].id==r.client) {
+   if (r.op==Detach) {
+    if (self->fBusy && self->fClientIndex==i) return kIOReturnBusy;
++   /* A waiting request still owns this identity: detaching now would dispatch
++    * it against a released client slot. Cancelling one is C3-06. */
++   if (self->fQueue.waiting(i)) return kIOReturnBusy;
+    for (unsigned rail=0;rail<SweetRailCount;++rail) if (self->fClients[i].votes[rail].enabled) return kIOReturnBusy;
+    if (self->fClients[i].displayVote!=SweetDisplayOff || self->fClients[i].displayStatus.uncertain) return kIOReturnBusy;
+    if (self->fClients[i].registerVote || self->fClients[i].registerStatus.uncertain) return kIOReturnBusy;
+@@ -1252,7 +1624,15 @@ IOReturn SweetRPMh::action(OSObject *owner,void *arg,void *,void *,void *)
+   if (r.op==PanelVote) {
+    if (self->fMode!=2) return kIOReturnNotPermitted;
+    if (self->fPoisoned) return kIOReturnNotReady;
+-   if (self->fBusy) return kIOReturnBusy;
++   /* A panel vote is not queued: its fence hands over exclusive leaf-provider
++    * references that would have to outlive the wait, which is the contract
++    * C3-06 owns. It therefore refuses while anything is in flight or waiting,
++    * instead of jumping ahead of requests that are already ordered. */
++   if (self->fBusy || !self->fQueue.empty()) {
++    SWEET_LOG_INFO("SWEET APPS QUEUE: phase=refuse kind=panel client=%u detail=not-a-queued-kind depth=%u\n",
++        i,self->fQueue.depth());
++    return kIOReturnBusy;
++   }
+    if (!self->panelFenceValid(*r.panelFence)) return kIOReturnNotReady;
+    self->fPanelFence=*r.panelFence;
+    self->fPanelFence.pins->retain(); self->fPanelFence.touch->retain();
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h
+index 6037939..dd10a8a 100644
+--- a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h
++++ b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h
+@@ -9,6 +9,7 @@
+ #include <IOKit/IOInterruptEventSource.h>
+ #include <IOKit/IOLocks.h>
+ #include "SweetAppsDoor.h"
++#include "SweetAppsQueue.h"
+ #include "SweetRPMhExecutor.h"
+ 
+ enum SweetRail { SweetRailVDDI, SweetRailVPNL, SweetRailHost, SweetRailPHY, SweetRailCount };
+@@ -99,6 +100,16 @@ struct SweetPanelSupplyFence {
+ 
+ extern "C" bool sweet_rpmh_irq(unsigned int);
+ 
++/* C3-05: which entry point a submission belongs to. A panel vote is
++ * deliberately absent: its fence hands over exclusive leaf-provider references
++ * that would have to outlive the wait, and cancelling or detaching a waiting
++ * request is the contract C3-06 owns. Those requests are therefore still
++ * refused while anything is in flight or waiting, instead of being queued
++ * behind a vote that may never retire. */
++enum SweetAppsRequestKind : unsigned { SweetAppsRequestNone,
++ SweetAppsRequestRailVote, SweetAppsRequestDisplayCorner,
++ SweetAppsRequestRegisterBandwidth };
++
+ class SweetRPMh : public IOService {
+  friend bool sweet_rpmh_irq(unsigned int);
+  OSDeclareDefaultStructors(SweetRPMh);
+@@ -135,6 +146,33 @@ class SweetRPMh : public IOService {
+   * through the published table. fTable is this service's own table in the
+   * other mode, so both modes have exactly one write path. */
+  bool fDelegated, fTablePublished, fIdentityReady, fInstalled;
++ /* C3-05: one transaction at a time, in arrival order. A second legal request
++  * waits in fQueue instead of being refused, and fCurrent is the copy the
++  * machine is working on - including the multi-flight display chain, so a
++  * request holds its place until its whole chain retires. The record lives in
++  * this service's own storage, so a dispatched request no longer depends on
++  * the caller's stack or arguments. A request that becomes illegal while it
++  * waits fails against its own token and row; it never overwrites the older
++  * one, and a poisoned service drains the queue instead of crossing that
++  * state. fQueueSelfTest is the explicit ADT request to demonstrate two
++  * admissions; absent means nothing runs. */
++ SweetAppsQueue fQueue;
++ SweetAppsRequest fCurrent;
++ bool fCurrentValid, fDispatching, fQueueSelfTest, fQueueTestRun;
++ unsigned fQueueRefused, fQuarantined, fQueueTestTries;
++ IOReturn admit(SweetAppsRequest &);
++ IOReturn validate(const SweetAppsRequest &);
++ IOReturn vetoRail(unsigned,unsigned,const SweetRailVote &,SweetRailVote *) const;
++ IOReturn launch(const SweetAppsRequest &);
++ void retireFlight(void);
++ void dispatchNext(void);
++ void drainQueue(IOReturn,const char *);
++ void markPending(const SweetAppsRequest &);
++ void markFailure(const SweetAppsRequest &,IOReturn);
++ bool queueSelfTest(void);
++ IOReturn launchRail(const SweetAppsRequest &);
++ IOReturn launchDisplayPower(const SweetAppsRequest &);
++ IOReturn launchRegisterBandwidth(const SweetAppsRequest &);
+  unsigned fSelfStores;
+  uint32_t fIdentityId, fIdentitySolver, fIdentityConfig;
+  SweetAppsDoor fTable;
+diff --git a/dxb/xnu/iokit/conf/files.arm64 b/dxb/xnu/iokit/conf/files.arm64
+index 4b98010..a6d480a 100644
+--- a/dxb/xnu/iokit/conf/files.arm64
++++ b/dxb/xnu/iokit/conf/files.arm64
+@@ -36,6 +36,7 @@ iokit/Kernel/arm/SweetRPMh.cpp                                    optional iokit
+ iokit/Kernel/arm/SweetRPMhExecutor.cpp                            optional iokitcpp
+ iokit/Kernel/arm/SweetAppsDoor.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetAppsLine.cpp                                optional iokitcpp
++iokit/Kernel/arm/SweetAppsQueue.cpp                               optional iokitcpp
+ 
+ iokit/Kernel/arm/IOQcomClock.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/IOQcomGCC.cpp                                     optional iokitcpp
+diff --git a/tools/mk-mh2lm-mdss-adt.py b/tools/mk-mh2lm-mdss-adt.py
+index ea7a65d..59772b5 100644
+--- a/tools/mk-mh2lm-mdss-adt.py
++++ b/tools/mk-mh2lm-mdss-adt.py
+@@ -42,7 +42,8 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
+ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
+             clock_gate=False, clock_disable=False, clock_share=False,
+             clock_vote_probe=False, clock_vote=False, clock_reset=False,
+-            rsc_channel=False, rsc_query=False, rsc_executor=False):
++            rsc_channel=False, rsc_query=False, rsc_executor=False,
++            rpmh_queue_selftest=False):
+     # C2-05 stands on both cards below it, so the two switch it needs are implied
+     # here rather than trusted to every caller: a share node without them would be
+     # refused at start and the image would carry a property that can do nothing.
+@@ -64,6 +65,10 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+         raise ValueError('--rsc-executor needs --rsc-channel')
+     if rsc_executor and not rpmh_irq:
+         raise ValueError('--rsc-executor needs --rpmh-irq (the old owner must be told to stand down)')
++    # C3-05's demonstration runs inside the display owner, which is where the
++    # queue lives; without that node the property would be read by nobody.
++    if rpmh_queue_selftest and not rpmh_irq:
++        raise ValueError('--rpmh-queue-selftest needs --rpmh-irq (the property is read by the display owner node)')
+     display_noc = display_noc or panel_pipeline
+     display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
+     root, end = adt.parse(blob)
+@@ -177,6 +182,11 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+             # completion line for this boot. The range list is left exactly as
+             # shipped so a rollback only has to drop this property.
+             rpmh.props.append(('sweet,rpmh-executor-delegated', 0, struct.pack('<I', 1)))
++        if rpmh_queue_selftest:
++            # C3-05: one boot-time demonstration of the bounded submission
++            # queue. Absent by default, and exactly 1 when present - the driver
++            # treats every other length or value as "do not run".
++            rpmh.props.append(('sweet,rpmh-queue-selftest', 0, struct.pack('<I', 1)))
+         arm.children.append(rpmh)
+     if rsc_channel:
+         # C3-01: a second, read-only reader of the apps RSC. It carries the same
+@@ -320,6 +330,7 @@ if __name__ == '__main__':
+     parser.add_argument('--rsc-channel', action='store_true', help='append the C3-01 read-only apps RSC channel; same three ranges as the display owner, no GIC range, zero stores')
+     parser.add_argument('--rsc-query', action='store_true', help='C3-02: let the channel query the read-only command DB for one known resource; requires --rsc-channel')
+     parser.add_argument('--rsc-executor', action='store_true', help='C3-04: the channel becomes the sole apps executor (fourth GIC range, sweet,rsc-executor) and the display node stands down; requires --rsc-channel and --rpmh-irq')
++    parser.add_argument('--rpmh-queue-selftest', action='store_true', help='C3-05: the display owner demonstrates the bounded submission queue once on this boot (sweet,rpmh-queue-selftest=1); requires --rpmh-irq')
+     parser.add_argument('source', type=Path)
+     parser.add_argument('destination', type=Path)
+     args = parser.parse_args()
+@@ -329,4 +340,5 @@ if __name__ == '__main__':
+     destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
+                       args.clock_disable, args.clock_share, args.clock_vote_probe,
+                       args.clock_vote, args.clock_reset, args.rsc_channel,
+-                      args.rsc_query, args.rsc_executor))
++                      args.rsc_query, args.rsc_executor,
++                      args.rpmh_queue_selftest))
+diff --git a/tools/tests/test-mh2lm-apps-queue.py b/tools/tests/test-mh2lm-apps-queue.py
+new file mode 100644
+index 0000000..5fd92b3
+--- /dev/null
++++ b/tools/tests/test-mh2lm-apps-queue.py
+@@ -0,0 +1,204 @@
++#!/usr/bin/env python3
++"""C3-05: the bounded apps-submission queue as a unit.
++
++The queue is the only new storage the apps RSC got in C3-05, so it is tested on
++its own, without IOKit and without the driver: capacity, arrival order across the
++array wrap, the refusal when full, the exact-resource lookup the owner uses to
++reject a duplicate, and the payload round trip that lets a request survive after
++the caller's stack and objects are gone.
++
++Run: python3 tools/tests/test-mh2lm-apps-queue.py [xnu-tree]
++"""
++import os
++import subprocess
++import sys
++import tempfile
++from pathlib import Path
++
++root = Path(sys.argv[1] if len(sys.argv) > 1 else "dxb/xnu").resolve()
++arm = root / "iokit/Kernel/arm"
++queue_h = (arm / "SweetAppsQueue.h").read_text()
++queue_cpp = (arm / "SweetAppsQueue.cpp").read_text()
++
++# The unit must not depend on IOKit beyond the integer types, and must compile to
++# nothing on a board that does not build this driver.
++assert '#include <IOKit/IOTypes.h>' in queue_h, "queue header lost its type include"
++assert queue_h.count('#if defined(ARM64_BOARD_CONFIG_MH2LM)') == 1
++assert queue_cpp.count('#if defined(ARM64_BOARD_CONFIG_MH2LM)') == 1
++assert 'kSweetAppsQueueCapacity = 8' in queue_h
++
++TEST = r'''
++static unsigned failures;
++#define check(x) do{ if(!(x)){ fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, #x); failures++; } }while(0)
++
++static SweetAppsRequest make(unsigned kind, unsigned client, unsigned rail,
++                             uint64_t p0, uint64_t p1, uint64_t token)
++{
++	SweetAppsRequest r = SweetAppsRequest();
++	r.kind = kind; r.client = client; r.rail = rail;
++	r.param[0] = p0; r.param[1] = p1; r.token = token;
++	return r;
++}
++
++static void fresh(void)
++{
++	SweetAppsQueue q;
++	check(q.empty() && !q.full() && q.depth() == 0);
++	check(q.accepted() == 0 && q.dispatched() == 0 && q.highWater() == 0);
++	check(q.head() == NULL);
++	check(!q.waiting(0));
++	check(q.find(1, 0, 0) == NULL);
++	q.pop();			/* popping nothing is a no-op, not an underflow */
++	check(q.empty() && q.dispatched() == 0);
++}
++
++/* Capacity is exactly the published bound, the ninth request is refused and the
++ * eight already accepted are untouched by the refusal. */
++static void capacity(void)
++{
++	SweetAppsQueue q;
++	for (unsigned i = 0; i < kSweetAppsQueueCapacity; ++i) {
++		SweetAppsRequest stored;
++		check(q.push(make(1, i, 0, i, ~uint64_t(i), 0x100 + i), &stored));
++		check(stored.seq == i + 1 && stored.client == i && stored.param[1] == ~uint64_t(i));
++		check(q.depth() == i + 1 && q.highWater() == i + 1);
++	}
++	check(q.full() && q.depth() == kSweetAppsQueueCapacity && q.accepted() == kSweetAppsQueueCapacity);
++	SweetAppsRequest more = make(1, 99, 0, 99, 99, 0x999);
++	check(!q.push(more) && q.depth() == kSweetAppsQueueCapacity && q.accepted() == kSweetAppsQueueCapacity);
++	check(more.seq == 0);		/* a refused request is not stamped */
++	check(q.head() && q.head()->client == 0 && q.head()->seq == 1);
++	for (unsigned i = 0; i < kSweetAppsQueueCapacity; ++i) {
++		check(q.head() && q.head()->client == i && q.head()->seq == i + 1);
++		q.pop();
++	}
++	check(q.empty() && q.dispatched() == kSweetAppsQueueCapacity && q.accepted() == kSweetAppsQueueCapacity);
++	check(q.highWater() == kSweetAppsQueueCapacity);
++}
++
++/* Arrival order survives the array wrap: the sequence stamped at push() is the
++ * order the owner dispatches in, never the slot order. */
++static void wrap(void)
++{
++	SweetAppsQueue q;
++	for (unsigned i = 0; i < 5; ++i) check(q.push(make(2, i, 0, i, 0, 0)));
++	for (unsigned i = 0; i < 3; ++i) q.pop();
++	check(q.depth() == 2 && q.dispatched() == 3);
++	for (unsigned i = 5; i < 11; ++i) check(q.push(make(2, i, 0, i, 0, 0)));
++	check(q.depth() == 8 && q.full() && q.highWater() == 8);
++	for (unsigned i = 3; i < 11; ++i) {
++		check(q.head() && q.head()->client == i);
++		check(q.head()->seq == i + 1);	/* seq keeps counting across the wrap */
++		check(q.head()->param[0] == i);
++		check(q.find(2, i, 0) == q.head());
++		q.pop();
++	}
++	check(q.empty() && q.accepted() == 11 && q.dispatched() == 11);
++	check(q.find(2, 3, 0) == NULL && !q.waiting(3));
++}
++
++/* The duplicate rule rests on this lookup being exact: same kind, same client
++ * and same resource, and nothing else. */
++static void lookup(void)
++{
++	SweetAppsQueue q;
++	check(q.push(make(3, 1, 4, 0, 0, 0xaa)));
++	check(q.push(make(3, 2, 4, 0, 0, 0xbb)));
++	check(q.push(make(4, 1, 4, 0, 0, 0xcc)));
++	check(q.find(3, 1, 4) && q.find(3, 1, 4)->token == 0xaa);
++	check(q.find(3, 2, 4) && q.find(3, 2, 4)->token == 0xbb);
++	check(q.find(4, 1, 4) && q.find(4, 1, 4)->token == 0xcc);
++	check(q.find(3, 1, 5) == NULL);			/* different resource */
++	check(q.find(3, 3, 4) == NULL);			/* different client */
++	check(q.find(5, 1, 4) == NULL);			/* different kind */
++	check(q.waiting(1) && q.waiting(2) && !q.waiting(3) && !q.waiting(99));
++	q.pop();
++	check(q.find(3, 1, 4) == NULL && q.waiting(1) && !q.waiting(3));
++	q.pop();
++	check(q.find(4, 1, 4) && q.waiting(1));
++	q.pop();
++	check(q.find(4, 1, 4) == NULL && !q.waiting(1) && q.empty());
++}
++
++/* Everything the dispatcher needs travels inside the record: the token was
++ * issued before the wait, and no pointer to the caller's stack is kept. */
++static void payload(void)
++{
++	SweetAppsQueue q;
++	SweetAppsRequest in = make(0xdead, 7, 0xbeef, 0x1122334455667788ULL, ~0ULL, 0xfe);
++	SweetAppsRequest stored;
++	check(q.push(in, &stored));
++	const SweetAppsRequest *head = q.head();
++	check(head != NULL);
++	check(head->kind == in.kind && head->client == in.client && head->rail == in.rail);
++	check(head->param[0] == in.param[0] && head->param[1] == in.param[1]);
++	check(head->token == in.token);
++	check(head->seq == stored.seq && stored.seq == 1);
++	in.kind = 0;			/* the caller may reuse its struct after admission */
++	check(q.head()->kind == 0xdead);
++}
++
++/* reset() is the boot-time clear the owner runs from start(): storage and
++ * counters go back to zero, so a stale request can never be dispatched. */
++static void reset(void)
++{
++	SweetAppsQueue q;
++	check(q.push(make(9, 0, 0, 0, 0, 1)) && q.push(make(9, 1, 0, 0, 0, 2)));
++	q.pop();
++	check(q.depth() == 1 && q.accepted() == 2 && q.dispatched() == 1);
++	q.reset();
++	check(q.empty() && !q.full() && q.depth() == 0 && q.head() == NULL);
++	check(q.accepted() == 0 && q.dispatched() == 0 && q.highWater() == 0);
++	check(q.find(9, 1, 0) == NULL && !q.waiting(1));
++	SweetAppsRequest stored;
++	check(q.push(make(9, 2, 0, 0, 0, 3), &stored) && stored.seq == 1);
++}
++
++int main(void)
++{
++	fresh(); capacity(); wrap(); lookup(); payload(); reset();
++	if (failures) { fprintf(stderr, "%u checks failed\n", failures); return 1; }
++	puts("PASS: C3-05 apps submission queue; fixed capacity 8, refused when full without stamping, arrival order across the array wrap, exact kind/client/resource lookup, payload and pre-issued token preserved after the caller reuses its struct, boot-time reset");
++	return 0;
++}
++'''
++
++PRELUDE = '''
++#include <stdint.h>
++#include <stddef.h>
++typedef int IOReturn;
++'''
++
++with tempfile.TemporaryDirectory(prefix='mh2lm-apps-queue-') as temp:
++    temp = Path(temp)
++    inc = temp / 'fake'
++    (inc / 'IOKit').mkdir(parents=True)
++    (inc / 'IOKit/IOTypes.h').write_text(PRELUDE)
++    # The shipped source is compiled as it is, through its own include, so a unit
++    # that stopped being self-contained could not hide behind a rewritten copy.
++    tu = temp / 'test.cpp'
++    tu.write_text('#include "SweetAppsQueue.cpp"\n'
++                  '#include <stdio.h>\n'
++                  '#include <stdint.h>\n' + TEST)
++    binary = temp / 'test'
++    flags = ['-std=c++17', '-g', '-pthread', '-fsanitize=address,undefined',
++             '-fno-omit-frame-pointer', '-I', str(temp), '-I', str(inc), '-I', str(arm),
++             '-DARM64_BOARD_CONFIG_MH2LM=1']
++    subprocess.run([os.environ.get('CXX', 'clang++-19'), *flags, str(tu), '-o', str(binary)],
++                   check=True, timeout=120)
++    env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0',
++               UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1')
++    subprocess.run([str(binary)], check=True, env=env, timeout=120)
++
++    # Without the board macro the unit must compile to an empty object: no other
++    # board inherits this storage.
++    empty = temp / 'empty.cpp'
++    empty.write_text('#include "SweetAppsQueue.h"\nvoid nothing(void) {}\n')
++    subprocess.run([os.environ.get('CXX', 'clang++-19'), '-std=c++17', '-c',
++                    str(empty), '-o', str(temp / 'empty.o'), '-I', str(temp), '-I', str(inc), '-I', str(arm)],
++                   check=True, timeout=120)
++    nm = subprocess.run(['llvm-nm-19', str(temp / 'empty.o')], capture_output=True, text=True)
++    if nm.returncode != 0:
++        nm = subprocess.run(['llvm-nm', str(temp / 'empty.o')], capture_output=True, text=True)
++    assert nm.returncode == 0, nm.stderr
++    assert 'SweetAppsQueue' not in nm.stdout, nm.stdout
+\ No newline at end of file
+diff --git a/tools/tests/test-mh2lm-build-file-list.py b/tools/tests/test-mh2lm-build-file-list.py
+index 3e25141..2b8b1d9 100644
+--- a/tools/tests/test-mh2lm-build-file-list.py
++++ b/tools/tests/test-mh2lm-build-file-list.py
+@@ -63,7 +63,8 @@ for name in names:
+ # The units this card added are the reason the check exists; keep them pinned so
+ # that a future weight-loss pass cannot quietly drop one of them again.
+ for unit in ('iokit/Kernel/arm/SweetAppsDoor.cpp',
+-             'iokit/Kernel/arm/SweetAppsLine.cpp'):
++             'iokit/Kernel/arm/SweetAppsLine.cpp',
++             'iokit/Kernel/arm/SweetAppsQueue.cpp'):
+     assert unit in seen, 'not in the build list: ' + unit
+ 
+ print('test-mh2lm-build-file-list: %d units listed, %d sources under arm, '
+diff --git a/tools/tests/test-mh2lm-display-service.py b/tools/tests/test-mh2lm-display-service.py
+index 63dad0f..7d72d2c 100644
+--- a/tools/tests/test-mh2lm-display-service.py
++++ b/tools/tests/test-mh2lm-display-service.py
+@@ -90,9 +90,13 @@ apps_door_header = (arm/'SweetAppsDoor.h').read_text() if (arm/'SweetAppsDoor.h'
+ apps_door_source = (arm/'SweetAppsDoor.cpp').read_text() if apps_door_header else ''
+ apps_line_header = (arm/'SweetAppsLine.h').read_text() if (arm/'SweetAppsLine.h').exists() else ''
+ apps_line_source = (arm/'SweetAppsLine.cpp').read_text() if apps_line_header else ''
++# C3-05: the bounded submission queue, also a separate translation unit.
++apps_queue_header = (arm/'SweetAppsQueue.h').read_text() if (arm/'SweetAppsQueue.h').exists() else ''
++apps_queue_source = (arm/'SweetAppsQueue.cpp').read_text() if apps_queue_header else ''
+ apps_line_source = re.sub(r'__asm__ volatile\("(dmb|dsb)[^"]*" ::: "memory"\);', '(void)0;', apps_line_source)
+-source = re.sub(r'^#include.*\n', '', apps_door_header+apps_line_header+apps_line_source+
+-                apps_door_source+rpmh_executor_header+rpmh_header+rpmh_source+
++source = re.sub(r'^#include.*\n', '', apps_door_header+apps_line_header+apps_queue_header+
++                apps_line_source+apps_door_source+apps_queue_source+
++                rpmh_executor_header+rpmh_header+rpmh_source+
+                 rpmh_executor_source, flags=re.M)+source
+ if (arm/'SweetPanelPins.h').exists():
+     pins_header = (arm/'SweetPanelPins.h').read_text().replace('class SweetPanelPins :', 'struct SweetPanelPins :').replace('class SweetPanelPinsClient :', 'struct SweetPanelPinsClient :')
+diff --git a/tools/tests/test-mh2lm-mdss-adt.py b/tools/tests/test-mh2lm-mdss-adt.py
+index f1ac7de..7c46057 100644
+--- a/tools/tests/test-mh2lm-mdss-adt.py
++++ b/tools/tests/test-mh2lm-mdss-adt.py
+@@ -798,6 +798,48 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-executor-adt-') as temp:
+     refused = subprocess.run([sys.executable, str(Path(m.__file__)), '--rsc-channel',
+                               '--rsc-executor', str(source), str(output)], capture_output=True)
+     assert refused.returncode != 0, refused
++# C3-05's demonstration is one property on the display owner node - the node the
++# driver reads it from - and it is exactly removable: dropping it gives the
++# C3-04 executor bytes back, so the round's image differs from that candidate by
++# the demonstration and nothing else.
++assert b'sweet,rpmh-queue-selftest' not in exec_tree
++queue_tree = m.derive(blob, rpmh_irq=True, rsc_channel=True, rsc_executor=True,
++                      rpmh_queue_selftest=True)
++qtree, qend = adt.parse(queue_tree)
++assert qend == len(queue_tree)
++qowner = next(n for n in qtree.children[1].children if n.name == 'display-rpmh')
++qchannel = next(n for n in qtree.children[1].children if n.name == 'rsc-channel')
++assert qowner.prop('sweet,rpmh-queue-selftest') == struct.pack('<I', 1)
++assert qowner.prop('sweet,rpmh-executor-delegated') == struct.pack('<I', 1)
++assert qchannel.prop('sweet,rsc-executor') == struct.pack('<I', 1)
++# Exactly one node carries it, and no node was added or reordered for it.
++assert queue_tree.count(b'sweet,rpmh-queue-selftest\0') == 1
++assert [n.name for n in qtree.children[1].children] == [n.name for n in etree.children[1].children]
++qowner.props = [x for x in qowner.props if x[0] != 'sweet,rpmh-queue-selftest']
++assert adt.serialize(qtree) == exec_tree
++# The property is read by the display owner, so a tree without that node must be
++# refused rather than built with a flag nothing consumes.
++for bad in ({'panel_identity': True, 'display_resources': True, 'rpmh_queue_selftest': True},
++            {'display_resources': True, 'rpmh_queue_selftest': True}):
++    try:
++        m.derive(blob, **bad)
++    except ValueError:
++        pass
++    else:
++        raise AssertionError('a self-test property with no owner node must be refused: %r' % (bad,))
++with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-queue-adt-') as temp:
++    source, output = Path(temp)/'base.adt', Path(temp)/'queue.adt'
++    source.write_bytes(blob)
++    subprocess.run([sys.executable, str(Path(m.__file__)), '--rpmh-irq', '--rsc-channel',
++                    '--rsc-executor', '--rpmh-queue-selftest',
++                    str(source), str(output)], check=True)
++    assert output.read_bytes() == queue_tree
++    assert source.read_bytes() == blob
++    refused = subprocess.run([sys.executable, str(Path(m.__file__)),
++                              '--rpmh-queue-selftest', str(source), str(output)],
++                             capture_output=True)
++    assert refused.returncode != 0, refused
++    assert output.read_bytes() == queue_tree
+ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
+       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
+       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
+@@ -810,4 +852,6 @@ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order
+       'that node and refuses to exist without it, and the C3-04 executor role, '
+       'which gives the channel the fourth range and stands the display owner '
+       'down without touching its ranges or INTID, one property per side away '
+-      'from the C3-03 bytes')
++      'from the C3-03 bytes, and the C3-05 demonstration, which is one '
++      '4-byte property on the display owner node, exactly removable to the '
++      'C3-04 bytes and refused without the node that reads it')
+diff --git a/tools/tests/test-mh2lm-panel-supply-fences.py b/tools/tests/test-mh2lm-panel-supply-fences.py
+index ceec5e8..78c0287 100644
+--- a/tools/tests/test-mh2lm-panel-supply-fences.py
++++ b/tools/tests/test-mh2lm-panel-supply-fences.py
+@@ -160,8 +160,16 @@ int main(){
+  {Harness h;auto f=prepare(h);auto token=panelVote(h,SweetRailVPNL,false,f);uint64_t denied=99;
+   auto other=attach(h.r);auto pr=h.p->refs.load(),tr=h.t->refs.load();
+   assert(h.r->requestPanelVote(other,SweetRailVDDI,{},f,&denied)==kIOReturnBusy&&!denied);
+-  assert(h.r->requestVote(other,SweetRailVDDI,{},&denied)==kIOReturnBusy&&!denied);
++  // C3-05: an ordinary vote no longer displaces the pending transaction - it
++  // waits behind it, holding neither leaf, so the fence is still armed and the
++  // TCS is untouched. A fenced request is never queued, only waited on.
++  auto queued=writes();
++  assert(h.r->requestVote(other,SweetRailVDDI,{},&denied)==0&&denied&&h.r->fQueue.depth()==1);
++  assert(writes()==queued&&h.p->refs==pr&&h.t->refs==tr);
++  assert(h.r->fPanelFence.pins&&h.r->fPanelFence.touch&&h.r->fBusy);
++  assert(h.r->requestPanelVote(other,SweetRailVDDI,{},f,&denied)==kIOReturnBusy&&!denied);
+   assert(h.p->refs==pr&&h.t->refs==tr);finishVote(h,token,false);
++  assert(h.r->fQueue.empty()&&!h.r->fBusy);
+   token=vote(h.r,h.m->fRPMhConsumer,SweetRailVPNL,supplyVote(SweetRailVPNL,true));
+   assert(h.r->cancelPanelVote(h.m->fRPMhConsumer,token)==0&&h.r->fBusy);
+   finishVote(h,token,true);assert(h.r->detachConsumer(other)==0);
+diff --git a/tools/tests/test-mh2lm-rpmh-resources.py b/tools/tests/test-mh2lm-rpmh-resources.py
+index cb4e4b3..5d247d0 100644
+--- a/tools/tests/test-mh2lm-rpmh-resources.py
++++ b/tools/tests/test-mh2lm-rpmh-resources.py
+@@ -56,9 +56,16 @@ static bool deliverRPMhIRQ(){
+ }
+ static void tick(SweetRPMh*s,unsigned us=100){fakeTicks+=us*1000;assert(s->fTimerAdded);if(!deliverRPMhIRQ())s->fTimer->action(s,s->fTimer);}
+ static void ack(SweetRPMh*s){
++ // C3-05: retiring a flight can start the next waiting request inside the same
++ // window, so "the machine is idle afterwards" only holds for an empty queue.
++ unsigned waiting=s->fQueue.depth();
+  uint32_t b=s->fTCSIndex*0x2a0;regs[TCS+4]|=1u<<s->fTCSIndex;regs[TCS+b+0x18]=1;
+  for(unsigned c=0;c<s->fCommandCount;++c)regs[TCS+b+0x3c+c*0x14]=(1<<8)|(1<<16);
+- tick(s);assert(s->fBusy);tick(s);assert(!s->fBusy);
++ tick(s);assert(s->fBusy);tick(s);
++ // A waiting request is dispatched in the same window, but only a request
++ // that is actually legal starts a flight - either way the queue shrinks and
++ // nothing is left waiting without an owner.
++ assert(!s->fBusy||s->fQueue.empty());assert(!waiting||s->fQueue.depth()<waiting);
+ }
+ static SweetRPMh*make(IOService*n){auto*s=new SweetRPMh();assert(s->start(n));assert(!writes());return s;}
+ static void destroy(SweetRPMh*s,IOService*n){s->stop(n);s->release();}
+@@ -126,7 +133,13 @@ int main(){
+  token=vote(s,id,SweetRailVDDI,{true,1800,1880,6000});tick(s);
+  assert(s->fBusy&&regs[TCS]==0x41);tick(s);assert(s->fBusy);
+  assert(status(s,id,token).state==SweetRPMhPending);
+- uint64_t denied=123;assert(s->requestVote(other,SweetRailPHY,{true,880,880,36000},&denied)==kIOReturnBusy&&denied==0);
++ // C3-05: a different resource is no longer refused while one is in flight -
++ // it waits in the queue. What is still refused is the resource already
++ // outstanding, and that refusal costs no token, no queue slot and no write.
++ uint64_t denied=123,serial=s->fNextToken;auto issued=writes();
++ assert(s->requestVote(id,SweetRailVDDI,{true,1800,1880,6000},&denied)==kIOReturnBusy&&denied==0);
++ assert(s->fNextToken==serial&&s->fQueue.empty()&&writes()==issued);
++ assert(status(s,id,token).state==SweetRPMhPending);
+  // An unrelated IRQ-enable bit changes during completion; preserve it.
+  regs[TCS]|=0x80;ack(s);auto q=status(s,id,token);assert(q.state==SweetRPMhComplete&&q.mode==4&&!q.uncertain);
+  assert(regs[TCS]==0xc1&&!(regs[TCS+4]&1));
+@@ -180,14 +193,20 @@ int main(){
+   }
+   destroy(s,n);reboot();
+  }
+- // Competing clients run through the same provider gate. Exactly one request
+- // is admitted; the other gets Busy rather than overwriting the active slot.
++ // Competing clients run through the same provider gate. Both are admitted -
++ // one starts and the other waits its turn - and each keeps its own token, so
++ // neither overwrites the slot the machine is working on. The gate still runs
++ // exactly one flight at a time, which is why the second needs a second ACK.
+  fixtures();s=make(n);id=attach(s);other=attach(s);
+  IOReturn rc1=-1,rc2=-1;uint64_t tok1=0,tok2=0;
+  std::thread a([&]{rc1=s->requestVote(id,SweetRailVDDI,{true,1800,1880,62000},&tok1);});
+  std::thread b([&]{rc2=s->requestVote(other,SweetRailPHY,{true,880,880,36000},&tok2);});
+- a.join();b.join();assert((rc1==0&&rc2==kIOReturnBusy)||(rc2==0&&rc1==kIOReturnBusy));
+- tick(s);ack(s);destroy(s,n);reboot();
++ a.join();b.join();assert(rc1==0&&rc2==0&&tok1&&tok2&&tok1!=tok2);
++ assert(s->fCurrentValid&&s->fCurrent.token==(s->fBusy?s->fCurrent.token:0));
++ for(unsigned i=0;i<4&&s->fBusy;++i){tick(s);ack(s);}
++ assert(!s->fBusy&&s->fQueue.empty());
++ assert(status(s,id,tok1).state==SweetRPMhComplete&&status(s,other,tok2).state==SweetRPMhComplete);
++ destroy(s,n);reboot();
+  // A real workloop-gated MMIO action and stop synchronize before unmapping.
+  fixtures();s=make(n);id=attach(s);token=vote(s,id,SweetRailVDDI,{true,1800,1880,62000});
+  pauseRead=true;pauseAddress=TCS;enteredRead=false;releaseRead=false;
+@@ -293,7 +312,10 @@ int main(){
+  token=displayVote(s,id,SweetDisplayOff);assert(!writes()&&!s->fBusy&&!s->fArcOwned[0]);
+  token=displayVote(s,id,SweetDisplayLowSVS);first=token;
+  assert(s->detachConsumer(id)==kIOReturnBusy);
+- assert(s->requestVote(other,SweetRailPHY,{true,880,880,36000},&denied)==kIOReturnBusy&&!denied);
++ // C3-05: what is refused while a chain runs is the resource already in flight,
++ // not an unrelated one (that one waits, see test-mh2lm-apps-queue.py).
++ for(unsigned c=0;c<2;++c)assert(s->requestDisplayPower(id,SweetDisplayLowSVS,&denied)==
++     kIOReturnBusy&&!denied&&!writes());
+  arcStage(s,0,6);assert(s->fBusy&&s->fClients[0].displayVote==SweetDisplayOff);
+  assert(displayStatus(s,id,token).acknowledged==1);
+  arcStage(s,1,6);assert(s->fBusy&&s->fClients[0].displayVote==SweetDisplayOff);
+@@ -350,14 +372,47 @@ int main(){
+  arcAcquire(s);
+  assert(regs[TCS+0x1c]==1&&regs[TCS+0x34]==0x51234&&regs[TCS+4]==0&&regs[TCS]==0x41);
+  destroy(s,n);reboot();
+- // Independent clients and VRM/ARC requests cannot interleave transactions.
++ // Independent clients and VRM/ARC requests cannot interleave transactions: a
++// request submitted while a display chain owns the TCS waits for the whole
++// chain to retire, then runs alone on the slot the chain released.
++ arcFixtures();s=make(n);id=attach(s);other=attach(s);tok1=tok2=0;
++ tok1=displayVote(s,id,SweetDisplayLowSVS);
++ assert(s->requestVote(other,SweetRailPHY,{true,880,880,36000},&tok2)==0&&tok2&&tok2!=tok1);
++ assert(s->fBusy&&s->fArcRequest&&s->fQueue.depth()==1);
++ arcStage(s,0,6);arcStage(s,1,6);arcStage(s,2,1);arcStage(s,1,3);arcStage(s,0,2);
++ assert(s->fBusy&&!s->fArcRequest&&s->fQueue.empty());
++ tick(s);ack(s);
++ assert(!s->fBusy&&s->fQueue.empty()&&status(s,other,tok2).state==SweetRPMhComplete);
++ assert(displayStatus(s,id,tok1).state==SweetRPMhComplete);
++ destroy(s,n);reboot();
++// C3-05: a request still waiting when the owner loses its footing never crosses
++// the isolation state - it is refused with the isolation reason, is not
++// programmed onto any TCS, and does not linger in the queue.
+  arcFixtures();s=make(n);id=attach(s);other=attach(s);tok1=tok2=0;
+- std::thread c([&]{rc1=s->requestDisplayPower(id,SweetDisplayLowSVS,&tok1);});
+- std::thread e([&]{rc2=s->requestVote(other,SweetRailPHY,{true,880,880,36000},&tok2);});
+- c.join();e.join();assert((rc1==0&&rc2==kIOReturnBusy)||(rc2==0&&rc1==kIOReturnBusy));
+- if(rc1==0){arcAcquire(s);}else{tick(s);ack(s);}
++ tok1=displayVote(s,id,SweetDisplayLowSVS);
++ assert(s->requestVote(other,SweetRailPHY,{true,880,880,36000},&tok2)==0&&tok2&&s->fQueue.depth()==1);
++ tick(s);tick(s,100001);
++ assert(s->fPoisoned&&s->fQueue.empty()&&!s->fBusy&&!s->fCurrentValid);
++ SweetRPMhStatus qst2=status(s,other,tok2);
++ assert(qst2.state==SweetRPMhFailed&&qst2.result==kIOReturnNotReady&&!qst2.uncertain&&!s->fOwned[SweetRailPHY]);
++ auto settled=trace.size();tick(s);assert(trace.size()==settled);destroy(s,n);reboot();
++// A full queue refuses the next submission explicitly: QueueFull, not a drop, a
++// merge or a quiet reorder, and the refusal spends no token and no status slot.
++ arcFixtures();s=make(n);
++ uint64_t q5[8];for(unsigned i=0;i<8;++i)q5[i]=attach(s);
++ uint64_t chainToken=displayVote(s,q5[0],SweetDisplayLowSVS);
++ const SweetRail q5Rails[4]={SweetRailVDDI,SweetRailVPNL,SweetRailHost,SweetRailPHY};
++ uint64_t q5Tokens[8];unsigned filled=0;
++ for(unsigned i=1;i<8;++i)q5Tokens[filled++]=vote(s,q5[i],q5Rails[i%4],{});
++ q5Tokens[filled++]=vote(s,q5[0],SweetRailPHY,{}); /* client 0, own distinct rail */
++ assert(filled==8&&s->fQueue.full()&&s->fQueue.accepted()==8&&s->fArcRequest);
++ uint64_t extra=99;auto q5Writes=writes();
++ assert(s->requestVote(q5[1],SweetRailHost,{},&extra)==kIOReturnNoResources&&!extra);
++ assert(writes()==q5Writes&&s->fQueue.depth()==8&&s->fQueueRefused==1);
++ SweetRPMhStatus qst={};assert(s->copyStatus(q5[1],q5Tokens[0],&qst)==0&&qst.state==SweetRPMhPending);
++ assert(displayStatus(s,q5[0],chainToken).state==SweetRPMhPending);
+  destroy(s,n);reboot();
+- // A failure at any stage retains confirmed parents and stops all later writes.
++// A failure at any stage retains confirmed parents and stops all later writes.
+  for(unsigned stage=0;stage<5;++stage){arcFixtures();s=make(n);id=attach(s);
+   token=displayVote(s,id,SweetDisplayLowSVS);
+   if(stage>0)arcStage(s,0,6);if(stage>1)arcStage(s,1,6);
+@@ -417,7 +472,7 @@ int main(){
+  destroy(s,n);reboot();
+  dropNub(n);assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
+  puts("PASS: actual display ARC chain: typed corners, rounded parents, staged fresh ACK, client aggregate, reverse withdrawal, shared VRM gate, inherited conflicts, optional malformed metadata, partial-failure ledger, no rollback, stop/retirement and exhaustion");
+- puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement,11 malformed resources, actual matching/termination");
++ puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement, one TCS owner across queued arrivals, explicit queue-full refusal, waiters refused at the isolation state, 11 malformed resources, actual matching/termination");
+ }
+ '''
+ # ack helper normally asserts successful cleanup; uncleared IRQ deliberately
+diff --git a/tools/tests/test-mh2lm-rsc-executor-door.py b/tools/tests/test-mh2lm-rsc-executor-door.py
+index 7e5d1be..a8439c2 100644
+--- a/tools/tests/test-mh2lm-rsc-executor-door.py
++++ b/tools/tests/test-mh2lm-rsc-executor-door.py
+@@ -223,9 +223,11 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-door-') as temp:
+     pristine=Path(temp)/'pristine.cpp'
+     pristine.write_text(ns['prelude']+common['DSI_MEMORY_FIXTURE']+pool+
+                         tu('SweetAppsDoor.h')+tu('SweetAppsLine.h')+
++                        tu('SweetAppsQueue.h')+
+                         tu('SweetRPMhExecutor.h')+tu('SweetRPMh.h')+
+                         tu('SweetPanelPins.h')+tu('SweetTouchPanel.h')+
+                         tu('SweetAppsDoor.cpp')+tu('SweetAppsLine.cpp')+
++                        tu('SweetAppsQueue.cpp')+
+                         tu('SweetRPMhExecutor.cpp')+tu('SweetRPMh.cpp'))
+     r=subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-fsyntax-only',
+                       str(pristine)],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)

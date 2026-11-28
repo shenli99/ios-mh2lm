@@ -9,6 +9,7 @@
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOLocks.h>
 #include "SweetAppsDoor.h"
+#include "SweetAppsQueue.h"
 #include "SweetRPMhExecutor.h"
 
 enum SweetRail { SweetRailVDDI, SweetRailVPNL, SweetRailHost, SweetRailPHY, SweetRailCount };
@@ -99,6 +100,16 @@ struct SweetPanelSupplyFence {
 
 extern "C" bool sweet_rpmh_irq(unsigned int);
 
+/* C3-05: which entry point a submission belongs to. A panel vote is
+ * deliberately absent: its fence hands over exclusive leaf-provider references
+ * that would have to outlive the wait, and cancelling or detaching a waiting
+ * request is the contract C3-06 owns. Those requests are therefore still
+ * refused while anything is in flight or waiting, instead of being queued
+ * behind a vote that may never retire. */
+enum SweetAppsRequestKind : unsigned { SweetAppsRequestNone,
+ SweetAppsRequestRailVote, SweetAppsRequestDisplayCorner,
+ SweetAppsRequestRegisterBandwidth };
+
 class SweetRPMh : public IOService {
  friend bool sweet_rpmh_irq(unsigned int);
  OSDeclareDefaultStructors(SweetRPMh);
@@ -135,6 +146,33 @@ class SweetRPMh : public IOService {
   * through the published table. fTable is this service's own table in the
   * other mode, so both modes have exactly one write path. */
  bool fDelegated, fTablePublished, fIdentityReady, fInstalled;
+ /* C3-05: one transaction at a time, in arrival order. A second legal request
+  * waits in fQueue instead of being refused, and fCurrent is the copy the
+  * machine is working on - including the multi-flight display chain, so a
+  * request holds its place until its whole chain retires. The record lives in
+  * this service's own storage, so a dispatched request no longer depends on
+  * the caller's stack or arguments. A request that becomes illegal while it
+  * waits fails against its own token and row; it never overwrites the older
+  * one, and a poisoned service drains the queue instead of crossing that
+  * state. fQueueSelfTest is the explicit ADT request to demonstrate two
+  * admissions; absent means nothing runs. */
+ SweetAppsQueue fQueue;
+ SweetAppsRequest fCurrent;
+ bool fCurrentValid, fDispatching, fQueueSelfTest, fQueueTestRun;
+ unsigned fQueueRefused, fQuarantined, fQueueTestTries;
+ IOReturn admit(SweetAppsRequest &);
+ IOReturn validate(const SweetAppsRequest &);
+ IOReturn vetoRail(unsigned,unsigned,const SweetRailVote &,SweetRailVote *) const;
+ IOReturn launch(const SweetAppsRequest &);
+ void retireFlight(void);
+ void dispatchNext(void);
+ void drainQueue(IOReturn,const char *);
+ void markPending(const SweetAppsRequest &);
+ void markFailure(const SweetAppsRequest &,IOReturn);
+ bool queueSelfTest(void);
+ IOReturn launchRail(const SweetAppsRequest &);
+ IOReturn launchDisplayPower(const SweetAppsRequest &);
+ IOReturn launchRegisterBandwidth(const SweetAppsRequest &);
  unsigned fSelfStores;
  uint32_t fIdentityId, fIdentitySolver, fIdentityConfig;
  SweetAppsDoor fTable;

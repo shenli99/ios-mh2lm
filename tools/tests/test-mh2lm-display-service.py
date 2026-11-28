@@ -90,9 +90,13 @@ apps_door_header = (arm/'SweetAppsDoor.h').read_text() if (arm/'SweetAppsDoor.h'
 apps_door_source = (arm/'SweetAppsDoor.cpp').read_text() if apps_door_header else ''
 apps_line_header = (arm/'SweetAppsLine.h').read_text() if (arm/'SweetAppsLine.h').exists() else ''
 apps_line_source = (arm/'SweetAppsLine.cpp').read_text() if apps_line_header else ''
+# C3-05: the bounded submission queue, also a separate translation unit.
+apps_queue_header = (arm/'SweetAppsQueue.h').read_text() if (arm/'SweetAppsQueue.h').exists() else ''
+apps_queue_source = (arm/'SweetAppsQueue.cpp').read_text() if apps_queue_header else ''
 apps_line_source = re.sub(r'__asm__ volatile\("(dmb|dsb)[^"]*" ::: "memory"\);', '(void)0;', apps_line_source)
-source = re.sub(r'^#include.*\n', '', apps_door_header+apps_line_header+apps_line_source+
-                apps_door_source+rpmh_executor_header+rpmh_header+rpmh_source+
+source = re.sub(r'^#include.*\n', '', apps_door_header+apps_line_header+apps_queue_header+
+                apps_line_source+apps_door_source+apps_queue_source+
+                rpmh_executor_header+rpmh_header+rpmh_source+
                 rpmh_executor_source, flags=re.M)+source
 if (arm/'SweetPanelPins.h').exists():
     pins_header = (arm/'SweetPanelPins.h').read_text().replace('class SweetPanelPins :', 'struct SweetPanelPins :').replace('class SweetPanelPinsClient :', 'struct SweetPanelPinsClient :')
