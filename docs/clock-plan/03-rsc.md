@@ -1,6 +1,6 @@
 # C3：apps RSC 公共事务通道
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 代码＋补丁＋门禁＋审计器完成（本地全绿），待 0145 双默认树实机；C3-04b 暂缓（无需求），C3-05～C3-08 未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 代码＋补丁＋门禁＋审计器完成（本地全绿），0145 编译失败于一处访问控制（已修、已补本地门禁），待 0146 双默认树实机；C3-04b 暂缓（无需求），C3-05～C3-08 未开始。
 
 ## 阶段目标与退出条件
 
@@ -223,7 +223,7 @@ owner 仍是唯一硬件所有者——TCS 选择、按类准入、面板栅栏�
 - **预期结果**：唯一 writer 和 IRQ owner 已迁移，资源语义不变。后续 C3-05 起与 C4 依赖本卡，不依赖 C3-04b。
 - **失败归属**：C3-04 owner-select／IRQ-owner／dispatch；新算法问题不能靠兼容回退隐藏。
 
-#### 实现与本地证据（C3-04 代码完成，待 0145 实机）
+#### 实现与本地证据（C3-04 代码完成，0145 编译失败已修，待 0146 实机）
 
 **切换点是设备树，不是启动参数**：固件对启动参数是 607 字节硬上限，现役已占 605 字节（见 C1-02），
 所以这一卡的两个开关只能是属性——`rsc-channel` 上的 `sweet,rsc-executor`（4 字节，值 1）与
@@ -286,7 +286,27 @@ delegated 环用 `--c3-03` 判 → `the ring hands the hardware to the channel: 
 0143｜0142 用 `--c3-04` 判 → `the ownership row still names SweetRPMh: this tree did not delegate`／
 `the C3-04 ring must print the ownership row`。
 
-**0145 待实机**（本卡收口要一次双默认树的启动）：环里应有 `SWEET APPS DOOR: phase=publish`、
+**0145 编译失败：一处访问控制，与流水线无关**：`.github/workflows/circleci.yml` 没被改过（最后一次改动是
+`1023fef`，远在本卡之前），失败是真编译错——整份 24 MB 日志里只有一条 `error:`：
+
+```
+IOQcomRSC.cpp:417:26: error: 'tcsRead' is a protected member of 'IOQcomRSCChannel'
+IOQcomRSC.h:202:11: note: declared protected here
+```
+
+即准入时那个读状态字的 thunk 写成了文件作用域的自由函数，而 `tcsRead()` 是成员。修补办法不是放宽成员可见性
+（那等于把这一卡费力守住的数组交给本翻译单元里任何调用者），而是把 thunk 变成 `IOQcomRSCChannel` 的静态成员，
+和既有那排 `door*` 适配器并列——它们存在的理由本来就是"用函数指针的 ABI 走进私有状态"。类对外 API 一个符号都没多。
+产物也自证失败：`xnu-kernel-0145.gz` 只有 175 400 B，解开是个 1 551 872 B 的 tar，里面只有 `kdk-libs/*.nm.txt`／
+`*.members.txt`／`arch.txt` 与空 `SHA256SUMS`，**没有 `kernel.development.mh2lm`**，所以 0145 不可烧、也无法出环。
+
+**为什么本地没先知**：五个夹具为了让用例能戳成员，把 `class X` 改写成 `struct X` 再编译，这一步把访问控制整个删掉了，
+于是"别的作用域能不能碰到这个成员"在本地永远不成立。现在编译这两个受影响单元的夹具
+（`test-mh2lm-rsc-channel.py`、`test-mh2lm-rsc-executor-door.py`）各自多走一遍**不改写**的语法检查：
+用出厂原文（只摘 `#include`）加假 IOKit 前导跑 `clang++ -fsyntax-only`，再用同一份 TU 追加一个文件作用域辅助函数
+作为反证，要求编译器**拒绝**它。反证那次必须看得见拒绝，否则门禁自己就是瞎的。
+
+**0146 待实机**（本卡收口要一次双默认树的启动）：环里应有 `SWEET APPS DOOR: phase=publish`、
 `SWEET RSC: phase=executor … workloop=own`、`executor=delegated … hardware-owner=IOQcomRSCChannel` 与 `phase=delegate`；
 **不该**有 `SWEET RPMH IRQ: INTID37 configured`、`executor=module`、以及任何旧入口的 store 行（`stores-here=0`）；
 自然 VRM／ARC／CN0 请求的 ACTIVE 完成与 cleanup 继续到达，USB／根卷、显示、触摸回归。

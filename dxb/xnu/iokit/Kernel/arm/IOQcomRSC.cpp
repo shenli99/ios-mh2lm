@@ -410,8 +410,8 @@ rscNowNS(void)
 
 /* The status word the line-admission step consults: any set bit means a
  * previous flight is still unacknowledged, which is a refusal, not a stall. */
-static uint32_t
-rscStatusThunk(void *context)
+uint32_t
+IOQcomRSCChannel::statusThunk(void *context)
 {
 	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
 	return channel?channel->tcsRead(kIOQcomRscTcsStatus):0u;
@@ -588,7 +588,7 @@ IOQcomRSCChannel::lineTriggerReady(void)
 	 * acknowledges a clear source or refuses the flight. An inherited source is
 	 * never cleared on somebody else's behalf. */
 	SweetAppsLine::Verdict admit=SweetAppsLine::admit(fGIC,rscNowNS(),
-	 rscNowNS()+1000000ULL,rscStatusThunk,this,NULL);
+	 rscNowNS()+1000000ULL,statusThunk,this,NULL);
 	if (admit==SweetAppsLine::LineWait) return kIOReturnNotReady;
 	if (admit==SweetAppsLine::LineForeign) return kIOReturnBusy;
 	if (admit!=SweetAppsLine::LineReady) return kIOReturnIOError;

@@ -86,8 +86,20 @@ The ADT generator test gains the C3-04 composition and both refusals.  Nothing
 in sleh.c changes: sweet_rpmh_irq() already routes INTID37 to whichever owner
 published, and the chain it sits in is untouched.
 
+The status word the admission step needs.  admit() takes a thunk that reads the
+TCS status register, and that read is a member: the class keeps the array to
+itself, so the thunk is a static member of the channel, declared beside the
+door adapters that exist for the same reason.  A file-scope helper cannot reach
+tcsRead() - the first compiler to see the whole unit said so, and that is the
+only thing the CI build of card C3-04 found - and the alternative, widening the
+member, would hand every caller in this translation unit the array this card is
+careful to keep private.  The host fixtures had been blind to this because they
+compile copies whose 'class' was rewritten to 'struct' so the cases can poke
+members; both fixtures that compile this unit now also compile the shipped text
+once, unchanged, and assert that a file-scope helper is still refused.
+
 diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp
-index 20f678b..106c8c2 100644
+index 20f678b..64dfb9f 100644
 --- a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp
 +++ b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp
 @@ -34,6 +34,7 @@
@@ -237,8 +249,8 @@ index 20f678b..106c8c2 100644
 +
 +/* The status word the line-admission step consults: any set bit means a
 + * previous flight is still unacknowledged, which is a refusal, not a stall. */
-+static uint32_t
-+rscStatusThunk(void *context)
++uint32_t
++IOQcomRSCChannel::statusThunk(void *context)
 +{
 +	IOQcomRSCChannel *channel=(IOQcomRSCChannel *)context;
 +	return channel?channel->tcsRead(kIOQcomRscTcsStatus):0u;
@@ -415,7 +427,7 @@ index 20f678b..106c8c2 100644
 +	 * acknowledges a clear source or refuses the flight. An inherited source is
 +	 * never cleared on somebody else's behalf. */
 +	SweetAppsLine::Verdict admit=SweetAppsLine::admit(fGIC,rscNowNS(),
-+	 rscNowNS()+1000000ULL,rscStatusThunk,this,NULL);
++	 rscNowNS()+1000000ULL,statusThunk,this,NULL);
 +	if (admit==SweetAppsLine::LineWait) return kIOReturnNotReady;
 +	if (admit==SweetAppsLine::LineForeign) return kIOReturnBusy;
 +	if (admit!=SweetAppsLine::LineReady) return kIOReturnIOError;
@@ -660,7 +672,7 @@ index 20f678b..106c8c2 100644
  	if (fLock) {
  		IOLockFree(fLock);
 diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
-index 4f9ea6c..36f41ba 100644
+index 4f9ea6c..0876db2 100644
 --- a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
 +++ b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
 @@ -37,24 +37,59 @@
@@ -725,7 +737,7 @@ index 4f9ea6c..36f41ba 100644
  };
  
  /* Vendor geometry, taken from the apps RSC node the display owner already
-@@ -140,7 +175,49 @@ class IOQcomRSCChannel : public IOService {
+@@ -140,7 +175,54 @@ class IOQcomRSCChannel : public IOService {
  	unsigned fQueryReads;
  	bool fQueryEnabled;
  	bool fMapped, fRegistered, fAccepting;
@@ -769,13 +781,18 @@ index 4f9ea6c..36f41ba 100644
 +	static void doorQuiet(void *context, uint32_t bit);
 +	static void doorStop(void *context);
 +	static bool doorIrq(void *context);
++	/* The status word the line-admission step consults. It is a static member
++	 * rather than a file-scope helper because tcsRead() stays protected: the
++	 * only caller is this class, and the card's claim is that no second scope
++	 * can reach the array. */
++	static uint32_t statusThunk(void *context);
 +	static bool doorInstall(void *context, void *target, bool (*callback)(void *));
 +	static unsigned doorStores(void *context);
 +	static unsigned doorIrqs(void *context);
  	bool mapWindows(IOService *provider);
  	bool readIdentity(void);
  	bool mapCommandDB(void);
-@@ -172,6 +249,10 @@ public:
+@@ -172,6 +254,10 @@ public:
  	IOReturn submit(uint64_t client, uint32_t address, uint32_t value,
  	 uint64_t *token);
  	unsigned channelReads(void) const { return fReads; }
@@ -2240,7 +2257,7 @@ index fc5b1dd..73dcef6 100644
  UNITS = r"""
  #include <assert.h>
 diff --git a/tools/tests/test-mh2lm-rsc-channel.py b/tools/tests/test-mh2lm-rsc-channel.py
-index 91f97ec..64db414 100755
+index 91f97ec..5983b10 100755
 --- a/tools/tests/test-mh2lm-rsc-channel.py
 +++ b/tools/tests/test-mh2lm-rsc-channel.py
 @@ -37,17 +37,21 @@ prelude = prelude.replace('static std::vector<unsigned> mapCalls;',
@@ -2333,9 +2350,12 @@ index 91f97ec..64db414 100755
  assert raw.count('kIODirectionIn')==1
  # One published entry, one definition, and it refuses.
  assert raw.count('IOQcomRSCChannel::submit(')==1
-@@ -116,12 +141,48 @@ rsc_header = rsc_header.replace('class IOQcomRSCChannel : public IOService {',
+@@ -115,13 +140,56 @@ rsc_header = re.sub(r'^#include.*\n', '', header_raw, flags=re.M)
+ rsc_header = rsc_header.replace('class IOQcomRSCChannel : public IOService {',
                                  'struct IOQcomRSCChannel : public IOService {')
  assert 'struct IOQcomRSCChannel' in rsc_header
++rsc_header_raw = re.sub(r'^#include.*\n', '', header_raw, flags=re.M)
++assert 'class IOQcomRSCChannel : public IOService {' in rsc_header_raw
  rsc_source = re.sub(r'^#include.*\n', '', raw, flags=re.M)
 -# Actual MMIO and the barrier are the only replaced engine statements.
 +# Actual MMIO and the barriers are the only replaced engine statements. The
@@ -2359,8 +2379,13 @@ index 91f97ec..64db414 100755
 + text = re.sub(r'^#include.*\n', '', (arm/name).read_text(), flags=re.M)
 + return text
 +apps_door_header = load_tu('SweetAppsDoor.h')
-+apps_line_header = load_tu('SweetAppsLine.h').replace('class SweetAppsLine {',
-+                                                      'struct SweetAppsLine {')
++# The pristine copies keep every access specifier: the fixture's own copy
++# rewrites `class` to `struct` so the driver can look at members, and that
++# rewrite is exactly what hides a protected member reached from the wrong scope.
++apps_line_header_raw = load_tu('SweetAppsLine.h')
++apps_line_source_raw = load_tu('SweetAppsLine.cpp')
++apps_line_header = apps_line_header_raw.replace('class SweetAppsLine {',
++                                                'struct SweetAppsLine {')
 +apps_line_source = load_tu('SweetAppsLine.cpp')
 +assert 'struct SweetAppsLine' in apps_line_header
 +apps_line_source = apps_line_source.replace('uint32_t value=*(volatile uint32_t *)(base+off);',
@@ -2384,7 +2409,7 @@ index 91f97ec..64db414 100755
  # The query module is a second file in the same kext: it owns the command DB
  # decoding and takes nothing but a reader, so the harness links the two exactly
  # as the build does - the header before the channel that includes it, the source
-@@ -179,14 +240,28 @@ static void seedDb(){
+@@ -179,14 +247,28 @@ static void seedDb(){
  static IOService*rscNub(unsigned abiLen=4,uint32_t abiValue=1,
   unsigned irqAbiLen=4,uint32_t irqAbiValue=1,
   unsigned intidLen=4,uint32_t intidValue=37,
@@ -2414,7 +2439,7 @@ index 91f97ec..64db414 100755
  /* One refusal: no writes, no successful start row, every map released. */
  static void refusal(IOService*n,bool seed,const char*detail){
   messages.clear();mapCalls.clear();descriptorRequests.clear();
-@@ -248,6 +323,18 @@ int main(){
+@@ -248,6 +330,18 @@ int main(){
    refusal(n,true,"detail=bad-rsc-intid value=38 expected=37");
    n->release();
   }
@@ -2433,7 +2458,7 @@ index 91f97ec..64db414 100755
   {	/* the query opt-in is versioned like the rest, and a short property is a
        wrong tree rather than a version to guess at */
    auto*n=rscNub(4,1,4,1,4,37,3);
-@@ -416,7 +503,7 @@ int main(){
+@@ -416,7 +510,7 @@ int main(){
    assert(logged("phase=map resource=apps-db-locator result=0"));
    assert(logged("phase=command-db address=0xb0000100 bytes=1024 version=0x1 flags=0 detail=read-only-map"));
    assert(logged("phase=irq intid=37 detail=described-not-armed"));
@@ -2442,7 +2467,7 @@ index 91f97ec..64db414 100755
    /* the owner's TCS words were read and left exactly as they were */
    assert(logged("phase=tcs irq-enable=0x1f irq-status=0x40 detail=observed-not-owned"));
    assert(regs[0x18220d00]==0x1fu&&regs[0x18220d04]==0x40u);
-@@ -564,6 +651,170 @@ int main(){
+@@ -564,6 +658,170 @@ int main(){
    p->stop(n2);p->release();
    n2->release();
   }
@@ -2613,7 +2638,7 @@ index 91f97ec..64db414 100755
   assert(!live&&!liveMaps);
   printf("test-mh2lm-rsc-channel: PASS (%u rows from the accepted pass)\n",(unsigned)acceptedRows);
   return 0;
-@@ -573,7 +824,9 @@ int main(){
+@@ -573,10 +831,41 @@ int main(){
  
  with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-') as temp:
      cpp = Path(temp)/'test.cpp'
@@ -2624,12 +2649,44 @@ index 91f97ec..64db414 100755
      if os.environ.get('MH2LM_KEEP_CPP'):
          Path('/tmp/mh2lm-rsc-kept.cpp').write_text(cpp.read_text())
      binary = Path(temp)/'test'
++    # ---- pristine compile -------------------------------------------------
++    # 0145 failed in CI on one line the host suite had already blessed:
++    # `channel->tcsRead()` from a file-scope helper, with tcsRead protected. The
++    # fixture compiled because it rewrites the class to a struct first, so the
++    # access specifiers were gone before clang ever looked. This compile keeps
++    # the shipped text - only the OKit prelude is fake - and it costs one
++    # syntax pass. The negative control below proves the gate can still see an
++    # access violation, so passing it means something.
++    pristine = Path(temp)/'pristine.cpp'
++    pristine.write_text(prelude+extra+apps_door_header+apps_line_header_raw+db_header+
++                        rsc_header_raw+apps_door_source+apps_line_source_raw+rsc_source+db_source)
++    syntax = ['-std=c++17', '-fsyntax-only']
++    r = subprocess.run([os.environ.get('CXX', 'clang++-19'), *syntax, str(pristine)],
++                       text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
++    if r.returncode:
++        print(r.stdout)
++        raise SystemExit('pristine compile failed: the shipped header and source '
++                         'no longer build without the harness rewriting them')
++    control = Path(temp)/'control.cpp'
++    control.write_text(pristine.read_text()+
++                       '\nuint32_t leaked(IOQcomRSCChannel *c){return c->tcsRead(0);}\n')
++    r = subprocess.run([os.environ.get('CXX', 'clang++-19'), *syntax, str(control)],
++                       text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
++    # Xcode's clang and the host's word the same refused access differently
++    # ("protected" vs "private") for a member in a class with no access label
++    # at all, which is where tcsRead sits. The gate wants the refusal, not the
++    # adjective, so it matches the shape every clang prints.
++    assert r.returncode and 'error:' in r.stdout and 'member of' in r.stdout, \
++        'the pristine gate no longer sees access control'
+     subprocess.run([os.environ.get('CXX', 'clang++-19'), '-std=c++17', '-g', '-pthread',
+                     '-fsanitize=address,undefined', '-fno-omit-frame-pointer', str(cpp), '-o', str(binary)], check=True)
+     env = dict(os.environ)
 diff --git a/tools/tests/test-mh2lm-rsc-executor-door.py b/tools/tests/test-mh2lm-rsc-executor-door.py
 new file mode 100644
-index 0000000..ea4946b
+index 0000000..7e5d1be
 --- /dev/null
 +++ b/tools/tests/test-mh2lm-rsc-executor-door.py
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,248 @@
 +#!/usr/bin/env python3
 +"""C3-04 service side: SweetRPMh as a client of the published executor table.
 +Usage: test-mh2lm-rsc-executor-door.py EXTRACTED_XNU
@@ -2649,7 +2706,7 @@ index 0000000..ea4946b
 +    0139-0143 rings already carry: same offsets, same values, same order.
 +"""
 +from pathlib import Path
-+import os,subprocess,sys,tempfile
++import os,re,subprocess,sys,tempfile
 +if len(sys.argv)!=2:sys.exit(__doc__)
 +here=Path(__file__).resolve().parent
 +parent=here/'test-mh2lm-rpmh-completion-irq.py'
@@ -2840,6 +2897,38 @@ index 0000000..ea4946b
 +'''
 +with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-door-') as temp:
 +    cpp=Path(temp)/'test.cpp';binary=Path(temp)/'test'
++    # ---- pristine compile -------------------------------------------------
++    # The functional cases below compile copies whose `class` was rewritten to
++    # `struct` so the driver can look at members; that rewrite deletes access
++    # control, which is how the 0145 CI build was the first compiler to ever see
++    # a protected member reached from a file-scope helper. This pass keeps the
++    # shipped text and only fakes IOKit. SweetRPMh.cpp is the unit C3-04 changed
++    # most, so it is the one that has to build with its own access specifiers.
++    arm=Path(sys.argv[1]).resolve()/'iokit/Kernel/arm'
++    def tu(name):
++        # A missing final newline would glue one header's #endif to the next
++        # header's #if, which is a preprocessor error and not a driver defect.
++        return re.sub(r'^#include.*\n','',(arm/name).read_text(),flags=re.M)+'\n'
++    pristine=Path(temp)/'pristine.cpp'
++    pristine.write_text(ns['prelude']+common['DSI_MEMORY_FIXTURE']+pool+
++                        tu('SweetAppsDoor.h')+tu('SweetAppsLine.h')+
++                        tu('SweetRPMhExecutor.h')+tu('SweetRPMh.h')+
++                        tu('SweetPanelPins.h')+tu('SweetTouchPanel.h')+
++                        tu('SweetAppsDoor.cpp')+tu('SweetAppsLine.cpp')+
++                        tu('SweetRPMhExecutor.cpp')+tu('SweetRPMh.cpp'))
++    r=subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-fsyntax-only',
++                      str(pristine)],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
++    if r.returncode:
++        print(r.stdout[:4000])
++        raise SystemExit('pristine compile failed: SweetRPMh.cpp no longer builds '
++                         'with the access specifiers it ships with')
++    control=Path(temp)/'control.cpp'
++    control.write_text(pristine.read_text()+
++                       '\nuint32_t leaked(SweetRPMh *s){return s->fRSC;}\n')
++    r=subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-fsyntax-only',
++                      str(control)],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
++    assert r.returncode and 'error:' in r.stdout and 'member of' in r.stdout, \
++        'the pristine gate no longer sees access control'
 +    cpp.write_text(ns['prelude']+common['DSI_MEMORY_FIXTURE']+pool+common['header']+common['source']+helpers+tests)
 +    if os.environ.get('MH2LM_KEEP_CPP'):
 +        Path('/tmp/mh2lm-rsc-door-kept.cpp').write_text(cpp.read_text())

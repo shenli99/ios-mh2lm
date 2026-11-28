@@ -17,7 +17,7 @@ This half proves the old entry point became a client of that table:
     0139-0143 rings already carry: same offsets, same values, same order.
 """
 from pathlib import Path
-import os,subprocess,sys,tempfile
+import os,re,subprocess,sys,tempfile
 if len(sys.argv)!=2:sys.exit(__doc__)
 here=Path(__file__).resolve().parent
 parent=here/'test-mh2lm-rpmh-completion-irq.py'
@@ -208,6 +208,38 @@ int main(){
 '''
 with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-door-') as temp:
     cpp=Path(temp)/'test.cpp';binary=Path(temp)/'test'
+    # ---- pristine compile -------------------------------------------------
+    # The functional cases below compile copies whose `class` was rewritten to
+    # `struct` so the driver can look at members; that rewrite deletes access
+    # control, which is how the 0145 CI build was the first compiler to ever see
+    # a protected member reached from a file-scope helper. This pass keeps the
+    # shipped text and only fakes IOKit. SweetRPMh.cpp is the unit C3-04 changed
+    # most, so it is the one that has to build with its own access specifiers.
+    arm=Path(sys.argv[1]).resolve()/'iokit/Kernel/arm'
+    def tu(name):
+        # A missing final newline would glue one header's #endif to the next
+        # header's #if, which is a preprocessor error and not a driver defect.
+        return re.sub(r'^#include.*\n','',(arm/name).read_text(),flags=re.M)+'\n'
+    pristine=Path(temp)/'pristine.cpp'
+    pristine.write_text(ns['prelude']+common['DSI_MEMORY_FIXTURE']+pool+
+                        tu('SweetAppsDoor.h')+tu('SweetAppsLine.h')+
+                        tu('SweetRPMhExecutor.h')+tu('SweetRPMh.h')+
+                        tu('SweetPanelPins.h')+tu('SweetTouchPanel.h')+
+                        tu('SweetAppsDoor.cpp')+tu('SweetAppsLine.cpp')+
+                        tu('SweetRPMhExecutor.cpp')+tu('SweetRPMh.cpp'))
+    r=subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-fsyntax-only',
+                      str(pristine)],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    if r.returncode:
+        print(r.stdout[:4000])
+        raise SystemExit('pristine compile failed: SweetRPMh.cpp no longer builds '
+                         'with the access specifiers it ships with')
+    control=Path(temp)/'control.cpp'
+    control.write_text(pristine.read_text()+
+                       '\nuint32_t leaked(SweetRPMh *s){return s->fRSC;}\n')
+    r=subprocess.run([os.environ.get('CXX','clang++-19'),'-std=c++17','-fsyntax-only',
+                      str(control)],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    assert r.returncode and 'error:' in r.stdout and 'member of' in r.stdout, \
+        'the pristine gate no longer sees access control'
     cpp.write_text(ns['prelude']+common['DSI_MEMORY_FIXTURE']+pool+common['header']+common['source']+helpers+tests)
     if os.environ.get('MH2LM_KEEP_CPP'):
         Path('/tmp/mh2lm-rsc-door-kept.cpp').write_text(cpp.read_text())

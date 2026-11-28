@@ -215,6 +215,11 @@ class IOQcomRSCChannel : public IOService {
 	static void doorQuiet(void *context, uint32_t bit);
 	static void doorStop(void *context);
 	static bool doorIrq(void *context);
+	/* The status word the line-admission step consults. It is a static member
+	 * rather than a file-scope helper because tcsRead() stays protected: the
+	 * only caller is this class, and the card's claim is that no second scope
+	 * can reach the array. */
+	static uint32_t statusThunk(void *context);
 	static bool doorInstall(void *context, void *target, bool (*callback)(void *));
 	static unsigned doorStores(void *context);
 	static unsigned doorIrqs(void *context);

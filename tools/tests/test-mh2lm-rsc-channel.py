@@ -140,6 +140,8 @@ rsc_header = re.sub(r'^#include.*\n', '', header_raw, flags=re.M)
 rsc_header = rsc_header.replace('class IOQcomRSCChannel : public IOService {',
                                 'struct IOQcomRSCChannel : public IOService {')
 assert 'struct IOQcomRSCChannel' in rsc_header
+rsc_header_raw = re.sub(r'^#include.*\n', '', header_raw, flags=re.M)
+assert 'class IOQcomRSCChannel : public IOService {' in rsc_header_raw
 rsc_source = re.sub(r'^#include.*\n', '', raw, flags=re.M)
 # Actual MMIO and the barriers are the only replaced engine statements. The
 # harness records both directions, so a store the channel should not have made
@@ -161,8 +163,13 @@ def load_tu(name):
  text = re.sub(r'^#include.*\n', '', (arm/name).read_text(), flags=re.M)
  return text
 apps_door_header = load_tu('SweetAppsDoor.h')
-apps_line_header = load_tu('SweetAppsLine.h').replace('class SweetAppsLine {',
-                                                      'struct SweetAppsLine {')
+# The pristine copies keep every access specifier: the fixture's own copy
+# rewrites `class` to `struct` so the driver can look at members, and that
+# rewrite is exactly what hides a protected member reached from the wrong scope.
+apps_line_header_raw = load_tu('SweetAppsLine.h')
+apps_line_source_raw = load_tu('SweetAppsLine.cpp')
+apps_line_header = apps_line_header_raw.replace('class SweetAppsLine {',
+                                                'struct SweetAppsLine {')
 apps_line_source = load_tu('SweetAppsLine.cpp')
 assert 'struct SweetAppsLine' in apps_line_header
 apps_line_source = apps_line_source.replace('uint32_t value=*(volatile uint32_t *)(base+off);',
@@ -830,6 +837,35 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-') as temp:
     if os.environ.get('MH2LM_KEEP_CPP'):
         Path('/tmp/mh2lm-rsc-kept.cpp').write_text(cpp.read_text())
     binary = Path(temp)/'test'
+    # ---- pristine compile -------------------------------------------------
+    # 0145 failed in CI on one line the host suite had already blessed:
+    # `channel->tcsRead()` from a file-scope helper, with tcsRead protected. The
+    # fixture compiled because it rewrites the class to a struct first, so the
+    # access specifiers were gone before clang ever looked. This compile keeps
+    # the shipped text - only the OKit prelude is fake - and it costs one
+    # syntax pass. The negative control below proves the gate can still see an
+    # access violation, so passing it means something.
+    pristine = Path(temp)/'pristine.cpp'
+    pristine.write_text(prelude+extra+apps_door_header+apps_line_header_raw+db_header+
+                        rsc_header_raw+apps_door_source+apps_line_source_raw+rsc_source+db_source)
+    syntax = ['-std=c++17', '-fsyntax-only']
+    r = subprocess.run([os.environ.get('CXX', 'clang++-19'), *syntax, str(pristine)],
+                       text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if r.returncode:
+        print(r.stdout)
+        raise SystemExit('pristine compile failed: the shipped header and source '
+                         'no longer build without the harness rewriting them')
+    control = Path(temp)/'control.cpp'
+    control.write_text(pristine.read_text()+
+                       '\nuint32_t leaked(IOQcomRSCChannel *c){return c->tcsRead(0);}\n')
+    r = subprocess.run([os.environ.get('CXX', 'clang++-19'), *syntax, str(control)],
+                       text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    # Xcode's clang and the host's word the same refused access differently
+    # ("protected" vs "private") for a member in a class with no access label
+    # at all, which is where tcsRead sits. The gate wants the refusal, not the
+    # adjective, so it matches the shape every clang prints.
+    assert r.returncode and 'error:' in r.stdout and 'member of' in r.stdout, \
+        'the pristine gate no longer sees access control'
     subprocess.run([os.environ.get('CXX', 'clang++-19'), '-std=c++17', '-g', '-pthread',
                     '-fsanitize=address,undefined', '-fno-omit-frame-pointer', str(cpp), '-o', str(binary)], check=True)
     env = dict(os.environ)
