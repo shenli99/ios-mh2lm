@@ -1,6 +1,6 @@
 # C3：apps RSC 公共事务通道
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 已在 0147 的**双默认树**上**验收通过**（委派档 `executor=delegated … hardware-owner=IOQcomRSCChannel`、交接四行按序到齐；对照档 `executor=module … hardware-owner=SweetRPMh`、verdict 与 0143 逐字段相同）；C3-04b 暂缓（无需求），C3-05 起未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 已在 0147 的**双默认树**上**验收通过**（委派档 `executor=delegated … hardware-owner=IOQcomRSCChannel`、交接四行按序到齐；对照档 `executor=module … hardware-owner=SweetRPMh`、verdict 与 0143 逐字段相同）；C3-04b 暂缓（无需求）；C3-05 代码完成、0148 在设备上**证明的是示意写错而不是队列有问题**（两条 rail 票被准入筛明确拒绝），示意已改到 CN0 寄存器带宽并在 0149 上等实机。
 
 ## 阶段目标与退出条件
 
@@ -400,6 +400,54 @@ adopted`）一条皆无。`--c3-04` 判这一环被拒：`the ownership row stil
 - **实机检验**：两个已允许请求通过新接口产生独立 token，观察入队／发出／完成顺序；不借本卡增加新资源类型。
 - **预期结果**：软件排队可用，仍不宣称多 TCS 并行吞吐。
 - **失败归属**：C3-05 enqueue／ordering／capacity；具体事务执行错误标记 executor phase。
+
+#### 实现与本地证据（C3-05 代码完成，0148 实机证明示意写错，0149 待机）
+
+**队列只是存储，不是策略**：`SweetAppsQueue.h/.cpp` 固定八槽、一个头、一个计数，加上 accepted／dispatched／high-water
+三个计数和入队时盖的序号；不分配、不加锁、不打印、不调 IOKit。`push()` 满了**拒绝**而不是丢最旧（同一资源的两票一旦折叠就没有
+定义好的先后），拒绝不盖序号；记录自包含，因为调用方的栈和活对象在请求真正发出时早已不在：kind、owner 的客户端槽、资源标签、
+载荷和**等待前就已发出的 token** 都随记录一起走。`find()` 只回答去重需要的那一问（同 kind、同 client、同 rail），
+`waiting()` 回答 detach 要问的那一问（这个客户端还有没有东西在排）。
+
+**准入被拆成两半**：`validate()` 是准入前的筛子，拿一份**还没存到任何地方**的提案，按同一批表和同一份已提交台账检查，
+在任何 token 存在之前就拒掉，所以被拒的提交不动调用方上一次的完成、不动 token 序列，也没有写入、没有状态槽、没有队项。
+它故意是同一套规则的**第二次读**而不是调进 launch：launch 需要一个可失败的记录，而先发 token 再筛会把一次笔误变成一次丢失的完成。
+筛子判不了等待期间会变的东西（TCS、执行器门、模式、隔离），所以 dispatch 再判一次，并把它记在排队请求**已经持有的 token** 上。
+直接（非排队）dispatch 失败时不发布状态、不写 Pending：调用方从返回值知道结果，这和本卡之前一样。
+
+**派发与退休**：`retireFlight()` 释放数组、清 `fBusy`／`fCurrent`、取消超时，然后 `dispatchNext()` 取队首。
+本卡最要紧的一处修补是 host 夹具逼出来的：**从队列里取出来的请求原先没有被设成“当前”请求**，于是它飞在天上的整段时间里，
+同一资源的第二次提交只跟队列（已经不装它了）和 `fCurrent`（还描述着上一笔）比，去重筛正好在它该尽责的那条路径上变弱。
+现在 `dispatchNext()` 在 launch 之前把要发的请求设为当前，`launch()` 在“这次派发不需要任何写入”时再清掉，
+所以一笔没碰到数组的请求不会替它的后继占着筛子。隔离状态被设置和 `stop` 时 `drainQueue()` 逐条拒掉排队请求（`kIOReturnNotReady`／`kIOReturnAborted`）并抬 quarantined。
+
+**0148 的实机结论是“示意写错”，不是“队列错了”**：那一轮把示意放在两条 rail 上（各抬 8 mV），环里先是两条
+`phase=refuse kind=rail-vote … detail=invalid result=0xe00002c2`，再是 `phase=selftest result=failed detail=pair-did-not-serialize`。
+原因在准入筛里：这棵树给每条 rail 的都是点票（min == max），聚合取地板的最大值和天花板的**最小值**，第二个 callers 一抬地板就非法——
+保护第一个客户端的规则同时禁止了第二次投票。旧代码还把步长夹在 `maxMV` 上，那样算出来的票**等于已持有的票**，就算合法也是静默空操作，永远不会发一趟。
+同一份环里 7 条普通票全部是 `seq=0 wait=direct`（去重筛与派发路径都在工作），没有一条 enqueue／queued 行——所以那一轮既没证明排队，也没弄坏原有路径。
+
+**示意改到 CN0 寄存器带宽**：这是这台机器上唯一**可以合法搬动**的量。寄存器带宽按最大值聚合，所以“要得更多”永远合法、永远真的发一趟。
+步长取 `scale()` 舍入到的 y 场一个整编码单位（本件 `unit=20000`、`width=4`，即 **20000 B/s**），绝不按百分比：
+比一个 y 单位更小的抬升会舍入到同一个 y，聚合丝毫不动。两个目标都先用 `scale()` 验过才发 token，两个客户端都是新槽位（否则第二次会被合并而不是排队）；
+本次启动在第一次 `retireFlight()` 时落地，那时 `fRegisterAggregate==0`、`fRegisterOwned==false`，所以环里应当读到
+`bytes0=20000 bytes1=40000`（资源 0）、两个不同 client 与 token、`depth=1 high-water=1`，以及启动自己那笔 300 000 000 B/s 的 CN0 票把两者都涵括在内的既成事实。
+两笔票按和其他票一样**留驻**（撤票是 C3-06）。
+
+**本地证据**：19 个编译 `SweetRPMh.cpp` 的主机夹具加三个相邻夹具串行全过；`test-mh2lm-display-noc.py` 的 C3-05 段用 `step()`（arm + 两拍，不带队列断言）
+走完“直接派发 → 入队 → 退休后从队里派发”，断言两笔都留在 `SweetRPMhPending`、第二个客户端在**等待中**和**飞行中**再提交都被 `already-outstanding` 拒（`kIOReturnBusy`）、
+队里那条派发后 `fCurrentValid && fCurrent.client==2`，并按行序验证“直接 → 入队 → 队列派发”三段；不带属性的对照启动断言 `!fQueueSelfTest` 且没有 selftest 行。
+`test-mh2lm-rpmh-resources.py` 用逐票的路径证明同一资源两个客户端按序合并。
+审计侧 `audit-clock-log.py --c3-05` 重写成按**合同**判（每个 token 只派发一次、direct⇒seq=0、queued/enqueue⇒seq≠0、入队深度与在途数对账、
+包装截断后重新对齐、任何时刻 `depth<=1`、隔离行之后不再派发、以及 CN0 那对数字），`selftest-queue-auditor.py` 17 个变体全过——
+其中 15 个反例各自打掉一条断言，另外两个互相拒收对方的环（带队列行的环用 `--c3-04` 判被拒、0147 的环用 `--c3-05` 判被拒）。
+0148 的对照环按 `--c3-04` 判**通过**：7 条 `seq=0` 直接派发、0 条 selftest／enqueue／queued／queue-full，即“不装属性的树只留无条件打印的直接派发行”。
+同一份环里还有 51 条 `SWEET FG ACCESS … op=grant-wait`（燃料计整轮没等到授权位），它属于电池那个消费者，脚本只在显式
+`--fg-grant-timeout-observed` 下接受并把它单独记进报告，不当作本卡的通过或失败。
+
+**0149 待机**：补丁 `0252` 收上面两处（示意改 CN0 + `dispatchNext` 设当前），`mk16k-0149.sh` 的十五张镜像与 0148 同树同参数，
+候选镜像名改为 `rscqueuecn0`，文本门里那条 selftest 行换成新措辞；用 0148 的内核空跑一遍，脚本恰好在“缺 C3-05 要求”那条门失败——
+说明 ADT 推导、钉值与其余门禁都已跑到并被收紧。
 
 ### C3-06 完成排队请求的取消与客户端退出合同
 

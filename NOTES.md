@@ -10415,3 +10415,55 @@ executor ADT `a81e8b56…` 钉住），但 `mk16k-0147.sh` 第一次跑就被自
 2107–2109 `INTID37 configured` → `executor=module … hardware-owner=SweetRPMh` → 第一笔自然完成。`--c3-04` 判这一环
 被拒（`the ownership row still names SweetRPMh`），两个方向都没污染。**C3-04 收口**：owner 由设备树选定、
 选定之后另一方碰不到硬件，这两种树各自产出与设计一致的环，判据按模式分叉而不是靠旗标放宽。下一卡 C3-05。
+
+**0148 上机：错的是示意，不是队列**。那一轮把"两个合法请求串起来"的示意放在两条 rail 上（各抬 8 mV），环
+`sweetlog-0148-0.bin`（4 198 400 B、`6e740a13…`、3 884 行未回绕）里没有排队行，先有的是两条拒绝：
+`phase=refuse kind=rail-vote client=1 resource=0/1 detail=invalid result=0xe00002c2`，然后
+`phase=selftest result=failed detail=pair-did-not-serialize`。审计器当场拒收（`check_baseline_drifted` 在 `assert not err`
+上停下，反例集合里正好是这一行），这是它该做的事：那一轮既没有排队证据，也确实没有坏掉既有路径——同环 7 条普通票
+全是 `seq=0 wait=direct`，说明去重筛与派发路径照旧工作，只有示意自己没飞起来。根因两条，都在**票的语义**上而不是队列上：
+
+1. 这棵树给每条 rail 的都是**点票**（min == max），聚合取地板的最大值、天花板的最小值。第二个 callers 一抬地板，
+   就直接越过别人已经报出的天花板——保护第一个客户端的规则同时禁止了第二次投票，所以"合法抬升"在这台机器的 rail 上不存在。
+2. 旧步长被夹在 `maxMV` 上，退而求其次算出来的票**等于已持有票**，就算合法也是静默空操作：`writeVoteRegister` 不觉得有变化，
+   聚合不变，请求永远不发——那会是一条更难看的失败（selftest 超时而不是 invalid）。
+
+**规矩**：示意的量必须挑"聚合方式允许搬动"的那个字段。寄存器带宽按最大值聚合，"要得更多"永远合法、永远真飞一趟；
+电压／电流按 min-max 夹，点票树上抬地板必被拒。所以 C3-05 的示意改到 CN0：步长取 `scale()` 舍入到的 y 场**一个整编码单位**
+（本件 `unit=20000`、`width=4` ⇒ 20000 B/s），绝不按百分比（比一个 y 单位更小的抬升会舍入到同一 y，聚合丝毫不动）；
+两个目标先用 `scale()` 验过才发 token；两个客户端都取**新**槽位，否则第二次会被合并进聚合而不是排队。
+落地时机是第一次 `retireFlight()`，那时 `fRegisterAggregate==0`、`fRegisterOwned==false`，所以环里应读到
+`bytes0=20000 bytes1=40000`、`resource=0`、两个 client／token、`depth=1 high-water=1`；本次开机自己那笔 300 000 000 B/s
+的 CN0 票（token 6／7）把两者都涵括在内，所以这两笔票是**留驻**的，撤票是 C3-06 的事。
+
+**host 夹具逼出的真漏洞：从队列里取出的请求没被设成"当前"**。`dispatchNext()` 原先只发不发"认"，于是排队请求飞行的那段时间里，
+同一资源的第二次提交只跟队列（已经不含它）和 `fCurrent`（还描述着上一笔）比——去重筛恰好在这条被本卡启用的路径上变弱。
+夹具里表现为 `assert(fCurrentValid && fCurrent.kind==… && fCurrent.seq)` 失败，一开始以为是测试写错，实际是驱动漏了一步。
+现在是 `dispatchNext()` 在 `launch()` 之前设当前、`launch()` 在"这次派发不需要任何写入"时清掉，所以一笔没碰到数组的请求
+不会替后继占着筛子。**规矩**：把某个物件从"等待"搬到"在途"的每一处代码，都要问它是否同时搬到所有"现在归你管"的记录里。
+
+**夹具上的三个坑，都是用例写错而不是代码错**：`ack()` 不能用在"完成窗口里新建了一个等待者"的场景（它的两条断言正好禁止这一点），
+所以示意段自己写 `step()`（先 `tick()` 再 arm＋两拍，不带断言）；`requestRegisterBandwidth()` 收的是**客户端 id** 不是槽位
+（`fClients[2].id` 才是 3）；日志 sink 存的是渲染后的整行，所以 `find("phase=selftest ")` 永远不等于 0，行首是 `SWEET APPS QUEUE: `。
+`step()` 少了开头那个 `tick()` 会让启动投票走不完（`fQueueTestRun` 一直是 false），表现成"示意没跑"。
+
+**审计器改成按合同判**。`--c3-05` 不再看"有没有某几行"，而是查合同：每个 token 只派发一次、`direct⇒seq=0`、
+`queued`／`enqueue⇒seq≠0`、入队深度与在途数逐笔对账、环被包装截断后重新对齐、任何时刻 `depth<=1`、
+第一条 `isolation-state-set`／`stop` 之后不再派发、以及 CN0 那对数字（`bytes1-bytes0==20000`、`bytes1>bytes0`、`depth=1 high-water=1`、
+`direct_line < enqueue_line < queued_line`）。`selftest-queue-auditor.py` 的 17 个变体里 15 个反例各自只打掉一条断言
+（`noselftest failed sameclient sametoken direct noseq depth2 highwater0 notkind reverse early enqueuefirst nostray twodispatch`），
+另两个是人格互拒：带队列行的环用 `--c3-04` 判被拒、0147 的环用 `--c3-05` 判被拒。
+
+**对照环上冒出一个别人的故障，别把它洗进来**。0148 对照（执行器树、无属性）用 `--c3-04` 判通过：7 条 `seq=0` 普通票、
+0 条 selftest／enqueue／queued／queue-full，即"不装属性的树只留无条件打印的直接派发行"。同一份环里却有 **51 条**
+`SWEET FG ACCESS … op=grant-wait … error=-10 final-error=-10`（燃料计整轮一次都没等到授权位），而 0147 的对照环只有 2 条 FG 行、一条 grant-wait 都没有。
+它属于电池那个消费者，不是本卡的证据也不是本卡的失败。处理方式是加一个**显式**旗标 `--fg-grant-timeout-observed`：
+没有它就照旧在 `assert set(warn) <= WANTED_WARN` 处停下，告诉读者"先确认这件事是不是你以为的那样再重判"；
+给了它就把这些行收进 `fg_grant_timeout` 单列一项（行数、种类、note 里写明"记在这个消费者账上，不当作本卡通过或失败"），
+基线 WARN 集合的断言一条不改。**规矩**：别人的故障可以在报告里出现，但只能出现在它自己的格子里，且必须由命令行显式承认。
+
+**0149 的打包脚本先空跑一遍**。`mk16k-0149.sh` 是 0148 的同树同参数拷贝：十五张镜像不变（十三张 0143 集、`rscexecutor` 对照、
+`rscqueuecn0` 候选）、ADT 摘要全部沿用（示意树仍是 `--rpmh-queue-selftest`，`f66a12b6…` 24 060 字节，生成器没动），
+文本门里只把那条 selftest 行换成新措辞（`kind=register-bandwidth resource=… bytes0=… bytes1=…`）。用 0148 的内核
+带 0149 的 tag 空跑一遍，脚本恰好在"kernel is missing a C3-05 requirement: … phase=selftest kind=register-bandwidth …"停下——
+说明 ADT 推导、摘要钉值、符号门与 C3-04 文本门在此之前都已跑到，并且那条门是紧的（旧内核过不了新门）。
