@@ -10467,3 +10467,18 @@ executor ADT `a81e8b56…` 钉住），但 `mk16k-0147.sh` 第一次跑就被自
 文本门里只把那条 selftest 行换成新措辞（`kind=register-bandwidth resource=… bytes0=… bytes1=…`）。用 0148 的内核
 带 0149 的 tag 空跑一遍，脚本恰好在"kernel is missing a C3-05 requirement: … phase=selftest kind=register-bandwidth …"停下——
 说明 ADT 推导、摘要钉值、符号门与 C3-04 文本门在此之前都已跑到，并且那条门是紧的（旧内核过不了新门）。
+
+**0149 候选环：示意第一次在设备上真的跑成了，判据却要修两处**。环里三行齐全——`phase=dispatch kind=register-bandwidth
+client=1 resource=0 token=2 seq=0 depth=0 wait=direct`、`phase=enqueue … client=2 … token=3 seq=1 depth=1`、
+`phase=selftest kind=register-bandwidth resource=0 bytes0=20000 bytes1=40000 client0=1 client1=2 token0=2 token1=3
+result0=0 result1=0 depth=1 high-water=1`，紧跟 `token=2 CN0 ACTIVE ACK bytes/s=20000` 与排队那笔 `dispatch … seq=1 … wait=queued`
+之后的 `token=3 CN0 ACTIVE ACK bytes/s=40000`：两趟都是真飞行（各自 `commands=1`、各自 fresh ACTIVE completion），
+第二笔等第一笔 ACK 之后才派发。旁边本次开机自己那串 `ldoa14 → ldoa17 → ldoc3 → ldoa5 → display corner → CN0 300000000 ×2`
+的资源、数值、顺序一条没变，只是被这对示意插在中间。
+
+判据上两处得改，都是"拿合成环的形状去判设备环"的老毛病。**其一**，`%#x` 打印 0 是 `0` 不是 `0x0`，而
+`make-queue-ring.py` 合成的是 `result0=0x0`，检查写成 `dm.group(8)=='0x0'` 就只在假环上成立——改成按数值读 `int(x,16)==0`，
+合成环也同步改成设备形状。**其二**，燃料计占位旗标原来只在 `--allow-baseline-drift`（宽松基线：不比对计数）里生效，
+于是"承认一个别人的故障"被迫连带放弃"逐字段基线相等"这条本卡最值钱的断言。现在严格路径也能收：把 grant-wait 行整行挑出环、
+记进 `fg_grant_timeout`，其余行照旧与 b32 逐项比对。**规矩**：容忍别人故障的开关必须与放宽本卡断言的开关正交，不能共用一个旗标。
+0149 候选环这样判下来：11 条队列行、0 条 refuse、111 条 FG grant-wait 单列、基线"非时钟 WARN/ERROR 与 b32 相等"。
