@@ -10482,3 +10482,9 @@ result0=0 result1=0 depth=1 high-water=1`，紧跟 `token=2 CN0 ACTIVE ACK bytes
 于是"承认一个别人的故障"被迫连带放弃"逐字段基线相等"这条本卡最值钱的断言。现在严格路径也能收：把 grant-wait 行整行挑出环、
 记进 `fg_grant_timeout`，其余行照旧与 b32 逐项比对。**规矩**：容忍别人故障的开关必须与放宽本卡断言的开关正交，不能共用一个旗标。
 0149 候选环这样判下来：11 条队列行、0 条 refuse、111 条 FG grant-wait 单列、基线"非时钟 WARN/ERROR 与 b32 相等"。
+
+**0149 对照环给出了本卡最硬的一句话**：同内核、只是 ADT 不带 `sweet,rpmh-queue-selftest`，环 `sweetlog-0149-1.bin`
+（`23d0d6b6…`、54 284 行）用 `--c2-03 --c3-04` 判通过——7 条 `seq=0 wait=direct`、0 条 selftest／enqueue／queued／queue-full；
+并且**全部 45 条 `SWEET RPMH`／`SWEET RSC` 行与 0147 候选环逐字节相同**（连 token 号与完成数都一样）。
+"属性不装时队列在线上一个字节也没改"因此不是推断而是逐行比出来的；候选环那一侧则是同一串被两笔 CN0 插在中间、其余资源／数值／顺序不变。
+两份报告存 `evidence/sweetlog-0149-{0,1}-review-c3-0{5,4}.json`。**C3-05 收口，C3 5/8**。
