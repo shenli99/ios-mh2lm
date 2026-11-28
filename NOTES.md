@@ -10544,7 +10544,25 @@ clang++-19 + 内核 KDK 头的 shim）编译改动过的两个翻译单元，`Sw
 `SweetRPMh.cpp` 213→270 条、`SweetAppsQueue.cpp` 7→15 条（该告警对每处指针下标都报一次，全树普遍存在，
 旧版本就有一百多条，不是本轮引入的形状）。基线目录 `base/` 取自 `43fe516`（C3-05 收口时的树），`edited/` 即待提交树。
 
-**0150 待抓的环**：候选环读到上面六行，且被撤的两笔在任何位置都没有派发出现在环里；所有既有的 Rail／ARC／CN0 自然投票与完成行、
+**0150 实机结果（失败，已定点，`0254`）**：环里只有三行错误——
+`phase=cancel-selftest step=1 … detail=trio-did-not-serialize depth=4`、
+`step=2 … detail=cancel-0xe00002eb b1-state=0 b1-result=0 ledger=0/0 exit-withdrew=0 lower=0xe00002eb depth=4`、
+`step=3 … detail=state-0 bytes=0 detach-0xe00002d5 aggregate=40000`。判据上没有模糊处：**取消合同没被证伪**，
+坏的是示意自己的时序——pair 示意与 step 1 都挂在同一个 `retireFlight()` 上，pair 那一趟结束时一笔在飞、一笔在等
+（`dispatch token=2 wait=direct`／`enqueue token=3 depth=1`／`phase=selftest depth=1`），`fQueueTestRun` 同时置位，
+于是三笔示意在同一趟里全部入队（`depth=2/3/4`），`trio-did-not-serialize`。`step=2`／`step=3` 是**失败即闭合**：
+`statusA.state` 不是 Complete，`cancelWaiting()` 没被调用，那些 `0`／`0xe00002eb`／`0xe00002d5` 都是占位值。
+代价只有"多投票"：三笔示意事后照常飞行，三个示意客户端的 CN0 票留到这次启动结束；没有回滚、没有重复写。
+
+**修法（`0254`，只动 `SweetRPMh.cpp`，配 1 个宿主 fixture）**：两个示意都只在**开窗为空**时提交
+（`if (fBusy || !fQueue.empty()) return false;`），否则静默返回、下一次退休再试；空窗判断放在 pair 的
+`fQueueTestTries++` **之前**，等待不消耗次数（否则六次脏窗口就把示意永久掐掉）。返回 `false` 是"还不是时候"，
+所以不打日志——没发生的事不该有行。宿主 fixture 钉两半：有飞行／有等待时 `fCancelStep` 不变、`fNextClient` 不变、
+零 `phase=cancel-selftest` 行；把队列排空后同一驱动排出 `depth=2 high-water=2` 并置 `fCancelStep=1`。
+审计器一行没改：它本来就要求 pair 行 `depth=1`、三笔 `depth=2 high-water=2`、`tail_dispatch == [a, lower]` 都 `direct/0/0`，
+0150 那种形状过不了其中任何一条（`--c3-06` 判 0150 环被拒，报的就是那三行错误）。
+
+**0151 待抓的环**：候选环读到上面六行，且被撤的两笔在任何位置都没有派发出现在环里；所有既有的 Rail／ARC／CN0 自然投票与完成行、
 `executor=delegated`、45 条 RPMH／RSC 线缆行一条不变。对照环用 `--c3-05` 判通过、用 `--c3-06` 判被拒。
 真实 provider 热终止本轮无法触发，所以"退出发生在某笔正在飞的时候"只有宿主证据（`in-flight` 拒绝＋字段全不变），实机这一半记为 host-only。
 **实机环到齐前 C3 仍记 5/8**，下一张是 C3-07（超时／不确定／隔离状态）。

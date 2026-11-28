@@ -1,6 +1,6 @@
 # C3：apps RSC 公共事务通道
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 已在 0147 的**双默认树**上**验收通过**（委派档 `executor=delegated … hardware-owner=IOQcomRSCChannel`、交接四行按序到齐；对照档 `executor=module … hardware-owner=SweetRPMh`、verdict 与 0143 逐字段相同）；C3-04b 暂缓（无需求）；C3-05 已在 0149 的**双默认树**上**验收通过**（候选档读到 `phase=selftest kind=register-bandwidth resource=0 bytes0=20000 bytes1=40000` 与配套的 direct／enqueue／queued 三行，两笔各自成飞、各自 ACK；对照档 45 条 RPMH／RSC 线缆行与 0147 逐字节相同，只多 7 条无条件直接派发行）；0148 那一轮在设备上证明的是**示意写错**（两条 rail 票被准入筛合法拒绝），不是队列有问题。C3-06 代码、宿主证据、审计器与包门禁已完成（0150 待实机复核）：排队中的请求可由持有者或退出客户端撤回，撤回既不是完成也不是硬件回滚，把 CN0 降回 0 由一笔真投票完成而不是撤掉任何人的账本。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 已在 0147 的**双默认树**上**验收通过**（委派档 `executor=delegated … hardware-owner=IOQcomRSCChannel`、交接四行按序到齐；对照档 `executor=module … hardware-owner=SweetRPMh`、verdict 与 0143 逐字段相同）；C3-04b 暂缓（无需求）；C3-05 已在 0149 的**双默认树**上**验收通过**（候选档读到 `phase=selftest kind=register-bandwidth resource=0 bytes0=20000 bytes1=40000` 与配套的 direct／enqueue／queued 三行，两笔各自成飞、各自 ACK；对照档 45 条 RPMH／RSC 线缆行与 0147 逐字节相同，只多 7 条无条件直接派发行）；0148 那一轮在设备上证明的是**示意写错**（两条 rail 票被准入筛合法拒绝），不是队列有问题。C3-06 代码、宿主证据、审计器与包门禁已完成；0150 实机在示意**时序**上失败（两示意共用一个退休窗口，三笔全入队），已由 `0254` 定点修复，**0151 重抓**：排队中的请求可由持有者或退出客户端撤回，撤回既不是完成也不是硬件回滚，把 CN0 降回 0 由一笔真投票完成而不是撤掉任何人的账本。
 
 ## 阶段目标与退出条件
 
@@ -529,6 +529,27 @@ C3-06 的环用 `--c3-05` 判被拒（它排三笔而那张卡说一笔）。
 并双向证明"没有 pair 就不许有撤回"（生成器拒绝且不落盘）。十六张镜像出自同一内核、同一参数表、同一固件：
 候选 `rsccancel`（两属性），对照 `rscqueuecn0`（只有 C3-05 属性，环里应有同一对示意图行而**没有**撤回行），
 其余十四张是旧树的控制。
+
+#### 0150 实机：示意没在空窗里跑（已定点，`0254` 修，0151 待抓）
+
+0150 候选环被判失败，但**取消合同本身没有被证伪**——坏的是示意驱动自己的时序：
+
+- 环里只有三行错误：`phase=cancel-selftest step=1 result=failed detail=trio-did-not-serialize depth=4`；
+  随后 `step=2 … detail=cancel-0xe00002eb b1-state=0 b1-result=0 ledger=0/0 exit-withdrew=0 lower=0xe00002eb depth=4`，
+  `step=3 … detail=state-0 bytes=0 detach-0xe00002d5 aggregate=40000`。
+- 起因：C3-05 的 pair 示意与 C3-06 的 step 1 挂在同一个 `retireFlight()` 上。pair 那一趟打印的是
+  `dispatch … token=2 … wait=direct` ＋ `enqueue … token=3 depth=1` ＋ `phase=selftest … depth=1`，
+  这一趟结束时**一笔在飞、一笔在等**，`fQueueTestRun` 同时置位，于是 step 1 在同一趟里被放行：
+  三笔全部入队（`depth=2/3/4`），`trio-did-not-serialize depth=4`。
+- `step=2`／`step=3` 是**失败即闭合**：`statusA.state` 不是 Complete，`cancelWaiting()` 根本没被调用，
+  所以 `b1-state=0`／`b1-result=0`／`lower=0xe00002eb` 都是占位值，合同路径一行都没走到。
+- 代价只有"多投票"：三笔示意请求事后照常飞行（`wait=queued`），三个示意客户端的 CN0 票留到这次启动结束；
+  硬件没有被回滚、也没有被重复写。
+- 修法（`0254`，只动 `SweetRPMh.cpp`）：两个示意都只在**开窗为空**（`!fBusy && fQueue.empty()`）时提交，
+  否则静默返回、下一次退休再试；空窗判断放在 pair 的 `fQueueTestTries` 计数**之前**，等待不消耗次数。
+  宿主 fixture 钉住两半：有飞行／有等待时零准入、零客户端、零行；空窗之后同一驱动真的排出一对并打印
+  `depth=2 high-water=2`。审计器不需要改——它本来就要求 pair 行 `depth=1`、三笔 `depth=2 high-water=2`、
+  `tail_dispatch == [a, lower]` 都 `direct/0/0`，0150 那种形状（深度 4、三笔真飞行）过不了其中任何一条。
 
 **ARM64 单编译**：按真实 CI 参数（0149 buildtree 的 `.CFLAGS` 与保存的原生编译行，clang++-19＋内核头 shim）各编一遍改动前后的
 `SweetRPMh.cpp`／`SweetAppsQueue.cpp`，两版都是 0 error，且**没有新告警类别**——只多出 `-Wunsafe-buffer-usage` 的实例
