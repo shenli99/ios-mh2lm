@@ -1,6 +1,6 @@
 # C3：apps RSC 公共事务通道
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 已在 0147 的**双默认树**上**验收通过**（委派档 `executor=delegated … hardware-owner=IOQcomRSCChannel`、交接四行按序到齐；对照档 `executor=module … hardware-owner=SweetRPMh`、verdict 与 0143 逐字段相同）；C3-04b 暂缓（无需求）；C3-05 代码完成、0148 在设备上**证明的是示意写错而不是队列有问题**（两条 rail 票被准入筛明确拒绝），示意已改到 CN0 寄存器带宽并在 0149 上等实机。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 已在 0147 的**双默认树**上**验收通过**（委派档 `executor=delegated … hardware-owner=IOQcomRSCChannel`、交接四行按序到齐；对照档 `executor=module … hardware-owner=SweetRPMh`、verdict 与 0143 逐字段相同）；C3-04b 暂缓（无需求）；C3-05 已在 0149 的**双默认树**上**验收通过**（候选档读到 `phase=selftest kind=register-bandwidth resource=0 bytes0=20000 bytes1=40000` 与配套的 direct／enqueue／queued 三行，两笔各自成飞、各自 ACK；对照档 45 条 RPMH／RSC 线缆行与 0147 逐字节相同，只多 7 条无条件直接派发行）；0148 那一轮在设备上证明的是**示意写错**（两条 rail 票被准入筛合法拒绝），不是队列有问题。
 
 ## 阶段目标与退出条件
 
@@ -401,7 +401,7 @@ adopted`）一条皆无。`--c3-04` 判这一环被拒：`the ownership row stil
 - **预期结果**：软件排队可用，仍不宣称多 TCS 并行吞吐。
 - **失败归属**：C3-05 enqueue／ordering／capacity；具体事务执行错误标记 executor phase。
 
-#### 实现与本地证据（C3-05 代码完成，0148 实机证明示意写错，0149 待机）
+#### 实现与证据（C3-05，0149 双默认树验收通过）
 
 **队列只是存储，不是策略**：`SweetAppsQueue.h/.cpp` 固定八槽、一个头、一个计数，加上 accepted／dispatched／high-water
 三个计数和入队时盖的序号；不分配、不加锁、不打印、不调 IOKit。`push()` 满了**拒绝**而不是丢最旧（同一资源的两票一旦折叠就没有
@@ -445,9 +445,21 @@ adopted`）一条皆无。`--c3-04` 判这一环被拒：`the ownership row stil
 同一份环里还有 51 条 `SWEET FG ACCESS … op=grant-wait`（燃料计整轮没等到授权位），它属于电池那个消费者，脚本只在显式
 `--fg-grant-timeout-observed` 下接受并把它单独记进报告，不当作本卡的通过或失败。
 
-**0149 待机**：补丁 `0252` 收上面两处（示意改 CN0 + `dispatchNext` 设当前），`mk16k-0149.sh` 的十五张镜像与 0148 同树同参数，
-候选镜像名改为 `rscqueuecn0`，文本门里那条 selftest 行换成新措辞；用 0148 的内核空跑一遍，脚本恰好在“缺 C3-05 要求”那条门失败——
-说明 ADT 推导、钉值与其余门禁都已跑到并被收紧。
+**0149 的两张环**（同一内核、两张默认树，唯一差别是 ADT 是否带 `sweet,rpmh-queue-selftest`）。补丁 `0252` 收上面两处；
+`mk16k-0149.sh` 的十五张镜像与 0148 同树同参数，候选镜像名改为 `rscqueuecn0`，文本门里那条 selftest 行换成新措辞，
+用 0148 的内核空跑一遍恰好在“缺 C3-05 要求”那条门失败，说明其余门禁都已跑到并被收紧。
+
+候选环（`sweetlog-0149-0.bin`）里，示意的三行按合同到齐：`phase=dispatch kind=register-bandwidth client=1 resource=0 token=2 seq=0
+depth=0 wait=direct` → `phase=enqueue … client=2 … token=3 seq=1 depth=1` → `phase=selftest resource=0 bytes0=20000 bytes1=40000
+client0=1 client1=2 token0=2 token1=3 result0=0 result1=0 depth=1 high-water=1`，随后 `token=2 CN0 ACTIVE ACK bytes/s=20000`，
+排队那笔在第一笔 ACK **之后**才以 `seq=1 depth=0 wait=queued` 派发，并回来 `token=3 CN0 ACTIVE ACK bytes/s=40000`：
+两趟都是真飞行（各自 `commands=1`、各自 fresh ACTIVE completion），间隔正好一个编码单位。**本次开机自己那串
+`ldoa14 → ldoa17 → ldoc3 → ldoa5 → display ARC corner=4 → CN0 300000000 ×2` 的资源、数值、顺序一条没变**，只是被这对示意插在中间；
+`executor=delegated tcs=0` 照旧。审计判决：11 条队列行、0 条 refuse、`truncated=0`、基线“非时钟 WARN/ERROR 与 b32 逐项相等”。
+
+对照环（`sweetlog-0149-1.bin`，执行器树、无属性）判**通过**：7 条 `seq=0 wait=direct`、0 条 selftest／enqueue／queued／queue-full；
+更硬的一条是**全部 45 条 `SWEET RPMH`／`SWEET RSC` 行与 0147 的候选环逐字节相同**——属性不装时，队列在线上一个字节也没改。
+两个环都各有百条左右 `SWEET FG ACCESS … op=grant-wait`（本机燃料计整轮等不到授权位），单列进 `fg_grant_timeout`，记在电池消费者账上。
 
 ### C3-06 完成排队请求的取消与客户端退出合同
 
