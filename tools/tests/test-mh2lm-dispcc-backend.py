@@ -82,6 +82,38 @@ disp_header = re.sub(r'^\s*(private|protected):\s*$', 'public:', disp_header, fl
 assert 'struct IOQcomDispCC' in disp_header
 
 raw = (arm/'IOQcomDispCC.cpp').read_text()
+
+# The harness compiles this file on top of a *struct* provider, which turns the
+# entry's default-private members public and hides access-control mistakes that
+# the kernel build catches (0155 did not link: registeredWrites was not
+# reachable through an entry pointer).  The shipped header is therefore read
+# with its own access labels, and every call this backend makes through the
+# entry is required to land in the entry's public section.
+def access_sections(text, cls):
+    body = text.split('class '+cls+' ', 1)[1].split('\n};', 1)[0]
+    body = body.split('{', 1)[1]
+    section, out = 'private', {}
+    for line in body.splitlines():
+        label = re.match(r'\s*(public|protected|private)\s*:\s*$', line)
+        if label:
+            section = label.group(1)
+            continue
+        for name in re.findall(r'(\w+)\s*\(', line):
+            out.setdefault(name, set()).add(section)
+    return out
+
+# The raw file: `header` above is already the struct the harness compiles.
+provider_access = access_sections((arm/'IOQcomClock.h').read_text(), 'IOQcomClockProvider')
+entry_calls = sorted(set(re.findall(r'\bentry\s*->\s*(\w+)\s*\(', raw)))
+assert entry_calls == ['registerController', 'registeredWrites', 'withdrawController'], entry_calls
+for name in entry_calls:
+    assert 'public' in provider_access.get(name, set()), (
+        "IOQcomDispCC calls the entry's %s(), which the shipped header does not "
+        "make public: the harness struct would hide that and the kernel build "
+        "would refuse it" % name)
+# And the cross-controller access prerequisite is the one thing this backend
+# declares but cannot verify alone: it must stay a declaration, not a probe.
+assert 'registerWrites' not in [n for n in entry_calls]
 # The card's zero-write claim is structural: the mapping is held for the
 # lifecycle and never resolved, so no load or store can exist at all.
 assert raw.count('getVirtualAddress')==0, raw.count('getVirtualAddress')

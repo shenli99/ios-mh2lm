@@ -135,10 +135,6 @@ class IOQcomClockProvider : public IOService {
  IOReturn admitInternal(IOQcomClockController *owner,uint32_t localID,const char *consumer,
   IOQcomClockInfo *info,uint32_t *reason,bool requirements,bool log);
  IOReturn checkDependenciesInternal(IOQcomClockHandle *handle,uint32_t *reason,bool log);
- /* Zero-write evidence: the sum reported by every registered backend and the
-  * number of registrations that produced it. */
- uint64_t registeredWrites(void);
-	unsigned registeredControllers(void);
 	/* C1-05 ledger. Fixed table, touched only under fLock; acquire is refused
 	 * when the resource's controller is not live, and a token belongs to the
 	 * registration generation it was granted under. */
@@ -167,6 +163,12 @@ public:
  static IOQcomClockProvider *publishedProvider(void);
  IOReturn registerController(IOQcomClockController *controller);
  IOReturn withdrawController(IOQcomClockController *controller);
+ /* Zero-write evidence, read by any backend that has to report the entry's
+  * own sum rather than its own opinion: the total every registered backend
+  * reports and how many registrations produced it. Both hold fLock only to
+  * collect retained controllers, so neither can run a backend under it. */
+ uint64_t registeredWrites(void);
+ unsigned registeredControllers(void);
  /* Resolve a consumer resource name through its sweet,clock-names /
  * sweet,clocks properties. NotFound: no such name/ID; NotReady: the named
  * controller is not registered (yet). No hardware access. */

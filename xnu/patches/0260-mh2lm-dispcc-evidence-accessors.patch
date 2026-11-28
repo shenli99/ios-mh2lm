@@ -1,0 +1,93 @@
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomClock.h b/dxb/xnu/iokit/Kernel/arm/IOQcomClock.h
+index c664989..8f01b38 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomClock.h
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomClock.h
+@@ -135,10 +135,6 @@ class IOQcomClockProvider : public IOService {
+  IOReturn admitInternal(IOQcomClockController *owner,uint32_t localID,const char *consumer,
+   IOQcomClockInfo *info,uint32_t *reason,bool requirements,bool log);
+  IOReturn checkDependenciesInternal(IOQcomClockHandle *handle,uint32_t *reason,bool log);
+- /* Zero-write evidence: the sum reported by every registered backend and the
+-  * number of registrations that produced it. */
+- uint64_t registeredWrites(void);
+-	unsigned registeredControllers(void);
+ 	/* C1-05 ledger. Fixed table, touched only under fLock; acquire is refused
+ 	 * when the resource's controller is not live, and a token belongs to the
+ 	 * registration generation it was granted under. */
+@@ -167,6 +163,12 @@ public:
+  static IOQcomClockProvider *publishedProvider(void);
+  IOReturn registerController(IOQcomClockController *controller);
+  IOReturn withdrawController(IOQcomClockController *controller);
++ /* Zero-write evidence, read by any backend that has to report the entry's
++  * own sum rather than its own opinion: the total every registered backend
++  * reports and how many registrations produced it. Both hold fLock only to
++  * collect retained controllers, so neither can run a backend under it. */
++ uint64_t registeredWrites(void);
++ unsigned registeredControllers(void);
+  /* Resolve a consumer resource name through its sweet,clock-names /
+  * sweet,clocks properties. NotFound: no such name/ID; NotReady: the named
+  * controller is not registered (yet). No hardware access. */
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.cpp b/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.cpp
+index 85a370f..f7db0a0 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.cpp
+@@ -314,4 +314,4 @@ IOQcomDispCC::copyClockName(uint32_t localID,char *buffer,unsigned size)
+ 	snprintf(buffer,size,"%s",entry->name);
+ 	return true;
+ }
+-#endif /* ARM64_BOARD_CONFIG_MH2LM */
+\ No newline at end of file
++#endif /* ARM64_BOARD_CONFIG_MH2LM */
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.h b/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.h
+index 5c1f62e..40d0f9c 100644
+--- a/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.h
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.h
+@@ -125,4 +125,4 @@ public:
+ };
+ 
+ #endif /* ARM64_BOARD_CONFIG_MH2LM */
+-#endif /* IOQCOM_DISPCC_H */
+\ No newline at end of file
++#endif /* IOQCOM_DISPCC_H */
+diff --git a/tools/tests/test-mh2lm-dispcc-backend.py b/tools/tests/test-mh2lm-dispcc-backend.py
+index 52a84c9..9086693 100644
+--- a/tools/tests/test-mh2lm-dispcc-backend.py
++++ b/tools/tests/test-mh2lm-dispcc-backend.py
+@@ -82,6 +82,38 @@ disp_header = re.sub(r'^\s*(private|protected):\s*$', 'public:', disp_header, fl
+ assert 'struct IOQcomDispCC' in disp_header
+ 
+ raw = (arm/'IOQcomDispCC.cpp').read_text()
++
++# The harness compiles this file on top of a *struct* provider, which turns the
++# entry's default-private members public and hides access-control mistakes that
++# the kernel build catches (0155 did not link: registeredWrites was not
++# reachable through an entry pointer).  The shipped header is therefore read
++# with its own access labels, and every call this backend makes through the
++# entry is required to land in the entry's public section.
++def access_sections(text, cls):
++    body = text.split('class '+cls+' ', 1)[1].split('\n};', 1)[0]
++    body = body.split('{', 1)[1]
++    section, out = 'private', {}
++    for line in body.splitlines():
++        label = re.match(r'\s*(public|protected|private)\s*:\s*$', line)
++        if label:
++            section = label.group(1)
++            continue
++        for name in re.findall(r'(\w+)\s*\(', line):
++            out.setdefault(name, set()).add(section)
++    return out
++
++# The raw file: `header` above is already the struct the harness compiles.
++provider_access = access_sections((arm/'IOQcomClock.h').read_text(), 'IOQcomClockProvider')
++entry_calls = sorted(set(re.findall(r'\bentry\s*->\s*(\w+)\s*\(', raw)))
++assert entry_calls == ['registerController', 'registeredWrites', 'withdrawController'], entry_calls
++for name in entry_calls:
++    assert 'public' in provider_access.get(name, set()), (
++        "IOQcomDispCC calls the entry's %s(), which the shipped header does not "
++        "make public: the harness struct would hide that and the kernel build "
++        "would refuse it" % name)
++# And the cross-controller access prerequisite is the one thing this backend
++# declares but cannot verify alone: it must stay a declaration, not a probe.
++assert 'registerWrites' not in [n for n in entry_calls]
+ # The card's zero-write claim is structural: the mapping is held for the
+ # lifecycle and never resolved, so no load or store can exist at all.
+ assert raw.count('getVirtualAddress')==0, raw.count('getVirtualAddress')
