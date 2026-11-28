@@ -636,6 +636,55 @@ C3-06 的环用 `--c3-05` 判被拒（它排三笔而那张卡说一笔）。
 - **预期结果**：调用者可区分 Pending／Complete／Failed／Uncertain；受损通道不会伪恢复。
 - **失败归属**：C3-07 attribution／state／quarantine；故障注入本身未命中则为证据不足。
 
+#### 0153 实机：验收通过（C3-07 关闭）
+
+`0256`／`0257` 的候选镜像 `boot-16k-0153-gpioirq-panel-pipeline-rsctransaction.img`（`9be6088b…`、35 545 088 字节）启动一次，
+环 `sweetlog-0153-0.bin`（`5f0c97fc…`、4 198 400 字节、3 959 行、未回卷、`flush_sequence=12`）在 SpringBoard 起来后一分钟内取到。
+九行窗口落在 2128–2141，逐字段：
+
+- `phase=dispatch … client=1 resource=0 token=2 seq=0 depth=0 wait=direct`——真实的 CN0 抬升，`base=0`、`target=20000`，
+  正好**一个编码单位**（`cn0Step() = (1*4+3)/4 * 20000`）；
+- `step=1 … token=2 generation=2 verdict=pending executed=1 retained=0 client=2 base=0 target=20000`——在飞的答案：
+  记录已经存在（`executed=1`）但还不是能查的样子（`retained=0`），这正是"答案没有被提前写下来"；
+- 第二笔 `dispatch … token=3`（把 boot 自己的值还回去，一次 no-write：数组已经在 telling 该值，所以不产生飞行）；
+- `step=2 … token=2 generation=2 verdict=complete executed=1 retained=1 other=0xe00002f0 unissued=0xe00002f0 next=3 rc=0`
+  ——退役后记录仍在；同一 token 的**另一代**与**从未签发过的 token** 都被 `kIOReturnNotFound` 拒（`0xe00002f0`），
+  自己的记录照常作答且 `rc=0`；
+- `step=3 … token=3 generation=0 verdict=complete executed=0 retained=1 client=2 first=2`——没到数组的提交同样留记录，
+  `generation=0` 就是"从未进入数组"这个事实本身，`first=2` 指回抬升那一笔；
+- `dispatch … token=4`（交回抬升的票，一次真实的零票）；
+- `step=4 … token=4 base=0 told=20000`——**交回不是补偿、不是回滚**：交出时数组 telling 的正是抬升要的值；
+- `phase=detach client=1 cancelled=0 depth=0 result=ok`（拥有者退出，什么也没带走）；
+- `step=5 … token=2 generation=2 verdict=complete retained=1 client=2 detach=0 exited=0 alien=0xe00002e2 told=0 late=0 quarantined=0`
+  ——拥有者的 id 走了之后记录仍然答得出；**另一个 id 被 `kIOReturnNotPermitted` 拒**（`0xe00002e2`）；全环 0 条
+  `stray`／`late`／`quarantine`／`refuse`。
+
+两个"分离"是这一卡的合同本身：`told=20000` 与 `step=1` 的 `target` 相等（交回的是自己的票，不是别人的），
+`step=5` 的 `told_after_exit=0` 回到 boot 自己的值（票交干净了）。`confirmed` 全程没有因在飞或不确定前进。
+
+`--c2-03 --c3-07` 判 **rc=0**；`console_rows`：1042 条 Sweet 行、最长 236 字节（`SWEET MDSS LINK`）、预算 254，
+本卡三行最紧 209／230／234 字节，一条都没越界；`executor=delegated`、45 条 RPMH／RSC 线缆行、既有 Rail／ARC／CN0 自然投票
+与完成行一条不变，`warn_inventory` 只有既有的 FB SCANOUT ×3 与 USB ×2，无新 kind、无 ERROR。
+
+**审计器由这一环纠正三处（工具侧，内核未改）**：
+
+1. 两个 `IOReturn` 常量**记错一族**。我按"列表顺序"把它们写成 `0xe00002c7`／`0xe00002bc`，而本树
+   `iokit/IOKit/IOReturn.h` 里 `kIOReturnNotFound = iokit_common_err(0x2f0)`、`kIOReturnNotPermitted = iokit_common_err(0x2e2)`，
+   设备打印的正是这两个。**内核一直是对的**：这卡第一次判定就停在这里（`step=2` 模板不匹配，`AssertionError: (2, [])`）。
+   常量的来源改成从 `IOReturn.h` 读，不再凭记忆。
+2. fixture 必须用 C 的 `%#x`。`rc=%#x` 在成功时打印 **`0`**，不是 `0x0`；合成环原先写 `0x0`，那条模板因此永远匹配不上真机。
+   `make-query-ring.py` 现在统一按 C 的形式重写零值，避免 fixture 与审计器互相印证一个设备产不出的环。
+3. 队列行命名的是**客户端行**，五种答案命名的是**消费 id**。0152 之前两者恰好相等（`id == slot + 1`），这一环第一次不等：
+   `dispatch`／`detach` 写 `client=1`，`step=1/3/5` 写 `client=2`。两者都对，是同一个客户端的两个名字，读起来却像矛盾。
+   现按"三条关于同一客户端的行必须指同一行"判（`raise_slot == handback_slot == detach_slot`），并要求两个名字都出现在报告里；
+   不要求 `id == slot + 1`，那是启动的属性不是卡的。新增反例 `detachslot`、`handbackslot`。
+
+`selftest-query-auditor.py` 现 **51 变体全 PASS**（46 条反例、4 条跨人格互拒、1 条正例）。
+
+**仍为 host-only 的三半**（如实记录，不声称硬件已验）：真实超时（这卡不改超时策略，只把状态暴露出来）、
+隔离分支（"受控软件诊断屏蔽本请求完成消费"未实施，`quarantine`／`refuse` 只有 fixture 与合成环覆盖）、
+以及第二次启动的复现性（同一镜像的第二环 `sweetlog-0153-1.bin` 待抓）。
+
 ### C3-08 保持一组命令的原子边界与顺序
 
 - **目标**：一个已知有序命令组能作为独立事务提交而不被拆散或重排。

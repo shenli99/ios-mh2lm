@@ -10601,4 +10601,32 @@ xnu 控制台把一行装进 `char str[SERIAL_CONS_BUF_SIZE]`（256 字节），
 `selftest-cancel-auditor.py` 现 26 变体全 PASS。教训：合成环只能证明断言自洽，**只有真环能证明断言与合同一致**——
 把演示的形状写进测试时，要照着驱动的第 3 步代码逐行走，而不是照着上一版断言写。
 
-C3 至此 **6/8**，下一张是 C3-07（超时／不确定／隔离状态）。
+**0153 实机结果（`0256`／`0257` 上验收通过，C3-07 关闭）**：镜像 `…-rsctransaction.img`（`9be6088b…`）启动一次，
+环 `sweetlog-0153-0.bin`（`5f0c97fc…`、3 959 行、未回卷）九行窗口在 2128–2141：
+
+- `dispatch … client=1 token=2 seq=0 depth=0 wait=direct`（`base=0 target=20000`，一个编码单位）；
+- `step=1 … token=2 generation=2 verdict=pending executed=1 retained=0 client=2`——飞行中：对象在、可查的样子不在；
+- `step=2 … token=2 generation=2 verdict=complete executed=1 retained=1 other=0xe00002f0 unissued=0xe00002f0 next=3 rc=0`
+  ——另一代与从未签发的 token 都是 `kIOReturnNotFound`，自己的记录 `rc=0`；
+- `step=3 … token=3 generation=0 verdict=complete executed=0 retained=1 client=2 first=2`——没进数组的提交也留记录；
+- `dispatch … token=4` 与 `step=4 … token=4 base=0 told=20000`——**交回不是补偿**，交出时数组 telling 的正是抬升值；
+- `detach client=1 cancelled=0 depth=0 result=ok`；
+- `step=5 … token=2 … client=2 detach=0 exited=0 alien=0xe00002e2 told=0 late=0 quarantined=0; answered after the client that owned it had left`
+  ——拥有者走了记录仍答得出，**别的 id 被 `kIOReturnNotPermitted` 拒**，全环无 stray／late／quarantine／refuse。
+
+`--c2-03 --c3-07` **rc=0**，`console_rows` 1042 行、最长 236、本卡三行 209／230／234 全在预算内；
+`executor=delegated`、45 条 RPMH／RSC 线缆行、既有自然投票与完成行一条不变，无新 WARN kind、无 ERROR。
+
+**这一环纠正了审计器三处，都是我的工具错、不是内核错**。其一，两个 `IOReturn` 常量记错一族：`kIOReturnNotFound` 是
+`iokit_common_err(0x2f0)`＝`0xe00002f0`、`kIOReturnNotPermitted` 是 `iokit_common_err(0x2e2)`＝`0xe00002e2`，本树
+`IOKit/IOReturn.h` 白纸黑字；我按"列表顺序"猜成 `0xc7`／`0xbc`，第一次判定就死在 `step=2`（`AssertionError: (2, [])`）。
+设备是对的，审计器不是——**常量从源码读，不从"应该差不多"读**。其二，`rc=%#x` 在成功时打印 `0` 不是 `0x0`（C 的 `%#x`
+对零不印前缀，Python 会印），合成环写 `0x0` 就等于钉了一条设备产不出的行，模板与真机永远不会相等；fixture 现在按 C 的形式重写零值。
+其三，队列行写的是**客户端行**、答案写的是**消费 id**：0152 之前两者恰好相等（`id == slot + 1`），0153 第一次不等
+（`dispatch`／`detach` 是 `client=1`，`step=1/3/5` 是 `client=2`）——都对，是同一个客户端的两个名字，读起来却像矛盾。
+现按身份判"三条关于同一客户端的行必须指同一行"（新增反例 `detachslot`、`handbackslot`），并**不**要求 `id == slot + 1`：
+那是这次启动的属性，不是卡的合同。教训与 0152 同一条的延伸：**断言要钉合同里说得出理由的关系，不要钉"恰好观察到的算术"**，
+否则下一次启动换个客户端顺序就红，红得还像内核错了。`selftest-query-auditor.py` 现 51 变体全 PASS。
+仍为 host-only：真实超时、隔离分支（未做受控故障注入）、以及第二环复现性（`sweetlog-0153-1.bin` 待抓）。
+
+C3 至此 **7/8**，下一张是 C3-08（一组命令的原子边界与顺序）。
