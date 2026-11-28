@@ -705,3 +705,62 @@ C3-06 的环用 `--c3-05` 判被拒（它排三笔而那张卡说一笔）。
 - **实机检验**：用已有获准命令组比对寄存器编程顺序和本次完成，整个组对应一个 token；不能仅观察最后一个资源值。
 - **预期结果**：为 VRM／BCM 的已知批次保留语义，不能吞掉控制／commit 命令。
 - **失败归属**：C3-08 group-layout／ordering／group-completion。
+
+#### 0154 实机：验收通过（C3-08 关闭）
+
+`0258` 的候选镜像 `boot-16k-0154-gpioirq-panel-pipeline-rscgroup.img`（`a20bd541…`、35 545 088 字节；
+kernel `a18946df…`、18 027 640 字节，`adt-command-group` `6f134dcb…`、24 060 字节）启动两次，两次都取到环：
+`sweetlog-0154-0.bin`（`d5adb061…`、4 198 400 字节、4 078 行、`flush_sequence=10`、未回卷）与
+`sweetlog-0154-1.bin`（`8c3ea156…`、4 059 行、`flush_sequence=16`、未回卷）。
+`--c2-03 --allow-baseline-drift --c3-08` 判 **rc=0**，两环的组证据逐字段相同。
+
+**先说这一轮最要紧的一条：它纠正了设计时的一句想当然。** 真正的上限不是身份给出的命令槽数，而是执行器那本
+被审查过的字账。`SweetRPMh.h` 里一个成员占 3 个字（`mv`／`mode`／`enable` 落在 `+0`／`+8`／`+4`），
+一次飞行自己另花 7 个字，账本 `kCapacity=20`，所以
+
+```
+limit = min(fNCPT, (kCapacity - 7) / 3)
+```
+
+设备上 `fNCPT=16`，`limit` 只有 **4**——生产组是 3 条，上限只比生产多一格。此前这个不等式靠一个字面量维持着，
+没人量过它。自检行把两个数一起打出来（`one`／`three` 是"一组一条"和"生产三条"的准入结果，`0` 即
+`kIOReturnSuccess`，`%#x` 对零打印 `0`）：
+
+- `phase=selftest ncpt=16 ledger=20 limit=4 one=0 three=0; the room binds, not the array`（110 字节）。
+
+组窗口（第一环 2134–2167，第二环同形、行号各差 1）逐字段：
+
+- `phase=dispatch kind=rail-vote client=0 resource=0 token=1 seq=0 depth=0 wait=direct`——队列放行这一组；
+- 三条成员行，**148／146／146 字节**，同一 token、`member=1/3 2/3 3/3`、`slot=0 1 2`、
+  地址 `0x42100 / 0x42108 / 0x42104`（`base+0 / +8 / +4`）、值 `0x708 / 0x7 / 0x1`（1800 mV、mode 7、enable 1）
+  ——**这三行就是写进那一个 TCS 的三条命令，以及它们的顺序**；
+- 首次飞行另打两行自身账目（`phase=line intid=37 owner=channel`、`executor=delegated tcs=0 commands=3`）；
+- `fresh ACTIVE completion tcs=0 commands=3 entries=0`——**一次中断退役三条命令**，不是三次；
+- `phase=done token=1 kind=rail-vote count=3 acked=3/3 wait=0x7 enable=0x7; batch complete, members separate`（130 字节）；
+- `token=1 ldoa14 ACTIVE ACK enable=1 mv=1800 mode=7`——ACK 的三个字与成员写的三个字逐个相等。
+
+另外三组同形：`0x41300`（ldoa17、3000 mV）、`0x41e00`（ldoc3、1200 mV）、`0x40b00`（ldoa5、880 mV），全部
+`acked=3/3`、`wait=0x7`。**只有多命令的 rail 票才是组**：同一启动的 `display-corner`（token=5）、
+`register-bandwidth` 与所有单命令票只打印 `commands=1` 的完成行，一条成员行也没有；全环 `GROUP` 行恰好
+4×4＋3＝19 条，其余 0 条。
+
+自检的三行落在首次退役的 ACK 之后（2143–2145）：摘要、拒绝、
+`phase=selftest count=5 limit=4 result=0xe00002c7 stored=0 tcs=none; refused, not split`（111 字节）。
+其中 `stored=0 tcs=none` 是两个真字段而非措辞：拒绝发生在**选 TCS 之前**，所以既没有半个批次，也没有槽位被占。
+`[ERROR] … kind=selftest-over count=5 limit=4 ncpt=16 ledger=20; refused whole, nothing written, no split`（141 字节）
+是全环**唯一**一条 ERROR 行——由属性 `sweet,rpmh-command-group` 主动摆出；属性不装时它一条也不会出现
+（0153 环作为对照仍被 `--c3-08` 判拒）。
+
+审计器侧（工具，未改内核）：`--c3-08` 现 **39 变体全 PASS**，且负例已改成**对设备自己那条环的单处改动**
+（删一行、复制一行、改一个字段、挪一行、把一行拉长），正例就是这一镜像的两条真环。这样"审计器会拒"指的是
+"会拒一条被改坏的真环"，而不是拒一条同形的假环。顺带修掉一处 fixture 自造的行：摘要里的零曾被写成 `one=0x0`，
+那是 C 的 `%#x` 产不出的形状；现在审计器按拼写拒绝它（变体 `zerohex`），不再只比数值。
+
+主机侧同轮：`tools/tests/test-mh2lm-rpmh-resources.py` 新增 3 个 C3-08 用例（容量边界、组内顺序、拒绝不落地），
+`tools/tests/test-mh2lm-mdss-adt.py` 覆盖新属性 `sweet,rpmh-command-group`（须与 `--rpmh-irq` 同用），
+在 `96cad55` 上全 PASS。
+
+**仍未验的一半**（如实记录）：这卡要求"批次接受／完成与每个命令状态区分"，而现在的完成是**一个事件**——
+`commands=3` 的一次退役只说明三条一起退了，不说明逐条状态；某条失败时整组算不成立（不拆开、不重试），
+但"某条失败"这条分支没有在硬件上出现过，只有 fixture 覆盖。"另一请求不能插入"是单飞所有权＋C3-05 串行准入的
+推论：环里能看到的是同一线程的顺序（成员行连续、退役只有一次），寄存器读回无法单独证明它。
