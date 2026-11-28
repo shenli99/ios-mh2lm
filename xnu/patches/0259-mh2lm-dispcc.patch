@@ -1,0 +1,1014 @@
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.cpp b/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.cpp
+new file mode 100644
+index 0000000..85a370f
+--- /dev/null
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.cpp
+@@ -0,0 +1,317 @@
++/* SM8150 DISPCC backend: the C6-01 read-only registration candidate.
++ *
++ * What this file does, in order: map the one declared window, verify the
++ * resolved physical address and the declared length against sm8150.dtsi,
++ * register the controller, and publish two descriptors plus the access
++ * prerequisite they both carry. It never derives a virtual base from the
++ * mapping, so there is no load and no store anywhere in this translation unit
++ * - the card's "初始化写计数为零" is a property of the code rather than a
++ * counter that could drift from it.
++ *
++ * Refusal attribution follows the card's own vocabulary: identity/property
++ * failures are phase=register, window failures are phase=map, and the
++ * cross-controller access prerequisite is phase=access.
++ *
++ * Nothing here is an opt-in: an image that carries the sweet,dispcc node gets
++ * these rows, and an image that does not gets none of them. There is no write
++ * gate to arm because there is no write path to gate. */
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++#include "IOQcomDispCC.h"
++#include <IOKit/IOLib.h>
++#include <libkern/c++/OSData.h>
++#include <string.h>
++#define SWEET_LOG_SINK IOLog
++#include "../../../bsd/dev/sweet_log_level.h"
++
++#define super IOQcomClockController
++
++OSDefineMetaClassAndStructors(IOQcomDispCC,IOQcomClockController);
++
++enum : unsigned { kIOQcomLogBuf=40 };
++
++/* A declared clock. parent[].localID carries, for fixed and unknown sources,
++ * the RCG parent-map selector the C6-02 decoder will match against
++ * CFG_SRC_SEL; it is never a clock identity and the admission walk ignores it
++ * for those sources. */
++struct DispClock {
++	const char *name;
++	uint32_t localID, kind, halt, capabilities, domain, accessDeps;
++	unsigned parents;
++	IOQcomClockParent parent[kIOQcomMaxParents];
++	uint32_t offset;
++	uint64_t corner[kIOQcomCornerCount];
++	bool pinned;
++};
++
++/* Both entries are the vendor dispcc-sm8150.c declarations, and neither is a
++ * guess:
++ *  - disp_cc_mdss_mdp_clk is a clk_branch2 at CBCR 0x200c with one enable bit,
++ *    halt_check BRANCH_HALT, no vdd_class (so no domain) and - unlike most
++ *    branch clocks - an explicit parent, disp_cc_mdss_mdp_clk_src.
++ *  - disp_cc_mdss_mdp_clk_src is the RCG at cmd_rcgr 0x20c8, hid_width 5,
++ *    parent_map disp_cc_parent_map_5 and vdd_class vdd_mm (CX).
++ *
++ * The register-access prerequisite is declared on both because it belongs to
++ * the block, not to one clock: sm8150.dtsi gives dispcc clock-names
++ * "cfg_ahb_clk" from GCC_DISP_AHB_CLK, so no register in this window can be
++ * read until GCC's branch is on. Declaring it makes the provider refuse the
++ * resource with detail=access on a tree whose GCC controller is missing,
++ * instead of handing out a handle into an unreachable window.
++ *
++ * capabilities carries QueryConfig only. QueryRate exists in the contract, and
++ * this candidate deliberately does not claim it: copyClockState answers
++ * Unsupported until C6-02 implements the decode, and advertising a rate this
++ * backend cannot report would be exactly the "能力虚报" the card forbids. */
++static const DispClock dispClocks[] = {
++	{ "disp_cc_mdss_mdp_clk", kIOQcomDispMdp, kIOQcomClockBranch, kIOQcomHaltCheck,
++	  kIOQcomCapQueryConfig, 0, 1u<<kIOQcomCCGCC, kIOQcomDispMdpParents,
++	  {{kIOQcomSourceLocal,kIOQcomCCDispCC,kIOQcomDispMdpSrc}},
++	  kIOQcomDispMdpEnableOffset, {0,0,0}, true },
++	{ "disp_cc_mdss_mdp_clk_src", kIOQcomDispMdpSrc, kIOQcomClockRCG, kIOQcomHaltDelay,
++	  kIOQcomCapQueryConfig, kIOQcomDomainCX, 1u<<kIOQcomCCGCC, kIOQcomDispMdpSrcParents,
++	  {{kIOQcomSourceXO,0,0},          /* P_BI_TCXO,            sel 0 */
++	   {kIOQcomSourceUnknown,0,1},     /* P_DISP_CC_PLL0_OUT_MAIN, sel 1 */
++	   {kIOQcomSourceUnknown,0,4},     /* P_DISP_CC_PLL1_OUT_MAIN, sel 4 */
++	   {kIOQcomSourceUnknown,0,5}},    /* P_DISP_CC_PLL1_OUT_EVEN, sel 5 */
++	  kIOQcomDispMdpSrcCmdOffset,
++	  {kIOQcomDispMdpSrcMinHz,kIOQcomDispMdpSrcLowerHz,kIOQcomDispMdpSrcLowHz}, false },
++};
++
++static const DispClock *
++dispEntry(uint32_t localID)
++{
++	for (unsigned i=0;i<sizeof dispClocks/sizeof dispClocks[0];i++) {
++		if (dispClocks[i].localID==localID) return &dispClocks[i];
++	}
++	return NULL;
++}
++
++/* planID=C6 rows name the controller as "dispcc" and a resource exactly as the
++ * provider spells one, "cc2:0x<localID>": a reader has to be able to join the
++ * C1 row for a clock to the C6 row that introduced it, and two spellings for
++ * one clock would make that a guess. */
++static void
++dispResource(char *buffer,unsigned size,uint32_t localID)
++{
++	if (localID) snprintf(buffer,size,"cc%u:0x%x",(unsigned)kIOQcomCCDispCC,localID);
++	else snprintf(buffer,size,"dispcc");
++}
++
++bool
++IOQcomDispCC::validateProperties(IOService *provider)
++{
++	if (!provider) return false;
++	/* Identity first: an ABI this driver does not know means the node was
++	 * written for a different candidate, and mapping its window to find out
++	 * how different would be the wrong order. */
++	OSData *abi=OSDynamicCast(OSData,provider->getProperty("sweet,dispcc-abi"));
++	if (!abi||abi->getLength()!=4||memcmp(abi->getBytesNoCopy(),"\1\0\0\0",4)) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C6 resource=dispcc phase=register result=%d detail=missing-dispcc-abi\n",
++		 kIOReturnBadArgument);
++		return false;
++	}
++	OSData *variant=OSDynamicCast(OSData,provider->getProperty("sweet,dispcc-variant"));
++	if (!variant||variant->getLength()!=4) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C6 resource=dispcc phase=register result=%d detail=missing-variant\n",
++		 kIOReturnBadArgument);
++		return false;
++	}
++	uint32_t observed=0;
++	memcpy(&observed,variant->getBytesNoCopy(),4);
++	if (observed!=kIOQcomDispVariantSm8150) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C6 resource=dispcc phase=register result=%d detail=variant-mismatch observed=%#x required=%#x\n",
++		 kIOReturnUnsupported,observed,(unsigned)kIOQcomDispVariantSm8150);
++		return false;
++	}
++	return true;
++}
++
++/* The mapping is the whole resource claim of this candidate: it proves the
++ * firmware translated this node's reg to the controller the vendor tree names,
++ * and it is the handle registration hands back to stop. No virtual base is
++ * taken here, so nothing that follows can reach the window by accident. */
++bool
++IOQcomDispCC::mapWindow(IOService *provider)
++{
++	fWindow.physical=kIOQcomDispWindowPhysical;
++	fWindow.length=0;
++	fWindow.map=provider?provider->mapDeviceMemoryWithIndex(0):NULL;
++	if (!fWindow.map) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C6 resource=dispcc phase=map result=%d detail=window-absent\n",
++		 kIOReturnNotReady);
++		return false;
++	}
++	uint64_t observed=fWindow.map->getPhysicalAddress();
++	uint64_t length=fWindow.map->getLength();
++	if (observed!=kIOQcomDispWindowPhysical) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C6 resource=dispcc phase=map result=%d detail=address-mismatch observed=%#llx required=%#llx\n",
++		 kIOReturnBadArgument,(unsigned long long)observed,
++		 (unsigned long long)kIOQcomDispWindowPhysical);
++		return false;
++	}
++	if (length<kIOQcomDispWindowLength) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C6 resource=dispcc phase=map result=%d detail=length-short observed=%#llx required=%#llx\n",
++		 kIOReturnBadArgument,(unsigned long long)length,
++		 (unsigned long long)kIOQcomDispWindowLength);
++		return false;
++	}
++	fWindow.length=length;
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C6 resource=dispcc phase=map result=0 physical=%#llx length=%#llx vbase=0\n",
++	 (unsigned long long)kIOQcomDispWindowPhysical,(unsigned long long)length);
++	return true;
++}
++
++void
++IOQcomDispCC::unmapWindow(void)
++{
++	OSSafeReleaseNULL(fWindow.map);
++	fWindow.length=0;
++	fMapped=false;
++}
++
++/* The access prerequisite is declared, not probed, and that is deliberate:
++ * the entry publishes itself and the GCC controller starts when IOKit gets to
++ * it, so a probe in this backend's start would report whatever the boot order
++ * happened to be - a false "dependency absent" on the exact boot where the
++ * dependency was a few milliseconds late. The provider owns the check: every
++ * admission of either resource walks accessDeps and refuses with
++ * detail=access, and the C1 listing prints the verdict in deps/depReason once
++ * both controllers are up. This candidate therefore prints the declaration it
++ * ships and leaves enforcement where it already lives. */
++void
++IOQcomDispCC::publishClocks(void)
++{
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C6 resource=dispcc phase=access result=0 declared=cc%u:0x0 bit=%#x gate=admission\n",
++	 (unsigned)kIOQcomCCGCC,(unsigned)(1u<<kIOQcomCCGCC));
++	for (unsigned i=0;i<sizeof dispClocks/sizeof dispClocks[0];i++) {
++		char resource[kIOQcomLogBuf];
++		dispResource(resource,sizeof resource,dispClocks[i].localID);
++		SWEET_LOG_INFO("SWEET CLOCK: planID=C6 resource=%s consumer=dispcc phase=clock kind=%u halt=%u caps=%#x parents=%u domain=%#x access=%#x offset=%#x pinned=%u\n",
++		 resource,dispClocks[i].kind,dispClocks[i].halt,dispClocks[i].capabilities,
++		 dispClocks[i].parents,dispClocks[i].domain,dispClocks[i].accessDeps,
++		 dispClocks[i].offset,dispClocks[i].pinned?1:0);
++	}
++}
++
++bool
++IOQcomDispCC::start(IOService *provider)
++{
++	if (fRegistered||fMapped) {
++		SWEET_LOG_WARN("SWEET CLOCK: planID=C6 resource=dispcc phase=register result=%d detail=already-started\n",
++		 kIOReturnBusy);
++		return false;
++	}
++	if (!provider||!super::start(provider)) return false;
++	if (!validateProperties(provider)) return false;
++	if (!mapWindow(provider)) {
++		unmapWindow();
++		return false;
++	}
++	fMapped=true;
++	/* The entry and this backend are independent IOServices; IOKit does not
++	 * order their start. Wait a bounded time for the entry to publish itself,
++	 * then refuse with a single line instead of registering into nothing. */
++	IOQcomClockProvider *entry=NULL;
++	for (unsigned i=0;i<kIOQcomDispProviderWaitTries;i++) {
++		entry=IOQcomClockProvider::publishedProvider();
++		if (entry) break;
++		IOSleep(kIOQcomDispProviderWaitMs);
++	}
++	if (!entry) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C6 resource=dispcc phase=register result=%d detail=provider-absent\n",
++		 kIOReturnNotReady);
++		unmapWindow();
++		return false;
++	}
++	IOReturn result=entry->registerController(this);
++	if (result!=kIOReturnSuccess) {
++		SWEET_LOG_ERROR("SWEET CLOCK: planID=C6 resource=dispcc phase=register result=%d detail=registration-refused\n",
++		 result);
++		unmapWindow();
++		return false;
++	}
++	fRegistered=true;
++	publishClocks();
++	/* One aggregate row, and the number it prints is the provider's own sum over
++	 * every registered backend, not this driver's opinion of itself. */
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C6 resource=dispcc phase=register result=0 controller=cc%u:0x0 clocks=%u writes=%llu\n",
++	 (unsigned)kIOQcomCCDispCC,(unsigned)kIOQcomDispClockCount,
++	 (unsigned long long)entry->registeredWrites());
++	return true;
++}
++
++void
++IOQcomDispCC::stop(IOService *provider)
++{
++	unsigned released=fMapped?1:0;
++	unsigned withdrawn=0;
++	if (fRegistered) {
++		IOQcomClockProvider *entry=IOQcomClockProvider::publishedProvider();
++		if (entry&&entry->withdrawController(this)==kIOReturnSuccess) withdrawn=1;
++		fRegistered=false;
++	}
++	unmapWindow();
++	SWEET_LOG_INFO("SWEET CLOCK: planID=C6 resource=dispcc phase=stop result=0 released=%u withdrawn=%u\n",
++	 released,withdrawn);
++	super::stop(provider);
++}
++
++void
++IOQcomDispCC::free(void)
++{
++	unmapWindow();
++	super::free();
++}
++
++uint32_t
++IOQcomDispCC::clockControllerID(void) const
++{
++	return kIOQcomCCDispCC;
++}
++
++IOReturn
++IOQcomDispCC::copyClockInfo(uint32_t localID,IOQcomClockInfo *info)
++{
++	if (!info) return kIOReturnBadArgument;
++	const DispClock *entry=dispEntry(localID);
++	if (!entry) return kIOReturnNotFound;
++	memset(info,0,sizeof *info);
++	info->controller=kIOQcomCCDispCC;
++	info->localID=entry->localID;
++	info->kind=entry->kind;
++	info->halt=entry->halt;
++	info->capabilities=entry->capabilities;
++	info->accessDeps=entry->accessDeps;
++	info->domain=entry->domain;
++	info->possibleCount=entry->parents;
++	for (unsigned i=0;i<entry->parents;i++) info->possible[i]=entry->parent[i];
++	for (unsigned i=0;i<kIOQcomCornerCount;i++) info->cornerMaxHz[i]=entry->corner[i];
++	info->pinned=entry->pinned;
++	/* Nothing in this candidate reads the window, so no enable bit was
++	 * observed. Setting this from a guess would make the first real decode
++	 * look like a confirmation of it. */
++	info->inheritedOn=false;
++	return kIOReturnSuccess;
++}
++
++/* C6-02 owns the decode. Until then the honest answer is Unsupported: the
++ * provider's QueryRate capability is not advertised either, so a consumer
++ * cannot be surprised by a rate this backend cannot state. */
++IOReturn
++IOQcomDispCC::copyClockState(uint32_t localID,IOQcomClockState *state)
++{
++	if (!state) return kIOReturnBadArgument;
++	if (!dispEntry(localID)) return kIOReturnNotFound;
++	return kIOReturnUnsupported;
++}
++
++bool
++IOQcomDispCC::copyClockName(uint32_t localID,char *buffer,unsigned size)
++{
++	if (!buffer||!size) return false;
++	const DispClock *entry=dispEntry(localID);
++	if (!entry) return false;
++	snprintf(buffer,size,"%s",entry->name);
++	return true;
++}
++#endif /* ARM64_BOARD_CONFIG_MH2LM */
+\ No newline at end of file
+diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.h b/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.h
+new file mode 100644
+index 0000000..5c1f62e
+--- /dev/null
++++ b/dxb/xnu/iokit/Kernel/arm/IOQcomDispCC.h
+@@ -0,0 +1,128 @@
++/* SM8150 DISPCC backend: the C6-01 read-only registration candidate.
++ *
++ * Contract of this candidate, in one place:
++ *  - It registers the display clock controller's identity and capability, and
++ *    nothing else: two declared resources (the MDSS MDP branch and the RCG it
++ *    selects from), each with the parent table, halt class, register-access
++ *    dependency and supply domain the vendor tables declare. No rate, no
++ *    parent selection and no gate state is claimed here, because this
++ *    candidate has not read a single register.
++ *  - It maps the vendor cc_base window once and validates the resolved
++ *    physical address and the declared length against sm8150.dtsi
++ *    (clock_dispcc reg = <0xaf00000 0x20000>, reg-names "cc_base"). The
++ *    mapping is kept as the registration's resource handle and is released on
++ *    stop. No virtual base is ever derived in this file, so there is no load
++ *    and no store to audit: "初始化写计数为零" is structural here rather than a
++ *    counter that could drift from the code.
++ *  - Every access to the block depends on somebody else's branch: sm8150.dtsi
++ *    gives dispcc clock-names "cfg_ahb_clk" / clocks <&clock_gcc
++ *    GCC_DISP_AHB_CLK>, and the display driver checks DISPCC_AHB_CBCR before
++ *    it touches the window. The descriptor declares that dependency on the GCC
++ *    controller and the provider's admission enforces it, refusing the
++ *    resource with detail=access while that controller is not registered: a
++ *    clock whose registers cannot be reached is reported unavailable, never
++ *    ready. The declaration is printed by start; it is deliberately not
++ *    re-probed there, because a start-time probe would report boot order
++ *    rather than the tree.
++ *  - The MDP source's parents are the vendor disp_cc_parent_map_5: TCXO is a
++ *    declared fixed source, the three PLL outputs are declared Unknown on
++ *    purpose. This candidate publishes no PLL resource, and an unknown parent
++ *    must make admission refuse instead of turning into a guessed Ready; the
++ *    RCG's supply domain is CX because the vendor table gives it vdd_mm, while
++ *    the branch declares no domain because its vendor entry has no vdd_class.
++ *  - copyClockState answers Unsupported. Rate/parent/gate decode is C6-02's
++ *    card, so QueryRate is not advertised either: a capability this candidate
++ *    cannot honour is not claimed.
++ *  - No write path exists: no enable, no disable, no reset, no PLL start. The
++ *    MDSS-owned branches keep their owner, and the backend never reads the
++ *    window, so the old writer's first handoff stays exactly as it was. */
++#ifndef IOQCOM_DISPCC_H
++#define IOQCOM_DISPCC_H
++
++#include "IOQcomClock.h"
++#include <IOKit/IOMemoryDescriptor.h>
++
++#if defined(ARM64_BOARD_CONFIG_MH2LM)
++
++/* The ADT ABI of this node: sweet,dispcc-abi 1 and the SoC variant word, the
++ * same shape sweet,gcc carries. A tree that states neither is refused instead
++ * of being treated as the only variant this driver knows. */
++enum : uint32_t { kIOQcomDispAbi=1, kIOQcomDispVariantSm8150=0x8150 };
++
++/* sm8150.dtsi: clock_dispcc reg = <0xaf00000 0x20000>. The 128 KiB window is
++ * the vendor's own cc_base range (it covers GDSC 0x3000 and the RSCC block at
++ * 0x4000 that the MDSS ledger reads); the display node maps the same pages, so
++ * this backend holds a read-only identity copy rather than a second writer. */
++enum : uint64_t {
++	kIOQcomDispWindowPhysical=0x0af00000ULL,
++	kIOQcomDispWindowLength=0x20000ULL,
++};
++
++/* Local IDs are this backend's identity space, not vendor clock IDs. The
++ * branch is the resource a consumer will ask for; the RCG is published as its
++ * parent so that parent is a real registration instead of an Unknown source
++ * hiding at the top of the walk. */
++enum : uint32_t {
++	kIOQcomDispMdp=1,        /* disp_cc_mdss_mdp_clk, CBCR 0x200c */
++	kIOQcomDispMdpSrc=2,     /* disp_cc_mdss_mdp_clk_src, RCG 0x20c8 */
++	kIOQcomDispClockCount=2,
++};
++
++/* The vendor register numbers these two identities name, kept here so the
++ * ring, the descriptor and dispcc-sm8150.c can be reconciled without a reader
++ * having to trust a comment. Nothing in this candidate dereferences them. */
++enum : uint32_t {
++	kIOQcomDispMdpEnableOffset=0x200c,
++	kIOQcomDispMdpSrcCmdOffset=0x20c8,
++};
++
++/* disp_cc_parent_map_5 has five entries and the descriptor table is four wide,
++ * so the test-PLL source (P_CORE_BI_PLL_TEST_SE, selector 7) is deliberately
++ * not declared: it is not a candidate for admission. The branch declares
++ * exactly one parent, its own source, because clk_branch2 has no parent_map at
++ * all - the parent of disp_cc_mdss_mdp_clk is spelled out in the vendor table
++ * (CLK_SET_RATE_PARENT, clk_branch2_ops). */
++enum : unsigned { kIOQcomDispMdpParents=1, kIOQcomDispMdpSrcVendorParents=5,
++	kIOQcomDispMdpSrcParents=kIOQcomMaxParents };
++
++/* The single source is the vendor RCG's vdd_class = &vdd_mm and its rate_max
++ * table (VDD_MIN/VDD_LOWER/VDD_LOW). These are ceilings the vendor states, not
++ * measured rates, and this candidate reports them as declarations only. */
++enum : uint64_t {
++	kIOQcomDispMdpSrcMinHz=19200000ULL,
++	kIOQcomDispMdpSrcLowerHz=171428571ULL,
++	kIOQcomDispMdpSrcLowHz=300000000ULL,
++};
++
++/* The entry and this backend are independent IOServices and IOKit does not
++ * order their start, so the provider is awaited for a bounded time and then
++ * named once in a single refusal row. */
++enum : unsigned { kIOQcomDispProviderWaitTries=200, kIOQcomDispProviderWaitMs=5 };
++
++class IOQcomDispCC : public IOQcomClockController {
++	OSDeclareDefaultStructors(IOQcomDispCC);
++	/* One window, one owner: the registration's resource handle. */
++	struct Window {
++		uint64_t physical;      /* expected resolved PA (ADT ranges applied) */
++		IOByteCount length;     /* observed length, reported as evidence */
++		IOMemoryMap *map;       /* owned mapping, released on stop/free */
++	};
++	Window fWindow;
++	bool fMapped;
++	bool fRegistered;
++	bool validateProperties(IOService *provider);
++	bool mapWindow(IOService *provider);
++	void unmapWindow(void);
++	void publishClocks(void);
++public:
++	uint32_t clockControllerID(void) const APPLE_KEXT_OVERRIDE;
++	IOReturn copyClockInfo(uint32_t localID,IOQcomClockInfo *info) APPLE_KEXT_OVERRIDE;
++	IOReturn copyClockState(uint32_t localID,IOQcomClockState *state) APPLE_KEXT_OVERRIDE;
++	bool copyClockName(uint32_t localID,char *buffer,unsigned size) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
++};
++
++#endif /* ARM64_BOARD_CONFIG_MH2LM */
++#endif /* IOQCOM_DISPCC_H */
+\ No newline at end of file
+diff --git a/dxb/xnu/iokit/KernelConfigTables.cpp b/dxb/xnu/iokit/KernelConfigTables.cpp
+index 676908f..d1a3662 100644
+--- a/dxb/xnu/iokit/KernelConfigTables.cpp
++++ b/dxb/xnu/iokit/KernelConfigTables.cpp
+@@ -77,6 +77,11 @@ const char * gIOKernelConfigTables =
+     "     'IONameMatch'     = 'sweet,gcc';"
+     "   },"
+     "   {"
++    "     'IOClass'         = IOQcomDispCC;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'sweet,dispcc';"
++    "   },"
++    "   {"
+     "     'IOClass'         = IOQcomRSCChannel;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+     "     'IONameMatch'     = 'sweet,rsc-channel';"
+diff --git a/dxb/xnu/iokit/conf/files.arm64 b/dxb/xnu/iokit/conf/files.arm64
+index a6d480a..620e4c8 100644
+--- a/dxb/xnu/iokit/conf/files.arm64
++++ b/dxb/xnu/iokit/conf/files.arm64
+@@ -40,6 +40,7 @@ iokit/Kernel/arm/SweetAppsQueue.cpp                               optional iokit
+ 
+ iokit/Kernel/arm/IOQcomClock.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/IOQcomGCC.cpp                                     optional iokitcpp
++iokit/Kernel/arm/IOQcomDispCC.cpp                                  optional iokitcpp
+ iokit/Kernel/arm/IOQcomRSC.cpp                                     optional iokitcpp
+ iokit/Kernel/arm/SweetRSCDatabase.cpp                              optional iokitcpp
+ 
+diff --git a/tools/mk-mh2lm-mdss-adt.py b/tools/mk-mh2lm-mdss-adt.py
+index 0622f4c..020b690 100644
+--- a/tools/mk-mh2lm-mdss-adt.py
++++ b/tools/mk-mh2lm-mdss-adt.py
+@@ -39,12 +39,18 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
+                 (0x03900000, 0x100000), (0x03d00000, 0x100000))
+ 
+ 
+-def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
++def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, dispcc=False, clock_measure=False,
+             clock_gate=False, clock_disable=False, clock_share=False,
+             clock_vote_probe=False, clock_vote=False, clock_reset=False,
+             rsc_channel=False, rsc_query=False, rsc_executor=False,
+             rpmh_queue_selftest=False, rpmh_queue_cancel=False,
+             rpmh_transaction_query=False, rpmh_command_group=False):
++    # C6-01 names the same physical page the display node already reaches. A page
++    # described as 0x3000 in one node and 0x20000 in the other would make the two
++    # descriptions of one block disagree, so the wider extent is requested too -
++    # and that has to happen before the display node's window list is built.
++    if dispcc:
++        display_resources = True
+     # C2-05 stands on both cards below it, so the two switch it needs are implied
+     # here rather than trusted to every caller: a share node without them would be
+     # refused at start and the image would carry a property that can do nothing.
+@@ -272,8 +278,8 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+     # refuses, and the generator will not emit one.
+     if clock_disable:
+         clock_gate = True
+-    if (clock_diag or gcc or clock_measure or clock_gate or clock_vote_probe
+-            or clock_reset):
++    if (clock_diag or gcc or dispcc or clock_measure or clock_gate
++            or clock_vote_probe or clock_reset):
+         clock_provider = True
+     gcc = gcc or clock_measure or clock_gate or clock_vote_probe or clock_reset
+     if clock_provider:
+@@ -336,6 +342,20 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+             # carried both would be refused at start.
+             gcc_node.props.append(('sweet,clock-reset', 0, struct.pack('<I', 1)))
+         arm.children.append(gcc_node)
++    if dispcc and not any(n.name == 'dispcc' for n in arm.children):
++        # C6: the read-only DISPCC backend. It carries the block's window so the
++        # backend can prove the resource it was matched against is the block the
++        # tree means, and it carries no window the display backend does not
++        # already have. Both nodes name the page on purpose: mdss is the writer
++        # (GDSC/clamp), this one never dereferences the mapping - the class has
++        # no store path at all - so the single-writer rule still holds.
++        dispcc_node = adt.Node()
++        dispcc_node.props = [('name', 0, b'dispcc\0'),
++                             ('compatible', 0, b'sweet,dispcc\0'),
++                             ('sweet,dispcc-abi', 0, struct.pack('<I', 1)),
++                             ('sweet,dispcc-variant', 0, struct.pack('<I', 0x8150)),
++                             ('reg', 0, encode(((0x0af00000, 0x20000),)))]
++        arm.children.append(dispcc_node)
+     return adt.serialize(root)
+ 
+ 
+@@ -352,6 +372,7 @@ if __name__ == '__main__':
+     parser.add_argument('--clock-provider', action='store_true', help='append the C1 clock entry; no window, no controller registration at boot')
+     parser.add_argument('--clock-diag', action='store_true', help='append the C1 clock entry with the diagnostic opt-in property (implies --clock-provider)')
+     parser.add_argument('--gcc', action='store_true', help='append the read-only C2 GCC backend windows and variant ABI (implies --clock-provider)')
++    parser.add_argument('--dispcc', action='store_true', help='append the read-only C6-01 DISPCC backend window and variant ABI (implies --clock-provider and --display-resources; maps the page, never stores)')
+     parser.add_argument('--clock-measure', action='store_true', help='append the C2-08 measurement opt-in gate (implies --gcc); the default image stays zero-write')
+     parser.add_argument('--clock-gate', action='store_true', help='append the C2-03 branch gate opt-in (implies --gcc); stores one enable bit and keeps it on until reboot')
+     parser.add_argument('--clock-disable', action='store_true', help='append the C2-04 verified disable opt-in (implies --clock-gate); withdraws that enable, proves the halt and releases the demand')
+@@ -372,7 +393,7 @@ if __name__ == '__main__':
+     source, destination = args.source, args.destination
+     if source.resolve() == destination.resolve():
+         sys.exit('output must differ from the baseline ADT')
+-    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
++    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.dispcc, args.clock_measure, args.clock_gate,
+                       args.clock_disable, args.clock_share, args.clock_vote_probe,
+                       args.clock_vote, args.clock_reset, args.rsc_channel,
+                       args.rsc_query, args.rsc_executor,
+diff --git a/tools/tests/test-mh2lm-dispcc-backend.py b/tools/tests/test-mh2lm-dispcc-backend.py
+new file mode 100644
+index 0000000..52a84c9
+--- /dev/null
++++ b/tools/tests/test-mh2lm-dispcc-backend.py
+@@ -0,0 +1,381 @@
++#!/usr/bin/env python3
++"""Actual C6-01 DISPCC backend against contract-only MMIO fixtures.
++Only OS allocation/locking/primitive and the device memory backing store are
++fixtures: the shipped IOQcomDispCC backend is compiled as written, on top of the
++shipped C1 provider. The structural checks pin the card's "初始化写计数为零" to
++the absence of an access path rather than to a counter, and the functional cases
++prove the identity/window refusals, the bounded entry wait, the two published
++descriptors, and - through the provider's own admission - that the access
++prerequisite is enforced and that the domain requirement is refused instead of
++reported ready.
++Usage: test-mh2lm-dispcc-backend.py EXTRACTED_XNU
++"""
++from pathlib import Path
++import os
++import re
++import subprocess
++import sys
++import tempfile
++
++if len(sys.argv) != 2:
++    sys.exit(__doc__)
++# Reuse the C1 provider fixture and its display-service primitives.
++existing = Path(__file__).with_name('test-mh2lm-clock-provider.py')
++ns = {'__file__': str(existing), '__name__': 'dispcc_fixture', '__doc__': ''}
++exec(compile(existing.read_text().split('arm = Path(sys.argv[1])')[0], str(existing), 'exec'), ns)
++
++prelude = ns['prelude']
++extra = ns['extra']
++# IOQcomDispCC.h declares its window with IOByteCount, exactly as IOQcomGCC.h
++# does; the kernel scalar typedefs are the only thing the fixture supplies.
++prelude += ('\nusing IOPhysicalAddress=uint64_t;using IOVirtualAddress=uintptr_t;'
++            'using IOByteCount=uint64_t;\n')
++
++# The diagnostic entry is a 5 s delayed thread call on the device. Queue it so a
++# case can register the real backend first and then run the listing, which is
++# the ordering the delay exists for.
++extra = extra.replace('''/* The diagnostic entry is armed with a delay so a backend that starts later
++   can register first; this fixture runs it in place, which is enough here. */
++static bool thread_call_enter_delayed(thread_call_t c,uint64_t){c->fn(c->p,nullptr);return false;}''',
++ '''/* The diagnostic entry is a 5 s delayed thread call on the device. Queue it
++   so a case can register a real backend first and then run the listing. */
++static bool thread_call_enter_delayed(thread_call_t c,uint64_t){delayedCalls.push_back(c);return false;}
++static void fireDelayed(){auto list=delayedCalls;delayedCalls.clear();
++ for(auto*c:list)c->fn(c->p,nullptr);}''')
++extra = extra.replace('static void thread_call_free(thread_call_t c){delete c;}',
++ '''/* queued delayed calls: freed entries must not stay reachable */
++static std::vector<FixtureThreadCall*> delayedCalls;
++static void thread_call_free(thread_call_t c){
++ delayedCalls.erase(std::remove(delayedCalls.begin(),delayedCalls.end(),c),delayedCalls.end());
++ delete c;}''')
++assert 'delayedCalls' in extra and 'delayedCalls.push_back' in extra and 'fireDelayed()' in extra
++
++# The DISPCC node's reg 0 resolves to the controller's own base, not to the GCC
++# page the positional fixture table happens to put at index 0: the backends are
++# matched by node name, so the address has to come from the node.
++prelude = prelude.replace('static unsigned badMap=99',
++ 'static bool dispccNub=false;\n'
++ '/* the ADT resource tree maps the whole declared window; the minimum tree maps\n'
++ ' * one page, and the card requires the declared length, so the default here is\n'
++ ' * the audited resource-mode length. */\n'
++ 'static size_t dispccLength=0x20000;\n'
++ 'static unsigned badMap=99', 1)
++prelude = prelude.replace('if(rpmhNub){assert(i<4);',
++ 'if(dispccNub){assert(i==0);m->customPA=0x0af00000;m->customSize=dispccLength;}\n'
++ 'if(rpmhNub){assert(i<4);', 1)
++assert 'dispccNub' in prelude
++
++arm = Path(sys.argv[1]).resolve()/'iokit/Kernel/arm'
++header = re.sub(r'^#include.*\n', '', (arm/'IOQcomClock.h').read_text(), flags=re.M)
++header = header.replace('class IOQcomClockHandle : public OSObject {',
++                        'struct IOQcomClockHandle : public OSObject {')
++header = header.replace('class IOQcomClockProvider : public IOService {',
++                        'struct IOQcomClockProvider : public IOService {')
++provider = re.sub(r'^#include.*\n', '', (arm/'IOQcomClock.cpp').read_text(), flags=re.M)
++
++disp_header = re.sub(r'^#include.*\n', '', (arm/'IOQcomDispCC.h').read_text(), flags=re.M)
++disp_header = disp_header.replace('class IOQcomDispCC : public IOQcomClockController {',
++                                  'struct IOQcomDispCC : public IOQcomClockController {')
++# The harness reads the mapping bookkeeping to prove the window is released, so
++# the section labels go; no member changes meaning.
++disp_header = re.sub(r'^\s*(private|protected):\s*$', 'public:', disp_header, flags=re.M)
++assert 'struct IOQcomDispCC' in disp_header
++
++raw = (arm/'IOQcomDispCC.cpp').read_text()
++# The card's zero-write claim is structural: the mapping is held for the
++# lifecycle and never resolved, so no load or store can exist at all.
++assert raw.count('getVirtualAddress')==0, raw.count('getVirtualAddress')
++assert raw.count('*(volatile')==0
++assert raw.count('readReg')==0 and raw.count('writeReg')==0
++assert raw.count('mapDeviceMemoryWithIndex(0)')==1
++assert raw.count('IOLockAlloc')==0          # nothing mutable after start
++# One declared window, one address, one length: the C0-02 numbers, not defaults.
++# The address is the header's constant and nowhere re-typed in the driver.
++assert raw.count('kIOQcomDispWindowPhysical')==4   # stored, compared, and both rows
++assert '0xaf00000' not in raw and '0x20000' not in raw
++assert 'kIOQcomDispWindowPhysical=0x0af00000ULL' in (arm/'IOQcomDispCC.h').read_text()
++assert 'kIOQcomDispWindowLength=0x20000ULL' in (arm/'IOQcomDispCC.h').read_text()
++assert 'fWindow.map=provider?provider->mapDeviceMemoryWithIndex(0):NULL;' in raw
++# Capability honesty: QueryRate exists in the contract and is deliberately not
++# advertised while copyClockState answers Unsupported.
++assert raw.count('kIOQcomCapQueryRate')==0
++assert raw.count('kIOQcomCapQueryConfig')==2   # one per descriptor, both identical
++assert 'return kIOReturnUnsupported;' in raw
++# The two opt-outs the ADT owns are read from the node, never assumed.
++assert raw.count('sweet,dispcc-abi')==1
++assert raw.count('sweet,dispcc-variant')==1
++assert raw.count('#if defined(ARM64_BOARD_CONFIG_MH2LM)')==1
++assert raw.count('#endif /* ARM64_BOARD_CONFIG_MH2LM */')==1
++disp_source = re.sub(r'^#include.*\n', '', raw, flags=re.M)
++# One translation unit each in the kernel, two in this harness: rename the
++# file-scope enum tag and reset the `super` macro between them.
++disp_source = disp_source.replace('kIOQcomLogBuf','kIOQcomDispLogBuf')
++disp_source = '#undef super\n' + disp_source
++
++tests = r'''
++static unsigned writes(){unsigned n=0;for(auto&o:trace)if(o.write)++n;return n;}
++static unsigned reads(){unsigned n=0;for(auto&o:trace)if(!o.write)++n;return n;}
++static bool logged(const std::string&n){for(auto&m:messages)if(m.find(n)!=std::string::npos)return true;return false;}
++static unsigned counted(const std::string&n){unsigned c=0;for(auto&m:messages)if(m.find(n)!=std::string::npos)++c;return c;}
++static void setData(IOService*s,const char*k,const void*p,unsigned n){
++ OSData*d=OSData::withBytes(p,n);assert(d);s->setProperty(k,d);d->release();
++}
++static IOService*bareNub(){
++ auto*n=fixtureAlloc<IOService>();uint32_t abi=1;setData(n,"sweet,clock-abi",&abi,4);return n;
++}
++/* The node the entry is matched against, optionally with the listing opt-in
++ * the C6 image arms. */
++static IOService*clockNub(bool diag=false){
++ auto*n=bareNub();if(diag){uint32_t one=1;setData(n,"sweet,clock-diag",&one,4);}return n;
++}
++static IOQcomClockProvider*startProvider(IOService*n){
++ auto*p=fixtureAlloc<IOQcomClockProvider>();assert(p->start(n));return p;
++}
++/* The ADT node this backend is matched against: sweet,dispcc with the ABI and
++ * the variant the generator emits. Everything is a knob so a refusal can be
++ * aimed at exactly one property. */
++/* The minimum a controller has to be for the access walk: an identity in
++ * range and the contract's three virtuals. */
++struct GccStandIn : IOQcomClockController {
++ uint32_t id=0;
++ uint32_t clockControllerID(void)const APPLE_KEXT_OVERRIDE{return id;}
++ IOReturn copyClockInfo(uint32_t,IOQcomClockInfo*)APPLE_KEXT_OVERRIDE{return kIOReturnNotFound;}
++ IOReturn copyClockState(uint32_t,IOQcomClockState*)APPLE_KEXT_OVERRIDE{return kIOReturnUnsupported;}
++};
++static IOService*dispNub(uint32_t variant=0x8150,bool abi=true,bool haveVariant=true,
++ unsigned abiLength=4,uint32_t abiValue=1){
++ dispccNub=true;
++ auto*n=fixtureAlloc<IOService>();
++ if(abi){setData(n,"sweet,dispcc-abi",&abiValue,abiLength);}
++ if(haveVariant)setData(n,"sweet,dispcc-variant",&variant,4);
++ return n;
++}
++/* A registered controller for the block DISPCC's registers depend on. The
++ * admission walk only needs it to exist; nothing here describes a clock or
++ * touches hardware, and no case enables anything through it. */
++static IOQcomClockController*gccStandIn(IOQcomClockProvider*p){
++ auto*c=fixtureAlloc<GccStandIn>();c->id=kIOQcomCCGCC;
++ assert(p->registerController(c)==kIOReturnSuccess);return c;
++}
++static IOQcomDispCC*startDisp(IOService*n){auto*d=fixtureAlloc<IOQcomDispCC>();assert(d->start(n));return d;}
++
++int main(){
++ assert(writes()==0&&reads()==0&&regs.empty());
++
++ /* -- identity refusals come before the window is even asked for ------ */
++ struct {const char*detail;uint32_t variant;bool abi;bool haveVariant;unsigned abiLength;uint32_t abiValue;} bad[]={
++  {"detail=missing-dispcc-abi",0x8150,false,true,4,1},
++  {"detail=missing-dispcc-abi",0x8150,true,true,3,1},
++  {"detail=missing-dispcc-abi",0x8150,true,true,4,2},
++  {"detail=missing-variant",   0x8150,true,false,4,1},
++  {"detail=variant-mismatch observed=0x8151 required=0x8150",0x8151,true,true,4,1},
++ };
++ for(auto&c:bad){
++  messages.clear();mapCalls.clear();
++  auto*n=dispNub(c.variant,c.abi,c.haveVariant,c.abiLength,c.abiValue);
++  auto*d=fixtureAlloc<IOQcomDispCC>();
++  assert(!d->start(n));
++  assert(logged(c.detail));
++  assert(counted("phase=register result=")==1);
++  assert(logged("planID=C6 resource=dispcc phase=register result="));
++  /* an identity this driver does not know is not a reason to map first */
++  assert(mapCalls.empty());
++  assert(!logged("phase=map"));
++  assert(!logged("phase=access")&&!logged("phase=clock"));
++  assert(!d->fMapped&&d->fWindow.map==nullptr);
++  d->release();n->release();assert(!live&&!liveMaps);
++ }
++
++ /* -- window refusals: absent, translated elsewhere, or short ---------- */
++ {
++  messages.clear();mapCalls.clear();
++  missingMap=0;
++  auto*n=dispNub();auto*d=fixtureAlloc<IOQcomDispCC>();
++  assert(!d->start(n));
++  assert(logged("phase=map result="+std::to_string(kIOReturnNotReady)+" detail=window-absent"));
++  assert(mapCalls.size()==1&&mapCalls[0]==0);
++  assert(!logged("phase=access")&&!logged("phase=register result=0"));
++  missingMap=99;
++  assert(!d->fMapped&&d->fWindow.map==nullptr);
++  d->release();n->release();assert(!live&&!liveMaps);
++ }
++ {
++  messages.clear();mapCalls.clear();
++  badMap=0;
++  auto*n=dispNub();auto*d=fixtureAlloc<IOQcomDispCC>();
++  assert(!d->start(n));
++  assert(logged("detail=address-mismatch observed=0xaf00004 required=0xaf00000"));
++  assert(!logged("phase=register result=0"));
++  badMap=99;
++  assert(!d->fMapped&&d->fWindow.map==nullptr);
++  d->release();n->release();assert(!live&&!liveMaps);
++ }
++ {
++  messages.clear();mapCalls.clear();
++  /* the minimum tree maps one page of the RSCC window; the card's resource is
++   * the whole declared 0x20000, so a short mapping is refused, not rounded. */
++  dispccLength=0x3000;
++  auto*n=dispNub();auto*d=fixtureAlloc<IOQcomDispCC>();
++  assert(!d->start(n));
++  assert(logged("detail=length-short observed=0x3000 required=0x20000"));
++  assert(!logged("phase=register result=0"));
++  dispccLength=0x20000;
++  assert(!d->fMapped&&d->fWindow.map==nullptr);
++  d->release();n->release();assert(!live&&!liveMaps);
++ }
++
++ /* -- the entry is a separate IOService: wait bounded, then say so ---- */
++ {
++  messages.clear();mapCalls.clear();
++  uint64_t before=fakeTicks;
++  auto*n=dispNub();auto*d=fixtureAlloc<IOQcomDispCC>();
++  assert(!d->start(n));
++  assert(logged("phase=register result="+std::to_string(kIOReturnNotReady)+" detail=provider-absent"));
++  /* 200 tries of 5 ms, and not one millisecond more: the wait is a budget, not
++   * a policy of retrying until something appears */
++  assert(fakeTicks-before==200u*5u*1000u);
++  assert(!logged("phase=register result=0")&&!logged("phase=clock"));
++  assert(!d->fMapped&&d->fWindow.map==nullptr);
++  d->release();n->release();assert(!live&&!liveMaps);
++ }
++
++ /* -- accepted: two descriptors, no write, no read, and a released map - */
++ {
++  messages.clear();mapCalls.clear();
++  auto*pn=clockNub();auto*p=startProvider(pn);
++  auto*n=dispNub();auto*d=startDisp(n);
++  assert(mapCalls.size()==1&&mapCalls[0]==0);
++  assert(logged("planID=C6 resource=dispcc phase=map result=0 physical=0xaf00000 length=0x20000 vbase=0"));
++  assert(logged("planID=C6 resource=dispcc phase=access result=0 declared=cc1:0x0 bit=0x2 gate=admission"));
++  /* domain=0, not domain=0x0: the driver prints %#x, and C prints a plain 0 for
++   * zero, so the ring cannot contain a zero with a 0x prefix. */
++  assert(logged("planID=C6 resource=cc2:0x1 consumer=dispcc phase=clock kind=1 halt=1 caps=0x1 "
++                "parents=1 domain=0 access=0x2 offset=0x200c pinned=1"));
++  assert(logged("planID=C6 resource=cc2:0x2 consumer=dispcc phase=clock kind=2 halt=2 caps=0x1 "
++                "parents=4 domain=0x1 access=0x2 offset=0x20c8 pinned=0"));
++  assert(logged("planID=C6 resource=dispcc phase=register result=0 controller=cc2:0x0 clocks=2 writes=0"));
++  /* the completion row is the last C6 row of the pass */
++  long last=-1;for(size_t i=0;i<messages.size();i++)if(messages[i].find("planID=C6")!=std::string::npos)last=(long)i;
++  assert(messages[last].find("phase=register result=0")!=std::string::npos);
++  /* and the whole pass touched no register at all, on either side */
++  assert(writes()==0&&reads()==0&&regs.empty());
++  assert(!logged("result=failed"));
++  assert(d->fMapped&&d->fWindow.map!=nullptr&&d->fRegistered);
++  IOMemoryMap*m=d->fWindow.map;
++  d->stop(n);
++  assert(logged("planID=C6 resource=dispcc phase=stop result=0 released=1 withdrawn=1"));
++  assert(d->fWindow.map==nullptr&&!d->fMapped&&!d->fRegistered);
++  /* the mapping object itself is gone, not merely forgotten */
++  assert(liveMaps==0);
++  (void)m;
++  /* a second stop is a no-op, and free() leaves nothing behind */
++  d->stop(n);
++  assert(logged("phase=stop result=0 released=0 withdrawn=0"));
++  d->release();n->release();
++  p->stop(pn);p->release();pn->release();
++  dispccNub=false;
++  assert(!live&&!liveMaps&&!logged("result=failed"));
++ }
++
++ /* -- the descriptors are what admission sees, and it is not lenient -- */
++ {
++  messages.clear();
++  auto*pn=clockNub(true);auto*p=startProvider(pn);
++  auto*n=dispNub();auto*d=startDisp(n);
++  IOQcomClockInfo info;uint32_t reason=kIOQcomDepReady;
++  /* without the block controller the resource is refused for its access
++   * prerequisite, and the row is the provider's, not this backend's */
++  IOReturn r=p->admit(d,kIOQcomDispMdp,"c6-test",&info,&reason,false);
++  assert(r==kIOReturnNotReady&&reason==kIOQcomDepAccess);
++  assert(logged("phase=admit result="+std::to_string(kIOReturnNotReady)+" detail=access-absent"));
++  /* with it registered the access half passes, and the walk stops exactly
++   * where this candidate cannot go yet: no domain owner exists for C6-01 */
++  auto*g=gccStandIn(p);
++  messages.clear();reason=kIOQcomDepReady;
++  assert(p->admit(d,kIOQcomDispMdp,"c6-test",&info,&reason,false)==kIOReturnSuccess);
++  assert(reason==kIOQcomDepReady);
++  assert(info.kind==kIOQcomClockBranch&&info.capabilities==kIOQcomCapQueryConfig);
++  assert(info.pinned&&info.possibleCount==1&&info.possible[0].source==kIOQcomSourceLocal);
++  assert(info.possible[0].controller==kIOQcomCCDispCC&&info.possible[0].localID==kIOQcomDispMdpSrc);
++  /* requirements=true admits the branch: it is structurally complete and its
++   * GCC dependency is present. The walk is structural - it proves each Local
++   * parent exists, is well formed and is not a cycle - and it does not re-judge
++   * the parent's domain, so the branch's admission is not the place the domain
++   * gate shows up. Asking for the RCG itself is, and that is the verdict C6-02
++   * and C6-03 have to respect instead of assuming the pair is ready. */
++  reason=kIOQcomDepReady;
++  assert(p->admit(d,kIOQcomDispMdp,"c6-test",&info,&reason,true)==kIOReturnSuccess);
++  assert(reason==kIOQcomDepReady);
++  reason=kIOQcomDepReady;
++  assert(p->admit(d,kIOQcomDispMdpSrc,"c6-test",&info,&reason,true)==kIOReturnNotReady);
++  assert(reason==kIOQcomDepDomain);
++  assert(logged("detail=domain-absent domain=0x1"));
++  /* the RCG declares the ceiling corners the vendor table names, and the rate
++   * it cannot decode is not offered */
++  IOQcomClockInfo src;reason=kIOQcomDepReady;
++  assert(p->admit(d,kIOQcomDispMdpSrc,"c6-test",&src,&reason,false)==kIOReturnSuccess);
++  assert(src.kind==kIOQcomClockRCG&&src.domain==kIOQcomDomainCX);
++  assert(src.cornerMaxHz[0]==19200000ull&&src.cornerMaxHz[1]==171428571ull&&
++         src.cornerMaxHz[2]==300000000ull);
++  assert((src.capabilities&kIOQcomCapQueryRate)==0);
++  assert(src.possibleCount==4);
++  assert(src.possible[0].source==kIOQcomSourceXO&&src.possible[0].localID==0);
++  /* the three PLL selectors carry no controller: they are RCG parent-map
++   * entries, and claiming one as a clock identity would invent an edge */
++  for(unsigned i=1;i<4;i++){
++   assert(src.possible[i].source==kIOQcomSourceUnknown);
++   assert(src.possible[i].controller==0);
++  }
++  /* unknown local IDs and states are refused, never defaulted */
++  IOQcomClockState state;
++  assert(d->copyClockInfo(3,&src)==kIOReturnNotFound);
++  assert(d->copyClockState(kIOQcomDispMdp,&state)==kIOReturnUnsupported);
++  assert(d->copyClockState(3,&state)==kIOReturnNotFound);
++  char name[48];assert(d->copyClockName(kIOQcomDispMdpSrc,name,sizeof name));
++  assert(std::string(name)=="disp_cc_mdss_mdp_clk_src");
++  assert(!d->copyClockName(9,name,sizeof name));
++
++  /* the opt-in listing prints this backend once the entry is up, and the row
++   * is the device's C6 evidence that the RCG cannot be reached without a
++   * domain owner */
++  messages.clear();
++  fireDelayed();
++  /* The listing names each clock the way copyClockName spells it, and its
++   * deps column is the runtime verdict on the pair: the branch is structurally
++   * ready, the RCG is not. Those two rows are what the C6-01 boot has to match
++   * on the device. */
++  assert(logged("planID=C1 resource=cc2:0x1 consumer=disp_cc_mdss_mdp_clk"));
++  assert(logged("planID=C1 resource=cc2:0x2 consumer=disp_cc_mdss_mdp_clk_src"));
++  assert(logged("phase=diag-done result=0 detail=zero-writes writes=0"));
++  assert(!logged("result=failed"));
++
++  d->stop(n);
++  p->withdrawController(g);
++  g->release();			/* the fixture's own reference to the stand-in */
++  d->release();n->release();
++  p->stop(pn);p->release();pn->release();
++  dispccNub=false;
++  assert(!live&&!liveMaps);
++ }
++ printf("PASS: actual C6-01 DISPCC backend; ADT-matched identity (abi/variant) refused "
++        "before the window is asked for, absent/address/short window refusals with clean "
++        "unmapping, the bounded entry wait, two published descriptors, one declaration row "
++        "for the GCC access prerequisite enforced by the provider's own admission walk, "
++        "the domain requirement refused rather than reported ready, and zero register "
++        "access by construction\n");
++ return 0;
++}
++'''
++
++with tempfile.TemporaryDirectory(prefix='mh2lm-dispcc-') as temp:
++    cpp = Path(temp)/'test.cpp'
++    cpp.write_text(prelude+extra+header+disp_header+provider+disp_source+tests)
++    if os.environ.get('MH2LM_KEEP_CPP'):
++        Path('/tmp/mh2lm-dispcc-kept.cpp').write_text(cpp.read_text())
++    binary = Path(temp)/'test'
++    subprocess.run([os.environ.get('CXX', 'clang++-19'), '-std=c++17', '-g', '-pthread',
++                    '-fsanitize=address,undefined', '-fno-omit-frame-pointer', str(cpp), '-o', str(binary)], check=True)
++    env = dict(os.environ)
++    env['ASAN_OPTIONS'] = env.get('ASAN_OPTIONS', '')+':detect_leaks=0'
++    env['UBSAN_OPTIONS'] = env.get('UBSAN_OPTIONS', '')+':halt_on_error=1:print_stacktrace=1'
++    subprocess.run([str(binary)], check=True, env=env, timeout=60)
+\ No newline at end of file
+diff --git a/tools/tests/test-mh2lm-mdss-adt.py b/tools/tests/test-mh2lm-mdss-adt.py
+index 7b1c79e..1081689 100644
+--- a/tools/tests/test-mh2lm-mdss-adt.py
++++ b/tools/tests/test-mh2lm-mdss-adt.py
+@@ -390,6 +390,61 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-gcc-adt-') as temp:
+     clock = next(n for n in arm.children if n.name == 'clock')
+     assert clock.prop('sweet,clock-diag') == struct.pack('<I', 1)
+     assert diagged != both.read_bytes()	# the diag bit and the node are separable
++# C6-01 asks for the DISPCC page on a node of its own. That page is already the
++# mdss node's second window, so the new node is not a second owner: it is a
++# second description of the same block, and the two have to agree on its extent
++# or the backend's "this is the page I was built for" check proves nothing.
++for opts in (dict(), dict(display_noc=True, panel_pins=True, panel_touch=True,
++                          panel_identity=True, rpmh_irq=True, panel_pipeline=True)):
++    plain = m.derive(blob, clock_provider=True, display_resources=True, **opts)
++    disped = m.derive(blob, dispcc=True, **opts)
++    tree, end = adt.parse(disped)
++    assert end == len(disped)
++    arm = tree.children[1]
++    node = next(n for n in arm.children if n.name == 'dispcc')
++    assert node.prop('compatible') == b'sweet,dispcc\0'
++    assert node.prop('sweet,dispcc-abi') == struct.pack('<I', 1)
++    assert node.prop('sweet,dispcc-variant') == struct.pack('<I', 0x8150)
++    assert node.children == []
++    addr, size = struct.unpack('<QQ', node.prop('reg'))
++    assert (addr + m.SOC_BASE, size) == (0x0af00000, 0x20000)
++    mdss = next(n for n in arm.children if n.name == 'mdss')
++    mreg = struct.unpack('<%dQ' % (len(mdss.prop('reg')) // 8), mdss.prop('reg'))
++    assert (mreg[2] + m.SOC_BASE, mreg[3]) == (0x0af00000, 0x20000)
++    order = [n.name for n in arm.children]
++    assert order.index('clock') + 1 == order.index('dispcc')
++    arm.children = [n for n in arm.children if n.name != 'dispcc']
++    assert adt.serialize(tree) == plain
++# Asking for the backend asks for the entry it registers with, and for the
++# extent that makes the two descriptions of the block agree.
++assert m.derive(blob, dispcc=True) == m.derive(blob, clock_provider=True,
++                                               display_resources=True, dispcc=True)
++assert m.derive(blob, dispcc=True) != m.derive(blob, clock_provider=True,
++                                               display_resources=True)
++assert not any(n.name == 'dispcc'
++               for n in adt.parse(m.derive(blob, display_resources=True))[0].children[1].children)
++assert not any(n.name == 'dispcc'
++               for n in adt.parse(m.derive(blob, gcc=True))[0].children[1].children)
++with tempfile.TemporaryDirectory(prefix='mh2lm-dispcc-adt-') as temp:
++    source, output = Path(temp)/'base.adt', Path(temp)/'dispcc.adt'
++    source.write_bytes(blob)
++    subprocess.run([sys.executable, str(Path(m.__file__)), '--dispcc',
++                    str(source), str(output)], check=True)
++    assert output.read_bytes() == m.derive(blob, dispcc=True)
++    assert source.read_bytes() == blob
++    both = Path(temp)/'both.adt'
++    subprocess.run([sys.executable, str(Path(m.__file__)), '--dispcc', '--clock-diag',
++                    str(source), str(both)], check=True)
++    assert both.read_bytes() == m.derive(blob, dispcc=True, clock_diag=True)
++    tree, end = adt.parse(both.read_bytes())
++    assert end == len(both.read_bytes())
++    arm = tree.children[1]
++    clock = next(n for n in arm.children if n.name == 'clock')
++    assert clock.prop('sweet,clock-diag') == struct.pack('<I', 1)
++    assert any(n.name == 'dispcc' for n in arm.children)
++print('PASS: C6-01 DISPCC node is opt-in, names the page the display node already '
++      'uses with the same extent, and is byte-restorable')
++
+ # C2-08 writes hardware for the first time, so the measurement request is a
+ # property on the GCC node: absent from every earlier image, removable byte for
+ # byte, and never implied by the window request alone.

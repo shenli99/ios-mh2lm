@@ -390,6 +390,61 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-gcc-adt-') as temp:
     clock = next(n for n in arm.children if n.name == 'clock')
     assert clock.prop('sweet,clock-diag') == struct.pack('<I', 1)
     assert diagged != both.read_bytes()	# the diag bit and the node are separable
+# C6-01 asks for the DISPCC page on a node of its own. That page is already the
+# mdss node's second window, so the new node is not a second owner: it is a
+# second description of the same block, and the two have to agree on its extent
+# or the backend's "this is the page I was built for" check proves nothing.
+for opts in (dict(), dict(display_noc=True, panel_pins=True, panel_touch=True,
+                          panel_identity=True, rpmh_irq=True, panel_pipeline=True)):
+    plain = m.derive(blob, clock_provider=True, display_resources=True, **opts)
+    disped = m.derive(blob, dispcc=True, **opts)
+    tree, end = adt.parse(disped)
+    assert end == len(disped)
+    arm = tree.children[1]
+    node = next(n for n in arm.children if n.name == 'dispcc')
+    assert node.prop('compatible') == b'sweet,dispcc\0'
+    assert node.prop('sweet,dispcc-abi') == struct.pack('<I', 1)
+    assert node.prop('sweet,dispcc-variant') == struct.pack('<I', 0x8150)
+    assert node.children == []
+    addr, size = struct.unpack('<QQ', node.prop('reg'))
+    assert (addr + m.SOC_BASE, size) == (0x0af00000, 0x20000)
+    mdss = next(n for n in arm.children if n.name == 'mdss')
+    mreg = struct.unpack('<%dQ' % (len(mdss.prop('reg')) // 8), mdss.prop('reg'))
+    assert (mreg[2] + m.SOC_BASE, mreg[3]) == (0x0af00000, 0x20000)
+    order = [n.name for n in arm.children]
+    assert order.index('clock') + 1 == order.index('dispcc')
+    arm.children = [n for n in arm.children if n.name != 'dispcc']
+    assert adt.serialize(tree) == plain
+# Asking for the backend asks for the entry it registers with, and for the
+# extent that makes the two descriptions of the block agree.
+assert m.derive(blob, dispcc=True) == m.derive(blob, clock_provider=True,
+                                               display_resources=True, dispcc=True)
+assert m.derive(blob, dispcc=True) != m.derive(blob, clock_provider=True,
+                                               display_resources=True)
+assert not any(n.name == 'dispcc'
+               for n in adt.parse(m.derive(blob, display_resources=True))[0].children[1].children)
+assert not any(n.name == 'dispcc'
+               for n in adt.parse(m.derive(blob, gcc=True))[0].children[1].children)
+with tempfile.TemporaryDirectory(prefix='mh2lm-dispcc-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'dispcc.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--dispcc',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == m.derive(blob, dispcc=True)
+    assert source.read_bytes() == blob
+    both = Path(temp)/'both.adt'
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--dispcc', '--clock-diag',
+                    str(source), str(both)], check=True)
+    assert both.read_bytes() == m.derive(blob, dispcc=True, clock_diag=True)
+    tree, end = adt.parse(both.read_bytes())
+    assert end == len(both.read_bytes())
+    arm = tree.children[1]
+    clock = next(n for n in arm.children if n.name == 'clock')
+    assert clock.prop('sweet,clock-diag') == struct.pack('<I', 1)
+    assert any(n.name == 'dispcc' for n in arm.children)
+print('PASS: C6-01 DISPCC node is opt-in, names the page the display node already '
+      'uses with the same extent, and is byte-restorable')
+
 # C2-08 writes hardware for the first time, so the measurement request is a
 # property on the GCC node: absent from every earlier image, removable byte for
 # byte, and never implied by the window request alone.

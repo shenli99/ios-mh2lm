@@ -39,12 +39,18 @@ TLMM_WINDOWS = ((0x03100000, 0x100000), (0x03500000, 0x100000),
                 (0x03900000, 0x100000), (0x03d00000, 0x100000))
 
 
-def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, clock_measure=False,
+def derive(blob, irq_preflight=False, display_resources=False, display_noc=False, panel_pins=False, panel_touch=False, panel_identity=False, rpmh_irq=False, panel_pipeline=False, clock_provider=False, clock_diag=False, gcc=False, dispcc=False, clock_measure=False,
             clock_gate=False, clock_disable=False, clock_share=False,
             clock_vote_probe=False, clock_vote=False, clock_reset=False,
             rsc_channel=False, rsc_query=False, rsc_executor=False,
             rpmh_queue_selftest=False, rpmh_queue_cancel=False,
             rpmh_transaction_query=False, rpmh_command_group=False):
+    # C6-01 names the same physical page the display node already reaches. A page
+    # described as 0x3000 in one node and 0x20000 in the other would make the two
+    # descriptions of one block disagree, so the wider extent is requested too -
+    # and that has to happen before the display node's window list is built.
+    if dispcc:
+        display_resources = True
     # C2-05 stands on both cards below it, so the two switch it needs are implied
     # here rather than trusted to every caller: a share node without them would be
     # refused at start and the image would carry a property that can do nothing.
@@ -272,8 +278,8 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
     # refuses, and the generator will not emit one.
     if clock_disable:
         clock_gate = True
-    if (clock_diag or gcc or clock_measure or clock_gate or clock_vote_probe
-            or clock_reset):
+    if (clock_diag or gcc or dispcc or clock_measure or clock_gate
+            or clock_vote_probe or clock_reset):
         clock_provider = True
     gcc = gcc or clock_measure or clock_gate or clock_vote_probe or clock_reset
     if clock_provider:
@@ -336,6 +342,20 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             # carried both would be refused at start.
             gcc_node.props.append(('sweet,clock-reset', 0, struct.pack('<I', 1)))
         arm.children.append(gcc_node)
+    if dispcc and not any(n.name == 'dispcc' for n in arm.children):
+        # C6: the read-only DISPCC backend. It carries the block's window so the
+        # backend can prove the resource it was matched against is the block the
+        # tree means, and it carries no window the display backend does not
+        # already have. Both nodes name the page on purpose: mdss is the writer
+        # (GDSC/clamp), this one never dereferences the mapping - the class has
+        # no store path at all - so the single-writer rule still holds.
+        dispcc_node = adt.Node()
+        dispcc_node.props = [('name', 0, b'dispcc\0'),
+                             ('compatible', 0, b'sweet,dispcc\0'),
+                             ('sweet,dispcc-abi', 0, struct.pack('<I', 1)),
+                             ('sweet,dispcc-variant', 0, struct.pack('<I', 0x8150)),
+                             ('reg', 0, encode(((0x0af00000, 0x20000),)))]
+        arm.children.append(dispcc_node)
     return adt.serialize(root)
 
 
@@ -352,6 +372,7 @@ if __name__ == '__main__':
     parser.add_argument('--clock-provider', action='store_true', help='append the C1 clock entry; no window, no controller registration at boot')
     parser.add_argument('--clock-diag', action='store_true', help='append the C1 clock entry with the diagnostic opt-in property (implies --clock-provider)')
     parser.add_argument('--gcc', action='store_true', help='append the read-only C2 GCC backend windows and variant ABI (implies --clock-provider)')
+    parser.add_argument('--dispcc', action='store_true', help='append the read-only C6-01 DISPCC backend window and variant ABI (implies --clock-provider and --display-resources; maps the page, never stores)')
     parser.add_argument('--clock-measure', action='store_true', help='append the C2-08 measurement opt-in gate (implies --gcc); the default image stays zero-write')
     parser.add_argument('--clock-gate', action='store_true', help='append the C2-03 branch gate opt-in (implies --gcc); stores one enable bit and keeps it on until reboot')
     parser.add_argument('--clock-disable', action='store_true', help='append the C2-04 verified disable opt-in (implies --clock-gate); withdraws that enable, proves the halt and releases the demand')
@@ -372,7 +393,7 @@ if __name__ == '__main__':
     source, destination = args.source, args.destination
     if source.resolve() == destination.resolve():
         sys.exit('output must differ from the baseline ADT')
-    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.clock_measure, args.clock_gate,
+    destination.write_bytes(derive(source.read_bytes(), args.irq_preflight, args.display_resources, args.display_noc, args.panel_pins, args.panel_touch, args.panel_identity, args.rpmh_irq, args.panel_pipeline, args.clock_provider, args.clock_diag, args.gcc, args.dispcc, args.clock_measure, args.clock_gate,
                       args.clock_disable, args.clock_share, args.clock_vote_probe,
                       args.clock_vote, args.clock_reset, args.rsc_channel,
                       args.rsc_query, args.rsc_executor,
