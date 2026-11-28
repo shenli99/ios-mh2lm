@@ -1,6 +1,6 @@
 # C3：apps RSC 公共事务通道
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 已在 0147 的**双默认树**上**验收通过**（委派档 `executor=delegated … hardware-owner=IOQcomRSCChannel`、交接四行按序到齐；对照档 `executor=module … hardware-owner=SweetRPMh`、verdict 与 0143 逐字段相同）；C3-04b 暂缓（无需求）；C3-05 已在 0149 的**双默认树**上**验收通过**（候选档读到 `phase=selftest kind=register-bandwidth resource=0 bytes0=20000 bytes1=40000` 与配套的 direct／enqueue／queued 三行，两笔各自成飞、各自 ACK；对照档 45 条 RPMH／RSC 线缆行与 0147 逐字节相同，只多 7 条无条件直接派发行）；0148 那一轮在设备上证明的是**示意写错**（两条 rail 票被准入筛合法拒绝），不是队列有问题。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 已在 0147 的**双默认树**上**验收通过**（委派档 `executor=delegated … hardware-owner=IOQcomRSCChannel`、交接四行按序到齐；对照档 `executor=module … hardware-owner=SweetRPMh`、verdict 与 0143 逐字段相同）；C3-04b 暂缓（无需求）；C3-05 已在 0149 的**双默认树**上**验收通过**（候选档读到 `phase=selftest kind=register-bandwidth resource=0 bytes0=20000 bytes1=40000` 与配套的 direct／enqueue／queued 三行，两笔各自成飞、各自 ACK；对照档 45 条 RPMH／RSC 线缆行与 0147 逐字节相同，只多 7 条无条件直接派发行）；0148 那一轮在设备上证明的是**示意写错**（两条 rail 票被准入筛合法拒绝），不是队列有问题。C3-06 代码、宿主证据、审计器与包门禁已完成（0150 待实机复核）：排队中的请求可由持有者或退出客户端撤回，撤回既不是完成也不是硬件回滚，把 CN0 降回 0 由一笔真投票完成而不是撤掉任何人的账本。
 
 ## 阶段目标与退出条件
 
@@ -470,6 +470,73 @@ client0=1 client1=2 token0=2 token1=3 result0=0 result1=0 depth=1 high-water=1`�
 - **实机检验**：受控诊断客户端在 B 排队期间退出，B 无写事件；已允许的 A 正常完成。真实 provider 热终止若不可触发，注明仅 host 证据。
 - **预期结果**：一个请求的取消不会撤掉其他客户端票，也不会提前回收在途存储。
 - **失败归属**：C3-06 cancel／detach／lifetime。
+
+#### 实现与本地证据（C3-06 代码与宿主证据完成，待 0150 实机）
+
+**取消只对尚未执行的请求成立。** 这半句决定了整张卡的形状：队列里的记录属于"还没跑"，`fCurrent` 属于"已经在跑"。
+`cancelWaiting(client,token,why)` 先在记录还在队里时结算归属——别人的等待回 `detail=not-owner` 加 `kIOReturnNotPermitted`，
+不属于自己的 token 不动队列顺序——再让记录出队、置 `Failed(3)`/`kIOReturnAborted`，打一行 `phase=cancel … result=ok why=%s`。
+已经被取出的 token 走另一条：`detail=already-triggered` 加 `kIOReturnBusy`，**不**打断飞行、不撤回任何票，
+因为"停掉半个事务"正是本设计没有的 rollback（共享约束 3.5）。
+
+**退出把"还在等"的一并带走，但先结算全部拒绝理由。** `detachClient()` 的四个前检查（`in-flight`／`rail-vote-retained`／
+`display-vote-retained`／`register-vote-retained`）全部排在任何撤销之前，回 `Busy` 时客户端与它的等待记录**一个字段都不变**；
+只有确定要成功的退出才调 `cancelClientQueue(client,"exit")`，把该客户端的新→旧逐条取出、各自一行、各自 token，
+再从 `fClients[]` 抹掉身份。`phase=detach client=%u cancelled=%u depth=%u result=ok` 里的 `cancelled` 就是这批条数。
+顺序反过来的写法（先抹身份再撤记录）会让派发器摸到一个已释放的槽，这正是卡里"释放对象后无访问"要挡的那件事。
+
+**把数组降下来是票，不是撤销。** `withdrawRegisterVote()` 只改账本：只有当**别的客户端**的生效票还等于被撤回的那个值
+（`others==told`）时才允许，否则 `would-change-hardware` + `kIOReturnNotPermitted`，且什么都不写；
+`held==0` 是 `detail=no-vote` + `kIOReturnNotFound`。成功行是 `previous=… aggregate=… others=… hardware=unchanged`。
+所以"把 CN0 回到 0"必须由某一笔**真投票**来做——示意里那笔来自已完成请求自己的客户端，`told` 取调用前一刻的
+`fRegisterAggregate`（它在 `finish()` 里才前进，不在 launch 时），因此 `told` 与三笔里第一笔的字节率相等。
+
+**存储层**：`SweetAppsQueue` 新增 `cancel(token,&removed)`／`cancelClient(client,out,cap)`／`cancelled()`／`findToken()`；
+两条路径都把记录从数组里移出（后面元素的顺序不变），并计入 `fCancelled`，与派发计数分开记账；
+`cancelClient` 按新→旧顺序写调用者的缓冲、超过容量就只写到容量为止但**全部出队**（调用者拿到的条数以返回值为准，
+`detach` 的 `cancelled` 即此值）。`kSweetAppsQueueCapacity=8` 不变。
+
+**示意图是三个消费者，不是两个。** 三笔 CN0 票各差一个编码单位（`base+3*step`／`+4*step`／`+5*step`，`step=cn0Step()=20000`，
+`base=fRegisterAggregate`），第一笔直接飞、后两笔排队（`depth=2`、`high-water=2`）。第一笔完成后数组由它的票持有，
+后两笔的账本条目才**可以**被撤回（`others==told` 成立），于是两种撤销各走一条：`fSelfClients[0..1]` 的账本条目由示意自己撤回，
+`b1` 由调用者取消、`b2` 由退出带走。为什么必须是三笔：两笔时第一笔完成即把数组交回给出示意的第二笔，撤回它自己那笔会立刻
+变成 `would-change-hardware`；三笔让"已完成的票持有数组、后面两笔只是账本"成立，撤销因此是纯账本操作。
+六行按序到齐：`phase=cancel-selftest kind=register-bandwidth … depth=2 high-water=2; first in flight, two waiting` →
+两行 `phase=withdraw … hardware=unchanged` → `phase=cancel … why=caller` → `phase=detach … cancelled=1 … why=exit` 那一批
+→ `phase=cancel-selftest step=2 result=ok …` → 真实的降票 `phase=dispatch … wait=direct` → `step=3 result=ok`（`aggregate=0 owned=1 depth=0 cancelled=2`）。
+`owned=1` 是"这一趟启动拥有过数组"的意思（第一笔完成时置位、从不清理），它也是那笔降到 0 的请求**真的**会飞行的原因
+（`noWrite` 只在 `!target && !fRegisterOwned` 或 `fRegisterOwned && target==fRegisterAggregate` 时成立）。
+
+**宿主证据**：`tools/tests/test-mh2lm-apps-queue.py` 增补按 token 撤（队首／队尾／不存在／零／已派发）与按客户端撤
+（只撤自己的、新→旧、缓冲不足仍全部出队、计数与派发分开）；`tools/tests/test-mh2lm-rpmh-resources.py` 增补三段——
+取消合同（别人的等待被拒且队列顺序不变、在途与邻座被拒、`Failed/Aborted` 之后账本不变）、退出撤销（新→旧、先结算拒绝理由、
+`Busy` 时字段全不变）、账本撤销（`others==told` 才允许、`would-change-hardware` 一次写入都没有、`no-vote`）。
+`tools/tests/test-mh2lm-mdss-adt.py` 增补派生侧：`sweet,rpmh-queue-cancel` 只出现在 display owner 上、恰好一条、
+删掉它逐字节回到 C3-05 树、`--rpmh-queue-cancel` 不带 `--rpmh-queue-selftest` 或没有 owner 节点时拒绝且不落盘。
+
+**审计器**：`--c3-06`（蕴含 `--c3-05`）按合同判，不按固定行数：两个被撤 token 在**整个环里**从未被派发；
+两条 `withdraw` 行都落在示意图行与 `step=2` 之间，且 `previous < aggregate == others`、`hardware=unchanged`；
+恰好三条 `detach`（两条 `cancelled=0` 是示意自己的条目、一条 `cancelled=1 depth=0` 是退出）；七行严格按序；
+`b1-state=3`／`b1-result=0xe00002eb`（设备上真值，宿主 fixture 里的 `7` 只是夹具常量）；`cancelled=2`；降票行 `depth=0` 且在 `step=2` 之后。
+`selftest-cancel-auditor.py` 跑 21 个变体：`ok` 通过，20 个反例各自打掉一条断言（没装属性、三笔没串行、`step=2` 报失败、
+账本没交回、撤回声称动了硬件、`told` 超过落地那笔、降票在飞行没清空时被放行、深度谎报、token 复用、
+`b1` 完成而非中止、退出撤了 0 条、只交回一条账本、三笔不是等步长、被撤的那笔竟然派发、`cancelled=1`、
+结束仍有等待、`step=2` 出现两次），外加两条跨人格互拒：C3-05 的环用 `--c3-06` 判被拒（没有示意），
+C3-06 的环用 `--c3-05` 判被拒（它排三笔而那张卡说一笔）。
+
+**包门禁**：`out-bs/mk16k-0150.sh` 在 0149 的钉子上加 18 条 C3-06 字面量与三条撤回路径的拒绝字面量，
+派生第三棵树 `adt-16k-3g-clock-executor-queueselftest-cancel.adt`（sha256 `8b92b1a0…`，只比 C3-05 树多一条属性，删掉即逐字节回到 C3-05），
+并双向证明"没有 pair 就不许有撤回"（生成器拒绝且不落盘）。十六张镜像出自同一内核、同一参数表、同一固件：
+候选 `rsccancel`（两属性），对照 `rscqueuecn0`（只有 C3-05 属性，环里应有同一对示意图行而**没有**撤回行），
+其余十四张是旧树的控制。
+
+**未上机的那一条边界**：`would-change-hardware` 故意不在设备上制造——它按设计打 ERROR，会落进审计的 `error_inventory`，
+把一次健康的启动变成需要解释的启动；这条边界由宿主 fixture 与队列单测覆盖，实机只证明"能撤的都撤对了、降票是真票"。
+
+**实机检验（0150，待用户抓环）**：候选环应读到上面六行，并满足：被撤的两笔在任何位置都没有派发出现在环里；
+所有既有的 Rail／ARC／CN0 自然投票与完成行、`executor=delegated` 与 45 条 RPMH／RSC 线缆行一条不变；
+对照环（`rscqueuecn0`）用 `--c3-05` 判通过、用 `--c3-06` 判被拒。真实 provider 热终止无法在本轮触发，
+因此"退出发生在某笔正在飞的时候"只有宿主证据（`in-flight` 拒绝 + 字段全不变），实机这一半记为 host-only。
 
 ### C3-07 对外提供超时、不确定与隔离状态
 

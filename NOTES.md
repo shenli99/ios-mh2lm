@@ -10488,3 +10488,57 @@ result0=0 result1=0 depth=1 high-water=1`，紧跟 `token=2 CN0 ACTIVE ACK bytes
 并且**全部 45 条 `SWEET RPMH`／`SWEET RSC` 行与 0147 候选环逐字节相同**（连 token 号与完成数都一样）。
 "属性不装时队列在线上一个字节也没改"因此不是推断而是逐行比出来的；候选环那一侧则是同一串被两笔 CN0 插在中间、其余资源／数值／顺序不变。
 两份报告存 `evidence/sweetlog-0149-{0,1}-review-c3-0{5,4}.json`。**C3-05 收口，C3 5/8**。
+
+**C3-06 的另一半：排队中的请求可以被撤，撤不是回滚**。C3-05 把"后来者被拒绝"变成"后来者按到达顺序等"，
+这一卡补的是那份等待的出口：等待中的请求可以**在跑起来之前**被撤回——由持有它的消费者，或由正在退出的客户端。
+合同的第一句决定了整张卡的形状：**取消只对还没执行的请求成立**。队里的记录属于"还没跑"，`fCurrent` 属于"已经在跑"，
+所以 `cancelWaiting()` 先在记录还在队里时结算归属（不是自己的一律 `detail=not-owner`＋`kIOReturnNotPermitted`，且不动队列顺序），
+再让记录出队、置 `Failed(3)`／`kIOReturnAborted`；已经被取出的 token 走另一条页：`detail=already-triggered`＋`kIOReturnBusy`，
+不打断飞行、不撤回任何票——"停掉半个事务"正是这套设计里没有的 rollback（共享约束 3.5：不确定时不自动重试、不回滚、不 reset）。
+
+**退出先结算拒绝理由，再带走等待。** `detachClient()` 的四个前检查（`in-flight`／`rail-vote-retained`／`display-vote-retained`／
+`register-vote-retained`）排在**任何**撤销之前，回 `Busy` 时客户端与它的等待记录一个字段都不变；只有确定要成功的退出才把
+该客户端的新→旧逐条取出、各自一行、各自 token，最后才从 `fClients[]` 抹身份。反过来写（先抹身份再撤记录）会让派发器
+摸到一个已释放的槽——这正是卡里"释放对象后无访问"要挡的那件事，也是为什么这条顺序在代码里写成注释而不是靠自觉。
+
+**降下来是票，不是减账本。** `withdrawRegisterVote()` 只有当**别的客户端**的生效票还等于被撤的那个值（`others==told`）时
+才允许纯账本删除，否则 `would-change-hardware`＋`kIOReturnNotPermitted`，且一次写入都不做；`held==0` 是 `detail=no-vote`。
+所以"把 CN0 回到 0"必须由一笔**真投票**完成，示意里那笔来自已完成请求自己的客户端，`told` 取调用前一刻的
+`fRegisterAggregate`（它在 `finish()` 里才前进，不在 launch 时）。
+
+**示意因此必须三个消费者，不是两个。** 三笔 CN0 票各差一个编码单位（`cn0Step()=20000`），第一笔直接飞、后两笔排队（`depth=2`）。
+两笔的写法会立刻出轨：第一笔完成就把数组交回给出示意的第二笔，撤回它自己那笔就成了 `would-change-hardware`。
+三笔让"已完成的票持有数组、后面两笔只是账本"成立，撤销于是是纯账本操作。六行按序到齐：`cancel-selftest … depth=2 high-water=2;
+first in flight, two waiting` → 两行 `phase=withdraw … hardware=unchanged` → `phase=cancel … why=caller` →
+`phase=detach … cancelled=1` → `step=2 result=ok` → 真实的降票 `phase=dispatch … wait=direct` → `step=3 result=ok`
+（`aggregate=0 owned=1 depth=0 cancelled=2`）。`owned=1` 是"这一趟启动拥有过数组"（第一笔完成时置位、从不清理），
+也是那笔降 0 请求真的会飞行的原因——`noWrite` 只在 `!target && !fRegisterOwned` 或 `fRegisterOwned && target==fRegisterAggregate` 时成立。
+
+**第一次写完就错了一次，宿主夹具当场抓住。** 原设计在第一步就把示意自己那两个账本条目交回，可那时三笔刚准入、数组仍由第一笔持有；
+第二次交回时 `others < told`，于是 `would-change-hardware`，第一步报 `result=failed` 并且每次退休都重试。修法是把交回挪进第二步
+（放在三笔都结算之后），撤回因此落在"别的票还撑着这个值"的窗口里。**这不是测试凑出来的形状，是合同本身要求的顺序**。
+
+**审计器新人格 `--c3-06`（蕴含 `--c3-05`）按合同判，不按固定行数**：两个被撤 token 在**整个环里**从未被派发；两条 `withdraw`
+都落在示意行与 `step=2` 之间且 `previous < aggregate == others`、`hardware=unchanged`；恰好三条 `detach`（两条 `cancelled=0`、
+一条 `cancelled=1 depth=0`）；七行严格按序；`b1-state=3`／`b1-result=0xe00002eb`（设备真值，宿主 fixture 里的 `7` 只是夹具常量）；
+降票行 `depth=0` 且在 `step=2` 之后。`selftest-cancel-auditor.py` **21 变体全 PASS**：反例各自打掉一条断言（没装属性、三笔没串行、
+`step=2` 报失败、账本没交回、撤回声称动了硬件、`told` 超过落地那笔、降票在飞行没清空时被放行、深度谎报、token 复用、
+`b1` 完成而非中止、退出撤了 0 条、只交回一条账本、三笔不是等步长、被撤那笔竟然派发、`cancelled=1`、结束仍有等待、`step=2` 出现两次），
+外加两条跨人格互拒（C3-05 的环用 `--c3-06` 判被拒、C3-06 的环用 `--c3-05` 判被拒）。
+
+**三个自己犯的错，都记在这里**：合成环 `depth0` 变体的替换串早已不再匹配（`depth=%d; two waits`），变体静默变成 `ok` 的副本，
+"应当被拒"于是永远为真——反例必须**先断言它真的改了东西**。`c305` 人格原先既选 `--c3-05` 又选队列环，那本来就该通过，
+测出来的是"审计器正确"的假象；现在脚本只传 `*CANCEL`，人格只决定**谁造环**。`QUEUE_TAIL_CUT` 一度取第一条 `phase=cancel-selftest`
+行，结果把三笔的第一次派发也算成"之后"，改成取示意行的第一次出现。
+
+**包门禁** `out-bs/mk16k-0150.sh`：在 0149 的钉子上加 18 条字面量与三条拒绝路径字面量，派生第三棵树
+`adt-16k-3g-clock-executor-queueselftest-cancel.adt`（`8b92b1a0…`，只比 C3-05 树多一条 4 字节属性，删掉即逐字节回到 C3-05），
+并双向证明"没有 pair 就不许有撤回"（生成器拒绝且不落盘，与 `--rpmh-queue-cancel` 依赖 `--rpmh-queue-selftest` 同一句话）。
+十六张镜像出自同一内核、同一参数表、同一固件：候选 `rsccancel`（两属性）、对照 `rscqueuecn0`（只有 C3-05 属性，
+环里应有同一对示意图行而**没有**撤回行）、其余十四张是旧树的控制。**故意不在设备上制造 `would-change-hardware`**：
+它按设计打 ERROR，会把一次健康启动变成需要解释的启动，这条边界由宿主 fixture 与队列单测覆盖。
+
+**0150 待抓的环**：候选环读到上面六行，且被撤的两笔在任何位置都没有派发出现在环里；所有既有的 Rail／ARC／CN0 自然投票与完成行、
+`executor=delegated`、45 条 RPMH／RSC 线缆行一条不变。对照环用 `--c3-05` 判通过、用 `--c3-06` 判被拒。
+真实 provider 热终止本轮无法触发，所以"退出发生在某笔正在飞的时候"只有宿主证据（`in-flight` 拒绝＋字段全不变），实机这一半记为 host-only。
+**实机环到齐前 C3 仍记 5/8**，下一张是 C3-07（超时／不确定／隔离状态）。
