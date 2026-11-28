@@ -950,6 +950,63 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-query-adt-') as temp:
                              capture_output=True)
     assert refused.returncode != 0, refused
     assert output.read_bytes() == probe_tree
+# C3-08's demonstration asks the group gate three questions and writes no
+# register, so it submits nothing and needs no flight - which is why it can
+# share a boot with every demonstration above it. It is still one 4-byte
+# property on the node whose driver reads it, and it is exactly removable:
+# dropping it gives the C3-04 bytes back.
+assert b'sweet,rpmh-command-group' not in blob
+group_tree = m.derive(blob, rpmh_irq=True, rsc_channel=True, rsc_executor=True,
+                      rpmh_command_group=True)
+gtree, gend = adt.parse(group_tree)
+assert gend == len(group_tree)
+gowner = next(n for n in gtree.children[1].children if n.name == 'display-rpmh')
+assert gowner.prop('sweet,rpmh-command-group') == struct.pack('<I', 1)
+assert group_tree.count(b'sweet,rpmh-command-group\0') == 1
+# It implies nothing: the tree that asks only for this one carries neither the
+# queue demonstration nor the transaction query, and its node list is the
+# executor one's.
+assert b'sweet,rpmh-queue-selftest' not in group_tree
+assert b'sweet,rpmh-queue-cancel' not in group_tree
+assert b'sweet,rpmh-transaction-query' not in group_tree
+assert [n.name for n in gtree.children[1].children] == [n.name for n in etree.children[1].children]
+gowner.props = [x for x in gowner.props if x[0] != 'sweet,rpmh-command-group']
+assert adt.serialize(gtree) == exec_tree
+# A boot that carries all four appends this one last: it is the only
+# demonstration that costs no flight and cannot fail one.
+all_group = m.derive(blob, rpmh_irq=True, rsc_channel=True, rsc_executor=True,
+                     rpmh_queue_selftest=True, rpmh_queue_cancel=True,
+                     rpmh_transaction_query=True, rpmh_command_group=True)
+ggtree, ggend = adt.parse(all_group)
+assert ggend == len(all_group)
+ggowner = next(n for n in ggtree.children[1].children if n.name == 'display-rpmh')
+gname = 'sweet,rpmh-command-group'
+gnames = [x[0] for x in ggowner.props]
+assert gnames[-1] == gname
+assert gnames.index('sweet,rpmh-queue-selftest') < gnames.index('sweet,rpmh-queue-cancel') \
+    < gnames.index('sweet,rpmh-transaction-query') < gnames.index(gname)
+assert ggowner.prop(gname) == struct.pack('<I', 1)
+# The property is read by the display owner, so a tree without that node must
+# be refused rather than built with a flag nothing consumes.
+try:
+    m.derive(blob, rpmh_command_group=True)
+except ValueError:
+    pass
+else:
+    raise AssertionError('a command-group property with no owner node must be refused')
+with tempfile.TemporaryDirectory(prefix='mh2lm-command-group-adt-') as temp:
+    source, output = Path(temp)/'base.adt', Path(temp)/'group.adt'
+    source.write_bytes(blob)
+    subprocess.run([sys.executable, str(Path(m.__file__)), '--rpmh-irq', '--rsc-channel',
+                    '--rsc-executor', '--rpmh-command-group',
+                    str(source), str(output)], check=True)
+    assert output.read_bytes() == group_tree
+    assert source.read_bytes() == blob
+    refused = subprocess.run([sys.executable, str(Path(m.__file__)),
+                              '--rpmh-command-group', str(source), str(output)],
+                             capture_output=True)
+    assert refused.returncode != 0, refused
+    assert output.read_bytes() == group_tree
 print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
@@ -969,4 +1026,4 @@ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order
       'without the demonstration it takes requests back from, and exactly '
       'removable to the C3-05 bytes, and the C3-07 transaction query, which is '
       'one property that implies neither demonstration, sits last when a boot '
-      'carries all three, and is exactly removable to the C3-04 bytes')
+      'carries all three, and is exactly removable to the C3-04 bytes, and the C3-08 command-group boundary, which is one property that implies nothing, writes no register, sits last when a boot carries all four, and is exactly removable to the C3-04 bytes')

@@ -44,7 +44,7 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             clock_vote_probe=False, clock_vote=False, clock_reset=False,
             rsc_channel=False, rsc_query=False, rsc_executor=False,
             rpmh_queue_selftest=False, rpmh_queue_cancel=False,
-            rpmh_transaction_query=False):
+            rpmh_transaction_query=False, rpmh_command_group=False):
     # C2-05 stands on both cards below it, so the two switch it needs are implied
     # here rather than trusted to every caller: a share node without them would be
     # refused at start and the image would carry a property that can do nothing.
@@ -80,6 +80,11 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
     # asks for one thing only.
     if rpmh_transaction_query and not rpmh_irq:
         raise ValueError('--rpmh-transaction-query needs --rpmh-irq (the property is read by the display owner node)')
+    # C3-08's demonstration asks the group gate three questions and writes no
+    # register, so it submits nothing and needs no flight of its own. It still
+    # needs the same owner node to read the property.
+    if rpmh_command_group and not rpmh_irq:
+        raise ValueError('--rpmh-command-group needs --rpmh-irq (the property is read by the display owner node)')
     display_noc = display_noc or panel_pipeline
     display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
     root, end = adt.parse(blob)
@@ -208,6 +213,12 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
             # queue demonstration above - and a tree that asks only for this one
             # reads as one demonstration, not as two.
             rpmh.props.append(('sweet,rpmh-transaction-query', 0, struct.pack('<I', 1)))
+        if rpmh_command_group:
+            # C3-08: the boundary of one ordered command group, asked rather
+            # than performed - it names the limit and refuses one more without
+            # touching a register, so it can share a boot with any other
+            # demonstration and cannot be mistaken for one of them.
+            rpmh.props.append(('sweet,rpmh-command-group', 0, struct.pack('<I', 1)))
         arm.children.append(rpmh)
     if rsc_channel:
         # C3-01: a second, read-only reader of the apps RSC. It carries the same
@@ -354,6 +365,7 @@ if __name__ == '__main__':
     parser.add_argument('--rpmh-queue-selftest', action='store_true', help='C3-05: the display owner demonstrates the bounded submission queue once on this boot (sweet,rpmh-queue-selftest=1); requires --rpmh-irq')
     parser.add_argument('--rpmh-queue-cancel', action='store_true', help='C3-06: the same demonstration also takes two waiting requests back (sweet,rpmh-queue-cancel=1); requires --rpmh-queue-selftest')
     parser.add_argument('--rpmh-transaction-query', action='store_true', help='C3-07: the display owner demonstrates the per-transaction record once on this boot (sweet,rpmh-transaction-query=1); requires --rpmh-irq and implies neither queue demonstration')
+    parser.add_argument('--rpmh-command-group', action='store_true', help='C3-08: the display owner asks the command-group gate for its boundary once on this boot (sweet,rpmh-command-group=1); requires --rpmh-irq, writes no register and implies nothing else')
     parser.add_argument('source', type=Path)
     parser.add_argument('destination', type=Path)
     args = parser.parse_args()
@@ -365,4 +377,4 @@ if __name__ == '__main__':
                       args.clock_vote, args.clock_reset, args.rsc_channel,
                       args.rsc_query, args.rsc_executor,
                       args.rpmh_queue_selftest, args.rpmh_queue_cancel,
-                      args.rpmh_transaction_query))
+                      args.rpmh_transaction_query, args.rpmh_command_group))
