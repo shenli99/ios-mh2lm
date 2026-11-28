@@ -98,6 +98,18 @@ compile copies whose 'class' was rewritten to 'struct' so the cases can poke
 members; both fixtures that compile this unit now also compile the shipped text
 once, unchanged, and assert that a file-scope helper is still refused.
 
+The build list.  Two new translation units are part of the kernel only when the
+build knows about them, so iokit/conf/files.arm64 gains both, next to the RPMH
+service they belong to.  Without that line the units still compile - their
+headers are included by their neighbours, so nothing complains - and the kernel
+then fails to link with every symbol the file was going to define, which is the
+round the second CI build of this card spent.  test-mh2lm-build-file-list.py
+closes the hole: every .cpp under iokit/Kernel/arm must appear in the arm64
+listing, the two units of this card are pinned by name, a duplicate entry is an
+error, and the scanner is driven against the same listing with one name removed,
+because a check that cannot fail is not a check.  The files this card adds or
+touches also gain the trailing newline the build warns about.
+
 diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp
 index 20f678b..64dfb9f 100644
 --- a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.cpp
@@ -672,7 +684,7 @@ index 20f678b..64dfb9f 100644
  	if (fLock) {
  		IOLockFree(fLock);
 diff --git a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
-index 4f9ea6c..0876db2 100644
+index 4f9ea6c..c4fd019 100644
 --- a/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
 +++ b/dxb/xnu/iokit/Kernel/arm/IOQcomRSC.h
 @@ -37,24 +37,59 @@
@@ -792,7 +804,7 @@ index 4f9ea6c..0876db2 100644
  	bool mapWindows(IOService *provider);
  	bool readIdentity(void);
  	bool mapCommandDB(void);
-@@ -172,6 +254,10 @@ public:
+@@ -172,8 +254,12 @@ public:
  	IOReturn submit(uint64_t client, uint32_t address, uint32_t value,
  	 uint64_t *token);
  	unsigned channelReads(void) const { return fReads; }
@@ -803,9 +815,13 @@ index 4f9ea6c..0876db2 100644
  	bool channelSubmitAllowed(void) const { return false; }
  };
  
+ #endif /* ARM64_BOARD_CONFIG_MH2LM */
+-#endif /* IOQCOM_RSC_H */
+\ No newline at end of file
++#endif /* IOQCOM_RSC_H */
 diff --git a/dxb/xnu/iokit/Kernel/arm/SweetAppsDoor.cpp b/dxb/xnu/iokit/Kernel/arm/SweetAppsDoor.cpp
 new file mode 100644
-index 0000000..b91313a
+index 0000000..3fe0185
 --- /dev/null
 +++ b/dxb/xnu/iokit/Kernel/arm/SweetAppsDoor.cpp
 @@ -0,0 +1,128 @@
@@ -937,10 +953,9 @@ index 0000000..b91313a
 +	return true;
 +}
 +#endif /* ARM64_BOARD_CONFIG_MH2LM */
-\ No newline at end of file
 diff --git a/dxb/xnu/iokit/Kernel/arm/SweetAppsDoor.h b/dxb/xnu/iokit/Kernel/arm/SweetAppsDoor.h
 new file mode 100644
-index 0000000..1b28053
+index 0000000..aee326d
 --- /dev/null
 +++ b/dxb/xnu/iokit/Kernel/arm/SweetAppsDoor.h
 @@ -0,0 +1,92 @@
@@ -1036,10 +1051,9 @@ index 0000000..1b28053
 +
 +#endif /* ARM64_BOARD_CONFIG_MH2LM */
 +#endif /* SWEET_APPS_DOOR_H */
-\ No newline at end of file
 diff --git a/dxb/xnu/iokit/Kernel/arm/SweetAppsLine.cpp b/dxb/xnu/iokit/Kernel/arm/SweetAppsLine.cpp
 new file mode 100644
-index 0000000..cb7a2b0
+index 0000000..ee9e3be
 --- /dev/null
 +++ b/dxb/xnu/iokit/Kernel/arm/SweetAppsLine.cpp
 @@ -0,0 +1,128 @@
@@ -1171,10 +1185,9 @@ index 0000000..cb7a2b0
 +	return LineReady;
 +}
 +#endif /* ARM64_BOARD_CONFIG_MH2LM */
-\ No newline at end of file
 diff --git a/dxb/xnu/iokit/Kernel/arm/SweetAppsLine.h b/dxb/xnu/iokit/Kernel/arm/SweetAppsLine.h
 new file mode 100644
-index 0000000..9b79087
+index 0000000..16594e0
 --- /dev/null
 +++ b/dxb/xnu/iokit/Kernel/arm/SweetAppsLine.h
 @@ -0,0 +1,66 @@
@@ -1244,7 +1257,6 @@ index 0000000..9b79087
 +};
 +#endif /* ARM64_BOARD_CONFIG_MH2LM */
 +#endif /* SWEET_APPS_LINE_H */
-\ No newline at end of file
 diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
 index 186ce1d..755a25d 100644
 --- a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
@@ -2031,6 +2043,19 @@ index e1ddd52..6037939 100644
   bool emptyTCS(unsigned);
   IOReturn begin(unsigned,unsigned,const SweetRailVote &);
   void addOperation(uint32_t,uint32_t,bool = false);
+diff --git a/dxb/xnu/iokit/conf/files.arm64 b/dxb/xnu/iokit/conf/files.arm64
+index 6ded5bc..4b98010 100644
+--- a/dxb/xnu/iokit/conf/files.arm64
++++ b/dxb/xnu/iokit/conf/files.arm64
+@@ -34,6 +34,8 @@ iokit/Kernel/arm/SweetMDSS.cpp                                    optional iokit
+ 
+ iokit/Kernel/arm/SweetRPMh.cpp                                    optional iokitcpp
+ iokit/Kernel/arm/SweetRPMhExecutor.cpp                            optional iokitcpp
++iokit/Kernel/arm/SweetAppsDoor.cpp                                optional iokitcpp
++iokit/Kernel/arm/SweetAppsLine.cpp                                optional iokitcpp
+ 
+ iokit/Kernel/arm/IOQcomClock.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/IOQcomGCC.cpp                                     optional iokitcpp
 diff --git a/tools/mk-mh2lm-mdss-adt.py b/tools/mk-mh2lm-mdss-adt.py
 index 8f7c58e..ea7a65d 100644
 --- a/tools/mk-mh2lm-mdss-adt.py
@@ -2108,6 +2133,83 @@ index 8f7c58e..ea7a65d 100644
                        args.clock_vote, args.clock_reset, args.rsc_channel,
 -                      args.rsc_query))
 +                      args.rsc_query, args.rsc_executor))
+diff --git a/tools/tests/test-mh2lm-build-file-list.py b/tools/tests/test-mh2lm-build-file-list.py
+new file mode 100644
+index 0000000..3e25141
+--- /dev/null
++++ b/tools/tests/test-mh2lm-build-file-list.py
+@@ -0,0 +1,70 @@
++#!/usr/bin/env python3
++"""Every driver translation unit under iokit/Kernel/arm must be in the build list.
++
++A new .cpp that nobody registered still compiles - its headers are included by
++its neighbours, so the compiler is happy - and then the kernel fails to link
++with every symbol the file was supposed to define.  That is a whole build round
++lost for a missing line in iokit/conf/files.arm64, so the list is checked here.
++
++The scanner is also driven against a fabricated listing so that a check which
++can never fail is itself caught.
++"""
++from pathlib import Path
++import sys
++
++tree = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else \
++    Path(__file__).resolve().parents[2]
++
++
++def listed(listing):
++    """The relative paths in a files.* listing, in file order."""
++    names = []
++    for line in listing.read_text().splitlines():
++        line = line.split('#')[0].strip()
++        if line:
++            names.append(line.split()[0])
++    return names
++
++
++def unlisted(root, names, tree):
++    """Units under root that the listing does not name, sorted."""
++    known = set(names)
++    found = []
++    for source in sorted((root).rglob('*.cpp')):
++        rel = source.relative_to(tree).as_posix()
++        if rel not in known:
++            found.append(rel)
++    return found
++
++
++build_list = tree / 'iokit/conf/files.arm64'
++assert build_list.is_file(), 'iokit/conf/files.arm64 is missing'
++arm = tree / 'iokit/Kernel/arm'
++
++names = listed(build_list)
++missing = unlisted(arm, names, tree)
++assert not missing, ('these translation units are in the tree but not in the '
++                     'build list, so the kernel links without them: ' +
++                     ', '.join(missing))
++
++# The scanner has to be able to fail: drop one name and it must name that file,
++# and only that file - a control that names everything proves nothing either.
++victim = next(name for name in names if name.startswith('iokit/Kernel/arm/'))
++pruned = unlisted(arm, [name for name in names if name != victim], tree)
++assert pruned == [victim], 'the scanner does not isolate a dropped unit: %r' % (pruned,)
++
++# A duplicate would build the unit twice, which the link would report as a
++# second definition - a different failure with the same cause, a bad edit here.
++seen = set()
++for name in names:
++    assert name not in seen, 'listed twice: ' + name
++    seen.add(name)
++
++# The units this card added are the reason the check exists; keep them pinned so
++# that a future weight-loss pass cannot quietly drop one of them again.
++for unit in ('iokit/Kernel/arm/SweetAppsDoor.cpp',
++             'iokit/Kernel/arm/SweetAppsLine.cpp'):
++    assert unit in seen, 'not in the build list: ' + unit
++
++print('test-mh2lm-build-file-list: %d units listed, %d sources under arm, '
++      'none missing' % (len(names), len(list(arm.rglob('*.cpp')))))
+\ No newline at end of file
 diff --git a/tools/tests/test-mh2lm-display-service.py b/tools/tests/test-mh2lm-display-service.py
 index 913621f..63dad0f 100644
 --- a/tools/tests/test-mh2lm-display-service.py

@@ -10293,7 +10293,7 @@ NEXT：下一个候选为 C2-01／C2-02 只读后端（GCC／RPMh 控制器身�
 
 NEXT：`out-bs/mk16k-0126.sh` 已备好（tag `0126`，ADT 门 `081f63dc…`／诊断 `8d6f2adb…`，`reg` 校验直接读生成器的 `GCC_WINDOWS`，因此自动跟随地址修正）。等 0126 内核构建产物：核对构建树 → 打包 → 实机默认档，验收仍是 `writes=0 reads=18 windows=4 snapshot=11 variant=0x8150` 加六条 `decode`／一条 `decode-sample`。
 
-## C3-04 一个启动只有一个 apps 执行器，由树决定（2026-11-27，补丁 0250，0145 编译失败已修，待 0146 实机）
+## C3-04 一个启动只有一个 apps 执行器，由树决定（2026-11-27，补丁 0250，0145／0146 两轮构建失败已修，待 0147 实机）
 
 C3-03 把机制搬进了模块但没动所有权，C3-04 动的就是所有权：一份**在启动时就选好**的 owner，选完之后另一方再也碰不到硬件。
 
@@ -10337,7 +10337,7 @@ delegated 侧只 map locator+DB、不 map 数组、不布防、采纳身份、�
 的全部钉子上加 13 个跨翻译单元符号（门 5 ＋ 线路 8，mangle 从编译产物抄）、23 条字面量，并从 0143 树派生
 `adt-16k-3g-clock-executor.adt`（断言两节点属性集、解码后的 range 等于 `RPMH_WINDOWS + IRQ_WINDOWS[-1:]`、arm-io 子节点顺序、
 摘除后逐字节还原成查询树、两条 CLI 等价 `cmp`、半边 `--rsc-executor` 必须拒绝且不留文件）。补丁
-`xnu/patches/0250-mh2lm-rsc-executor.patch`（2 938 行／15 文件）在 `2f5d61d` 干净树上 `patch -p1` 严格重放后 15 个文件逐字节相同、无 `.orig`。
+`xnu/patches/0250-mh2lm-rsc-executor.patch`（3 040 行／17 文件）在 `2f5d61d` 干净树上 `patch -p1` 严格重放后 15 个文件逐字节相同、无 `.orig`。
 
 **审计器**：`--c3-04`（蕴含 `--c3-03`）判三项——通道（`windows=5`／`ranges=4`、map 顺序以 `apps-gic length=0x10000` 结尾、两条模式措辞）、
 ownership（`executor=delegated`／`hardware-owner=IOQcomRSCChannel`，仍在第一笔自然完成正上方）、交接（门只一条且在 start 之前、
@@ -10356,6 +10356,16 @@ protected，宿主 clang 19 对同一处措辞是 private——成员落在类�
 产物侧也印证失败：`xnu-kernel-0145.gz` 只有 175 400 B，解开是 1 551 872 B 的 tar，只有 `kdk-libs/*.nm.txt`／`*.members.txt`／`arch.txt`
 与空 `SHA256SUMS`，没有 `kernel.development.mh2lm`——0145 不可烧，也出不了环，判断"到底成功没有"看产物比看界面更可靠。
 
+**0146 是链接失败**：编译全过，链接器却把清单倒出来——`iokit/conf/files.arm64` 里没有本卡那两个新翻译单元。
+`sweet_apps_owner`／`sweet_apps_door`／`sweet_apps_door_publish`／`sweet_apps_door_withdraw`、八个 `SweetAppsLine::*`，
+还有 `sleh.c` 引用的 `sweet_rpmh_irq`（定义也搬进了 `SweetAppsDoor.cpp`）全部 undefined。**机制**：xnu 只编
+`iokit/conf/files.arm64` 里列出的 `.cpp`，没列出就永远不编；而头文件被邻居 `#include` 了，编译器不会报任何东西——只有链接器知道。
+**教训**：新增 `.cpp` 的第一件事是登记构建清单，不是写代码。现在 `tools/tests/test-mh2lm-build-file-list.py` 把这件事变成主机可查
+（`iokit/Kernel/arm` 全量对照 arm64 清单、本卡两单元按名字钉住、重复登记算错、并用"删掉一个名字"的清单做反证，反证必须只报那一个文件）。
+
+**顺手修掉的噪声**：那次日志里两条 `-Wnewline-eof`（`SweetAppsDoor.h:92`、`SweetAppsLine.h:66`）——本卡新增的 `.h`／`.cpp`
+末尾缺换行，补上（`IOQcomRSC.h` 也是）。
+
 **坑（本地为什么没先知）**：五个夹具为了让用例能戳成员，把 `class X` 改写成 `struct X` 再编译，这一步把访问控制整个删掉了，
 于是"别的作用域能不能碰这个成员"在本地永远不成立。现在编译这两个受影响单元的两个夹具（`test-mh2lm-rsc-channel.py`、
 `test-mh2lm-rsc-executor-door.py`）各多走一遍**不改写**的 `-fsyntax-only`：出厂原文只摘 `#include` 加假 IOKit 前导，
@@ -10367,6 +10377,6 @@ protected，宿主 clang 19 对同一处措辞是 private——成员落在类�
 从 `xnu/<component>/` 软链成 overlay 后，会掉进 `ipc_entry_bits_t` 未定义——出厂的私有头并不等于安装出去的导出头。
 结论：没有未裁剪的 buildtree，本地无法忠实重放单翻译单元编译；该单元的可移植检查就靠上面那遍原文 `-fsyntax-only`。
 
-**0146 待实机**（判据）：环里应有 `SWEET APPS DOOR: phase=publish`、`SWEET RSC: phase=executor … workloop=own`、
+**0147 待实机**（判据）：环里应有 `SWEET APPS DOOR: phase=publish`、`SWEET RSC: phase=executor … workloop=own`、
 `executor=delegated … hardware-owner=IOQcomRSCChannel`、`phase=delegate`；**不该**有 `SWEET RPMH IRQ: INTID37 configured`、
 `executor=module`、任何旧入口 store 行；自然 VRM／ARC／CN0 请求的 ACTIVE 完成与 cleanup 继续到达，USB／根卷、显示、触摸回归。
