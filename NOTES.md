@@ -10562,7 +10562,21 @@ clang++-19 + 内核 KDK 头的 shim）编译改动过的两个翻译单元，`Sw
 审计器一行没改：它本来就要求 pair 行 `depth=1`、三笔 `depth=2 high-water=2`、`tail_dispatch == [a, lower]` 都 `direct/0/0`，
 0150 那种形状过不了其中任何一条（`--c3-06` 判 0150 环被拒，报的就是那三行错误）。
 
-**0151 待抓的环**：候选环读到上面六行，且被撤的两笔在任何位置都没有派发出现在环里；所有既有的 Rail／ARC／CN0 自然投票与完成行、
-`executor=delegated`、45 条 RPMH／RSC 线缆行一条不变。对照环用 `--c3-05` 判通过、用 `--c3-06` 判被拒。
-真实 provider 热终止本轮无法触发，所以"退出发生在某笔正在飞的时候"只有宿主证据（`in-flight` 拒绝＋字段全不变），实机这一半记为 host-only。
-**实机环到齐前 C3 仍记 5/8**，下一张是 C3-07（超时／不确定／隔离状态）。
+**0151 实机结果（合同到齐，`step=2` 行被控制台截断，`0255` 修）**：候选环 `sweetlog-0151-0.bin`（`743abe48…`、4 198 400 字节、
+54 610 行、未回卷）把取消合同六行全读到了：`phase=selftest … token0=2 token1=3 depth=1 high-water=1`、两笔 `enqueue`、
+`phase=cancel-selftest … depth=2 high-water=2; first in flight, two waiting`、两条 `phase=withdraw … hardware=unchanged`、
+`phase=cancel … why=caller`／`why=exit`、`phase=detach … cancelled=0` ×2 与 `cancelled=1 depth=0`、
+`step=2 result=ok a=4 b1=5 b1-state=3 b1-result=0xe00002eb b2=6 exit-withdrew=1 lower=7 ledger=2/2 told=100000 depth=0`、
+真实的降票与 `step=3 result=ok exited=3 aggregate=0 owned=1 depth=0 cancelled=2`；被撤的两笔全环没有出现在任何派发／ACK 行上，
+`executor=delegated`、45 条 RPMH／RSC 线缆行、全部既有 Rail／ARC／CN0 自然投票与完成行一条不变。**但 `step=2` 那一行到 `b2=` 就断了**：
+xnu 控制台把一行装进 `char str[SERIAL_CONS_BUF_SIZE]`（256 字节），`console_printbuf_putc` 只在 `pos < 255` 时存字节、换行也在
+这 255 之内，超出部分**静默丢弃、连换行一起丢**；331 字节的行只剩 255，尾巴还粘到下一行。这是全树性质的（同环 47 行被粘、
+45 行超 255，几乎都是用户态 `[System Event]`），Sweet 只有这一行。**判断**：不是容差问题，是生产者的行必须装得进缓冲区——
+审计器加了一条与人格无关的 `console_rows`（Sweet 行不得出现第二个标记、最长 254 字节），0151 候选环正是在这一条上被拒、
+其余人格没有被评估；对照环 `sweetlog-0151-1.bin`（`787a847b…`）`--c2-03 --c3-05` rc=0、`console_rows` 干净
+（1014 行、最长 236）、0 条 `phase=cancel-selftest`。**修法 `0255`** 只改这一行（不动控制台、不动别人写的 47 行）：字段在前、
+句子在后，实测 203 字节、字段取满 253，整行上限 254；机器字段一个不少，所以截断仍可区分——被截断的行依旧被拒。
+宿主 fixture 现在真驱动第 2、3 步（pair 的两笔账本由公共调用造出，示意本身归 C3-05 的 fixture），并断言两行都装得下。
+真实 provider 热终止仍只能宿主证明，"退出发生在某笔正在飞的时候"这一半记 host-only。**0152 重抓**：候选环读到上面六行且
+`step=2` 行完整、`console_rows` 通过；对照环用 `--c3-05` 通过、`--c3-06` 被拒。**实机环到齐前 C3 仍记 5/8**，
+下一张是 C3-07（超时／不确定／隔离状态）。

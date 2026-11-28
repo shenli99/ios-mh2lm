@@ -1,6 +1,6 @@
 # C3：apps RSC 公共事务通道
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 已在 0147 的**双默认树**上**验收通过**（委派档 `executor=delegated … hardware-owner=IOQcomRSCChannel`、交接四行按序到齐；对照档 `executor=module … hardware-owner=SweetRPMh`、verdict 与 0143 逐字段相同）；C3-04b 暂缓（无需求）；C3-05 已在 0149 的**双默认树**上**验收通过**（候选档读到 `phase=selftest kind=register-bandwidth resource=0 bytes0=20000 bytes1=40000` 与配套的 direct／enqueue／queued 三行，两笔各自成飞、各自 ACK；对照档 45 条 RPMH／RSC 线缆行与 0147 逐字节相同，只多 7 条无条件直接派发行）；0148 那一轮在设备上证明的是**示意写错**（两条 rail 票被准入筛合法拒绝），不是队列有问题。C3-06 代码、宿主证据、审计器与包门禁已完成；0150 实机在示意**时序**上失败（两示意共用一个退休窗口，三笔全入队），已由 `0254` 定点修复，**0151 重抓**：排队中的请求可由持有者或退出客户端撤回，撤回既不是完成也不是硬件回滚，把 CN0 降回 0 由一笔真投票完成而不是撤掉任何人的账本。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 已在 0147 的**双默认树**上**验收通过**（委派档 `executor=delegated … hardware-owner=IOQcomRSCChannel`、交接四行按序到齐；对照档 `executor=module … hardware-owner=SweetRPMh`、verdict 与 0143 逐字段相同）；C3-04b 暂缓（无需求）；C3-05 已在 0149 的**双默认树**上**验收通过**（候选档读到 `phase=selftest kind=register-bandwidth resource=0 bytes0=20000 bytes1=40000` 与配套的 direct／enqueue／queued 三行，两笔各自成飞、各自 ACK；对照档 45 条 RPMH／RSC 线缆行与 0147 逐字节相同，只多 7 条无条件直接派发行）；0148 那一轮在设备上证明的是**示意写错**（两条 rail 票被准入筛合法拒绝），不是队列有问题。C3-06 代码、宿主证据、审计器与包门禁已完成；0150 实机在示意**时序**上失败（两示意共用一个退休窗口，三笔全入队），已由 `0254` 定点修复；0151 实机把取消合同六行全部读到（撤、退出、账本、降票都对），但 `step=2` 那一行**被控制台的行缓冲截断**（331 字节只存 255，尾巴连换行一起丢），已由 `0255` 把该行改成字段在前、句子在后的形状，**0152 重抓**：排队中的请求可由持有者或退出客户端撤回，撤回既不是完成也不是硬件回滚，把 CN0 降回 0 由一笔真投票完成而不是撤掉任何人的账本。
 
 ## 阶段目标与退出条件
 
@@ -557,6 +557,33 @@ C3-06 的环用 `--c3-05` 判被拒（它排三笔而那张卡说一笔）。
 
 **未上机的那一条边界**：`would-change-hardware` 故意不在设备上制造——它按设计打 ERROR，会落进审计的 `error_inventory`，
 把一次健康的启动变成需要解释的启动；这条边界由宿主 fixture 与队列单测覆盖，实机只证明"能撤的都撤对了、降票是真票"。
+
+#### 0151 实机：合同六行到齐，`step=2` 那一行被控制台截断（`0255` 修，0152 待抓）
+
+0151 候选环 `sweetlog-0151-0.bin`（`743abe48…`、4 198 400 字节、54 610 行、未回卷）把取消合同读全了，逐字段与设计一致：
+
+- `phase=selftest … token0=2 token1=3 result0=0 result1=0 depth=1 high-water=1`，两笔 `enqueue`（`client=4 token=5`、`client=5 token=6`）
+  与 `phase=cancel-selftest … depth=2 high-water=2; first in flight, two waiting`；
+- 两条 `phase=withdraw … previous=20000`／`previous=40000 aggregate=100000 others=100000 hardware=unchanged`；
+- `phase=cancel … token=5 … result=ok why=caller` 与 `token=6 … why=exit`；`phase=detach … cancelled=0` ×2 与 `cancelled=1 depth=0`；
+- `step=2 result=ok a=4 b1=5 b1-state=3 b1-result=0xe00002eb b2=6 exit-withdrew=1 lower=7 ledger=2/2 told=100000 depth=0`（见下）；
+- 真实的降票 `phase=dispatch … wait=direct` 与 `step=3 result=ok exited=3 aggregate=0 owned=1 depth=0 cancelled=2`。
+
+被撤的两笔全环从未出现在任何 `phase=dispatch`／`ACK` 行上，`executor=delegated` 与 45 条 RPMH／RSC 线缆行一条不变。
+**但 `step=2` 那一行到 `b2=` 就断了**：xnu 的控制台把一行装进 `char str[SERIAL_CONS_BUF_SIZE]`
+（`osfmk/console/serial_protos.h` 的 256 字节），`console_printbuf_putc` 只在 `pos < 255` 时存字节、换行也在这 255 之内，
+超出的部分**静默丢弃、连换行一起丢**，于是 331 字节的那一行只剩 255 字节，尾巴粘到下一行上。这不是这一行独有的毛病：
+同一环里 47 行被粘、45 行超 255（几乎都是用户态的 `[System Event]`），Sweet 只有这一行。
+
+**判断**：这不是"容差"问题，是"生产者的行必须装得进缓冲区"。审计器加了与人格无关的一条 `console_rows`：任何 Sweet 行
+不得出现第二个标记、最长不得超过 254 字节（255 字节里含换行，行尾不能丢）；0151 候选环正是**在这一条上被拒**，
+其余人格因此没有被评估。对照环 `sweetlog-0151-1.bin`（`787a847b…`、54 643 行）用 `--c2-03 --c3-05` 判 rc=0、
+`console_rows` 干净（1014 行、最长 236 字节），0 条 `phase=cancel-selftest`。
+
+**修法（`0255`）**：只改这一行，不改控制台、不动其它子系统的行（那 47 行是别人的生产者在同一棵树上写出来的）。
+字段在前、句子在后：本示意实测 203 字节、字段取满 253 字节，整行上限 254；机器字段一个不少，所以 0151 那种"只丢散文"的
+截断仍然可区分——被截断的行依旧被 `console_rows` 拒。宿主 fixture 现在真的驱动第 2、3 步（pair 的两笔账本由公共调用造出，
+示意本身由 C3-05 的 fixture 驱动），并断言两行都装得下。
 
 **实机检验（0150，待用户抓环）**：候选环应读到上面六行，并满足：被撤的两笔在任何位置都没有派发出现在环里；
 所有既有的 Rail／ARC／CN0 自然投票与完成行、`executor=delegated` 与 45 条 RPMH／RSC 线缆行一条不变；
