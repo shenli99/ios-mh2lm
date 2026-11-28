@@ -1,6 +1,6 @@
 # C3：apps RSC 公共事务通道
 
-[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 委派档已在 0147 上**验收通过**（`executor=delegated … hardware-owner=IOQcomRSCChannel`，交接四行按序到齐、第一笔自然完成紧跟 ownership 行、十笔完成与七条 ACK 一笔未丢），对照档同一内核待启（0145／0146 两轮构建失败于漏登记与一处访问控制，均已修、均已补本地门禁）；C3-04b 暂缓（无需求），C3-05～C3-08 未开始。
+[返回总计划](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md)。各卡默认遵守[总计划 3.5 共享约束](../CLOCK-SYSTEM-IMPLEMENTATION-PLAN.md#35-所有卡共享的默认约束)，卡内只写特有边界。状态：C3-01 已在设备上两次读到同一块并**验收通过**（0140 读到、抓一处读错；0141 带上补丁 `0247` 复验严格 rc=0）；C3-02 已在 0142 上**验收通过**（查询与 owner 对同一资源给出同一份答案，十次载入／零存储不变）；C3-03 已在 0143 上**验收通过**（执行机制已搬进无状态模块，环里仍是旧服务持有硬件，自然 ACTIVE 完成照旧到达）；C3-04 已在 0147 的**双默认树**上**验收通过**（委派档 `executor=delegated … hardware-owner=IOQcomRSCChannel`、交接四行按序到齐；对照档 `executor=module … hardware-owner=SweetRPMh`、verdict 与 0143 逐字段相同）；C3-04b 暂缓（无需求），C3-05 起未开始。
 
 ## 阶段目标与退出条件
 
@@ -359,9 +359,27 @@ store 行（`stores-here=0`、`phase=start … writes=0`、`phase=executor … s
 （委派的旧侧还在自己读块）、`execinstall`（模块环带着交接那两行）。0143 环用同一个审计器复判仍 rc=0
 （`mode=module entries_max=10 handler=display-owner`），两个方向没有互相污染。
 
-**本卡还差的一半**：对照档 `boot-16k-0147-gpioirq-panel-pipeline.img` 的启动——同一个内核、树里没有两条属性，
-环应与 0143 同形（`executor=module tcs=0 commands=3 open=0 hardware-owner=SweetRPMh`、`INTID37 configured` 在场、
-无 door／executor／install／line 行）。那一环到手前，C3-04 只算"委派侧通过"。
+#### 实机验收：0147 对照档（C3-04 收口，2026-11-28）
+
+同一个内核、树里没有那两条属性，环 `logs/sweetlog-0147-1.bin`（4 198 400 字节，sha256 `093735bf…`；
+`total=4194304 flush-seq=307347 capacity=8`，54 535 行，已回绕）。`--c2-03 --c3-03` 严格 rc=0，
+**verdict 与 0143 逐字段相同**——机器比对了 0143 那次判定的全部字段，只有四处数字不同，且都不是契约：
+`executor.line` 2111 → 2108、`channel.line` 154 → 156、`workloop.rows` 13 → 12、`workloop.line_count`
+4291 → 3834（后者是抓环时刻的函数，不是行为）。
+
+模式由设备树决定，两个方向都在硬件上量到了：同一份驱动，136 行仍是旧侧自己读块（`pre-v3 RSC id=0x10700
+config=0x800c8104 ncpt=16 ACTIVE=2`），140–141 行门由旧侧发布且 `owner=SweetRPMh`；委派树里同一行是
+`owner=IOQcomRSCChannel` 且旧侧不再读块。通道侧回到只读形态：148 `phase=irq … detail=described-not-armed`、
+149–151 三段 map（没有 gic 那段）、152 identity、153 `command-db … read-only-map`、154 `db-query … CN0 …
+reads=292`、155 `tcs … detail=observed-not-owned`、156 `phase=start … windows=4 ranges=3 reads=10 writes=0 …
+submit=not-ready`；2107 `INTID37 configured` 在场、2108 `executor=module tcs=0 commands=3 open=0
+hardware-owner=SweetRPMh`、2109 就是本次开机第一笔自然完成（`entries=1`）。十笔 RPMH 完成＋4 条显示 NoC 完成、
+无 ERROR；委派档那五行（`executor=delegated`／`phase=delegate`／`phase=install`／`phase=line`／`identity
+adopted`）一条皆无。`--c3-04` 判这一环被拒：`the ownership row still names SweetRPMh: this tree did not delegate`。
+
+**C3-04 由此收口**：执行器的 owner 在启动时由设备树选定，选完之后另一方碰不到硬件——委派档里旧侧零 store、
+零 IRQ handler、连块都不读，对照档里通道只读三窗、`submit=not-ready`、`armed=false`；两种树在同一个内核上
+各自产出与设计一致的环，且判据按模式分叉而不是靠旗标放宽。
 
 ### C3-04b （可选）运行中将 apps 执行器从旧服务交接给 channel
 

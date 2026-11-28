@@ -10406,6 +10406,12 @@ executor ADT `a81e8b56…` 钉住），但 `mk16k-0147.sh` 第一次跑就被自
 （`delegateentries`／`delegatenoinstall`／`delegatelinefirst`／`delegateprev3`／`execinstall` 五个新反证），
 0143 环用同一审计器复判仍是 `mode=module entries_max=10`，两个方向没互相污染。
 
-**还差一半**：对照档 `boot-16k-0147-gpioirq-panel-pipeline.img`（同内核、树里无那两条属性）待启，环应与 0143 同形——
-`executor=module … hardware-owner=SweetRPMh`、`INTID37 configured` 在场、无 door／executor／install／line 行。
-那一环到手前，C3-04 只算委派侧通过。
+**对照档把"设备树选 owner"这件事量全了**：同一个内核、树里没有那两条属性，环 `sweetlog-0147-1.bin`
+（`093735bf…`、54 535 行、已回绕）用 `--c2-03 --c3-03` rc=0，**verdict 与 0143 逐字段相同**——把两次判定摊平做差，
+只有四处不同：`executor.line` 2111→2108、`channel.line` 154→156、`workloop.rows` 13→12、`workloop.line_count`
+4291→3834，后两个是抓环时刻的函数。要看的四件事在环里：136 行旧侧仍自己读块（`pre-v3 RSC … ACTIVE=2`）、
+141 行门由旧侧发布且 `owner=SweetRPMh`（委派树里同一行是 `owner=IOQcomRSCChannel`）、通道退回只读形态
+（`windows=4 ranges=3`、`detail=described-not-armed`／`observed-not-owned`、`submit=not-ready`）、
+2107–2109 `INTID37 configured` → `executor=module … hardware-owner=SweetRPMh` → 第一笔自然完成。`--c3-04` 判这一环
+被拒（`the ownership row still names SweetRPMh`），两个方向都没污染。**C3-04 收口**：owner 由设备树选定、
+选定之后另一方碰不到硬件，这两种树各自产出与设计一致的环，判据按模式分叉而不是靠旗标放宽。下一卡 C3-05。
