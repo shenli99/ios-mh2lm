@@ -12,6 +12,13 @@
  * it. The caller's stack and its live objects are gone by the time a queued
  * request is dispatched, so everything needed to rebuild it must already be
  * inside the record.
+ *
+ * C3-06 adds the one way a record leaves without being dispatched: the owner
+ * withdraws it by the token it already handed to the caller, or by client when
+ * that client exits. Both only ever see what is still waiting - a dispatched
+ * request is out of this storage, so the queue cannot cancel a flight, and a
+ * cancelled record is gone before the dispatcher could reach it. Order among
+ * the survivors is the arrival order they were stamped with, never slot order.
  */
 #ifndef SWEET_APPS_QUEUE_H
 #define SWEET_APPS_QUEUE_H
@@ -37,7 +44,8 @@ struct SweetAppsRequest {
 class SweetAppsQueue {
 	SweetAppsRequest fSlots[kSweetAppsQueueCapacity];
 	unsigned fHead, fCount, fNextSeq;
-	unsigned fAccepted, fDispatched, fHighWater;
+	unsigned fAccepted, fDispatched, fHighWater, fCancelled;
+	void removeAt(unsigned index, SweetAppsRequest *removed);
 public:
 	SweetAppsQueue();
 	void reset(void);
@@ -63,6 +71,24 @@ public:
 	const SweetAppsRequest *find(unsigned kind, unsigned client, unsigned rail) const;
 	/* Whether this client still has a waiting request, without naming one. */
 	bool waiting(unsigned client) const;
+	/* C3-06: withdraw one waiting record by the token the owner issued for it.
+	 * True means it was still waiting and no longer is, and *removed carries the
+	 * same bytes the dispatcher would have seen, so the owner can fail exactly
+	 * that request against exactly that token. False means this queue never
+	 * held that token - it was already dispatched, already withdrawn, or never
+	 * admitted - which is the owner's to distinguish, not the queue's. */
+	bool cancel(uint64_t token, SweetAppsRequest *removed = NULL);
+	/* The waiting record for a token, or NULL. Read-only, so the owner can
+	 * settle who it belongs to before withdrawing anything. */
+	const SweetAppsRequest *findToken(uint64_t token) const;
+	/* Every waiting record of one client, because an exiting client may hold one
+	 * per resource. Newest first in *removed so the owner's own re-insertion (if
+	 * it ever needed one) cannot invert arrival order; at most cap are written
+	 * and the return value is how many left the queue. */
+	unsigned cancelClient(unsigned client, SweetAppsRequest *removed = NULL,
+	    unsigned cap = kSweetAppsQueueCapacity);
+	/* How many records have left this queue without being dispatched. */
+	unsigned cancelled(void) const { return fCancelled; }
 };
 #endif
 #endif

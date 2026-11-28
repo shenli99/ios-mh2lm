@@ -1,0 +1,1068 @@
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.cpp b/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.cpp
+index 2f5fa9b..67387bb 100644
+--- a/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.cpp
+@@ -5,6 +5,12 @@
+  * dispatch. Nothing here calls into IOKit, locks, or the log: the owner
+  * serializes every call from its gate, and a refusal is the owner's row to
+  * print, not this unit's.
++ *
++ * C3-06: a withdrawn record is compacted out of the logical window, so the
++ * surviving order is the sequence the records were stamped with and no slot
++ * between head and tail is ever reachable twice. Cancelling is not dispatching:
++ * fDispatched only counts records the dispatcher actually took, which is what
++ * lets a ring reader tell "the owner retired it" from "the caller took it back".
+  */
+ #if defined(ARM64_BOARD_CONFIG_MH2LM)
+ #include "SweetAppsQueue.h"
+@@ -19,7 +25,7 @@ SweetAppsQueue::reset(void)
+ {
+ 	for (unsigned i = 0; i < kSweetAppsQueueCapacity; ++i) fSlots[i] = SweetAppsRequest();
+ 	fHead = fCount = fNextSeq = 0;
+-	fAccepted = fDispatched = fHighWater = 0;
++	fAccepted = fDispatched = fHighWater = fCancelled = 0;
+ }
+ 
+ bool
+@@ -71,4 +77,60 @@ SweetAppsQueue::waiting(unsigned client) const
+ 	}
+ 	return false;
+ }
++
++/* Pull one record out of the logical window and close the gap behind it. The
++ * slot that leaves keeps its bytes only in *removed; it is not re-readable
++ * through the queue, which is the point - nothing the owner cancels can be
++ * dispatched by a later drain. */
++void
++SweetAppsQueue::removeAt(unsigned index, SweetAppsRequest *removed)
++{
++	if (index >= fCount) return;
++	if (removed) *removed = fSlots[(fHead + index) % kSweetAppsQueueCapacity];
++	for (unsigned i = index; i + 1 < fCount; ++i)
++		fSlots[(fHead + i) % kSweetAppsQueueCapacity] =
++			fSlots[(fHead + i + 1) % kSweetAppsQueueCapacity];
++	fSlots[(fHead + fCount - 1) % kSweetAppsQueueCapacity] = SweetAppsRequest();
++	fCount--;
++	fCancelled++;
++}
++
++const SweetAppsRequest *
++SweetAppsQueue::findToken(uint64_t token) const
++{
++	if (!token) return NULL;
++	for (unsigned i = 0; i < fCount; ++i) {
++		const SweetAppsRequest &slot = fSlots[(fHead + i) % kSweetAppsQueueCapacity];
++		if (slot.token == token) return &slot;
++	}
++	return NULL;
++}
++
++bool
++SweetAppsQueue::cancel(uint64_t token, SweetAppsRequest *removed)
++{
++	if (!token) return false;
++	for (unsigned i = 0; i < fCount; ++i) {
++		if (fSlots[(fHead + i) % kSweetAppsQueueCapacity].token != token) continue;
++		removeAt(i, removed);
++		return true;
++	}
++	return false;
++}
++
++unsigned
++SweetAppsQueue::cancelClient(unsigned client, SweetAppsRequest *removed, unsigned cap)
++{
++	unsigned taken = 0;
++	/* Backwards, so every index still to be examined keeps its meaning while
++	 * the window shrinks under it. */
++	for (unsigned i = fCount; i-- > 0; ) {
++		const SweetAppsRequest &slot = fSlots[(fHead + i) % kSweetAppsQueueCapacity];
++		if (slot.client != client) continue;
++		if (removed && taken < cap) removeAt(i, &removed[taken]);
++		else removeAt(i, NULL);
++		taken++;
++	}
++	return taken;
++}
+ #endif
+\ No newline at end of file
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.h b/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.h
+index 90dc811..518fe0e 100644
+--- a/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.h
++++ b/dxb/xnu/iokit/Kernel/arm/SweetAppsQueue.h
+@@ -12,6 +12,13 @@
+  * it. The caller's stack and its live objects are gone by the time a queued
+  * request is dispatched, so everything needed to rebuild it must already be
+  * inside the record.
++ *
++ * C3-06 adds the one way a record leaves without being dispatched: the owner
++ * withdraws it by the token it already handed to the caller, or by client when
++ * that client exits. Both only ever see what is still waiting - a dispatched
++ * request is out of this storage, so the queue cannot cancel a flight, and a
++ * cancelled record is gone before the dispatcher could reach it. Order among
++ * the survivors is the arrival order they were stamped with, never slot order.
+  */
+ #ifndef SWEET_APPS_QUEUE_H
+ #define SWEET_APPS_QUEUE_H
+@@ -37,7 +44,8 @@ struct SweetAppsRequest {
+ class SweetAppsQueue {
+ 	SweetAppsRequest fSlots[kSweetAppsQueueCapacity];
+ 	unsigned fHead, fCount, fNextSeq;
+-	unsigned fAccepted, fDispatched, fHighWater;
++	unsigned fAccepted, fDispatched, fHighWater, fCancelled;
++	void removeAt(unsigned index, SweetAppsRequest *removed);
+ public:
+ 	SweetAppsQueue();
+ 	void reset(void);
+@@ -63,6 +71,24 @@ public:
+ 	const SweetAppsRequest *find(unsigned kind, unsigned client, unsigned rail) const;
+ 	/* Whether this client still has a waiting request, without naming one. */
+ 	bool waiting(unsigned client) const;
++	/* C3-06: withdraw one waiting record by the token the owner issued for it.
++	 * True means it was still waiting and no longer is, and *removed carries the
++	 * same bytes the dispatcher would have seen, so the owner can fail exactly
++	 * that request against exactly that token. False means this queue never
++	 * held that token - it was already dispatched, already withdrawn, or never
++	 * admitted - which is the owner's to distinguish, not the queue's. */
++	bool cancel(uint64_t token, SweetAppsRequest *removed = NULL);
++	/* The waiting record for a token, or NULL. Read-only, so the owner can
++	 * settle who it belongs to before withdrawing anything. */
++	const SweetAppsRequest *findToken(uint64_t token) const;
++	/* Every waiting record of one client, because an exiting client may hold one
++	 * per resource. Newest first in *removed so the owner's own re-insertion (if
++	 * it ever needed one) cannot invert arrival order; at most cap are written
++	 * and the return value is how many left the queue. */
++	unsigned cancelClient(unsigned client, SweetAppsRequest *removed = NULL,
++	    unsigned cap = kSweetAppsQueueCapacity);
++	/* How many records have left this queue without being dispatched. */
++	unsigned cancelled(void) const { return fCancelled; }
+ };
+ #endif
+ #endif
+\ No newline at end of file
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
+index e3deaf2..5f163a5 100644
+--- a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
++++ b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.cpp
+@@ -44,12 +44,15 @@ enum { Stride=0x2a0, CommandStride=0x14, IRQEnable=0, IRQStatus=4, IRQClear=8,
+ struct RPMhRequest {
+  unsigned op, rail; uint64_t client, token; SweetRailVote vote;
+  uint64_t *idOut; SweetRailInfo *info; SweetRPMhStatus *status;
++ uint64_t *previous, *aggregate;
+  SweetDisplayPowerInfo *displayInfo; SweetDisplayPowerStatus *displayStatus;
+  SweetBCMInfo *bcmInfo; uint64_t bandwidth; SweetRegisterBandwidthStatus *registerStatus;
+  const SweetPanelSupplyFence *panelFence;
+ };
+ enum { Attach, Detach, Info, Vote, Query, Shutdown, DisplayInfo, DisplayVote, DisplayQuery,
+- BCMInfo, RegisterVote, RegisterQuery, PanelVote, PanelCancel };
++ BCMInfo, RegisterVote, RegisterQuery, PanelVote, PanelCancel, Cancel, Withdraw };
++
++/* C3-06: the request names where a withdrawal reports what it did. */
+ 
+ bool SweetBCMInfo::scale(uint64_t rate,unsigned busWidth,unsigned ports,unsigned *value) const
+ {
+@@ -409,6 +412,19 @@ static const char *sweetRequestName(unsigned kind)
+  }
+ }
+ 
++/* One encoded unit of CN0 at this vote's own bus width (4 bytes, one port):
++ * divisor = busWidth*ports*unit in scale(), so the rate that moves y by one is
++ * that divisor divided by the register width. Zero means this boot cannot say,
++ * and no demonstration runs with a raise that would not move the field. */
++uint64_t
++SweetRPMh::cn0Step(void) const
++{
++ const SweetBCMInfo &bcm=fBCM[SweetBCMCN0];
++ uint64_t divisor=(uint64_t)bcm.unit*4;
++ if (!divisor || !bcm.width) return 0;
++ return (divisor+bcm.width-1)/bcm.width;
++}
++
+ /* C3-05 device demonstration, requested explicitly by an ADT property and off
+  * for every other boot. Two consumers each raise register bandwidth by one
+  * whole encoded step, through the same admission path a client uses, so the
+@@ -427,20 +443,17 @@ static const char *sweetRequestName(unsigned kind)
+  * raise smaller than that rounds to the same y and the aggregate would not move.
+  * Nothing is submitted unless scale() accepts both targets, and nothing is
+  * demonstrated by a pair that could not be written. The votes are retained
+- * afterwards like any other vote, because withdrawing one is C3-06; the boot's
+- * own display vote for this resource subsumes them. */
++ * afterwards like any other vote, and the boot's own display vote for this
++ * resource subsumes them; C3-06 withdraws them explicitly, in cancelSelfTest(),
++ * once this pair has retired - never as a side effect of this demonstration. */
+ bool
+ SweetRPMh::queueSelfTest(void)
+ {
+  if (fQueueTestTries++ >= 6) return true;
+  if (fNextClient==~0ULL) return false;
+  if (!lookupBCM(SweetBCMCN0)) return false;
+- /* One encoded unit of CN0 at this vote's own bus width (4 bytes, one port):
+-  * divisor = busWidth*ports*unit in scale(), so the rate that moves y by one is
+-  * that divisor divided by the register width. */
+- uint64_t divisor=(uint64_t)fBCM[SweetBCMCN0].unit*4;
+- if (!divisor || !fBCM[SweetBCMCN0].width) return false;
+- uint64_t step=(divisor+fBCM[SweetBCMCN0].width-1)/fBCM[SweetBCMCN0].width;
++ uint64_t step=cn0Step();
++ if (!step) return false;
+  uint64_t base=fRegisterOwned ? fRegisterAggregate : 0;
+  uint64_t proposal[2]={base+step,base+2*step};
+  for (unsigned k=0;k<2;++k) {
+@@ -456,6 +469,7 @@ SweetRPMh::queueSelfTest(void)
+  unsigned tokens[2]={0,0}; unsigned results[2]={0,0};
+  for (unsigned k=0;k<2;++k) {
+   fClients[clients[k]]={}; fClients[clients[k]].id=++fNextClient;
++  fSelfClients[k]=(unsigned)clients[k];
+   IOReturn result=beginRegisterBandwidth((unsigned)clients[k],proposal[k]);
+   results[k]=(unsigned)result;
+   tokens[k]=(unsigned)fClients[clients[k]].registerStatus.token;
+@@ -474,6 +488,166 @@ SweetRPMh::queueSelfTest(void)
+  return true;
+ }
+ 
++/* C3-06 device demonstration, step 1: three requests for one quantity, of
++ * which only the first will ever be written.
++ *
++ * The base is what the array is being told *now*, not a constant: the pair
++ * demonstration in front of this one has already raised it, and a proposal that
++ * did not exceed it would be admitted without a write - which would make the
++ * two behind it pointless. The two behind it must be waiting, at depth 1 and 2;
++ * a trio that all flew, or all waited, would prove nothing about either way of
++ * taking a request back.
++ *
++ * The pair's ledger entries are *not* withdrawn here. A withdrawal is legal
++ * only while somebody else holds the array up, and until the first of these
++ * three lands, nobody does: a vote does not exist before it completes. Step 2
++ * runs at that moment, and hands the pair back then.
++ */
++bool
++SweetRPMh::cancelSelfTest(void)
++{
++ uint64_t step=cn0Step();
++ if (!step) return true;
++ uint64_t base=fRegisterAggregate;
++ uint64_t proposal[3]={base+3*step,base+4*step,base+5*step};
++ for (unsigned k=0;k<3;++k) {
++  unsigned y=0;
++  if (!fBCM[SweetBCMCN0].scale(proposal[k],4,1,&y)) {
++   SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=cancel-selftest step=1 result=failed detail=scale-refused\n");
++   return true;
++  }
++ }
++ int clients[3]={-1,-1,-1};
++ for (unsigned i=0;i<8 && clients[2]<0;++i) {
++  if (fClients[i].id) continue;
++  for (unsigned k=0;k<3;++k) if (clients[k]<0) { clients[k]=(int)i; break; }
++ }
++ if (clients[2]<0) return true;
++ for (unsigned k=0;k<3;++k) {
++  unsigned i=(unsigned)clients[k];
++  fClients[i]={}; fClients[i].id=++fNextClient;
++  fCancelClients[k]=i;
++  IOReturn result=beginRegisterBandwidth(i,proposal[k]);
++  fCancelTokens[k]=fClients[i].registerStatus.token;
++  if (result!=kIOReturnSuccess) {
++   SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=cancel-selftest step=1 result=failed detail=admission-%u result=%#x\n",
++       k,(unsigned)result);
++   return true;
++  }
++ }
++ bool distinct=fCancelTokens[1] && fCancelTokens[2] &&
++     fCancelTokens[0]!=fCancelTokens[1] && fCancelTokens[1]!=fCancelTokens[2];
++ if (!distinct || fQueue.depth()!=2) {
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=cancel-selftest step=1 result=failed detail=trio-did-not-serialize depth=%u\n",
++      fQueue.depth());
++  return true;
++ }
++ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=cancel-selftest kind=register-bandwidth resource=%u bytes0=%llu bytes1=%llu bytes2=%llu client0=%u client1=%u client2=%u token0=%u token1=%u token2=%u depth=%u high-water=%u; first in flight, two waiting\n",
++     (unsigned)SweetBCMCN0,proposal[0],proposal[1],proposal[2],
++     fCancelClients[0],fCancelClients[1],fCancelClients[2],
++     (unsigned)fCancelTokens[0],(unsigned)fCancelTokens[1],(unsigned)fCancelTokens[2],
++     fQueue.depth(),fQueue.highWater());
++ return true;
++}
++
++/* C3-06 device demonstration, step 2: the first half has completed on hardware,
++ * so the two behind it are still waiting - the only moment at which they can be
++ * taken back without touching anything the provider owns.
++ *
++ * It is also the only moment the pair demonstration's ledger can be handed
++ * back: the completed request holds the array now, so each of those two votes
++ * can leave the ledger without moving the array - which is exactly what a
++ * withdrawal has to be. Both are ordinary calls, and both clients then leave.
++ *
++ * Then the two halves of the contract run on the two waiting requests, so one
++ * ring shows both: the caller withdraws its own wait by token, and the next
++ * client never withdraws anything because it has already exited. Neither is a
++ * hardware rollback - the array keeps the value the completed half wrote.
++ *
++ * Finally the completed client asks for the boot's own rate back. That is the
++ * other half of "a withdrawal is not a vote": getting the array back down is a
++ * transaction, so it is a vote, it goes out as one, and it is the last thing
++ * this demonstration asks for. */
++bool
++SweetRPMh::cancelSelfTestCancel(void)
++{
++ const unsigned a=fCancelClients[0], b1=fCancelClients[1], b2=fCancelClients[2];
++ bool ok=a<8 && b1<8 && b2<8;
++ SweetRegisterBandwidthStatus statusA={};
++ if (a<8 && fClients[a].id && fClients[a].registerStatus.token==fCancelTokens[0])
++  statusA=fClients[a].registerStatus;
++ ok=ok && statusA.state==SweetRPMhComplete;
++ unsigned withdrew=0, exited=0;
++ if (ok) {
++  for (unsigned k=0;k<2 && ok;++k) {
++   const unsigned i=fSelfClients[k];
++   uint64_t previous=0, aggregate=0;
++   if (i>=8 || !fClients[i].id || !fClients[i].registerVote) { ok=false; break; }
++   if (withdrawRegisterVote(i,&previous,&aggregate)==kIOReturnSuccess) withdrew++;
++   else { ok=false; break; }
++   if (detachClient(i,NULL)==kIOReturnSuccess) exited++;
++   else ok=false;
++  }
++  ok=ok && withdrew==2 && exited==2;
++ }
++ fCancelLedger=ok;
++ const IOReturn cancelled=ok ? cancelWaiting(b1,fCancelTokens[1],"caller") : kIOReturnAborted;
++ SweetRegisterBandwidthStatus statusB1={};
++ if (cancelled==kIOReturnSuccess && b1<8) statusB1=fClients[b1].registerStatus;
++ ok=ok && cancelled==kIOReturnSuccess;
++ ok=ok && statusB1.state==SweetRPMhFailed && statusB1.result==kIOReturnAborted;
++ /* The other waiting request is never named by anyone: its client simply goes,
++  * and the exit is what withdraws it. */
++ unsigned exitedWith=0;
++ const IOReturn detached=ok ? detachClient(b2,&exitedWith) : kIOReturnBusy;
++ ok=ok && detached==kIOReturnSuccess && exitedWith==1;
++ const uint64_t told=fRegisterAggregate;
++ uint64_t lowered=0;
++ if (ok) {
++  const IOReturn result=beginRegisterBandwidth(a,0);
++  lowered=fClients[a].registerStatus.token;
++  ok=result==kIOReturnSuccess && lowered && lowered!=fCancelTokens[1] &&
++      lowered!=fCancelTokens[2];
++ }
++ fCancelLower=ok ? lowered : 0;
++ if (!ok) {
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=cancel-selftest step=2 result=failed detail=cancel-%#x b1-state=%u b1-result=%#x ledger=%u/%u exit-withdrew=%u lower=%#x depth=%u\n",
++      (unsigned)cancelled,statusB1.state,(unsigned)statusB1.result,withdrew,exited,
++      exitedWith,(unsigned)(lowered?(IOReturn)0:kIOReturnAborted),fQueue.depth());
++  return true;
++ }
++ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=cancel-selftest step=2 result=ok a-token=%u b1-token=%u b1-state=%u b1-result=%#x b2-token=%u exit-withdrew=%u lower-token=%u ledger-withdrew=%u ledger-exited=%u told=%llu depth=%u; one explicit withdrawal, one exit withdrawal, neither dispatched, the pair handed back on the completed request's vote\n",
++     (unsigned)fCancelTokens[0],(unsigned)fCancelTokens[1],statusB1.state,
++     (unsigned)statusB1.result,(unsigned)fCancelTokens[2],exitedWith,
++     (unsigned)fCancelLower,withdrew,exited,told,fQueue.depth());
++ return true;
++}
++
++/* C3-06 device demonstration, step 3: the lowering vote has completed, so the
++ * last identity can go. The ring ends with the array being told this boot's own
++ * value again - the demonstration leaves no ledger entry and no raised rate
++ * behind, and nothing it did lowered the array by withdrawal. */
++bool
++SweetRPMh::cancelSelfTestFinish(void)
++{
++ const unsigned a=fCancelClients[0];
++ bool ok=fCancelLower && a<8 && fClients[a].id;
++ SweetRegisterBandwidthStatus status={};
++ if (ok && fClients[a].registerStatus.token==fCancelLower) status=fClients[a].registerStatus;
++ ok=ok && status.state==SweetRPMhComplete && !status.bytesPerSecond;
++ unsigned exitedWith=0;
++ const IOReturn detached=ok ? detachClient(a,&exitedWith) : kIOReturnBusy;
++ ok=ok && detached==kIOReturnSuccess && !fClients[a].id && !exitedWith;
++ if (!ok) {
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=cancel-selftest step=3 result=failed detail=state-%u bytes=%llu detach-%#x aggregate=%llu\n",
++      status.state,status.bytesPerSecond,(unsigned)detached,fRegisterAggregate);
++  return true;
++ }
++ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=cancel-selftest step=3 result=ok exited=%u aggregate=%llu owned=%u depth=%u cancelled=%u; two waits never dispatched, every ledger entry handed back\n",
++     a,fRegisterAggregate,fRegisterOwned?1u:0u,fQueue.depth(),fQueue.cancelled());
++ return true;
++}
++
+ /* A queued vote is rebuilt from these two words, never from the caller's
+  * reference: the caller may return as soon as its token exists, and the queue
+  * must still hold everything the dispatch needs. */
+@@ -668,6 +842,137 @@ SweetRPMh::drainQueue(IOReturn result,const char *reason)
+  }
+ }
+ 
++/* C3-06: withdraw one request that has not been triggered yet.
++ *
++ * The queue is the only place such a record exists, so "there is nothing here
++ * to cancel" is answered from this service's own state instead of guessed: the
++ * request is either the one the machine is working on - triggered, and from
++ * then on the provider's to finalize or isolate - or its token names nothing
++ * that still waits. Both refusals are decisive and cost no write; neither sends
++ * a compensating vote for a value the array is still being told.
++ *
++ * A withdrawal is not a hardware rollback: the hardware was never told about a
++ * waiting request, so failing it changes only this client's ledger. Another
++ * client's ledger and vote are never touched, and the record is out of the
++ * queue before the dispatcher could reach it again. */
++IOReturn
++SweetRPMh::cancelWaiting(unsigned client,uint64_t token,const char *why)
++{
++ SweetAppsRequest removed={};
++ if (!token) return kIOReturnBadArgument;
++ const SweetAppsRequest *waiting=fQueue.findToken(token);
++ if (waiting) {
++  /* One client cannot withdraw another's wait, and a refusal must not disturb
++   * the order of what the queue holds - so ownership is settled while the
++   * record is still in place. */
++  if (waiting->client!=client) {
++   SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u token=%llu detail=not-owner result=%#x\n",
++       sweetRequestName(waiting->kind),client,waiting->rail,token,(unsigned)kIOReturnNotPermitted);
++   return kIOReturnNotPermitted;
++  }
++  if (!fQueue.cancel(token,&removed)) return kIOReturnNotFound;
++  markFailure(removed,kIOReturnAborted);
++  SWEET_LOG_INFO("SWEET APPS QUEUE: phase=cancel kind=%s client=%u resource=%u token=%llu seq=%u depth=%u result=ok why=%s\n",
++      sweetRequestName(removed.kind),removed.client,removed.rail,removed.token,removed.seq,
++      fQueue.depth(),why);
++  return kIOReturnSuccess;
++ }
++ const bool triggered=fCurrentValid && fCurrent.token==token;
++ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=refuse kind=%s client=%u resource=%u token=%llu detail=%s result=%#x why=%s\n",
++     sweetRequestName(triggered?fCurrent.kind:SweetAppsRequestNone),client,
++     triggered?fCurrent.rail:0,token,triggered?"already-triggered":"unknown-token",
++     (unsigned)(triggered?kIOReturnBusy:kIOReturnNotFound),why);
++ return triggered?kIOReturnBusy:kIOReturnNotFound;
++}
++
++/* Everything one exiting client still had waiting, newest first. Each record
++ * gets its own row and its own token, so a reader can account for every wait
++ * that will now never be dispatched. */
++unsigned
++SweetRPMh::cancelClientQueue(unsigned client,const char *why)
++{
++ SweetAppsRequest removed[kSweetAppsQueueCapacity];
++ const unsigned taken=fQueue.cancelClient(client,removed,kSweetAppsQueueCapacity);
++ for (unsigned i=0;i<taken && i<kSweetAppsQueueCapacity;++i) {
++  markFailure(removed[i],kIOReturnAborted);
++  SWEET_LOG_INFO("SWEET APPS QUEUE: phase=cancel kind=%s client=%u resource=%u token=%llu seq=%u depth=%u result=ok why=%s\n",
++      sweetRequestName(removed[i].kind),removed[i].client,removed[i].rail,removed[i].token,
++      removed[i].seq,fQueue.depth(),why);
++ }
++ return taken;
++}
++
++/* Detach, with the waiting half of the contract attached to it.
++ *
++ * The refusal checks come first, before anything is withdrawn: a detach that
++ * answers Busy must leave the client exactly as it was, including its waiting
++ * requests. Only a detach that is going to succeed takes the waiting records
++ * with it - which is the whole point of C3-06, since releasing the identity
++ * while a record still names it is how a dispatch would reach a dead slot. */
++IOReturn
++SweetRPMh::detachClient(unsigned client,unsigned *cancelled)
++{
++ if (cancelled) *cancelled=0;
++ if (client>=8 || !fClients[client].id) return kIOReturnNotFound;
++ const char *detail=NULL;
++ if (fBusy && fClientIndex==client) detail="in-flight";
++ for (unsigned rail=0;!detail && rail<SweetRailCount;++rail)
++  if (fClients[client].votes[rail].enabled) detail="rail-vote-retained";
++ if (!detail && (fClients[client].displayVote!=SweetDisplayOff ||
++     fClients[client].displayStatus.uncertain)) detail="display-vote-retained";
++ if (!detail && (fClients[client].registerVote || fClients[client].registerStatus.uncertain))
++  detail="register-vote-retained";
++ if (detail) {
++  SWEET_LOG_INFO("SWEET APPS QUEUE: phase=detach client=%u cancelled=0 depth=%u detail=%s result=%#x\n",
++      client,fQueue.depth(),detail,(unsigned)kIOReturnBusy);
++  return kIOReturnBusy;
++ }
++ const unsigned withdrawn=cancelClientQueue(client,"exit");
++ fClients[client]={};
++ if (cancelled) *cancelled=withdrawn;
++ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=detach client=%u cancelled=%u depth=%u result=ok\n",
++     client,withdrawn,fQueue.depth());
++ return kIOReturnSuccess;
++}
++
++/* Drop this client's own CN0 vote from the ledger.
++ *
++ * The array is being told fRegisterAggregate. Removing a vote is a pure ledger
++ * edit only while somebody else still holds that value up; if this client is
++ * what holds it, then the hardware would have to be told something lower, and
++ * that is a transaction - a new vote - not a side effect of a withdrawal. So
++ * the lowering case is refused instead of silently retargeted, and a refusal
++ * changes nothing. No reverse vote is ever produced here. */
++IOReturn
++SweetRPMh::withdrawRegisterVote(unsigned client,uint64_t *previous,uint64_t *aggregate)
++{
++ if (client>=8 || !fClients[client].id) return kIOReturnNotFound;
++ const uint64_t held=fClients[client].registerVote;
++ const uint64_t told=fRegisterAggregate;
++ uint64_t others=0;
++ for (unsigned i=0;i<8;++i)
++  if (i!=client && fClients[i].id && fClients[i].registerVote>others)
++   others=fClients[i].registerVote;
++ if (!held) {
++  SWEET_LOG_INFO("SWEET APPS QUEUE: phase=withdraw kind=register-bandwidth client=%u previous=0 aggregate=%llu detail=no-vote\n",
++      client,told);
++  return kIOReturnNotFound;
++ }
++ if (others<told) {
++  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=withdraw kind=register-bandwidth client=%u previous=%llu aggregate=%llu others=%llu result=%#x detail=would-change-hardware; lower it with a vote\n",
++      client,held,told,others,(unsigned)kIOReturnNotPermitted);
++  return kIOReturnNotPermitted;
++ }
++ /* others == told by the refusal above, so the array keeps being told exactly
++  * what it was told before this call: only the ledger moves. */
++ fClients[client].registerVote=0;
++ if (previous) *previous=held;
++ if (aggregate) *aggregate=told;
++ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=withdraw kind=register-bandwidth client=%u previous=%llu aggregate=%llu others=%llu hardware=unchanged\n",
++     client,held,told,others);
++ return kIOReturnSuccess;
++}
++
+ /* Publish the token before the request runs. Fields that a dispatch has not
+  * computed yet stay zero until it does; Pending is the state that says so. */
+ void
+@@ -1050,6 +1355,19 @@ bool SweetRPMh::start(IOService *provider)
+  /* An explicit tree request to demonstrate the submission queue on this boot.
+   * Absent, zero or anything but 1 means the demonstration does not run. */
+  fQueueSelfTest=propertyRequested(provider,"sweet,rpmh-queue-selftest");
++ /* C3-06: cancelling and detaching a waiting request is the second explicit
++  * tree request. It implies the first, because the thing it withdraws is a
++  * request that the pair demonstration queued - a tree that asks only for the
++  * withdrawal still runs the pair, and therefore still shows the same queue,
++  * refusal and retirement rows before its own. */
++ fQueueCancel=propertyRequested(provider,"sweet,rpmh-queue-cancel");
++ if (fQueueCancel) fQueueSelfTest=true;
++ /* Both demonstrations start from nothing to say, so a restart cannot inherit a
++  * step from the boot before it. */
++ fCancelStep=0; fCancelLower=0; fCancelLedger=false;
++ fCancelTokens[0]=fCancelTokens[1]=fCancelTokens[2]=0;
++ fSelfClients[0]=fSelfClients[1]=0;
++ fCancelClients[0]=fCancelClients[1]=fCancelClients[2]=0;
+  /* C3-04: the owner comes from the tree, before the first register access and
+   * without a boot arg (the boot-arg budget is spent). A tree that says both
+   * sides program the line resolves to SweetAppsOwnerNone and nothing starts. */
+@@ -1410,6 +1728,23 @@ void SweetRPMh::retireFlight(void)
+  if (fQueueSelfTest && !fQueueTestRun && !fPoisoned && fAccepting) {
+   if (queueSelfTest()) fQueueTestRun=true;
+  }
++ /* C3-06: three more moments, each one only after the previous one has actually
++  * retired on hardware. Step 1 admits a trio whose last two members will never
++  * be dispatched; step 2, reached when the first member completes, hands the
++  * pair demonstration's ledger back, takes both waiting requests back (one by
++  * its owner, one by its client leaving) and asks for the boot's own rate
++  * again; step 3, reached when that lands, lets the last identity exit. All
++  * three run through the same gate as any client, so none can bypass the
++  * ordering or the refusals it is meant to demonstrate. */
++ if (fQueueCancel && fQueueTestRun && !fPoisoned && fAccepting) {
++  if (fCancelStep==0) {
++   if (cancelSelfTest()) fCancelStep=1;
++  } else if (fCancelStep==1) {
++   if (cancelSelfTestCancel()) fCancelStep=2;
++  } else if (fCancelStep==2) {
++   if (cancelSelfTestFinish()) fCancelStep=3;
++  }
++ }
+  dispatchNext();
+ }
+ 
+@@ -1604,16 +1939,13 @@ IOReturn SweetRPMh::action(OSObject *owner,void *arg,void *,void *,void *)
+   return kIOReturnNoResources;
+  }
+  for (unsigned i=0;i<8;++i) if (r.client && self->fClients[i].id==r.client) {
+-  if (r.op==Detach) {
+-   if (self->fBusy && self->fClientIndex==i) return kIOReturnBusy;
+-   /* A waiting request still owns this identity: detaching now would dispatch
+-    * it against a released client slot. Cancelling one is C3-06. */
+-   if (self->fQueue.waiting(i)) return kIOReturnBusy;
+-   for (unsigned rail=0;rail<SweetRailCount;++rail) if (self->fClients[i].votes[rail].enabled) return kIOReturnBusy;
+-   if (self->fClients[i].displayVote!=SweetDisplayOff || self->fClients[i].displayStatus.uncertain) return kIOReturnBusy;
+-   if (self->fClients[i].registerVote || self->fClients[i].registerStatus.uncertain) return kIOReturnBusy;
+-   self->fClients[i]={}; return kIOReturnSuccess;
+-  }
++  /* C3-06: an exiting client takes its waiting requests with it. A request the
++   * machine has already triggered stays the provider's until it retires, and so
++   * does this identity - the same refusal this path always gave, now only for
++   * the work that is genuinely in flight. */
++  if (r.op==Detach) return self->detachClient(i,NULL);
++  if (r.op==Cancel) return self->cancelWaiting(i,r.token,"caller");
++  if (r.op==Withdraw) return self->withdrawRegisterVote(i,r.previous,r.aggregate);
+   if (r.op==Query) {
+    if (!r.token || self->fClients[i].status.token!=r.token) return kIOReturnNotFound;
+    *r.status=self->fClients[i].status; return kIOReturnSuccess;
+@@ -1699,6 +2031,20 @@ IOReturn SweetRPMh::requestRegisterBandwidth(uint64_t id,uint64_t bandwidth,uint
+ IOReturn SweetRPMh::copyRegisterBandwidthStatus(uint64_t id,uint64_t token,SweetRegisterBandwidthStatus *status)
+ { if (!status) return kIOReturnBadArgument; RPMhRequest r={}; r.op=RegisterQuery; r.client=id; r.token=token; r.registerStatus=status; return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady; }
+ 
++IOReturn SweetRPMh::cancelRequest(uint64_t id,uint64_t token)
++{
++ if (!token) return kIOReturnBadArgument;
++ RPMhRequest r={}; r.op=Cancel; r.client=id; r.token=token;
++ return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady;
++}
++IOReturn SweetRPMh::withdrawRegisterBandwidth(uint64_t id,uint64_t *previous,uint64_t *aggregate)
++{
++ if (!previous || !aggregate) return kIOReturnBadArgument;
++ *previous=*aggregate=0;
++ RPMhRequest r={}; r.op=Withdraw; r.client=id; r.previous=previous; r.aggregate=aggregate;
++ return fGateAdded ? fGate->runAction(action,&r) : kIOReturnNotReady;
++}
++
+ void SweetRPMh::shutdown(void)
+ {
+  if (fGateAdded) { RPMhRequest r={}; r.op=Shutdown; (void)fGate->runAction(action,&r); }
+diff --git a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h
+index dd10a8a..d8c341e 100644
+--- a/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h
++++ b/dxb/xnu/iokit/Kernel/arm/SweetRPMh.h
+@@ -159,6 +159,20 @@ class SweetRPMh : public IOService {
+  SweetAppsQueue fQueue;
+  SweetAppsRequest fCurrent;
+  bool fCurrentValid, fDispatching, fQueueSelfTest, fQueueTestRun;
++ /* C3-06: the second explicit request. It implies the pair demonstration, and
++  * once that pair has retired it withdraws the two votes the pair left behind,
++  * detaches those clients, then runs one more pair whose waiting half is
++  * cancelled and whose client exits before it could ever be dispatched.
++  * fCancelStep says which half has already happened, so a boot that loses the
++  * queue to an isolation state never reports a demonstration it did not run. */
++ bool fQueueCancel;
++ unsigned fCancelStep;
++ /* The identities the two demonstrations created, and the tokens the second
++  * pair was handed, kept so the second half acts on exactly those requests
++  * instead of guessing from the ledger. */
++ bool fCancelLedger;
++ unsigned fSelfClients[2], fCancelClients[3];
++ uint64_t fCancelTokens[3], fCancelLower;
+  unsigned fQueueRefused, fQuarantined, fQueueTestTries;
+  IOReturn admit(SweetAppsRequest &);
+  IOReturn validate(const SweetAppsRequest &);
+@@ -170,6 +184,14 @@ class SweetRPMh : public IOService {
+  void markPending(const SweetAppsRequest &);
+  void markFailure(const SweetAppsRequest &,IOReturn);
+  bool queueSelfTest(void);
++ uint64_t cn0Step(void) const;
++ bool cancelSelfTest(void);
++ bool cancelSelfTestCancel(void);
++ bool cancelSelfTestFinish(void);
++ IOReturn cancelWaiting(unsigned,uint64_t,const char *);
++ unsigned cancelClientQueue(unsigned,const char *);
++ IOReturn detachClient(unsigned,unsigned *);
++ IOReturn withdrawRegisterVote(unsigned,uint64_t *,uint64_t *);
+  IOReturn launchRail(const SweetAppsRequest &);
+  IOReturn launchDisplayPower(const SweetAppsRequest &);
+  IOReturn launchRegisterBandwidth(const SweetAppsRequest &);
+@@ -301,6 +323,21 @@ public:
+   * Same client/gate/completion engine. Bytes/sec, no raw BCM bitfields. */
+  IOReturn requestRegisterBandwidth(uint64_t,uint64_t,uint64_t *);
+  IOReturn copyRegisterBandwidthStatus(uint64_t,uint64_t,SweetRegisterBandwidthStatus *);
++ /* C3-06: withdraw one request that is still waiting, by the token the caller
++  * already holds. A request that has been triggered is not cancellable here and
++  * is refused instead: its storage and its TCS slot belong to the provider,
++  * which finalizes or isolates it. Cancelling never sends a compensating vote,
++  * never touches another client's ledger, and never frees in-flight storage.
++  * Attached clients are also detached only after their waiting requests have
++  * been withdrawn this way, so no record can be dispatched against a slot that
++  * the exit has already released. */
++ IOReturn cancelRequest(uint64_t,uint64_t);
++ /* Drop this client's own CN0 vote from the ledger. Refused when this client is
++  * what holds the acknowledged aggregate up, because lowering the array from
++  * there is a new transaction and therefore the caller's explicit vote - not a
++  * side effect of a withdrawal. Answered with the previous and resulting
++  * aggregate so a caller can report what the hardware is still being told. */
++ IOReturn withdrawRegisterBandwidth(uint64_t,uint64_t *,uint64_t *);
+ };
+ 
+ /* Matching only retain/withdraw + queues owner event. stop outside owner gate.
+diff --git a/tools/mk-mh2lm-mdss-adt.py b/tools/mk-mh2lm-mdss-adt.py
+index 59772b5..de11409 100644
+--- a/tools/mk-mh2lm-mdss-adt.py
++++ b/tools/mk-mh2lm-mdss-adt.py
+@@ -43,7 +43,7 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+             clock_gate=False, clock_disable=False, clock_share=False,
+             clock_vote_probe=False, clock_vote=False, clock_reset=False,
+             rsc_channel=False, rsc_query=False, rsc_executor=False,
+-            rpmh_queue_selftest=False):
++            rpmh_queue_selftest=False, rpmh_queue_cancel=False):
+     # C2-05 stands on both cards below it, so the two switch it needs are implied
+     # here rather than trusted to every caller: a share node without them would be
+     # refused at start and the image would carry a property that can do nothing.
+@@ -69,6 +69,11 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+     # queue lives; without that node the property would be read by nobody.
+     if rpmh_queue_selftest and not rpmh_irq:
+         raise ValueError('--rpmh-queue-selftest needs --rpmh-irq (the property is read by the display owner node)')
++    # C3-06's demonstration withdraws requests that the C3-05 one queued, so a
++    # tree that asks for it asks for both: on its own it would have nothing to
++    # take back and the boot would print a demonstration that proves nothing.
++    if rpmh_queue_cancel and not rpmh_queue_selftest:
++        raise ValueError('--rpmh-queue-cancel needs --rpmh-queue-selftest (it withdraws requests that demonstration queued)')
+     display_noc = display_noc or panel_pipeline
+     display_resources = display_resources or display_noc or panel_pins or panel_touch or panel_identity or rpmh_irq
+     root, end = adt.parse(blob)
+@@ -187,6 +192,10 @@ def derive(blob, irq_preflight=False, display_resources=False, display_noc=False
+             # queue. Absent by default, and exactly 1 when present - the driver
+             # treats every other length or value as "do not run".
+             rpmh.props.append(('sweet,rpmh-queue-selftest', 0, struct.pack('<I', 1)))
++        if rpmh_queue_cancel:
++            # C3-06: the same boot also takes two waiting requests back, which
++            # only exists because the property above made the queue run.
++            rpmh.props.append(('sweet,rpmh-queue-cancel', 0, struct.pack('<I', 1)))
+         arm.children.append(rpmh)
+     if rsc_channel:
+         # C3-01: a second, read-only reader of the apps RSC. It carries the same
+@@ -331,6 +340,7 @@ if __name__ == '__main__':
+     parser.add_argument('--rsc-query', action='store_true', help='C3-02: let the channel query the read-only command DB for one known resource; requires --rsc-channel')
+     parser.add_argument('--rsc-executor', action='store_true', help='C3-04: the channel becomes the sole apps executor (fourth GIC range, sweet,rsc-executor) and the display node stands down; requires --rsc-channel and --rpmh-irq')
+     parser.add_argument('--rpmh-queue-selftest', action='store_true', help='C3-05: the display owner demonstrates the bounded submission queue once on this boot (sweet,rpmh-queue-selftest=1); requires --rpmh-irq')
++    parser.add_argument('--rpmh-queue-cancel', action='store_true', help='C3-06: the same demonstration also takes two waiting requests back (sweet,rpmh-queue-cancel=1); requires --rpmh-queue-selftest')
+     parser.add_argument('source', type=Path)
+     parser.add_argument('destination', type=Path)
+     args = parser.parse_args()
+@@ -341,4 +351,4 @@ if __name__ == '__main__':
+                       args.clock_disable, args.clock_share, args.clock_vote_probe,
+                       args.clock_vote, args.clock_reset, args.rsc_channel,
+                       args.rsc_query, args.rsc_executor,
+-                      args.rpmh_queue_selftest))
++                      args.rpmh_queue_selftest, args.rpmh_queue_cancel))
+diff --git a/tools/tests/test-mh2lm-apps-queue.py b/tools/tests/test-mh2lm-apps-queue.py
+index 5fd92b3..600f705 100644
+--- a/tools/tests/test-mh2lm-apps-queue.py
++++ b/tools/tests/test-mh2lm-apps-queue.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""C3-05: the bounded apps-submission queue as a unit.
++"""C3-05/C3-06: the bounded apps-submission queue as a unit.
+ 
+ The queue is the only new storage the apps RSC got in C3-05, so it is tested on
+ its own, without IOKit and without the driver: capacity, arrival order across the
+@@ -7,6 +7,12 @@ array wrap, the refusal when full, the exact-resource lookup the owner uses to
+ reject a duplicate, and the payload round trip that lets a request survive after
+ the caller's stack and objects are gone.
+ 
++C3-06 adds the one way a record leaves without being dispatched. A withdrawal is
++tested here at the storage level: by token anywhere in the window (head, middle,
++tail), by client (newest first, and the client's own records only), the refusal
++for a token that is not waiting, and the counters - a cancelled record is not a
++dispatched one, and the slot it leaves is cleared rather than left readable.
++
+ Run: python3 tools/tests/test-mh2lm-apps-queue.py [xnu-tree]
+ """
+ import os
+@@ -138,6 +144,82 @@ static void payload(void)
+ 	check(q.head()->kind == 0xdead);
+ }
+ 
++/* C3-06: a token identifies one waiting record and nothing else. Withdrawing it
++ * closes the gap in arrival order without disturbing the requests behind it, and
++ * the record that left is handed back so the owner can fail exactly that token. */
++static void cancelByToken(void)
++{
++	SweetAppsQueue q;
++	SweetAppsRequest stored;
++	check(q.push(make(1, 4, 2, 0x11, 0, 0xa1), &stored));
++	check(q.push(make(1, 5, 2, 0x22, 0, 0xa2), &stored));
++	check(q.push(make(1, 6, 2, 0x33, 0, 0xa3), &stored));
++	check(q.findToken(0xa1) && q.findToken(0xa1)->client == 4);
++	check(q.findToken(0xa3) && q.findToken(0xa3)->client == 6);
++	check(q.findToken(0) == NULL && q.findToken(0xff) == NULL);
++
++	/* the head */
++	SweetAppsRequest gone = make(0, 0, 0, 0, 0, 0);
++	check(q.cancel(0xa1, &gone) && gone.token == 0xa1 && gone.client == 4);
++	check(gone.seq == 1);			/* the withdrawn record keeps its stamp */
++	check(q.depth() == 2 && q.cancelled() == 1 && q.dispatched() == 0);
++	check(q.head() && q.head()->token == 0xa2 && q.head()->seq == 2);
++	check(q.findToken(0xa1) == NULL && q.find(1, 4, 2) == NULL);
++
++	/* the tail: the two ahead of it keep their order */
++	check(q.cancel(0xa3) && q.depth() == 1 && q.cancelled() == 2);
++	check(q.cancel(0xa3) == false && q.depth() == 1 && q.cancelled() == 2);
++	check(q.head() && q.head()->token == 0xa2);
++	q.pop();
++	check(q.empty() && q.dispatched() == 1 && q.cancelled() == 2);
++
++	/* nothing to withdraw must change nothing: an unknown token, a zero token
++	 * (never issued), and a token that has already been dispatched. */
++	check(q.push(make(1, 7, 2, 0x44, 0, 0xa4), &stored));
++	check(!q.cancel(0xff) && !q.cancel(0) && !q.cancel(0xa2) && q.depth() == 1);
++	check(q.cancelled() == 2 && q.accepted() == 4);
++	q.pop();
++
++	/* A cancelled record is not a dispatched one, and its slot is cleared: a
++	 * stale copy in the window must not be readable as a live request. */
++	check(q.dispatched() == 2 && q.cancelled() == 2);
++	check(q.findToken(0xa1) == NULL && !q.waiting(4) && !q.waiting(6));
++}
++
++/* A withdrawing client takes its own records and no one else's, newest first, so
++ * the copy the owner publishes is the order a reader would expect. */
++static void cancelByClient(void)
++{
++	SweetAppsQueue q;
++	SweetAppsRequest stored;
++	SweetAppsRequest out[3];
++	const unsigned tokens[6] = { 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6 };
++	const unsigned owners[6] = { 3, 8, 3, 9, 3, 8 };
++	for (unsigned i = 0; i < 6; ++i)
++		check(q.push(make(1, owners[i], i, i, 0, tokens[i]), &stored));
++	check(q.depth() == 6 && q.cancelled() == 0);
++
++	const unsigned taken = q.cancelClient(3, out, 3);
++	check(taken == 3 && q.depth() == 3 && q.cancelled() == 3 && q.dispatched() == 0);
++	check(out[0].token == 0xb5 && out[1].token == 0xb3 && out[2].token == 0xb1);
++	check(!q.waiting(3) && q.waiting(8) && q.waiting(9));
++	check(q.head() && q.head()->token == 0xb2);	/* others keep their order */
++	check(q.head()->seq == 2);
++	check(q.findToken(0xb3) == NULL && q.findToken(0xb4) != NULL);
++
++	/* a client with nothing waiting is not an error, and costs nothing */
++	check(q.cancelClient(3, out, 3) == 0 && q.depth() == 3 && q.cancelled() == 3);
++	check(q.cancelClient(99) == 0 && q.depth() == 3);
++
++	/* a caller with a smaller buffer still gets every record out: the ones past
++	 * the cap are withdrawn without being copied anywhere. */
++	check(q.cancelClient(8, out, 1) == 2 && q.depth() == 1 && q.cancelled() == 5);
++	check(out[0].token == 0xb6);
++	q.pop();
++	check(q.empty() && q.dispatched() == 1 && q.cancelled() == 5);
++	check(q.cancelled() + q.dispatched() == q.accepted());
++}
++
+ /* reset() is the boot-time clear the owner runs from start(): storage and
+  * counters go back to zero, so a stale request can never be dispatched. */
+ static void reset(void)
+@@ -149,7 +231,8 @@ static void reset(void)
+ 	q.reset();
+ 	check(q.empty() && !q.full() && q.depth() == 0 && q.head() == NULL);
+ 	check(q.accepted() == 0 && q.dispatched() == 0 && q.highWater() == 0);
+-	check(q.find(9, 1, 0) == NULL && !q.waiting(1));
++	check(q.cancelled() == 0);
++	check(q.find(9, 1, 0) == NULL && !q.waiting(1) && q.findToken(2) == NULL);
+ 	SweetAppsRequest stored;
+ 	check(q.push(make(9, 2, 0, 0, 0, 3), &stored) && stored.seq == 1);
+ }
+@@ -157,8 +240,9 @@ static void reset(void)
+ int main(void)
+ {
+ 	fresh(); capacity(); wrap(); lookup(); payload(); reset();
++	cancelByToken(); cancelByClient();
+ 	if (failures) { fprintf(stderr, "%u checks failed\n", failures); return 1; }
+-	puts("PASS: C3-05 apps submission queue; fixed capacity 8, refused when full without stamping, arrival order across the array wrap, exact kind/client/resource lookup, payload and pre-issued token preserved after the caller reuses its struct, boot-time reset");
++	puts("PASS: C3-05/C3-06 apps submission queue; fixed capacity 8, refused when full without stamping, arrival order across the array wrap, exact kind/client/resource lookup, payload and pre-issued token preserved after the caller reuses its struct, withdrawal by token (head/tail/unknown/zero/already dispatched) and by client (own records only, newest first, every record out even past the caller's buffer) counted apart from dispatches, boot-time reset");
+ 	return 0;
+ }
+ '''
+diff --git a/tools/tests/test-mh2lm-mdss-adt.py b/tools/tests/test-mh2lm-mdss-adt.py
+index 7c46057..9c176fe 100644
+--- a/tools/tests/test-mh2lm-mdss-adt.py
++++ b/tools/tests/test-mh2lm-mdss-adt.py
+@@ -840,6 +840,57 @@ with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-queue-adt-') as temp:
+                              capture_output=True)
+     assert refused.returncode != 0, refused
+     assert output.read_bytes() == queue_tree
++# C3-06's withdrawal is a second property on the same node, and it is defined
++# against the first: it takes back requests that demonstration queued, so a tree
++# that asks for it has to ask for both, and dropping it gives the C3-05 bytes
++# back exactly.
++assert b'sweet,rpmh-queue-cancel' not in queue_tree
++cancel_tree = m.derive(blob, rpmh_irq=True, rsc_channel=True, rsc_executor=True,
++                       rpmh_queue_selftest=True, rpmh_queue_cancel=True)
++ctree, cend = adt.parse(cancel_tree)
++assert cend == len(cancel_tree)
++cowner = next(n for n in ctree.children[1].children if n.name == 'display-rpmh')
++assert cowner.prop('sweet,rpmh-queue-cancel') == struct.pack('<I', 1)
++assert cowner.prop('sweet,rpmh-queue-selftest') == struct.pack('<I', 1)
++assert cancel_tree.count(b'sweet,rpmh-queue-cancel\0') == 1
++assert [n.name for n in ctree.children[1].children] == [n.name for n in qtree.children[1].children]
++cowner.props = [x for x in cowner.props if x[0] != 'sweet,rpmh-queue-cancel']
++assert adt.serialize(ctree) == queue_tree
++# Asking for the withdrawal alone would queue nothing to withdraw, and a tree
++# without the display owner node has nobody to read either property.
++try:
++    m.derive(blob, rpmh_irq=True, rsc_channel=True, rsc_executor=True,
++             rpmh_queue_cancel=True)
++except ValueError:
++    pass
++else:
++    raise AssertionError('a cancel property without the demonstration it withdraws from must be refused')
++for bad in ({'panel_identity': True, 'display_resources': True,
++             'rpmh_queue_selftest': True, 'rpmh_queue_cancel': True},
++            {'display_resources': True, 'rpmh_queue_selftest': True,
++             'rpmh_queue_cancel': True}):
++    try:
++        m.derive(blob, **bad)
++    except ValueError:
++        pass
++    else:
++        raise AssertionError('a cancel property with no owner node must be refused: %r' % (bad,))
++with tempfile.TemporaryDirectory(prefix='mh2lm-rsc-cancel-adt-') as temp:
++    source, output = Path(temp)/'base.adt', Path(temp)/'cancel.adt'
++    source.write_bytes(blob)
++    subprocess.run([sys.executable, str(Path(m.__file__)), '--rpmh-irq', '--rsc-channel',
++                    '--rsc-executor', '--rpmh-queue-selftest', '--rpmh-queue-cancel',
++                    str(source), str(output)], check=True)
++    assert output.read_bytes() == cancel_tree
++    assert source.read_bytes() == blob
++    # A refused derivation writes nothing: the tree already on disk stays as it
++    # was, so a mistyped round cannot ship the previous candidate by accident.
++    refused = subprocess.run([sys.executable, str(Path(m.__file__)),
++                              '--rpmh-irq', '--rsc-channel', '--rsc-executor',
++                              '--rpmh-queue-cancel', str(source), str(output)],
++                             capture_output=True)
++    assert refused.returncode != 0, refused
++    assert output.read_bytes() == cancel_tree
+ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order-stable, '
+       'exactly removable to the C1 and original bytes, and selectable from the CLI, with the '
+       'C2-08 measurement, C2-03 branch gate and dependent C2-04 disable as opt-in properties '
+@@ -854,4 +905,7 @@ print('PASS: C2 GCC windows are a separate opt-in node, low-alias encoded, order
+       'down without touching its ranges or INTID, one property per side away '
+       'from the C3-03 bytes, and the C3-05 demonstration, which is one '
+       '4-byte property on the display owner node, exactly removable to the '
+-      'C3-04 bytes and refused without the node that reads it')
++      'C3-04 bytes and refused without the node that reads it, and the C3-06 '
++      'withdrawal, which is a second property on that same node, refused '
++      'without the demonstration it takes requests back from, and exactly '
++      'removable to the C3-05 bytes')
+diff --git a/tools/tests/test-mh2lm-rpmh-resources.py b/tools/tests/test-mh2lm-rpmh-resources.py
+index 4c99ddb..e89b62a 100644
+--- a/tools/tests/test-mh2lm-rpmh-resources.py
++++ b/tools/tests/test-mh2lm-rpmh-resources.py
+@@ -41,6 +41,19 @@ static void fixtures(){
+   for(unsigned c=0;c<3;++c)regs[TCS+t*0x2a0+0x3c+c*0x14]=(1<<8)|(1<<16);}
+  regs[TCS]=0x41;
+ }
++// CN0 metadata the register-bandwidth path needs: one additional DB header
++// describing a single slave-5 entry named CN0, its 8-byte aux table holding the
++// unit and the packed width/vcd. The DB is enlarged for it; the rails keep their
++// own entries where fixtures() put them.
++static void bandwidthFixtures(){
++ fixtures();regs[LOC+4]=512;
++ regs[DB+24]=5|(112<<16);regs[DB+28]=176|(1<<16); // slave5, entries@256, aux@320, count1
++ uint32_t key[2]={0,0};const char*name="CN0";
++ for(unsigned k=0;k<3;++k)key[k/4]|=uint32_t(uint8_t(name[k]))<<(8*(k%4));
++ regs[DB+256]=key[0];regs[DB+260]=key[1];
++ regs[DB+256+16]=0x50000;regs[DB+256+20]=8;regs[DB+256+22]=0;
++ regs[DB+320]=20000;regs[DB+324]=4|(1<<16);
++}
+ static IOService*nub(bool rpmh=true){auto*n=new IOService;n->rpmhNub=rpmh;
+  uint32_t abi=1;auto*d=OSData::withBytes(&abi,4);n->properties[rpmh?"sweet,rpmh-abi":"sweet,display-resource-abi"]=d;
+  if(rpmh){n->properties["sweet,rpmh-irq-abi"]=OSData::withBytes(&abi,4);uint32_t intid=37;n->properties["sweet,rpmh-intid"]=OSData::withBytes(&intid,4);}return n;}
+@@ -500,9 +513,119 @@ int main(){
+  assert(s->requestVote(id,SweetRailPHY,{true,880,880,36000},&token)==kIOReturnNoResources&&!token&&!writes());
+  s->fNextClient=~0ULL;assert(s->attachConsumer(&token)==kIOReturnNoResources&&!token);
+  destroy(s,n);reboot();
+- dropNub(n);assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
++
++// C3-06 cancel / detach / lifetime. A request that has not been dispatched can
++// be taken back by its owner and can never be dispatched afterwards; a request
++// that has already been triggered cannot, and belongs to the provider until it
++// finishes. Neither kind of withdrawal is a hardware rollback, and one client's
++// withdrawal never touches another client's votes or another client's requests.
++ fixtures();resourceMode=2;s=make(n);id=attach(s);other=attach(s);
++ token=vote(s,id,SweetRailVDDI,{true,1800,1880,62000});tick(s);assert(s->fBusy);
++ uint64_t bTok=vote(s,other,SweetRailPHY,{true,880,880,36000});
++ assert(s->fQueue.depth()==1&&s->fQueue.dispatched()==0);
++ auto cancelWrites=writes();
++ assert(status(s,other,bTok).state==SweetRPMhPending);
++ // Nothing is withdrawn by a caller who cannot name it, and an in-flight
++ // request is not a candidate: its storage belongs to the provider now.
++ assert(s->cancelRequest(other,0)==kIOReturnBadArgument&&s->fQueue.depth()==1);
++ assert(s->cancelRequest(other,token)==kIOReturnBusy&&s->fQueue.depth()==1);
++ assert(s->cancelRequest(other,0xdeadbeef)==kIOReturnNotFound&&s->fQueue.depth()==1);
++ // Only the owner may take its own wait back; a neighbour's wait is not a
++ // withdrawal candidate, and the refusal leaves it waiting.
++ assert(s->cancelRequest(id,bTok)==kIOReturnNotPermitted&&s->fQueue.depth()==1);
++ assert(status(s,other,bTok).state==SweetRPMhPending&&writes()==cancelWrites);
++ // The owner withdraws it: the token fails as withdrawn (not as a timeout, and
++ // not uncertain), no hardware is written, and the flight in progress is
++ // untouched and still completes under its own provider.
++ assert(s->cancelRequest(other,bTok)==0);
++ assert(s->fQueue.empty()&&s->fQueue.cancelled()==1&&s->fQueue.dispatched()==0);
++ SweetRPMhStatus gone=status(s,other,bTok);
++ assert(gone.state==SweetRPMhFailed&&gone.result==kIOReturnAborted&&!gone.uncertain);
++ assert(writes()==cancelWrites&&s->fBusy&&s->fCurrentValid&&s->fCurrent.token==token);
++ // a cancelled token is gone, not "cancelled again", and costs nothing
++ assert(s->cancelRequest(other,bTok)==kIOReturnNotFound);
++ assert(s->fQueue.cancelled()==1&&writes()==cancelWrites);
++ ack(s);assert(!s->fBusy&&status(s,id,token).state==SweetRPMhComplete);
++ // A withdrawn wait releases its resource: the same client may ask again and
++ // what it gets is a new request with a new token, not the withdrawn one.
++ uint64_t again=vote(s,other,SweetRailPHY,{true,880,880,36000});
++ assert(again&&again!=bTok);tick(s);ack(s);
++ assert(status(s,other,again).state==SweetRPMhComplete&&s->fQueue.cancelled()==1);
++ destroy(s,n);reboot();
++ // Exiting is the other way a wait is withdrawn, and an exit is refused while
++ // anything is retained: the refusal withdraws nothing.
++ fixtures();resourceMode=2;s=make(n);id=attach(s);other=attach(s);uint64_t third=attach(s);
++ uint64_t keep=vote(s,other,SweetRailVDDI,{true,1800,1880,62000});tick(s);ack(s);
++ assert(!s->fBusy&&s->fClients[1].votes[SweetRailVDDI].enabled);
++ token=vote(s,id,SweetRailVPNL,{true,3000,3008,857000});tick(s);assert(s->fBusy);
++ uint64_t cTok=vote(s,other,SweetRailHost,{true,1200,1200,1000});
++ uint64_t dTok=vote(s,third,SweetRailHost,{true,1200,1200,1000});
++ assert(s->fQueue.depth()==2);
++ assert(s->detachConsumer(other)==kIOReturnBusy&&s->fQueue.depth()==2);
++ assert(status(s,other,cTok).state==SweetRPMhPending&&s->fClients[1].votes[SweetRailVDDI].enabled);
++ // The request in flight is not its client's to take back either.
++ assert(s->detachConsumer(id)==kIOReturnBusy&&s->fQueue.depth()==2);
++ // third holds nothing but its wait, so it goes - and the wait goes with it,
++ // before the slot can be handed to anyone else.
++ messages.clear();
++ assert(s->detachConsumer(third)==0&&s->fQueue.depth()==1&&s->fQueue.cancelled()==1);
++ assert(s->detachConsumer(third)==kIOReturnNotFound);
++ bool sawExit=false,sawDetach=false;
++ for(auto &m:messages){
++  if(m.find("phase=cancel")!=std::string::npos&&m.find("why=exit")!=std::string::npos)sawExit=true;
++  if(m.find("phase=detach")!=std::string::npos&&m.find("cancelled=1")!=std::string::npos)sawDetach=true;
++ }
++ assert(sawExit&&sawDetach);
++ // The wait that was still queued is untouched and still gets dispatched.
++ ack(s);assert(s->fBusy&&s->fCurrent.token==cTok&&s->fQueue.empty());
++ tick(s);ack(s);
++ assert(!s->fBusy&&status(s,other,cTok).state==SweetRPMhComplete);
++ // Giving a retained vote back is a flight like any other - a disable, not a
++ // withdrawal - and only after it lands can that client leave. Host is a
++ // handoff rail, so its entry is refused to a lone client and keeps the client.
++ uint64_t off=vote(s,other,SweetRailVDDI,{false,0,0,0});tick(s);ack(s);
++ assert(!s->fBusy&&!s->fClients[1].votes[SweetRailVDDI].enabled);
++ assert(status(s,other,off).state==SweetRPMhComplete&&s->fClients[1].votes[SweetRailHost].enabled);
++ assert(s->detachConsumer(other)==kIOReturnBusy&&s->detachConsumer(id)==kIOReturnBusy);
++ off=vote(s,id,SweetRailVPNL,{false,0,0,0});tick(s);ack(s);
++ assert(!s->fBusy&&!s->fClients[0].votes[SweetRailVPNL].enabled);
++ assert(s->detachConsumer(id)==0&&s->detachConsumer(id)==kIOReturnNotFound);
++ destroy(s,n);reboot();
++ // Withdrawing a ledger entry is not a vote. It is allowed only when the array
++ // is being told what someone else asks for: then it is a pure ledger edit. When
++ // the client holds the aggregate, lowering it needs a real vote and the
++ // withdrawal is refused instead of quietly rolling the hardware back.
++ bandwidthFixtures();s=make(n);id=attach(s);other=attach(s);
++ uint64_t prev=9,agg=9,bw1=0,bw2=0;
++ assert(s->withdrawRegisterBandwidth(id,&prev,&agg)==kIOReturnNotFound);
++ assert(!prev&&!agg);
++ assert(s->withdrawRegisterBandwidth(0,&prev,&agg)==kIOReturnNotFound);
++ assert(s->withdrawRegisterBandwidth(id,NULL,NULL)==kIOReturnBadArgument);
++ assert(s->withdrawRegisterBandwidth(id,NULL,&agg)==kIOReturnBadArgument);
++ assert(s->requestRegisterBandwidth(id,20000,&bw1)==0&&bw1);
++ tick(s);ack(s);
++ assert(s->requestRegisterBandwidth(other,40000,&bw2)==0&&bw2&&bw2!=bw1);
++ tick(s);ack(s);
++ assert(s->fRegisterAggregate==40000&&s->fRegisterOwned&&s->fClients[0].registerVote==20000);
++ trace.clear();prev=agg=0;
++ assert(s->withdrawRegisterBandwidth(id,&prev,&agg)==0);
++ assert(prev==20000&&agg==40000&&!writes());
++ assert(s->fClients[0].registerVote==0&&s->fRegisterAggregate==40000);
++ // other holds the aggregate: a withdrawal would have to lower the array.
++ prev=agg=0;
++ assert(s->withdrawRegisterBandwidth(other,&prev,&agg)==kIOReturnNotPermitted);
++ assert(!prev&&!agg&&!writes()&&s->fClients[1].registerVote==40000);
++ // It leaves by saying zero as a vote, which is a flight like any other.
++ assert(s->detachConsumer(id)==0);
++ uint64_t bw3=0;
++ assert(s->requestRegisterBandwidth(other,0,&bw3)==0&&bw3);
++ tick(s);ack(s);
++ assert(!s->fRegisterAggregate&&s->fClients[1].registerVote==0);
++ assert(s->detachConsumer(other)==0);
++ destroy(s,n);reboot();
++  dropNub(n);assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
+  puts("PASS: actual display ARC chain: typed corners, rounded parents, staged fresh ACK, client aggregate, reverse withdrawal, shared VRM gate, inherited conflicts, optional malformed metadata, partial-failure ledger, no rollback, stop/retirement and exhaustion");
+- puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement, one TCS owner across queued arrivals, explicit queue-full refusal, waiters refused at the isolation state, 11 malformed resources, actual matching/termination");
++ puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement, one TCS owner across queued arrivals, explicit queue-full refusal, waiters refused at the isolation state, owner-only cancellation of a waiting request with no hardware write and no reverse vote, in-flight and neighbour cancels refused, exit withdrawal newest-first after its retain checks, ledger-only register withdrawal refused when it would move hardware, 11 malformed resources, actual matching/termination");
+ }
+ '''
+ # ack helper normally asserts successful cleanup; uncleared IRQ deliberately

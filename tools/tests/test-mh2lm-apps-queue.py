@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""C3-05: the bounded apps-submission queue as a unit.
+"""C3-05/C3-06: the bounded apps-submission queue as a unit.
 
 The queue is the only new storage the apps RSC got in C3-05, so it is tested on
 its own, without IOKit and without the driver: capacity, arrival order across the
 array wrap, the refusal when full, the exact-resource lookup the owner uses to
 reject a duplicate, and the payload round trip that lets a request survive after
 the caller's stack and objects are gone.
+
+C3-06 adds the one way a record leaves without being dispatched. A withdrawal is
+tested here at the storage level: by token anywhere in the window (head, middle,
+tail), by client (newest first, and the client's own records only), the refusal
+for a token that is not waiting, and the counters - a cancelled record is not a
+dispatched one, and the slot it leaves is cleared rather than left readable.
 
 Run: python3 tools/tests/test-mh2lm-apps-queue.py [xnu-tree]
 """
@@ -138,6 +144,82 @@ static void payload(void)
 	check(q.head()->kind == 0xdead);
 }
 
+/* C3-06: a token identifies one waiting record and nothing else. Withdrawing it
+ * closes the gap in arrival order without disturbing the requests behind it, and
+ * the record that left is handed back so the owner can fail exactly that token. */
+static void cancelByToken(void)
+{
+	SweetAppsQueue q;
+	SweetAppsRequest stored;
+	check(q.push(make(1, 4, 2, 0x11, 0, 0xa1), &stored));
+	check(q.push(make(1, 5, 2, 0x22, 0, 0xa2), &stored));
+	check(q.push(make(1, 6, 2, 0x33, 0, 0xa3), &stored));
+	check(q.findToken(0xa1) && q.findToken(0xa1)->client == 4);
+	check(q.findToken(0xa3) && q.findToken(0xa3)->client == 6);
+	check(q.findToken(0) == NULL && q.findToken(0xff) == NULL);
+
+	/* the head */
+	SweetAppsRequest gone = make(0, 0, 0, 0, 0, 0);
+	check(q.cancel(0xa1, &gone) && gone.token == 0xa1 && gone.client == 4);
+	check(gone.seq == 1);			/* the withdrawn record keeps its stamp */
+	check(q.depth() == 2 && q.cancelled() == 1 && q.dispatched() == 0);
+	check(q.head() && q.head()->token == 0xa2 && q.head()->seq == 2);
+	check(q.findToken(0xa1) == NULL && q.find(1, 4, 2) == NULL);
+
+	/* the tail: the two ahead of it keep their order */
+	check(q.cancel(0xa3) && q.depth() == 1 && q.cancelled() == 2);
+	check(q.cancel(0xa3) == false && q.depth() == 1 && q.cancelled() == 2);
+	check(q.head() && q.head()->token == 0xa2);
+	q.pop();
+	check(q.empty() && q.dispatched() == 1 && q.cancelled() == 2);
+
+	/* nothing to withdraw must change nothing: an unknown token, a zero token
+	 * (never issued), and a token that has already been dispatched. */
+	check(q.push(make(1, 7, 2, 0x44, 0, 0xa4), &stored));
+	check(!q.cancel(0xff) && !q.cancel(0) && !q.cancel(0xa2) && q.depth() == 1);
+	check(q.cancelled() == 2 && q.accepted() == 4);
+	q.pop();
+
+	/* A cancelled record is not a dispatched one, and its slot is cleared: a
+	 * stale copy in the window must not be readable as a live request. */
+	check(q.dispatched() == 2 && q.cancelled() == 2);
+	check(q.findToken(0xa1) == NULL && !q.waiting(4) && !q.waiting(6));
+}
+
+/* A withdrawing client takes its own records and no one else's, newest first, so
+ * the copy the owner publishes is the order a reader would expect. */
+static void cancelByClient(void)
+{
+	SweetAppsQueue q;
+	SweetAppsRequest stored;
+	SweetAppsRequest out[3];
+	const unsigned tokens[6] = { 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6 };
+	const unsigned owners[6] = { 3, 8, 3, 9, 3, 8 };
+	for (unsigned i = 0; i < 6; ++i)
+		check(q.push(make(1, owners[i], i, i, 0, tokens[i]), &stored));
+	check(q.depth() == 6 && q.cancelled() == 0);
+
+	const unsigned taken = q.cancelClient(3, out, 3);
+	check(taken == 3 && q.depth() == 3 && q.cancelled() == 3 && q.dispatched() == 0);
+	check(out[0].token == 0xb5 && out[1].token == 0xb3 && out[2].token == 0xb1);
+	check(!q.waiting(3) && q.waiting(8) && q.waiting(9));
+	check(q.head() && q.head()->token == 0xb2);	/* others keep their order */
+	check(q.head()->seq == 2);
+	check(q.findToken(0xb3) == NULL && q.findToken(0xb4) != NULL);
+
+	/* a client with nothing waiting is not an error, and costs nothing */
+	check(q.cancelClient(3, out, 3) == 0 && q.depth() == 3 && q.cancelled() == 3);
+	check(q.cancelClient(99) == 0 && q.depth() == 3);
+
+	/* a caller with a smaller buffer still gets every record out: the ones past
+	 * the cap are withdrawn without being copied anywhere. */
+	check(q.cancelClient(8, out, 1) == 2 && q.depth() == 1 && q.cancelled() == 5);
+	check(out[0].token == 0xb6);
+	q.pop();
+	check(q.empty() && q.dispatched() == 1 && q.cancelled() == 5);
+	check(q.cancelled() + q.dispatched() == q.accepted());
+}
+
 /* reset() is the boot-time clear the owner runs from start(): storage and
  * counters go back to zero, so a stale request can never be dispatched. */
 static void reset(void)
@@ -149,7 +231,8 @@ static void reset(void)
 	q.reset();
 	check(q.empty() && !q.full() && q.depth() == 0 && q.head() == NULL);
 	check(q.accepted() == 0 && q.dispatched() == 0 && q.highWater() == 0);
-	check(q.find(9, 1, 0) == NULL && !q.waiting(1));
+	check(q.cancelled() == 0);
+	check(q.find(9, 1, 0) == NULL && !q.waiting(1) && q.findToken(2) == NULL);
 	SweetAppsRequest stored;
 	check(q.push(make(9, 2, 0, 0, 0, 3), &stored) && stored.seq == 1);
 }
@@ -157,8 +240,9 @@ static void reset(void)
 int main(void)
 {
 	fresh(); capacity(); wrap(); lookup(); payload(); reset();
+	cancelByToken(); cancelByClient();
 	if (failures) { fprintf(stderr, "%u checks failed\n", failures); return 1; }
-	puts("PASS: C3-05 apps submission queue; fixed capacity 8, refused when full without stamping, arrival order across the array wrap, exact kind/client/resource lookup, payload and pre-issued token preserved after the caller reuses its struct, boot-time reset");
+	puts("PASS: C3-05/C3-06 apps submission queue; fixed capacity 8, refused when full without stamping, arrival order across the array wrap, exact kind/client/resource lookup, payload and pre-issued token preserved after the caller reuses its struct, withdrawal by token (head/tail/unknown/zero/already dispatched) and by client (own records only, newest first, every record out even past the caller's buffer) counted apart from dispatches, boot-time reset");
 	return 0;
 }
 '''

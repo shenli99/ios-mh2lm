@@ -159,6 +159,20 @@ class SweetRPMh : public IOService {
  SweetAppsQueue fQueue;
  SweetAppsRequest fCurrent;
  bool fCurrentValid, fDispatching, fQueueSelfTest, fQueueTestRun;
+ /* C3-06: the second explicit request. It implies the pair demonstration, and
+  * once that pair has retired it withdraws the two votes the pair left behind,
+  * detaches those clients, then runs one more pair whose waiting half is
+  * cancelled and whose client exits before it could ever be dispatched.
+  * fCancelStep says which half has already happened, so a boot that loses the
+  * queue to an isolation state never reports a demonstration it did not run. */
+ bool fQueueCancel;
+ unsigned fCancelStep;
+ /* The identities the two demonstrations created, and the tokens the second
+  * pair was handed, kept so the second half acts on exactly those requests
+  * instead of guessing from the ledger. */
+ bool fCancelLedger;
+ unsigned fSelfClients[2], fCancelClients[3];
+ uint64_t fCancelTokens[3], fCancelLower;
  unsigned fQueueRefused, fQuarantined, fQueueTestTries;
  IOReturn admit(SweetAppsRequest &);
  IOReturn validate(const SweetAppsRequest &);
@@ -170,6 +184,14 @@ class SweetRPMh : public IOService {
  void markPending(const SweetAppsRequest &);
  void markFailure(const SweetAppsRequest &,IOReturn);
  bool queueSelfTest(void);
+ uint64_t cn0Step(void) const;
+ bool cancelSelfTest(void);
+ bool cancelSelfTestCancel(void);
+ bool cancelSelfTestFinish(void);
+ IOReturn cancelWaiting(unsigned,uint64_t,const char *);
+ unsigned cancelClientQueue(unsigned,const char *);
+ IOReturn detachClient(unsigned,unsigned *);
+ IOReturn withdrawRegisterVote(unsigned,uint64_t *,uint64_t *);
  IOReturn launchRail(const SweetAppsRequest &);
  IOReturn launchDisplayPower(const SweetAppsRequest &);
  IOReturn launchRegisterBandwidth(const SweetAppsRequest &);
@@ -301,6 +323,21 @@ public:
   * Same client/gate/completion engine. Bytes/sec, no raw BCM bitfields. */
  IOReturn requestRegisterBandwidth(uint64_t,uint64_t,uint64_t *);
  IOReturn copyRegisterBandwidthStatus(uint64_t,uint64_t,SweetRegisterBandwidthStatus *);
+ /* C3-06: withdraw one request that is still waiting, by the token the caller
+  * already holds. A request that has been triggered is not cancellable here and
+  * is refused instead: its storage and its TCS slot belong to the provider,
+  * which finalizes or isolates it. Cancelling never sends a compensating vote,
+  * never touches another client's ledger, and never frees in-flight storage.
+  * Attached clients are also detached only after their waiting requests have
+  * been withdrawn this way, so no record can be dispatched against a slot that
+  * the exit has already released. */
+ IOReturn cancelRequest(uint64_t,uint64_t);
+ /* Drop this client's own CN0 vote from the ledger. Refused when this client is
+  * what holds the acknowledged aggregate up, because lowering the array from
+  * there is a new transaction and therefore the caller's explicit vote - not a
+  * side effect of a withdrawal. Answered with the previous and resulting
+  * aggregate so a caller can report what the hardware is still being told. */
+ IOReturn withdrawRegisterBandwidth(uint64_t,uint64_t *,uint64_t *);
 };
 
 /* Matching only retain/withdraw + queues owner event. stop outside owner gate.

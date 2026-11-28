@@ -41,6 +41,19 @@ static void fixtures(){
   for(unsigned c=0;c<3;++c)regs[TCS+t*0x2a0+0x3c+c*0x14]=(1<<8)|(1<<16);}
  regs[TCS]=0x41;
 }
+// CN0 metadata the register-bandwidth path needs: one additional DB header
+// describing a single slave-5 entry named CN0, its 8-byte aux table holding the
+// unit and the packed width/vcd. The DB is enlarged for it; the rails keep their
+// own entries where fixtures() put them.
+static void bandwidthFixtures(){
+ fixtures();regs[LOC+4]=512;
+ regs[DB+24]=5|(112<<16);regs[DB+28]=176|(1<<16); // slave5, entries@256, aux@320, count1
+ uint32_t key[2]={0,0};const char*name="CN0";
+ for(unsigned k=0;k<3;++k)key[k/4]|=uint32_t(uint8_t(name[k]))<<(8*(k%4));
+ regs[DB+256]=key[0];regs[DB+260]=key[1];
+ regs[DB+256+16]=0x50000;regs[DB+256+20]=8;regs[DB+256+22]=0;
+ regs[DB+320]=20000;regs[DB+324]=4|(1<<16);
+}
 static IOService*nub(bool rpmh=true){auto*n=new IOService;n->rpmhNub=rpmh;
  uint32_t abi=1;auto*d=OSData::withBytes(&abi,4);n->properties[rpmh?"sweet,rpmh-abi":"sweet,display-resource-abi"]=d;
  if(rpmh){n->properties["sweet,rpmh-irq-abi"]=OSData::withBytes(&abi,4);uint32_t intid=37;n->properties["sweet,rpmh-intid"]=OSData::withBytes(&intid,4);}return n;}
@@ -500,9 +513,119 @@ int main(){
  assert(s->requestVote(id,SweetRailPHY,{true,880,880,36000},&token)==kIOReturnNoResources&&!token&&!writes());
  s->fNextClient=~0ULL;assert(s->attachConsumer(&token)==kIOReturnNoResources&&!token);
  destroy(s,n);reboot();
- dropNub(n);assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
+
+// C3-06 cancel / detach / lifetime. A request that has not been dispatched can
+// be taken back by its owner and can never be dispatched afterwards; a request
+// that has already been triggered cannot, and belongs to the provider until it
+// finishes. Neither kind of withdrawal is a hardware rollback, and one client's
+// withdrawal never touches another client's votes or another client's requests.
+ fixtures();resourceMode=2;s=make(n);id=attach(s);other=attach(s);
+ token=vote(s,id,SweetRailVDDI,{true,1800,1880,62000});tick(s);assert(s->fBusy);
+ uint64_t bTok=vote(s,other,SweetRailPHY,{true,880,880,36000});
+ assert(s->fQueue.depth()==1&&s->fQueue.dispatched()==0);
+ auto cancelWrites=writes();
+ assert(status(s,other,bTok).state==SweetRPMhPending);
+ // Nothing is withdrawn by a caller who cannot name it, and an in-flight
+ // request is not a candidate: its storage belongs to the provider now.
+ assert(s->cancelRequest(other,0)==kIOReturnBadArgument&&s->fQueue.depth()==1);
+ assert(s->cancelRequest(other,token)==kIOReturnBusy&&s->fQueue.depth()==1);
+ assert(s->cancelRequest(other,0xdeadbeef)==kIOReturnNotFound&&s->fQueue.depth()==1);
+ // Only the owner may take its own wait back; a neighbour's wait is not a
+ // withdrawal candidate, and the refusal leaves it waiting.
+ assert(s->cancelRequest(id,bTok)==kIOReturnNotPermitted&&s->fQueue.depth()==1);
+ assert(status(s,other,bTok).state==SweetRPMhPending&&writes()==cancelWrites);
+ // The owner withdraws it: the token fails as withdrawn (not as a timeout, and
+ // not uncertain), no hardware is written, and the flight in progress is
+ // untouched and still completes under its own provider.
+ assert(s->cancelRequest(other,bTok)==0);
+ assert(s->fQueue.empty()&&s->fQueue.cancelled()==1&&s->fQueue.dispatched()==0);
+ SweetRPMhStatus gone=status(s,other,bTok);
+ assert(gone.state==SweetRPMhFailed&&gone.result==kIOReturnAborted&&!gone.uncertain);
+ assert(writes()==cancelWrites&&s->fBusy&&s->fCurrentValid&&s->fCurrent.token==token);
+ // a cancelled token is gone, not "cancelled again", and costs nothing
+ assert(s->cancelRequest(other,bTok)==kIOReturnNotFound);
+ assert(s->fQueue.cancelled()==1&&writes()==cancelWrites);
+ ack(s);assert(!s->fBusy&&status(s,id,token).state==SweetRPMhComplete);
+ // A withdrawn wait releases its resource: the same client may ask again and
+ // what it gets is a new request with a new token, not the withdrawn one.
+ uint64_t again=vote(s,other,SweetRailPHY,{true,880,880,36000});
+ assert(again&&again!=bTok);tick(s);ack(s);
+ assert(status(s,other,again).state==SweetRPMhComplete&&s->fQueue.cancelled()==1);
+ destroy(s,n);reboot();
+ // Exiting is the other way a wait is withdrawn, and an exit is refused while
+ // anything is retained: the refusal withdraws nothing.
+ fixtures();resourceMode=2;s=make(n);id=attach(s);other=attach(s);uint64_t third=attach(s);
+ uint64_t keep=vote(s,other,SweetRailVDDI,{true,1800,1880,62000});tick(s);ack(s);
+ assert(!s->fBusy&&s->fClients[1].votes[SweetRailVDDI].enabled);
+ token=vote(s,id,SweetRailVPNL,{true,3000,3008,857000});tick(s);assert(s->fBusy);
+ uint64_t cTok=vote(s,other,SweetRailHost,{true,1200,1200,1000});
+ uint64_t dTok=vote(s,third,SweetRailHost,{true,1200,1200,1000});
+ assert(s->fQueue.depth()==2);
+ assert(s->detachConsumer(other)==kIOReturnBusy&&s->fQueue.depth()==2);
+ assert(status(s,other,cTok).state==SweetRPMhPending&&s->fClients[1].votes[SweetRailVDDI].enabled);
+ // The request in flight is not its client's to take back either.
+ assert(s->detachConsumer(id)==kIOReturnBusy&&s->fQueue.depth()==2);
+ // third holds nothing but its wait, so it goes - and the wait goes with it,
+ // before the slot can be handed to anyone else.
+ messages.clear();
+ assert(s->detachConsumer(third)==0&&s->fQueue.depth()==1&&s->fQueue.cancelled()==1);
+ assert(s->detachConsumer(third)==kIOReturnNotFound);
+ bool sawExit=false,sawDetach=false;
+ for(auto &m:messages){
+  if(m.find("phase=cancel")!=std::string::npos&&m.find("why=exit")!=std::string::npos)sawExit=true;
+  if(m.find("phase=detach")!=std::string::npos&&m.find("cancelled=1")!=std::string::npos)sawDetach=true;
+ }
+ assert(sawExit&&sawDetach);
+ // The wait that was still queued is untouched and still gets dispatched.
+ ack(s);assert(s->fBusy&&s->fCurrent.token==cTok&&s->fQueue.empty());
+ tick(s);ack(s);
+ assert(!s->fBusy&&status(s,other,cTok).state==SweetRPMhComplete);
+ // Giving a retained vote back is a flight like any other - a disable, not a
+ // withdrawal - and only after it lands can that client leave. Host is a
+ // handoff rail, so its entry is refused to a lone client and keeps the client.
+ uint64_t off=vote(s,other,SweetRailVDDI,{false,0,0,0});tick(s);ack(s);
+ assert(!s->fBusy&&!s->fClients[1].votes[SweetRailVDDI].enabled);
+ assert(status(s,other,off).state==SweetRPMhComplete&&s->fClients[1].votes[SweetRailHost].enabled);
+ assert(s->detachConsumer(other)==kIOReturnBusy&&s->detachConsumer(id)==kIOReturnBusy);
+ off=vote(s,id,SweetRailVPNL,{false,0,0,0});tick(s);ack(s);
+ assert(!s->fBusy&&!s->fClients[0].votes[SweetRailVPNL].enabled);
+ assert(s->detachConsumer(id)==0&&s->detachConsumer(id)==kIOReturnNotFound);
+ destroy(s,n);reboot();
+ // Withdrawing a ledger entry is not a vote. It is allowed only when the array
+ // is being told what someone else asks for: then it is a pure ledger edit. When
+ // the client holds the aggregate, lowering it needs a real vote and the
+ // withdrawal is refused instead of quietly rolling the hardware back.
+ bandwidthFixtures();s=make(n);id=attach(s);other=attach(s);
+ uint64_t prev=9,agg=9,bw1=0,bw2=0;
+ assert(s->withdrawRegisterBandwidth(id,&prev,&agg)==kIOReturnNotFound);
+ assert(!prev&&!agg);
+ assert(s->withdrawRegisterBandwidth(0,&prev,&agg)==kIOReturnNotFound);
+ assert(s->withdrawRegisterBandwidth(id,NULL,NULL)==kIOReturnBadArgument);
+ assert(s->withdrawRegisterBandwidth(id,NULL,&agg)==kIOReturnBadArgument);
+ assert(s->requestRegisterBandwidth(id,20000,&bw1)==0&&bw1);
+ tick(s);ack(s);
+ assert(s->requestRegisterBandwidth(other,40000,&bw2)==0&&bw2&&bw2!=bw1);
+ tick(s);ack(s);
+ assert(s->fRegisterAggregate==40000&&s->fRegisterOwned&&s->fClients[0].registerVote==20000);
+ trace.clear();prev=agg=0;
+ assert(s->withdrawRegisterBandwidth(id,&prev,&agg)==0);
+ assert(prev==20000&&agg==40000&&!writes());
+ assert(s->fClients[0].registerVote==0&&s->fRegisterAggregate==40000);
+ // other holds the aggregate: a withdrawal would have to lower the array.
+ prev=agg=0;
+ assert(s->withdrawRegisterBandwidth(other,&prev,&agg)==kIOReturnNotPermitted);
+ assert(!prev&&!agg&&!writes()&&s->fClients[1].registerVote==40000);
+ // It leaves by saying zero as a vote, which is a flight like any other.
+ assert(s->detachConsumer(id)==0);
+ uint64_t bw3=0;
+ assert(s->requestRegisterBandwidth(other,0,&bw3)==0&&bw3);
+ tick(s);ack(s);
+ assert(!s->fRegisterAggregate&&s->fClients[1].registerVote==0);
+ assert(s->detachConsumer(other)==0);
+ destroy(s,n);reboot();
+  dropNub(n);assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
  puts("PASS: actual display ARC chain: typed corners, rounded parents, staged fresh ACK, client aggregate, reverse withdrawal, shared VRM gate, inherited conflicts, optional malformed metadata, partial-failure ledger, no rollback, stop/retirement and exhaustion");
- puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement, one TCS owner across queued arrivals, explicit queue-full refusal, waiters refused at the isolation state, 11 malformed resources, actual matching/termination");
+ puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement, one TCS owner across queued arrivals, explicit queue-full refusal, waiters refused at the isolation state, owner-only cancellation of a waiting request with no hardware write and no reverse vote, in-flight and neighbour cancels refused, exit withdrawal newest-first after its retain checks, ledger-only register withdrawal refused when it would move hardware, 11 malformed resources, actual matching/termination");
 }
 '''
 # ack helper normally asserts successful cleanup; uncleared IRQ deliberately
