@@ -659,8 +659,20 @@ C3-06 的环用 `--c3-05` 判被拒（它排三笔而那张卡说一笔）。
   ——拥有者的 id 走了之后记录仍然答得出；**另一个 id 被 `kIOReturnNotPermitted` 拒**（`0xe00002e2`）；全环 0 条
   `stray`／`late`／`quarantine`／`refuse`。
 
-两个"分离"是这一卡的合同本身：`told=20000` 与 `step=1` 的 `target` 相等（交回的是自己的票，不是别人的），
-`step=5` 的 `told_after_exit=0` 回到 boot 自己的值（票交干净了）。`confirmed` 全程没有因在飞或不确定前进。
+这段跨度里的 14 行（含别个子系统穿插的 5 行）自己就把"交回"讲全了，不必只信 `told=`：
+
+- 2128 派发 → 2129 `step=1`（**问在飞行与完成之间**）→ 2130 `SWEET RPMH IRQ: fresh ACTIVE completion tcs=0 commands=1 entries=0; cleanup pending`
+  → 2131 `token=2 CN0 ACTIVE ACK bytes/s=20000`；
+- 2132 `token=3` 派发 → 2133 `token=3 CN0 ACTIVE ACK bytes/s=20000` 且**没有 IRQ 完成行**——数组已经在 telling 20000，
+  这次提交是 no-write，与 `step=3` 的 `generation=0 executed=0` 是同一件事的两种说法；
+- 2136 `token=4` 派发 → 2138 完成 → 2139 `token=4 CN0 ACTIVE ACK bytes/s=0`——交回真的把 CN0 拉回 0。
+
+三个 ACK 值（20000／20000／0）与 `step=1.target`、`step=4.told`、`step=5.told_after_exit` 逐值相等，所以 `told` 不是自报账目：
+**交回的是自己的票（等于自己抬的值），交完后数组回到 boot 自己的值。**`confirmed` 全程没有因在飞或不确定前进。
+
+**第二次启动复现**：同一镜像再启动一次，环 `sweetlog-0153-1.bin`（`cdb237b7…`、4 198 400 字节、4 020 行、未回卷、
+`flush_sequence=14`）`--c2-03 --c3-07` 同样 **rc=0**，`console_rows` 1092 行、最长 236；两次启动的 2136–2149 与 2128–2141
+两段跨度**逐字节相同**（14 行全等），token／generation／client 行号之外无一处差异——这一卡的数字不是单次启动的巧合。
 
 `--c2-03 --c3-07` 判 **rc=0**；`console_rows`：1042 条 Sweet 行、最长 236 字节（`SWEET MDSS LINK`）、预算 254，
 本卡三行最紧 209／230／234 字节，一条都没越界；`executor=delegated`、45 条 RPMH／RSC 线缆行、既有 Rail／ARC／CN0 自然投票
@@ -681,9 +693,8 @@ C3-06 的环用 `--c3-05` 判被拒（它排三笔而那张卡说一笔）。
 
 `selftest-query-auditor.py` 现 **51 变体全 PASS**（46 条反例、4 条跨人格互拒、1 条正例）。
 
-**仍为 host-only 的三半**（如实记录，不声称硬件已验）：真实超时（这卡不改超时策略，只把状态暴露出来）、
-隔离分支（"受控软件诊断屏蔽本请求完成消费"未实施，`quarantine`／`refuse` 只有 fixture 与合成环覆盖）、
-以及第二次启动的复现性（同一镜像的第二环 `sweetlog-0153-1.bin` 待抓）。
+**仍为 host-only 的两半**（如实记录，不声称硬件已验）：真实超时（这卡不改超时策略，只把状态暴露出来）与
+隔离分支（"受控软件诊断屏蔽本请求完成消费"未实施，`quarantine`／`refuse` 只有 fixture 与合成环覆盖）。
 
 ### C3-08 保持一组命令的原子边界与顺序
 
