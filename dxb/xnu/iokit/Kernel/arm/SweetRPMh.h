@@ -235,6 +235,21 @@ class SweetRPMh : public IOService {
  unsigned fQueryPhase, fQuerySlot, fQueryTries;
  uint64_t fQueryClient, fQueryToken, fQueryGeneration, fQueryBase;
  uint64_t fQueryRestore, fQueryIdle;
+ /* C3-08: one ordered command group per TCS. The rail vote is the shape this
+  * boot already submits - floor, mode and enable for one rail, three commands
+  * behind one trigger - so the group is the unit that has to be admitted or
+  * refused whole: never split across two TCSes (the order would then span two
+  * triggers and the completion would describe two batches), never truncated.
+  * groupCapacity() is the room this boot actually has - the array's NCPT or the
+  * reviewed word buffer, whichever binds - and checkGroup() is the only place
+  * that answer becomes a verdict. fGroupSelfTest is the explicit ADT request
+  * that demonstrates the boundary by asking for it: an over-long group is
+  * refused before any state changes, so the demonstration writes nothing. */
+ bool fGroupSelfTest, fGroupTestRun;
+ enum { SweetRPMhGroupWords=3, SweetRPMhGroupOverhead=7 };
+ unsigned groupCapacity(void) const;
+ IOReturn checkGroup(unsigned,uint64_t,const char *) const;
+ void groupSelfTest(void);
  IOReturn admit(SweetAppsRequest &);
  IOReturn validate(const SweetAppsRequest &);
  IOReturn vetoRail(unsigned,unsigned,const SweetRailVote &,SweetRailVote *) const;

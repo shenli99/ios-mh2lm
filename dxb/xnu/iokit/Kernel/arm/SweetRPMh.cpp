@@ -1073,6 +1073,29 @@ SweetRPMh::querySelfTestLeave(void)
  return true;
 }
 
+/* C3-08: the group boundary, asked rather than performed.
+ *
+ * The same gate the rail path uses is asked three questions on this boot's own
+ * identity: does one command fit, do the three the production group carries
+ * fit, and does one more than fits get in. The third answer is the
+ * demonstration, and it costs no register access at all, because a refused
+ * group is refused before a TCS is chosen - which is the honest way to show the
+ * boundary: nothing was split, nothing was truncated, and there is no
+ * half-programmed batch left behind to explain. */
+void
+SweetRPMh::groupSelfTest(void)
+{
+ const unsigned limit=groupCapacity();
+ const IOReturn one=checkGroup(1,0,"selftest-one");
+ const IOReturn three=checkGroup(3,0,"selftest-three");
+ SWEET_LOG_INFO("SWEET RPMH GROUP: phase=selftest ncpt=%u ledger=%u limit=%u one=%#x three=%#x; the room binds, not the array\n",
+     fNCPT,(unsigned)SweetRPMhExecutor::kCapacity,limit,(unsigned)one,(unsigned)three);
+ const unsigned over=limit+1;
+ const IOReturn refused=checkGroup(over,0,"selftest-over");
+ SWEET_LOG_INFO("SWEET RPMH GROUP: phase=selftest count=%u limit=%u result=%#x stored=0 tcs=none; refused, not split\n",
+     over,limit,(unsigned)refused);
+}
+
 /* A queued vote is rebuilt from these two words, never from the caller's
  * reference: the caller may return as soon as its token exists, and the queue
  * must still hold everything the dispatch needs. */
@@ -1818,6 +1841,11 @@ bool SweetRPMh::start(IOService *provider)
   * attempts that have already retired. */
  fQuerySelfTest=propertyRequested(provider,"sweet,rpmh-transaction-query");
  fQueryActive=false;
+ /* C3-08: asking for the group boundary is its own explicit tree request. It
+  * implies none of the above: it submits no request, writes no register and
+  * consumes no token, so it can run on a boot that asks for nothing else. */
+ fGroupSelfTest=propertyRequested(provider,"sweet,rpmh-command-group");
+ fGroupTestRun=false;
  /* Both demonstrations start from nothing to say, so a restart cannot inherit a
   * step from the boot before it. */
  fCancelStep=0; fCancelLower=0; fCancelLedger=false;
@@ -1883,6 +1911,46 @@ bool SweetRPMh::emptyTCS(unsigned t)
 }
 void SweetRPMh::addOperation(uint32_t off,uint32_t value,bool w1c)
 { fOperations[fOperationCount++]={off,value,w1c}; }
+
+/* C3-08: how many commands one TCS may carry here, and what a group that asks
+ * for more is told.
+ *
+ * Two numbers bound a group and they are not the same number. The array's NCPT
+ * is the hardware's answer, sixteen slots at most. This service's reviewed word
+ * buffer is the other one: kCapacity words hold the fixed head and tail plus
+ * three words per command, and the room that leaves is the smaller figure. Both
+ * are reported wherever the limit is printed, because naming sixteen while four
+ * fit is how a refusal stops being believable.
+ *
+ * A group is the set of commands one trigger carries, so it is admitted or
+ * refused whole. It is never split across two TCSes: the order would then span
+ * two triggers and the completion would describe two batches, which is a
+ * different request that nobody asked for. It is never truncated either: a
+ * three-member group is not the four-member one with a member missing. */
+unsigned
+SweetRPMh::groupCapacity(void) const
+{
+ if (!fNCPT) return 0; /* identity not adopted: no claim, and no write either */
+ const unsigned words=(SweetRPMhExecutor::kCapacity-SweetRPMhGroupOverhead)/SweetRPMhGroupWords;
+ return words<fNCPT ? words : fNCPT;
+}
+
+IOReturn
+SweetRPMh::checkGroup(unsigned count,uint64_t token,const char *kind) const
+{
+ const unsigned limit=groupCapacity();
+ if (!limit) {
+  SWEET_LOG_ERROR("SWEET RPMH GROUP: phase=refuse token=%llu kind=%s count=%u limit=0 ncpt=%u; array identity not adopted, group refused, nothing written\n",
+      token,kind,count,fNCPT);
+  return kIOReturnNotReady;
+ }
+ if (!count || count>limit) {
+  SWEET_LOG_ERROR("SWEET RPMH GROUP: phase=refuse token=%llu kind=%s count=%u limit=%u ncpt=%u ledger=%u; refused whole, nothing written, no split\n",
+      token,kind,count,limit,fNCPT,(unsigned)SweetRPMhExecutor::kCapacity);
+  return kIOReturnUnsupported;
+ }
+ return kIOReturnSuccess;
+}
 
 /* The layout is declared once, next to the offsets it describes. */
 static const SweetRPMhLayout tcsLayout={
@@ -2108,6 +2176,15 @@ IOReturn SweetRPMh::launchRail(const SweetAppsRequest &request)
      (target.loadUA>=railLimits[rail].modeThresholdUA)==(fAggregate[rail].loadUA>=railLimits[rail].modeThresholdUA))))) {
   fClients[client].votes[rail]=proposal; fClients[client].status=status; fAggregate[rail]=target; return kIOReturnSuccess;
  }
+ /* C3-08: the voltage group is the existing approved shape - a floor, a mode
+  * and an enable vote for one rail, programmed in that order into consecutive
+  * slots of one TCS behind one trigger. Its size is decided here, before a TCS
+  * is picked, so a group that does not fit changes no state at all: no slot
+  * selected, no client status written, nothing stored and no token consumed
+  * beyond the caller's own. */
+ const unsigned count=target.enabled ? 3u : 1u;
+ IOReturn fit=checkGroup(count,request.token,"rail-vote");
+ if (fit!=kIOReturnSuccess) return fit;
  int chosen=-1;
  for (unsigned t=0;t<2;++t) {
   uint32_t b=t*Stride, enabled=tcsRead(b+Enable);
@@ -2123,12 +2200,20 @@ IOReturn SweetRPMh::launchRail(const SweetAppsRequest &request)
  fBusy=true; fExecuting=false; fIRQObserved=false; fOperation=0; fOperationCount=0; fWriteIssued=false;
  uint32_t b=fTCSIndex*Stride, bit=1u<<fTCSIndex;
  addOperation(IRQEnable,fSavedIRQ&~bit); addOperation(IRQClear,bit,true);
- fCommandCount=target.enabled ? 3u : 1u; fCommandMask=(1u<<fCommandCount)-1u;
+ fCommandCount=count; fCommandMask=(1u<<fCommandCount)-1u;
  const uint32_t offsets[]={0,8,4}, values[]={rounded,status.mode,1};
  for (unsigned c=0;c<fCommandCount;++c) {
+  const uint32_t address=fAddresses[rail]+(target.enabled ? offsets[c] : 4);
   addOperation(b+Message+c*CommandStride,WriteACK);
-  addOperation(b+Address+c*CommandStride,fAddresses[rail]+(target.enabled ? offsets[c] : 4));
+  addOperation(b+Address+c*CommandStride,address);
   addOperation(b+Data+c*CommandStride,target.enabled ? values[c] : 0);
+  /* A member row per command, in the order the words are queued: the slot
+   * number is the array's own position, so the log reads the same way the
+   * hardware will. One member is not a group and is already named by the ACK
+   * row that follows, so it stays quiet. */
+  if (count>1)
+   SWEET_LOG_INFO("SWEET RPMH GROUP: token=%llu kind=rail-vote member=%u/%u slot=%u address=%#x data=%#x wait=1; one TCS, one trigger, slot order is write order\n",
+       request.token,c+1,count,c,address,target.enabled ? values[c] : 0);
  }
  addOperation(b+Wait,fCommandMask); addOperation(b+Enable,fCommandMask);
  addOperation(b+Control,0); addOperation(b+Control,AMC); addOperation(IRQEnable,0);
@@ -2225,6 +2310,14 @@ void SweetRPMh::retireFlight(void)
   * already retired, and it asks for its own windows: a boot request that
   * intervenes is allowed to go first rather than being queued behind it. */
  if (fQuerySelfTest && !fPoisoned && fAccepting && fQueryPhase<4) querySelfTest();
+ /* C3-08: last, because it describes the group the rail traffic of this boot
+  * already submitted. It submits nothing itself: it asks this boot's own
+  * identity how much room a group has, then asks the same gate for one command
+  * too many. fIdentityReady is the gate that makes the answer real rather than
+  * a guess - without an adopted array there is no capacity to report. */
+ if (fGroupSelfTest && !fGroupTestRun && fIdentityReady && !fPoisoned && fAccepting) {
+  groupSelfTest(); fGroupTestRun=true;
+ }
  dispatchNext();
 }
 
@@ -2374,6 +2467,16 @@ void SweetRPMh::advance(void)
  }
  SWEET_LOG_INFO("SWEET RPMH IRQ: fresh ACTIVE completion tcs=%u commands=%u entries=%u; cleanup pending\n",
   fTCSIndex,fCommandCount,__atomic_load_n(&fIRQEntries,__ATOMIC_ACQUIRE));
+ /* C3-08: the batch verdict above and the members are two statements, not one.
+  * verify() reads every member's own status word, so a group that finished with
+  * a member unacknowledged never reaches this row - it fails as a whole, with
+  * that member named by the snapshot that follows. What this row adds is the
+  * headcount: one token, one trigger, and every member accounted for. Only a
+  * multi-command flight is a group; the single-command shapes are already fully
+  * described by their own ACK row. */
+ if (fCommandCount>1 && !fArcRequest && !fRegisterRequest)
+  SWEET_LOG_INFO("SWEET RPMH GROUP: phase=done token=%llu kind=rail-vote count=%u acked=%u/%u wait=%#x enable=%#x; batch complete, members separate\n",
+      fFlightToken,fCommandCount,fCommandCount-unacknowledged,fCommandCount,fCommandMask,fCommandMask);
  if (!SweetRPMhExecutor::stageCleanup(ports,tcsLayout,b,fOperations,&fOperationCount,AMC,bit,
   fSavedIRQ)) {
   finish(kIOReturnIOError,true); return;

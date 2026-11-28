@@ -934,9 +934,99 @@ int main(){
   destroy(s,n);reboot();
  }
 
+  // C3-08: a group is one TCS, one trigger and an order the array can be read
+ // back for. The three members are the existing approved shape - floor, mode
+ // and enable for one rail - so this case is about that shape holding, not
+ // about a new command being invented.
+ {
+  fixtures();resourceMode=2;s=make(n);messages.clear();
+  uint64_t cid=attach(s);
+  const SweetRail rail=SweetRailVDDI;
+  const uint32_t base=0x40000+rail*0x100;
+  trace.clear();
+  const uint64_t tok=vote(s,cid,rail,{true,1800,1880,62000});
+  tick(s);
+  assert(s->fBusy&&s->fCommandCount==3&&s->fCommandMask==7);
+  const uint32_t b=s->fTCSIndex*0x2a0;
+  // Slot order is write order and write order is the batch's: floor at +0,
+  // mode at +8, enable at +4. A batch that only programmed the last value, or
+  // the same value three times, would read differently here.
+  assert(regs[TCS+b+0x34]==base+0&&regs[TCS+b+0x34+0x14]==base+8&&regs[TCS+b+0x34+2*0x14]==base+4);
+  assert(regs[TCS+b+0x38]==1800&&regs[TCS+b+0x38+0x14]==7&&regs[TCS+b+0x38+2*0x14]==1);
+  // One trigger for the whole batch, covering every member by mask rather
+  // than one trigger per command.
+  unsigned triggers=0;
+  for(auto&o:trace)if(o.write&&o.addr==TCS+b+0x14&&(o.value&(1u<<24))){++triggers;assert(o.value&(1u<<16));}
+  assert(triggers==1&&regs[TCS+b+0x10]==7&&regs[TCS+b+0x1c]==7);
+  // The rows say what the array holds, member by member and in that order.
+  unsigned members=0;std::string order;
+  for(auto&m:messages)if(m.find("kind=rail-vote member=")!=std::string::npos){++members;order+=m;}
+  assert(members==3);
+  assert(order.find("member=1/3")<order.find("member=2/3")&&order.find("member=2/3")<order.find("member=3/3"));
+  assert(order.find("slot=0")<order.find("slot=1")&&order.find("slot=1")<order.find("slot=2"));
+  char hex[24];snprintf(hex,sizeof hex,"0x%x",base);
+  assert(order.find(std::string("address=")+hex)!=std::string::npos);
+  // The batch completes once and its members are reported separately.
+  ack(s);
+  std::string done;for(auto&m:messages)if(m.find("phase=done token="+std::to_string(tok))!=std::string::npos)done=m;
+  assert(!done.empty()&&done.find("count=3 acked=3/3")!=std::string::npos);
+  assert(status(s,cid,tok).state==SweetRPMhComplete&&!s->fQuarantine);
+  destroy(s,n);reboot();
+ }
+ // A member that never acknowledged fails the whole batch: one completion is
+ // one event, so a batch cannot be half-done and must not be reported as done.
+ {
+  fixtures();resourceMode=2;s=make(n);messages.clear();
+  uint64_t cid=attach(s);
+  const uint64_t tok=vote(s,cid,SweetRailVDDI,{true,1800,1880,62000});
+  tick(s);assert(s->fBusy);
+  const uint32_t b=s->fTCSIndex*0x2a0;
+  regs[TCS+b+0x3c]=(1<<8)|(1<<16);
+  regs[TCS+b+0x3c+0x14]=(1<<8)|(1<<16);
+  regs[TCS+b+0x3c+2*0x14]=(1<<8);      // issued, never completed
+  regs[TCS]|=1u<<s->fTCSIndex;regs[TCS+4]|=1u<<s->fTCSIndex;regs[TCS+b+0x18]=1;
+  messages.clear();tick(s);
+  assert(!s->fBusy&&s->fRetiredUncertain);
+  // The member is named, and no batch-complete row is printed for a batch that
+  // did not complete.
+  std::string named,done;
+  for(auto&m:messages){
+   if(m.find("command=2")!=std::string::npos)named=m;
+   if(m.find("phase=done token=")!=std::string::npos)done=m;
+  }
+  assert(!named.empty()&&done.empty());
+  destroy(s,n);reboot();
+ }
+ // The capacity boundary, asked rather than performed. The identity has three
+ // slots, so the approved three-member group fits and a fourth command does
+ // not; the demonstration asks the same gate the rail path uses and writes
+ // nothing, which is why it can run on a boot that asks for nothing else.
+ {
+  fixtures();resourceMode=2;s=make(n);messages.clear();
+  s->fGroupSelfTest=true;
+  uint64_t cid=attach(s);
+  vote(s,cid,SweetRailVDDI,{true,1800,1880,62000});
+  tick(s);ack(s);
+  assert(s->fGroupTestRun&&!s->fBusy);
+  std::string summary,refused,over;
+  for(auto&m:messages){
+   if(m.find("phase=selftest ncpt=")!=std::string::npos)summary=m;
+   if(m.find("kind=selftest-over")!=std::string::npos)refused=m;
+   if(m.find("stored=0 tcs=none")!=std::string::npos)over=m;
+  }
+  assert(!summary.empty()&&!refused.empty()&&!over.empty());
+  // Both limits are named, because the smaller one is the one that binds.
+  assert(summary.find("ncpt=3")!=std::string::npos&&summary.find("ledger=20")!=std::string::npos);
+  assert(summary.find("limit=3")!=std::string::npos&&summary.find("one=0 three=0")!=std::string::npos);
+  assert(refused.find("count=4 limit=3")!=std::string::npos);
+  assert(over.find("result=")!=std::string::npos);
+  for(auto&m:messages)if(m.find("SWEET RPMH GROUP:")!=std::string::npos)assert(m.size()<=254);
+  destroy(s,n);reboot();
+ }
+
   dropNub(n);assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
  puts("PASS: actual display ARC chain: typed corners, rounded parents, staged fresh ACK, client aggregate, reverse withdrawal, shared VRM gate, inherited conflicts, optional malformed metadata, partial-failure ledger, no rollback, stop/retirement and exhaustion");
- puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement, one TCS owner across queued arrivals, explicit queue-full refusal, waiters refused at the isolation state, owner-only cancellation of a waiting request with no hardware write and no reverse vote, in-flight and neighbour cancels refused, exit withdrawal newest-first after its retain checks, ledger-only register withdrawal refused when it would move hardware, 11 malformed resources, owner-scoped transaction records with generation/cross-client/unissued refusal and bounded eviction, stray and late completions dropped without moving the ledger, quarantine veto and named refusal, cancelled request answered aborted without a generation, actual matching/termination");
+ puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement, one TCS owner across queued arrivals, explicit queue-full refusal, waiters refused at the isolation state, owner-only cancellation of a waiting request with no hardware write and no reverse vote, in-flight and neighbour cancels refused, exit withdrawal newest-first after its retain checks, ledger-only register withdrawal refused when it would move hardware, 11 malformed resources, owner-scoped transaction records with generation/cross-client/unissued refusal and bounded eviction, stray and late completions dropped without moving the ledger, quarantine veto and named refusal, cancelled request answered aborted without a generation, ordered multi-command group in one TCS with one trigger and its capacity refusal, actual matching/termination");
 }
 '''
 # ack helper normally asserts successful cleanup; uncleared IRQ deliberately
