@@ -449,6 +449,14 @@ SweetRPMh::cn0Step(void) const
 bool
 SweetRPMh::queueSelfTest(void)
 {
+ /* "One flight window" is a claim about the array when the pair is admitted: the
+  * first member must still be holding it when the second arrives. A retirement
+  * that starts with a real submission already waiting would park both members
+  * behind it, print the same two successes and demonstrate nothing, so this
+  * waits for a window that starts empty instead of spending a try on one that
+  * cannot show the shape it advertises. (0150: the next demonstration down is
+  * reached from the same retirement and was admitted into exactly such a queue.) */
+ if (fBusy || !fQueue.empty()) return false;
  if (fQueueTestTries++ >= 6) return true;
  if (fNextClient==~0ULL) return false;
  if (!lookupBCM(SweetBCMCN0)) return false;
@@ -506,6 +514,17 @@ SweetRPMh::queueSelfTest(void)
 bool
 SweetRPMh::cancelSelfTest(void)
 {
+ /* The same rule as the pair demonstration above, and for one more reason: the
+  * trio is only a demonstration while its first member flies *directly* and the
+  * other two wait behind it. Admitted into a busy array - which is what the 0150
+  * boot did, because both demonstrations were reached from one retirement and
+  * the pair left its second member waiting - all three park, three real raises
+  * are left on the array, and nothing was demonstrated (depth=4,
+  * trio-did-not-serialize). Step 1 therefore waits for a window that starts
+  * empty instead of spending its one shot on a window that cannot show the shape
+  * it claims; a wait here prints nothing, which is right, because nothing
+  * happened. */
+ if (fBusy || !fQueue.empty()) return false;
  uint64_t step=cn0Step();
  if (!step) return true;
  uint64_t base=fRegisterAggregate;

@@ -623,6 +623,45 @@ int main(){
  assert(!s->fRegisterAggregate&&s->fClients[1].registerVote==0);
  assert(s->detachConsumer(other)==0);
  destroy(s,n);reboot();
+// C3-06 on hardware, 0150: the driver's first step needs a window of its own.
+// Both demonstrations hang off the same retirement, so at the moment the trio
+// would have been admitted the pair's first member is in flight and its second
+// is waiting: the trio parks behind them, all three raises really reach the
+// array and nothing is demonstrated - the 0150 ring said `depth=4` and
+// `trio-did-not-serialize`, and three votes stayed raised for the rest of the
+// boot. A window that starts with work in it must therefore be refused in
+// silence and retried later, not spent.
+ bandwidthFixtures();s=make(n);id=attach(s);other=attach(s);
+ uint64_t bw0=0;
+ s->fQueueCancel=true;s->fQueueTestRun=true;s->fCancelStep=0;
+ token=vote(s,id,SweetRailVDDI,{true,1800,1880,6000});
+ assert(s->fBusy);
+ assert(s->requestRegisterBandwidth(other,20000,&bw0)==0&&bw0);
+ assert(s->fQueue.depth()==1);
+ uint64_t nobody=s->fNextClient;
+ messages.clear();
+ s->retireFlight();
+ assert(s->fCancelStep==0&&s->fNextClient==nobody);
+ assert(!s->fQueue.cancelled());
+ for(auto &m:messages)assert(m.find("phase=cancel-selftest")==std::string::npos);
+ // That window's own wait started on the way out; it is a real flight and it
+ // ends like one, which leaves the driver the empty window it was waiting for.
+ // (Disarmed for the drain: otherwise the driver runs inside the completion,
+ // and this window would be answering a question the test did not ask yet.)
+ s->fQueueCancel=false;
+ tick(s);ack(s);
+ assert(!s->fBusy&&s->fQueue.empty()&&s->fCancelStep==0);
+ s->fQueueCancel=true;
+ messages.clear();
+ s->retireFlight();
+ assert(s->fCancelStep==1&&s->fBusy&&s->fQueue.depth()==2);
+ bool trio=false;
+ for(auto &m:messages)if(m.find("phase=cancel-selftest")!=std::string::npos&&
+   m.find("depth=2 high-water=2")!=std::string::npos)trio=true;
+ assert(trio);
+ // The trio stays where the demonstration put it; stop() is what takes it back.
+ s->fQueueCancel=false;s->fCancelStep=3;
+ destroy(s,n);reboot();
   dropNub(n);assert(!live&&!liveMaps&&!rawBlocks&&subscriptions.empty());
  puts("PASS: actual display ARC chain: typed corners, rounded parents, staged fresh ACK, client aggregate, reverse withdrawal, shared VRM gate, inherited conflicts, optional malformed metadata, partial-failure ledger, no rollback, stop/retirement and exhaustion");
  puts("PASS: actual RPMh/MDSS resources; no implicit writes, bounded IDs/tokens, multi-client aggregate/disable, UFS/USB shared last-disable veto with unchanged token/status and no writes, independent fresh completion, inherited conflicts, timer readback/timeout, stop/late event/retirement, one TCS owner across queued arrivals, explicit queue-full refusal, waiters refused at the isolation state, owner-only cancellation of a waiting request with no hardware write and no reverse vote, in-flight and neighbour cancels refused, exit withdrawal newest-first after its retain checks, ledger-only register withdrawal refused when it would move hardware, 11 malformed resources, actual matching/termination");
