@@ -860,17 +860,20 @@ SweetRPMh::quarantineInfo(unsigned *tcs,IOReturn *cause,unsigned *refused)
  *
  * It submits real votes, because a record of something that did not happen
  * would prove nothing: one raise of the CN0 rate, the restore that puts the
- * boot's own value back, and one request for the value the array is already
- * telling. Then it asks about each attempt by (token, generation) - while it
- * flies, after it retires, with the generation it did not take, with a token
- * nobody was given, for a request the array was never told about, and finally
- * after the client that owned them has left.
+ * boot's own value back, one request for the value the array is already
+ * telling, and the vote that hands the raise back so its client can leave.
+ * Then it asks about each attempt by (token, generation) - while it flies,
+ * after it retires, with the generation it did not take, with a token nobody
+ * was given, for a request the array was never told about, and finally after
+ * the client that owned them has left.
  *
- * It takes only windows that start empty and it restores what it raised, so a
- * boot that is already talking to the array is never driven further than the
- * demonstration itself. Every request it submits can retire synchronously, and
- * the demonstration therefore keeps a re-entrancy flag: a settlement that
- * happens inside its own submission must not start the next step. */
+ * It takes only windows that start empty and it hands back what it raised, so a
+ * boot that is already talking to the array is never left driven further than
+ * the demonstration itself. A request it submits may retire synchronously, and
+ * the steps that need no retirement are taken in one pass; the two that hand
+ * the array on wait for their own flight like any other caller. The
+ * re-entrancy flag keeps a settlement that lands inside its own submission
+ * from starting the next step out of order. */
 bool
 SweetRPMh::querySelfTest(void)
 {
@@ -887,8 +890,9 @@ SweetRPMh::querySelfTest(void)
   * demonstration cannot wait for a retirement that will never come. */
  for (unsigned guard=0;guard<4;++guard) {
   done=(fQueryPhase==0 ? querySelfTestRaise(step) :
-      (fQueryPhase==1 ? querySelfTestRetired() : querySelfTestSettle()));
-  if (!done || fBusy || !fQueue.empty() || fQueryPhase>=4 || fQueryPhase<2) break;
+      (fQueryPhase==1 ? querySelfTestRetired() :
+       (fQueryPhase==2 ? querySelfTestSettle() : querySelfTestLeave())));
+  if (!done || fBusy || !fQueue.empty() || fQueryPhase>=4) break;
  }
  fQueryActive=false;
  return done;
@@ -979,10 +983,12 @@ SweetRPMh::querySelfTestRetired(void)
  return true;
 }
 
-/* Step 3 and 4: a request the array is already telling settles without a
- * transaction of its own, and its record outlives the client that asked. Both
- * are visible the moment the submission returns, so neither needs another
- * retirement to be observed. */
+/* Step 3 and the hand-back that step 4 asks for: a request the array is already
+ * telling settles without a transaction of its own, so both the question and
+ * its answer are visible the moment the submission returns - no retirement is
+ * needed to observe them. The exit that follows is not like that: the client is
+ * still holding the array, so it hands the vote back first, and whether the
+ * hand-back was accepted is what the next retirement tells. */
 bool
 SweetRPMh::querySelfTestSettle(void)
 {
@@ -1005,30 +1011,64 @@ SweetRPMh::querySelfTestSettle(void)
  }
  SWEET_LOG_INFO("SWEET APPS QUEUE: phase=transaction step=3 result=ok token=%llu generation=0 verdict=%s executed=0 retained=1 client=%llu first=%llu; a request the array was already telling settles complete and unexecuted\n",
      fQueryRestore,verdictName(restore.verdict),fQueryClient,fQueryToken);
- /* Its own vote is zero, so it holds nothing the array is still being told. */
+ /* The client still holds the array with its own vote, and a client that holds
+  * anything may not leave: the exit would be refused, and the record this card
+  * is about has to outlive an owner that handed everything back. So the vote is
+  * given back the only way a vote can be given back - with another vote, this
+  * one for zero. It is a real transaction (the boot's own holders keep the
+  * value up, this client stops being one of them), so the answer about the
+  * record after the exit waits for its retirement. */
+ const uint64_t told=fRegisterAggregate;
+ const IOReturn given=beginRegisterBandwidth(fQuerySlot,0);
+ const uint64_t back=fClients[fQuerySlot].registerStatus.token;
+ if (given!=kIOReturnSuccess || !back || back==fQueryToken || back==fQueryRestore) {
+  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=transaction step=4 result=failed detail=%s rc=%#x token=%llu told=%llu; a client that still holds the array cannot leave it\n",
+      given==kIOReturnSuccess?"no-fresh-token":"vote-refused",(unsigned)given,back,told);
+  fQueryPhase=4;
+  return true;
+ }
+ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=transaction step=4 result=ok token=%llu base=%llu told=%llu; the exit handed the vote back with a vote, not with the detach\n",
+     back,fQueryBase,told);
+ fQueryPhase=3;
+ return true;
+}
+
+/* The last step: the client that asked is gone, and the record is still there.
+ *
+ * It runs on the retirement of the hand-back above, because a client that is
+ * still waiting for its own vote to be acknowledged is still holding it. */
+bool
+SweetRPMh::querySelfTestLeave(void)
+{
+ if (fBusy || !fQueue.empty()) return false;
  unsigned exitedWith=0;
  const IOReturn detached=detachClient(fQuerySlot,&exitedWith);
  SweetTransactionStatus after={};
  unsigned tcs=0, refused=0; IOReturn cause=kIOReturnSuccess;
  quarantineInfo(&tcs,&cause,&refused);
+ const uint64_t told=fRegisterAggregate;
  const IOReturn last=detached==kIOReturnSuccess ?
      copyTransactionStatus(fQueryClient,fQueryToken,fQueryGeneration,&after) : kIOReturnNotPermitted;
  /* A client that never asked for this attempt may not read it even though the
-  * record survived its owner. */
+  * record survived its owner. Its answer goes to its own buffer: a refusal
+  * still clears the status it was handed, so asking into the same one would
+  * erase the answer this step is about. */
+ SweetTransactionStatus alienStatus={};
  const IOReturn alien=detached==kIOReturnSuccess ?
-     copyTransactionStatus(fQueryClient+1,fQueryToken,fQueryGeneration,&after) : kIOReturnSuccess;
+     copyTransactionStatus(fQueryClient+1,fQueryToken,fQueryGeneration,&alienStatus) :
+     kIOReturnSuccess;
  const bool stayed=last==kIOReturnSuccess && after.verdict==SweetTransactionComplete &&
      after.retained && alien==kIOReturnNotPermitted;
  if (!stayed) {
-  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=transaction step=4 result=failed detail=%s detach=%#x query=%#x alien=%#x verdict=%s retained=%u late=%u refused=%u quarantined=%u\n",
+  SWEET_LOG_ERROR("SWEET APPS QUEUE: phase=transaction step=5 result=failed detail=%s detach=%#x query=%#x alien=%#x verdict=%s retained=%u late=%u refused=%u quarantined=%u\n",
       detached==kIOReturnSuccess?"record-lost":"detach-refused",(unsigned)detached,(unsigned)last,
       (unsigned)alien,verdictName(after.verdict),after.retained?1u:0u,fLateCompletions,refused,fQuarantine?1u:0u);
   fQueryPhase=4;
   return true;
  }
- SWEET_LOG_INFO("SWEET APPS QUEUE: phase=transaction step=4 result=ok token=%llu verdict=%s retained=1 client=%llu detach=%#x exited=%u alien=%#x late=%u quarantined=%u; answered after the client that owned it had left\n",
-     fQueryToken,verdictName(after.verdict),fQueryClient,(unsigned)detached,exitedWith,
-     (unsigned)alien,fLateCompletions,fQuarantine?1u:0u);
+ SWEET_LOG_INFO("SWEET APPS QUEUE: phase=transaction step=5 result=ok token=%llu generation=%llu verdict=%s retained=1 client=%llu detach=%#x exited=%u alien=%#x told=%llu late=%u quarantined=%u; answered after the client that owned it had left\n",
+     fQueryToken,fQueryGeneration,verdictName(after.verdict),fQueryClient,(unsigned)detached,
+     exitedWith,(unsigned)alien,told,fLateCompletions,fQuarantine?1u:0u);
  fQueryPhase=4;
  return true;
 }

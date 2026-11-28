@@ -910,14 +910,26 @@ int main(){
   regs[TCS]|=1u<<dt;regs[TCS+4]|=1u<<dt;regs[TCS+db+0x18]=1;
   for(unsigned c=0;c<s->fCommandCount&&c<3;++c)regs[TCS+db+0x3c+c*0x14]=(1<<8)|(1<<16);
   regs[0x17a00104]|=1u<<5;
-  for(unsigned n=0;n<8&&s->fBusy;++n)tick(s);
+  // The raise retires, and the two answers that need no flight are taken inside
+  // that retirement. The hand-back the demonstration's exit needs is a vote of
+  // its own, so it takes the array again and is only answered once it lands.
+  for(unsigned n=0;n<8&&s->fQueryPhase<3;++n)tick(s);
+  assert(s->fQueryPhase==3&&s->fBusy);
+  tick(s);                    // the hand-back's payload
+  ack(s);                     // and the completion it waits for
   assert(!s->fBusy&&s->fQueryPhase==4);
-  unsigned rows=0,longest=0;
+  // Five rows, and not one of them a failure: a demonstration that went wrong
+  // halfway is exactly what these cases must not accept as evidence.
+  unsigned rows=0,longest=0,failed=0;
   for(auto &m:messages)if(m.find("phase=transaction")!=std::string::npos){
    ++rows;longest=longest>(unsigned)m.size()?longest:(unsigned)m.size();
+   if(m.find(" result=failed ")!=std::string::npos)++failed;
   }
-  assert(rows==4&&longest<=255);
-  printf("transaction rows: count=%u longest=%u of 255 bytes\n",rows,longest);
+  assert(rows==5&&!failed);
+  // 255 characters fit the console's line buffer and the newline is one of
+  // them, so a row that is printed whole is at most 254 bytes of text.
+  assert(longest<=254);
+  printf("transaction rows: count=%u longest=%u of 254 bytes\n",rows,longest);
   assert(s->fRetainedCount>=2);
   destroy(s,n);reboot();
  }

@@ -253,6 +253,7 @@ class SweetRPMh : public IOService {
  bool querySelfTestRaise(uint64_t);
  bool querySelfTestRetired(void);
  bool querySelfTestSettle(void);
+ bool querySelfTestLeave(void);
  void armFlight(uint64_t);
  void settle(uint64_t,unsigned,unsigned,IOReturn,bool);
  void retainTransaction(uint64_t,uint64_t,uint64_t,unsigned,unsigned,IOReturn,bool,bool);
